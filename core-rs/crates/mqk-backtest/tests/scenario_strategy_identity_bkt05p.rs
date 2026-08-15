@@ -226,11 +226,21 @@ fn derive_run_id_differs_on_input_data_hash() {
 fn run_id_encodes_input_bar_data() {
     let cfg = BacktestConfig::test_defaults();
 
-    let bars_a = vec![bar(1_700_000_060)];
+    // BKT-FUTURE-EXECUTION-01: the signal bar's own price no longer feeds
+    // the fill (it's priced from the *next* bar), so the differing bar here
+    // must be the fill bar for the equity-curve sanity check below to still
+    // hold. `input_data_hash`/`run_id` sensitivity is proven regardless of
+    // which bar differs.
+    let bars_a = vec![bar(1_700_000_060), bar(1_700_000_120)];
     let bars_b = {
-        let mut b = bar(1_700_000_060);
-        b.close_micros = 120_000_000; // different close price
-        vec![b]
+        // A flat fill bar leaves equity unchanged regardless of its price
+        // level (BUY fills at HIGH, which then equals the mark exactly) —
+        // so this variant introduces a spread: HIGH (the BUY fill price)
+        // differs from CLOSE (the post-fill mark), producing a real,
+        // measurable equity delta versus bars_a's perfectly flat fill.
+        let mut b = bar(1_700_000_120);
+        b.high_micros = 120_000_000;
+        vec![bar(1_700_000_060), b]
     };
 
     let mut engine_a = BacktestEngine::new(cfg.clone());

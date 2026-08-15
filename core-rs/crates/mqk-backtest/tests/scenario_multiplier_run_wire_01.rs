@@ -253,8 +253,14 @@ fn bmw02b_multiplier_100_scales_full_run_outputs() {
 
 #[test]
 fn bmw02c_allocation_cap_notional_scales_with_multiplier() {
-    // Single bar: qty=100 @ $100 = $10,000 notional at multiplier=1.
-    let bars = vec![flat_bar(1_700_000_060, 100)];
+    // BKT-FUTURE-EXECUTION-01: the allocation cap is checked at fill time,
+    // so the pending order needs a later bar of its own symbol to reach it.
+    // Two identical flat bars: bar 1 signals, bar 2 is where the cap check
+    // (qty=100 @ $100 = $10,000 notional at multiplier=1) actually happens.
+    let bars = vec![
+        flat_bar(1_700_000_060, 100),
+        flat_bar(1_700_000_120, 100),
+    ];
 
     let mut cfg = BacktestConfig::test_defaults();
     // 0.20x equity = $20,000 cap (default equity = $100,000).

@@ -41,12 +41,25 @@ const BACKTEST_INPUT_NS: Uuid = Uuid::from_bytes([
 
 /// A single fill produced by the backtest engine, with full provenance.
 ///
-/// Extends [`mqk_portfolio::Fill`] with three provenance fields:
+/// Extends [`mqk_portfolio::Fill`] with four provenance fields:
 ///
 /// - `fill_id`: deterministic UUIDv5 — unique per fill, stable across replays
 /// - `order_id`: deterministic UUIDv5 — identifies the originating order intent,
 ///   stable across replays (same bar + symbol + side + intent position → same ID)
-/// - `bar_end_ts`: epoch seconds of the bar whose close triggered this fill
+/// - `signal_ts`: epoch seconds of the bar on which the strategy decision that
+///   produced this order was made (order-creation time, copied from the
+///   originating [`BacktestOrder::signal_ts`])
+/// - `fill_ts`: epoch seconds of the bar whose market data actually priced
+///   this fill (execution time)
+///
+/// # BKT-FUTURE-EXECUTION-01 — causal execution
+///
+/// For every ordinary strategy-intent-driven fill, `fill_ts > signal_ts`
+/// strictly: the fill is always priced from the first later bar for the
+/// order's own `symbol`, never from the bar the signal was generated on.
+/// Flatten-all fills (forced risk flatten) are the one deliberate exception —
+/// they remain immediate/same-bar (`fill_ts == signal_ts`), see
+/// [`BacktestEngine::flatten_all`](crate::engine::BacktestEngine).
 ///
 /// Implements `Deref<Target = Fill>` so all `Fill` field accesses
 /// (`symbol`, `side`, `qty`, `price_micros`, `fee_micros`) work transparently
@@ -55,13 +68,13 @@ const BACKTEST_INPUT_NS: Uuid = Uuid::from_bytes([
 /// # ID generation
 ///
 /// ```text
-/// order_id = UUIDv5(BACKTEST_ORDER_NS, "{bar_end_ts}:{symbol}:{side_char}:{intent_seq}")
+/// order_id = UUIDv5(BACKTEST_ORDER_NS, "{signal_ts}:{symbol}:{side_char}:{intent_seq}")
 /// fill_id  = UUIDv5(BACKTEST_FILL_NS,  order_id.as_bytes())
 /// ```
 ///
 /// For flatten-all fills (risk halt / drawdown flatten):
 /// ```text
-/// order_id = UUIDv5(BACKTEST_ORDER_NS, "flatten:{bar_end_ts}:{symbol}:{symbol_seq}")
+/// order_id = UUIDv5(BACKTEST_ORDER_NS, "flatten:{signal_ts}:{symbol}:{symbol_seq}")
 /// fill_id  = UUIDv5(BACKTEST_FILL_NS,  order_id.as_bytes())
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,8 +85,13 @@ pub struct BacktestFill {
     /// Deterministic per-order UUID. Ties this fill back to the originating
     /// order intent (bar position + symbol + side + intent index).
     pub order_id: Uuid,
-    /// Bar end timestamp (epoch seconds) at which this fill was triggered.
-    pub bar_end_ts: i64,
+    /// Bar end timestamp (epoch seconds) at which the strategy decision that
+    /// produced this fill's order was made. Matches the originating
+    /// [`BacktestOrder::signal_ts`].
+    pub signal_ts: i64,
+    /// Bar end timestamp (epoch seconds) of the market data that actually
+    /// priced this fill. For ordinary strategy orders, `fill_ts > signal_ts`.
+    pub fill_ts: i64,
     /// The underlying fill record used for portfolio accounting.
     pub inner: Fill,
 }
@@ -81,11 +99,13 @@ pub struct BacktestFill {
 impl BacktestFill {
     /// Build a deterministic order ID for a strategy-intent-driven fill.
     ///
-    /// `intent_seq` is the 0-based position of this intent among all intents
-    /// produced for the current bar.
-    pub fn make_order_id(bar_end_ts: i64, symbol: &str, is_buy: bool, intent_seq: usize) -> Uuid {
+    /// `signal_ts` is the bar timestamp at which the order was generated
+    /// (decision time), not the (possibly later) fill time.  `intent_seq` is
+    /// the 0-based position of this intent among all intents produced for
+    /// the signal bar.
+    pub fn make_order_id(signal_ts: i64, symbol: &str, is_buy: bool, intent_seq: usize) -> Uuid {
         let side_char = if is_buy { 'B' } else { 'S' };
-        let name = format!("{}:{}:{}:{}", bar_end_ts, symbol, side_char, intent_seq);
+        let name = format!("{}:{}:{}:{}", signal_ts, symbol, side_char, intent_seq);
         Uuid::new_v5(&BACKTEST_ORDER_NS, name.as_bytes())
     }
 
@@ -93,8 +113,8 @@ impl BacktestFill {
     ///
     /// `symbol_seq` is the 0-based position of this symbol in the sorted
     /// flatten iteration (BTreeMap order is alphabetical, hence deterministic).
-    pub fn make_flatten_order_id(bar_end_ts: i64, symbol: &str, symbol_seq: usize) -> Uuid {
-        let name = format!("flatten:{}:{}:{}", bar_end_ts, symbol, symbol_seq);
+    pub fn make_flatten_order_id(signal_ts: i64, symbol: &str, symbol_seq: usize) -> Uuid {
+        let name = format!("flatten:{}:{}:{}", signal_ts, symbol, symbol_seq);
         Uuid::new_v5(&BACKTEST_ORDER_NS, name.as_bytes())
     }
 
@@ -130,20 +150,42 @@ pub enum BacktestOrderSide {
 /// BKT-04P: every order intent is recorded regardless of whether risk allowed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrderStatus {
-    /// Risk allowed the order; a corresponding fill was produced.
+    /// A later eligible bar for the order's own symbol was found; a
+    /// corresponding fill was produced.
     Filled,
-    /// Risk rejected the order; no fill was produced.
+    /// Risk rejected the order at signal time (or the allocation cap
+    /// rejected it once the future fill price became known); no fill was
+    /// produced.
     Rejected,
     /// This order triggered (or was caught by) a risk halt. No fill for
     /// the intent itself, but a flatten-all sequence may follow.
     HaltTriggered,
+    /// BKT-FUTURE-EXECUTION-01: the order was admitted at signal time but no
+    /// later eligible bar for its symbol ever arrived before the dataset
+    /// was exhausted. No fill was, or ever will be, produced.
+    ///
+    /// BKT-FUTURE-EXECUTION-01-REPAIR-01: this status is reserved for a run
+    /// that actually reached the end of its input data with the order still
+    /// pending. A run that instead stopped early because of a risk halt
+    /// reports [`OrderStatus::CanceledOnHalt`] for the same still-pending
+    /// order instead -- the data that could have filled it may well still
+    /// exist, it was simply never reached, which is a materially different
+    /// (and more truthful) reason than "the dataset ran out."
+    UnfilledEndOfData,
+    /// BKT-FUTURE-EXECUTION-01-REPAIR-01: the order was admitted at signal
+    /// time but the run halted (see [`BacktestReport::halted`]) before any
+    /// later eligible bar for its symbol was reached. Distinct from
+    /// [`OrderStatus::UnfilledEndOfData`]: the run terminated early, it did
+    /// not exhaust its input data with the order still outstanding.
+    CanceledOnHalt,
 }
 
 /// An order intent record produced by the backtest engine.
 ///
 /// BKT-04P: emitted for every intent (strategy-driven or flatten-all),
-/// whether risk allowed or rejected it. Enables a complete audit trail
-/// of what the strategy wanted vs. what was actually executed.
+/// whether risk allowed, rejected, or left permanently unfilled. Enables a
+/// complete audit trail of what the strategy wanted vs. what was actually
+/// executed.
 ///
 /// `order_id` is the same deterministic UUIDv5 used in `BacktestFill.order_id`
 /// for fills that correspond to this order.
@@ -151,9 +193,13 @@ pub enum OrderStatus {
 pub struct BacktestOrder {
     /// Deterministic per-order UUID (same namespace as `BacktestFill.order_id`).
     pub order_id: Uuid,
-    /// Bar end timestamp (epoch seconds) at which this order was generated.
-    pub bar_end_ts: i64,
-    /// Symbol this order targets.
+    /// Bar end timestamp (epoch seconds) at which the strategy decision that
+    /// produced this order was made. This is decision/order-creation time,
+    /// not fill time — see `BacktestFill::fill_ts` for when (and whether)
+    /// this order actually filled.
+    pub signal_ts: i64,
+    /// Symbol this order targets. Only market data for this exact symbol may
+    /// price a fill for this order.
     pub symbol: String,
     /// Direction.
     pub side: BacktestOrderSide,
@@ -737,6 +783,78 @@ pub fn derive_run_id_with_economics(
     Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
 }
 
+/// BKT-FUTURE-EXECUTION-01-REPAIR-01 (Blocker 2): identifies the
+/// execution/replay semantic used to turn admitted signals into fills.
+///
+/// Folded into `run_id` via [`derive_run_id_with_execution_model`] so that
+/// two engines with different fill semantics (e.g. same-bar vs.
+/// future-target-symbol-bar) can never collide on identity for otherwise
+/// identical strategy/config/input-data/economics -- see that function's
+/// doc comment for why `derive_run_id`/`derive_run_id_with_economics` alone
+/// cannot guarantee that.
+///
+/// `BacktestEngine::run` (BKT-FUTURE-EXECUTION-01: pending order -> first
+/// later target-symbol bar) always uses exactly this value today; there is
+/// no operator-selectable legacy same-bar mode.
+pub const BACKTEST_EXECUTION_MODEL_ID: &str = "future_target_symbol_bar_v1";
+
+/// Derive a deterministic backtest run ID, folding in both instrument
+/// economics and the execution-model semantic identity.
+///
+/// BKT-FUTURE-EXECUTION-01-REPAIR-01 (Blocker 2): [`derive_run_id_with_economics`]
+/// folds in strategy, config, input data, and economics -- but not *how*
+/// admitted signals were turned into fills. BKT-FUTURE-EXECUTION-01 changed
+/// that meaning materially (same-bar fills -> future-target-symbol-bar
+/// fills, admission-time cap check -> fill-time cap check) without changing
+/// any of `derive_run_id_with_economics`'s inputs, so a run under the old
+/// semantics and a run under the new semantics could otherwise collide on
+/// `run_id` for identical strategy/config/input/economics even though their
+/// fills, equity, and P&L differ. This function closes that gap:
+/// `execution_model_id` (e.g. [`BACKTEST_EXECUTION_MODEL_ID`]) is hashed in
+/// explicitly, under a new `v4` prefix that can never collide with a
+/// `v2`/`v3` (execution-model-unaware) digest, since the version prefix
+/// itself always differs.
+///
+/// Economics folding mirrors [`derive_run_id_with_economics`]'s collapsing
+/// rule: `economics.is_default_equity()` always hashes to the same
+/// `"equity"` token regardless of which explicit (multiplier=1, no margin)
+/// value produced it, so a default-equity run and an explicit-equity run
+/// remain identity-equivalent under this function too. Any other economics
+/// value is hashed by its exact fields, so non-default economics still
+/// produces a distinct `run_id`. Changing `execution_model_id` alone (all
+/// other inputs held fixed) always changes the resulting `run_id`, since it
+/// is hashed in as an explicit, distinguishing component of the canonical
+/// string.
+pub fn derive_run_id_with_execution_model(
+    strategy_name: &str,
+    config_id: &Uuid,
+    input_data_hash: &str,
+    economics: &BacktestInstrumentEconomics,
+    execution_model_id: &str,
+) -> Uuid {
+    let economics_token = if economics.is_default_equity() {
+        "equity".to_string()
+    } else {
+        format!(
+            "mult={}|im={}|mm={}",
+            economics.contract_multiplier,
+            economics
+                .initial_margin_micros
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            economics
+                .maintenance_margin_micros
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        )
+    };
+    let data = format!(
+        "mqk-bkt.run.v4|{}|{}|{}|{}|exec={}",
+        strategy_name, config_id, input_data_hash, economics_token, execution_model_id
+    );
+    Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
+}
+
 // ---------------------------------------------------------------------------
 // BacktestReport
 // ---------------------------------------------------------------------------
@@ -779,7 +897,7 @@ pub struct BacktestReport {
     pub orders: Vec<BacktestOrder>,
     /// All fills executed during the backtest, with per-fill provenance.
     ///
-    /// BKT-01P: each fill carries `fill_id`, `order_id`, and `bar_end_ts`.
+    /// BKT-01P: each fill carries `fill_id`, `order_id`, `signal_ts`, and `fill_ts`.
     /// Implements `Deref<Target = Fill>` for transparent field access.
     pub fills: Vec<BacktestFill>,
     /// Last known price per symbol.
@@ -805,6 +923,14 @@ pub struct BacktestReport {
     /// never calls `BacktestEngine::with_economics` -- multiplier=1, no margin,
     /// `margin_enforced=false`, identical to today's implicit equity behavior.
     pub economics: BacktestEconomicsReport,
+    /// BKT-FUTURE-EXECUTION-01-REPAIR-01 (Blocker 2): the execution/replay
+    /// semantic that actually produced this run's fills -- see
+    /// [`BACKTEST_EXECUTION_MODEL_ID`]. Folded into `run_id` via
+    /// [`derive_run_id_with_execution_model`] so artifacts can state
+    /// truthfully what execution semantics generated them, and so this
+    /// value's identity contribution is independently verifiable from the
+    /// report alone.
+    pub execution_model_id: String,
 }
 
 impl BacktestReport {
@@ -834,6 +960,7 @@ impl BacktestReport {
             last_bar_close_micros: None,
             sizing: StrategySizingConfig::default_sizing(),
             economics: BacktestEconomicsReport::equity(),
+            execution_model_id: String::new(),
         }
     }
 }

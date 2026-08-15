@@ -32,7 +32,8 @@ fn bar(ts: i64) -> BacktestBar {
     )
 }
 
-/// Buy 10 SPY on bar 1, hold forever.
+/// Targets 10 SPY on every bar (restated every tick so a resolved fill is
+/// never implicitly flattened by a later, unrelated tick).
 struct BuyTen;
 
 impl Strategy for BuyTen {
@@ -41,16 +42,16 @@ impl Strategy for BuyTen {
     }
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-        if _ctx.now_tick == 1 {
-            StrategyOutput::new(vec![TargetPosition::new("SPY", 10)])
-        } else {
-            StrategyOutput::new(vec![])
-        }
+        StrategyOutput::new(vec![TargetPosition::new("SPY", 10)])
     }
 }
 
+/// BKT-FUTURE-EXECUTION-01: bar 1 signals the buy; bar 2 is the first later
+/// SPY bar, so it prices the fill. Both bars are flat at the same price, so
+/// the expected fee/price values below are unchanged from the pre-existing
+/// single-bar version.
 fn run_one_buy(commission: CommissionModel) -> mqk_backtest::BacktestReport {
-    let bars = vec![bar(1_700_000_060)];
+    let bars = vec![bar(1_700_000_060), bar(1_700_000_120)];
     let mut cfg = BacktestConfig::test_defaults();
     cfg.max_gross_exposure_mult_micros = 5_000_000; // 5x — permissive
     cfg.commission = commission;

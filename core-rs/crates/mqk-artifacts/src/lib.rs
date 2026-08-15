@@ -652,6 +652,10 @@ struct BacktestMetrics<'a> {
     // --- Existing fields (preserved; schema_version stays 1 — additive change) ---
     schema_version: i32,
     run_id: Uuid,
+    /// BKT-FUTURE-EXECUTION-01-REPAIR-01: the execution/replay semantic
+    /// that actually produced this run's fills (see
+    /// `mqk_backtest::BACKTEST_EXECUTION_MODEL_ID`), folded into `run_id`.
+    execution_model_id: &'a str,
     strategy_name: &'a str,
     halted: bool,
     halt_reason: Option<&'a str>,
@@ -976,7 +980,7 @@ fn compute_fifo_trade_pnls(fills: &[mqk_backtest::BacktestFill]) -> Vec<i64> {
 /// Count equity-curve bars where at least one position was non-zero at bar close.
 ///
 /// Reconstructs net position per symbol by replaying fills in order.
-/// Fills must be sorted by bar_end_ts (engine guarantees this).
+/// Fills must be sorted by fill_ts (engine guarantees this).
 fn count_exposure_bars(fills: &[mqk_backtest::BacktestFill], equity_curve: &[(i64, i64)]) -> usize {
     use std::collections::HashMap;
 
@@ -985,8 +989,8 @@ fn count_exposure_bars(fills: &[mqk_backtest::BacktestFill], equity_curve: &[(i6
     let mut exposed = 0usize;
 
     for &(bar_ts, _) in equity_curve {
-        // Apply all fills whose bar_end_ts <= this bar's timestamp.
-        while fill_idx < fills.len() && fills[fill_idx].bar_end_ts <= bar_ts {
+        // Apply all fills whose fill_ts <= this bar's timestamp.
+        while fill_idx < fills.len() && fills[fill_idx].fill_ts <= bar_ts {
             let f = &fills[fill_idx];
             let delta = match &f.inner.side {
                 Side::Buy => f.qty,
@@ -1040,12 +1044,16 @@ pub fn write_backtest_report(
             mqk_backtest::OrderStatus::Filled => "FILLED",
             mqk_backtest::OrderStatus::Rejected => "REJECTED",
             mqk_backtest::OrderStatus::HaltTriggered => "HALT_TRIGGERED",
+            mqk_backtest::OrderStatus::UnfilledEndOfData => "UNFILLED_END_OF_DATA",
+            mqk_backtest::OrderStatus::CanceledOnHalt => "CANCELED_ON_HALT",
         };
         // 9 columns: ts_utc,order_id,symbol,side,qty,order_type,limit_price,stop_price,status
         // Backtest orders are always MARKET with no limit or stop price (both empty).
+        // ts_utc is signal_ts (decision/order-creation time) -- see fills.csv
+        // below for fill_ts (actual execution time), which can be later.
         orders_csv.push_str(&format!(
             "{},{},{},{},{},MARKET,,,{}\n",
-            o.bar_end_ts, o.order_id, o.symbol, side_str, o.qty, status_str,
+            o.signal_ts, o.order_id, o.symbol, side_str, o.qty, status_str,
         ));
     }
     let orders_path = run_dir.join("orders.csv");
@@ -1058,8 +1066,8 @@ pub fn write_backtest_report(
         let side = format!("{:?}", f.side).to_uppercase(); // BUY / SELL deterministically
         fills_csv.push_str(&format!(
             "{},{},{},{},{},{},{},{}\n",
-            f.bar_end_ts, // exact bar end timestamp — unique per fill
-            f.fill_id,    // deterministic UUIDv5 per fill
+            f.fill_ts, // bar end timestamp that actually priced this fill (BKT-FUTURE-EXECUTION-01: may be later than the order's signal_ts)
+            f.fill_id, // deterministic UUIDv5 per fill
             f.order_id,   // deterministic UUIDv5 per originating order intent
             f.symbol,
             side,
@@ -1176,6 +1184,7 @@ pub fn write_backtest_report(
     let metrics = BacktestMetrics {
         schema_version: 1,
         run_id: report.run_id,
+        execution_model_id: report.execution_model_id.as_str(),
         strategy_name: report.strategy_name.as_str(),
         halted: report.halted,
         halt_reason: report.halt_reason.as_deref(),
@@ -1328,6 +1337,10 @@ fn build_report_md(
     out.push_str(&format!(
         "| Input Data Hash | {} |\n",
         report.input_data_hash
+    ));
+    out.push_str(&format!(
+        "| Execution Model | {} |\n",
+        m.execution_model_id
     ));
     out.push_str(&format!("| Halted | {} |\n", m.halted));
     if let Some(r) = m.halt_reason {
@@ -1549,7 +1562,7 @@ mod tests {
             orders: vec![
                 BacktestOrder {
                     order_id,
-                    bar_end_ts: 1_000,
+                    signal_ts: 1_000,
                     symbol: "SPY".to_string(),
                     side: BacktestOrderSide::Buy,
                     qty: 10,
@@ -1557,7 +1570,7 @@ mod tests {
                 },
                 BacktestOrder {
                     order_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"order2"),
-                    bar_end_ts: 2_000,
+                    signal_ts: 2_000,
                     symbol: "SPY".to_string(),
                     side: BacktestOrderSide::Sell,
                     qty: 10,
@@ -1567,7 +1580,8 @@ mod tests {
             fills: vec![BacktestFill {
                 fill_id,
                 order_id,
-                bar_end_ts: 1_000,
+                signal_ts: 1_000,
+                fill_ts: 1_000,
                 inner: Fill::new("SPY", Side::Buy, 10, 150_000_000, 5_000),
             }],
             last_prices: {
@@ -1709,6 +1723,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// BKT-FUTURE-EXECUTION-01-REPAIR-01: metrics.json and report.md must
+    /// truthfully surface the execution model that actually produced the
+    /// run -- not a placeholder, and never a value implying same-bar
+    /// execution when the run actually used future-target-symbol-bar
+    /// execution.
+    #[test]
+    fn execution_model_id_is_written_truthfully_to_metrics_and_report_md() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mqk_art_test_exec_model_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let report = BacktestReport {
+            execution_model_id: mqk_backtest::BACKTEST_EXECUTION_MODEL_ID.to_string(),
+            ..test_report_with_orders()
+        };
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
+
+        let metrics_contents = std::fs::read_to_string(tmp.join("metrics.json")).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&metrics_contents).expect("metrics.json must be valid JSON");
+        assert_eq!(
+            v["execution_model_id"], mqk_backtest::BACKTEST_EXECUTION_MODEL_ID,
+            "metrics.json must truthfully carry the execution model that produced the run"
+        );
+
+        let report_md = std::fs::read_to_string(tmp.join("report.md")).unwrap();
+        assert!(
+            report_md.contains(mqk_backtest::BACKTEST_EXECUTION_MODEL_ID),
+            "report.md must surface the execution model in its Identity section"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// ART-05: orders.csv status column carries correct values (not in stop_price slot).
     #[test]
     fn orders_csv_status_column_is_correct() {
@@ -1737,7 +1787,10 @@ mod tests {
             let stop_price_val = cols[stop_price_idx];
 
             assert!(
-                matches!(status_val, "FILLED" | "REJECTED" | "HALT_TRIGGERED"),
+                matches!(
+                    status_val,
+                    "FILLED" | "REJECTED" | "HALT_TRIGGERED" | "UNFILLED_END_OF_DATA"
+                ),
                 "status column must be a valid status string, got '{}'",
                 status_val
             );
@@ -1781,7 +1834,8 @@ mod tests {
         BacktestFill {
             fill_id,
             order_id,
-            bar_end_ts: bar_ts,
+            signal_ts: bar_ts,
+            fill_ts: bar_ts,
             inner: Fill::new(symbol, side, qty, price_micros, fee_micros),
         }
     }

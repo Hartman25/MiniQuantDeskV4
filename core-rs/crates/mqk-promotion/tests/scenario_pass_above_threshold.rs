@@ -10,7 +10,8 @@ fn bf(inner: Fill) -> BacktestFill {
     BacktestFill {
         fill_id: uuid::Uuid::new_v5(&ns, b"prom_test_fill"),
         order_id: uuid::Uuid::new_v5(&ns, b"prom_test_order"),
-        bar_end_ts: 0,
+        signal_ts: 0,
+        fill_ts: 0,
         inner,
     }
 }

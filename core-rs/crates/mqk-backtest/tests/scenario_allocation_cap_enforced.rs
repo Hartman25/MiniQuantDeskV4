@@ -29,16 +29,31 @@ impl Strategy for BigBuyOnce {
 
 #[test]
 fn allocation_cap_rejects_risk_increasing_intent() {
-    // One bar where worst-case BUY fill is at HIGH.
-    let bars = vec![BacktestBar::new(
-        "SPY",
-        1_700_000_060,
-        500_000_000,
-        500_000_000,
-        500_000_000,
-        500_000_000,
-        1000,
-    )];
+    // BKT-FUTURE-EXECUTION-01: the allocation cap is checked at fill time
+    // (using the actual fill price), not at signal time -- so the pending
+    // order needs a later bar of its own symbol to reach that check at all.
+    // Two identical flat bars: bar 1 signals, bar 2 is where the cap check
+    // (and the worst-case BUY-at-HIGH pricing) actually happens.
+    let bars = vec![
+        BacktestBar::new(
+            "SPY",
+            1_700_000_060,
+            500_000_000,
+            500_000_000,
+            500_000_000,
+            500_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_120,
+            500_000_000,
+            500_000_000,
+            500_000_000,
+            500_000_000,
+            1000,
+        ),
+    ];
 
     let mut cfg = BacktestConfig::test_defaults();
     // Initial equity is 100k (from defaults). Set cap to 10% (0.10).
@@ -50,4 +65,9 @@ fn allocation_cap_rejects_risk_increasing_intent() {
 
     // The intent should be rejected due to allocation cap. No fills.
     assert_eq!(report.fills.len(), 0);
+    assert_eq!(report.orders.len(), 1);
+    assert_eq!(
+        report.orders[0].status,
+        mqk_backtest::OrderStatus::Rejected
+    );
 }

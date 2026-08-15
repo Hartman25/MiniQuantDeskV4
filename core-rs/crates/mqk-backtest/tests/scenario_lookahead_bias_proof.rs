@@ -113,36 +113,47 @@ fn make_bars(n: usize) -> Vec<BacktestBar> {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Fill price is bounded by *current* bar's [LOW, HIGH]
+// Test 1: Fill price is bounded by the first *later* bar's [LOW, HIGH] —
+// never the signal bar's own range, never a bar beyond the first eligible one.
 // ---------------------------------------------------------------------------
 
-/// A BUY signal on bar 1 must fill within bar 1's [LOW_1, HIGH_1].
+/// BKT-FUTURE-EXECUTION-01: a BUY signal on bar 1 must fill within bar 2's
+/// [LOW_2, HIGH_2] — the first later bar for SPY — and never within bar 1's
+/// own range (that would be same-bar lookahead) nor bar 3's (that would be
+/// skipping the first eligible bar, a different kind of lookahead).
 ///
-/// Any price outside this range would require knowing bar 2's open (or higher),
-/// proving lookahead.  Bar prices are spaced $20 apart so the ranges are
-/// non-overlapping — a fill at bar 2's price cannot be mistaken for bar 1's.
+/// Bar prices are spaced $20 apart so the three ranges are pairwise
+/// non-overlapping — a fill at any other bar's price cannot be mistaken for
+/// bar 2's.
 ///
-/// The engine is run with **only bar 1** so that bar 2 is structurally
+/// The engine is run with only bars 1 and 2 so bar 3 is structurally
 /// inaccessible; the non-overlap is confirmed statically as a test-setup
 /// assertion before the engine is started.
 #[test]
-fn fill_price_bounded_by_current_bar_range() {
-    // Build 2 bars to demonstrate non-overlap, but feed only bar 1.
-    let all_bars = make_bars(2);
-    let bar1_low = all_bars[0].low_micros;
+fn fill_price_bounded_by_first_later_bar_range() {
+    // Build 3 bars to demonstrate non-overlap, but feed only bars 1 and 2.
+    let all_bars = make_bars(3);
     let bar1_high = all_bars[0].high_micros;
+    let bar2_low = all_bars[1].low_micros;
+    let bar2_high = all_bars[1].high_micros;
+    let bar3_low = all_bars[2].low_micros;
 
-    // Sanity: bar 2's price range must not overlap bar 1's.
-    // With $20 spacing and ±$5 OHLC: bar 2 low = $115, bar 1 high = $105.
+    // Sanity: adjacent bars' price ranges must not overlap.
     assert!(
-        all_bars[1].low_micros > bar1_high,
+        bar2_low > bar1_high,
         "test setup: bar 2 low ({}) must exceed bar 1 high ({}) for non-overlap",
-        all_bars[1].low_micros,
+        bar2_low,
         bar1_high
     );
+    assert!(
+        bar3_low > bar2_high,
+        "test setup: bar 3 low ({}) must exceed bar 2 high ({}) for non-overlap",
+        bar3_low,
+        bar2_high
+    );
 
-    // Run with only bar 1 — bar 2 is never presented to the engine.
-    let bars = vec![all_bars[0].clone()];
+    // Run with only bars 1 and 2 — bar 3 is never presented to the engine.
+    let bars = vec![all_bars[0].clone(), all_bars[1].clone()];
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut engine = BacktestEngine::new(BacktestConfig::test_defaults());
     engine
@@ -153,13 +164,26 @@ fn fill_price_bounded_by_current_bar_range() {
     assert_eq!(report.fills.len(), 1, "expected exactly 1 fill");
     let fill = &report.fills[0];
 
-    // The fill price must lie within bar 1's range.  Since bar 2 was never
-    // passed to the engine, any out-of-range price would prove a lookahead.
+    // The fill must be priced from bar 2, not bar 1 — proving the signal
+    // bar's own data never fills its own order.
+    assert_eq!(fill.signal_ts, all_bars[0].end_ts, "signal made on bar 1");
+    assert_eq!(fill.fill_ts, all_bars[1].end_ts, "priced from bar 2");
+
+    // The fill price must lie within bar 2's range. Since bar 3 was never
+    // passed to the engine, any out-of-range price would prove a lookahead
+    // beyond the first eligible bar.
     assert!(
-        fill.price_micros >= bar1_low && fill.price_micros <= bar1_high,
-        "fill price {} is outside bar 1 range [{}, {}] — future-bar data leaked",
+        fill.price_micros >= bar2_low && fill.price_micros <= bar2_high,
+        "fill price {} is outside bar 2 range [{}, {}] — future-bar data leaked",
         fill.price_micros,
-        bar1_low,
+        bar2_low,
+        bar2_high
+    );
+    // And explicitly not within bar 1's own range — same-bar lookahead check.
+    assert!(
+        fill.price_micros > bar1_high,
+        "fill price {} must not fall inside bar 1's range (high={}) — same-bar fill detected",
+        fill.price_micros,
         bar1_high
     );
 }

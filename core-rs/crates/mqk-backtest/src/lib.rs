@@ -65,7 +65,8 @@ pub use sweep::{
     SweepRowResult, SWEEP_MAX_COMBINATIONS,
 };
 pub use types::{
-    derive_input_data_hash, derive_run_id, derive_run_id_with_economics, BacktestBar,
-    BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
-    CommissionModel, OrderStatus, StrategySizingConfig, StressProfile,
+    derive_input_data_hash, derive_run_id, derive_run_id_with_economics,
+    derive_run_id_with_execution_model, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder,
+    BacktestOrderSide, BacktestReport, CommissionModel, OrderStatus, StrategySizingConfig,
+    StressProfile, BACKTEST_EXECUTION_MODEL_ID,
 };

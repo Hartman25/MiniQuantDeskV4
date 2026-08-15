@@ -4,8 +4,10 @@
 //! - A non-nil `fill_id` (deterministic UUIDv5)
 //! - A non-nil `order_id` (deterministic UUIDv5)
 //! - `fill_id != order_id` (the two IDs are derived from different namespaces)
-//! - `bar_end_ts == bar.end_ts` for the bar that triggered the fill
-//! - Identical replay → identical (fill_id, order_id, bar_end_ts) — determinism
+//! - `signal_ts == ` the bar the decision was made on; `fill_ts == ` the
+//!   later bar that actually priced it (BKT-FUTURE-EXECUTION-01: `fill_ts >
+//!   signal_ts` for ordinary strategy orders)
+//! - Identical replay → identical (fill_id, order_id, signal_ts, fill_ts) — determinism
 //! - Different bars produce different order_ids — uniqueness
 //! - Flatten-all fills carry distinct IDs from intent-driven fills for the same bar
 
@@ -42,6 +44,20 @@ fn bar2(ts: i64) -> BacktestBar {
     )
 }
 
+fn bar3(ts: i64) -> BacktestBar {
+    BacktestBar::new(
+        "SPY",
+        ts,
+        120_000_000,
+        125_000_000,
+        115_000_000,
+        120_000_000,
+        1_000,
+    )
+}
+
+/// Buys on bar 1 (fills on bar 2 -- the first later SPY bar), sells on bar 2
+/// (fills on bar 3 -- the first later SPY bar after the sell signal).
 struct BuyOnBar1ExitOnBar2;
 
 impl Strategy for BuyOnBar1ExitOnBar2 {
@@ -58,8 +74,15 @@ impl Strategy for BuyOnBar1ExitOnBar2 {
     }
 }
 
-fn run_two_bar() -> mqk_backtest::BacktestReport {
-    let bars = vec![bar(1_700_000_060), bar2(1_700_000_120)];
+const TS_BAR1: i64 = 1_700_000_060;
+const TS_BAR2: i64 = 1_700_000_120;
+const TS_BAR3: i64 = 1_700_000_180;
+
+/// Three bars so both the buy (signalled on bar 1) and the sell (signalled
+/// on bar 2, once the buy has resolved) each have a later bar of their own
+/// symbol to fill against.
+fn run_three_bar() -> mqk_backtest::BacktestReport {
+    let bars = vec![bar(TS_BAR1), bar2(TS_BAR2), bar3(TS_BAR3)];
     let mut cfg = BacktestConfig::test_defaults();
     cfg.max_gross_exposure_mult_micros = 5_000_000; // 5x — permissive
     let mut engine = BacktestEngine::new(cfg);
@@ -73,23 +96,23 @@ fn run_two_bar() -> mqk_backtest::BacktestReport {
 
 #[test]
 fn fill_and_order_ids_are_non_nil() {
-    let report = run_two_bar();
+    let report = run_three_bar();
     assert_eq!(report.fills.len(), 2, "expected buy + sell");
 
     for f in &report.fills {
         assert_ne!(
             f.fill_id,
             Uuid::nil(),
-            "fill_id must not be nil (symbol={}, ts={})",
+            "fill_id must not be nil (symbol={}, fill_ts={})",
             f.symbol,
-            f.bar_end_ts
+            f.fill_ts
         );
         assert_ne!(
             f.order_id,
             Uuid::nil(),
-            "order_id must not be nil (symbol={}, ts={})",
+            "order_id must not be nil (symbol={}, fill_ts={})",
             f.symbol,
-            f.bar_end_ts
+            f.fill_ts
         );
     }
 }
@@ -100,7 +123,7 @@ fn fill_and_order_ids_are_non_nil() {
 
 #[test]
 fn fill_id_differs_from_order_id() {
-    let report = run_two_bar();
+    let report = run_three_bar();
     assert_eq!(report.fills.len(), 2);
 
     for f in &report.fills {
@@ -112,28 +135,27 @@ fn fill_id_differs_from_order_id() {
 }
 
 // ---------------------------------------------------------------------------
-// P3: bar_end_ts matches the bar that triggered the fill
+// P3: signal_ts is decision time, fill_ts is the later pricing bar
 // ---------------------------------------------------------------------------
 
+/// BKT-FUTURE-EXECUTION-01: the buy is signalled on bar 1 but priced from
+/// bar 2 (the first later SPY bar); the sell is signalled on bar 2 (once the
+/// buy has resolved and the strategy sees a position to exit) but priced
+/// from bar 3. `fill_ts` must always be strictly greater than `signal_ts`.
 #[test]
-fn bar_end_ts_matches_triggering_bar() {
-    let ts_bar1: i64 = 1_700_000_060;
-    let ts_bar2: i64 = 1_700_000_120;
-
-    let report = run_two_bar();
+fn signal_ts_and_fill_ts_reflect_decision_and_pricing_bars_separately() {
+    let report = run_three_bar();
     assert_eq!(report.fills.len(), 2);
 
-    // Fill 0: BUY triggered on bar 1
-    assert_eq!(
-        report.fills[0].bar_end_ts, ts_bar1,
-        "BUY fill bar_end_ts should match bar 1 ts"
-    );
+    let buy = &report.fills[0];
+    assert_eq!(buy.signal_ts, TS_BAR1, "buy decision made on bar 1");
+    assert_eq!(buy.fill_ts, TS_BAR2, "buy priced from the first later SPY bar");
+    assert!(buy.fill_ts > buy.signal_ts);
 
-    // Fill 1: SELL triggered on bar 2
-    assert_eq!(
-        report.fills[1].bar_end_ts, ts_bar2,
-        "SELL fill bar_end_ts should match bar 2 ts"
-    );
+    let sell = &report.fills[1];
+    assert_eq!(sell.signal_ts, TS_BAR2, "sell decision made on bar 2");
+    assert_eq!(sell.fill_ts, TS_BAR3, "sell priced from the first later SPY bar");
+    assert!(sell.fill_ts > sell.signal_ts);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,8 +164,8 @@ fn bar_end_ts_matches_triggering_bar() {
 
 #[test]
 fn ids_are_stable_across_identical_replays() {
-    let r1 = run_two_bar();
-    let r2 = run_two_bar();
+    let r1 = run_three_bar();
+    let r2 = run_three_bar();
 
     assert_eq!(r1.fills.len(), r2.fills.len());
     for (f1, f2) in r1.fills.iter().zip(r2.fills.iter()) {
@@ -156,8 +178,12 @@ fn ids_are_stable_across_identical_replays() {
             "order_id must be identical across replays"
         );
         assert_eq!(
-            f1.bar_end_ts, f2.bar_end_ts,
-            "bar_end_ts must be identical across replays"
+            f1.signal_ts, f2.signal_ts,
+            "signal_ts must be identical across replays"
+        );
+        assert_eq!(
+            f1.fill_ts, f2.fill_ts,
+            "fill_ts must be identical across replays"
         );
     }
 }
@@ -168,16 +194,16 @@ fn ids_are_stable_across_identical_replays() {
 
 #[test]
 fn different_bars_produce_different_order_ids() {
-    let report = run_two_bar();
+    let report = run_three_bar();
     assert_eq!(report.fills.len(), 2);
 
     assert_ne!(
         report.fills[0].order_id, report.fills[1].order_id,
-        "fills on different bars must have distinct order_ids"
+        "fills signalled on different bars must have distinct order_ids"
     );
     assert_ne!(
         report.fills[0].fill_id, report.fills[1].fill_id,
-        "fills on different bars must have distinct fill_ids"
+        "fills signalled on different bars must have distinct fill_ids"
     );
 }
 

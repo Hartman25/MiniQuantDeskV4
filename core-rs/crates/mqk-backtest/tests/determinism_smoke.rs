@@ -54,24 +54,33 @@ fn determinism_equity_curve_and_fills_are_stable() {
 
     let report = engine.run(&bars).expect("run backtest");
 
+    // BKT-FUTURE-EXECUTION-01: the tick-1 buy signal (bar end_ts=60) is
+    // priced from bar end_ts=120 (the first later bar) at its HIGH
+    // (1_030_000), not from bar 60's HIGH. The tick-2 sell signal (bar
+    // end_ts=120, generated once the buy has resolved) is priced from bar
+    // end_ts=180 at its LOW (1_000_000).
     assert_eq!(report.fills.len(), 2);
 
     assert_eq!(report.fills[0].symbol, "TEST");
     assert_eq!(format!("{:?}", report.fills[0].side), "Buy");
     assert_eq!(report.fills[0].qty, 10);
-    assert_eq!(report.fills[0].price_micros, 1_010_000);
+    assert_eq!(report.fills[0].signal_ts, 60);
+    assert_eq!(report.fills[0].fill_ts, 120);
+    assert_eq!(report.fills[0].price_micros, 1_030_000);
     assert_eq!(report.fills[0].fee_micros, 0);
 
     assert_eq!(report.fills[1].symbol, "TEST");
     assert_eq!(format!("{:?}", report.fills[1].side), "Sell");
     assert_eq!(report.fills[1].qty, 10);
-    assert_eq!(report.fills[1].price_micros, 1_010_000);
+    assert_eq!(report.fills[1].signal_ts, 120);
+    assert_eq!(report.fills[1].fill_ts, 180);
+    assert_eq!(report.fills[1].price_micros, 1_000_000);
     assert_eq!(report.fills[1].fee_micros, 0);
 
     let expected = vec![
-        (60, 99_999_900_000),
-        (120, 100_000_000_000),
-        (180, 100_000_000_000),
+        (60, 100_000_000_000),
+        (120, 99_999_900_000),
+        (180, 99_999_700_000),
     ];
     assert_eq!(report.equity_curve, expected);
 

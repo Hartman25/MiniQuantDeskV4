@@ -198,26 +198,32 @@ fn backtest_applies_same_delta_rule_as_direct_call() {
 /// A live fill "at close" or "at market (between OHLC)" would be ≤ HIGH.
 /// The backtest assumes the worst-case buyer price, so it is never more
 /// optimistic than a live fill.
+///
+/// BKT-FUTURE-EXECUTION-01: the signal is generated on bar 1, but the fill
+/// is priced from bar 2 (the first later SPY bar) — a second bar is required
+/// so the pending order has somewhere to resolve.
 #[test]
 fn buy_fill_price_is_at_least_close_conservative_bound() {
-    // Spread bar: close=$100, high=$105, low=$95.
-    let bar = spread_bar("SPY", 1_700_000_060, 100 * M, 5 * M);
-    let close = bar.close_micros;
-    let high = bar.high_micros;
+    // Bar 1 signals; its price data has no bearing on the fill.
+    let bar1 = flat_bar("SPY", 1_700_000_060, 100 * M);
+    // Spread bar 2: close=$100, high=$105, low=$95 — this prices the fill.
+    let bar2 = spread_bar("SPY", 1_700_000_120, 100 * M, 5 * M);
+    let close = bar2.close_micros;
+    let high = bar2.high_micros;
 
     let strategy = StaticTarget::new(vec![(1, vec![TargetPosition::new("SPY", 10)])]);
 
     let mut engine = BacktestEngine::new(alignment_config(100_000 * M, 0));
     engine.add_strategy(Box::new(strategy)).unwrap();
-    let report = engine.run(&[bar]).unwrap();
+    let report = engine.run(&[bar1, bar2]).unwrap();
 
     assert_eq!(report.fills.len(), 1);
     let fill_price = report.fills[0].price_micros;
 
-    // Fill must be at HIGH (no slippage in alignment_config).
+    // Fill must be at bar 2's HIGH (no slippage in alignment_config).
     assert_eq!(
         fill_price, high,
-        "BUY fill should be at HIGH with 0 slippage"
+        "BUY fill should be at bar 2's HIGH with 0 slippage"
     );
 
     // Key alignment property: fill >= close (never favorable vs close).
@@ -237,14 +243,20 @@ fn buy_fill_price_is_at_least_close_conservative_bound() {
 ///
 /// The backtest assumes the worst-case seller price, so it is never more
 /// optimistic than a live fill.
+///
+/// BKT-FUTURE-EXECUTION-01: the buy (signalled bar 1) fills on bar 2; the
+/// sell is signalled on bar 2 once the buy has resolved, and fills on bar 3
+/// — the spread bar that must price it.
 #[test]
 fn sell_fill_price_is_at_most_close_conservative_bound() {
-    // Bar 1: buy 10 SPY (flat bar to avoid price complication).
-    // Bar 2: sell 10 SPY from a spread bar; fill should be at LOW ≤ CLOSE.
-    let buy_bar = flat_bar("SPY", 1_700_000_060, 100 * M);
-    let sell_bar = spread_bar("SPY", 1_700_000_120, 100 * M, 5 * M);
-    let close = sell_bar.close_micros;
-    let low = sell_bar.low_micros;
+    // Bar 1: buy signal (flat bar, no bearing on the fill price).
+    // Bar 2: buy fills here (flat, so entry price is unambiguous); sell signalled here.
+    // Bar 3: sell fills here — a spread bar, so fill should be at LOW ≤ CLOSE.
+    let bar1 = flat_bar("SPY", 1_700_000_060, 100 * M);
+    let bar2 = flat_bar("SPY", 1_700_000_120, 100 * M);
+    let bar3 = spread_bar("SPY", 1_700_000_180, 100 * M, 5 * M);
+    let close = bar3.close_micros;
+    let low = bar3.low_micros;
 
     let strategy = StaticTarget::new(vec![
         (1, vec![TargetPosition::new("SPY", 10)]),
@@ -253,7 +265,7 @@ fn sell_fill_price_is_at_most_close_conservative_bound() {
 
     let mut engine = BacktestEngine::new(alignment_config(100_000 * M, 0));
     engine.add_strategy(Box::new(strategy)).unwrap();
-    let report = engine.run(&[buy_bar, sell_bar]).unwrap();
+    let report = engine.run(&[bar1, bar2, bar3]).unwrap();
 
     assert_eq!(report.fills.len(), 2);
     let sell_price = report.fills[1].price_micros;
@@ -331,19 +343,25 @@ fn risk_daily_loss_limit_governs_backtest_and_direct_evaluate_identically() {
     );
 
     // --- Part B: same threshold in backtest engine ---
-    // initial=$10,000; buy 10 SPY@$100 (flat bar).  Next bar: price=$40 (crash).
+    // BKT-FUTURE-EXECUTION-01: the bar 1 buy signal fills on bar 2 (flat
+    // $100, so the entry price is unambiguous), holds through bar 2's own
+    // signal, then bar 3 crashes to $40 and signals the sell -- the risk
+    // check for that sell intent fires at signal time, using bar 3's
+    // just-updated mark.
     // equity = ($10,000 - $1,000) + 10*$40 = $9,400 — same as input_below above.
     let bar1 = flat_bar("SPY", 1_700_000_060, 100 * M);
-    let bar2 = flat_bar("SPY", 1_700_000_120, 40 * M); // crash: equity drops to $9,400
+    let bar2 = flat_bar("SPY", 1_700_000_120, 100 * M); // buy fills here
+    let bar3 = flat_bar("SPY", 1_700_000_180, 40 * M); // crash: equity drops to $9,400
 
     let strategy = StaticTarget::new(vec![
         (1, vec![TargetPosition::new("SPY", 10)]),
-        (2, vec![TargetPosition::new("SPY", 0)]), // sell intent triggers risk check
+        (2, vec![TargetPosition::new("SPY", 10)]), // hold once the buy has resolved
+        (3, vec![TargetPosition::new("SPY", 0)]),  // sell intent triggers risk check
     ]);
 
     let mut engine = BacktestEngine::new(alignment_config(INITIAL, LIMIT));
     engine.add_strategy(Box::new(strategy)).unwrap();
-    let report = engine.run(&[bar1, bar2]).unwrap();
+    let report = engine.run(&[bar1, bar2, bar3]).unwrap();
 
     assert!(
         report.halted,
@@ -365,15 +383,21 @@ fn risk_daily_loss_limit_governs_backtest_and_direct_evaluate_identically() {
 fn backtest_fills_replay_identically_via_shared_apply_fill() {
     const INITIAL: i64 = 100_000 * M;
 
-    // Buy 10 SPY @ flat $100; sell at flat $110 (profit $100).
+    // BKT-FUTURE-EXECUTION-01: buy signalled on bar 1 fills on bar 2 (flat
+    // $100 — unambiguous entry); sell signalled on bar 3 (once the buy has
+    // resolved and bar 2's hold re-confirms it) fills on bar 4 (flat $110 —
+    // unambiguous exit). Profit is still (110-100)*10 = $100.
     let bars = vec![
         flat_bar("SPY", 1_700_000_060, 100 * M),
-        flat_bar("SPY", 1_700_000_120, 110 * M),
+        flat_bar("SPY", 1_700_000_120, 100 * M),
+        flat_bar("SPY", 1_700_000_180, 100 * M),
+        flat_bar("SPY", 1_700_000_240, 110 * M),
     ];
 
     let strategy = StaticTarget::new(vec![
         (1, vec![TargetPosition::new("SPY", 10)]),
-        (2, vec![TargetPosition::new("SPY", 0)]),
+        (2, vec![TargetPosition::new("SPY", 10)]),
+        (3, vec![TargetPosition::new("SPY", 0)]),
     ]);
 
     let mut engine = BacktestEngine::new(alignment_config(INITIAL, 0));

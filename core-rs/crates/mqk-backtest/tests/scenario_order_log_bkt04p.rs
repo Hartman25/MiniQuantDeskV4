@@ -1,15 +1,19 @@
 //! BKT-04P: Order log proof.
 //!
 //! Proves that the backtest engine emits one `BacktestOrder` record per intent,
-//! regardless of risk outcome:
+//! regardless of outcome:
 //!
-//! - O1: Every allowed intent produces an order with status Filled
-//! - O2: Every risk-rejected intent produces an order with status Rejected
+//! - O1: Every admitted intent that finds a later bar to fill against produces an order with status Filled
+//! - O2: Every allocation-cap-rejected intent produces an order with status Rejected
 //! - O3: Filled order's order_id matches the corresponding fill's order_id
 //! - O4: Rejected order has no corresponding fill
 //! - O5: Flatten-all intents appear in the order log with status Filled
 //! - O6: orders.len() >= fills.len() (can't fill more than we ordered)
 //! - O7: Order log is stable across identical replays (deterministic)
+//!
+//! BKT-FUTURE-EXECUTION-01: admitted orders are no longer filled same-bar —
+//! every test here gives an admitted intent a later bar of its own symbol to
+//! resolve against, exactly as `BacktestEngine::run` now requires.
 
 use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine, CommissionModel, OrderStatus};
 use mqk_execution::{StrategyOutput, TargetPosition};
@@ -23,7 +27,7 @@ fn bar(ts: i64, high: i64, low: i64) -> BacktestBar {
     BacktestBar::new("SPY", ts, 100_000_000, high, low, 100_000_000, 1_000)
 }
 
-/// Buy on bar 1, sell on bar 2.
+/// Buy on bar 1 (fills bar 2), sell on bar 2 (fills bar 3).
 struct BuyThenSell;
 
 impl Strategy for BuyThenSell {
@@ -44,6 +48,7 @@ fn run_buy_sell() -> mqk_backtest::BacktestReport {
     let bars = vec![
         bar(1_700_000_060, 100_000_000, 100_000_000),
         bar(1_700_000_120, 100_000_000, 100_000_000),
+        bar(1_700_000_180, 100_000_000, 100_000_000),
     ];
     let mut cfg = BacktestConfig::test_defaults();
     cfg.max_gross_exposure_mult_micros = 5_000_000;
@@ -54,7 +59,7 @@ fn run_buy_sell() -> mqk_backtest::BacktestReport {
 }
 
 // ---------------------------------------------------------------------------
-// O1: Allowed intents appear as Filled orders
+// O1: Admitted intents that find a later bar produce Filled orders
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -76,35 +81,52 @@ fn allowed_intents_produce_filled_orders() {
 }
 
 // ---------------------------------------------------------------------------
-// O2: Rejected intents appear as Rejected orders (risk daily-loss-limit)
+// O2: Allocation-cap-rejected intents appear as Rejected orders
 // ---------------------------------------------------------------------------
 
-/// Strategy that tries to buy a huge position — should be capped by exposure limit.
-struct OverExpose;
+/// Strategy that tries to buy a huge position once — should be capped by the
+/// exposure limit once its pending order reaches fill-time resolution
+/// (BKT-FUTURE-EXECUTION-01: the allocation cap is checked at fill time,
+/// using the actual fill price, not at signal time).
+struct OverExposeOnce {
+    fired: bool,
+}
 
-impl Strategy for OverExpose {
+impl Strategy for OverExposeOnce {
     fn spec(&self) -> StrategySpec {
         StrategySpec::new("bkt04p_over_expose", 60)
     }
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-        // Target a 100-share position with tight exposure cap → will be rejected
-        StrategyOutput::new(vec![TargetPosition::new("SPY", 100)])
+        if !self.fired {
+            self.fired = true;
+            // Target a 100-share position with a tight exposure cap → rejected.
+            StrategyOutput::new(vec![TargetPosition::new("SPY", 100)])
+        } else {
+            StrategyOutput::new(vec![])
+        }
     }
 }
 
 #[test]
 fn risk_rejected_intent_appears_in_order_log() {
-    // Tight exposure cap: 0.01x equity on 100k = $1000 → can't buy 100 shares @ $100
-    let bars = vec![bar(1_700_000_060, 100_000_000, 100_000_000)];
+    // Tight exposure cap: 0.01x equity on 100k = $1000 → can't buy 100 shares @ $100.
+    // Two bars: bar 1 signals the order, bar 2 gives it a later SPY bar to
+    // resolve (and be cap-rejected) against.
+    let bars = vec![
+        bar(1_700_000_060, 100_000_000, 100_000_000),
+        bar(1_700_000_120, 100_000_000, 100_000_000),
+    ];
     let mut cfg = BacktestConfig::test_defaults();
     cfg.max_gross_exposure_mult_micros = 10_000; // 0.01x — forces rejection
     cfg.commission = CommissionModel::ZERO;
     let mut engine = BacktestEngine::new(cfg);
-    engine.add_strategy(Box::new(OverExpose)).unwrap();
+    engine
+        .add_strategy(Box::new(OverExposeOnce { fired: false }))
+        .unwrap();
     let report = engine.run(&bars).unwrap();
 
-    // No fills (rejected)
+    // No fills (cap-rejected at fill time)
     assert_eq!(report.fills.len(), 0, "tight cap should produce no fills");
 
     // But order log has the attempt
@@ -154,12 +176,17 @@ fn filled_order_id_matches_fill_order_id() {
 
 #[test]
 fn rejected_order_has_no_fill() {
-    let bars = vec![bar(1_700_000_060, 100_000_000, 100_000_000)];
+    let bars = vec![
+        bar(1_700_000_060, 100_000_000, 100_000_000),
+        bar(1_700_000_120, 100_000_000, 100_000_000),
+    ];
     let mut cfg = BacktestConfig::test_defaults();
     cfg.max_gross_exposure_mult_micros = 10_000;
     cfg.commission = CommissionModel::ZERO;
     let mut engine = BacktestEngine::new(cfg);
-    engine.add_strategy(Box::new(OverExpose)).unwrap();
+    engine
+        .add_strategy(Box::new(OverExposeOnce { fired: false }))
+        .unwrap();
     let report = engine.run(&bars).unwrap();
 
     for order in report
@@ -208,8 +235,8 @@ fn order_log_is_deterministic_across_replays() {
             "order_id must be stable across replays"
         );
         assert_eq!(
-            o1.bar_end_ts, o2.bar_end_ts,
-            "bar_end_ts must be stable across replays"
+            o1.signal_ts, o2.signal_ts,
+            "signal_ts must be stable across replays"
         );
         assert_eq!(o1.status, o2.status, "status must be stable across replays");
     }

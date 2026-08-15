@@ -177,21 +177,27 @@ fn gate_volatility_mult_matches_base_yaml() {
 /// - conservative BUY fill   = HIGH + 205 bps adj = 520_455_000
 #[test]
 fn gate_buy_fill_price_is_worse_under_conservative_config() {
-    let bar = spread_bar(1_700_000_060);
+    // BKT-FUTURE-EXECUTION-01: bar 1 signals the buy; the fill is priced
+    // from bar 2, the first later SPY bar. Both bars carry identical OHLC
+    // (spread_bar's values don't depend on `ts`), so the expected fill
+    // prices below are unchanged from the pre-existing single-bar version.
+    let bar1 = spread_bar(1_700_000_060);
+    let bar2 = spread_bar(1_700_000_120);
+    let bars = [bar1, bar2];
 
     // Run with test_defaults (0 slippage).
     let mut engine_test = BacktestEngine::new(BacktestConfig::test_defaults());
     engine_test
         .add_strategy(Box::new(HoldQty::new(10)))
         .unwrap();
-    let report_test = engine_test.run(std::slice::from_ref(&bar)).unwrap();
+    let report_test = engine_test.run(&bars).unwrap();
 
     // Run with conservative_defaults (205 effective bps on this bar).
     let mut engine_cons = BacktestEngine::new(BacktestConfig::conservative_defaults());
     engine_cons
         .add_strategy(Box::new(HoldQty::new(10)))
         .unwrap();
-    let report_cons = engine_cons.run(std::slice::from_ref(&bar)).unwrap();
+    let report_cons = engine_cons.run(&bars).unwrap();
 
     assert_eq!(
         report_test.fills.len(),
@@ -231,26 +237,29 @@ fn gate_buy_fill_price_is_worse_under_conservative_config() {
 /// - conservative SELL fill   = LOW − 205 bps adj = 479_955_000
 #[test]
 fn gate_sell_fill_price_is_worse_under_conservative_config() {
-    let buy_bar = spread_bar(1_700_000_060);
-    let sell_bar = spread_bar(1_700_000_120);
+    // BKT-FUTURE-EXECUTION-01: bar 1 signals the buy (fills bar 2); bar 2
+    // also carries the sell signal, once the buy has resolved (fills bar
+    // 3). All three bars carry identical OHLC (spread_bar's values don't
+    // depend on `ts`), so the expected fill prices below are unchanged from
+    // the pre-existing two-bar version.
+    let bar1 = spread_bar(1_700_000_060);
+    let bar2 = spread_bar(1_700_000_120);
+    let bar3 = spread_bar(1_700_000_180);
+    let bars = [bar1, bar2, bar3];
 
     // Run with test_defaults (0 slippage).
     let mut engine_test = BacktestEngine::new(BacktestConfig::test_defaults());
     engine_test
         .add_strategy(Box::new(RoundTrip::new(10)))
         .unwrap();
-    let report_test = engine_test
-        .run(&[buy_bar.clone(), sell_bar.clone()])
-        .unwrap();
+    let report_test = engine_test.run(&bars).unwrap();
 
     // Run with conservative_defaults (205 effective bps on these bars).
     let mut engine_cons = BacktestEngine::new(BacktestConfig::conservative_defaults());
     engine_cons
         .add_strategy(Box::new(RoundTrip::new(10)))
         .unwrap();
-    let report_cons = engine_cons
-        .run(&[buy_bar.clone(), sell_bar.clone()])
-        .unwrap();
+    let report_cons = engine_cons.run(&bars).unwrap();
 
     assert_eq!(
         report_test.fills.len(),
@@ -296,26 +305,27 @@ fn gate_sell_fill_price_is_worse_under_conservative_config() {
 /// test config. A failing gate here means slippage is not being applied.
 #[test]
 fn gate_conservative_config_produces_lower_final_equity() {
-    let buy_bar = spread_bar(1_700_000_060);
-    let sell_bar = spread_bar(1_700_000_120);
+    // BKT-FUTURE-EXECUTION-01: three identical spread bars so the buy
+    // (signalled bar 1) and the sell (signalled bar 2, once the buy has
+    // resolved) each have a later bar to fill against — see Gate 4.
+    let bar1 = spread_bar(1_700_000_060);
+    let bar2 = spread_bar(1_700_000_120);
+    let bar3 = spread_bar(1_700_000_180);
+    let bars = [bar1, bar2, bar3];
 
     // Run with test_defaults (0 slippage, no risk limits, no integrity).
     let mut engine_test = BacktestEngine::new(BacktestConfig::test_defaults());
     engine_test
         .add_strategy(Box::new(RoundTrip::new(10)))
         .unwrap();
-    let report_test = engine_test
-        .run(&[buy_bar.clone(), sell_bar.clone()])
-        .unwrap();
+    let report_test = engine_test.run(&bars).unwrap();
 
     // Run with conservative_defaults (205 bps effective, risk limits active, integrity on).
     let mut engine_cons = BacktestEngine::new(BacktestConfig::conservative_defaults());
     engine_cons
         .add_strategy(Box::new(RoundTrip::new(10)))
         .unwrap();
-    let report_cons = engine_cons
-        .run(&[buy_bar.clone(), sell_bar.clone()])
-        .unwrap();
+    let report_cons = engine_cons.run(&bars).unwrap();
 
     // Conservative run must not halt: daily loss $405 is well within the $2,000 limit.
     assert!(
