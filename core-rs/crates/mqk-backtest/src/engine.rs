@@ -19,7 +19,7 @@
 //! - Deterministic iteration order where possible; input bars must be
 //!   non-decreasing by `end_ts` (see `BacktestError::UnsortedInput`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 
@@ -89,6 +89,17 @@ pub enum BacktestError {
     /// asked for. Equal timestamps (same-frame, cross-symbol bars) are not
     /// out of order and are always accepted.
     UnsortedInput { end_ts: i64, prev_end_ts: i64 },
+    /// BKT-FUTURE-EXECUTION-01-REPAIR-02 (Blocker 1) -- a second bar for the
+    /// same `(symbol, end_ts)` pair was seen within one same-timestamp
+    /// execution batch. A duplicate can only ever occur within a single
+    /// batch (two bars can only share `end_ts` if they are in the same
+    /// batch), so this is equivalent to a global duplicate check.
+    /// Ambiguous data provenance -- there is no principled, order-invariant
+    /// way to decide which row is correct, so the run fails closed with
+    /// zero fills rather than picking a winner by physical row order.
+    /// Matches [`crate::market_frame::MarketFrameError::DuplicateBar`]'s
+    /// contract.
+    DuplicateBar { symbol: String, end_ts: i64 },
 }
 
 impl core::fmt::Display for BacktestError {
@@ -119,6 +130,11 @@ impl core::fmt::Display for BacktestError {
                 f,
                 "unsorted input rejected: bar end_ts={} arrived after end_ts={} (input must be non-decreasing by end_ts)",
                 end_ts, prev_end_ts
+            ),
+            BacktestError::DuplicateBar { symbol, end_ts } => write!(
+                f,
+                "duplicate bar for symbol={} end_ts={}: ambiguous data provenance, refusing to guess a winner",
+                symbol, end_ts
             ),
         }
     }
@@ -404,18 +420,47 @@ impl BacktestEngine {
             }
             prev_end_ts = Some(bar.end_ts);
 
-            // Corporate action exclusion gate.
-            if self
-                .config
-                .corporate_action_policy
-                .is_excluded(&bar.symbol, bar.end_ts)
-            {
-                self.halted = true;
-                self.halt_reason = Some(format!(
-                    "Corporate action exclusion: symbol '{}' at ts={} is in a forbidden period",
-                    bar.symbol, bar.end_ts
-                ));
-                break;
+            // BKT-FUTURE-EXECUTION-01-REPAIR-02: validate the entire
+            // same-`end_ts` execution batch -- duplicate `(symbol, end_ts)`
+            // identity, corporate-action exclusion, and integrity -- exactly
+            // once per distinct `end_ts`, at the first physical row
+            // encountered for that timestamp, regardless of which symbol
+            // occupies that row. This must happen before any bar in the
+            // batch can be used to price a pending fill
+            // (`resolve_pending_orders_for_batch`) or be reached by this
+            // batch's own strategy dispatch -- otherwise a sibling bar's own
+            // safety violation (forbidden corporate-action period,
+            // integrity disarm/halt/reject) could be used to price a fill,
+            // or a symbol's strategy tick could run, before that sibling's
+            // own safety state is known. See `validate_execution_batch`.
+            //
+            // BKT-FUTURE-EXECUTION-01-REPAIR-01 (Blocker 1): still resolved
+            // (and now validated) once per distinct `end_ts`, not once per
+            // row -- see `resolve_pending_orders_for_batch` for why batching
+            // is required for order-independent determinism under a binding
+            // allocation cap.
+            if resolved_batch_end_ts != Some(bar.end_ts) {
+                let batch_len = bars[idx..]
+                    .iter()
+                    .take_while(|b| b.end_ts == bar.end_ts)
+                    .count();
+                let batch = &bars[idx..idx + batch_len];
+                let batch_end_ts = bar.end_ts;
+
+                let bar_by_symbol = self.validate_execution_batch(batch)?;
+                resolved_batch_end_ts = Some(batch_end_ts);
+
+                // A corporate-action exclusion anywhere in the batch halts
+                // the whole run before any bar in the batch (not just the
+                // excluded symbol) is used further -- no sibling can fill,
+                // and no symbol's strategy tick runs, from an unsafe batch.
+                if self.halted {
+                    break;
+                }
+
+                if !self.execution_blocked {
+                    self.resolve_pending_orders_for_batch(batch_end_ts, &bar_by_symbol);
+                }
             }
 
             // Benchmark price tracking: record first open and update last close each bar.
@@ -423,38 +468,6 @@ impl BacktestEngine {
                 self.first_bar_open_micros = Some(bar.open_micros);
             }
             self.last_bar_close_micros = Some(bar.close_micros);
-
-            // PATCH 22: Integrity gate.
-            if self.integrity_enabled {
-                let feed = FeedId::new("backtest");
-                let now_tick = bar.end_ts as u64;
-                let int_bar = IntegrityBar::new(
-                    BarKey::new(
-                        bar.symbol.clone(),
-                        IntegrityTimeframe::secs(self.config.timeframe_secs),
-                        bar.end_ts,
-                    ),
-                    bar.is_complete,
-                    bar.close_micros,
-                    bar.volume,
-                );
-                let decision = integrity_evaluate_bar(
-                    &self.integrity_config,
-                    &mut self.integrity_state,
-                    &feed,
-                    now_tick,
-                    &int_bar,
-                );
-                match decision.action {
-                    IntegrityAction::Disarm | IntegrityAction::Halt => {
-                        self.execution_blocked = true;
-                    }
-                    IntegrityAction::Allow => {}
-                    IntegrityAction::Reject => {
-                        self.execution_blocked = true;
-                    }
-                }
-            }
 
             // 2. Update last prices
             self.last_prices
@@ -468,29 +481,6 @@ impl BacktestEngine {
                     &self.last_prices,
                 );
                 self.risk_state = Some(RiskState::new(bar.day_id, equity, bar.reject_window_id));
-            }
-
-            // BKT-FUTURE-EXECUTION-01: resolve orders admitted on an earlier
-            // bar that are now eligible against this bar's own symbol, using
-            // this bar's own market data to price them. Runs before the
-            // strategy sees this bar -- fill/portfolio state is never a
-            // function of the current bar's not-yet-generated signal, and
-            // the strategy never observes fill outcomes (it only ever sees
-            // `ctx`, never `self.portfolio`). Skipped while execution is
-            // integrity-blocked: a disarmed feed blocks all dispatch, not
-            // just new intents.
-            //
-            // BKT-FUTURE-EXECUTION-01-REPAIR-01 (Blocker 1): resolved once
-            // per distinct `end_ts`, not once per row, and gated at exactly
-            // the same point the original per-row call was -- so
-            // integrity-driven blocking still takes effect at the same row
-            // it always did. See `resolve_pending_orders_for_batch` for why
-            // batching (rather than resolving per-row using only this row's
-            // own symbol) is required for order-independent determinism
-            // under a binding allocation cap.
-            if !self.execution_blocked && resolved_batch_end_ts != Some(bar.end_ts) {
-                self.resolve_pending_orders_for_batch(bars, idx);
-                resolved_batch_end_ts = Some(bar.end_ts);
             }
 
             // 3. Build strategy context and feed bar
@@ -769,11 +759,150 @@ impl BacktestEngine {
         })
     }
 
+    /// BKT-FUTURE-EXECUTION-01-REPAIR-02: validate every bar in a
+    /// same-`end_ts` execution batch -- duplicate `(symbol, end_ts)`
+    /// identity, corporate-action exclusion, and integrity -- before any
+    /// bar in the batch can be used to price a pending fill
+    /// (`resolve_pending_orders_for_batch`) or be reached by this batch's
+    /// own strategy dispatch. Called once per distinct `end_ts`, at the
+    /// first physical row encountered for that timestamp (see the call
+    /// site in `run`), regardless of which symbol physically occupies that
+    /// row.
+    ///
+    /// Every check below iterates the batch in canonical (symbol-ascending)
+    /// order, never physical row order -- this is what makes the
+    /// corporate-action and integrity outcomes identical across row-order
+    /// permutations, and (for integrity) keeps its stateful mutation order
+    /// deterministic and independent of caller-supplied row order too. Each
+    /// bar's integrity state is mutated at most once per run, here -- `run`
+    /// no longer calls `integrity_evaluate_bar` itself.
+    ///
+    /// # Duplicate `(symbol, end_ts)` -- fails closed
+    ///
+    /// A second bar for the same symbol within this batch is ambiguous data
+    /// provenance -- there is no principled, order-invariant way to pick a
+    /// winner, so the whole run aborts with [`BacktestError::DuplicateBar`]
+    /// before any frame is resolved or observed, checked purely by key
+    /// identity (independent of completeness or byte-equality). A duplicate
+    /// can only ever occur *within* one batch (two bars can only share
+    /// `end_ts` if they're in the same batch), so this is equivalent to a
+    /// global check across the whole input, matching
+    /// [`crate::market_frame::MarketFrameError::DuplicateBar`]'s contract.
+    ///
+    /// # Corporate-action exclusion
+    ///
+    /// If any bar in the batch falls in a forbidden corporate-action
+    /// period, the whole batch is unsafe: `self.halted` is set (with the
+    /// same halt-reason format the previous per-row check used) so the call
+    /// site in `run` stops before resolving pending orders or dispatching
+    /// strategy for this timestamp, for every symbol in the batch -- not
+    /// just the excluded one. This is what guarantees a valid sibling
+    /// (e.g. SPY) can never fill from, or even observe, a batch containing
+    /// a forbidden bar for another symbol (e.g. AAPL), regardless of which
+    /// one physically appears first.
+    ///
+    /// # Integrity
+    ///
+    /// If integrity is enabled, every structurally-valid bar in the batch
+    /// is evaluated (in the same canonical order) and any
+    /// `Disarm`/`Halt`/`Reject` decision sets `self.execution_blocked`
+    /// (sticky) -- which the call site in `run` checks *before* invoking
+    /// `resolve_pending_orders_for_batch`, so a sibling that would
+    /// integrity-disarm/halt/reject can never price a fill first.
+    ///
+    /// # Structural validity (unchanged from REPAIR-01)
+    ///
+    /// A bar that would itself fail per-bar structural validation
+    /// (incomplete, or a negative timestamp) is left out of the returned
+    /// symbol lookup -- its own error still surfaces later, at its own row,
+    /// exactly where per-row validation raises it today; nothing here
+    /// bypasses that. Corporate-action and integrity are only evaluated for
+    /// bars that pass this structural filter, since an incomplete/malformed
+    /// bar was already unusable market data before this repair.
+    fn validate_execution_batch<'b>(
+        &mut self,
+        batch: &'b [BacktestBar],
+    ) -> Result<BTreeMap<&'b str, &'b BacktestBar>, BacktestError> {
+        // Duplicate check -- purely by key identity, over every bar in the
+        // batch regardless of completeness (matches market_frame's
+        // contract: fires the same way whether or not the duplicate rows
+        // are otherwise valid or byte-identical).
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for b in batch {
+            if !seen.insert(b.symbol.as_str()) {
+                return Err(BacktestError::DuplicateBar {
+                    symbol: b.symbol.clone(),
+                    end_ts: b.end_ts,
+                });
+            }
+        }
+
+        // Canonical (symbol-ascending) lookup of structurally-valid bars in
+        // this batch -- independent of physical row order.
+        let mut bar_by_symbol: BTreeMap<&str, &BacktestBar> = BTreeMap::new();
+        for b in batch {
+            if b.is_complete && b.end_ts >= 0 {
+                bar_by_symbol.insert(b.symbol.as_str(), b);
+            }
+        }
+
+        // Corporate-action exclusion, checked for every eligible bar in
+        // canonical order before any of them can be used.
+        for b in bar_by_symbol.values() {
+            if self
+                .config
+                .corporate_action_policy
+                .is_excluded(&b.symbol, b.end_ts)
+            {
+                self.halted = true;
+                self.halt_reason = Some(format!(
+                    "Corporate action exclusion: symbol '{}' at ts={} is in a forbidden period",
+                    b.symbol, b.end_ts
+                ));
+                return Ok(bar_by_symbol);
+            }
+        }
+
+        // Integrity, evaluated once per bar (canonical order) -- never
+        // re-evaluated when `run`'s per-row loop later reaches this bar's
+        // own physical row.
+        if self.integrity_enabled {
+            for b in bar_by_symbol.values() {
+                let feed = FeedId::new("backtest");
+                let now_tick = b.end_ts as u64;
+                let int_bar = IntegrityBar::new(
+                    BarKey::new(
+                        b.symbol.clone(),
+                        IntegrityTimeframe::secs(self.config.timeframe_secs),
+                        b.end_ts,
+                    ),
+                    b.is_complete,
+                    b.close_micros,
+                    b.volume,
+                );
+                let decision = integrity_evaluate_bar(
+                    &self.integrity_config,
+                    &mut self.integrity_state,
+                    &feed,
+                    now_tick,
+                    &int_bar,
+                );
+                match decision.action {
+                    IntegrityAction::Disarm | IntegrityAction::Halt | IntegrityAction::Reject => {
+                        self.execution_blocked = true;
+                    }
+                    IntegrityAction::Allow => {}
+                }
+            }
+        }
+
+        Ok(bar_by_symbol)
+    }
+
     /// BKT-FUTURE-EXECUTION-01-REPAIR-01 (Blocker 1): resolve every pending
-    /// order eligible against the same-timestamp batch of bars starting at
-    /// `bars[idx]` (all bars sharing `bars[idx].end_ts`), exactly once per
-    /// distinct timestamp, before any row in the batch is otherwise
-    /// processed (see the call site in `run`).
+    /// order eligible against `bar_by_symbol` -- the already-validated
+    /// (see `validate_execution_batch`), canonical symbol lookup for the
+    /// same-timestamp batch at `batch_end_ts`.
     ///
     /// Same-timestamp, cross-symbol bars form one deterministic execution
     /// frame:
@@ -790,27 +919,11 @@ impl BacktestEngine {
     /// Net effect: the same set of same-timestamp bars produces the same
     /// accepted/rejected split under a binding allocation cap no matter
     /// which physical row order the caller supplies them in.
-    ///
-    /// A sibling bar in the batch that would itself fail per-bar validation
-    /// (incomplete, or a negative timestamp) is left out of this frame's
-    /// symbol lookup -- its own error still surfaces later, at its own row,
-    /// exactly where per-row validation raises it today; nothing here
-    /// bypasses that.
-    fn resolve_pending_orders_for_batch(&mut self, bars: &[BacktestBar], idx: usize) {
-        let batch_end_ts = bars[idx].end_ts;
-        let batch_len = bars[idx..]
-            .iter()
-            .take_while(|b| b.end_ts == batch_end_ts)
-            .count();
-        let batch = &bars[idx..idx + batch_len];
-
-        let mut bar_by_symbol: BTreeMap<&str, &BacktestBar> = BTreeMap::new();
-        for b in batch {
-            if b.is_complete && b.end_ts >= 0 {
-                bar_by_symbol.entry(b.symbol.as_str()).or_insert(b);
-            }
-        }
-
+    fn resolve_pending_orders_for_batch(
+        &mut self,
+        batch_end_ts: i64,
+        bar_by_symbol: &BTreeMap<&str, &BacktestBar>,
+    ) {
         // Establish every symbol's mark for this frame before any cap check
         // runs (see doc comment above).
         for (sym, b) in bar_by_symbol.iter() {
