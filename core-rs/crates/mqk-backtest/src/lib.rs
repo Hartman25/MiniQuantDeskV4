@@ -18,6 +18,7 @@ pub mod corporate_actions; // Patch B4
 mod economics; // BACKTEST-MULTIPLIER-MARGIN-01
 mod engine;
 pub mod loader;
+pub mod market_frame; // BKT-MULTISYMBOL-MARKET-FRAME-01
 pub mod regime;
 pub mod strategy_lab;
 pub mod strategy_scan_review;
@@ -32,6 +33,10 @@ pub use economics::{
 }; // BACKTEST-MULTIPLIER-MARGIN-01 / BACKTEST-REPORT-ECONOMICS-ARTIFACT-01
 pub use engine::{BacktestEngine, BacktestError};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
+pub use market_frame::{
+    build_market_frames, evaluate_market_frames, strategy_context_for_symbol, MarketFrame,
+    MarketFrameError, MarketFrameEvaluator, MarketFrameView,
+}; // BKT-MULTISYMBOL-MARKET-FRAME-01
 pub use regime::{
     detect_market_regime, MarketRegimeClassification, MarketRegimeConfidence, MarketRegimeFeatures,
     MarketRegimeInput, MarketRegimeKind, MarketRegimePolicy, MarketRegimeReasonCode,
