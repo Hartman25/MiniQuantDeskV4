@@ -8,9 +8,22 @@ import numpy as np
 import pandas as pd
 
 from .contracts import MLTrainConfig
+from .evidence_boundary import DIAGNOSTIC_OR_FIT_ONLY_EVIDENCE_CLASS
 from .model_logreg import fit_logreg_deterministic
 from .schema import generate_feature_schema, validate_feature_schema
 from .util_hash import file_record, sha256_json
+
+# RESEARCH-LEGACY-TRAINING-BOUNDARY-01
+#
+# fit_logreg_deterministic (model_logreg.py) standardizes over whatever full
+# X this module passes it -- there is no fold loop here, so nothing
+# structurally guarantees the rows it was fit on are train-only. Contrast
+# with mqk_research.ml.eval_walkforward, the registered/official path, which
+# fits standardization per-fold on train-only rows inside a purged
+# walk-forward loop. This module's output is legitimate for quick
+# diagnostics/sanity-fitting but must never be mistaken for OOS evidence a
+# promotion decision could rely on -- see .evidence_boundary for the
+# fail-closed structural check that enforces this.
 
 
 def _stable_sort(df: pd.DataFrame) -> pd.DataFrame:
@@ -105,6 +118,13 @@ def train_model(run_dir: Path, cfg: MLTrainConfig) -> Path:
     meta_path = out_dir / "ml_train_meta.json"
     meta = {
         "schema_version": "ml_train_meta_v1",
+        # RESEARCH-LEGACY-TRAINING-BOUNDARY-01: self-declared for human/
+        # tooling visibility only. The actual fail-closed gate
+        # (evidence_boundary.classify_research_artifact) does NOT trust this
+        # label alone -- it never even reads this field -- because a bare
+        # string is trivially flippable; it classifies structurally from
+        # schema_version + required shape instead.
+        "evidence_class": DIAGNOSTIC_OR_FIT_ONLY_EVIDENCE_CLASS,
         "inputs": {
             "features_csv": file_record(features_path),
             "targets_csv": file_record(targets_path),
