@@ -754,7 +754,7 @@ mod prestart_retry_safety_tests {
     }
 
     fn unique_suffix() -> String {
-        Uuid::new_v4().to_string().replace('-', "")[..10].to_string()
+        Uuid::new_v4().to_string().replace('-', "")[..10].to_string() // allow: test-only — isolated DB test fixture, never called from production paths
     }
 
     fn test_operation_id(seed: &str) -> Uuid {
@@ -1035,7 +1035,7 @@ mod prestart_retry_safety_tests {
             other => panic!("expected Applied, got {other:?}"),
         };
 
-        let run_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4(); // allow: test-only — isolated DB test fixture, never called from production paths
         let v4 = match mqk_db::transition_autonomous_daily_operation_to_running(
             &pool,
             &TransitionAutonomousDailyOperationToRunningArgs {
