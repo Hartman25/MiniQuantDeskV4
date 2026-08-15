@@ -19,6 +19,13 @@ class LabelSpec:
     Label definition (default):
       - fwd_ret = log(close[t+h] / close[t]) where h = horizon_bars
       - target = 1 if fwd_ret > ret_threshold else 0
+      - label_end_ts = end_ts of bar[t+h] — the LAST bar timestamp whose
+        market data (its close) is consumed by the label. This is an
+        INCLUSIVE endpoint, not an exclusive one: the label has consumed
+        information through and including label_end_ts. Any consumer
+        reasoning about temporal isolation (e.g. walk-forward purge/embargo,
+        holdout reservation) must treat a boundary exactly equal to
+        label_end_ts as already-consumed, not as free of leakage.
 
     Deterministic: no randomness, stable sorts, strict joins.
     """
@@ -115,6 +122,7 @@ def label_shadow_intents(
 
             fwd_ret = float(np.log(c1 / c0))
             target = 1 if fwd_ret > spec.ret_threshold else 0
+            label_end_ts = pd.Timestamp(ts_list[k])
 
             out_rows.append({
                 "run_id": row["run_id"],
@@ -124,6 +132,7 @@ def label_shadow_intents(
                 "intent": row["intent"],
                 "fwd_ret": fwd_ret,
                 "target": int(target),
+                "label_end_ts": label_end_ts.isoformat(),
             })
 
     out = pd.DataFrame(out_rows)
@@ -135,6 +144,11 @@ def label_shadow_intents(
     out_targets_csv.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_targets_csv, index=False)
 
+    # No version bump: shadow_label_meta_v1's own JSON shape (schema_version/
+    # spec/inputs/outputs/ids) is unchanged. targets.csv's label_end_ts column
+    # is additive and covered by the outputs.targets_csv file_record hash —
+    # this meta contract does not enumerate targets.csv columns, so it makes
+    # no claim label_end_ts's addition would break.
     meta = {
         "schema_version": "shadow_label_meta_v1",
         "spec": {
