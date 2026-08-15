@@ -15,6 +15,18 @@ REGISTRY_SCHEMA_VERSION = "research-experiment-registry-v1"
 
 _TERMINAL_ATTEMPT_STATUSES = ("succeeded", "failed", "blocked")
 
+# RESEARCH-HOLDOUT-CONSUMPTION-LEDGER-01
+# Distinct contract from the hypothesis/trial/attempt tables above, sharing
+# the same SQLite authority. Purely additive: does not redefine what
+# "reserved_not_evaluated" means anywhere else in the codebase (see
+# eval_walkforward.py / economic_walkforward.py), and no code path in this
+# patch ever reads or scores holdout-region data. See
+# mqk_research.ml.holdout_ledger for the deterministic holdout_id and the
+# public entry points that wrap the methods below.
+HOLDOUT_LEDGER_SCHEMA_VERSION = "research_holdout_ledger_v1"
+_HOLDOUT_STATUS_RESERVED = "reserved"
+_HOLDOUT_STATUS_CONSUMED = "consumed"
+
 
 class ResearchResultStore:
     def __init__(self, db_path: Path) -> None:
@@ -133,6 +145,19 @@ class ResearchResultStore:
                     on research_attempt_slices(job_id);
                 create index if not exists idx_research_attempt_slices_trial
                     on research_attempt_slices(trial_id);
+
+                create table if not exists research_holdout_ledger (
+                    holdout_id text primary key,
+                    status text not null,
+                    dataset_identity_json text not null,
+                    holdout_start_utc text not null,
+                    holdout_end_utc text not null,
+                    protocol_version text not null,
+                    consumer_identity_json text,
+                    result_identity text,
+                    consumed_at text,
+                    schema_version text not null
+                );
                 """
             )
             connection.commit()
@@ -685,3 +710,122 @@ class ResearchResultStore:
             "failed_attempts": counts["failed"],
             "blocked_attempts": counts["blocked"],
         }
+
+    # ------------------------------------------------------------------
+    # RESEARCH-HOLDOUT-CONSUMPTION-LEDGER-01
+    #
+    # Durable record of a dataset's reserved final holdout region moving from
+    # RESERVED to CONSUMED. `holdout_id` is a deterministic content hash the
+    # caller computes from immutable facts only (see
+    # mqk_research.ml.holdout_ledger.compute_holdout_id) -- this class never
+    # computes it and never reads or scores any holdout-region data itself.
+    # ------------------------------------------------------------------
+
+    def reserve_holdout(
+        self,
+        *,
+        holdout_id: str,
+        dataset_identity: Dict[str, Any],
+        holdout_start_utc: str,
+        holdout_end_utc: str,
+        protocol_version: str,
+    ) -> None:
+        """Idempotently record that `holdout_id` exists in the ledger. Safe to
+        call repeatedly with the SAME facts (e.g. independent research runs
+        against the same dataset/boundary reserving the same holdout) -- a
+        no-op if the row already exists with identical facts, regardless of
+        its current status (reserving an already-CONSUMED holdout must never
+        downgrade it back to reserved). Fails closed if `holdout_id` already
+        exists with CONFLICTING facts -- a genuine hash collision or a caller
+        bug, either way not something to silently trust."""
+        dataset_identity_json = json.dumps(dataset_identity, sort_keys=True, separators=(",", ":"))
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                insert or ignore into research_holdout_ledger (
+                    holdout_id, status, dataset_identity_json, holdout_start_utc, holdout_end_utc,
+                    protocol_version, consumer_identity_json, result_identity, consumed_at, schema_version
+                ) values (?, ?, ?, ?, ?, ?, null, null, null, ?)
+                """,
+                (
+                    holdout_id,
+                    _HOLDOUT_STATUS_RESERVED,
+                    dataset_identity_json,
+                    holdout_start_utc,
+                    holdout_end_utc,
+                    protocol_version,
+                    HOLDOUT_LEDGER_SCHEMA_VERSION,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                """
+                select dataset_identity_json, holdout_start_utc, holdout_end_utc, protocol_version
+                from research_holdout_ledger where holdout_id=?
+                """,
+                (holdout_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError(f"failed to reserve holdout_id={holdout_id!r}")
+        if tuple(row) != (dataset_identity_json, holdout_start_utc, holdout_end_utc, protocol_version):
+            raise RuntimeError(f"holdout_id collision with conflicting facts: {holdout_id!r}")
+
+    def consume_holdout(
+        self,
+        *,
+        holdout_id: str,
+        consumer_identity: Dict[str, Any],
+        consumed_at: str,
+        result_identity: Optional[str] = None,
+    ) -> None:
+        """Atomically transition `holdout_id` from RESERVED to CONSUMED.
+        Fails closed if the holdout was never reserved (unknown holdout_id --
+        callers must reserve_holdout first) or is already CONSUMED (by this
+        or any other caller; the original consumer's record is never
+        overwritten). Uses the same BEGIN IMMEDIATE pattern as
+        finalize_attempt: SQLite's write lock serializes concurrent callers
+        racing to consume the SAME holdout_id, so exactly one transaction
+        observes status='reserved' and wins; every other transaction (whether
+        it started before or after the winner committed) observes
+        status='consumed' and raises."""
+        consumer_identity_json = json.dumps(consumer_identity, sort_keys=True, separators=(",", ":"))
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "select status from research_holdout_ledger where holdout_id=?", (holdout_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown holdout_id (never reserved): {holdout_id!r}")
+                if row[0] != _HOLDOUT_STATUS_RESERVED:
+                    raise RuntimeError(
+                        f"holdout {holdout_id!r} is already consumed; a reserved final holdout "
+                        "can be consumed at most once and its original consumer is never overwritten"
+                    )
+                connection.execute(
+                    """
+                    update research_holdout_ledger
+                    set status=?, consumer_identity_json=?, result_identity=?, consumed_at=?
+                    where holdout_id=?
+                    """,
+                    (_HOLDOUT_STATUS_CONSUMED, consumer_identity_json, result_identity, consumed_at, holdout_id),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def get_holdout(self, holdout_id: str) -> Dict[str, Any]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "select * from research_holdout_ledger where holdout_id=?", (holdout_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown holdout_id: {holdout_id}")
+        record = dict(row)
+        record["dataset_identity"] = json.loads(record.pop("dataset_identity_json"))
+        consumer_json = record.pop("consumer_identity_json")
+        record["consumer_identity"] = json.loads(consumer_json) if consumer_json else None
+        return record
