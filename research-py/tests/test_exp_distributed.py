@@ -51,6 +51,11 @@ class ExpDistributedTests(unittest.TestCase):
             ],
             "max_workers": 1,
             "notes": ["test only"],
+            # RESEARCH-EXPERIMENT-REGISTRY-01-REPAIR-01: this legacy fixture has
+            # no hypothesis_id; run_batch/rerun_failed_jobs now fail closed
+            # unless registered OR explicitly opted into an unregistered
+            # diagnostic run. This is a diagnostic fixture, not research.
+            "allow_unregistered_diagnostic": True,
         }
         path = root / "batch.json"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -125,6 +130,7 @@ class ExpDistributedTests(unittest.TestCase):
                 "symbol_groups": [["AAA", "BBB"]],
                 "windows": [{"label": "bad", "start_utc": "2024-01-01T00:00:00Z", "end_utc": "2024-01-12T00:00:00Z"}],
                 "max_workers": 1,
+                "allow_unregistered_diagnostic": True,
             }
             spec_path = root / "bad_batch.json"
             spec_path.write_text(json.dumps(spec_payload, indent=2), encoding="utf-8")

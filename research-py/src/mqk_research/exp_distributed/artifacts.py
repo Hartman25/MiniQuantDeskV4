@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from .hashing import sha256_file
+from .hashing import sha256_bytes, sha256_file
 from .models import JobSpec
 
 
@@ -140,6 +140,29 @@ def write_job_artifacts(
     )
     files["artifact_metadata"] = str(metadata_path)
     return files
+
+
+# RESEARCH-EXPERIMENT-REGISTRY-01-REPAIR-03
+#
+# job_root() is deterministic (batch_id, job_index, job_id) and write_job_artifacts
+# overwrites in place on an exact retry, so `files` above (and artifact_metadata.json
+# on disk) are current/source operational locations only — NOT durable per-attempt
+# evidence. capture_artifact_evidence() snapshots artifact_metadata.json's own
+# CONTENT (the file/sha256/bytes records write_job_artifacts already computed) so a
+# caller can embed it into an immutable attempt-slice record BEFORE a later retry
+# overwrites the same source path. Must be called synchronously right after the job
+# that produced `artifact_paths` returns — not deferred, not re-derived later from
+# the (by-then possibly-overwritten) source path.
+def capture_artifact_evidence(artifact_paths: Dict[str, str]) -> Dict[str, Any]:
+    metadata_path_raw = artifact_paths.get("artifact_metadata")
+    if not metadata_path_raw:
+        return {"artifact_files": {}, "artifact_metadata_sha256": None}
+    metadata_bytes = Path(metadata_path_raw).read_bytes()
+    metadata = json.loads(metadata_bytes.decode("utf-8"))
+    return {
+        "artifact_files": metadata.get("files", {}),
+        "artifact_metadata_sha256": sha256_bytes(metadata_bytes),
+    }
 
 
 def write_job_spec(root: Path, job: JobSpec) -> Path:

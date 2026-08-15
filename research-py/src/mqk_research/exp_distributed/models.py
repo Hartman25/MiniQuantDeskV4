@@ -50,6 +50,21 @@ class BatchSpec:
     notes: List[str] = field(default_factory=list)
     schema_version: str = SCHEMA_VERSION
     engine_id: str = ENGINE_ID
+    # RESEARCH-EXPERIMENT-REGISTRY-01: research-trial identity. Non-empty
+    # hypothesis_id opts this batch into the experiment registry (see
+    # exp_distributed/registry_integration.py). hypothesis_id is required for
+    # run_batch/rerun_failed_jobs UNLESS allow_unregistered_diagnostic=True is
+    # set explicitly — planning (create_batch/build_batch_plan) is exempt from
+    # this gate since planning is not attempting research
+    # (RESEARCH-EXPERIMENT-REGISTRY-01-REPAIR-01, see runner._resolve_registration_mode).
+    hypothesis_id: str = ""
+    hypothesis_text: str = ""
+    # Explicit, non-default opt-out of registry gating for official execution
+    # (run_batch/rerun_failed_jobs). Mutually exclusive with hypothesis_id.
+    # Never a silent fallback — must be set on purpose. Runs under this flag
+    # are marked registry_status="unregistered_diagnostic" and are NOT
+    # promotion-quality research.
+    allow_unregistered_diagnostic: bool = False
 
     def validate(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -66,6 +81,10 @@ class BatchSpec:
             raise ValueError("at least one window is required")
         if not self.symbol_groups:
             raise ValueError("at least one symbol group is required")
+        if self.hypothesis_id and self.allow_unregistered_diagnostic:
+            raise ValueError(
+                "hypothesis_id and allow_unregistered_diagnostic are mutually exclusive"
+            )
         normalized_groups: List[List[str]] = []
         for group in self.symbol_groups:
             if not group:
@@ -99,6 +118,9 @@ class BatchSpec:
             notes=[str(note) for note in raw.get("notes", [])],
             schema_version=str(raw.get("schema_version", SCHEMA_VERSION)),
             engine_id=str(raw.get("engine_id", ENGINE_ID)),
+            hypothesis_id=str(raw.get("hypothesis_id", "")),
+            hypothesis_text=str(raw.get("hypothesis_text", "")),
+            allow_unregistered_diagnostic=bool(raw.get("allow_unregistered_diagnostic", False)),
         )
 
 

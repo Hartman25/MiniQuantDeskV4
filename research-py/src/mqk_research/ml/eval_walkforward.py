@@ -541,6 +541,24 @@ def main_eval(argv: list[str] | None = None) -> int:
             "label_end_ts in every mode."
         ),
     )
+    # RESEARCH-EXPERIMENT-REGISTRY-01: this CLI is registered by default. A
+    # research-quality run must identify itself; an explicit, non-default flag
+    # is required to opt out (see mqk_research.ml.registry_integration).
+    ap.add_argument("--experiment-id", default=None, help="Required unless --allow-unregistered-diagnostic")
+    ap.add_argument("--hypothesis-id", default=None, help="Required unless --allow-unregistered-diagnostic")
+    ap.add_argument("--strategy-id", default=None, help="Required unless --allow-unregistered-diagnostic")
+    ap.add_argument("--hypothesis-text", default=None, help="Optional human-readable hypothesis statement")
+    ap.add_argument("--registry-db", default=None, help="Override the experiment registry SQLite path")
+    ap.add_argument(
+        "--allow-unregistered-diagnostic",
+        action="store_true",
+        help=(
+            "Explicitly run WITHOUT registering a trial/attempt. Mutually exclusive "
+            "with --experiment-id/--hypothesis-id/--strategy-id. Artifact is marked "
+            "registry.registry_status=unregistered_diagnostic. NOT promotion-quality "
+            "research."
+        ),
+    )
     args = ap.parse_args(argv)
 
     spec = WalkForwardSpec(
@@ -553,13 +571,51 @@ def main_eval(argv: list[str] | None = None) -> int:
         embargo_seconds=args.embargo_seconds,
         holdout_months=args.holdout_months,
     )
-    out = run_walkforward_eval(
-        Path(args.run_dir),
-        label_col=args.label,
-        l2=args.l2,
-        lr=args.lr,
-        steps=args.steps,
-        spec=spec,
-    )
-    print(f"OK eval={out}")
+
+    registration_ids = (args.experiment_id, args.hypothesis_id, args.strategy_id)
+    if args.allow_unregistered_diagnostic:
+        if any(registration_ids):
+            ap.error(
+                "--allow-unregistered-diagnostic cannot be combined with "
+                "--experiment-id/--hypothesis-id/--strategy-id"
+            )
+        out_path = run_walkforward_eval(
+            Path(args.run_dir),
+            label_col=args.label,
+            l2=args.l2,
+            lr=args.lr,
+            steps=args.steps,
+            spec=spec,
+        )
+        out = json.loads(out_path.read_text(encoding="utf-8"))
+        out["registry"] = {
+            "schema_version": "research-experiment-registry-v1",
+            "registry_status": "unregistered_diagnostic",
+        }
+        out_path.write_text(json.dumps(out, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    elif all(registration_ids):
+        from mqk_research.ml.registry_integration import run_registered_walkforward_eval
+
+        out_path = run_registered_walkforward_eval(
+            Path(args.run_dir),
+            experiment_id=args.experiment_id,
+            hypothesis_id=args.hypothesis_id,
+            strategy_id=args.strategy_id,
+            hypothesis_text=args.hypothesis_text,
+            registry_db=Path(args.registry_db) if args.registry_db else None,
+            label_col=args.label,
+            l2=args.l2,
+            lr=args.lr,
+            steps=args.steps,
+            spec=spec,
+        )
+    else:
+        ap.error(
+            "mqk-ml-eval-wf requires --experiment-id, --hypothesis-id, and --strategy-id "
+            "for registered research runs, or pass --allow-unregistered-diagnostic for an "
+            "explicit unregistered diagnostic run"
+        )
+        return 2
+
+    print(f"OK eval={out_path}")
     return 0
