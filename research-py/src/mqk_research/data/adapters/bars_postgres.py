@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Literal
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Literal
 
 import pandas as pd
 from sqlalchemy import text
@@ -14,6 +14,102 @@ class BarsQuery:
     start_utc: pd.Timestamp
     end_utc: pd.Timestamp
     timeframe: str  # e.g. "1D"
+
+
+# ---------------------------------------------------------------------------
+# BKT-DATA-PROVENANCE-POINT-IN-TIME-01
+#
+# md_bars' close-column resolution (_detect_md_bars_schema below) tries
+# several candidate column names, including some that would represent a
+# DIFFERENT price-adjustment convention (adj_close/close_adj) than a bare
+# "close"/close_micros. Silently picking whichever is present, with no
+# record of which one was used, is the audit's A17 finding -- this section
+# makes that resolution explicit and auditable instead.
+#
+# VERIFIED FACTS (read-only investigation, 2026-08; see
+# docs/research/Research_Backtest_V1_Closeout_Audit.md Section on P8):
+#   - md_bars' actual schema (migrations 0003_backtest_schema.sql +
+#     0042_md_bars_provider_metadata.sql) has never had an adj_close/
+#     close_adj column -- only close_micros. There is currently no genuine
+#     split/dividend-adjusted candidate column in this system's schema for
+#     _pick_first_present to have silently preferred.
+#   - The only active equity historical-data provider in this codebase
+#     (core-rs/crates/mqk-md/src/alpaca_provider.rs) explicitly requests
+#     Alpaca's /v2/stocks/bars with adjustment=raw. Per Alpaca's own
+#     documentation (docs.alpaca.markets/reference/stockbars, confirmed
+#     2026-08): "raw: no adjustments" -- i.e. split/dividend/spin-off
+#     adjustments are NOT applied. This is Alpaca's own default and is
+#     requested explicitly (not left implicit) by this codebase.
+# These two facts are recorded here as an explicit, versioned assertion
+# (_VERIFIED_RAW_UNADJUSTED_CLOSE_COLUMNS / _VERIFIED_RAW_UNADJUSTED_PROVIDER_IDS)
+# rather than assumed silently -- so a FUTURE change to either side (a new
+# adjusted-price ingestion path, or a schema change adding an adjusted
+# column) is forced to make an explicit decision here instead of the old
+# silent-preference behavior continuing to apply unnoticed.
+#
+# provider_id is genuinely INCOMPLETE for pre-existing rows in this
+# database today (a separate, already-tracked gap --
+# MARKET-DATA-PROVIDER-PROVENANCE-01 -- where some ingestion paths wrote
+# provider_id='unknown' even for real Alpaca-sourced bars). This module
+# does not attempt to resolve that attribution bug; it fails closed
+# (PRICE_CONVENTION_UNVERIFIABLE) whenever the observed provider_id set for
+# a query window is not exactly the verified set, rather than assuming
+# 'unknown' rows are safe.
+
+PRICE_CONVENTION_RAW_UNADJUSTED = "raw_unadjusted"
+PRICE_CONVENTION_UNVERIFIABLE = "unverifiable"
+
+_VERIFIED_RAW_UNADJUSTED_CLOSE_COLUMNS: FrozenSet[str] = frozenset({"close_micros"})
+_VERIFIED_RAW_UNADJUSTED_PROVIDER_IDS: FrozenSet[str] = frozenset({"alpaca"})
+
+_CONVENTION_BASIS_NOTE = (
+    "core-rs/crates/mqk-md/src/alpaca_provider.rs requests Alpaca /v2/stocks/bars "
+    "with adjustment=raw (verified against Alpaca's official documentation: "
+    "raw = no adjustments applied), and md_bars has never had an adjusted-price "
+    "column in its schema. price_adjustment_convention is asserted "
+    f"{PRICE_CONVENTION_RAW_UNADJUSTED!r} only when BOTH the resolved close "
+    "column and every provider_id observed for the exact query window are "
+    "within the independently-verified set; otherwise it is reported "
+    f"{PRICE_CONVENTION_UNVERIFIABLE!r} rather than assumed."
+)
+
+
+def classify_price_convention(*, close_col: str, provider_ids_observed: FrozenSet[str]) -> str:
+    """Pure decision logic, no IO. Returns PRICE_CONVENTION_RAW_UNADJUSTED
+    only when the resolved close column AND every provider_id observed for
+    the query window are within the independently-verified raw/unadjusted
+    set. An empty, unknown, mixed, or unmapped provider_id set, or any close
+    column other than the one verified column, returns
+    PRICE_CONVENTION_UNVERIFIABLE -- never silently assumed."""
+    if close_col not in _VERIFIED_RAW_UNADJUSTED_CLOSE_COLUMNS:
+        return PRICE_CONVENTION_UNVERIFIABLE
+    if not provider_ids_observed:
+        return PRICE_CONVENTION_UNVERIFIABLE
+    if not provider_ids_observed <= _VERIFIED_RAW_UNADJUSTED_PROVIDER_IDS:
+        return PRICE_CONVENTION_UNVERIFIABLE
+    return PRICE_CONVENTION_RAW_UNADJUSTED
+
+
+class PriceProvenanceUnverifiable(RuntimeError):
+    """Raised by require_verified_price_provenance when a bars provenance
+    record cannot be asserted as a known, verified adjustment convention."""
+
+
+def require_verified_price_provenance(provenance: Dict[str, Any], *, context: Optional[str] = None) -> None:
+    """Fail-closed gate for any research/promotion consumer that needs a
+    verified price-adjustment convention before treating bars data as
+    credible economic evidence. Raises PriceProvenanceUnverifiable unless
+    provenance["price_adjustment_convention"] == PRICE_CONVENTION_RAW_UNADJUSTED."""
+    if provenance.get("price_adjustment_convention") != PRICE_CONVENTION_RAW_UNADJUSTED:
+        where = f" ({context})" if context else ""
+        raise PriceProvenanceUnverifiable(
+            f"price provenance{where} is not a verified adjustment convention "
+            f"(convention={provenance.get('price_adjustment_convention')!r}, "
+            f"close_column={provenance.get('close_column')!r}, "
+            f"provider_ids_observed={provenance.get('provider_ids_observed')!r}); "
+            "refusing to treat this bars data as having a known price-adjustment "
+            "convention"
+        )
 
 
 MICROS_SCALE = 1_000_000.0
@@ -196,6 +292,119 @@ def _to_epoch_bound(ts_utc: pd.Timestamp, unit: EpochUnit) -> int:
 def _epoch_series_to_utc(series: pd.Series, unit: EpochUnit) -> pd.Series:
     # integer epoch -> datetime64[ns, UTC]
     return pd.to_datetime(series.astype("int64"), unit=unit, utc=True)
+
+
+def _query_distinct_provider_ids(
+    engine: Engine,
+    symbols: List[str],
+    timeframe: str,
+    ts_col: str,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+) -> Tuple[bool, List[str]]:
+    """Read-only. Returns (provider_metadata_available, provider_ids_observed).
+    provider_metadata_available=False means the provider_id column itself is
+    absent (e.g. a schema older than migration 0042) -- a genuinely
+    different fact from provider_metadata_available=True with an EMPTY
+    provider_ids_observed list (column exists, this exact query window
+    matched zero rows). Never conflates unavailable, empty, and present."""
+    colset = set(_load_md_bars_columns(engine))
+    if "provider_id" not in colset:
+        return False, []
+
+    ts_type = _column_db_type(engine, ts_col)
+    is_integer_ts = ts_type in {"bigint", "integer", "smallint"}
+    if is_integer_ts:
+        epoch_unit = infer_epoch_unit_strict(engine, ts_col)
+        start_bound = _to_epoch_bound(start_utc, epoch_unit)
+        end_bound = _to_epoch_bound(end_utc, epoch_unit)
+        q = text(
+            f"""
+            select distinct provider_id
+            from md_bars
+            where symbol = any(:symbols)
+              and timeframe = :timeframe
+              and {ts_col} >= :start_bound
+              and {ts_col} < :end_bound
+            order by provider_id asc
+            """
+        )
+        params: Dict[str, Any] = {
+            "symbols": symbols,
+            "timeframe": timeframe,
+            "start_bound": start_bound,
+            "end_bound": end_bound,
+        }
+    else:
+        q = text(
+            f"""
+            select distinct provider_id
+            from md_bars
+            where symbol = any(:symbols)
+              and timeframe = :timeframe
+              and {ts_col} >= :start_utc
+              and {ts_col} < :end_utc
+            order by provider_id asc
+            """
+        )
+        params = {
+            "symbols": symbols,
+            "timeframe": timeframe,
+            "start_utc": start_utc.to_pydatetime(),
+            "end_utc": end_utc.to_pydatetime(),
+        }
+
+    with engine.connect() as cxn:
+        rows = cxn.execute(q, params).fetchall()
+    return True, sorted({str(r[0]) for r in rows if r[0] is not None})
+
+
+def _build_price_provenance(
+    *, close_col: str, provider_metadata_available: bool, provider_ids_observed: List[str]
+) -> Dict[str, Any]:
+    convention = classify_price_convention(
+        close_col=close_col, provider_ids_observed=frozenset(provider_ids_observed)
+    )
+    return {
+        "close_column": close_col,
+        "provider_metadata_available": provider_metadata_available,
+        "provider_ids_observed": provider_ids_observed,
+        "price_adjustment_convention": convention,
+        "convention_basis": _CONVENTION_BASIS_NOTE,
+    }
+
+
+def resolve_price_provenance(
+    engine: Engine,
+    symbols: List[str],
+    timeframe: str,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+) -> Dict[str, Any]:
+    """Standalone, read-only entry point: resolve the price-adjustment
+    provenance for a given (symbols, timeframe, window) bars query without
+    fetching the bars themselves. `history()` computes the equivalent
+    result inline (reusing schema/bounds it already resolved) and attaches
+    it to the returned DataFrame's `.attrs["price_provenance"]` -- both
+    paths share classify_price_convention and _query_distinct_provider_ids
+    so they can never disagree."""
+    _require_tz(start_utc, "start_utc")
+    _require_tz(end_utc, "end_utc")
+    start_utc = start_utc.tz_convert("UTC")
+    end_utc = end_utc.tz_convert("UTC")
+    symbols_norm = sorted({s.strip().upper() for s in symbols if s.strip()})
+    if not symbols_norm:
+        raise ValueError("symbols must contain at least one non-empty symbol")
+
+    ts_col, _open_col, _high_col, _low_col, close_col, _volume_col, _has_is_complete = _detect_md_bars_schema(engine)
+    provider_metadata_available, provider_ids_observed = _query_distinct_provider_ids(
+        engine, symbols_norm, timeframe, ts_col, start_utc, end_utc
+    )
+    return _build_price_provenance(
+        close_col=close_col,
+        provider_metadata_available=provider_metadata_available,
+        provider_ids_observed=provider_ids_observed,
+    )
 
 
 def _diagnose_empty(engine: Engine, symbols: List[str], timeframe: str, ts_col: str, has_is_complete: bool) -> str:
@@ -392,5 +601,18 @@ def history(engine: Engine, q: BarsQuery) -> pd.DataFrame:
     missing_syms = [s for s in symbols if s not in present]
     if missing_syms:
         raise RuntimeError(f"Missing data for symbols in window: {missing_syms}")
+
+    # BKT-DATA-PROVENANCE-POINT-IN-TIME-01: attach an explicit, auditable
+    # price-provenance record rather than leaving the close_col resolution
+    # (A17) silent. .attrs is metadata on the DataFrame object itself, not a
+    # column -- callers that don't know about it see no behavior change.
+    provider_metadata_available, provider_ids_observed = _query_distinct_provider_ids(
+        engine, symbols, q.timeframe, ts_col, start_utc, end_utc
+    )
+    df.attrs["price_provenance"] = _build_price_provenance(
+        close_col=close_col,
+        provider_metadata_available=provider_metadata_available,
+        provider_ids_observed=provider_ids_observed,
+    )
 
     return df
