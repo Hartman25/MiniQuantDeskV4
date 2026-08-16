@@ -79,14 +79,49 @@ SCHEMA_VERSION = "bars_provenance_manifest_v1"
 PRICE_CONVENTION_RAW_UNADJUSTED = "raw_unadjusted"
 PRICE_CONVENTION_UNVERIFIABLE = "unverifiable"
 
-# No price-adjustment convention other than raw_unadjusted has ever been
-# independently verified in this system (see bars_postgres.py's
-# BKT-DATA-PROVENANCE-POINT-IN-TIME-01 header and the P8 Wave-1 audit
-# findings) -- this set is intentionally empty in production. It exists as
-# a named seam so a FUTURE verified adjusted-data provider can be added
-# here explicitly (an auditable code change) rather than the
-# adjusted_data policy being silently accepted for an unverified source.
-_KNOWN_ADJUSTED_CONVENTIONS: FrozenSet[str] = frozenset()
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01: the first verified adjusted-data
+# provider in this system -- Alpaca's /v2/stocks/bars with adjustment=all,
+# confirmed against Alpaca's official documentation
+# (docs.alpaca.markets/reference/stockbars, fetched 2026-08-15) to apply
+# split + cash-dividend + spin-off price/volume adjustment. This is an
+# auditable, explicit code addition (the named seam the module header
+# above anticipated), NOT a silent broadening of trust -- see
+# _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION below: satisfying
+# corporate_action_policy=adjusted_data for THIS convention additionally
+# requires a verified, content-addressed source_attestation object proving
+# the data was actually produced by the trusted extractor
+# (mqk_research.data.alpaca_historical) with adjustment=all -- a caller
+# manually constructing price_adjustment_convention="alpaca_all_adjusted_v1"
+# on a hand-built manifest is NOT sufficient (see
+# _require_verified_source_attestation / SourceAttestationUnverifiable).
+PRICE_CONVENTION_ALPACA_ALL_ADJUSTED = "alpaca_all_adjusted_v1"
+
+# No price-adjustment convention other than raw_unadjusted and (as of
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) alpaca_all_adjusted_v1 has ever
+# been independently verified in this system. This set exists as a named
+# seam so a FUTURE verified adjusted-data provider can be added here
+# explicitly (an auditable code change) rather than the adjusted_data
+# policy being silently accepted for an unverified source.
+_KNOWN_ADJUSTED_CONVENTIONS: FrozenSet[str] = frozenset({PRICE_CONVENTION_ALPACA_ALL_ADJUSTED})
+
+# Adjusted conventions whose adjusted_data policy claim additionally requires
+# a verified source_attestation (see _require_verified_source_attestation),
+# mapped to the adjustment mode the attestation must declare. Conventions NOT
+# in this dict (e.g. a test-only convention a test monkeypatches into
+# _KNOWN_ADJUSTED_CONVENTIONS) are accepted on the structural convention-name
+# check alone, unchanged from the pre-existing contract.
+_CONVENTION_REQUIRED_ADJUSTMENT_MODE: Dict[str, str] = {
+    PRICE_CONVENTION_ALPACA_ALL_ADJUSTED: "all",
+}
+_CONVENTIONS_REQUIRING_SOURCE_ATTESTATION: FrozenSet[str] = frozenset(_CONVENTION_REQUIRED_ADJUSTMENT_MODE.keys())
+
+# The narrow allowlist of extractor identities trusted to produce a
+# source_attestation that can satisfy _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION.
+# Bumping the extractor's contract/logic should mint a new id here (an
+# explicit, auditable change), not silently keep trusting the old one.
+_TRUSTED_EXTRACTOR_IDS: FrozenSet[str] = frozenset({"mqk_research.data.alpaca_historical.v1"})
+
+SOURCE_ATTESTATION_SCHEMA_VERSION = "research_source_attestation_v1"
 
 # --- corporate-action policy (mirrors mqk-backtest::CorporateActionPolicy) ---
 CA_POLICY_ADJUSTED_DATA = "adjusted_data"
@@ -136,6 +171,16 @@ class CorporateActionIntegrityError(RuntimeError):
     check_corporate_action_integrity)."""
 
 
+class SourceAttestationUnverifiable(RuntimeError):
+    """Fail-closed (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01): raised when a
+    manifest's corporate_action_policy=adjusted_data claim, for a price
+    convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION, cannot be
+    verified against a real, content-addressed source_attestation object
+    proving the data was produced by a trusted research extractor. A
+    manually-asserted convention string alone is never sufficient -- see
+    _require_verified_source_attestation."""
+
+
 class BarsProvenanceContentMismatch(RuntimeError):
     """Fail-closed (Defect 1): raised BEFORE any economic P&L is computed
     when the bars actually loaded for evaluation do not match the content a
@@ -177,6 +222,229 @@ def canonical_semantic_bars_hash(bars: pd.DataFrame) -> str:
     return sha256_json(rows)
 
 
+def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[str, Any]:
+    """The canonical, hashable subset of a source attestation object
+    (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) -- normalized field selection so
+    two logically-identical attestations always hash identically, mirroring
+    canonical_ca_evidence_content's normalization discipline. Deliberately
+    excludes `retrieval_timestamp_utc` (audit-only wall-clock metadata --
+    the SAME extraction re-run at a different moment must still produce the
+    same attestation identity) and any self-reported `attestation_id`
+    (never trusted -- see source_attestation_id)."""
+    return {
+        "schema_version": attestation.get("schema_version"),
+        "source_provider_id": attestation.get("source_provider_id"),
+        "extractor_id": attestation.get("extractor_id"),
+        "api_endpoint_bars": attestation.get("api_endpoint_bars"),
+        "api_endpoint_corporate_actions": attestation.get("api_endpoint_corporate_actions"),
+        "symbols": sorted({str(s).strip().upper() for s in attestation.get("symbols") or []}),
+        "requested_start_utc": attestation.get("requested_start_utc"),
+        "requested_end_utc": attestation.get("requested_end_utc"),
+        "returned_coverage_start_utc": attestation.get("returned_coverage_start_utc"),
+        "returned_coverage_end_utc": attestation.get("returned_coverage_end_utc"),
+        "adjustment_mode": attestation.get("adjustment_mode"),
+        "feed": attestation.get("feed"),
+        "asof": attestation.get("asof"),
+        "pagination_complete_bars": attestation.get("pagination_complete_bars"),
+        "pagination_complete_corporate_actions": attestation.get("pagination_complete_corporate_actions"),
+        "corporate_action_query_coverage": attestation.get("corporate_action_query_coverage"),
+        "category_b_events_found": attestation.get("category_b_events_found"),
+        "raw_response_content_hashes": attestation.get("raw_response_content_hashes"),
+        "canonical_semantic_bars_hash": attestation.get("canonical_semantic_bars_hash"),
+        "canonical_corporate_action_evidence_hash": attestation.get("canonical_corporate_action_evidence_hash"),
+        "protocol_version": attestation.get("protocol_version"),
+    }
+
+
+def source_attestation_id(attestation: Dict[str, Any]) -> str:
+    """Deterministic, content-DERIVED source attestation id -- the only
+    legitimate value for a manifest's source_attestation_id. A caller can
+    never simply assert an arbitrary string here:
+    _require_verified_source_attestation independently recomputes this from
+    the supplied attestation object and requires exact equality."""
+    return sha256_json(canonical_source_attestation_content(attestation))
+
+
+def build_source_attestation(
+    *,
+    source_provider_id: str,
+    extractor_id: str,
+    api_endpoint_bars: str,
+    api_endpoint_corporate_actions: str,
+    symbols: Sequence[str],
+    requested_start_utc: str,
+    requested_end_utc: str,
+    returned_coverage_start_utc: Optional[str],
+    returned_coverage_end_utc: Optional[str],
+    adjustment_mode: str,
+    feed: Optional[str],
+    asof: Optional[str],
+    pagination_complete_bars: bool,
+    pagination_complete_corporate_actions: bool,
+    corporate_action_query_coverage: Dict[str, Any],
+    category_b_events_found: Sequence[Dict[str, Any]],
+    raw_response_content_hashes: Dict[str, Any],
+    canonical_semantic_bars_hash: str,
+    canonical_corporate_action_evidence_hash: str,
+    retrieval_timestamp_utc: str,
+    protocol_version: str = "1",
+) -> Dict[str, Any]:
+    """Pure assembly of one durable, content-addressed source attestation
+    (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) -- the evidence a trusted
+    research extractor (e.g. mqk_research.data.alpaca_historical) attaches
+    to prove a bars provenance manifest's adjusted-data claim was actually
+    produced by that extractor with the declared adjustment mode, not
+    merely asserted. `category_b_events_found` must be an empty sequence for
+    an attestation to ever satisfy _require_verified_source_attestation --
+    a non-empty value records (for audit purposes only) that the extractor
+    itself refused to produce clean adjusted data; such an attestation
+    should never accompany a manifest claiming a usable adjusted_data
+    policy in the first place (see
+    mqk_research.data.alpaca_historical.CorporateActionReviewRequired)."""
+    attestation: Dict[str, Any] = {
+        "schema_version": SOURCE_ATTESTATION_SCHEMA_VERSION,
+        "source_provider_id": source_provider_id,
+        "extractor_id": extractor_id,
+        "api_endpoint_bars": api_endpoint_bars,
+        "api_endpoint_corporate_actions": api_endpoint_corporate_actions,
+        "symbols": sorted({str(s).strip().upper() for s in symbols}),
+        "requested_start_utc": requested_start_utc,
+        "requested_end_utc": requested_end_utc,
+        "returned_coverage_start_utc": returned_coverage_start_utc,
+        "returned_coverage_end_utc": returned_coverage_end_utc,
+        "adjustment_mode": adjustment_mode,
+        "feed": feed,
+        "asof": asof,
+        "pagination_complete_bars": bool(pagination_complete_bars),
+        "pagination_complete_corporate_actions": bool(pagination_complete_corporate_actions),
+        "corporate_action_query_coverage": corporate_action_query_coverage,
+        "category_b_events_found": list(category_b_events_found),
+        "raw_response_content_hashes": raw_response_content_hashes,
+        "canonical_semantic_bars_hash": canonical_semantic_bars_hash,
+        "canonical_corporate_action_evidence_hash": canonical_corporate_action_evidence_hash,
+        "protocol_version": protocol_version,
+        "retrieval_timestamp_utc": retrieval_timestamp_utc,
+    }
+    attestation["attestation_id"] = source_attestation_id(attestation)
+    return attestation
+
+
+def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str, Any]) -> None:
+    """Defect closure (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01): for a price
+    convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION,
+    corporate_action_policy=adjusted_data is satisfied ONLY when a real
+    source_attestation object is supplied, its canonical content hash
+    recomputes to the manifest's declared source_attestation_id, it comes
+    from a trusted extractor identity, its declared adjustment_mode matches
+    what the convention requires, both retrievals report complete
+    pagination, it records zero unresolved REQUIRES_FAIL_CLOSED_REVIEW
+    corporate actions, and its coverage (symbols + returned date range)
+    includes everything actually present in `bars`. A bare convention
+    string with no verifiable attestation -- the pre-patch status quo -- is
+    never sufficient."""
+    convention = manifest.get("price_adjustment_convention")
+    declared_id = manifest.get("source_attestation_id")
+    attestation = manifest.get("source_attestation")
+    if not declared_id or not isinstance(attestation, dict):
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: corporate_action_policy={CA_POLICY_ADJUSTED_DATA!r} with "
+            f"price_adjustment_convention={convention!r} requires a real, content-addressed "
+            "source_attestation object (see build_source_attestation) proving the data was "
+            "produced by a trusted research extractor -- a manually-asserted convention string "
+            "alone does not satisfy this contract"
+        )
+    if attestation.get("schema_version") != SOURCE_ATTESTATION_SCHEMA_VERSION:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.schema_version={attestation.get('schema_version')!r} "
+            f"!= {SOURCE_ATTESTATION_SCHEMA_VERSION!r}"
+        )
+    recomputed_id = source_attestation_id(attestation)
+    if recomputed_id != declared_id:
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation_id does not match the recomputed canonical content "
+            f"hash of the supplied attestation object (declared={declared_id!r}, "
+            f"recomputed={recomputed_id!r}) -- refusing to trust a caller-selected attestation id"
+        )
+    if attestation.get("extractor_id") not in _TRUSTED_EXTRACTOR_IDS:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.extractor_id={attestation.get('extractor_id')!r} is "
+            f"not a trusted research extractor ({sorted(_TRUSTED_EXTRACTOR_IDS)!r})"
+        )
+    expected_mode = _CONVENTION_REQUIRED_ADJUSTMENT_MODE.get(convention)
+    if attestation.get("adjustment_mode") != expected_mode:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.adjustment_mode={attestation.get('adjustment_mode')!r} "
+            f"does not match the adjustment mode required for price_adjustment_convention="
+            f"{convention!r} ({expected_mode!r})"
+        )
+    if not attestation.get("pagination_complete_bars") or not attestation.get(
+        "pagination_complete_corporate_actions"
+    ):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation declares incomplete pagination for bars and/or "
+            "corporate-action retrieval"
+        )
+    if attestation.get("category_b_events_found"):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation records unresolved REQUIRES_FAIL_CLOSED_REVIEW "
+            f"corporate action(s) -- refusing to trust adjusted data over them: "
+            f"{attestation.get('category_b_events_found')}"
+        )
+    if attestation.get("canonical_semantic_bars_hash") != manifest.get("canonical_semantic_bars_hash"):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.canonical_semantic_bars_hash does not match the "
+            "manifest's own canonical_semantic_bars_hash"
+        )
+
+    manifest_ca_evidence = manifest.get("corporate_action_evidence")
+    if not isinstance(manifest_ca_evidence, dict):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: manifest is missing a corporate_action_evidence object required alongside "
+            "an attested adjusted_data claim"
+        )
+    recomputed_ca_hash = corporate_action_evidence_id(manifest_ca_evidence)
+    if recomputed_ca_hash != manifest.get("corporate_action_evidence_id"):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: manifest corporate_action_evidence does not match manifest "
+            f"corporate_action_evidence_id (declared={manifest.get('corporate_action_evidence_id')!r}, "
+            f"recomputed={recomputed_ca_hash!r}) -- refusing to trust tampered corporate-action evidence"
+        )
+    if attestation.get("canonical_corporate_action_evidence_hash") != recomputed_ca_hash:
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.canonical_corporate_action_evidence_hash does not match "
+            "the manifest's own (recomputed) corporate-action evidence hash"
+        )
+
+    if bars.empty:
+        return
+
+    actual_symbols = {str(s).strip().upper() for s in bars["symbol"].unique()}
+    attested_symbols = set(attestation.get("symbols") or [])
+    missing_symbols = actual_symbols - attested_symbols
+    if missing_symbols:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation symbol coverage does not include bars symbol(s) "
+            f"{sorted(missing_symbols)!r}"
+        )
+
+    cov_start = attestation.get("returned_coverage_start_utc")
+    cov_end = attestation.get("returned_coverage_end_utc")
+    if not cov_start or not cov_end:
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation missing returned_coverage_start_utc/"
+            "returned_coverage_end_utc"
+        )
+    actual_ts = pd.to_datetime(bars["end_ts"], utc=True)
+    cov_start_ts = pd.Timestamp(cov_start)
+    cov_end_ts = pd.Timestamp(cov_end)
+    if actual_ts.min() < cov_start_ts or actual_ts.max() > cov_end_ts:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation returned-coverage range [{cov_start_ts.isoformat()}, "
+            f"{cov_end_ts.isoformat()}] does not include the full observed bars date range "
+            f"[{actual_ts.min().isoformat()}, {actual_ts.max().isoformat()}]"
+        )
+
+
 def build_bars_provenance_manifest(
     *,
     price_provenance: Dict[str, Any],
@@ -191,6 +459,7 @@ def build_bars_provenance_manifest(
     universe_mode: str,
     bars: pd.DataFrame,
     artifact_path: Optional[Path] = None,
+    source_attestation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Pure assembly of one durable, versioned bars provenance manifest. No
     IO except (optionally) hashing `artifact_path`'s bytes if supplied.
@@ -208,6 +477,12 @@ def build_bars_provenance_manifest(
     check_corporate_action_integrity for OFFICIAL registered research. Not
     part of provenance_identity_fragment (its content-derived ID already is)
     -- an audit-only field, like artifact_sha256.
+    `source_attestation` (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) is the full,
+    content-addressed source-attestation object (see build_source_attestation)
+    that a manifest claiming corporate_action_policy=adjusted_data with a
+    convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION must supply --
+    only its derived id enters provenance_identity_fragment/trial identity;
+    the full object here is audit-only, like corporate_action_evidence.
     """
     symbols_sorted = sorted({str(s).strip().upper() for s in symbol_universe if str(s).strip()})
     forbidden_sorted = sorted(
@@ -235,6 +510,8 @@ def build_bars_provenance_manifest(
         "canonical_semantic_bars_hash": canonical_semantic_bars_hash(bars),
         "row_count": int(len(bars)),
         "artifact_sha256": sha256_file(Path(artifact_path)) if artifact_path is not None else None,
+        "source_attestation": source_attestation,
+        "source_attestation_id": source_attestation_id(source_attestation) if source_attestation is not None else None,
     }
 
 
@@ -249,7 +526,11 @@ def provenance_identity_fragment(manifest: Dict[str, Any]) -> Dict[str, Any]:
     excludes source_query_identity's informational-only sub-fields
     (provider_metadata_available / convention_basis are audit context, not
     an independent economic fact once provider_ids_observed and
-    price_adjustment_convention are already included)."""
+    price_adjustment_convention are already included). Includes
+    `source_attestation_id` (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) -- its
+    derived id only, not the full attestation object -- so which trusted
+    extraction produced an adjusted-data candidate is part of its identity,
+    the same way corporate_action_evidence_id already is."""
     return {
         "schema_version": manifest["schema_version"],
         "provider_ids_observed": manifest["provider_ids_observed"],
@@ -264,6 +545,7 @@ def provenance_identity_fragment(manifest: Dict[str, Any]) -> Dict[str, Any]:
         "symbol_universe": manifest["symbol_universe"],
         "universe_mode": manifest["universe_mode"],
         "canonical_semantic_bars_hash": manifest["canonical_semantic_bars_hash"],
+        "source_attestation_id": manifest.get("source_attestation_id"),
     }
 
 
@@ -291,6 +573,13 @@ def require_registered_bars_provenance(manifest: Dict[str, Any]) -> None:
             "convention -- refusing official registered economic evaluation on bars data whose "
             "price-adjustment convention cannot be confirmed (e.g. a provider-attribution gap "
             "reporting 'unverifiable')"
+        )
+
+    if convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION and not manifest.get("source_attestation_id"):
+        raise BarsProvenanceUnverifiable(
+            f"Fail-closed: price_adjustment_convention={convention!r} requires a source_attestation_id "
+            "on the manifest (see build_source_attestation) -- a caller-asserted convention string "
+            "alone is not sufficient to authorize official registered economic evaluation"
         )
 
     policy = manifest.get("corporate_action_policy")
@@ -568,8 +857,10 @@ def check_corporate_action_integrity(bars: pd.DataFrame, manifest: Dict[str, Any
     - CA_POLICY_ADJUSTED_DATA is satisfied only when
       price_adjustment_convention is one of the independently-verified
       adjusted conventions this system currently recognizes
-      (_KNOWN_ADJUSTED_CONVENTIONS -- empty in production today). Refuses
-      to trust an unproven "adjusted" claim.
+      (_KNOWN_ADJUSTED_CONVENTIONS). Refuses to trust an unproven "adjusted"
+      claim. For a convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION
+      (e.g. alpaca_all_adjusted_v1), the convention name alone is NOT
+      enough -- see _require_verified_source_attestation.
     - CA_POLICY_FORBID_AFFECTED_PERIODS is satisfied only when a real,
       content-addressed corporate_action_evidence object verifies against
       the manifest's declared corporate_action_evidence_id (Defect 2 --
@@ -591,6 +882,8 @@ def check_corporate_action_integrity(bars: pd.DataFrame, manifest: Dict[str, Any
                 f"{convention!r} is not one of the independently-verified adjusted conventions "
                 "this system currently recognizes -- refusing to trust an unproven 'adjusted' claim"
             )
+        if convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION:
+            _require_verified_source_attestation(bars, manifest)
         return
 
     if policy == CA_POLICY_FORBID_AFFECTED_PERIODS:

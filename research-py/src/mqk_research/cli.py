@@ -682,6 +682,40 @@ def run_phase1_equity(policy_path: Path, asof_utc: pd.Timestamp, pg_url: str, ou
     return run_dir
 
 
+def run_alpaca_research_extraction(
+    *, symbols_csv: str, start_utc: pd.Timestamp, end_utc: pd.Timestamp, timeframe: str, out_root: Path
+) -> Path:
+    """BKT-RESEARCH-MARKET-DATA-AUTHORITY-01: thin CLI wrapper around
+    mqk_research.data.alpaca_historical.extract_research_bars_with_provenance
+    + write_research_extraction_artifacts. Produces research_bars.csv,
+    research_bars_provenance.json, corporate_actions.json,
+    corporate_actions_provenance.json in a deterministic run_id directory.
+    The written research_bars_provenance.json is ready to pass directly as
+    `bars_provenance` to run_registered_economic_walkforward_eval -- no
+    manual manifest fabrication required."""
+    from mqk_research.data.alpaca_historical import (
+        extract_research_bars_with_provenance,
+        write_research_extraction_artifacts,
+    )
+
+    symbols = sorted({s.strip().upper() for s in symbols_csv.split(",") if s.strip()})
+    if not symbols:
+        raise ValueError("--symbols must be non-empty (comma-separated)")
+
+    result = extract_research_bars_with_provenance(
+        symbols=symbols, start_utc=start_utc, end_utc=end_utc, timeframe=timeframe
+    )
+
+    run_id = stable_run_id(
+        "alpaca_research_extract_v1",
+        start_utc.isoformat(),
+        {"symbols": symbols, "start_utc": start_utc.isoformat(), "end_utc": end_utc.isoformat(), "timeframe": timeframe},
+    )
+    run_dir = out_root / run_id
+    write_research_extraction_artifacts(run_dir, result)
+    return run_dir
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     p = argparse.ArgumentParser(
         prog="mqk-research",
@@ -690,6 +724,16 @@ def main(argv: Optional[list[str]] = None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("preflight", help="DB sanity checks (md_bars presence, ranges, timeframes, symbols)")
+
+    extract_p = sub.add_parser(
+        "extract-alpaca-bars",
+        help="Fetch official adjustment=all research bars + corporate-action evidence directly from Alpaca",
+    )
+    extract_p.add_argument("--symbols", required=True, help="Comma-separated symbols (fixed_ex_ante universe)")
+    extract_p.add_argument("--start-utc", required=True, help="Inclusive start, timezone-aware (e.g. 2020-01-01T00:00:00Z)")
+    extract_p.add_argument("--end-utc", required=True, help="Exclusive end, timezone-aware (e.g. 2024-01-01T00:00:00Z)")
+    extract_p.add_argument("--timeframe", default="1Day", help="Alpaca bar timeframe (default: 1Day)")
+    extract_p.add_argument("--out", default="runs", help="Output root directory (default: runs/)")
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--policy", required=True, help="Policy YAML path")
@@ -714,6 +758,17 @@ def main(argv: Optional[list[str]] = None) -> None:
             raise RuntimeError("Missing Postgres connection. Provide --pg-url OR set MQK_PG_URL in the environment.")
         engine = make_engine(PgConfig(url=pg_url))
         print(json.dumps(preflight(engine), indent=2, sort_keys=True))
+        return
+
+    if args.cmd == "extract-alpaca-bars":
+        run_dir = run_alpaca_research_extraction(
+            symbols_csv=args.symbols,
+            start_utc=_parse_utc_ts(args.start_utc, "start_utc"),
+            end_utc=_parse_utc_ts(args.end_utc, "end_utc"),
+            timeframe=args.timeframe,
+            out_root=Path(args.out),
+        )
+        print(str(run_dir))
         return
 
     policy_path = Path(args.policy)
