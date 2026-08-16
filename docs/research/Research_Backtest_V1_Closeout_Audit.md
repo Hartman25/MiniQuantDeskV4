@@ -1425,6 +1425,157 @@ confirmed deterministic finding from the independent review; the
 Section 14 Wave 2 independent-review checkpoint is still the remaining
 blocker before P7A can move to `CLOSED`.
 
+### 1J. RESEARCH-WEIGHT-TO-SHARE-PARITY-01 (P7B) (2026-08-15)
+
+**Verdict: `IMPLEMENTED_PENDING_REVIEW`.**
+
+**Mission.** Close Area K1/K7: Python's economic evaluator expresses target
+positions as CONTINUOUS portfolio weights (equal-weight-active across active
+symbols); Rust's execution boundary (`TargetPosition { symbol, qty: i64 }`,
+`mqk_execution::engine::targets_to_order_intents`) is discrete whole-share.
+No documented bridge existed for turning a weight target into a share order.
+
+**Discovery finding.** No existing Rust seam converts a WEIGHT into a QTY at
+signal time using a price: native Rust strategies (e.g.
+`IntradayScalperStrategy`) decide an ABSOLUTE, price-INDEPENDENT
+`target_qty` (a fixed config constant) — price only ever enters to check an
+OPTIONAL notional CAP against an already-decided qty, via
+`IntradayScalperStrategy::apply_caps`'s formula:
+`max_qty_from_notional = (max_notional_usd * 1_000_000) / last_close_micros`
+(integer floor division against the strategy's own LAST KNOWN close;
+fails closed to `qty=0` if that close is unavailable). This is the sole
+accepted Rust precedent for converting a USD notional into a discrete share
+count from a price, so P7B's `weight_to_target_qty` generalizes it
+unit-for-unit (`notional_micros // price_micros`, using
+`weight * equity_usd` as the notional in place of a fixed cap constant) —
+it does not invent a new formula.
+
+**Protocol: `weight_to_share_v1`.** New module
+`research-py/src/mqk_research/ml/weight_to_share.py`:
+
+- **Equity basis:** `equity_usd` — a FIXED (non-compounding) nominal USD
+  basis, explicit and identity-bearing. Default `100_000.0`, mirroring
+  `BacktestConfig::test_defaults`/`conservative_defaults`'s own
+  `initial_cash_micros = 100_000_000_000` (100k USD) exactly — not an
+  invented number. economic_walkforward.py has no dollar cash ledger (works
+  entirely in weight/return space), so this is a deliberate, documented
+  simplification, not a claim to model a real cash ledger (CLAUDE.md
+  Section 5D: "do not invent a fake broker cash model").
+- **Price basis:** `signal_row_close_v1` — the EXECUTING row's own close,
+  the SAME close economic_walkforward.py already uses for that row's
+  `gross_return`/`turnover`. Never a future bar's HIGH/LOW, and never the
+  P7A conservative fill price — those remain P7A's execution-time-only
+  authority for the actual fill, entirely separate from this SIZING price.
+  A full flatten (`weight == 0.0`) needs no price at all (mirrors P7A's
+  forced-flatten exception never touching `execution_price_cost`), so the
+  priceless forced fold-end exit row never fails closed on a missing close.
+- **Rounding:** `floor_toward_zero_magnitude_v1` — `notional_micros //
+  price_micros`, integer floor division (both operands non-negative),
+  matching Rust's own truncating division convention. Never rounds up —
+  proves the GROSS EXPOSURE INVARIANT structurally: since floor rounding
+  can only reduce magnitude relative to the continuous weight target,
+  discrete gross notional can never exceed the continuous gross notional
+  the frozen `_simulate_fold_execution` capacity engine already proved
+  satisfies `max_gross_exposure`.
+- **Lot size:** `1` (whole US equity/ETF shares — V1 scope only).
+- **Caps:** `max_target_qty` / `max_position_notional_usd`, optional,
+  `None` (uncapped) by default — same field names and semantics as Rust's
+  `StrategySizingConfig`/`IntradayScalperStrategy` caps.
+- **Current-position → order-delta:** mirrors
+  `mqk_execution::engine::targets_to_order_intents` exactly (`delta =
+  target_qty - current_qty`; `None` if zero; `("buy", delta)` /
+  `("sell", -delta)` otherwise) via `target_qty_to_order_delta`.
+
+**Scope discipline (what this module does NOT do).** It does not re-derive
+capacity/allocation decisions (`max_gross_exposure`, cohort deferral,
+reduce-first-defer-increase) — those remain `_simulate_fold_execution`'s
+frozen, accepted job (P7A/REPAIR-02/REPAIR-03), untouched by this patch. P7B
+is a pure, additive, READ-ONLY translation applied AFTER a capacity-aware
+`executed_weight` is already decided, converting each already-resolved row
+into the discrete share quantity an equivalent `TargetPosition` would need.
+
+**Wiring.** `EconomicWalkForwardSpec.weight_to_share: Optional[WeightToShareSpec]
+= None` (opt-in; `None` is the diagnostic/legacy continuous-weight-only
+state, bit-for-bit unchanged for every existing caller).
+`economic_protocol_identity()` always includes a `weight_to_share` fragment
+(`{"weight_to_share_protocol_id": None}` when unset) — identity-bearing,
+consumed automatically by `economic_registry_integration.
+build_economic_trial_identity`. `_simulate_fold` computes per-symbol,
+per-row share-translation events (AFTER the forced-flatten mutation, so a
+fold-end flatten is correctly seen as `executed_weight=0.0`) and attaches
+them to each fold's summary as `weight_to_share_evidence`;
+`run_economic_walkforward`'s output JSON carries the top-level identity
+fragment under `"weight_to_share"`. New
+`economic_registry_integration.require_official_weight_to_share_parity` —
+same fail-closed shape as P7A's `require_official_execution_pricing_parity`
+— raises unless `weight_to_share` is set; composes with (does not replace)
+the P7A gate. Not yet wired into promotion — that is explicitly P7C's scope.
+
+**Identity.** `equity_usd`, `max_target_qty`, `max_position_notional_usd`
+are always identity-bearing (changing any one changes
+`weight_to_share_protocol_identity()`'s output, hence
+`economic_protocol_identity()`, hence `build_economic_trial_identity`'s
+`trial_id`) — proven by
+`test_identity_sensitivity_to_equity_usd`/`_to_caps`/`_via_full_trial_identity`.
+`rounding_policy`/`lot_size`/`price_basis` are fixed-by-protocol-version
+constants (analogous to how P7A's `pricing_model_id` bakes in its own fixed
+formula) — echoed in the identity fragment for audit clarity, not
+independently configurable in V1. Result values (generated qty/P&L) never
+enter identity — proven by `test_result_independence_qty_values_do_not_change_identity`.
+
+**Negative/regression proof (16 required tests, all present in
+`research-py/tests/test_weight_to_share_parity_p7b.py`, 32 tests total):**
+deterministic basic translation; whole-share floor rounding; zero-share
+edge (no fabricated exposure); reduction → SELL delta; increase → BUY
+delta; full flatten needs no price and produces an exact close; multi-
+symbol ordering is independent of OOS-csv row order (proven end-to-end
+through `run_economic_walkforward`); price sensitivity across a rounding
+boundary; identity sensitivity to `equity_usd`/caps (unit + full
+`build_economic_trial_identity` layer); result-independence; no future-bar
+leakage (mutating a later row cannot change an earlier row's `target_qty`);
+missing/non-positive price for a nonzero weight fails closed (mirrors
+`_row_execution_pricing_components`'s identical pattern); gross-exposure
+invariant swept across weight/price combinations; P7A/P7B composability
+(both gates satisfiable together, neither replaces the other); diagnostic
+(`weight_to_share=None`) negative control against the official gate; no
+fractional-share fabrication (`isinstance(qty, int)` swept). Plus: spec
+validation (protocol_id/equity_usd/caps), cap-interaction tests (mirrors
+`IntradayScalperStrategy`'s own SPS04 fixture numerically: max_notional=$700,
+price=$200.50 → capped qty=3), and end-to-end wiring tests (forced fold-end
+flatten through the real pipeline; output-artifact identity; diagnostic
+omission negative control).
+
+**Files changed:** `research-py/src/mqk_research/ml/weight_to_share.py`
+(new), `research-py/src/mqk_research/ml/economic_walkforward.py`
+(`weight_to_share` field + wiring), `research-py/src/mqk_research/ml/
+economic_registry_integration.py` (`require_official_weight_to_share_parity`),
+`research-py/tests/test_weight_to_share_parity_p7b.py` (new, 32 tests),
+this document (Section 1J, this addendum).
+
+**Tests.** `test_weight_to_share_parity_p7b.py`: 32 passed (new).
+`test_execution_pricing_parity_p7a.py`: 47 passed, unchanged.
+`test_economic_walkforward.py`: 63 passed, unchanged.
+`test_alpaca_historical.py`/`test_source_attestation.py`/
+`test_multiple_testing_judge.py`/`test_evidence_boundary.py`/
+`test_bars_provenance.py` (directly-affected callers of the touched
+modules): 185 passed, unchanged. `git diff --check`: clean. No Rust files
+were touched by this patch (pure Python Research bridge, zero calls into
+`core-rs`) — per CLAUDE.md Section 15 ("do not run the entire Rust
+workspace for Python-only changes"), the Rust suite was not re-run; the
+Rust seams this patch mirrors (`targets_to_order_intents`,
+`IntradayScalperStrategy::apply_caps`) were read-only discovery, not
+modified.
+
+**Gate status updates:** P7B moves from `OPEN` to
+`IMPLEMENTED_PENDING_REVIEW` (Sections 12/14/15/16/16A/17/20 apply the same
+update). `RESEARCH_BACKTEST_FOUNDATION_READY` (Section 16A) remains `NOT
+MET` — P7C is still `OPEN`, and neither P7A nor P7B is yet `CLOSED` (Wave 2's
+independent-review checkpoint has not occurred for either). Next patch: P7C
+(`PROMOTION-OOS-EVIDENCE-GATE-01`), which composes
+`require_official_execution_pricing_parity` and
+`require_official_weight_to_share_parity` (both required together) into the
+actual `mqk-promotion::evaluator.rs` gate.
+
 ---
 
 ## 2. Baseline

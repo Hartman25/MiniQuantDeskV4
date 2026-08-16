@@ -52,6 +52,7 @@ __all__ = [
     "ECONOMIC_PROTOCOL_ID",
     "build_economic_trial_identity",
     "require_official_execution_pricing_parity",
+    "require_official_weight_to_share_parity",
     "run_registered_economic_walkforward_eval",
 ]
 
@@ -174,6 +175,30 @@ def require_official_execution_pricing_parity(economic_spec: EconomicWalkForward
             f"execution_pricing.pricing_model_id={EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1!r}, "
             f"got {normalized.execution_pricing.pricing_model_id!r} -- the diagnostic/legacy "
             "close-only pricing model can never satisfy official registered parity evidence"
+        )
+
+
+def require_official_weight_to_share_parity(economic_spec: EconomicWalkForwardSpec) -> None:
+    """Fail-closed OFFICIAL REGISTERED PARITY CONTRACT gate (P7B,
+    RESEARCH-WEIGHT-TO-SHARE-PARITY-01). A caller that intends a registered
+    economic result to count as promotion-grade parity evidence must call
+    this in addition to (not instead of)
+    `require_official_execution_pricing_parity` (P7A) -- P7C's promotion
+    gate requires BOTH. The diagnostic/legacy continuous-weight-only state
+    -- `EconomicWalkForwardSpec.weight_to_share`'s own default, `None`, kept
+    unchanged by most existing registered-path callers/tests that predate
+    P7B and are not asserting promotion-grade parity -- intentionally,
+    permanently fails this gate; see mqk_research.ml.weight_to_share module
+    docstring. Wiring this gate into the actual promotion pipeline
+    (mqk-promotion::evaluator.rs) is P7C's scope, not P7B's -- this function
+    is the mechanism P7C composes with."""
+    normalized = economic_spec.normalized()
+    if normalized.weight_to_share is None:
+        raise RuntimeError(
+            "Fail-closed: official registered weight-to-share parity contract (P7B) requires "
+            "economic_spec.weight_to_share to be set to a WeightToShareSpec instance -- "
+            "continuous-weight-only economic evaluation (the diagnostic/legacy default) can "
+            "never satisfy official registered weight-to-share parity evidence"
         )
 
 

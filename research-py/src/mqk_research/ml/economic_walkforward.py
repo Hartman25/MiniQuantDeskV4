@@ -16,6 +16,11 @@ from mqk_research.data.bars_provenance import (
 from mqk_research.ml import economics
 from mqk_research.ml.execution_pricing import ExecutionPricingSpec, conservative_fill_price
 from mqk_research.ml.util_hash import file_record, sha256_json
+from mqk_research.ml.weight_to_share import (
+    WeightToShareSpec,
+    translate_symbol_weight_series_to_share_events,
+    weight_to_share_protocol_identity,
+)
 
 # RESEARCH-ECONOMIC-WALKFORWARD-01 (+ REPAIR-01)
 #
@@ -229,6 +234,12 @@ class EconomicWalkForwardSpec:
     # this explicitly reproduce pre-P7A behavior bit-for-bit -- see
     # ExecutionPricingSpec / mqk_research.ml.execution_pricing.
     execution_pricing: ExecutionPricingSpec = field(default_factory=ExecutionPricingSpec)
+    # P7B (RESEARCH-WEIGHT-TO-SHARE-PARITY-01): optional weight->share
+    # translation evidence. Defaults to None (diagnostic/legacy continuous-
+    # weight-only behavior, bit-for-bit unchanged) so existing callers that
+    # don't pass this are completely unaffected -- see weight_to_share
+    # module docstring.
+    weight_to_share: Optional[WeightToShareSpec] = None
     protocol_id: str = PROTOCOL_ID
 
     def normalized(self) -> "EconomicWalkForwardSpec":
@@ -243,11 +254,13 @@ class EconomicWalkForwardSpec:
                 "cost_model.slippage_bps_per_side must be 0 to avoid double-charging slippage "
                 "(commission_bps_per_side is unaffected and remains the separate commission charge)"
             )
+        weight_to_share = self.weight_to_share.normalized() if self.weight_to_share is not None else None
         return EconomicWalkForwardSpec(
             signal_policy=self.signal_policy.normalized(),
             cost_model=cost_model,
             annualization=self.annualization.normalized(),
             execution_pricing=execution_pricing,
+            weight_to_share=weight_to_share,
             protocol_id=self.protocol_id,
         )
 
@@ -284,6 +297,11 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
             "slippage_bps": spec.execution_pricing.slippage_bps,
             "volatility_mult_bps": spec.execution_pricing.volatility_mult_bps,
         },
+        # P7B (RESEARCH-WEIGHT-TO-SHARE-PARITY-01): always identity-bearing,
+        # same rationale as execution_pricing above -- see weight_to_share
+        # module docstring. `{"weight_to_share_protocol_id": None}` when
+        # spec.weight_to_share is the diagnostic/legacy None default.
+        "weight_to_share": weight_to_share_protocol_identity(spec.weight_to_share),
         "annualization": {
             "annualization_days": spec.annualization.annualization_days,
             "risk_free_rate_annual": spec.annualization.risk_free_rate_annual,
@@ -943,6 +961,12 @@ def _simulate_fold(
         execution_pricing=spec.execution_pricing,
     )
 
+    # P7B (RESEARCH-WEIGHT-TO-SHARE-PARITY-01): normalized once, outside the
+    # loop, so a validation error (e.g. bad equity_usd) fails closed before
+    # any per-symbol translation work starts.
+    wts_spec = spec.weight_to_share.normalized() if spec.weight_to_share is not None else None
+    weight_to_share_events_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+
     for s in symbols:
         rows = rows_by_symbol[s]
         final_weight = final_weight_by_symbol[s]
@@ -983,6 +1007,26 @@ def _simulate_fold(
                 "commission_notional": abs(final_weight),
             })
             final_weight = 0.0
+
+        # P7B: translated AFTER the forced-flatten mutation above, so the
+        # fold-end flatten (if any) is correctly seen as executed_weight=0.0
+        # here too -- a full flatten needs no price (see weight_to_target_qty
+        # docstring), so the priceless forced-exit row never fails closed on
+        # a missing close. Uses each row's own close (the SAME close already
+        # used for that row's gross_return/turnover above) as the sizing
+        # price -- never a later row's price (no future-bar leakage).
+        if wts_spec is not None:
+            price_rows: List[Dict[str, Any]] = []
+            for r in rows:
+                close_val = close_frame.at[r["timestamp"], s]
+                price_rows.append({
+                    "timestamp": r["timestamp"],
+                    "close": float(close_val) if pd.notna(close_val) else None,
+                    "executed_weight": r["executed_weight"],
+                })
+            weight_to_share_events_by_symbol[s] = translate_symbol_weight_series_to_share_events(
+                price_rows, wts_spec
+            )
 
         exec_index: List[pd.Timestamp] = []
         exec_values: List[float] = []
@@ -1078,6 +1122,16 @@ def _simulate_fold(
         "total_turnover": float(fold_df["turnover"].sum()),
         "average_gross_exposure": float(fold_df["gross_exposure"].mean()) if len(fold_df) else 0.0,
     })
+    if wts_spec is not None:
+        # JSON-safe: pd.Timestamp -> isoformat string (this fold summary is
+        # embedded verbatim into economic_walk_forward.json's "folds" array).
+        summary["weight_to_share_evidence"] = {
+            s: [
+                {**event, "timestamp": pd.Timestamp(event["timestamp"]).isoformat()}
+                for event in events
+            ]
+            for s, events in weight_to_share_events_by_symbol.items()
+        }
     return fold_df, summary
 
 
@@ -1184,6 +1238,7 @@ def run_economic_walkforward(
         "signal_policy": identity["signal_policy"],
         "cost_model": identity["cost_model"],
         "execution_pricing": identity["execution_pricing"],
+        "weight_to_share": identity["weight_to_share"],
         "annualization": identity["annualization"],
         "inputs": {
             "bars_csv": bars_record,
