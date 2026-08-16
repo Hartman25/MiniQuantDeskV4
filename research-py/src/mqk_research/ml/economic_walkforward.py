@@ -169,6 +169,19 @@ class SignalPolicySpec:
       scope declaration, see that constant's docstring) and is always
       identity-bearing.
 
+      TRUTHFUL SCORE SEMANTICS (mission Section 2 "LONG-SHORT TERMINOLOGY
+      DEFECT"): the model's actual training truth is `target = 1 iff
+      fwd_ret > a POSITIVE return threshold`, and `ml_score = P(target =
+      1)` -- the probability of that BULLISH positive-return class ONLY. A
+      score `<= short_threshold` is therefore a LOW probability of the
+      bullish class -- NOT a calibrated estimate of how likely the price
+      is to fall (a mathematically distinct claim the model was never
+      trained to produce, since it never partitions the negative-return
+      outcome on its own). `short_threshold` encodes an explicit BEARISH
+      STRATEGY HYPOTHESIS (low-bullish-confidence names are used as a
+      short candidate), not a statistically-certain forecast of a falling
+      price.
+
     GROSS EXPOSURE (both direction policies): `max_gross_exposure` bounds
     `sum(abs(weight_i))`, NEVER the signed sum -- a +0.5 long and a -0.5
     short together consume gross 1.0, not 0.0 (mission Section 5C). Under
@@ -372,17 +385,32 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
         "signal_policy": {
             "entry_threshold": spec.signal_policy.entry_threshold,
             "long_only": spec.signal_policy.long_only,
-            # RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01: always identity-bearing
-            # -- a legacy long_only_v1 candidate and a long_short_
-            # threshold_v1 candidate must never share a trial_id even if
-            # every other field happened to coincide.
-            "direction_policy": spec.signal_policy.direction_policy,
-            "short_threshold": spec.signal_policy.short_threshold,
-            "borrow_model": spec.signal_policy.borrow_model,
             "sizing": spec.signal_policy.sizing,
             "max_gross_exposure": spec.signal_policy.max_gross_exposure,
             "fold_end_policy": spec.signal_policy.fold_end_policy,
             "capacity_policy": spec.signal_policy.capacity_policy,
+            # RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01-REPAIR-01 (mission
+            # Section 4A): ADDITIVE ONLY under long_short_threshold_v1 --
+            # direction_policy/short_threshold/borrow_model are always
+            # identity-bearing THERE (a long/short candidate differing only
+            # by short_threshold or borrow_model must never share a
+            # trial_id), but are entirely ABSENT from the dict under the
+            # legacy long_only_v1 default (both are always None there
+            # anyway -- SignalPolicySpec.normalized() enforces it). Absence,
+            # not a constant None value, is what keeps every pre-existing
+            # long_only_v1 candidate's canonical identity byte-for-byte
+            # identical to its pre-long-short-patch trial_id (canonical_json
+            # sorts keys, so PRESENCE is what changes the hash, not order --
+            # see test_legacy_long_only_identity_exact_golden_equality).
+            **(
+                {
+                    "direction_policy": spec.signal_policy.direction_policy,
+                    "short_threshold": spec.signal_policy.short_threshold,
+                    "borrow_model": spec.signal_policy.borrow_model,
+                }
+                if spec.signal_policy.is_long_short
+                else {}
+            ),
         },
         "cost_model": {
             "commission_bps_per_side": spec.cost_model.commission_bps_per_side,
