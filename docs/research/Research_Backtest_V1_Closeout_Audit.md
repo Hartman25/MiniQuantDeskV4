@@ -235,7 +235,7 @@ unpushed, one commit each, sequenced strictly after Wave 1's four commits.
 | Patch | Verdict | Commit (local, unpushed) |
 |---|---|---|
 | PATCH A `RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01` | **CLOSED** | `8bc4dbc2` |
-| PATCH B `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` | **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED** | `4f7e297e` |
+| PATCH B `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` | **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED**; 3 deterministic defects closed 2026-08-15 by **PATCH C** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-02` (`5bba8d6c`, **`P8_CONTRACT_COMPLETE` / `DATA_SOURCE_BLOCKED`**) — see Section 1C | `4f7e297e` |
 
 ### PATCH A — corrected DSR trial-count semantics
 
@@ -455,6 +455,124 @@ prerequisite this addendum adds to the roadmap — tracked here as
 **`BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`** (not yet scoped, not yet a
 patch — per the mission's own instruction, this addendum reports the
 blocker honestly rather than inventing a sourcing plan).
+
+---
+
+## 1C. WAVE-1-INDEPENDENT-REPAIR-02 ADDENDUM (2026-08-15)
+
+Mission `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-02` closed three
+deterministic defects found by independent review of PATCH B (Section 1B),
+against the SAME commit chain, HEAD `5bba8d6c58a4d2a509fbd86882cd8f9013a24b56`.
+`RESEARCH-MULTIPLE-TESTING-JUDGE-01`'s methodology (PATCH A, commit
+`8bc4dbc2`) was NOT reopened; only its comparability key was updated to
+consume this repair's corrected data-identity authority (see item 3 below).
+
+**Verdict: `P8_CONTRACT_COMPLETE` / `DATA_SOURCE_BLOCKED`.** The P8 safety/
+identity CONTRACT (manifest-to-bars binding, corporate-action evidence
+verification, canonical trial identity) is now complete and proven by
+regression test. Real `raw_unadjusted` registered research remains
+HONESTLY fail-closed-blocked, exactly as Section 1B already reported —
+`BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01` (an external evidence SOURCE, not
+this CONTRACT) is unchanged as the remaining prerequisite.
+
+1. **Manifest was not bound to the actually-loaded bars.** PATCH B's
+   `require_registered_bars_provenance` verified a manifest's STRUCTURAL
+   shape but never checked that it actually described the bars being
+   evaluated — a manifest built for bars A could be paired with bars B on
+   disk. Fixed with a new content-binding preflight,
+   `require_bars_match_manifest()` (`bars_provenance.py`), that recomputes
+   `canonical_semantic_bars_hash` from the bars actually loaded and requires
+   exact equality with the manifest's declared hash, then cross-checks the
+   observed symbol universe, timestamp range, and (best-effort, from the
+   bars content alone) daily-granularity consistency against the manifest's
+   declared contract. Raises the new `BarsProvenanceContentMismatch`; runs
+   in `run_economic_walkforward()` immediately after bars load, BEFORE
+   `check_corporate_action_integrity` and before any fold is simulated.
+   `canonical_semantic_bars_hash` itself now also fails closed on duplicate
+   `(symbol, end_ts)` rows (previously sorted/hashed them ambiguously),
+   agreeing with `load_bars`'s existing duplicate contract.
+2. **Corporate-action evidence was forgeable.** PATCH B's
+   `forbid_affected_periods` policy trusted any non-empty
+   `corporate_action_evidence_id` STRING and whatever `forbidden_periods`
+   sat next to it in the same manifest — a caller could assert anything
+   (the pre-repair tests' own `"evidence-v1"` fixture proved this). Fixed
+   with a real, content-addressed corporate-action evidence contract:
+   `build_corporate_action_evidence()` assembles an evidence object (schema
+   version, source/provider identity, covered symbol universe, coverage
+   start/end, corporate-action entries with symbol/action-type/effective
+   window, artifact hash) whose `evidence_id` is DERIVED from its canonical
+   content via `corporate_action_evidence_id()` — never caller-chosen.
+   `check_corporate_action_integrity` now independently recomputes that ID,
+   requires the evidence's coverage to include the complete observed bars
+   universe/range, and requires the manifest's `forbidden_periods` to be
+   exactly what `forbidden_periods_from_evidence()` derives from the
+   verified evidence — this is the narrow interface a future
+   `BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01` data patch must satisfy. No
+   authoritative source calls it with real data anywhere in this repository
+   today (unchanged from Section 1B) — official registered `raw_unadjusted`
+   evaluation stays fail-closed until one exists; only direct/diagnostic
+   test fixtures use `build_corporate_action_evidence` with synthetic
+   content, and the dedicated tests proving a bare evidence-ID string still
+   fails the official registered path were kept (and added to).
+3. **Row-order-invariant trial-identity test was a false positive, and
+   physical bars bytes still leaked into candidate identity.** PATCH B's
+   `_write_min_registered_inputs` test helper never actually wrote
+   `bars.csv` to disk, so its row-reorder identity test compared two
+   identical `{"sha256": None, "bytes": None}` records regardless of
+   physical order — it could not have caught a regression. Fixed the test
+   helper first (writes real bars content in both physical orders) and
+   confirmed it goes RED against the pre-repair `build_economic_trial_identity`
+   (stash+rerun negative control: reordering flips `trial_id`), THEN removed
+   `data_identity.economic_bars_csv`'s physical sha256/bytes from
+   `build_economic_trial_identity` entirely — economic bars candidate
+   identity is now carried SOLELY by `bars_provenance`'s
+   `canonical_semantic_bars_hash` (already present via
+   `provenance_identity_fragment`). The physical bars-file record is not
+   lost — it remains fully auditable per ATTEMPT (not per trial) in
+   `economic_walkforward.run_economic_walkforward`'s own output artifact
+   (`out["inputs"]["bars_csv"]`), which was already unconditionally written
+   and untouched by this fix.
+   `RESEARCH-MULTIPLE-TESTING-JUDGE-01`'s comparison key
+   (`multiple_testing_judge._comparison_key`) was updated in the same
+   commit to consume the full `bars_provenance` identity fragment instead
+   of the now-removed physical `economic_bars_csv.sha256` — two trials
+   whose provenance basis differs (provider, adjustment convention, CA
+   policy/evidence, universe, or extraction range) no longer share a DSR/PBO
+   comparison scope. The judge's own `judge_id_basis` was also extended to
+   include `DSR_TRIAL_COUNT_PROTOCOL_VERSION` (a declared methodology
+   version, never a numeric result) — a future change to the effective-
+   independent-trial estimation method now changes `judge_id` even when the
+   registry and every DSR/PBO numeric output happen to come out
+   byte-identical.
+
+**Tests.** 24 new/repaired tests in `test_bars_provenance.py` (now 58 total)
+covering all `REQUIRED TESTS` items 1–14 and 17–18 from the repair mission
+(manifest-to-bars binding negative/positive controls, canonical-hash/
+symbol-universe/range mismatch fail-closed, duplicate `(symbol,end_ts)`
+fail-closed, arbitrary-evidence-string and empty-forbidden-periods rejection
+at both the manifest level and the full OFFICIAL registered pipeline,
+evidence-ID derivation and content-sensitivity, coverage-too-small and
+missing-symbol-coverage rejection, caller-modified-forbidden-periods
+rejection, the synthetic diagnostic escape hatch remaining usable, and
+physical-bytes exclusion from trial identity); 3 existing tests repaired in
+place to use real synthetic evidence/chronology-safe fixtures instead of the
+pre-repair `"evidence-v1"` anti-pattern (the split negative control, the
+forbid-affected-periods overlap test, and the full registered-pipeline
+chronology/holdout test, the last of which now proves its mechanics via
+`ADJUSTED_DATA` + the same dependency-injected test-only convention Section
+1B's PATCH B already used, since `FORBID_AFFECTED_PERIODS` can no longer be
+satisfied without a real evidence source). 4 test fixture helpers in
+`test_economic_walkforward.py`, `test_evidence_boundary.py`, and
+`test_multiple_testing_judge.py` that build manifests for the OFFICIAL
+registered path were updated to the same real-evidence contract (they were
+not the subject of the repair but would otherwise have broken). 3 new tests
+in `test_multiple_testing_judge.py` (34 total) prove comparison-scope
+separation by provenance basis and `judge_id` sensitivity to the DSR
+protocol version. Full `research-py` suite: **1231 passed, 7 skipped, 12
+subtests passed** (zero regressions; skip count unchanged from Section 1B).
+
+Repair commit: `5bba8d6c58a4d2a509fbd86882cd8f9013a24b56`
+("research: bind economic evaluation to canonical bar provenance").
 
 ---
 
@@ -850,7 +968,8 @@ The candidate roadmap (Patch 6–10) was **directionally correct but incompletel
 | **P6C** `RESEARCH-LEGACY-TRAINING-BOUNDARY-01` | Fail-closed structural boundary preventing `ml/train.py`'s single-shot/global-fit output from being mistaken for promotion-grade OOS evidence. | **CLOSED** (`c643588d`) |
 | **P8** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01` | Verify and stamp the actual adjustment convention used by `md_bars`; add provider-identity capture; add provider-revision/backfill detection; make an explicit, documented decision on corporate-action/delisting scope for V1 based on what's found. | **CLOSED** (`2b87c400`), narrowly scoped; corporate-action conclusion corrected 2026-08-15 by **PATCH B** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` (`4f7e297e`, **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED**) — see Section 1B |
 | **PATCH A** `RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01` | Correct DSR effective-independent-trial accounting per Bailey & López de Prado 2014 Appendix A.3; fix zero-cross-trial-variance null benchmark; tighten comparison scope. | **CLOSED** (`8bc4dbc2`) |
-| **PATCH B** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` | Durable bars provenance manifest + fail-closed corporate-action preflight, threaded into registered economic trial identity. | **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED** (`4f7e297e`) |
+| **PATCH B** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` | Durable bars provenance manifest + fail-closed corporate-action preflight, threaded into registered economic trial identity. | **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED** (`4f7e297e`); superseded by **PATCH C** — see Section 1C |
+| **PATCH C** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-02` | Bind manifest to actually-loaded bars content; require real content-addressed corporate-action evidence (not a bare ID string); remove physical bars-file bytes from economic trial identity; update multiple-testing comparison key to the corrected provenance authority. | **`P8_CONTRACT_COMPLETE` / `DATA_SOURCE_BLOCKED`** (`5bba8d6c`) — see Section 1C |
 | **P7A** `RESEARCH-EXECUTION-PRICING-PARITY-01` | Reconcile execution-price-model divergence between Python and Rust (Area F/K/N: Python prices at close + flat symmetric bps; Rust prices worst-case HIGH/LOW + slippage). | **OPEN** |
 | **P7B** `RESEARCH-WEIGHT-TO-SHARE-PARITY-01` | Document/implement the weight→share-order translation layer bridging Python's continuous portfolio-weight semantics and Rust's discrete `qty: i64` share semantics (Area K1/K7). | **OPEN** |
 | **P7C** `PROMOTION-OOS-EVIDENCE-GATE-01` | Wire the Rust promotion gate (`mqk-promotion::evaluator.rs`) to actually consume Python walk-forward/OOS/multiple-testing evidence; absorbs the already-tracked `PROMOTION-WALKFORWARD-GATE-WIRING-01`. | **OPEN** |
