@@ -21,6 +21,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from mqk_research.data.bars_provenance import (
+    CA_POLICY_FORBID_AFFECTED_PERIODS,
+    PRICE_CONVENTION_RAW_UNADJUSTED,
+    UNIVERSE_MODE_FIXED_EX_ANTE,
+    build_bars_provenance_manifest,
+)
 from mqk_research.exp_distributed.storage import ResearchResultStore
 from mqk_research.ml import economics
 from mqk_research.ml.economic_registry_integration import (
@@ -1078,6 +1084,39 @@ def test_holdout_never_produces_economic_output(tmp_path):
 # TESTS 26-31 — registry integration
 # ---------------------------------------------------------------------------
 
+def _synthetic_bars_provenance(bars_path: Path) -> Dict[str, Any]:
+    """BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01: the official
+    registered path now REQUIRES a durable bars provenance manifest. These
+    tests use synthetic, decoupled-from-labels bars fixtures (see
+    _build_flat_bars) with no real corporate-action risk -- an explicit
+    FORBID_AFFECTED_PERIODS declaration with zero forbidden periods is an
+    honest statement for synthetic test data (there is nothing to exclude),
+    distinct from real registered data, which has no authoritative
+    corporate-action source today and is expected to fail closed (see
+    test_raw_unadjusted_without_corporate_action_safety_fails_closed)."""
+    bars = pd.read_csv(bars_path)
+    end_ts = pd.to_datetime(bars["end_ts"], utc=True)
+    return build_bars_provenance_manifest(
+        price_provenance={
+            "close_column": "close",
+            "provider_ids_observed": ["test_fixture"],
+            "price_adjustment_convention": PRICE_CONVENTION_RAW_UNADJUSTED,
+            "provider_metadata_available": True,
+            "convention_basis": "synthetic test fixture — no real provider involved",
+        },
+        corporate_action_policy=CA_POLICY_FORBID_AFFECTED_PERIODS,
+        corporate_action_evidence_id="test-fixture-no-known-corporate-actions-v1",
+        forbidden_periods=(),
+        timeframe="1D",
+        start_utc=end_ts.min().isoformat(),
+        end_utc=end_ts.max().isoformat(),
+        symbol_universe=sorted(bars["symbol"].astype(str).unique().tolist()),
+        universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE,
+        bars=bars,
+        artifact_path=bars_path,
+    )
+
+
 def _registered_economic_run(run_dir, df, bars_path, *, registry_db, economic_spec=None, wf_spec=None):
     _write_full_run_dir(run_dir, df)
     return run_registered_economic_walkforward_eval(
@@ -1087,6 +1126,7 @@ def _registered_economic_run(run_dir, df, bars_path, *, registry_db, economic_sp
         strategy_id="research.econ_v1",
         bars_csv=bars_path,
         economic_spec=economic_spec or _spec(),
+        bars_provenance=_synthetic_bars_provenance(bars_path),
         registry_db=registry_db,
         wf_spec=wf_spec or WalkForwardSpec(**BASE_SPEC_KW),
         steps=10,

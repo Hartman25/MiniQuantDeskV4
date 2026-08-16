@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from mqk_research.data.bars_provenance import provenance_identity_fragment, require_registered_bars_provenance
 from mqk_research.exp_distributed.hashing import short_hash
 from mqk_research.exp_distributed.runner import default_db_path, default_root
 from mqk_research.exp_distributed.storage import REGISTRY_SCHEMA_VERSION, ResearchResultStore
@@ -24,6 +25,13 @@ from mqk_research.ml.util_hash import file_record
 # ECONOMIC_PROTOCOL_ID ("economic_walk_forward_v1"), and a successful
 # attempt's result_id/result_summary come from the ECONOMIC evaluation, not
 # AUC/logloss.
+#
+# BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01: `bars_provenance` is a
+# REQUIRED argument (no default) on both build_economic_trial_identity and
+# run_registered_economic_walkforward_eval -- the official registered path
+# cannot forget or skip the durable bars provenance contract (see
+# mqk_research.data.bars_provenance). This is the one place in the codebase
+# where that contract is structurally, not just conventionally, enforced.
 
 __all__ = [
     "ECONOMIC_PROTOCOL_ID",
@@ -56,14 +64,20 @@ def build_economic_trial_identity(
     standardize: bool,
     clip_z: float,
     economic_spec: EconomicWalkForwardSpec,
+    bars_provenance: Dict[str, Any],
 ) -> Tuple[str, Dict[str, Any]]:
     """Canonical, result-independent trial identity for a registered economic
     walk-forward candidate. Includes everything that materially changes the
     candidate's economic meaning: classification data/spec/model AND economic
-    protocol/bars-data-identity/signal-policy/cost-model/annualization.
-    Deliberately excludes anything derived from evaluation output (AUC,
-    logloss, returns, eval_ids, artifact paths) — changing a RESULT must
-    never change a trial_id."""
+    protocol/bars-data-identity/signal-policy/cost-model/annualization AND
+    (BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01) the bars provenance
+    identity fragment (provider, price-adjustment convention, corporate-
+    action policy/evidence, canonical semantic bars content, query window,
+    symbol universe, universe mode). Deliberately excludes anything derived
+    from evaluation output (AUC, logloss, returns, eval_ids, artifact paths,
+    the manifest's own artifact_sha256/row_count physical-file facts) —
+    changing a RESULT (or a byte-identical semantic reorder of the same
+    bars) must never change a trial_id."""
     normalized_economic_spec = economic_spec.normalized()
     identity: Dict[str, Any] = {
         "experiment_id": experiment_id,
@@ -75,6 +89,7 @@ def build_economic_trial_identity(
             "targets_csv": _content_identity(targets_path),
             "feature_schema": _content_identity(schema_path),
             "economic_bars_csv": _content_identity(bars_path),
+            "bars_provenance": provenance_identity_fragment(bars_provenance),
         },
         "evaluation_spec": {
             "label_col": label_col,
@@ -109,6 +124,7 @@ def run_registered_economic_walkforward_eval(
     strategy_id: str,
     bars_csv: Path,
     economic_spec: EconomicWalkForwardSpec,
+    bars_provenance: Dict[str, Any],
     hypothesis_text: Optional[str] = None,
     registry_db: Optional[Path] = None,
     end_ts_col: str = "end_ts",
@@ -130,12 +146,21 @@ def run_registered_economic_walkforward_eval(
     AUC/logloss remain available in the classification artifact but are
     secondary evidence — the ECONOMIC result is what gets registered as this
     attempt's primary result.
+
+    `bars_provenance` (BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01) is a
+    REQUIRED durable provenance manifest (see
+    mqk_research.data.bars_provenance.build_bars_provenance_manifest) —
+    verified fail-closed here (require_registered_bars_provenance) BEFORE
+    any classification/economic evaluation runs, folded into the trial
+    identity, and re-verified against the actually-loaded bars content by
+    run_economic_walkforward's corporate-action preflight.
     """
     if not experiment_id.strip() or not hypothesis_id.strip() or not strategy_id.strip():
         raise ValueError(
             "run_registered_economic_walkforward_eval requires non-empty experiment_id, "
             "hypothesis_id, and strategy_id"
         )
+    require_registered_bars_provenance(bars_provenance)
 
     run_dir = Path(run_dir)
     bars_csv = Path(bars_csv)
@@ -171,6 +196,7 @@ def run_registered_economic_walkforward_eval(
         standardize=standardize,
         clip_z=clip_z,
         economic_spec=normalized_economic_spec,
+        bars_provenance=bars_provenance,
     )
     store.register_trial(
         trial_id=trial_id,
@@ -199,6 +225,7 @@ def run_registered_economic_walkforward_eval(
             bars_csv=bars_csv,
             spec=normalized_economic_spec,
             walk_forward_eval_path=wf_out_path,
+            provenance_manifest=bars_provenance,
         )
     except Exception as exc:
         store.finalize_attempt(

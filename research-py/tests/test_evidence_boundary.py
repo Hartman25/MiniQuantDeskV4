@@ -22,6 +22,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from mqk_research.data.bars_provenance import (
+    CA_POLICY_FORBID_AFFECTED_PERIODS,
+    PRICE_CONVENTION_RAW_UNADJUSTED,
+    UNIVERSE_MODE_FIXED_EX_ANTE,
+    build_bars_provenance_manifest,
+)
 from mqk_research.ml.contracts import MLTrainConfig
 from mqk_research.ml.economic_registry_integration import run_registered_economic_walkforward_eval
 from mqk_research.ml.economic_walkforward import AnnualizationSpec, CostModelSpec, EconomicWalkForwardSpec, SignalPolicySpec
@@ -76,6 +82,33 @@ def _build_flat_bars(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _synthetic_bars_provenance(bars_path: Path) -> dict:
+    """BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01: the official
+    registered path now requires a durable bars provenance manifest. See
+    test_economic_walkforward.py's identical helper for the full rationale."""
+    bars = pd.read_csv(bars_path)
+    end_ts = pd.to_datetime(bars["end_ts"], utc=True)
+    return build_bars_provenance_manifest(
+        price_provenance={
+            "close_column": "close",
+            "provider_ids_observed": ["test_fixture"],
+            "price_adjustment_convention": PRICE_CONVENTION_RAW_UNADJUSTED,
+            "provider_metadata_available": True,
+            "convention_basis": "synthetic test fixture — no real provider involved",
+        },
+        corporate_action_policy=CA_POLICY_FORBID_AFFECTED_PERIODS,
+        corporate_action_evidence_id="test-fixture-no-known-corporate-actions-v1",
+        forbidden_periods=(),
+        timeframe="1D",
+        start_utc=end_ts.min().isoformat(),
+        end_utc=end_ts.max().isoformat(),
+        symbol_universe=sorted(bars["symbol"].astype(str).unique().tolist()),
+        universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE,
+        bars=bars,
+        artifact_path=bars_path,
+    )
+
+
 def _real_legacy_train_artifact(tmp_path: Path) -> dict:
     """Real, unmutated output of the legacy single-shot path."""
     run_dir = tmp_path / "legacy_run"
@@ -117,6 +150,7 @@ def _real_economic_walkforward_artifact(tmp_path: Path) -> dict:
             cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=5.0),
             annualization=AnnualizationSpec(),
         ),
+        bars_provenance=_synthetic_bars_provenance(bars_path),
         registry_db=registry_db, wf_spec=wf_spec, steps=10,
     )
     return json.loads(out_path.read_text(encoding="utf-8"))

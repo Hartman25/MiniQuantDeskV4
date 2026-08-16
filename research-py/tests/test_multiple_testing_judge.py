@@ -978,6 +978,12 @@ def test_real_pipeline_integration(tmp_path):
     """Full-pipeline integration: two REAL registered economic walk-forward
     runs (real classifier training + real causal execution simulation),
     differing only by entry_threshold, feeding the judge end to end."""
+    from mqk_research.data.bars_provenance import (
+        CA_POLICY_FORBID_AFFECTED_PERIODS,
+        PRICE_CONVENTION_RAW_UNADJUSTED,
+        UNIVERSE_MODE_FIXED_EX_ANTE,
+        build_bars_provenance_manifest,
+    )
     from mqk_research.ml.economic_registry_integration import run_registered_economic_walkforward_eval
     from mqk_research.ml.economic_walkforward import AnnualizationSpec, CostModelSpec, EconomicWalkForwardSpec, SignalPolicySpec
     from mqk_research.ml.eval_walkforward import WalkForwardSpec
@@ -995,6 +1001,26 @@ def test_real_pipeline_integration(tmp_path):
         bars_path = run_dir / "bars.csv"
         bars_df.to_csv(bars_path, index=False)
         _write_full_run_dir(run_dir, df)
+        end_ts = pd.to_datetime(bars_df["end_ts"], utc=True)
+        bars_provenance = build_bars_provenance_manifest(
+            price_provenance={
+                "close_column": "close",
+                "provider_ids_observed": ["test_fixture"],
+                "price_adjustment_convention": PRICE_CONVENTION_RAW_UNADJUSTED,
+                "provider_metadata_available": True,
+                "convention_basis": "synthetic test fixture — no real provider involved",
+            },
+            corporate_action_policy=CA_POLICY_FORBID_AFFECTED_PERIODS,
+            corporate_action_evidence_id="test-fixture-no-known-corporate-actions-v1",
+            forbidden_periods=(),
+            timeframe="1D",
+            start_utc=end_ts.min().isoformat(),
+            end_utc=end_ts.max().isoformat(),
+            symbol_universe=sorted(bars_df["symbol"].astype(str).unique().tolist()),
+            universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE,
+            bars=bars_df,
+            artifact_path=bars_path,
+        )
         run_registered_economic_walkforward_eval(
             run_dir,
             experiment_id="exp.real_pipeline", hypothesis_id="hyp.real", strategy_id=f"research.v{label}",
@@ -1002,6 +1028,7 @@ def test_real_pipeline_integration(tmp_path):
             economic_spec=EconomicWalkForwardSpec(
                 signal_policy=SignalPolicySpec(entry_threshold=threshold), cost_model=cost, annualization=ann,
             ),
+            bars_provenance=bars_provenance,
             registry_db=registry_db, wf_spec=wf_spec, steps=10,
         )
 

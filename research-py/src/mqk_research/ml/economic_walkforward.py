@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from mqk_research.data.bars_provenance import check_corporate_action_integrity
 from mqk_research.ml import economics
 from mqk_research.ml.util_hash import file_record, sha256_json
 
@@ -846,7 +847,21 @@ def run_economic_walkforward(
     spec: EconomicWalkForwardSpec,
     walk_forward_eval_path: Optional[Path] = None,
     oos_predictions_path: Optional[Path] = None,
+    provenance_manifest: Optional[Dict[str, Any]] = None,
 ) -> Path:
+    """`provenance_manifest` (mqk_research.data.bars_provenance) is
+    OPTIONAL here (BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01): this is
+    the low-level, non-registered entry point, and existing direct/
+    synthetic callers construct bars_csv fixtures with no durable
+    provenance record at all. When omitted (None), no corporate-action
+    preflight runs -- this is the explicit diagnostic path, distinct from
+    economic_registry_integration.run_registered_economic_walkforward_eval,
+    which ALWAYS requires and verifies a real manifest before calling this
+    function. When supplied, the manifest's corporate-action policy is
+    checked against the actually-loaded bars content BEFORE any fold is
+    simulated (see mqk_research.data.bars_provenance.
+    check_corporate_action_integrity) -- an integrity preflight, not a
+    change to the existing future-execution chronology below."""
     run_dir = Path(run_dir)
     spec = spec.normalized()
     bars_csv = Path(bars_csv)
@@ -862,6 +877,8 @@ def run_economic_walkforward(
 
     bars_record = verify_bars_provenance(run_dir, bars_csv)
     bars = load_bars(bars_csv)
+    if provenance_manifest is not None:
+        check_corporate_action_integrity(bars, provenance_manifest)
     oos = load_oos_predictions(oos_path)
 
     fold_frames: List[pd.DataFrame] = []
@@ -918,6 +935,7 @@ def run_economic_walkforward(
         "holdout": {"status": "reserved_not_evaluated"},
         "folds": fold_summaries,
         "aggregate": aggregate,
+        "bars_provenance": provenance_manifest,
     }
     out["ids"] = {"economic_eval_id": sha256_json(out)}
 
