@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from mqk_research.data.bars_provenance import check_corporate_action_integrity, require_bars_match_manifest
+from mqk_research.data.bars_provenance import (
+    check_corporate_action_integrity,
+    require_bars_match_manifest,
+    require_bars_pricing_provenance,
+)
 from mqk_research.ml import economics
+from mqk_research.ml.execution_pricing import ExecutionPricingSpec, conservative_fill_price
 from mqk_research.ml.util_hash import file_record, sha256_json
 
 # RESEARCH-ECONOMIC-WALKFORWARD-01 (+ REPAIR-01)
@@ -219,15 +224,30 @@ class EconomicWalkForwardSpec:
     signal_policy: SignalPolicySpec
     cost_model: CostModelSpec
     annualization: AnnualizationSpec
+    # P7A (RESEARCH-EXECUTION-PRICING-PARITY-01): defaults to the diagnostic/
+    # legacy close-only pricing model, so existing callers that don't pass
+    # this explicitly reproduce pre-P7A behavior bit-for-bit -- see
+    # ExecutionPricingSpec / mqk_research.ml.execution_pricing.
+    execution_pricing: ExecutionPricingSpec = field(default_factory=ExecutionPricingSpec)
     protocol_id: str = PROTOCOL_ID
 
     def normalized(self) -> "EconomicWalkForwardSpec":
         if self.protocol_id != PROTOCOL_ID:
             raise ValueError(f"unsupported economic protocol_id: {self.protocol_id!r}")
+        execution_pricing = self.execution_pricing.normalized()
+        cost_model = self.cost_model.normalized()
+        if execution_pricing.is_official_parity_model and cost_model.slippage_bps_per_side != 0.0:
+            raise RuntimeError(
+                "Fail-closed: execution_pricing uses the official rust_conservative_bar_range_v1 "
+                "parity model, which already models slippage via directional bar-range pricing -- "
+                "cost_model.slippage_bps_per_side must be 0 to avoid double-charging slippage "
+                "(commission_bps_per_side is unaffected and remains the separate commission charge)"
+            )
         return EconomicWalkForwardSpec(
             signal_policy=self.signal_policy.normalized(),
-            cost_model=self.cost_model.normalized(),
+            cost_model=cost_model,
             annualization=self.annualization.normalized(),
+            execution_pricing=execution_pricing,
             protocol_id=self.protocol_id,
         )
 
@@ -251,6 +271,19 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
             "slippage_bps_per_side": spec.cost_model.slippage_bps_per_side,
             "diagnostic_zero_cost": spec.cost_model.diagnostic_zero_cost,
         },
+        # P7A: always identity-bearing -- which pricing model produced a
+        # trial's economics is always a real, distinguishing fact, even
+        # when it's the diagnostic default (see execution_pricing module
+        # docstring). slippage_bps/volatility_mult_bps only economically
+        # matter under the official model, but are included unconditionally
+        # since they're cheap, small, and their presence alone never
+        # collides two otherwise-identical diagnostic trials (both report
+        # the same defaults).
+        "execution_pricing": {
+            "pricing_model_id": spec.execution_pricing.pricing_model_id,
+            "slippage_bps": spec.execution_pricing.slippage_bps,
+            "volatility_mult_bps": spec.execution_pricing.volatility_mult_bps,
+        },
         "annualization": {
             "annualization_days": spec.annualization.annualization_days,
             "risk_free_rate_annual": spec.annualization.risk_free_rate_annual,
@@ -263,12 +296,21 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def load_bars(bars_csv: Path) -> pd.DataFrame:
+def load_bars(bars_csv: Path, *, require_pricing_columns: bool = False) -> pd.DataFrame:
+    """`require_pricing_columns=True` (P7A) additionally requires and
+    validates `high`/`low` -- callers pass this whenever
+    `spec.execution_pricing.is_official_parity_model`, since the official
+    rust_conservative_bar_range_v1 model consumes them and must fail closed
+    rather than silently fall back to close-only pricing (see
+    Research_Backtest_V1_Closeout_Audit.md P7A mission, "no fallback from
+    missing high/low to close for official evaluation")."""
     bars_csv = Path(bars_csv)
     if not bars_csv.exists():
         raise FileNotFoundError(f"Fail-closed: missing economic bars file: {bars_csv}")
     bars = pd.read_csv(bars_csv)
     required = ["symbol", "end_ts", "close"]
+    if require_pricing_columns:
+        required = required + ["high", "low"]
     missing = [c for c in required if c not in bars.columns]
     if missing:
         raise RuntimeError(f"Fail-closed: bars csv missing required columns: {missing}")
@@ -285,6 +327,22 @@ def load_bars(bars_csv: Path) -> pd.DataFrame:
     if (close <= 0.0).any():
         raise RuntimeError("Fail-closed: bars close must be strictly positive")
     bars["close"] = close.astype(float)
+
+    if require_pricing_columns:
+        high = pd.to_numeric(bars["high"], errors="coerce")
+        low = pd.to_numeric(bars["low"], errors="coerce")
+        if high.isna().any() or not np.isfinite(high.to_numpy(dtype=float)).all():
+            raise RuntimeError("Fail-closed: bars high contains missing/non-finite values")
+        if low.isna().any() or not np.isfinite(low.to_numpy(dtype=float)).all():
+            raise RuntimeError("Fail-closed: bars low contains missing/non-finite values")
+        bars["high"] = high.astype(float)
+        bars["low"] = low.astype(float)
+        if (bars["high"] < bars["low"]).any():
+            raise RuntimeError("Fail-closed: bars contain high < low (impossible bar shape)")
+        if ((bars["close"] < bars["low"]) | (bars["close"] > bars["high"])).any():
+            raise RuntimeError(
+                "Fail-closed: bars contain close outside [low, high] (impossible bar shape)"
+            )
 
     dup_mask = bars.duplicated(subset=["symbol", "end_ts"], keep=False)
     if dup_mask.any():
@@ -408,6 +466,29 @@ def _build_fold_close_frame(
     return pivot
 
 
+def _build_fold_high_low_frames(
+    bars: pd.DataFrame, symbols: List[str], test_start: pd.Timestamp, test_end: pd.Timestamp
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """P7A companion to _build_fold_close_frame: high/low pivoted the same
+    way, over the same fold window/symbol set, so `.at[t, s]` lookups stay
+    aligned with `close_frame`'s. Only called when
+    spec.execution_pricing.is_official_parity_model -- diagnostic-model
+    folds never touch high/low."""
+    subset = bars[
+        bars["symbol"].isin(symbols) & (bars["end_ts"] >= test_start) & (bars["end_ts"] < test_end)
+    ]
+    if subset.empty:
+        raise RuntimeError(
+            "Fail-closed: no economic bars available inside the fold's test window "
+            f"[{test_start.isoformat()}, {test_end.isoformat()}) for symbols {symbols}"
+        )
+    high_pivot = subset.pivot_table(index="end_ts", columns="symbol", values="high", aggfunc="last")
+    low_pivot = subset.pivot_table(index="end_ts", columns="symbol", values="low", aggfunc="last")
+    high_pivot = high_pivot.sort_index(kind="mergesort").sort_index(axis=1).reindex(columns=symbols)
+    low_pivot = low_pivot.sort_index(kind="mergesort").sort_index(axis=1).reindex(columns=symbols)
+    return high_pivot, low_pivot
+
+
 def _build_pending_events(
     oos_fold: pd.DataFrame, symbols: List[str], signal_policy: SignalPolicySpec
 ) -> Dict[str, List[Tuple[pd.Timestamp, float]]]:
@@ -462,10 +543,55 @@ def _build_pending_events(
 _GROSS_TOL = 1e-9
 
 
+def _row_execution_price_cost(
+    delta_weight: float,
+    close: float,
+    high: Optional[float],
+    low: Optional[float],
+    execution_pricing: Optional[ExecutionPricingSpec],
+) -> float:
+    """P7A: the adverse-price cost of executing `delta_weight` worth of
+    gross exposure at THIS bar's conservative fill price instead of its
+    close. BUY (delta_weight > 0) uses HIGH, SELL (delta_weight < 0,
+    including ordinary decreases) uses LOW -- mirrors Rust's
+    conservative_fill_price side convention exactly. Always 0.0 under the
+    diagnostic pricing model (execution_pricing is None or not the official
+    model) -- existing callers/tests that never pass execution_pricing are
+    numerically unaffected. Only applies to ORDINARY strategy-driven
+    executions (this function's only two call sites, both inside
+    _simulate_fold_execution) -- the fold-end force_flat_last_bar exception
+    in _simulate_fold is a separate code path that never calls this,
+    matching Rust's flatten_all exception (close/mark pricing, no
+    conservative HIGH/LOW slippage)."""
+    if execution_pricing is None or not execution_pricing.is_official_parity_model:
+        return 0.0
+    if delta_weight == 0.0:
+        return 0.0
+    if high is None or low is None or pd.isna(high) or pd.isna(low):
+        raise RuntimeError(
+            "Fail-closed: official execution-pricing parity model requires a high/low value for "
+            "every bar with an executing turnover event"
+        )
+    side = "buy" if delta_weight > 0 else "sell"
+    fill = conservative_fill_price(
+        high=float(high),
+        low=float(low),
+        close=float(close),
+        side=side,
+        slippage_bps=execution_pricing.slippage_bps,
+        volatility_mult_bps=execution_pricing.volatility_mult_bps,
+    )
+    return abs(delta_weight) * abs(fill - float(close)) / float(close)
+
+
 def _simulate_fold_execution(
     close_frame: pd.DataFrame,
     pending_events: Dict[str, List[Tuple[pd.Timestamp, float]]],
     max_gross_exposure: float,
+    *,
+    high_frame: Optional[pd.DataFrame] = None,
+    low_frame: Optional[pd.DataFrame] = None,
+    execution_pricing: Optional[ExecutionPricingSpec] = None,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, float]]:
     """Joint, timestamp-frame causal execution/allocation state machine
     (capacity_policy=CAPACITY_POLICY_ID) sharing one portfolio-level gross-
@@ -565,13 +691,23 @@ def _simulate_fold_execution(
             prev_close[s] = c
 
         turnover: Dict[str, float] = {s: 0.0 for s in present}
+        execution_price_cost: Dict[str, float] = {s: 0.0 for s in present}
 
         # D: gross-reducing (and no-op) candidates execute unconditionally.
         for s in present:
             if candidate[s] is None:
                 continue
             if candidate[s] <= executed_weight[s] + _GROSS_TOL:
-                turnover[s] = abs(candidate[s] - executed_weight[s])
+                old_weight = executed_weight[s]
+                delta = candidate[s] - old_weight
+                turnover[s] = abs(delta)
+                execution_price_cost[s] = _row_execution_price_cost(
+                    delta,
+                    close_frame.at[t, s],
+                    high_frame.at[t, s] if high_frame is not None else None,
+                    low_frame.at[t, s] if low_frame is not None else None,
+                    execution_pricing,
+                )
                 executed_weight[s] = candidate[s]
                 pending_idx[s] += 1
 
@@ -621,7 +757,16 @@ def _simulate_fold_execution(
             delta = sum(abs(candidate[s]) - abs(executed_weight[s]) for s in members)
             if gross + delta <= max_gross_exposure + _GROSS_TOL:
                 for s in members:
-                    turnover[s] = abs(candidate[s] - executed_weight[s])
+                    old_weight = executed_weight[s]
+                    member_delta = candidate[s] - old_weight
+                    turnover[s] = abs(member_delta)
+                    execution_price_cost[s] = _row_execution_price_cost(
+                        member_delta,
+                        close_frame.at[t, s],
+                        high_frame.at[t, s] if high_frame is not None else None,
+                        low_frame.at[t, s] if low_frame is not None else None,
+                        execution_pricing,
+                    )
                     executed_weight[s] = candidate[s]
                     pending_idx[s] += 1
                 gross += delta
@@ -642,6 +787,7 @@ def _simulate_fold_execution(
                 "turnover": turnover[s],
                 "interval_exposure": interval_exposure[s],
                 "executed_weight": executed_weight[s],
+                "execution_price_cost": execution_price_cost[s],
             })
 
     return rows_by_symbol, dict(executed_weight)
@@ -720,6 +866,9 @@ def _simulate_fold(
     close_frame: pd.DataFrame,
     pending_events: Dict[str, List[Tuple[pd.Timestamp, float]]],
     spec: EconomicWalkForwardSpec,
+    *,
+    high_frame: Optional[pd.DataFrame] = None,
+    low_frame: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Run the joint, gross-cap-aware causal state machine
     (_simulate_fold_execution) for every symbol in this fold and merge the
@@ -728,7 +877,15 @@ def _simulate_fold(
     forward-filled here, because a forward-filled close would fabricate a
     same-price "bar" for the missing
     symbol and let a sibling symbol's timestamp silently stand in for this
-    symbol's own next bar (BLOCKER 2)."""
+    symbol's own next bar (BLOCKER 2).
+
+    P7A: `high_frame`/`low_frame` (only passed when
+    spec.execution_pricing.is_official_parity_model) drive an ADDITIONAL
+    adverse-price cost component on top of transaction_cost -- see
+    _row_execution_price_cost / _simulate_fold_execution. The fold-end
+    force_flat_last_bar exit below deliberately never adds this component
+    (see its own comment) -- it is the forced-flatten exception, mirroring
+    Rust's flatten_all."""
     bar_index = close_frame.index
     symbols = list(close_frame.columns)
     global_last_ts = bar_index[-1]
@@ -737,10 +894,16 @@ def _simulate_fold(
     gross_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
     turnover_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
     interval_exposure_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
+    execution_price_cost_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
     executed_weight_series: Dict[str, pd.Series] = {}
 
     rows_by_symbol, final_weight_by_symbol = _simulate_fold_execution(
-        close_frame, pending_events, spec.signal_policy.max_gross_exposure
+        close_frame,
+        pending_events,
+        spec.signal_policy.max_gross_exposure,
+        high_frame=high_frame,
+        low_frame=low_frame,
+        execution_pricing=spec.execution_pricing,
     )
 
     for s in symbols:
@@ -756,6 +919,10 @@ def _simulate_fold(
         # append a priceless exit row: turnover/cost only, no gross return —
         # closing a position never earns a return over an interval with no
         # observed price move, and no bar beyond the fold's window is read.
+        # P7A: this exit is the forced-flatten EXCEPTION (mirrors Rust's
+        # flatten_all) — it never adds execution_price_cost, ordinary/
+        # strategy-driven turnover already carries whatever
+        # _simulate_fold_execution computed for it.
         if rows and rows[-1]["timestamp"] == global_last_ts:
             if abs(final_weight) > 1e-12:
                 exit_turnover = abs(final_weight)
@@ -770,6 +937,7 @@ def _simulate_fold(
                 "turnover": abs(final_weight),
                 "interval_exposure": abs(final_weight),
                 "executed_weight": 0.0,
+                "execution_price_cost": 0.0,
             })
             final_weight = 0.0
 
@@ -780,6 +948,7 @@ def _simulate_fold(
             gross_by_ts[t] += r["gross_contrib"]
             turnover_by_ts[t] += r["turnover"]
             interval_exposure_by_ts[t] += r["interval_exposure"]
+            execution_price_cost_by_ts[t] += r["execution_price_cost"]
             exec_index.append(t)
             exec_values.append(r["executed_weight"])
         executed_weight_series[s] = pd.Series(exec_values, index=pd.DatetimeIndex(exec_index))
@@ -796,7 +965,15 @@ def _simulate_fold(
     gross_return = pd.Series([gross_by_ts[t] for t in bar_index], index=bar_index)
     turnover = pd.Series([turnover_by_ts[t] for t in bar_index], index=bar_index)
     interval_exposure = pd.Series([interval_exposure_by_ts[t] for t in bar_index], index=bar_index)
-    transaction_cost = economics.compute_transaction_cost(turnover, one_way_cost_bps)
+    execution_price_cost = pd.Series(
+        [execution_price_cost_by_ts[t] for t in bar_index], index=bar_index
+    )
+    # P7A: commission (compute_transaction_cost, still purely bps-of-
+    # turnover) and the directional adverse-price cost are two distinct,
+    # additive components — see EconomicWalkForwardSpec.normalized()'s
+    # double-charging guard, which requires cost_model.slippage_bps_per_side
+    # == 0 whenever execution_price_cost can be nonzero.
+    transaction_cost = economics.compute_transaction_cost(turnover, one_way_cost_bps) + execution_price_cost
     net_return = economics.compute_net_return_exact(gross_return, transaction_cost)
 
     gross_exposure = exposure_frame.abs().sum(axis=1)
@@ -815,6 +992,7 @@ def _simulate_fold(
         "gross_return": gross_return.to_numpy(dtype=float),
         "turnover": turnover.to_numpy(dtype=float),
         "transaction_cost": transaction_cost.to_numpy(dtype=float),
+        "execution_price_cost": execution_price_cost.to_numpy(dtype=float),
         "net_return": net_return.to_numpy(dtype=float),
         "interval_exposure": interval_exposure.to_numpy(dtype=float),
         "gross_exposure": gross_exposure.to_numpy(dtype=float),
@@ -878,11 +1056,14 @@ def run_economic_walkforward(
     wf_eval = json.loads(wf_path.read_text(encoding="utf-8"))
     used_folds = _parse_used_folds(wf_eval)
 
+    use_official_pricing = spec.execution_pricing.is_official_parity_model
     bars_record = verify_bars_provenance(run_dir, bars_csv)
-    bars = load_bars(bars_csv)
+    bars = load_bars(bars_csv, require_pricing_columns=use_official_pricing)
     if provenance_manifest is not None:
         require_bars_match_manifest(bars, provenance_manifest)
         check_corporate_action_integrity(bars, provenance_manifest)
+        if use_official_pricing:
+            require_bars_pricing_provenance(bars, provenance_manifest)
     oos = load_oos_predictions(oos_path)
 
     fold_frames: List[pd.DataFrame] = []
@@ -894,8 +1075,16 @@ def run_economic_walkforward(
             raise RuntimeError(f"Fail-closed: no OOS predictions found for used fold {fold_no}")
         symbols = sorted(oos_fold["symbol"].unique())
         close_frame = _build_fold_close_frame(bars, symbols, boundaries["test_start"], boundaries["test_end"])
+        high_frame = low_frame = None
+        if use_official_pricing:
+            high_frame, low_frame = _build_fold_high_low_frames(
+                bars, symbols, boundaries["test_start"], boundaries["test_end"]
+            )
         pending_events = _build_pending_events(oos_fold, symbols, spec.signal_policy)
-        fold_df, fold_summary = _simulate_fold(fold_no, boundaries, close_frame, pending_events, spec)
+        fold_df, fold_summary = _simulate_fold(
+            fold_no, boundaries, close_frame, pending_events, spec,
+            high_frame=high_frame, low_frame=low_frame,
+        )
         fold_frames.append(fold_df)
         fold_summaries.append(fold_summary)
 
@@ -926,6 +1115,7 @@ def run_economic_walkforward(
         "protocol": {"protocol_id": spec.protocol_id},
         "signal_policy": identity["signal_policy"],
         "cost_model": identity["cost_model"],
+        "execution_pricing": identity["execution_pricing"],
         "annualization": identity["annualization"],
         "inputs": {
             "bars_csv": bars_record,

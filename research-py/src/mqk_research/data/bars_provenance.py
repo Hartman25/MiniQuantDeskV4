@@ -216,6 +216,15 @@ _SUPPORTED_UNIVERSE_MODES: FrozenSet[str] = frozenset({UNIVERSE_MODE_FIXED_EX_AN
 
 _CANONICAL_HASH_COLUMNS = ("symbol", "end_ts", "close")
 
+# P7A (RESEARCH-EXECUTION-PRICING-PARITY-01): a NEW, additional hash column
+# set -- deliberately NOT folded into _CANONICAL_HASH_COLUMNS/
+# canonical_semantic_bars_hash above. That hash's (symbol,end_ts,close)
+# contract is already load-bearing for existing source_attestation /
+# corporate-action-evidence content addressing; silently widening its
+# formula would reinterpret every already-computed attestation/evidence
+# hash. See canonical_pricing_bars_hash.
+_CANONICAL_PRICING_HASH_COLUMNS = ("symbol", "end_ts", "close", "high", "low")
+
 
 class BarsProvenanceUnverifiable(RuntimeError):
     """Fail-closed: raised when a bars provenance manifest does not satisfy
@@ -249,6 +258,19 @@ class BarsProvenanceContentMismatch(RuntimeError):
     require_bars_match_manifest."""
 
 
+class BarShapeInvalid(RuntimeError):
+    """Fail-closed (P7A): raised when a bar's high/low/close values are not
+    a physically possible OHLC observation (high < low, or close outside
+    [low, high]). The accepted Rust conservative fill model
+    (core-rs/crates/mqk-backtest/src/engine.rs::conservative_fill_price)
+    does not itself validate this -- confirmed by direct reading, no such
+    check exists in engine.rs or BacktestBar::new. Official registered
+    Python evaluation validates it anyway, before any adverse fill price or
+    economic P&L is computed from it, independent of whether the Rust
+    reference implementation happens to check the same thing (CLAUDE.md
+    fail-closed philosophy)."""
+
+
 def canonical_semantic_bars_hash(bars: pd.DataFrame) -> str:
     """Content hash of the bars' SEMANTIC content (symbol, end_ts, close),
     normalized by sorting rows chronologically per-symbol and selecting
@@ -277,6 +299,53 @@ def canonical_semantic_bars_hash(bars: pd.DataFrame) -> str:
         )
     rows = [
         {"symbol": r.symbol, "end_ts": r.end_ts, "close": r.close} for r in normalized.itertuples(index=False)
+    ]
+    return sha256_json(rows)
+
+
+def canonical_pricing_bars_hash(bars: pd.DataFrame) -> str:
+    """P7A (RESEARCH-EXECUTION-PRICING-PARITY-01) content hash of the bars'
+    execution-pricing-relevant SEMANTIC content (symbol, end_ts, close,
+    high, low) -- same normalization discipline as
+    canonical_semantic_bars_hash (sorted by symbol/end_ts, fixed column
+    order, invariant to physical row order, fail-closed on duplicate
+    (symbol,end_ts) rows), plus a fail-closed OHLC sanity check (see
+    BarShapeInvalid). Only the official rust_conservative_bar_range_v1
+    execution-pricing model (mqk_research.ml.execution_pricing) actually
+    consumes high/low, so only that model's official registered trials
+    bind their identity to this hash -- see
+    economic_registry_integration.build_economic_trial_identity. A
+    deliberately NEW/additional hash, not a change to
+    canonical_semantic_bars_hash -- see _CANONICAL_PRICING_HASH_COLUMNS."""
+    missing = [c for c in _CANONICAL_PRICING_HASH_COLUMNS if c not in bars.columns]
+    if missing:
+        raise ValueError(f"canonical_pricing_bars_hash: bars missing required columns: {missing}")
+    normalized = bars[list(_CANONICAL_PRICING_HASH_COLUMNS)].copy()
+    normalized["symbol"] = normalized["symbol"].astype(str)
+    normalized["end_ts"] = pd.to_datetime(normalized["end_ts"], utc=True).map(lambda t: t.isoformat())
+    normalized["close"] = normalized["close"].astype(float)
+    normalized["high"] = normalized["high"].astype(float)
+    normalized["low"] = normalized["low"].astype(float)
+    normalized = normalized.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+    dup_mask = normalized.duplicated(subset=["symbol", "end_ts"], keep=False)
+    if bool(dup_mask.any()):
+        dup_rows = normalized.loc[dup_mask, ["symbol", "end_ts"]].drop_duplicates().to_dict("records")
+        raise ValueError(
+            f"Fail-closed: canonical_pricing_bars_hash: duplicate (symbol,end_ts) rows: {dup_rows}"
+        )
+    bad_shape = normalized[
+        (normalized["high"] < normalized["low"])
+        | (normalized["close"] < normalized["low"])
+        | (normalized["close"] > normalized["high"])
+    ]
+    if not bad_shape.empty:
+        raise BarShapeInvalid(
+            "Fail-closed: canonical_pricing_bars_hash: impossible bar shape (high < low, or close "
+            f"outside [low, high]) in {len(bad_shape)} row(s), e.g. {bad_shape.iloc[0].to_dict()}"
+        )
+    rows = [
+        {"symbol": r.symbol, "end_ts": r.end_ts, "close": r.close, "high": r.high, "low": r.low}
+        for r in normalized.itertuples(index=False)
     ]
     return sha256_json(rows)
 
@@ -757,6 +826,12 @@ def build_bars_provenance_manifest(
         "symbol_universe_id": sha256_json(symbols_sorted),
         "universe_mode": universe_mode,
         "canonical_semantic_bars_hash": canonical_semantic_bars_hash(bars),
+        # P7A: only computed when bars actually carry high/low -- None for
+        # bars that don't (backward compatible; require_bars_pricing_
+        # provenance fails closed on None rather than fabricating a hash).
+        "canonical_pricing_bars_hash": (
+            canonical_pricing_bars_hash(bars) if {"high", "low"}.issubset(bars.columns) else None
+        ),
         "row_count": int(len(bars)),
         "artifact_sha256": sha256_file(Path(artifact_path)) if artifact_path is not None else None,
         "source_attestation": source_attestation,
@@ -919,6 +994,35 @@ def require_bars_match_manifest(bars: pd.DataFrame, manifest: Dict[str, Any]) ->
                 "Fail-closed: manifest declares timeframe='1D' but actual bars contain sub-day "
                 "timestamps -- declared timeframe does not match observed bar granularity"
             )
+
+
+def require_bars_pricing_provenance(bars: pd.DataFrame, manifest: Dict[str, Any]) -> None:
+    """P7A (RESEARCH-EXECUTION-PRICING-PARITY-01) fail-closed CONTENT-BINDING
+    preflight for the official rust_conservative_bar_range_v1
+    execution-pricing model -- mirrors require_bars_match_manifest's
+    close-only contract for high/low. MUST be called (in addition to, not
+    instead of, require_bars_match_manifest) before any adverse-price
+    economic cost is computed under a manifest claiming to describe `bars`,
+    for the identical reason require_bars_match_manifest exists: catches a
+    stale/wrong manifest -- including one built before P7A and therefore
+    missing canonical_pricing_bars_hash entirely -- paired with different
+    bars data. Never regenerates or repairs the manifest."""
+    declared_hash = manifest.get("canonical_pricing_bars_hash")
+    if not declared_hash:
+        raise BarsProvenanceUnverifiable(
+            "Fail-closed: bars provenance manifest is missing canonical_pricing_bars_hash -- "
+            "required to bind high/low into official registered execution-pricing-parity "
+            "evaluation (P7A); rebuild the manifest with build_bars_provenance_manifest against "
+            "bars that include high/low columns"
+        )
+    actual_hash = canonical_pricing_bars_hash(bars)
+    if actual_hash != declared_hash:
+        raise BarsProvenanceContentMismatch(
+            f"Fail-closed: actual bars canonical_pricing_bars_hash={actual_hash!r} does not match "
+            f"manifest-declared canonical_pricing_bars_hash={declared_hash!r} -- refusing official "
+            "execution-pricing-parity evaluation on bars whose high/low content differs from what "
+            "the manifest declares"
+        )
 
 
 def canonical_ca_evidence_content(evidence: Dict[str, Any]) -> Dict[str, Any]:

@@ -15,6 +15,7 @@ from mqk_research.ml.economic_walkforward import (
     run_economic_walkforward,
 )
 from mqk_research.ml.eval_walkforward import WalkForwardSpec, run_walkforward_eval
+from mqk_research.ml.execution_pricing import EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1
 from mqk_research.ml.util_hash import file_record
 
 # RESEARCH-ECONOMIC-WALKFORWARD-01
@@ -50,6 +51,7 @@ from mqk_research.ml.util_hash import file_record
 __all__ = [
     "ECONOMIC_PROTOCOL_ID",
     "build_economic_trial_identity",
+    "require_official_execution_pricing_parity",
     "run_registered_economic_walkforward_eval",
 ]
 
@@ -137,8 +139,42 @@ def build_economic_trial_identity(
         },
         "economic_protocol": economic_protocol_identity(normalized_economic_spec),
     }
+    # P7A (RESEARCH-EXECUTION-PRICING-PARITY-01): high/low only become
+    # candidate-defining when the official rust_conservative_bar_range_v1
+    # pricing model actually consumes them -- a diagnostic-model trial's
+    # identity is deliberately unaffected by changing high/low (nothing in
+    # its economics depends on them). See bars_provenance.
+    # canonical_pricing_bars_hash / require_bars_pricing_provenance.
+    if normalized_economic_spec.execution_pricing.is_official_parity_model:
+        identity["data_identity"]["bars_pricing_provenance"] = {
+            "canonical_pricing_bars_hash": bars_provenance.get("canonical_pricing_bars_hash"),
+        }
     trial_id = short_hash(identity, length=32)
     return trial_id, identity
+
+
+def require_official_execution_pricing_parity(economic_spec: EconomicWalkForwardSpec) -> None:
+    """Fail-closed OFFICIAL REGISTERED PARITY CONTRACT gate (P7A,
+    RESEARCH-EXECUTION-PRICING-PARITY-01). A caller that intends a
+    registered economic result to count as promotion-grade parity evidence
+    (Research_Backtest_V1_Closeout_Audit.md Area K8/N7 -- "Python's
+    execution price model MUST MATCH Rust's before promotion") must call
+    this. The diagnostic/legacy close-only pricing model --
+    EconomicWalkForwardSpec's own default, still used by most existing
+    registered-path callers/tests that predate P7A and are not asserting
+    promotion-grade parity -- intentionally, permanently fails this gate;
+    see mqk_research.ml.execution_pricing module docstring. Wiring this gate
+    into the actual promotion pipeline (mqk-promotion::evaluator.rs) is
+    P7C's scope, not P7A's -- this function is the mechanism P7C (and any
+    other caller asserting parity today) composes with."""
+    normalized = economic_spec.normalized()
+    if not normalized.execution_pricing.is_official_parity_model:
+        raise RuntimeError(
+            "Fail-closed: official registered execution-pricing parity contract (P7A) requires "
+            f"execution_pricing.pricing_model_id={EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1!r}, "
+            f"got {normalized.execution_pricing.pricing_model_id!r} -- the diagnostic/legacy "
+            "close-only pricing model can never satisfy official registered parity evidence"
+        )
 
 
 def run_registered_economic_walkforward_eval(

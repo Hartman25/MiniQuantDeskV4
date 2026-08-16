@@ -1,0 +1,61 @@
+{
+  "schema_version": "execution_pricing_golden_v1",
+  "description": "P7A (RESEARCH-EXECUTION-PRICING-PARITY-01) cross-language golden vector. Both mqk_research.ml.execution_pricing.conservative_fill_price_micros (Python) and core-rs/crates/mqk-backtest/src/engine.rs's BacktestEngine::conservative_fill_price (Rust, exercised end-to-end via BacktestEngine::run) must resolve every case below to the exact same fill_price_micros. Prices are decimal dollars; *_micros fields are the canonical integer form (round(price * 1_000_000)). Do not edit expected_fill_price_micros without re-deriving it by hand from the formula documented in engine.rs's conservative_fill_price doc comment -- these values are the independent proof, not derived by calling either implementation.",
+  "formula": "base = high if side==buy else low; bar_spread_bps = (high-low)*10000 // close; vol_component = bar_spread_bps*volatility_mult_bps // 10000; effective_slippage_bps = slippage_bps + vol_component; adjustment = base*effective_slippage_bps // 10000; buy => base+adjustment; sell => base-adjustment",
+  "cases": [
+    {
+      "name": "buy_zero_slippage",
+      "high": 101.00, "low": 99.00, "close": 100.00,
+      "side": "buy", "slippage_bps": 0, "volatility_mult_bps": 0,
+      "expected_fill_price_micros": 101000000
+    },
+    {
+      "name": "sell_zero_slippage",
+      "high": 101.00, "low": 99.00, "close": 100.00,
+      "side": "sell", "slippage_bps": 0, "volatility_mult_bps": 0,
+      "expected_fill_price_micros": 99000000
+    },
+    {
+      "name": "buy_nonzero_flat_slippage",
+      "high": 101.00, "low": 99.00, "close": 100.00,
+      "side": "buy", "slippage_bps": 50, "volatility_mult_bps": 0,
+      "expected_fill_price_micros": 101505000
+    },
+    {
+      "name": "sell_nonzero_flat_slippage",
+      "high": 101.00, "low": 99.00, "close": 100.00,
+      "side": "sell", "slippage_bps": 50, "volatility_mult_bps": 0,
+      "expected_fill_price_micros": 98505000
+    },
+    {
+      "name": "buy_nonzero_volatility_mult",
+      "high": 101.00, "low": 99.00, "close": 100.00,
+      "side": "buy", "slippage_bps": 0, "volatility_mult_bps": 5000,
+      "expected_fill_price_micros": 102010000
+    },
+    {
+      "name": "sell_nonzero_volatility_mult",
+      "high": 101.00, "low": 99.00, "close": 100.00,
+      "side": "sell", "slippage_bps": 0, "volatility_mult_bps": 5000,
+      "expected_fill_price_micros": 98010000
+    },
+    {
+      "name": "wide_bar_buy",
+      "high": 150.00, "low": 50.00, "close": 100.00,
+      "side": "buy", "slippage_bps": 5, "volatility_mult_bps": 5000,
+      "expected_fill_price_micros": 225075000
+    },
+    {
+      "name": "narrow_bar_sell",
+      "high": 100.02, "low": 99.98, "close": 100.00,
+      "side": "sell", "slippage_bps": 5, "volatility_mult_bps": 5000,
+      "expected_fill_price_micros": 99910014
+    },
+    {
+      "name": "truncation_edge_buy",
+      "high": 100.07, "low": 99.93, "close": 100.00,
+      "side": "buy", "slippage_bps": 0, "volatility_mult_bps": 3333,
+      "expected_fill_price_micros": 100110028
+    }
+  ]
+}
