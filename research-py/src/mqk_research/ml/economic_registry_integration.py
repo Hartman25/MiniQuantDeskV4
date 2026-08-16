@@ -32,6 +32,20 @@ from mqk_research.ml.util_hash import file_record
 # cannot forget or skip the durable bars provenance contract (see
 # mqk_research.data.bars_provenance). This is the one place in the codebase
 # where that contract is structurally, not just conventionally, enforced.
+#
+# BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-02 (Defect 3): economic bars
+# DATA IDENTITY is now carried ENTIRELY by `bars_provenance`'s
+# canonical_semantic_bars_hash (via provenance_identity_fragment) -- the
+# physical bars_path's own file-bytes sha256 is deliberately NOT included in
+# `identity` (and therefore never participates in trial_id). Two bars CSVs
+# that are byte-for-byte different only because of physical row order share
+# the same canonical_semantic_bars_hash and MUST share the same trial_id;
+# including the physical sha256 here would silently create a distinct
+# "candidate" out of a pure formatting difference. The physical bars_path
+# record remains fully preserved and auditable per ATTEMPT (not per trial)
+# -- see economic_walkforward.run_economic_walkforward's own output
+# artifact, `out["inputs"]["bars_csv"]` -- so no provenance is lost, it is
+# just correctly scoped to evidence rather than candidate identity.
 
 __all__ = [
     "ECONOMIC_PROTOCOL_ID",
@@ -77,7 +91,15 @@ def build_economic_trial_identity(
     from evaluation output (AUC, logloss, returns, eval_ids, artifact paths,
     the manifest's own artifact_sha256/row_count physical-file facts) —
     changing a RESULT (or a byte-identical semantic reorder of the same
-    bars) must never change a trial_id."""
+    bars) must never change a trial_id. (Defect 3) `bars_path`'s own
+    physical file-bytes identity is likewise deliberately excluded from
+    `identity` for the same reason -- see module docstring; the canonical
+    semantic bars authority lives entirely in `bars_provenance`. `bars_path`
+    itself is still required and existence-checked here (fail-closed on a
+    missing file) even though its content never enters `identity`."""
+    bars_path = Path(bars_path)
+    if not bars_path.exists():
+        raise FileNotFoundError(f"Missing required registry input: {bars_path}")
     normalized_economic_spec = economic_spec.normalized()
     identity: Dict[str, Any] = {
         "experiment_id": experiment_id,
@@ -88,7 +110,10 @@ def build_economic_trial_identity(
             "features_csv": _content_identity(features_path),
             "targets_csv": _content_identity(targets_path),
             "feature_schema": _content_identity(schema_path),
-            "economic_bars_csv": _content_identity(bars_path),
+            # (Defect 3) NOT economic_bars_csv physical sha256/bytes -- the
+            # canonical semantic bars authority below is the sole economic
+            # bars identity facet; see build_economic_trial_identity's and
+            # this module's docstrings.
             "bars_provenance": provenance_identity_fragment(bars_provenance),
         },
         "evaluation_spec": {

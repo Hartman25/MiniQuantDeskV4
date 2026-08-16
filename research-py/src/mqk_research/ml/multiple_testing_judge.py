@@ -92,9 +92,19 @@ def _json_field(raw: Optional[str]) -> Any:
 # under:
 #   - protocol_id (must be economic_walk_forward_v1; nothing else is
 #     supported by this evaluator).
-#   - the underlying market data the simulation executed against
-#     (data_identity.economic_bars_csv content hash) -- comparing Sharpe
-#     ratios computed against different price histories is not a multiple-
+#   - the underlying market data / provenance basis the simulation executed
+#     against (data_identity.bars_provenance -- the FULL canonical P8
+#     provenance identity fragment: canonical_semantic_bars_hash,
+#     provider_ids_observed, price_adjustment_convention,
+#     corporate_action_policy/evidence_id, timeframe, start_utc/end_utc,
+#     symbol_universe, universe_mode; RESEARCH-MULTIPLE-TESTING-JUDGE-01-
+#     REPAIR-02, following BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-02's
+#     Defect 3). NOT the bars file's own physical sha256 -- that no longer
+#     exists in trial identity at all (a physical-formatting-only reorder of
+#     byte-identical semantic bars must remain comparable, not just share a
+#     trial_id). Comparing Sharpe ratios computed under a genuinely
+#     different provenance basis (different provider, adjustment convention,
+#     CA policy/evidence, universe, or extraction range) is not a multiple-
 #     testing question, it's a different experiment.
 #   - the walk-forward/discovery-period structure (evaluation_spec: train/
 #     test/step months, purge/embargo, holdout_months) -- this determines
@@ -135,7 +145,7 @@ def _comparison_key(identity: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     signal_policy = economic_protocol["signal_policy"]
     key_obj = {
         "protocol_id": identity["protocol_id"],
-        "economic_bars_sha256": identity["data_identity"]["economic_bars_csv"]["sha256"],
+        "bars_provenance": identity["data_identity"]["bars_provenance"],
         "evaluation_spec": identity["evaluation_spec"],
         "annualization": economic_protocol["annualization"],
         "cost_model": economic_protocol["cost_model"],
@@ -389,15 +399,21 @@ def build_multiple_testing_judge(
         "evaluation_slice_count": evaluation_slice_count,
     }
 
-    # judge_id basis: EVERY field here is a structural/registry-state fact
-    # (what exists, what got included/excluded and why, what content it
-    # hashes to) -- never a DSR/PBO NUMERIC result. Re-running the judge
-    # after a code change that alters the statistical output, without
-    # altering the registry or which artifacts were selected, must not
-    # change judge_id.
+    # judge_id basis: EVERY field here is a structural/registry-state fact,
+    # or a declared METHODOLOGY/PROTOCOL VERSION identifier -- never a
+    # DSR/PBO NUMERIC result. Re-running the judge after a code change that
+    # alters the statistical output, without altering the registry, which
+    # artifacts were selected, or the declared methodology version, must not
+    # change judge_id. RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-02 (judge
+    # protocol-identity follow-through): dsr_trial_count_protocol_version IS
+    # included here (a declared METHODOLOGY VERSION, not a numeric result) --
+    # a change to the effective-independent-trial ESTIMATION METHOD must
+    # produce a different judge_id even when the registry and every DSR/PBO
+    # numeric output happen to come out byte-identical.
     judge_id_basis = {
         "protocol_id": spec.protocol_id,
         "schema_version": spec.schema_version,
+        "dsr_trial_count_protocol_version": DSR_TRIAL_COUNT_PROTOCOL_VERSION,
         "experiment_id": experiment_id,
         "hypothesis_id": hypothesis_id,
         "comparison_scope": comparison_scope,

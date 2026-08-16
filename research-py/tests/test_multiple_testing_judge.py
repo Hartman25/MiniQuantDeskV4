@@ -67,7 +67,34 @@ def _identity(
     fold_end_policy: str = "force_flat_last_bar",
     capacity_policy: str = "reduce_first_defer_increase_batch_v1",
     data_salt: str = "",
+    bars_provenance_overrides: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, Dict[str, Any]]:
+    # P8 REPAIR-02 (Defect 3 follow-through): production identity no longer
+    # carries a physical economic_bars_csv sha256 -- economic bars identity
+    # lives entirely in the bars_provenance identity fragment (see
+    # economic_registry_integration.build_economic_trial_identity /
+    # mqk_research.data.bars_provenance.provenance_identity_fragment). This
+    # fixture mirrors that shape; `bars_sha256` now feeds
+    # canonical_semantic_bars_hash (kept as the param name so every existing
+    # call site below -- which only cares about "same vs. different bars
+    # data" -- needs no change).
+    bars_provenance: Dict[str, Any] = {
+        "schema_version": "bars_provenance_manifest_v1",
+        "provider_ids_observed": ["alpaca"],
+        "resolved_close_column": "close_micros",
+        "price_adjustment_convention": "raw_unadjusted",
+        "corporate_action_policy": "forbid_affected_periods",
+        "corporate_action_evidence_id": "evidence-fixture",
+        "forbidden_periods": [],
+        "timeframe": "1D",
+        "start_utc": "2021-01-01T00:00:00+00:00",
+        "end_utc": "2021-02-01T00:00:00+00:00",
+        "symbol_universe": ["AAA"],
+        "universe_mode": "fixed_ex_ante",
+        "canonical_semantic_bars_hash": bars_sha256,
+    }
+    bars_provenance.update(bars_provenance_overrides or {})
+
     identity: Dict[str, Any] = {
         "experiment_id": experiment_id,
         "hypothesis_id": hypothesis_id,
@@ -77,7 +104,7 @@ def _identity(
             "features_csv": {"sha256": f"feat-{strategy_id}{data_salt}", "bytes": 1},
             "targets_csv": {"sha256": f"targ-{strategy_id}{data_salt}", "bytes": 1},
             "feature_schema": {"sha256": f"schema-{strategy_id}", "bytes": 1},
-            "economic_bars_csv": {"sha256": bars_sha256, "bytes": 1},
+            "bars_provenance": bars_provenance,
         },
         "evaluation_spec": evaluation_spec or _evaluation_spec(),
         "model_spec": {"l2": 1e-3, "lr": 0.05, "steps": 10, "standardize": True, "clip_z": 8.0},
@@ -139,6 +166,7 @@ def _register_trial_with_result(
     capacity_policy: str = "reduce_first_defer_increase_batch_v1",
     data_salt: str = "",
     origin: str = "test",
+    bars_provenance_overrides: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, str]:
     """Register a trial and ONE succeeded attempt with a hand-crafted
     economic result. Returns (trial_id, attempt_id)."""
@@ -148,6 +176,7 @@ def _register_trial_with_result(
         bars_sha256=bars_sha256, evaluation_spec=evaluation_spec, annualization=annualization,
         cost_bps=cost_bps, slippage_bps=slippage_bps, threshold=threshold,
         fold_end_policy=fold_end_policy, capacity_policy=capacity_policy, data_salt=data_salt,
+        bars_provenance_overrides=bars_provenance_overrides,
     )
     store.register_trial(
         trial_id=trial_id, experiment_id=experiment_id, hypothesis_id=hypothesis_id,
@@ -983,6 +1012,7 @@ def test_real_pipeline_integration(tmp_path):
         PRICE_CONVENTION_RAW_UNADJUSTED,
         UNIVERSE_MODE_FIXED_EX_ANTE,
         build_bars_provenance_manifest,
+        build_corporate_action_evidence,
     )
     from mqk_research.ml.economic_registry_integration import run_registered_economic_walkforward_eval
     from mqk_research.ml.economic_walkforward import AnnualizationSpec, CostModelSpec, EconomicWalkForwardSpec, SignalPolicySpec
@@ -1002,6 +1032,16 @@ def test_real_pipeline_integration(tmp_path):
         bars_df.to_csv(bars_path, index=False)
         _write_full_run_dir(run_dir, df)
         end_ts = pd.to_datetime(bars_df["end_ts"], utc=True)
+        symbol_universe = sorted(bars_df["symbol"].astype(str).unique().tolist())
+        coverage_start = end_ts.min().isoformat()
+        coverage_end = (end_ts.max() + pd.Timedelta(seconds=1)).isoformat()
+        evidence = build_corporate_action_evidence(
+            source_provider_id="test_fixture_no_known_corporate_actions",
+            covered_symbol_universe=symbol_universe,
+            coverage_start_utc=coverage_start,
+            coverage_end_utc=coverage_end,
+            corporate_action_entries=(),
+        )
         bars_provenance = build_bars_provenance_manifest(
             price_provenance={
                 "close_column": "close",
@@ -1011,12 +1051,13 @@ def test_real_pipeline_integration(tmp_path):
                 "convention_basis": "synthetic test fixture — no real provider involved",
             },
             corporate_action_policy=CA_POLICY_FORBID_AFFECTED_PERIODS,
-            corporate_action_evidence_id="test-fixture-no-known-corporate-actions-v1",
+            corporate_action_evidence_id=evidence["evidence_id"],
+            corporate_action_evidence=evidence,
             forbidden_periods=(),
             timeframe="1D",
-            start_utc=end_ts.min().isoformat(),
-            end_utc=end_ts.max().isoformat(),
-            symbol_universe=sorted(bars_df["symbol"].astype(str).unique().tolist()),
+            start_utc=coverage_start,
+            end_utc=coverage_end,
+            symbol_universe=symbol_universe,
             universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE,
             bars=bars_df,
             artifact_path=bars_path,
@@ -1264,3 +1305,80 @@ def test_changing_strategy_threshold_alone_stays_comparable(tmp_path):
     assert set(out["included_trial_ids"]) == {trial_a, trial_b}
     assert out["excluded_trial_ids"] == []
     assert out["holdout"] == {"status": "reserved_not_evaluated"}
+
+
+# ---------------------------------------------------------------------------
+# RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-02 (following
+# BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-02's Defect 3): the comparison
+# key now uses the FULL canonical P8 bars_provenance identity fragment, not
+# a bare physical bars-file sha256. REQUIRED TEST 24: two trials whose
+# provenance BASIS differs (provider, adjustment convention, CA policy/
+# evidence, universe, or extraction range) must NOT share a comparison
+# scope, even when their (now-irrelevant) physical bars bytes happen to
+# coincide.
+# ---------------------------------------------------------------------------
+
+
+def test_different_provenance_basis_separates_comparison_scopes(tmp_path):
+    """REQUIRED TEST 24."""
+    db = tmp_path / "reg.sqlite3"
+    store = ResearchResultStore(db)
+    dates = _dates(20)
+
+    trial_a, _ = _register_trial_with_result(
+        store, experiment_id="exp.provenance_scope", hypothesis_id="hyp", strategy_id="a",
+        run_dir=tmp_path / "a", dates=dates, net_returns=[0.01] * 10 + [-0.02] * 10,
+    )
+    trial_b, _ = _register_trial_with_result(
+        store, experiment_id="exp.provenance_scope", hypothesis_id="hyp", strategy_id="b",
+        run_dir=tmp_path / "b", dates=dates, net_returns=[-0.005] * 10 + [0.01] * 10,
+    )
+    trial_diff_provider, _ = _register_trial_with_result(
+        store, experiment_id="exp.provenance_scope", hypothesis_id="hyp", strategy_id="diffprovider",
+        run_dir=tmp_path / "c", dates=dates, net_returns=[0.02] * 10 + [-0.01] * 10,
+        bars_provenance_overrides={"provider_ids_observed": ["a_completely_different_provider"]},
+    )
+    trial_diff_universe, _ = _register_trial_with_result(
+        store, experiment_id="exp.provenance_scope", hypothesis_id="hyp", strategy_id="diffuniverse",
+        run_dir=tmp_path / "d", dates=dates, net_returns=[0.015] * 10 + [-0.015] * 10,
+        bars_provenance_overrides={"symbol_universe": ["AAA", "BBB"]},
+    )
+    trial_diff_ca_policy, _ = _register_trial_with_result(
+        store, experiment_id="exp.provenance_scope", hypothesis_id="hyp", strategy_id="diffcapolicy",
+        run_dir=tmp_path / "e", dates=dates, net_returns=[0.01] * 10 + [-0.01] * 10,
+        bars_provenance_overrides={"corporate_action_policy": "adjusted_data"},
+    )
+
+    out = build_multiple_testing_judge(experiment_id="exp.provenance_scope", registry_db=db)
+    assert set(out["included_trial_ids"]) == {trial_a, trial_b}
+    excluded = {e["trial_id"]: e["reason"] for e in out["excluded_trial_ids"]}
+    assert excluded[trial_diff_provider] == "incompatible_comparison_scope"
+    assert excluded[trial_diff_universe] == "incompatible_comparison_scope"
+    assert excluded[trial_diff_ca_policy] == "incompatible_comparison_scope"
+
+
+# ---------------------------------------------------------------------------
+# REQUIRED TEST 26 — judge_id changes when the DSR methodology/protocol
+# version changes, even with byte-identical registry state and numeric
+# output.
+# ---------------------------------------------------------------------------
+
+
+def test_judge_id_changes_when_dsr_protocol_version_changes(tmp_path, monkeypatch):
+    """REQUIRED TEST 26."""
+    db = tmp_path / "reg.sqlite3"
+    store = ResearchResultStore(db)
+    _two_trial_scope(store, tmp_path)
+
+    out_before = build_multiple_testing_judge(experiment_id="exp.det", registry_db=db)
+
+    import mqk_research.ml.multiple_testing_judge as mtj
+
+    monkeypatch.setattr(mtj, "DSR_TRIAL_COUNT_PROTOCOL_VERSION", "dsr_effective_trial_accounting_v2_test_only")
+    out_after = build_multiple_testing_judge(experiment_id="exp.det", registry_db=db)
+
+    assert out_before["ids"]["judge_id"] != out_after["ids"]["judge_id"]
+    # The declared version label alone must not perturb the actual DSR/PBO
+    # numeric computation (same registry, same inputs, same math).
+    assert out_before["dsr_results"] == out_after["dsr_results"]
+    assert out_before["pbo_result"] == out_after["pbo_result"]

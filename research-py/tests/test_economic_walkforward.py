@@ -26,6 +26,7 @@ from mqk_research.data.bars_provenance import (
     PRICE_CONVENTION_RAW_UNADJUSTED,
     UNIVERSE_MODE_FIXED_EX_ANTE,
     build_bars_provenance_manifest,
+    build_corporate_action_evidence,
 )
 from mqk_research.exp_distributed.storage import ResearchResultStore
 from mqk_research.ml import economics
@@ -1088,14 +1089,30 @@ def _synthetic_bars_provenance(bars_path: Path) -> Dict[str, Any]:
     """BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01: the official
     registered path now REQUIRES a durable bars provenance manifest. These
     tests use synthetic, decoupled-from-labels bars fixtures (see
-    _build_flat_bars) with no real corporate-action risk -- an explicit
-    FORBID_AFFECTED_PERIODS declaration with zero forbidden periods is an
-    honest statement for synthetic test data (there is nothing to exclude),
-    distinct from real registered data, which has no authoritative
-    corporate-action source today and is expected to fail closed (see
-    test_raw_unadjusted_without_corporate_action_safety_fails_closed)."""
+    _build_flat_bars) with no real corporate-action risk.
+
+    REPAIR-02 (Defect 2): a bare evidence-ID string no longer satisfies
+    CA_POLICY_FORBID_AFFECTED_PERIODS -- a real, content-addressed evidence
+    object (covering the full symbol universe/date range, zero entries, an
+    honest statement for synthetic test data with nothing to exclude) is
+    required even here. Still distinct from real registered data, which has
+    no authoritative corporate-action evidence SOURCE today and is expected
+    to fail closed (see
+    test_fake_evidence_and_empty_forbidden_periods_cannot_pass_official_registered_evaluation
+    in test_bars_provenance.py) -- this fixture proves the verification
+    MECHANISM, it does not claim a real external CA source exists."""
     bars = pd.read_csv(bars_path)
     end_ts = pd.to_datetime(bars["end_ts"], utc=True)
+    symbol_universe = sorted(bars["symbol"].astype(str).unique().tolist())
+    coverage_start = end_ts.min().isoformat()
+    coverage_end = (end_ts.max() + pd.Timedelta(seconds=1)).isoformat()
+    evidence = build_corporate_action_evidence(
+        source_provider_id="test_fixture_no_known_corporate_actions",
+        covered_symbol_universe=symbol_universe,
+        coverage_start_utc=coverage_start,
+        coverage_end_utc=coverage_end,
+        corporate_action_entries=(),
+    )
     return build_bars_provenance_manifest(
         price_provenance={
             "close_column": "close",
@@ -1105,12 +1122,13 @@ def _synthetic_bars_provenance(bars_path: Path) -> Dict[str, Any]:
             "convention_basis": "synthetic test fixture — no real provider involved",
         },
         corporate_action_policy=CA_POLICY_FORBID_AFFECTED_PERIODS,
-        corporate_action_evidence_id="test-fixture-no-known-corporate-actions-v1",
+        corporate_action_evidence_id=evidence["evidence_id"],
+        corporate_action_evidence=evidence,
         forbidden_periods=(),
         timeframe="1D",
-        start_utc=end_ts.min().isoformat(),
-        end_utc=end_ts.max().isoformat(),
-        symbol_universe=sorted(bars["symbol"].astype(str).unique().tolist()),
+        start_utc=coverage_start,
+        end_utc=coverage_end,
+        symbol_universe=symbol_universe,
         universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE,
         bars=bars,
         artifact_path=bars_path,

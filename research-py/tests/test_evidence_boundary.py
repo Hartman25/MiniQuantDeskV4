@@ -27,6 +27,7 @@ from mqk_research.data.bars_provenance import (
     PRICE_CONVENTION_RAW_UNADJUSTED,
     UNIVERSE_MODE_FIXED_EX_ANTE,
     build_bars_provenance_manifest,
+    build_corporate_action_evidence,
 )
 from mqk_research.ml.contracts import MLTrainConfig
 from mqk_research.ml.economic_registry_integration import run_registered_economic_walkforward_eval
@@ -85,9 +86,24 @@ def _build_flat_bars(df: pd.DataFrame) -> pd.DataFrame:
 def _synthetic_bars_provenance(bars_path: Path) -> dict:
     """BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01: the official
     registered path now requires a durable bars provenance manifest. See
-    test_economic_walkforward.py's identical helper for the full rationale."""
+    test_economic_walkforward.py's identical helper for the full rationale.
+
+    REPAIR-02 (Defect 2): a bare evidence-ID string no longer satisfies
+    CA_POLICY_FORBID_AFFECTED_PERIODS -- a real, content-addressed evidence
+    object covering the full symbol universe/date range is required (see
+    test_economic_walkforward.py's identically-updated helper)."""
     bars = pd.read_csv(bars_path)
     end_ts = pd.to_datetime(bars["end_ts"], utc=True)
+    symbol_universe = sorted(bars["symbol"].astype(str).unique().tolist())
+    coverage_start = end_ts.min().isoformat()
+    coverage_end = (end_ts.max() + pd.Timedelta(seconds=1)).isoformat()
+    evidence = build_corporate_action_evidence(
+        source_provider_id="test_fixture_no_known_corporate_actions",
+        covered_symbol_universe=symbol_universe,
+        coverage_start_utc=coverage_start,
+        coverage_end_utc=coverage_end,
+        corporate_action_entries=(),
+    )
     return build_bars_provenance_manifest(
         price_provenance={
             "close_column": "close",
@@ -97,12 +113,13 @@ def _synthetic_bars_provenance(bars_path: Path) -> dict:
             "convention_basis": "synthetic test fixture — no real provider involved",
         },
         corporate_action_policy=CA_POLICY_FORBID_AFFECTED_PERIODS,
-        corporate_action_evidence_id="test-fixture-no-known-corporate-actions-v1",
+        corporate_action_evidence_id=evidence["evidence_id"],
+        corporate_action_evidence=evidence,
         forbidden_periods=(),
         timeframe="1D",
-        start_utc=end_ts.min().isoformat(),
-        end_utc=end_ts.max().isoformat(),
-        symbol_universe=sorted(bars["symbol"].astype(str).unique().tolist()),
+        start_utc=coverage_start,
+        end_utc=coverage_end,
+        symbol_universe=symbol_universe,
         universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE,
         bars=bars,
         artifact_path=bars_path,

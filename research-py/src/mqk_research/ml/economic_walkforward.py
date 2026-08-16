@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from mqk_research.data.bars_provenance import check_corporate_action_integrity
+from mqk_research.data.bars_provenance import check_corporate_action_integrity, require_bars_match_manifest
 from mqk_research.ml import economics
 from mqk_research.ml.util_hash import file_record, sha256_json
 
@@ -857,9 +857,12 @@ def run_economic_walkforward(
     preflight runs -- this is the explicit diagnostic path, distinct from
     economic_registry_integration.run_registered_economic_walkforward_eval,
     which ALWAYS requires and verifies a real manifest before calling this
-    function. When supplied, the manifest's corporate-action policy is
-    checked against the actually-loaded bars content BEFORE any fold is
-    simulated (see mqk_research.data.bars_provenance.
+    function. When supplied, the manifest is first CONTENT-BOUND to the
+    actually-loaded bars (Defect 1 / P8 REPAIR-02 -- see
+    mqk_research.data.bars_provenance.require_bars_match_manifest, which
+    catches a stale/wrong manifest paired with different bars data), and
+    only then is the manifest's corporate-action policy checked against
+    that bars content BEFORE any fold is simulated (see
     check_corporate_action_integrity) -- an integrity preflight, not a
     change to the existing future-execution chronology below."""
     run_dir = Path(run_dir)
@@ -878,6 +881,7 @@ def run_economic_walkforward(
     bars_record = verify_bars_provenance(run_dir, bars_csv)
     bars = load_bars(bars_csv)
     if provenance_manifest is not None:
+        require_bars_match_manifest(bars, provenance_manifest)
         check_corporate_action_integrity(bars, provenance_manifest)
     oos = load_oos_predictions(oos_path)
 
