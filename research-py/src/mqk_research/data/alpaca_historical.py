@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +16,8 @@ import pandas as pd
 from mqk_research.data.bars_provenance import (
     CA_POLICY_ADJUSTED_DATA,
     PRICE_CONVENTION_ALPACA_ALL_ADJUSTED,
+    SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC,
+    SOURCE_AUTHORITY_OFFICIAL_PROVIDER,
     UNIVERSE_MODE_FIXED_EX_ANTE,
     build_bars_provenance_manifest,
     build_corporate_action_evidence,
@@ -63,6 +66,43 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 # economic P&L is computed -- a hand-built manifest asserting the same
 # convention string is NOT sufficient (see
 # bars_provenance.SourceAttestationUnverifiable).
+#
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 (independent-review
+# repair) closed four further defects:
+#   - Defect 1 (CA discovery completeness): Alpaca's /v1/corporate-actions
+#     `start`/`end` filter by `process_date`, which Alpaca's own developer
+#     relations team confirms "can be several days (or more) after the
+#     ex_date" with no documented bound (forum.alpaca.markets/t/
+#     querying-corporate-actions-by-ex-date-rather-than-process-date/17724,
+#     verified 2026-08-15). A query bounded by the research window can
+#     therefore miss an event whose ex_date falls inside the window but
+#     whose process_date lands after it. See CA_DISCOVERY_PROCESS_DATE_FLOOR
+#     / _ca_discovery_process_date_bounds below: the fix queries the full
+#     provider-supported process_date history for the requested symbols
+#     through the explicit ASOF, then filters locally by effective-date
+#     (ex_date-based) intersection with the research window --
+#     _filter_entries_intersecting_range.
+#   - Defect 2 (implicit ASOF): fetch_historical_bars now requires an
+#     explicit, caller-resolved `asof` (never the provider's implicit
+#     current-day default) and records it verbatim in the source
+#     attestation, which already participates in attestation identity (see
+#     bars_provenance.canonical_source_attestation_content).
+#   - Defect 3 (official vs diagnostic authority): extraction is now split
+#     into extract_research_bars_with_provenance (OFFICIAL: fixed base URL,
+#     real HTTP transport, no injectable transport/base_url, mints
+#     SOURCE_AUTHORITY_OFFICIAL_PROVIDER) and
+#     extract_research_bars_with_provenance_diagnostic (INTERNAL: injectable
+#     transport for tests, always mints SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC
+#     + DIAGNOSTIC_EXTRACTOR_ID, which bars_provenance never trusts).
+#   - Defect 4 (transport artifacts in semantic identity): per-page raw
+#     response hashes remain on the attestation object as audit evidence but
+#     no longer participate in source_attestation_id (see bars_provenance.
+#     canonical_source_attestation_content).
+#   - Provider end-inclusive/internal end-exclusive mismatch: Alpaca's bars
+#     `end` is documented inclusive; this repo's internal contract is the
+#     half-open [start_utc, end_utc). fetch_historical_bars now normalizes
+#     locally so a bar at or past end_utc, or before start_utc, never enters
+#     the canonical research dataset.
 
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
@@ -75,7 +115,19 @@ DEFAULT_TIMEFRAME = "1Day"
 ENV_ALPACA_KEY = "ALPACA_API_KEY_PAPER"
 ENV_ALPACA_SECRET = "ALPACA_API_SECRET_PAPER"
 
+# Trusted, OFFICIAL extraction identity -- the only extractor_id
+# bars_provenance._TRUSTED_EXTRACTOR_IDS accepts. Only
+# extract_research_bars_with_provenance (fixed base URL, real HTTP
+# transport) may mint an attestation carrying this id.
 EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v1"
+
+# Explicitly UNtrusted diagnostic identity (Defect 3). Minted only by
+# extract_research_bars_with_provenance_diagnostic; never satisfies
+# bars_provenance._TRUSTED_EXTRACTOR_IDS or SOURCE_AUTHORITY_OFFICIAL_PROVIDER
+# regardless of what transport/base_url a caller injects.
+DIAGNOSTIC_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v1"
+
+_ASOF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Corporate-action type vocabulary, verified 2026-08-15 against Alpaca's
 # official /v1/corporate-actions OpenAPI schema
@@ -174,6 +226,19 @@ _COVERED_BY_ADJUSTMENT_ALL: FrozenSet[str] = frozenset(
     {"forward_split", "reverse_split", "cash_dividend", "spin_off"}
 )
 
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 (Defect 1): Alpaca
+# documents no bound on how far a corporate action's process_date can lag
+# its ex_date/effective_date ("can be several days (or more)" -- Alpaca
+# Developer Relations, forum.alpaca.markets, 2025-08-28). With no documented
+# bound, only querying the full provider-supported process_date history for
+# the requested symbols is a PROVEN superset -- a short arbitrary buffer
+# (30/60/90 days) would be an unproven guess. This is an explicit "no lower
+# bound" sentinel, not a padding heuristic: well before any US-listed
+# equity/ETF's corporate-action history.
+CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC = pd.Timestamp("1900-01-01T00:00:00Z")
+
+CA_DISCOVERY_PROTOCOL_V1 = "process_date_full_history_through_asof_v1"
+
 
 class AlpacaCredentialsMissing(RuntimeError):
     """Fail-closed: raised when ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER
@@ -220,6 +285,15 @@ def load_alpaca_credentials(env: Optional[Dict[str, str]] = None) -> AlpacaCrede
             "in the environment (repo convention; values are never printed/logged)."
         )
     return AlpacaCredentials(api_key=key, api_secret=secret)
+
+
+def _require_resolved_asof(asof: str) -> str:
+    """Fail-closed format check for a caller-RESOLVED asof date (Defect 2):
+    must be an explicit YYYY-MM-DD, never None/empty -- this module never
+    falls back to Alpaca's implicit current-day default."""
+    if not asof or not _ASOF_RE.match(asof):
+        raise ValueError(f"asof must be an explicit 'YYYY-MM-DD' date string, got {asof!r}")
+    return asof
 
 
 # (url, query_params, headers) -> (status_code, response_body_bytes). Tests
@@ -293,6 +367,7 @@ def fetch_historical_bars(
     symbols: Sequence[str],
     start_utc: pd.Timestamp,
     end_utc: pd.Timestamp,
+    asof: str,
     timeframe: str = DEFAULT_TIMEFRAME,
     adjustment: str = ADJUSTMENT_ALL,
     feed: str = DEFAULT_FEED,
@@ -303,10 +378,17 @@ def fetch_historical_bars(
     """Fetch complete, deterministically-normalized historical bars from
     Alpaca's official /v2/stocks/bars endpoint. Returns (bars_df, fetch_meta).
     bars_df has columns [symbol, end_ts (ISO-8601 UTC string), open, high,
-    low, close, volume], sorted (symbol, end_ts) ascending. Fails closed on:
-    provider HTTP error, incomplete pagination, a missing 'bars' key,
-    duplicate (symbol,end_ts) rows, non-finite OHLC prices, or any requested
-    symbol returning zero bars."""
+    low, close, volume], sorted (symbol, end_ts) ascending, containing only
+    rows satisfying start_utc <= end_ts < end_utc (Defect: Alpaca's `end` is
+    documented INCLUSIVE; this repo's internal contract is the half-open
+    [start_utc, end_utc), so a bar at or past end_utc -- or, defensively,
+    before start_utc -- is normalized out locally, never entering the
+    canonical dataset). `asof` (Defect 2) must be an explicit caller-resolved
+    'YYYY-MM-DD' string -- this function never relies on Alpaca's implicit
+    current-day asof default. Fails closed on: provider HTTP error,
+    incomplete pagination, a missing 'bars' key, duplicate (symbol,end_ts)
+    rows, non-finite OHLC prices, zero bars inside the canonical window, or
+    any requested symbol returning zero such bars."""
     symbols_norm = sorted({s.strip().upper() for s in symbols if s.strip()})
     if not symbols_norm:
         raise ValueError("symbols must be non-empty")
@@ -316,6 +398,7 @@ def fetch_historical_bars(
     end_utc = end_utc.tz_convert("UTC")
     if end_utc <= start_utc:
         raise ValueError("end_utc must be > start_utc")
+    asof = _require_resolved_asof(asof)
 
     creds = credentials or load_alpaca_credentials()
     getter = http_get or _default_http_get
@@ -326,6 +409,7 @@ def fetch_historical_bars(
         "start": start_utc.isoformat(),
         "end": end_utc.isoformat(),
         "adjustment": adjustment,
+        "asof": asof,
         "feed": feed,
         "limit": "10000",
         "sort": "asc",
@@ -366,6 +450,21 @@ def fetch_historical_bars(
 
     df = pd.DataFrame(rows)
 
+    # Alpaca's bars `end` is a documented INCLUSIVE upper bound
+    # (docs.alpaca.markets/reference/stockbars, verified 2026-08-15): a bar
+    # timestamped exactly at end_utc can be returned by the provider. This
+    # repo's internal research contract is the half-open [start_utc,
+    # end_utc) -- normalize locally so such a bar (or, defensively, one
+    # before start_utc) never enters the canonical dataset, semantic hash,
+    # or economic evaluation.
+    in_window = (df["end_ts"] >= start_utc) & (df["end_ts"] < end_utc)
+    df = df.loc[in_window].reset_index(drop=True)
+    if df.empty:
+        raise AlpacaHistoricalExtractionError(
+            f"Alpaca returned bars for symbols={symbols_norm} but none fall inside the internal "
+            f"half-open window [{start_utc.isoformat()}, {end_utc.isoformat()})"
+        )
+
     for col in ("open", "high", "low", "close"):
         values = df[col].to_numpy(dtype=float)
         if not np.isfinite(values).all():
@@ -390,6 +489,7 @@ def fetch_historical_bars(
         "resolved_feed": feed,
         "resolved_adjustment": adjustment,
         "resolved_timeframe": timeframe,
+        "resolved_asof": asof,
         "requested_start_utc": start_utc.isoformat(),
         "requested_end_utc": end_utc.isoformat(),
         "returned_coverage_start_utc": df["end_ts"].min(),
@@ -445,13 +545,19 @@ def fetch_corporate_actions(
     base_url: str = ALPACA_DATA_BASE_URL,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Fetch complete corporate-action evidence from Alpaca's official
-    /v1/corporate-actions endpoint for the same symbol universe/range as a
-    bars request. Returns (entries, fetch_meta): entries is a flat,
-    normalized list of {"symbol","action_type","effective_start_ts",
-    "effective_end_ts"} dicts merged across every corporate_actions.<type>
-    response bucket and every page (see _effective_windows_for_entry).
-    Fails closed on: provider HTTP error, incomplete pagination, a missing
-    'corporate_actions' key, or an unknown requested type."""
+    /v1/corporate-actions endpoint for the given symbol universe and
+    [start_utc, end_utc] PROCESS-DATE query window (Alpaca filters/sorts
+    this endpoint's start/end by process_date, not ex_date/effective_date --
+    see module header Defect 1; callers wanting complete effective-date
+    coverage must pass a process-date window proven broad enough, then
+    filter locally with _filter_entries_intersecting_range -- this function
+    itself is a pure, literal pass-through of whatever window it is given).
+    Returns (entries, fetch_meta): entries is a flat, normalized list of
+    {"symbol","action_type","effective_start_ts","effective_end_ts"} dicts
+    merged across every corporate_actions.<type> response bucket and every
+    page (see _effective_windows_for_entry). Fails closed on: provider HTTP
+    error, incomplete pagination, a missing 'corporate_actions' key, or an
+    unknown requested type."""
     symbols_norm = sorted({s.strip().upper() for s in symbols if s.strip()})
     if not symbols_norm:
         raise ValueError("symbols must be non-empty")
@@ -538,6 +644,36 @@ def classify_corporate_action_type(action_type: str, *, adjustment_mode: str = A
     return CATEGORY_COVERED_BY_ADJUSTMENT if action_type in _COVERED_BY_ADJUSTMENT_ALL else CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
 
 
+def _filter_entries_intersecting_range(
+    entries: Sequence[Dict[str, Any]],
+    *,
+    symbol_universe: Sequence[str],
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+) -> List[Dict[str, Any]]:
+    """Return the subset of `entries` that affect a symbol in
+    `symbol_universe` and whose [effective_start_ts, effective_end_ts]
+    window intersects [start_utc, end_utc) -- deterministic, order-
+    independent (sorted by symbol/action_type/effective_start_ts). Operates
+    on EFFECTIVE (ex_date-based) windows regardless of what process-date
+    query window the entries were originally discovered under (see Defect 1
+    / CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC)."""
+    universe = {s.strip().upper() for s in symbol_universe}
+    start_bound = start_utc.tz_convert("UTC")
+    end_bound = end_utc.tz_convert("UTC")
+    hits: List[Dict[str, Any]] = []
+    for e in entries:
+        if e["symbol"] not in universe:
+            continue
+        e_start = pd.Timestamp(e["effective_start_ts"])
+        e_start = e_start.tz_localize("UTC") if e_start.tzinfo is None else e_start.tz_convert("UTC")
+        e_end = pd.Timestamp(e["effective_end_ts"])
+        e_end = e_end.tz_localize("UTC") if e_end.tzinfo is None else e_end.tz_convert("UTC")
+        if e_end >= start_bound and e_start < end_bound:
+            hits.append(e)
+    return sorted(hits, key=lambda e: (e["symbol"], e["action_type"], e["effective_start_ts"]))
+
+
 def find_requires_review_events(
     entries: Sequence[Dict[str, Any]],
     *,
@@ -546,56 +682,67 @@ def find_requires_review_events(
     end_utc: pd.Timestamp,
     adjustment_mode: str = ADJUSTMENT_ALL,
 ) -> List[Dict[str, Any]]:
-    """Return the subset of `entries` that are CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW,
-    affect a symbol in `symbol_universe`, and whose
-    [effective_start_ts, effective_end_ts] window intersects
-    [start_utc, end_utc) -- deterministic, order-independent (sorted by
-    symbol/action_type/effective_start_ts)."""
-    universe = {s.strip().upper() for s in symbol_universe}
-    start_bound = start_utc.tz_convert("UTC")
-    end_bound = end_utc.tz_convert("UTC")
-    hits: List[Dict[str, Any]] = []
-    for e in entries:
-        if e["symbol"] not in universe:
-            continue
-        if classify_corporate_action_type(e["action_type"], adjustment_mode=adjustment_mode) != CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW:
-            continue
-        e_start = pd.Timestamp(e["effective_start_ts"]).tz_localize("UTC") if pd.Timestamp(e["effective_start_ts"]).tzinfo is None else pd.Timestamp(e["effective_start_ts"]).tz_convert("UTC")
-        e_end = pd.Timestamp(e["effective_end_ts"]).tz_localize("UTC") if pd.Timestamp(e["effective_end_ts"]).tzinfo is None else pd.Timestamp(e["effective_end_ts"]).tz_convert("UTC")
-        if e_end >= start_bound and e_start < end_bound:
-            hits.append(e)
+    """Return the subset of `entries` that are CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+    and intersect [start_utc, end_utc) for a symbol in `symbol_universe` (see
+    _filter_entries_intersecting_range) -- deterministic, order-independent."""
+    intersecting = _filter_entries_intersecting_range(
+        entries, symbol_universe=symbol_universe, start_utc=start_utc, end_utc=end_utc
+    )
+    hits = [
+        e
+        for e in intersecting
+        if classify_corporate_action_type(e["action_type"], adjustment_mode=adjustment_mode)
+        == CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+    ]
     return sorted(hits, key=lambda e: (e["symbol"], e["action_type"], e["effective_start_ts"]))
 
 
-def extract_research_bars_with_provenance(
+def _ca_discovery_process_date_bounds(
+    *, start_utc: pd.Timestamp, end_utc: pd.Timestamp, asof: str
+) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """The PROCESS-DATE query window (Defect 1) proven broad enough to
+    discover every corporate action whose EFFECTIVE (ex_date-based) window
+    could intersect [start_utc, end_utc): floor is
+    CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC (no documented process_date/ex_date
+    bound exists -- see module header), ceiling is the later of the explicit
+    ASOF and the research window's own end (covers both "process_date lands
+    after the research window" and any asof <= end_utc edge case)."""
+    asof_ts = pd.Timestamp(f"{asof}T00:00:00Z")
+    ceiling = max(asof_ts, end_utc.tz_convert("UTC"))
+    return CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC, ceiling
+
+
+def _extract_research_bars_with_provenance_impl(
     *,
     symbols: Sequence[str],
     start_utc: pd.Timestamp,
     end_utc: pd.Timestamp,
-    timeframe: str = DEFAULT_TIMEFRAME,
-    feed: str = DEFAULT_FEED,
-    credentials: Optional[AlpacaCredentials] = None,
-    http_get: Optional[HttpGet] = None,
-    base_url: str = ALPACA_DATA_BASE_URL,
-    retrieval_timestamp_utc: Optional[str] = None,
+    asof: str,
+    timeframe: str,
+    feed: str,
+    credentials: Optional[AlpacaCredentials],
+    http_get: HttpGet,
+    base_url: str,
+    extractor_id: str,
+    source_authority: str,
+    retrieval_timestamp_utc: Optional[str],
 ) -> Dict[str, Any]:
-    """Official, narrow entry point for fixed_ex_ante US equity/ETF research
-    extraction: fetches adjustment=all bars AND corporate-actions for the
-    SAME symbol/range from Alpaca, fails closed
-    (CorporateActionReviewRequired) if any REQUIRES_FAIL_CLOSED_REVIEW event
-    intersects the request, and otherwise returns a fully-formed,
-    source-attested bars provenance manifest ready to pass directly as
-    `bars_provenance` to
-    mqk_research.ml.economic_registry_integration.run_registered_economic_walkforward_eval
-    -- no manual manifest fabrication required (see mission "REGISTERED
-    ECONOMIC INTEGRATION"). Returns {"bars": DataFrame, "manifest": {...},
-    "corporate_action_evidence": {...}, "corporate_action_entries": [...]}."""
+    """Shared extraction/orchestration body (Defect 3): NOT part of this
+    module's public surface. `extractor_id`/`source_authority` are supplied
+    by the caller-facing wrapper (extract_research_bars_with_provenance for
+    the OFFICIAL path, extract_research_bars_with_provenance_diagnostic for
+    the INTERNAL/diagnostic path) and are never derived from `http_get`/
+    `base_url` -- an injected diagnostic transport can never produce an
+    OFFICIAL attestation by construction, regardless of what URL it points
+    at."""
     symbols_norm = sorted({s.strip().upper() for s in symbols if s.strip()})
+    asof = _require_resolved_asof(asof)
 
     bars_df, bars_meta = fetch_historical_bars(
         symbols=symbols_norm,
         start_utc=start_utc,
         end_utc=end_utc,
+        asof=asof,
         timeframe=timeframe,
         adjustment=ADJUSTMENT_ALL,
         feed=feed,
@@ -603,13 +750,20 @@ def extract_research_bars_with_provenance(
         http_get=http_get,
         base_url=base_url,
     )
-    ca_entries, ca_meta = fetch_corporate_actions(
+
+    ca_discovery_start_utc, ca_discovery_end_utc = _ca_discovery_process_date_bounds(
+        start_utc=start_utc, end_utc=end_utc, asof=asof
+    )
+    ca_entries_discovered, ca_meta = fetch_corporate_actions(
         symbols=symbols_norm,
-        start_utc=start_utc,
-        end_utc=end_utc,
+        start_utc=ca_discovery_start_utc,
+        end_utc=ca_discovery_end_utc,
         credentials=credentials,
         http_get=http_get,
         base_url=base_url,
+    )
+    ca_entries = _filter_entries_intersecting_range(
+        ca_entries_discovered, symbol_universe=symbols_norm, start_utc=start_utc, end_utc=end_utc
     )
 
     review_required = find_requires_review_events(
@@ -649,7 +803,8 @@ def extract_research_bars_with_provenance(
 
     attestation = build_source_attestation(
         source_provider_id="alpaca",
-        extractor_id=EXTRACTOR_ID,
+        extractor_id=extractor_id,
+        source_authority=source_authority,
         api_endpoint_bars=bars_meta["endpoint"],
         api_endpoint_corporate_actions=ca_meta["endpoint"],
         symbols=symbols_norm,
@@ -659,12 +814,15 @@ def extract_research_bars_with_provenance(
         returned_coverage_end_utc=bars_meta["returned_coverage_end_utc"],
         adjustment_mode=ADJUSTMENT_ALL,
         feed=feed,
-        asof=None,
+        asof=bars_meta["resolved_asof"],
         pagination_complete_bars=bars_meta["pagination_complete"],
         pagination_complete_corporate_actions=ca_meta["pagination_complete"],
         corporate_action_query_coverage={
-            "requested_start_utc": ca_meta["requested_start_utc"],
-            "requested_end_utc": ca_meta["requested_end_utc"],
+            "discovery_protocol": CA_DISCOVERY_PROTOCOL_V1,
+            "process_date_query_start_utc": ca_meta["requested_start_utc"],
+            "process_date_query_end_utc": ca_meta["requested_end_utc"],
+            "research_window_start_utc": start_utc.tz_convert("UTC").isoformat(),
+            "research_window_end_utc": end_utc.tz_convert("UTC").isoformat(),
             "requested_types": ca_meta["requested_types"],
             "symbols_requested": ca_meta["symbols_requested"],
         },
@@ -712,6 +870,93 @@ def extract_research_bars_with_provenance(
         "corporate_action_evidence": evidence,
         "corporate_action_entries": ca_entries,
     }
+
+
+def extract_research_bars_with_provenance(
+    *,
+    symbols: Sequence[str],
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    asof: str,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    feed: str = DEFAULT_FEED,
+    credentials: Optional[AlpacaCredentials] = None,
+    retrieval_timestamp_utc: Optional[str] = None,
+) -> Dict[str, Any]:
+    """OFFICIAL, narrow entry point for fixed_ex_ante US equity/ETF research
+    extraction (Defect 3): fixed official Alpaca base URL, real HTTP
+    transport -- no injectable transport/base_url. Fetches adjustment=all
+    bars AND corporate-actions for the SAME symbol/range from Alpaca (CA
+    discovery is proven-superset, not window-bounded -- see Defect 1 /
+    _ca_discovery_process_date_bounds), requires an explicit `asof` (Defect
+    2 -- never Alpaca's implicit current-day default), fails closed
+    (CorporateActionReviewRequired) if any REQUIRES_FAIL_CLOSED_REVIEW event
+    intersects the request, and otherwise returns a fully-formed,
+    OFFICIAL-authority source-attested bars provenance manifest ready to
+    pass directly as `bars_provenance` to
+    mqk_research.ml.economic_registry_integration.run_registered_economic_walkforward_eval
+    -- no manual manifest fabrication required. Returns {"bars": DataFrame,
+    "manifest": {...}, "corporate_action_evidence": {...},
+    "corporate_action_entries": [...]}.
+
+    For deterministic, offline unit testing with an injected transport, use
+    extract_research_bars_with_provenance_diagnostic instead -- that path
+    can never mint an attestation this function's OFFICIAL authority
+    satisfies (see bars_provenance.SOURCE_AUTHORITY_OFFICIAL_PROVIDER)."""
+    return _extract_research_bars_with_provenance_impl(
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        asof=asof,
+        timeframe=timeframe,
+        feed=feed,
+        credentials=credentials,
+        http_get=_default_http_get,
+        base_url=ALPACA_DATA_BASE_URL,
+        extractor_id=EXTRACTOR_ID,
+        source_authority=SOURCE_AUTHORITY_OFFICIAL_PROVIDER,
+        retrieval_timestamp_utc=retrieval_timestamp_utc,
+    )
+
+
+def extract_research_bars_with_provenance_diagnostic(
+    *,
+    symbols: Sequence[str],
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    asof: str,
+    http_get: HttpGet,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    feed: str = DEFAULT_FEED,
+    credentials: Optional[AlpacaCredentials] = None,
+    base_url: str = ALPACA_DATA_BASE_URL,
+    retrieval_timestamp_utc: Optional[str] = None,
+) -> Dict[str, Any]:
+    """INTERNAL/DIAGNOSTIC extraction (Defect 3): the injectable-transport
+    testability seam for deterministic, offline unit tests (`http_get` is
+    REQUIRED -- no default -- forcing the caller to supply an explicit fake;
+    normal test suites never touch the network). Same extraction/validation
+    logic as extract_research_bars_with_provenance, but ALWAYS mints
+    DIAGNOSTIC_EXTRACTOR_ID + bars_provenance.SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC
+    -- neither is caller-overridable here, so an attestation produced by this
+    function can never satisfy bars_provenance._require_verified_source_attestation
+    (see check_corporate_action_integrity's adjusted_data branch) and can
+    never authorize OFFICIAL registered economic evaluation, regardless of
+    how realistic the injected transport/base_url/response content is."""
+    return _extract_research_bars_with_provenance_impl(
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        asof=asof,
+        timeframe=timeframe,
+        feed=feed,
+        credentials=credentials,
+        http_get=http_get,
+        base_url=base_url,
+        extractor_id=DIAGNOSTIC_EXTRACTOR_ID,
+        source_authority=SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC,
+        retrieval_timestamp_utc=retrieval_timestamp_utc,
+    )
 
 
 def write_research_extraction_artifacts(run_dir: Path, result: Dict[str, Any]) -> Dict[str, Path]:

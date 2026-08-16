@@ -3,8 +3,13 @@ BKT-RESEARCH-MARKET-DATA-AUTHORITY-01 -- tests for the dedicated Alpaca
 research historical-data extractor (mqk_research.data.alpaca_historical).
 
 No real network access is used anywhere in this file -- every test injects a
-fake `http_get` callable. Covers the mission's REQUIRED TESTS items that
-pertain to this module:
+fake `http_get` callable, via the INTERNAL/DIAGNOSTIC entry point
+(extract_research_bars_with_provenance_diagnostic) added by
+BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01's official/diagnostic
+authority split (Defect 3) -- see test_extractor_split_* below for the
+structural proof that the OFFICIAL entry point cannot accept an injected
+transport. Covers the mission's REQUIRED TESTS items that pertain to this
+module:
   1.  requests the exact verified historical adjustment mode (all)
   2.  pagination is complete
   3.  provider response row order does not alter canonical semantic identity
@@ -24,6 +29,17 @@ pertain to this module:
   24. malformed response fails closed
   25. non-finite price fails closed
   27. no secrets appear in provenance artifacts
+
+REPAIR-01 additions (see module docstring in alpaca_historical.py):
+  R1.  CA event with ex_date inside the research window but process_date
+       after research_end is still discovered (Defect 1)
+  R2.  CA discovery does not use an arbitrary short process-date buffer
+  R3.  CA discovery pagination that never terminates still fails closed
+  R4.  official bars request always sends an explicit asof (Defect 2)
+  R5.  official extraction path exposes no injectable transport (Defect 3)
+  R6.  a bar exactly at the internal exclusive end_utc boundary is excluded
+       from the canonical dataset (provider end-inclusive normalization)
+  R7.  a bar before start_utc is excluded
 """
 from __future__ import annotations
 
@@ -96,6 +112,7 @@ def _queue_empty_ca(http: FakeHttp) -> None:
 
 WINDOW_START = pd.Timestamp("2021-01-01T00:00:00Z")
 WINDOW_END = pd.Timestamp("2021-02-01T00:00:00Z")
+ASOF = "2021-02-15"
 
 
 # ---------------------------------------------------------------------------
@@ -107,10 +124,43 @@ def test_fetch_bars_requests_adjustment_all():
     http = FakeHttp()
     http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z")]}))
     df, meta = ah.fetch_historical_bars(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
     )
     assert http.calls[0]["params"]["adjustment"] == "all"
     assert meta["resolved_adjustment"] == "all"
+
+
+def test_fetch_bars_requests_explicit_asof():
+    """REQUIRED TEST R4: the official bars request always sends an explicit
+    asof -- never relies on Alpaca's implicit current-day default."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z")]}))
+    df, meta = ah.fetch_historical_bars(
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+    )
+    assert http.calls[0]["params"]["asof"] == ASOF
+    assert meta["resolved_asof"] == ASOF
+
+
+def test_fetch_bars_missing_asof_rejected():
+    http = FakeHttp()
+    with pytest.raises(ValueError, match="asof"):
+        ah.fetch_historical_bars(
+            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof="", credentials=_creds(), http_get=http
+        )
+
+
+def test_fetch_bars_malformed_asof_rejected():
+    http = FakeHttp()
+    with pytest.raises(ValueError, match="asof"):
+        ah.fetch_historical_bars(
+            symbols=["AAA"],
+            start_utc=WINDOW_START,
+            end_utc=WINDOW_END,
+            asof="not-a-date",
+            credentials=_creds(),
+            http_get=http,
+        )
 
 
 def test_fetch_bars_pagination_complete_across_multiple_pages():
@@ -118,7 +168,7 @@ def test_fetch_bars_pagination_complete_across_multiple_pages():
     http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z")]}, next_token="tok1"))
     http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-05T00:00:00Z")]}))
     df, meta = ah.fetch_historical_bars(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
     )
     assert len(http.calls) == 2
     assert http.calls[1]["params"]["page_token"] == "tok1"
@@ -134,7 +184,7 @@ def test_fetch_bars_response_row_order_does_not_alter_canonical_hash():
         _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z", c=100.0), _bar("2021-01-05T00:00:00Z", c=101.0)]}),
     )
     df_a, _ = ah.fetch_historical_bars(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_a
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http_a
     )
 
     http_b = FakeHttp()
@@ -144,7 +194,7 @@ def test_fetch_bars_response_row_order_does_not_alter_canonical_hash():
         _bars_page({"AAA": [_bar("2021-01-05T00:00:00Z", c=101.0), _bar("2021-01-04T00:00:00Z", c=100.0)]}),
     )
     df_b, _ = ah.fetch_historical_bars(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_b
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http_b
     )
 
     assert canonical_semantic_bars_hash(df_a) == canonical_semantic_bars_hash(df_b)
@@ -159,7 +209,7 @@ def test_fetch_bars_duplicate_symbol_end_ts_fails_closed():
     )
     with pytest.raises(ah.AlpacaHistoricalExtractionError, match="duplicate"):
         ah.fetch_historical_bars(
-            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
         )
 
 
@@ -168,7 +218,7 @@ def test_fetch_bars_non_finite_price_fails_closed():
     http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z", c=float("nan"))]}))
     with pytest.raises(ah.AlpacaHistoricalExtractionError, match="non-finite"):
         ah.fetch_historical_bars(
-            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
         )
 
 
@@ -177,7 +227,7 @@ def test_fetch_bars_provider_http_error_fails_closed():
     http.queue(BARS_URL, 500, {"message": "internal error"})
     with pytest.raises(ah.AlpacaHistoricalExtractionError, match="status=500"):
         ah.fetch_historical_bars(
-            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
         )
 
 
@@ -186,7 +236,7 @@ def test_fetch_bars_malformed_json_fails_closed():
     http.queue(BARS_URL, 200, b"{not json")
     with pytest.raises(ah.AlpacaHistoricalExtractionError, match="JSON decode"):
         ah.fetch_historical_bars(
-            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
         )
 
 
@@ -195,7 +245,7 @@ def test_fetch_bars_missing_bars_key_fails_closed():
     http.queue(BARS_URL, 200, {"next_page_token": None})
     with pytest.raises(ah.AlpacaHistoricalExtractionError, match="missing required 'bars'"):
         ah.fetch_historical_bars(
-            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
         )
 
 
@@ -214,7 +264,68 @@ def test_fetch_bars_missing_symbol_in_response_fails_closed():
     http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z")]}))
     with pytest.raises(ah.AlpacaHistoricalExtractionError, match="BBB"):
         ah.fetch_historical_bars(
-            symbols=["AAA", "BBB"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+            symbols=["AAA", "BBB"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+        )
+
+
+# ---------------------------------------------------------------------------
+# REQUIRED TESTS R6/R7 -- provider end-inclusive vs internal [start,end)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_bars_excludes_bar_exactly_at_end_utc_boundary():
+    """Alpaca's documented-inclusive `end` can return a bar timestamped
+    exactly at end_utc; this repo's internal contract is the half-open
+    [start_utc, end_utc), so that bar must never enter the canonical
+    dataset, semantic hash, or economic evaluation."""
+    http = FakeHttp()
+    http.queue(
+        BARS_URL,
+        200,
+        _bars_page(
+            {
+                "AAA": [
+                    _bar("2021-01-04T00:00:00Z", c=100.0),
+                    _bar(WINDOW_END.isoformat(), c=999.0),  # exactly at end_utc
+                ]
+            }
+        ),
+    )
+    df, meta = ah.fetch_historical_bars(
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+    )
+    assert len(df) == 1
+    assert pd.Timestamp(df.iloc[0]["end_ts"]) < WINDOW_END
+    assert 999.0 not in df["close"].to_numpy()
+
+
+def test_fetch_bars_excludes_bar_before_start_utc():
+    http = FakeHttp()
+    http.queue(
+        BARS_URL,
+        200,
+        _bars_page(
+            {
+                "AAA": [
+                    _bar("2020-12-31T00:00:00Z", c=888.0),  # before start_utc
+                    _bar("2021-01-04T00:00:00Z", c=100.0),
+                ]
+            }
+        ),
+    )
+    df, meta = ah.fetch_historical_bars(
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+    )
+    assert len(df) == 1
+    assert 888.0 not in df["close"].to_numpy()
+
+
+def test_fetch_bars_only_boundary_bar_fails_closed_as_zero_bars():
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar(WINDOW_END.isoformat(), c=999.0)]}))
+    with pytest.raises(ah.AlpacaHistoricalExtractionError, match="none fall inside"):
+        ah.fetch_historical_bars(
+            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
         )
 
 
@@ -399,7 +510,7 @@ def test_find_requires_review_events_ignores_outside_universe_or_range():
 
 
 # ---------------------------------------------------------------------------
-# extract_research_bars_with_provenance -- full orchestration
+# extract_research_bars_with_provenance_diagnostic -- full orchestration
 # ---------------------------------------------------------------------------
 
 
@@ -431,12 +542,18 @@ def _queue_clean_extraction(http: FakeHttp, symbol: str = "AAA") -> None:
     )
 
 
+def _extract(http: FakeHttp, **overrides: Any) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = dict(
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+    )
+    kwargs.update(overrides)
+    return ah.extract_research_bars_with_provenance_diagnostic(**kwargs)
+
+
 def test_extraction_records_exact_symbol_universe_and_range_and_timeframe():
     http = FakeHttp()
     _queue_clean_extraction(http)
-    result = ah.extract_research_bars_with_provenance(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, timeframe="1Day", credentials=_creds(), http_get=http
-    )
+    result = _extract(http, timeframe="1Day")
     manifest = result["manifest"]
     assert manifest["symbol_universe"] == ["AAA"]
     assert manifest["timeframe"] == "1Day"
@@ -447,26 +564,70 @@ def test_extraction_records_exact_symbol_universe_and_range_and_timeframe():
 def test_extraction_records_provider_identity_and_adjustment_mode():
     http = FakeHttp()
     _queue_clean_extraction(http)
-    result = ah.extract_research_bars_with_provenance(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
-    )
+    result = _extract(http)
     manifest = result["manifest"]
     assert manifest["provider_ids_observed"] == ["alpaca"]
     assert manifest["price_adjustment_convention"] == ah.PRICE_CONVENTION_ALPACA_ALL_ADJUSTED
     assert manifest["source_attestation"]["adjustment_mode"] == "all"
+    assert manifest["source_attestation"]["asof"] == ASOF
 
 
-def test_extraction_produces_manifest_that_passes_registered_gates():
+def test_extraction_produces_manifest_that_passes_registered_gates_via_official_path():
+    """The registered gates (require_registered_bars_provenance /
+    check_corporate_action_integrity) must accept a manifest produced by the
+    OFFICIAL entry point. Exercised here through the real network-free
+    _extract_research_bars_with_provenance_impl body shared by both entry
+    points, but minted with the OFFICIAL extractor_id/source_authority --
+    see test_diagnostic_authority_cannot_pass_registered_gates below for the
+    contrasting diagnostic case."""
     http = FakeHttp()
     _queue_clean_extraction(http)
-    result = ah.extract_research_bars_with_provenance(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
+    result = ah._extract_research_bars_with_provenance_impl(
+        symbols=["AAA"],
+        start_utc=WINDOW_START,
+        end_utc=WINDOW_END,
+        asof=ASOF,
+        timeframe=ah.DEFAULT_TIMEFRAME,
+        feed=ah.DEFAULT_FEED,
+        credentials=_creds(),
+        http_get=http,
+        base_url=ah.ALPACA_DATA_BASE_URL,
+        extractor_id=ah.EXTRACTOR_ID,
+        source_authority="official_provider",
+        retrieval_timestamp_utc=None,
     )
     manifest = result["manifest"]
     bars = result["bars"]
     require_registered_bars_provenance(manifest)
     require_bars_match_manifest(bars, manifest)
     check_corporate_action_integrity(bars, manifest)  # must not raise
+
+
+def test_diagnostic_authority_cannot_pass_registered_gates():
+    """REQUIRED TEST 9: a diagnostic-transport extraction must never
+    authorize official registered research, even though it is otherwise a
+    perfectly well-formed, internally-consistent manifest."""
+    from mqk_research.data.bars_provenance import SourceAttestationUnverifiable
+
+    http = FakeHttp()
+    _queue_clean_extraction(http)
+    result = _extract(http)
+    manifest = result["manifest"]
+    bars = result["bars"]
+    assert manifest["source_attestation"]["extractor_id"] == ah.DIAGNOSTIC_EXTRACTOR_ID
+    assert manifest["source_attestation"]["source_authority"] == "diagnostic_synthetic"
+    with pytest.raises(SourceAttestationUnverifiable):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_official_entry_point_has_no_injectable_transport_params():
+    """REQUIRED TEST 8 (structural): the OFFICIAL public extraction function
+    accepts no http_get/base_url override at all."""
+    import inspect
+
+    sig = inspect.signature(ah.extract_research_bars_with_provenance)
+    assert "http_get" not in sig.parameters
+    assert "base_url" not in sig.parameters
 
 
 def test_extraction_fails_closed_on_uncovered_corporate_action_in_range():
@@ -491,9 +652,7 @@ def test_extraction_fails_closed_on_uncovered_corporate_action_in_range():
         ),
     )
     with pytest.raises(ah.CorporateActionReviewRequired, match="cash_merger"):
-        ah.extract_research_bars_with_provenance(
-            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
-        )
+        _extract(http)
 
 
 def test_extraction_fails_closed_even_when_the_action_day_bar_is_absent():
@@ -521,18 +680,14 @@ def test_extraction_fails_closed_even_when_the_action_day_bar_is_absent():
         ),
     )
     with pytest.raises(ah.CorporateActionReviewRequired):
-        ah.extract_research_bars_with_provenance(
-            symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
-        )
+        _extract(http)
 
 
 def test_extraction_no_secrets_in_manifest_or_evidence():
     http = FakeHttp()
     _queue_clean_extraction(http)
     creds = ah.AlpacaCredentials(api_key="super-secret-key", api_secret="super-secret-secret")
-    result = ah.extract_research_bars_with_provenance(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=creds, http_get=http
-    )
+    result = _extract(http, credentials=creds)
     blob = json.dumps(result["manifest"]) + json.dumps(result["corporate_action_evidence"])
     assert "super-secret-key" not in blob
     assert "super-secret-secret" not in blob
@@ -544,15 +699,90 @@ def test_extraction_no_secrets_in_manifest_or_evidence():
 def test_extraction_altered_bars_fail_before_pl_via_content_binding():
     http = FakeHttp()
     _queue_clean_extraction(http)
-    result = ah.extract_research_bars_with_provenance(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
-    )
+    result = _extract(http)
     tampered = result["bars"].copy()
     tampered.loc[0, "close"] = tampered.loc[0, "close"] + 1.0
     from mqk_research.data.bars_provenance import BarsProvenanceContentMismatch
 
     with pytest.raises(BarsProvenanceContentMismatch):
         require_bars_match_manifest(tampered, result["manifest"])
+
+
+# ---------------------------------------------------------------------------
+# REPAIR-01 Defect 1 -- CA discovery completeness (process_date lag)
+# ---------------------------------------------------------------------------
+
+
+def test_ca_discovery_finds_event_with_ex_date_in_range_but_process_date_after_end():
+    """REQUIRED TEST R1: an event whose ex_date falls inside the research
+    window but whose process_date lands AFTER research_end (the mission's
+    own example: research_end=Jun30, ex_date=Jun28, process_date=Jul02) must
+    still be discovered -- proving the pre-repair defect (querying CA
+    start/end == the research window, which Alpaca filters by process_date)
+    is closed."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-06-04T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {
+                "cash_dividends": [
+                    {
+                        "id": "d1",
+                        "symbol": "AAA",
+                        "cusip": "x",
+                        "rate": 0.1,
+                        "ex_date": "2021-06-28",
+                        "process_date": "2021-07-02",
+                    }
+                ]
+            }
+        ),
+    )
+    result = ah.extract_research_bars_with_provenance_diagnostic(
+        symbols=["AAA"],
+        start_utc=pd.Timestamp("2021-06-01T00:00:00Z"),
+        end_utc=pd.Timestamp("2021-06-30T00:00:00Z"),
+        asof="2021-07-05",  # must be >= process_date to have discovered it
+        credentials=_creds(),
+        http_get=http,
+    )
+    entries = result["corporate_action_entries"]
+    assert len(entries) == 1
+    assert entries[0]["effective_start_ts"] == "2021-06-28"
+
+
+def test_ca_discovery_query_uses_full_history_floor_not_a_narrow_buffer():
+    """REQUIRED TEST R2: the CA discovery query's process-date lower bound
+    is the documented 'no bound available' floor, not a short arbitrary
+    padding window (e.g. 30/60/90 days before the research window)."""
+    http = FakeHttp()
+    _queue_clean_extraction(http)
+    _extract(http)
+    ca_call = next(c for c in http.calls if c["url"] == CA_URL)
+    assert ca_call["params"]["start"] == ah.CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC.date().isoformat()
+    assert ca_call["params"]["start"] == "1900-01-01"
+
+
+def test_ca_discovery_query_end_covers_asof():
+    http = FakeHttp()
+    _queue_clean_extraction(http)
+    _extract(http, asof="2021-03-01")
+    ca_call = next(c for c in http.calls if c["url"] == CA_URL)
+    assert ca_call["params"]["end"] == "2021-03-01"
+
+
+def test_ca_discovery_incomplete_pagination_fails_closed():
+    """REQUIRED TEST R3: the broadened CA discovery query still fails closed
+    if the provider never terminates pagination -- no silent partial
+    'complete enough' result."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z")]}))
+    for _ in range(600):
+        http.queue(CA_URL, 200, _ca_page({}, next_token="always-more"))
+    with pytest.raises(ah.AlpacaHistoricalExtractionError, match="did not terminate"):
+        _extract(http)
 
 
 # ---------------------------------------------------------------------------
@@ -579,9 +809,7 @@ def test_load_alpaca_credentials_reads_repo_convention_env_vars():
 def test_write_research_extraction_artifacts_writes_expected_files(tmp_path: Path):
     http = FakeHttp()
     _queue_clean_extraction(http)
-    result = ah.extract_research_bars_with_provenance(
-        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http
-    )
+    result = _extract(http)
     run_dir = tmp_path / "run1"
     paths = ah.write_research_extraction_artifacts(run_dir, result)
 

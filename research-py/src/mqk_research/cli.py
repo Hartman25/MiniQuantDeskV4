@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -683,16 +684,19 @@ def run_phase1_equity(policy_path: Path, asof_utc: pd.Timestamp, pg_url: str, ou
 
 
 def run_alpaca_research_extraction(
-    *, symbols_csv: str, start_utc: pd.Timestamp, end_utc: pd.Timestamp, timeframe: str, out_root: Path
+    *, symbols_csv: str, start_utc: pd.Timestamp, end_utc: pd.Timestamp, timeframe: str, asof: str, out_root: Path
 ) -> Path:
-    """BKT-RESEARCH-MARKET-DATA-AUTHORITY-01: thin CLI wrapper around
-    mqk_research.data.alpaca_historical.extract_research_bars_with_provenance
+    """BKT-RESEARCH-MARKET-DATA-AUTHORITY-01: thin CLI wrapper around the
+    OFFICIAL mqk_research.data.alpaca_historical.extract_research_bars_with_provenance
     + write_research_extraction_artifacts. Produces research_bars.csv,
     research_bars_provenance.json, corporate_actions.json,
     corporate_actions_provenance.json in a deterministic run_id directory.
     The written research_bars_provenance.json is ready to pass directly as
     `bars_provenance` to run_registered_economic_walkforward_eval -- no
-    manual manifest fabrication required."""
+    manual manifest fabrication required. `asof` (BKT-RESEARCH-MARKET-DATA-
+    AUTHORITY-01-REPAIR-01 Defect 2) must already be a resolved 'YYYY-MM-DD'
+    string -- the caller (main()) resolves and prints it before this runs,
+    never leaving it to Alpaca's implicit current-day default."""
     from mqk_research.data.alpaca_historical import (
         extract_research_bars_with_provenance,
         write_research_extraction_artifacts,
@@ -703,7 +707,7 @@ def run_alpaca_research_extraction(
         raise ValueError("--symbols must be non-empty (comma-separated)")
 
     result = extract_research_bars_with_provenance(
-        symbols=symbols, start_utc=start_utc, end_utc=end_utc, timeframe=timeframe
+        symbols=symbols, start_utc=start_utc, end_utc=end_utc, timeframe=timeframe, asof=asof
     )
 
     run_id = stable_run_id(
@@ -733,6 +737,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     extract_p.add_argument("--start-utc", required=True, help="Inclusive start, timezone-aware (e.g. 2020-01-01T00:00:00Z)")
     extract_p.add_argument("--end-utc", required=True, help="Exclusive end, timezone-aware (e.g. 2024-01-01T00:00:00Z)")
     extract_p.add_argument("--timeframe", default="1Day", help="Alpaca bar timeframe (default: 1Day)")
+    extract_p.add_argument(
+        "--asof",
+        required=True,
+        help="Explicit resolved asof date, format YYYY-MM-DD (never defaulted to Alpaca's implicit current day)",
+    )
     extract_p.add_argument("--out", default="runs", help="Output root directory (default: runs/)")
 
     common = argparse.ArgumentParser(add_help=False)
@@ -761,11 +770,16 @@ def main(argv: Optional[list[str]] = None) -> None:
         return
 
     if args.cmd == "extract-alpaca-bars":
+        resolved_asof = args.asof
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", resolved_asof):
+            raise ValueError(f"--asof must be an explicit 'YYYY-MM-DD' date string, got {resolved_asof!r}")
+        print(f"resolved_asof={resolved_asof}")
         run_dir = run_alpaca_research_extraction(
             symbols_csv=args.symbols,
             start_utc=_parse_utc_ts(args.start_utc, "start_utc"),
             end_utc=_parse_utc_ts(args.end_utc, "end_utc"),
             timeframe=args.timeframe,
+            asof=resolved_asof,
             out_root=Path(args.out),
         )
         print(str(run_dir))

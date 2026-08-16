@@ -121,6 +121,32 @@ _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION: FrozenSet[str] = frozenset(_CONVENTIO
 # explicit, auditable change), not silently keep trusting the old one.
 _TRUSTED_EXTRACTOR_IDS: FrozenSet[str] = frozenset({"mqk_research.data.alpaca_historical.v1"})
 
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 (Defect 3): a caller-typed
+# extractor_id string alone was found to be an insufficiently strong
+# authority boundary -- see mqk_research.data.alpaca_historical's OFFICIAL
+# vs DIAGNOSTIC extraction split (extract_research_bars_with_provenance vs
+# extract_research_bars_with_provenance_diagnostic). Every source_attestation
+# now also declares an explicit, typed source_authority; only the official
+# authority can satisfy _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION.
+SOURCE_AUTHORITY_OFFICIAL_PROVIDER = "official_provider"
+SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC = "diagnostic_synthetic"
+
+# Per-convention expected trusted profile (Defect 3): the source_provider_id
+# and exact official API endpoints a source_attestation must declare to
+# satisfy this convention -- a hand-typed or diagnostic-transport attestation
+# claiming a fake provider id or endpoint must fail the same way a fake
+# extractor_id already does. Conventions not in these maps are accepted on
+# the pre-existing (adjustment-mode-only) checks alone.
+_CONVENTION_REQUIRED_SOURCE_PROVIDER: Dict[str, str] = {
+    PRICE_CONVENTION_ALPACA_ALL_ADJUSTED: "alpaca",
+}
+_CONVENTION_REQUIRED_ENDPOINTS: Dict[str, "tuple[str, str]"] = {
+    PRICE_CONVENTION_ALPACA_ALL_ADJUSTED: (
+        "https://data.alpaca.markets/v2/stocks/bars",
+        "https://data.alpaca.markets/v1/corporate-actions",
+    ),
+}
+
 SOURCE_ATTESTATION_SCHEMA_VERSION = "research_source_attestation_v1"
 
 # --- corporate-action policy (mirrors mqk-backtest::CorporateActionPolicy) ---
@@ -230,11 +256,23 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
     excludes `retrieval_timestamp_utc` (audit-only wall-clock metadata --
     the SAME extraction re-run at a different moment must still produce the
     same attestation identity) and any self-reported `attestation_id`
-    (never trusted -- see source_attestation_id)."""
+    (never trusted -- see source_attestation_id).
+
+    BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 (Defect 4): also
+    deliberately excludes `raw_response_content_hashes` -- per-page
+    provider-response hashes are a TRANSPORT/pagination-boundary fact, not a
+    semantic research fact. Two extractions with byte-identical semantic
+    bars/corporate-action content that merely paginated differently (e.g. a
+    different `limit`, or the provider splitting pages differently across
+    reruns) must share one semantic source_attestation_id; the raw hashes
+    remain on the attestation object itself as audit-only evidence (see
+    build_source_attestation), just outside canonical identity -- the same
+    treatment `retrieval_timestamp_utc` and `attestation_id` already get."""
     return {
         "schema_version": attestation.get("schema_version"),
         "source_provider_id": attestation.get("source_provider_id"),
         "extractor_id": attestation.get("extractor_id"),
+        "source_authority": attestation.get("source_authority"),
         "api_endpoint_bars": attestation.get("api_endpoint_bars"),
         "api_endpoint_corporate_actions": attestation.get("api_endpoint_corporate_actions"),
         "symbols": sorted({str(s).strip().upper() for s in attestation.get("symbols") or []}),
@@ -249,7 +287,6 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
         "pagination_complete_corporate_actions": attestation.get("pagination_complete_corporate_actions"),
         "corporate_action_query_coverage": attestation.get("corporate_action_query_coverage"),
         "category_b_events_found": attestation.get("category_b_events_found"),
-        "raw_response_content_hashes": attestation.get("raw_response_content_hashes"),
         "canonical_semantic_bars_hash": attestation.get("canonical_semantic_bars_hash"),
         "canonical_corporate_action_evidence_hash": attestation.get("canonical_corporate_action_evidence_hash"),
         "protocol_version": attestation.get("protocol_version"),
@@ -269,6 +306,7 @@ def build_source_attestation(
     *,
     source_provider_id: str,
     extractor_id: str,
+    source_authority: str,
     api_endpoint_bars: str,
     api_endpoint_corporate_actions: str,
     symbols: Sequence[str],
@@ -305,6 +343,7 @@ def build_source_attestation(
         "schema_version": SOURCE_ATTESTATION_SCHEMA_VERSION,
         "source_provider_id": source_provider_id,
         "extractor_id": extractor_id,
+        "source_authority": source_authority,
         "api_endpoint_bars": api_endpoint_bars,
         "api_endpoint_corporate_actions": api_endpoint_corporate_actions,
         "symbols": sorted({str(s).strip().upper() for s in symbols}),
@@ -369,6 +408,43 @@ def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str,
         raise SourceAttestationUnverifiable(
             f"Fail-closed: source_attestation.extractor_id={attestation.get('extractor_id')!r} is "
             f"not a trusted research extractor ({sorted(_TRUSTED_EXTRACTOR_IDS)!r})"
+        )
+    if attestation.get("source_authority") != SOURCE_AUTHORITY_OFFICIAL_PROVIDER:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.source_authority={attestation.get('source_authority')!r} "
+            f"is not {SOURCE_AUTHORITY_OFFICIAL_PROVIDER!r} -- a diagnostic/synthetic-authority "
+            "attestation (see mqk_research.data.alpaca_historical.extract_research_bars_with_"
+            "provenance_diagnostic) can never authorize official registered research, regardless of "
+            "whether it is otherwise internally consistent"
+        )
+    expected_provider = _CONVENTION_REQUIRED_SOURCE_PROVIDER.get(convention)
+    if expected_provider is not None and attestation.get("source_provider_id") != expected_provider:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.source_provider_id={attestation.get('source_provider_id')!r} "
+            f"does not match the provider required for price_adjustment_convention={convention!r} "
+            f"({expected_provider!r})"
+        )
+    expected_endpoints = _CONVENTION_REQUIRED_ENDPOINTS.get(convention)
+    if expected_endpoints is not None:
+        expected_bars_endpoint, expected_ca_endpoint = expected_endpoints
+        if attestation.get("api_endpoint_bars") != expected_bars_endpoint:
+            raise SourceAttestationUnverifiable(
+                f"Fail-closed: source_attestation.api_endpoint_bars={attestation.get('api_endpoint_bars')!r} "
+                f"does not match the official endpoint required for price_adjustment_convention="
+                f"{convention!r} ({expected_bars_endpoint!r})"
+            )
+        if attestation.get("api_endpoint_corporate_actions") != expected_ca_endpoint:
+            raise SourceAttestationUnverifiable(
+                "Fail-closed: source_attestation.api_endpoint_corporate_actions="
+                f"{attestation.get('api_endpoint_corporate_actions')!r} does not match the official "
+                f"endpoint required for price_adjustment_convention={convention!r} "
+                f"({expected_ca_endpoint!r})"
+            )
+    if not attestation.get("asof"):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation is missing an explicit asof -- an official extraction "
+            "must never rely on the provider's implicit current-day default (see "
+            "mqk_research.data.alpaca_historical.fetch_historical_bars's required asof parameter)"
         )
     expected_mode = _CONVENTION_REQUIRED_ADJUSTMENT_MODE.get(convention)
     if attestation.get("adjustment_mode") != expected_mode:

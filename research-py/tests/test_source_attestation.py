@@ -70,6 +70,7 @@ def _valid_attestation(bars: pd.DataFrame, evidence: Dict[str, Any], **overrides
     kwargs: Dict[str, Any] = dict(
         source_provider_id="alpaca",
         extractor_id=TRUSTED_EXTRACTOR_ID,
+        source_authority="official_provider",
         api_endpoint_bars="https://data.alpaca.markets/v2/stocks/bars",
         api_endpoint_corporate_actions="https://data.alpaca.markets/v1/corporate-actions",
         symbols=symbols,
@@ -79,7 +80,7 @@ def _valid_attestation(bars: pd.DataFrame, evidence: Dict[str, Any], **overrides
         returned_coverage_end_utc="2021-02-01T00:00:00+00:00",
         adjustment_mode="all",
         feed="iex",
-        asof=None,
+        asof="2021-02-15",
         pagination_complete_bars=True,
         pagination_complete_corporate_actions=True,
         corporate_action_query_coverage={"requested_start_utc": "2021-01-01T00:00:00+00:00"},
@@ -258,6 +259,156 @@ def test_unresolved_category_b_events_cannot_authorize_run():
     manifest = _valid_manifest(bars, source_attestation=attestation)
     with pytest.raises(SourceAttestationUnverifiable, match="REQUIRES_FAIL_CLOSED_REVIEW"):
         check_corporate_action_integrity(bars, manifest)
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 Defect 3 -- trusted source
+# profile: a fake provider id / endpoint / diagnostic authority must fail
+# the official gate exactly like a fake extractor_id already does.
+# ---------------------------------------------------------------------------
+
+
+def test_fake_source_provider_id_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(bars, evidence, source_provider_id="made-up-provider")
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="source_provider_id"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_fake_bars_endpoint_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(bars, evidence, api_endpoint_bars="https://evil.example.com/v2/stocks/bars")
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="api_endpoint_bars"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_fake_corporate_actions_endpoint_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(
+        bars, evidence, api_endpoint_corporate_actions="https://evil.example.com/v1/corporate-actions"
+    )
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="api_endpoint_corporate_actions"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_diagnostic_source_authority_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(bars, evidence, source_authority="diagnostic_synthetic")
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="source_authority"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_official_trusted_profile_passes():
+    """REQUIRED TEST 14: a fully well-formed, OFFICIAL-authority attestation
+    -- correct provider, extractor, endpoints, source_authority, explicit
+    asof, complete pagination, no unresolved review-required events, and
+    matching bars/CA hashes -- passes the registered gate."""
+    bars = _bars_df([100.0, 101.0])
+    manifest = _valid_manifest(bars)
+    require_registered_bars_provenance(manifest)
+    check_corporate_action_integrity(bars, manifest)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 Defect 2 -- explicit ASOF
+# ---------------------------------------------------------------------------
+
+
+def test_missing_asof_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(bars, evidence, asof=None)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="asof"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_changing_asof_changes_source_attestation_id():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    att_a = _valid_attestation(bars, evidence, asof="2021-02-15")
+    att_b = _valid_attestation(bars, evidence, asof="2021-06-01")
+    assert att_a["attestation_id"] != att_b["attestation_id"]
+
+
+def test_same_asof_and_semantic_data_is_deterministic():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    att_a = _valid_attestation(bars, evidence, asof="2021-02-15")
+    att_b = _valid_attestation(bars, evidence, asof="2021-02-15")
+    assert att_a["attestation_id"] == att_b["attestation_id"]
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 Defect 4 -- semantic
+# identity excludes transport/pagination artifacts (page hashes)
+# ---------------------------------------------------------------------------
+
+
+def test_different_page_segmentation_preserves_semantic_source_identity():
+    """REQUIRED TEST 15: same semantic bars + same CA evidence + same
+    request contract but different page boundaries => same semantic
+    source_attestation_id."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    att_a = _valid_attestation(
+        bars, evidence, raw_response_content_hashes={"bars_pages": ["p1"], "corporate_action_pages": ["c1"]}
+    )
+    att_b = _valid_attestation(
+        bars,
+        evidence,
+        raw_response_content_hashes={"bars_pages": ["p1a", "p1b"], "corporate_action_pages": ["c1a", "c1b", "c1c"]},
+    )
+    assert att_a["attestation_id"] == att_b["attestation_id"]
+
+
+def test_raw_response_hashes_remain_audit_visible_despite_exclusion_from_identity():
+    """REQUIRED TEST 16: page/raw-response hashes stay on the attestation
+    object (audit evidence) even though they do not participate in
+    source_attestation_id."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(
+        bars, evidence, raw_response_content_hashes={"bars_pages": ["p1", "p2"], "corporate_action_pages": ["c1"]}
+    )
+    assert attestation["raw_response_content_hashes"] == {"bars_pages": ["p1", "p2"], "corporate_action_pages": ["c1"]}
+
+
+def test_different_semantic_bars_hash_changes_source_attestation_id():
+    """REQUIRED TEST 17: different semantic bars still changes identity."""
+    bars_a = _bars_df([100.0, 101.0])
+    bars_b = _bars_df([200.0, 201.0])
+    evidence = _clean_ca_evidence(bars_a)
+    att_a = _valid_attestation(bars_a, evidence)
+    att_b = _valid_attestation(bars_b, evidence)
+    assert att_a["attestation_id"] != att_b["attestation_id"]
+
+
+def test_different_ca_evidence_hash_changes_source_attestation_id():
+    """REQUIRED TEST 18: different semantic CA evidence still changes
+    identity."""
+    bars = _bars_df([100.0, 101.0])
+    evidence_a = _clean_ca_evidence(bars)
+    evidence_b = build_corporate_action_evidence(
+        source_provider_id="alpaca",
+        covered_symbol_universe=["AAA"],
+        coverage_start_utc="2021-01-01T00:00:00+00:00",
+        coverage_end_utc="2021-02-01T00:00:00+00:00",
+        corporate_action_entries=[
+            {"symbol": "AAA", "action_type": "cash_dividend", "effective_start_ts": "2021-01-10", "effective_end_ts": "2021-01-10"}
+        ],
+    )
+    att_a = _valid_attestation(bars, evidence_a)
+    att_b = _valid_attestation(bars, evidence_b)
+    assert att_a["attestation_id"] != att_b["attestation_id"]
 
 
 # ---------------------------------------------------------------------------
