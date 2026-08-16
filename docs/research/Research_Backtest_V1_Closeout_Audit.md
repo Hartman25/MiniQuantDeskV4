@@ -899,6 +899,84 @@ mission's explicit instruction not to implement them.
 
 ---
 
+## 1F. BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-02 ADDENDUM (2026-08-15)
+
+Independent review of Section 1E found one further deterministic defect in
+REPAIR-01's Defect 1 fix. Mission `BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-
+REPAIR-02` closed it against the same commit chain. Baseline for this
+repair: local `main`, two commits ahead of `origin/main` HEAD
+`ec5a3fcd8ac3232fa5f057ae56a939a78971f083` (Section 1E's own two commits).
+
+**Verdict: `COMPLETE`.**
+
+**Root defect.** REPAIR-01's CA discovery process-date ceiling was
+`max(asof, research_end)` — coupling the corporate-action discovery snapshot
+cutoff to the bars `asof` parameter. Alpaca's official documentation defines
+`asof` as the entity/symbol-name-change resolution date sent to
+`/v2/stocks/bars` — it says nothing about, and does not bound,
+`/v1/corporate-actions` `process_date` coverage. Because Alpaca documents no
+bound on how far `process_date` can lag `ex_date` (Section 1E), a real event
+with `process_date` after BOTH `research_end` and `asof` — e.g. `research_end
+= asof = 2020-06-30`, event `ex_date = 2020-06-28` (inside the research
+interval), `process_date = 2020-07-02` — would have been silently missed:
+`max(asof, research_end) = 2020-06-30 < 2020-07-02`, so REPAIR-01's CA query
+would never have reached that `process_date` at all.
+
+**Fix — three separately-named concepts.** `bars_asof` (entity/symbol-mapping
+identity, sent verbatim to `/v2/stocks/bars`, unchanged) and the CA discovery
+snapshot cutoff are now independent: `_resolve_ca_discovery_cutoff_utc`
+resolves the CA discovery cutoff ONCE, before either provider call, from an
+explicit `retrieval_timestamp_utc` (or real wall-clock UTC "now" for a live
+extraction) — never from `asof` or `research_end`.
+`_ca_discovery_process_date_bounds` now takes this resolved cutoff directly;
+the CA discovery query window is `[CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC
+("1900-01-01"), ca_discovery_cutoff_utc]`. The discovery protocol constant
+was bumped `CA_DISCOVERY_PROTOCOL_V1` → `CA_DISCOVERY_PROTOCOL_V2`
+(`process_date_full_history_through_retrieval_snapshot_v2`), and
+`source_attestation.corporate_action_query_coverage`'s fields were renamed
+`process_date_query_start_utc`/`process_date_query_end_utc` →
+`ca_discovery_start_utc`/`ca_discovery_end_utc` to match, so the recorded
+contract cannot be misread as bars-asof-derived.
+
+**Revision-sensitive provenance (by design, unchanged mechanism).**
+Corporate-action evidence is a provider snapshot, not timeless truth: the
+same bars request/asof/research window re-extracted at a LATER CA discovery
+cutoff can legitimately surface a provider-backfilled corporate action.
+`corporate_action_evidence`/`corporate_action_evidence_id` already changed
+identity when entries content changed (Section 1D's Defect 2 contract,
+unmodified by this repair) — this repair does not add new identity-plumbing
+for that; it only fixes what the discovery query *finds*. Re-extracting with
+the same pinned `retrieval_timestamp_utc` and identical underlying provider
+content remains deterministic (same `source_attestation_id`); a later
+snapshot that finds an additional event changes
+`corporate_action_evidence_id` → `source_attestation_id` →
+`provenance_identity_fragment`, propagating into trial identity as intended.
+
+**Files changed:** `research-py/src/mqk_research/data/alpaca_historical.py`
+(`_resolve_ca_discovery_cutoff_utc`, `_ca_discovery_process_date_bounds`
+signature change, `CA_DISCOVERY_PROTOCOL_V2`, renamed
+`corporate_action_query_coverage` fields; `bars_provenance.py` and `cli.py`
+required no changes — the coverage dict was already a free-form field and
+`retrieval_timestamp_utc` was already an existing parameter on both entry
+points), `research-py/tests/test_alpaca_historical.py` (RED/GREEN proof for
+the mission's exact scenario; cutoff-independent-of-asof; cutoff-change
+represented in the source contract; same-snapshot determinism; later-snapshot
+revision sensitivity propagating to `corporate_action_evidence_id`/
+`source_attestation_id`/`provenance_identity_fragment`).
+
+**Tests.** `test_alpaca_historical.py`: 62 passed (was 55; +1 test replaced,
++8 new). `test_source_attestation.py` + `test_bars_provenance.py` +
+`test_economic_walkforward.py` + `test_multiple_testing_judge.py`: 164
+passed. Full `research-py` suite: **1324 passed, 7 skipped, 12 subtests
+passed** (zero regressions; skip count unchanged from Section 1E).
+
+**Remaining blocker:** none for this repair's scope. Category-B
+corporate-action handling remains an explicit future patch, unchanged from
+Sections 1D/1E. P7/P9/P10 remain out of scope, per this repair mission's
+explicit instruction not to implement them.
+
+---
+
 ## 2. Baseline
 
 ```
