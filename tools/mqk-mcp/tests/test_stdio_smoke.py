@@ -47,7 +47,7 @@ def test_stdio_handshake_lists_and_calls_readonly_tools(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "README.md").write_text("MiniQuantDesk MCP smoke proof\n", encoding="utf-8")
-    (repo / ".env.local").write_text("SHOULD_NOT_LEAK=secret\n", encoding="utf-8")
+    (repo / ".env.local").write_text("SHOULD_NOT_LEAK=secret-value-123\n", encoding="utf-8")
 
     _git(repo, "init")
     _git(repo, "add", "README.md")
@@ -94,7 +94,7 @@ def test_stdio_handshake_lists_and_calls_readonly_tools(tmp_path: Path) -> None:
             denied_text = _text(denied)
             assert "environment/secret files is denied" in denied_text
             assert "SHOULD_NOT_LEAK" not in denied_text
-            assert "secret" not in denied_text
+            assert "secret-value-123" not in denied_text
 
             snapshot = await client.call_tool("mqk_repo_snapshot", {})
             assert not snapshot.is_error
