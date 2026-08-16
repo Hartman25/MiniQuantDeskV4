@@ -4,17 +4,16 @@ use sha2::{Digest, Sha256};
 
 // ============================================================================
 // P7C-REPAIR-01 (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-01)
+// P7C-REPAIR-02 (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-02)
 // ============================================================================
 //
-// DEFECT FIXED: the original P7C (`PromotionOosEvidence`, now removed) was a
-// public, all-`pub`-field, `Deserialize`-able struct populated ENTIRELY by
-// the caller. `check_oos_evidence` verified that its ten fields equalled
-// expected strings/booleans, but it never authenticated those claims
-// against real Research artifacts -- a caller could manually type
-// `economic_protocol_id: "economic_walk_forward_v1".to_string()` (etc.) and
-// satisfy the gate without a single real artifact existing anywhere. The
-// crate's own original positive test demonstrated exactly this weakness by
-// hand-constructing a "valid" evidence struct.
+// DEFECT FIXED (REPAIR-01): the original P7C (`PromotionOosEvidence`, now
+// removed) was a public, all-`pub`-field, `Deserialize`-able struct
+// populated ENTIRELY by the caller. `check_oos_evidence` verified that its
+// ten fields equalled expected strings/booleans, but it never authenticated
+// those claims against real Research artifacts -- a caller could manually
+// type `economic_protocol_id: "economic_walk_forward_v1".to_string()` (etc.)
+// and satisfy the gate without a single real artifact existing anywhere.
 //
 // FIX: [`VerifiedPromotionOosEvidence`] has PRIVATE fields, derives
 // `Serialize` (for audit/report output) but deliberately NOT `Deserialize`
@@ -26,10 +25,26 @@ use sha2::{Digest, Sha256};
 // REAL `economic_walk_forward.json` / multiple-testing-judge JSON / daily
 // -returns CSV bytes, hash-binds them to each other, and extracts every
 // fact from that verified content -- never from caller-supplied claims.
-// [`VerifiedPromotionOosEvidence::valid_for_testing`] is a plain, clearly
-// named test-only escape hatch (mirrors [`crate::ArtifactLock::new_for_testing`]'s
-// existing convention exactly) for tests that need a passing candidate and
-// are not themselves testing the OOS-evidence gate.
+//
+// DEFECT FIXED (REPAIR-02, mission Section 5A-5G): REPAIR-01's hash-binding
+// proved INTEGRITY (the three artifacts are mutually consistent) but never
+// AUTHORITY (that the bundle corresponds to any REAL registered Research
+// trial/attempt/judge run) -- a caller could still fabricate all three
+// artifacts, keep every hash internally consistent, and pass. Fixed by
+// requiring a [`ResearchAttemptAuthority`] parameter: a durable-registry
+// excerpt (in production, built by the caller from `ResearchResultStore`'s
+// `research_trials`/`research_attempts` tables -- see that struct's own
+// docs) that the supplied artifacts must match, including the FULL judge
+// artifact's own SHA-256 (catching a mutated DSR/PBO numeric OUTPUT, not
+// merely mutated inputs -- input-hash binding alone cannot). Also closes:
+// the missing `discrete_share_economic_path_v1` requirement (an
+// evidence-only P7B artifact, lacking real discrete economics, could
+// otherwise still satisfy this gate) and incomplete judge structural
+// validation (schema_version/protocol_id/comparison_scope were never
+// checked). REPAIR-02 also removes the `valid_for_testing` production
+// bypass entirely (mission Section 5A) -- every test now constructs
+// evidence through this real verifier with valid synthetic artifact bytes
+// and a matching authority record (see `tests/common/mod.rs`).
 
 /// Required `economic_protocol_id` value -- see
 /// `mqk_research.ml.economic_walkforward.PROTOCOL_ID`. A candidate whose
@@ -70,6 +85,65 @@ pub const REQUIRED_JUDGE_STATUS: &str = "evaluated";
 
 /// Required PBO `status` value -- see the judge's own `pbo_result.status`.
 pub const REQUIRED_PBO_STATUS: &str = "evaluated";
+
+/// Required `discrete_economics_protocol_id` value, present on EVERY entry
+/// of the economic artifact's `folds[]` array whenever discrete shares
+/// genuinely drove that fold's economics -- see
+/// `mqk_research.ml.weight_to_share.DISCRETE_ECONOMICS_PROTOCOL_ID_V1`.
+/// P7C-REPAIR-02 (mission Section 5B, defect C): REQUIRED in addition to
+/// `weight_to_share_protocol_id` -- an evidence-only P7B artifact (the
+/// translation exists but discrete shares never actually drove the P&L)
+/// carries `weight_to_share_protocol_id` but NOT this marker, and must not
+/// satisfy promotion.
+pub const REQUIRED_DISCRETE_ECONOMICS_PROTOCOL_ID: &str = "discrete_share_economic_path_v1";
+
+/// Required judge artifact `schema_version` -- see
+/// `mqk_research.ml.multiple_testing_judge.SCHEMA_VERSION`.
+pub const REQUIRED_JUDGE_SCHEMA_VERSION: &str = "multiple_testing_judge_v1";
+
+/// Required judge artifact `protocol.protocol_id` -- see
+/// `mqk_research.ml.multiple_testing_judge.PROTOCOL_ID`.
+pub const REQUIRED_JUDGE_PROTOCOL_ID: &str = "research_multiple_testing_judge_v1";
+
+/// P7C-REPAIR-02 (mission Section 5C/5D): the durable Research-registry
+/// authority a promotion evidence bundle must be anchored to. Internal
+/// hash-consistency between the three supplied artifacts (REPAIR-01) proves
+/// only that they are mutually consistent -- never that they correspond to
+/// any REAL registered Research trial/attempt/judge run. A caller could
+/// otherwise fabricate all three artifacts, keep every internal hash
+/// consistent, and still pass.
+///
+/// In production this is built by the CALLER from the real Research
+/// registry (`mqk_research.exp_distributed.storage.ResearchResultStore`'s
+/// `research_trials`/`research_attempts` tables -- the only place a
+/// genuine trial_id/economic_eval_id pairing and a genuine judge-artifact
+/// hash can come from, since the judge is itself built by querying that
+/// same registry, see `multiple_testing_judge.build_multiple_testing_judge`).
+/// This crate deliberately has NO database dependency of its own (adding
+/// one would be a new cross-language, cross-database integration this
+/// mission does not authorize -- see CLAUDE.md Section 30 "smallest
+/// correct implementation" / "reuses existing seams"); it only verifies
+/// that the SUPPLIED artifact bytes match what this authority record
+/// durably claims.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResearchAttemptAuthority {
+    /// Must equal the `trial_id` being verified.
+    pub trial_id: String,
+    /// The durably-registered `research_attempts.result_id` for the
+    /// SELECTED SUCCESSFUL attempt of `trial_id` -- must equal the economic
+    /// artifact's own `ids.economic_eval_id`.
+    pub economic_eval_id: String,
+    /// SHA-256 (lowercase hex) of the FULL judge artifact's CANONICAL JSON
+    /// form (parse -> re-serialize with sorted keys -> hash -- see
+    /// `verify_promotion_oos_evidence`'s own hashing, which this must
+    /// match exactly), as durably recorded when the judge ran. This is
+    /// what catches a mutated DSR/PBO numeric OUTPUT (mission Section
+    /// 5D/5F) -- REPAIR-01's input-hash binding only proves the judge's
+    /// own recorded INPUT hashes match, never that the judge's OWN output
+    /// values are the ones a durable record actually produced. Canonical
+    /// (not raw-bytes) so pure field reordering does not change the hash.
+    pub judge_artifact_sha256: String,
+}
 
 /// Non-forgeable, structurally VERIFIED OOS evidence for one promotion
 /// candidate. Every field was extracted from, and cross-checked against,
@@ -112,21 +186,6 @@ impl VerifiedPromotionOosEvidence {
 
     pub fn probability_of_backtest_overfitting(&self) -> f64 {
         self.probability_of_backtest_overfitting
-    }
-
-    /// **Test-only bypass** -- constructs a structurally-passing evidence
-    /// bundle WITHOUT running the verifier, for tests that need a passing
-    /// candidate and are not themselves testing the OOS-evidence gate.
-    /// Mirrors [`crate::ArtifactLock::new_for_testing`]'s naming convention
-    /// exactly. Do **not** use in production code.
-    pub fn valid_for_testing(trial_id: impl Into<String>) -> Self {
-        Self {
-            trial_id: trial_id.into(),
-            economic_eval_id: "test_synthetic_economic_eval_id".to_string(),
-            folds_used: 3,
-            deflated_sharpe_ratio: 0.9,
-            probability_of_backtest_overfitting: 0.1,
-        }
     }
 }
 
@@ -171,14 +230,25 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
         .unwrap_or_default()
 }
 
-/// Fail-closed structural verification + hash-binding + statistical-
-/// threshold extraction (P7C-REPAIR-01 CORE RULE). Parses `economic_walk_
-/// forward_json` and `judge_json` (the RAW text content of those real
-/// Research artifacts) and `economic_daily_returns_csv` (the raw bytes of
-/// the daily-returns CSV the economic artifact claims to have produced),
-/// and returns `Ok(VerifiedPromotionOosEvidence)` ONLY when every one of
-/// the following holds -- otherwise `Err` with one human-readable reason
-/// per failing check (stable order, never a single opaque failure):
+/// Fail-closed structural verification + hash-binding + AUTHORITY-anchoring
+/// + statistical-threshold extraction (P7C-REPAIR-01/-02 CORE RULE). Parses
+/// `economic_walk_forward_json` and `judge_json` (the RAW text content of
+/// those real Research artifacts) and `economic_daily_returns_csv` (the raw
+/// bytes of the daily-returns CSV the economic artifact claims to have
+/// produced), and returns `Ok(VerifiedPromotionOosEvidence)` ONLY when
+/// every one of the following holds -- otherwise `Err` with one
+/// human-readable reason per failing check (stable order, never a single
+/// opaque failure):
+///
+/// AUTHORITY (P7C-REPAIR-02, checked FIRST -- mission Section 5C/5D):
+///   - `authority.trial_id` == the supplied `trial_id`
+///   - `authority.economic_eval_id` == the economic artifact's own
+///     `ids.economic_eval_id`
+///   - `authority.judge_artifact_sha256` == SHA-256 of the FULL supplied
+///     `judge_json` bytes -- this is what a caller CANNOT satisfy merely by
+///     keeping the three artifacts internally self-consistent; it requires
+///     a durable record produced when the judge actually ran (see
+///     [`ResearchAttemptAuthority`])
 ///
 /// STRUCTURAL (economic artifact):
 ///   - `protocol.protocol_id` == [`REQUIRED_ECONOMIC_PROTOCOL_ID`]
@@ -186,6 +256,11 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
 ///   - `holdout.status` == [`REQUIRED_HOLDOUT_STATUS`]
 ///   - `execution_pricing.pricing_model_id` == [`REQUIRED_EXECUTION_PRICING_PROTOCOL_ID`]
 ///   - `weight_to_share.weight_to_share_protocol_id` == `Some(`[`REQUIRED_WEIGHT_TO_SHARE_PROTOCOL_ID`]`)`
+///   - `folds` is a non-empty array and EVERY entry's
+///     `discrete_economics_protocol_id` == [`REQUIRED_DISCRETE_ECONOMICS_PROTOCOL_ID`]
+///     (P7C-REPAIR-02, mission Section 5B -- an evidence-only P7B artifact
+///     that never actually let discrete shares drive the P&L carries the
+///     weight_to_share marker above but not this one)
 ///   - `ids.economic_eval_id` is non-empty
 ///
 /// HASH BINDING:
@@ -201,6 +276,12 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
 ///     pass.
 ///
 /// STRUCTURAL (judge artifact) + CANDIDATE/TRIAL BINDING:
+///   - `schema_version` == [`REQUIRED_JUDGE_SCHEMA_VERSION`] (P7C-REPAIR-02,
+///     mission Section 5G)
+///   - `protocol.protocol_id` == [`REQUIRED_JUDGE_PROTOCOL_ID`] (P7C-REPAIR-02)
+///   - `comparison_scope` is structurally present (a non-null, non-empty
+///     JSON object) -- an unresolved/absent comparison population cannot
+///     back a promotion decision (P7C-REPAIR-02)
 ///   - `judge_status` == [`REQUIRED_JUDGE_STATUS`]
 ///   - `holdout.status` == [`REQUIRED_HOLDOUT_STATUS`]
 ///   - `trial_id` is present in `included_trial_ids` (never merely absent
@@ -210,11 +291,15 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
 ///     and a finite `deflated_sharpe_ratio`
 ///   - `pbo_result.status` == [`REQUIRED_PBO_STATUS`] with a finite `pbo`
 ///
-/// Performs ZERO holdout scoring and ZERO filesystem/network I/O -- pure
-/// parsing of caller-supplied in-memory content. The caller is responsible
-/// for reading these three byte/string buffers from disk exactly once each
+/// Performs ZERO holdout scoring and ZERO filesystem/network/database I/O
+/// -- pure parsing of caller-supplied in-memory content (including
+/// `authority`, which the caller is responsible for having genuinely
+/// derived from the durable Research registry -- see
+/// [`ResearchAttemptAuthority`]'s own docs). The caller is responsible for
+/// reading these three byte/string buffers from disk exactly once each
 /// (this function never re-reads or re-resolves a path).
 pub fn verify_promotion_oos_evidence(
+    authority: &ResearchAttemptAuthority,
     trial_id: &str,
     economic_walk_forward_json: &str,
     economic_daily_returns_csv: &[u8],
@@ -224,6 +309,13 @@ pub fn verify_promotion_oos_evidence(
     let trial_id = trial_id.trim();
     if trial_id.is_empty() {
         errs.push("OOS evidence rejected: trial_id is empty".to_string());
+    }
+    if authority.trial_id != trial_id {
+        errs.push(format!(
+            "OOS evidence rejected: authority.trial_id {:?} does not match supplied trial_id \
+             {trial_id:?} -- this authority record does not anchor this candidate",
+            authority.trial_id
+        ));
     }
 
     let econ: Value = match serde_json::from_str(economic_walk_forward_json) {
@@ -244,6 +336,29 @@ pub fn verify_promotion_oos_evidence(
             return Err(errs);
         }
     };
+
+    // Full judge artifact authority hash (mission Section 5D/5F): hashed
+    // from the CANONICAL re-serialization of the parsed judge Value, not
+    // the raw input bytes -- this crate's serde_json (no "preserve_order"
+    // feature anywhere in the workspace) represents JSON objects as
+    // BTreeMap internally, so re-serializing always sorts keys
+    // (recursively). This makes the hash invariant to pure field
+    // reordering (REQUIRED TEST 34/mission 5K item 33) while remaining
+    // fully sensitive to any genuine content change -- including a
+    // mutated DSR/PBO numeric OUTPUT (mission Section 5D/5F), which
+    // REPAIR-01's input-hash binding alone could never catch.
+    let canonical_judge_bytes = serde_json::to_vec(&judge)
+        .expect("a successfully-parsed serde_json::Value always re-serializes");
+    let actual_judge_sha256 = sha256_hex(&canonical_judge_bytes);
+    if authority.judge_artifact_sha256 != actual_judge_sha256 {
+        errs.push(format!(
+            "OOS evidence rejected: authority.judge_artifact_sha256 {:?} does not match the \
+             actual supplied judge artifact's canonical SHA-256 {actual_judge_sha256:?} -- this \
+             judge artifact (including its DSR/PBO numeric output) is not the one durably \
+             registered for this candidate",
+            authority.judge_artifact_sha256
+        ));
+    }
 
     // ---- economic_walk_forward.json structural checks ----
     let economic_protocol_id = get_str(&econ, &["protocol", "protocol_id"]).unwrap_or_default();
@@ -296,6 +411,33 @@ pub fn verify_promotion_oos_evidence(
         ));
     }
 
+    // P7C-REPAIR-02 (mission Section 5B, defect C): require the DISCRETE
+    // economics marker on every fold, not merely the weight_to_share
+    // TRANSLATION marker checked above -- proves discrete shares actually
+    // drove the economics, not merely that the translation exists.
+    let folds = econ.get("folds").and_then(Value::as_array).cloned().unwrap_or_default();
+    if folds.is_empty() {
+        errs.push(
+            "OOS evidence rejected: economic artifact has no folds[] -- no discrete economics \
+             evidence to check"
+                .to_string(),
+        );
+    } else {
+        for (i, fold) in folds.iter().enumerate() {
+            let marker = fold
+                .get("discrete_economics_protocol_id")
+                .and_then(Value::as_str);
+            if marker != Some(REQUIRED_DISCRETE_ECONOMICS_PROTOCOL_ID) {
+                errs.push(format!(
+                    "OOS evidence rejected: folds[{i}].discrete_economics_protocol_id {marker:?} \
+                     != required Some({REQUIRED_DISCRETE_ECONOMICS_PROTOCOL_ID:?}) -- an \
+                     evidence-only weight_to_share translation is not sufficient; discrete \
+                     shares must have actually driven this fold's economics"
+                ));
+            }
+        }
+    }
+
     let economic_eval_id = get_str(&econ, &["ids", "economic_eval_id"])
         .unwrap_or_default()
         .to_string();
@@ -305,6 +447,13 @@ pub fn verify_promotion_oos_evidence(
              evidence bundle against a specific economic_walk_forward.json artifact"
                 .to_string(),
         );
+    } else if authority.economic_eval_id != economic_eval_id {
+        errs.push(format!(
+            "OOS evidence rejected: authority.economic_eval_id {:?} does not match the economic \
+             artifact's own ids.economic_eval_id {economic_eval_id:?} -- this economic artifact \
+             is not the one durably registered for this candidate's selected successful attempt",
+            authority.economic_eval_id
+        ));
     }
 
     // ---- hash binding #1: economic artifact <-> actual daily-returns bytes ----
@@ -322,6 +471,33 @@ pub fn verify_promotion_oos_evidence(
     let actual_economic_json_sha256 = sha256_hex(economic_walk_forward_json.as_bytes());
 
     // ---- judge.json structural checks ----
+    // P7C-REPAIR-02 (mission Section 5G): reject an unknown judge
+    // schema/protocol outright -- REPAIR-01 never checked these, so a
+    // caller supplying an arbitrary JSON shape (as long as it happened to
+    // carry the specific fields REPAIR-01 read) could satisfy the gate.
+    let judge_schema_version = get_str(&judge, &["schema_version"]).unwrap_or_default();
+    if judge_schema_version != REQUIRED_JUDGE_SCHEMA_VERSION {
+        errs.push(format!(
+            "OOS evidence rejected: judge schema_version {judge_schema_version:?} != required \
+             {REQUIRED_JUDGE_SCHEMA_VERSION:?} -- unknown/unsupported judge artifact shape"
+        ));
+    }
+    let judge_protocol_id = get_str(&judge, &["protocol", "protocol_id"]).unwrap_or_default();
+    if judge_protocol_id != REQUIRED_JUDGE_PROTOCOL_ID {
+        errs.push(format!(
+            "OOS evidence rejected: judge protocol.protocol_id {judge_protocol_id:?} != required \
+             {REQUIRED_JUDGE_PROTOCOL_ID:?} -- unknown/unsupported judge methodology"
+        ));
+    }
+    match judge.get("comparison_scope") {
+        Some(Value::Object(map)) if !map.is_empty() => {}
+        other => errs.push(format!(
+            "OOS evidence rejected: judge comparison_scope is missing, null, or an empty/\
+             malformed object ({other:?}) -- no valid comparison population was resolved for \
+             this judge run"
+        )),
+    }
+
     let judge_status = get_str(&judge, &["judge_status"]).unwrap_or_default();
     if judge_status != REQUIRED_JUDGE_STATUS {
         errs.push(format!(

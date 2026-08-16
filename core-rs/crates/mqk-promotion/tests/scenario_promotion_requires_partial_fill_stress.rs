@@ -8,6 +8,8 @@
 //! - Profit factor is computed correctly from partial fills.
 //! - No phantom PnL is generated for the uncancelled portion of a partial-fill.
 
+mod common;
+
 use mqk_backtest::{
     derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
 };
@@ -26,8 +28,7 @@ fn bf(inner: Fill) -> BacktestFill {
     }
 }
 use mqk_promotion::{
-    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, VerifiedPromotionOosEvidence,
-    StressSuiteResult,
+    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -98,7 +99,7 @@ fn stress_suite_not_run_blocks_promotion() {
         report: good_report(),
         stress_suite: None,  // not run
         artifact_lock: None, // B6: not locked; test expects failure
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("stress_not_run_trial")), // P7C: isolate stress gate
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_not_run_trial")), // P7C: isolate stress gate
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -127,7 +128,7 @@ fn zero_scenarios_run_is_invalid_stress_suite() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(0)), // 0 scenarios — invalid
         artifact_lock: None,                            // B6: not locked; test expects failure
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("zero_scenarios_trial")), // P7C: isolate stress gate
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("zero_scenarios_trial")), // P7C: isolate stress gate
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -164,7 +165,7 @@ fn stress_suite_failed_scenarios_block_promotion() {
         report: good_report(),
         stress_suite: Some(suite),
         artifact_lock: None, // B6: not locked; test expects failure
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("stress_failed_trial")), // P7C: isolate stress gate
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_failed_trial")), // P7C: isolate stress gate
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -202,7 +203,7 @@ fn stress_suite_passed_with_good_metrics_allows_promotion() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(3)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("stress_passed_trial")), // P7C
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_passed_trial")), // P7C
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);

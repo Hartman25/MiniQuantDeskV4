@@ -12,13 +12,15 @@
 //! - Malformed manifest JSON is rejected (`ManifestParse`).
 //! - A partial artifact (no audit log events) blocks promotion.
 
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mqk_audit::AuditWriter;
 use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 use mqk_promotion::{
     evaluate_promotion, lock_artifact_from_str, ArtifactLock, LockError, PromotionConfig,
-    PromotionInput, VerifiedPromotionOosEvidence, StressSuiteResult,
+    PromotionInput, StressSuiteResult,
 };
 use uuid::Uuid;
 
@@ -128,7 +130,7 @@ fn no_artifact_lock_blocks_promotion() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(1)),
         artifact_lock: None, // ← B6 gate fires here
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("no_lock_trial")), // P7C: isolate B6 gate
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("no_lock_trial")), // P7C: isolate B6 gate
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -165,7 +167,7 @@ fn valid_lock_admits_promotion() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(1)),
         artifact_lock: Some(lock),
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("valid_lock_trial")), // P7C
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("valid_lock_trial")), // P7C
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -373,7 +375,7 @@ fn new_for_testing_is_accepted_by_evaluator() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(1)),
         artifact_lock: Some(lock),
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("new_for_testing_lock_trial")), // P7C
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("new_for_testing_lock_trial")), // P7C
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);

@@ -7,6 +7,8 @@
 //! - An unprofitable backtest report fails promotion with correct reason codes.
 //! - Metrics computed from BacktestReport are consistent with evaluator output.
 
+mod common;
+
 use mqk_backtest::{
     derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
 };
@@ -24,10 +26,7 @@ fn bf(inner: Fill) -> BacktestFill {
         inner,
     }
 }
-use mqk_promotion::{
-    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, VerifiedPromotionOosEvidence,
-    StressSuiteResult,
-};
+use mqk_promotion::{evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult};
 
 /// Build a BacktestReport with deterministic real provenance but a synthetic equity curve.
 ///
@@ -138,7 +137,7 @@ fn profitable_backtest_passes_promotion() {
         report,
         stress_suite: Some(StressSuiteResult::pass(1)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("profitable_backtest_trial")), // P7C
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("profitable_backtest_trial")), // P7C
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -186,7 +185,7 @@ fn unprofitable_backtest_fails_promotion() {
         report,
         stress_suite: None,
         artifact_lock: None, // B6: not locked; test expects failure anyway
-        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("unprofitable_backtest_trial")), // P7C: isolate metrics failure
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("unprofitable_backtest_trial")), // P7C: isolate metrics failure
     };
 
     let decision = evaluate_promotion(&config, &input);

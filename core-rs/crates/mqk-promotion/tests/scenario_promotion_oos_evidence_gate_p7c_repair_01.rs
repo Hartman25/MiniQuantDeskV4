@@ -5,11 +5,12 @@
 //! repair mission's REQUIRED tests (Section 6K, 35 items, referenced by
 //! number) plus the Section 7 acceptance-boundary load-bearing proofs.
 
-use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 use mqk_promotion::{
     evaluate_promotion, pick_winner, select_best, verify_promotion_oos_evidence, ArtifactLock,
-    Candidate, PromotionConfig, PromotionInput, StressSuiteResult, VerifiedPromotionOosEvidence,
+    Candidate, PromotionConfig, PromotionInput, ResearchAttemptAuthority, StressSuiteResult,
+    VerifiedPromotionOosEvidence,
 };
+use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -23,40 +24,64 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Matches `verify_promotion_oos_evidence`'s own canonical judge-artifact
+/// hashing exactly -- see that function's doc comment.
+fn canonical_json_sha256(json_str: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(json_str).expect("valid JSON fixture");
+    sha256_hex(&serde_json::to_vec(&value).expect("Value always re-serializes"))
+}
+
 struct Fixture {
     trial_id: String,
     economic_json: String,
     daily_csv: Vec<u8>,
     judge_json: String,
+    /// P7C-REPAIR-02: the durable authority record this fixture's artifacts
+    /// are anchored to, built from the ORIGINAL (pre-mutation) content --
+    /// a negative-control test that mutates `economic_json`/`judge_json`
+    /// after construction deliberately leaves `authority` unchanged, so the
+    /// mutated bundle ALSO fails the new authority checks (in addition to
+    /// whichever specific structural check that test is targeting) --
+    /// every existing assertion here uses `reasons_contain` (presence, not
+    /// exclusivity), so this is compatible with every pre-existing test.
+    authority: ResearchAttemptAuthority,
 }
 
-/// A fully self-consistent, structurally valid evidence bundle for
-/// `trial_id`: hashes genuinely match, every required field is present and
-/// correct. This is the ONLY shape `verify_promotion_oos_evidence` accepts.
+/// A fully self-consistent, structurally valid, AUTHORITY-anchored evidence
+/// bundle for `trial_id`: hashes genuinely match, every required field is
+/// present and correct, and the authority record matches. This is the ONLY
+/// shape `verify_promotion_oos_evidence` accepts.
 fn valid_fixture(trial_id: &str) -> Fixture {
     let daily_csv = b"date,net_daily_return\n2021-01-01,0.0010\n2021-01-02,0.0021\n".to_vec();
     let daily_sha = sha256_hex(&daily_csv);
     let economic_eval_id = format!("econ_eval_{trial_id}");
 
     let economic_json = format!(
-        r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}}}}"#
+        r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}},"folds":[{{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}}]}}"#
     );
     let economic_sha = sha256_hex(economic_json.as_bytes());
 
     let judge_json = format!(
-        r#"{{"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":0.85}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
+        r#"{{"schema_version":"multiple_testing_judge_v1","protocol":{{"protocol_id":"research_multiple_testing_judge_v1"}},"comparison_scope":{{"experiment_id":"exp_{trial_id}"}},"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":0.85}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
     );
+
+    let authority = ResearchAttemptAuthority {
+        trial_id: trial_id.to_string(),
+        economic_eval_id: economic_eval_id.clone(),
+        judge_artifact_sha256: canonical_json_sha256(&judge_json),
+    };
 
     Fixture {
         trial_id: trial_id.to_string(),
         economic_json,
         daily_csv,
         judge_json,
+        authority,
     }
 }
 
 fn verify(f: &Fixture) -> Result<VerifiedPromotionOosEvidence, Vec<String>> {
-    verify_promotion_oos_evidence(&f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
+    verify_promotion_oos_evidence(&f.authority, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
 }
 
 fn reasons_contain(errs: &[String], needle: &str) -> bool {
@@ -176,9 +201,14 @@ fn judge_artifact_for_wrong_trial_fails() {
     let f = valid_fixture("real_trial");
     // Ask the verifier about a DIFFERENT trial_id than the one the fixture
     // actually documents.
-    let errs =
-        verify_promotion_oos_evidence("some_other_trial", &f.economic_json, &f.daily_csv, &f.judge_json)
-            .unwrap_err();
+    let errs = verify_promotion_oos_evidence(
+        &f.authority,
+        "some_other_trial",
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .unwrap_err();
     assert!(reasons_contain(&errs, "judged comparison scope"));
 }
 
@@ -315,6 +345,175 @@ fn diagnostic_continuous_weight_only_p7b_fails() {
 }
 
 // ---------------------------------------------------------------------------
+// P7C-REPAIR-02 REQUIRED TESTS (mission Section 5B) — the DISCRETE
+// economics marker is required in ADDITION to weight_to_share_protocol_id
+// -- an evidence-only P7B artifact (translation exists, discrete shares
+// never actually drove the P&L) carries the marker checked above but not
+// this one.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_discrete_economics_marker_fails() {
+    let mut f = valid_fixture("no_discrete_marker_trial");
+    f.economic_json = f.economic_json.replace(
+        r#""folds":[{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}]"#,
+        r#""folds":[{}]"#,
+    );
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "discrete_economics_protocol_id"), "got: {errs:?}");
+}
+
+#[test]
+fn empty_folds_array_fails() {
+    let mut f = valid_fixture("empty_folds_trial");
+    f.economic_json = f.economic_json.replace(
+        r#""folds":[{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}]"#,
+        r#""folds":[]"#,
+    );
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "no folds"), "got: {errs:?}");
+}
+
+// ---------------------------------------------------------------------------
+// P7C-REPAIR-02 REQUIRED TESTS (mission Section 5G) — judge structural
+// validation: unknown schema/protocol/missing comparison scope all fail.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wrong_judge_schema_version_fails() {
+    let mut f = valid_fixture("wrong_judge_schema_trial");
+    f.judge_json = f
+        .judge_json
+        .replace(r#""schema_version":"multiple_testing_judge_v1""#, r#""schema_version":"some_other_v2""#);
+    f.authority.judge_artifact_sha256 = canonical_json_sha256(&f.judge_json);
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "judge schema_version"), "got: {errs:?}");
+}
+
+#[test]
+fn wrong_judge_protocol_id_fails() {
+    let mut f = valid_fixture("wrong_judge_protocol_trial");
+    f.judge_json = f.judge_json.replace(
+        r#""protocol_id":"research_multiple_testing_judge_v1""#,
+        r#""protocol_id":"some_other_protocol_v1""#,
+    );
+    f.authority.judge_artifact_sha256 = canonical_json_sha256(&f.judge_json);
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "judge protocol.protocol_id"), "got: {errs:?}");
+}
+
+#[test]
+fn missing_comparison_scope_fails() {
+    let mut f = valid_fixture("missing_scope_trial");
+    f.judge_json = f
+        .judge_json
+        .replace(r#""comparison_scope":{"experiment_id":"exp_missing_scope_trial"},"#, "");
+    f.authority.judge_artifact_sha256 = canonical_json_sha256(&f.judge_json);
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "comparison_scope"), "got: {errs:?}");
+}
+
+#[test]
+fn empty_comparison_scope_object_fails() {
+    let mut f = valid_fixture("empty_scope_trial");
+    f.judge_json = f
+        .judge_json
+        .replace(r#""comparison_scope":{"experiment_id":"exp_empty_scope_trial"}"#, r#""comparison_scope":{}"#);
+    f.authority.judge_artifact_sha256 = canonical_json_sha256(&f.judge_json);
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "comparison_scope"), "got: {errs:?}");
+}
+
+#[test]
+fn null_comparison_scope_fails() {
+    let mut f = valid_fixture("null_scope_trial");
+    f.judge_json = f
+        .judge_json
+        .replace(r#""comparison_scope":{"experiment_id":"exp_null_scope_trial"}"#, r#""comparison_scope":null"#);
+    f.authority.judge_artifact_sha256 = canonical_json_sha256(&f.judge_json);
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "comparison_scope"), "got: {errs:?}");
+}
+
+// ---------------------------------------------------------------------------
+// P7C-REPAIR-02 REQUIRED TESTS (mission Section 5C/5E) — AUTHORITY anchor:
+// the load-bearing RED/GREEN proof. A completely fabricated but internally
+// self-consistent bundle (every hash matches every other hash) must still
+// fail because it was never registered -- i.e. no authority record backs
+// it. This is what REPAIR-01 alone could never catch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fabricated_internally_consistent_unregistered_bundle_fails() {
+    // Build a bundle EXACTLY the way valid_fixture does (so every internal
+    // hash is genuinely self-consistent -- this is not a malformed-JSON
+    // test), but never register it: construct an authority for a
+    // DIFFERENT, unrelated trial/economic_eval_id/judge hash, exactly as
+    // if this fabricated bundle simply does not exist in the durable
+    // Research registry.
+    let f = valid_fixture("fabricated_trial");
+    let unrelated_authority = ResearchAttemptAuthority {
+        trial_id: "fabricated_trial".to_string(),
+        economic_eval_id: "some_other_registered_eval_id".to_string(),
+        judge_artifact_sha256: "0".repeat(64),
+    };
+    let errs = verify_promotion_oos_evidence(
+        &unrelated_authority,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .unwrap_err();
+    assert!(reasons_contain(&errs, "economic_eval_id"), "got: {errs:?}");
+    assert!(reasons_contain(&errs, "judge_artifact_sha256"), "got: {errs:?}");
+}
+
+#[test]
+fn authority_trial_id_mismatch_fails() {
+    let f = valid_fixture("authority_mismatch_trial");
+    let wrong_authority = ResearchAttemptAuthority {
+        trial_id: "a_completely_different_trial".to_string(),
+        ..f.authority.clone()
+    };
+    let errs = verify_promotion_oos_evidence(
+        &wrong_authority,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .unwrap_err();
+    assert!(reasons_contain(&errs, "authority.trial_id"), "got: {errs:?}");
+}
+
+/// mission Section 5F: mutating ONLY the candidate's DSR value (keeping
+/// every other field, and every OTHER hash relationship, byte-identical)
+/// must fail via the full judge artifact authority hash -- REPAIR-01's
+/// input-hash binding alone could never catch this, since the judge's
+/// OWN recorded input hashes (of the economic/csv artifacts) are
+/// untouched by this mutation.
+#[test]
+fn mutated_dsr_value_fails_authority_hash() {
+    let mut f = valid_fixture("mutated_dsr_trial");
+    f.judge_json = f.judge_json.replace(r#""deflated_sharpe_ratio":0.85"#, r#""deflated_sharpe_ratio":0.99"#);
+    // authority.judge_artifact_sha256 is deliberately LEFT UNCHANGED here
+    // (still the pre-mutation hash) -- this is exactly what happens when
+    // an attacker mutates a judge artifact after it was registered.
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "judge_artifact_sha256"), "got: {errs:?}");
+}
+
+/// mission Section 5F: same proof for PBO.
+#[test]
+fn mutated_pbo_value_fails_authority_hash() {
+    let mut f = valid_fixture("mutated_pbo_trial");
+    f.judge_json = f.judge_json.replace(r#""pbo":0.15"#, r#""pbo":0.01"#);
+    let errs = verify(&f).unwrap_err();
+    assert!(reasons_contain(&errs, "judge_artifact_sha256"), "got: {errs:?}");
+}
+
+// ---------------------------------------------------------------------------
 // REQUIRED TESTS 26/27 — non-finite DSR/PBO fails (JSON cannot encode
 // literal NaN/Infinity, so the realistic non-finite failure mode is a
 // missing/null numeric field -- exercised distinctly from the "row missing
@@ -364,10 +563,10 @@ fn json_field_ordering_does_not_alter_verification_result() {
     let judge_reordered = serde_json::to_string(&serde_json::Value::Object(reversed)).unwrap();
     assert_ne!(judge_reordered, f.judge_json, "sanity: ordering actually differs");
 
-    let a = verify_promotion_oos_evidence(&f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
+    let a = verify_promotion_oos_evidence(&f.authority, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
         .expect("original order verifies");
-    let b = verify_promotion_oos_evidence(&f.trial_id, &f.economic_json, &f.daily_csv, &judge_reordered)
-        .expect("reordered judge JSON must verify identically");
+    let b = verify_promotion_oos_evidence(&f.authority, &f.trial_id, &f.economic_json, &f.daily_csv, &judge_reordered)
+        .expect("reordered judge JSON must verify identically (canonical hash is order-invariant)");
     assert_eq!(a, b);
 }
 
@@ -385,9 +584,19 @@ fn hand_typed_shortcut_json_missing_real_artifact_shape_fails() {
     let daily_csv = b"not,real,returns".to_vec();
     let economic_json = r#"{"claim":"trust me, this is valid"}"#.to_string();
     let judge_json = r#"{"claim":"trust me too"}"#.to_string();
-    let errs =
-        verify_promotion_oos_evidence("shortcut_trial", &economic_json, &daily_csv, &judge_json)
-            .unwrap_err();
+    let authority = ResearchAttemptAuthority {
+        trial_id: "shortcut_trial".to_string(),
+        economic_eval_id: String::new(),
+        judge_artifact_sha256: String::new(),
+    };
+    let errs = verify_promotion_oos_evidence(
+        &authority,
+        "shortcut_trial",
+        &economic_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .unwrap_err();
     assert!(errs.len() >= 5, "expected multiple independent structural failures, got: {errs:?}");
     assert!(reasons_contain(&errs, "economic_protocol_id"));
     assert!(reasons_contain(&errs, "judge_status"));
@@ -582,14 +791,40 @@ fn evaluate_promotion_performs_no_io_or_holdout_access() {
 }
 
 // ---------------------------------------------------------------------------
-// Test-only helper still admitted by evaluator (documented bypass, mirrors
-// ArtifactLock::new_for_testing)
+// P7C-REPAIR-02 REQUIRED TEST (mission Section 5A/5K item 1): no production
+// valid_for_testing shortcut exists. The old test here documented the
+// OPPOSITE (a bypass admitted by the evaluator) -- that bypass is now
+// entirely removed (see tests/common/mod.rs for its real-verifier
+// replacement). This proves it stays gone: the crate's own source contains
+// no `valid_for_testing` symbol anywhere.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn valid_for_testing_helper_is_accepted_by_evaluator() {
-    let ev = VerifiedPromotionOosEvidence::valid_for_testing("helper_trial");
-    let input = otherwise_valid_input("helper_trial_input", Some(ev));
+fn no_valid_for_testing_shortcut_exists_in_crate_source() {
+    for path in [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/research_evidence.rs"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/types.rs"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"),
+    ] {
+        let source = std::fs::read_to_string(path).expect("crate source file must exist");
+        // Matches an actual callable definition/reference (`fn
+        // valid_for_testing` or `::valid_for_testing(`), not this test's
+        // own explanatory prose about the REMOVED bypass in doc comments.
+        assert!(
+            !source.contains("fn valid_for_testing") && !source.contains("::valid_for_testing("),
+            "found a valid_for_testing shortcut in {path} -- P7C-REPAIR-02 requires the ONLY \
+             route to VerifiedPromotionOosEvidence to be the real verifier"
+        );
+    }
+}
+
+/// REQUIRED TEST: a genuinely valid, authority-anchored bundle -- built the
+/// same way `tests/common::valid_oos_evidence_for_testing` does -- passes
+/// the evaluator end to end.
+#[test]
+fn genuinely_verified_evidence_is_accepted_by_evaluator() {
+    let ev = verify(&valid_fixture("genuinely_verified_trial")).unwrap();
+    let input = otherwise_valid_input("genuinely_verified_input", Some(ev));
     let decision = evaluate_promotion(&lenient_config(), &input);
     assert!(decision.passed, "fail_reasons: {:?}", decision.fail_reasons);
 }
