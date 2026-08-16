@@ -116,14 +116,33 @@ def _json_field(raw: Optional[str]) -> Any:
 # a universe/feature change that alters which folds get skipped for
 # too-few-rows) -- CSCV's row-position block partition is only meaningful
 # if every column truly represents the same chronological observations.
+#
+# RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01: the comparison key also
+# includes the cost model (commission/slippage/diagnostic_zero_cost) and the
+# execution/capacity/fold-end policy (capacity_policy, fold_end_policy).
+# Two candidates measured under different cost or execution/capacity
+# assumptions are not answering the same multiple-testing question even if
+# their calendars and annualization convention match -- their Sharpe ratios
+# were produced by different measurement processes, not just different
+# strategies. entry_threshold/long_only/sizing/max_gross_exposure remain
+# DELIBERATELY excluded: those are candidate-differentiating strategy
+# choices, exactly what a multiple-testing comparison is supposed to range
+# over (see test_changing_strategy_threshold_alone_stays_comparable).
 
 
 def _comparison_key(identity: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    economic_protocol = identity["economic_protocol"]
+    signal_policy = economic_protocol["signal_policy"]
     key_obj = {
         "protocol_id": identity["protocol_id"],
         "economic_bars_sha256": identity["data_identity"]["economic_bars_csv"]["sha256"],
         "evaluation_spec": identity["evaluation_spec"],
-        "annualization": identity["economic_protocol"]["annualization"],
+        "annualization": economic_protocol["annualization"],
+        "cost_model": economic_protocol["cost_model"],
+        "execution_capacity_policy": {
+            "capacity_policy": signal_policy["capacity_policy"],
+            "fold_end_policy": signal_policy["fold_end_policy"],
+        },
     }
     return canonical_json(key_obj), key_obj
 
@@ -391,7 +410,10 @@ def build_multiple_testing_judge(
     }
     judge_id = short_hash(judge_id_basis, length=32)
 
-    dsr_results = _compute_dsr_results(evaluable_candidates, per_trial_excess, per_trial_stats, annualization_days)
+    trial_accounting = _compute_dsr_trial_accounting(evaluable_candidates, per_trial_excess)
+    dsr_results = _compute_dsr_results(
+        evaluable_candidates, per_trial_excess, per_trial_stats, annualization_days, trial_accounting
+    )
     pbo_result = _compute_pbo_result(evaluable_candidates, per_trial_excess, spec)
 
     dsr_evaluable = economically_evaluable_trials >= 2 and any(r["evaluable"] for r in dsr_results)
@@ -416,10 +438,76 @@ def build_multiple_testing_judge(
         "input_economic_result_ids": input_economic_result_ids,
         "input_artifacts": input_artifacts,
         "holdout": {"status": "reserved_not_evaluated"},
+        "dsr_trial_accounting": trial_accounting,
         "dsr_results": dsr_results,
         "pbo_result": pbo_result,
         "judge_status": judge_status,
         "ids": {"judge_id": judge_id},
+    }
+
+
+# RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01 -- DSR trial-count protocol
+# version. Bump this whenever the effective-independent-trial ESTIMATION
+# METHOD changes (not when the registry population changes -- that's
+# registry_population's job, and not when a numeric result changes -- see
+# judge_id_basis's own docstring on why numeric results never enter identity
+# fields). Distinct from JudgeSpec.schema_version, which governs the overall
+# judge artifact shape.
+DSR_TRIAL_COUNT_PROTOCOL_VERSION = "dsr_effective_trial_accounting_v1"
+TRIAL_CORRELATION_METHOD = "bailey_lopez_de_prado_2014_appendix_a3_equal_weighted_average_pairwise_correlation"
+CORRELATION_BASIS = "economic_walk_forward_v1_net_daily_return_excess_of_daily_risk_free_aligned_by_comparison_scope_dates"
+
+
+def _compute_dsr_trial_accounting(
+    candidates: List[_LoadedCandidate], per_trial_excess: Dict[str, np.ndarray]
+) -> Dict[str, Any]:
+    """Shared, group-level trial-count accounting consumed by every entry in
+    dsr_results (RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01 / P6). Computed
+    ONCE here (not re-derived per trial) so every dsr_results row is
+    provably reading the same effective-N estimate -- never three silently
+    different trial counts.
+
+    Distinguishes, per the repair mission's required semantics:
+      - raw_unique_trial_count: M, the RAW candidate/trial population size
+        feeding this DSR computation (the economically-evaluable candidate
+        count -- a DIFFERENT concept from registry_population's registry-
+        truth fields, which this block does not replace or duplicate).
+      - effective_independent_trial_count: N-hat, the count used INSIDE the
+        DSR multiple-testing correction (Bailey & Lopez de Prado 2014,
+        Appendix A.3) -- may be None when not numerically defensible.
+    """
+    trial_ids = sorted(c.trial_id for c in candidates)
+    m = len(trial_ids)
+    base = {
+        "raw_unique_trial_count": m,
+        "effective_independent_trial_count": None,
+        "average_pairwise_correlation": None,
+        "trial_correlation_method": TRIAL_CORRELATION_METHOD,
+        "correlation_basis": CORRELATION_BASIS,
+        "observations_used_for_correlation": None,
+        "ill_conditioning_threshold": None,
+        "numerically_defensible": False,
+        "not_evaluable_reason": None,
+        "dsr_trial_count_protocol_version": DSR_TRIAL_COUNT_PROTOCOL_VERSION,
+    }
+    if m < 2:
+        return {**base, "not_evaluable_reason": "insufficient_trial_population_for_correction"}
+
+    matrix = np.column_stack([per_trial_excess[t] for t in trial_ids])
+    estimate = mts.estimate_effective_independent_trials(matrix)
+    base["observations_used_for_correlation"] = estimate["observations"]
+    if not estimate["evaluable"]:
+        return {
+            **base,
+            "average_pairwise_correlation": estimate.get("average_pairwise_correlation"),
+            "not_evaluable_reason": estimate["reason"],
+        }
+    return {
+        **base,
+        "effective_independent_trial_count": estimate["effective_independent_trials"],
+        "average_pairwise_correlation": estimate["average_pairwise_correlation"],
+        "ill_conditioning_threshold": estimate["ill_conditioning_threshold"],
+        "numerically_defensible": True,
     }
 
 
@@ -428,6 +516,7 @@ def _compute_dsr_results(
     per_trial_excess: Dict[str, np.ndarray],
     per_trial_stats: Dict[str, Dict[str, Any]],
     annualization_days: int,
+    trial_accounting: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     trial_ids = sorted(c.trial_id for c in candidates)
@@ -442,11 +531,37 @@ def _compute_dsr_results(
                 "observations": stats.get("observations"),
                 "observed_sharpe_per_period": stats.get("sharpe_per_period"),
                 "trials_used_by_correction": n,
+                "effective_independent_trials_used_by_correction": None,
+            })
+        return results
+
+    n_hat = trial_accounting["effective_independent_trial_count"]
+    if n_hat is None:
+        # The raw population is >= 2, but the effective-independent-trial
+        # estimate itself is not numerically defensible (ill-conditioned
+        # correlation estimate, or a degenerate N-hat <= 1 from
+        # near-duplicate candidates). Per the repair mission: never fall
+        # back to silently treating raw M as independent N -- report a
+        # typed not_evaluable result instead.
+        reason = f"effective_trial_correction_not_evaluable:{trial_accounting['not_evaluable_reason']}"
+        for trial_id in trial_ids:
+            stats = per_trial_stats[trial_id]
+            results.append({
+                "trial_id": trial_id,
+                "evaluable": False,
+                "reason": reason,
+                "observations": stats["observations"],
+                "observed_sharpe_per_period": stats["sharpe_per_period"],
+                "observed_sharpe_annualized": stats["sharpe_per_period"] * float(np.sqrt(annualization_days)),
+                "skewness": stats["skewness"],
+                "kurtosis_raw": stats["kurtosis_raw"],
+                "trials_used_by_correction": n,
+                "effective_independent_trials_used_by_correction": None,
             })
         return results
 
     sr_list = [per_trial_stats[t]["sharpe_per_period"] for t in trial_ids]
-    group_stats = mts.expected_max_sharpe(sr_list)
+    group_stats = mts.expected_max_sharpe(sr_list, effective_independent_trials=n_hat)
     e_max = group_stats["expected_max_sharpe"]
     variance = group_stats["variance_of_trial_sharpe"]
 
@@ -469,6 +584,7 @@ def _compute_dsr_results(
             "skewness": stats["skewness"],
             "kurtosis_raw": stats["kurtosis_raw"],
             "trials_used_by_correction": n,
+            "effective_independent_trials_used_by_correction": n_hat,
             "variance_of_trial_sharpe": variance,
             "expected_max_sharpe_benchmark": e_max,
             "deflated_sharpe_ratio": psr,

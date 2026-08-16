@@ -62,7 +62,10 @@ def _identity(
     evaluation_spec: Optional[Dict[str, Any]] = None,
     annualization: Optional[Dict[str, Any]] = None,
     cost_bps: float = 10.0,
+    slippage_bps: float = 5.0,
     threshold: float = 0.5,
+    fold_end_policy: str = "force_flat_last_bar",
+    capacity_policy: str = "reduce_first_defer_increase_batch_v1",
     data_salt: str = "",
 ) -> tuple[str, Dict[str, Any]]:
     identity: Dict[str, Any] = {
@@ -82,11 +85,11 @@ def _identity(
             "protocol_id": ECONOMIC_PROTOCOL_ID,
             "signal_policy": {
                 "entry_threshold": threshold, "long_only": True, "sizing": "equal_weight_active",
-                "max_gross_exposure": 1.0, "fold_end_policy": "force_flat_last_bar",
-                "capacity_policy": "reduce_first_defer_increase_batch_v1",
+                "max_gross_exposure": 1.0, "fold_end_policy": fold_end_policy,
+                "capacity_policy": capacity_policy,
             },
             "cost_model": {
-                "commission_bps_per_side": cost_bps, "slippage_bps_per_side": 5.0,
+                "commission_bps_per_side": cost_bps, "slippage_bps_per_side": slippage_bps,
                 "diagnostic_zero_cost": False,
             },
             "annualization": annualization or _annualization(),
@@ -130,7 +133,10 @@ def _register_trial_with_result(
     evaluation_spec: Optional[Dict[str, Any]] = None,
     annualization: Optional[Dict[str, Any]] = None,
     cost_bps: float = 10.0,
+    slippage_bps: float = 5.0,
     threshold: float = 0.5,
+    fold_end_policy: str = "force_flat_last_bar",
+    capacity_policy: str = "reduce_first_defer_increase_batch_v1",
     data_salt: str = "",
     origin: str = "test",
 ) -> tuple[str, str]:
@@ -140,7 +146,8 @@ def _register_trial_with_result(
     trial_id, identity = _identity(
         experiment_id=experiment_id, hypothesis_id=hypothesis_id, strategy_id=strategy_id,
         bars_sha256=bars_sha256, evaluation_spec=evaluation_spec, annualization=annualization,
-        cost_bps=cost_bps, threshold=threshold, data_salt=data_salt,
+        cost_bps=cost_bps, slippage_bps=slippage_bps, threshold=threshold,
+        fold_end_policy=fold_end_policy, capacity_policy=capacity_policy, data_salt=data_salt,
     )
     store.register_trial(
         trial_id=trial_id, experiment_id=experiment_id, hypothesis_id=hypothesis_id,
@@ -214,8 +221,17 @@ def test_pbo_deterministic(tmp_path):
 
 
 def test_dsr_expected_max_sharpe_increases_with_trial_count(tmp_path):
-    """TEST 2. Empirically pinned: expected_max_sharpe([-1,1]) ~= 0.5198 <
-    expected_max_sharpe([-1,0,1]) ~= 0.6963 (mqk_research.ml.multiple_testing_stats)."""
+    """TEST 2. Adding a third candidate trial changes the shared DSR
+    benchmark relative to the two-trial group. Since RESEARCH-MULTIPLE-
+    TESTING-JUDGE-01-REPAIR-01, the N plugged into the extreme-value
+    quantile terms is the EFFECTIVE independent trial count (Appendix A.3),
+    not the raw trial count directly -- so this test no longer pins literal
+    benchmark values (those depend on the trials' realized correlation, not
+    just how many there are). trials_used_by_correction still reports the
+    raw population size unchanged (2 -> 3): see
+    test_effective_independent_trial_count_is_distinct_from_raw_population
+    for the direct proof that raw and effective counts are tracked
+    separately."""
     db = tmp_path / "reg.sqlite3"
     store = ResearchResultStore(db)
     dates = _dates(20)
@@ -280,6 +296,10 @@ def test_attempts_do_not_inflate_dsr_trial_count(tmp_path):
     assert out["included_trial_ids"] == sorted([trial_a, trial_b])
     for r in out["dsr_results"]:
         assert r["trials_used_by_correction"] == 2
+    # TEST 2 (repair): attempts/retries must not alter the RAW effective-N
+    # input population either -- attempt_count=4 must never leak into
+    # dsr_trial_accounting.
+    assert out["dsr_trial_accounting"]["raw_unique_trial_count"] == 2
 
     # TEST 17: failed attempt history remains visible in the registry.
     attempts = store.list_attempts(trial_a)
@@ -318,6 +338,9 @@ def test_evaluation_slices_do_not_inflate_trial_count(tmp_path):
     assert out["registry_population"]["evaluation_slice_count"] == 3
     for r in out["dsr_results"]:
         assert r["trials_used_by_correction"] == 2
+    # TEST 3 (repair): slices must not alter the raw effective-N input
+    # population either.
+    assert out["dsr_trial_accounting"]["raw_unique_trial_count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +560,9 @@ def test_row_order_invariant(tmp_path):
 
     assert out_sorted["dsr_results"] == out_shuffled["dsr_results"]
     assert out_sorted["pbo_result"] == out_shuffled["pbo_result"]
+    # REQUIRED TEST 8: physical row order must not alter the effective-N
+    # correlation estimate either.
+    assert out_sorted["dsr_trial_accounting"] == out_shuffled["dsr_trial_accounting"]
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +601,9 @@ def test_trial_column_order_invariant(tmp_path):
     assert out_forward["included_trial_ids"] == out_reverse["included_trial_ids"]
     assert out_forward["dsr_results"] == out_reverse["dsr_results"]
     assert out_forward["pbo_result"] == out_reverse["pbo_result"]
+    # REQUIRED TEST 7: trial column order must not alter the effective-N
+    # correlation estimate either.
+    assert out_forward["dsr_trial_accounting"] == out_reverse["dsr_trial_accounting"]
 
 
 # ---------------------------------------------------------------------------
@@ -822,7 +851,9 @@ def test_negative_control_attempt_count_substituted_for_trial_count_corrupts_res
     # as N might effectively do.
     wrong_sr_list = sr_list + [sr_list[0], sr_list[0]]
     assert len(wrong_sr_list) == out["registry_population"]["attempt_count"]
-    wrong_benchmark = mts.expected_max_sharpe(wrong_sr_list)["expected_max_sharpe"]
+    wrong_benchmark = mts.expected_max_sharpe(
+        wrong_sr_list, effective_independent_trials=float(len(wrong_sr_list))
+    )["expected_max_sharpe"]
 
     # This is the required negative control: a naive "assert equal" written
     # against the attempt-count-derived (wrong) benchmark FAILS against the
@@ -979,4 +1010,230 @@ def test_real_pipeline_integration(tmp_path):
     assert out["registry_population"]["attempted_unique_trials"] == 2
     assert out["comparison_scope"] is not None
     assert out["judge_status"] in {"evaluated", "partially_evaluable"}
+
+
+# ---------------------------------------------------------------------------
+# RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01 -- paper-faithful effective
+# independent trial accounting (Bailey & Lopez de Prado 2014, Appendix A.3)
+# and zero-cross-trial-variance null benchmark.
+# ---------------------------------------------------------------------------
+
+
+def test_zero_cross_trial_variance_benchmark_is_zero_not_observed_mean():
+    """REQUIRED TEST 9 + regression proof. Bailey & Lopez de Prado 2014 eq.
+    2: SR_0 = sqrt(V[{SR_n}]) * (...) -- the null-rejection threshold is
+    computed under H0 (true SR = 0 for every trial) and deliberately omits
+    the observed cross-trial mean. With zero observed cross-trial variance
+    (every trial produced an identical per-period Sharpe), sqrt(0) = 0
+    exactly, so SR_0 MUST be 0.0 -- not the shared observed Sharpe. A prior
+    implementation returned float(np.mean(arr)) here instead; this proves
+    that was wrong."""
+    identical_sharpes = [0.7, 0.7, 0.7]
+    result = mts.expected_max_sharpe(identical_sharpes, effective_independent_trials=2.5)
+    assert result["expected_max_sharpe"] == 0.0
+    assert result["variance_of_trial_sharpe"] == 0.0
+    assert result["null_benchmark_basis"] == "zero_cross_trial_variance"
+
+    # Negative control: the OLD (wrong) behavior would have returned 0.7
+    # (the shared observed mean) here. Prove that a naive "the benchmark
+    # equals the observed common Sharpe" assertion FAILS against the real,
+    # paper-faithful result.
+    with pytest.raises(AssertionError):
+        assert result["expected_max_sharpe"] == pytest.approx(0.7)
+
+
+def test_expected_max_sharpe_rejects_degenerate_effective_n():
+    with pytest.raises(ValueError):
+        mts.expected_max_sharpe([0.1, 0.5], effective_independent_trials=1.0)
+    with pytest.raises(ValueError):
+        mts.expected_max_sharpe([0.1, 0.5], effective_independent_trials=0.3)
+
+
+def test_average_pairwise_correlation_column_and_row_order_invariant():
+    rng = np.random.default_rng(11)
+    base = rng.normal(size=60)
+    matrix = np.column_stack([base + 0.001 * rng.normal(size=60) for _ in range(4)])
+
+    rho_forward = mts.average_pairwise_correlation(matrix)
+    rho_reversed_cols = mts.average_pairwise_correlation(matrix[:, ::-1])
+    assert rho_forward["evaluable"] and rho_reversed_cols["evaluable"]
+    assert rho_forward["average_pairwise_correlation"] == pytest.approx(
+        rho_reversed_cols["average_pairwise_correlation"], abs=1e-12
+    )
+
+    shuffle = np.roll(np.arange(60), 17)
+    rho_reordered_rows = mts.average_pairwise_correlation(matrix[shuffle, :])
+    assert rho_reordered_rows["evaluable"]
+    assert rho_forward["average_pairwise_correlation"] == pytest.approx(
+        rho_reordered_rows["average_pairwise_correlation"], abs=1e-9
+    )
+
+
+def test_highly_correlated_family_effective_n_below_raw_m():
+    """REQUIRED TEST 4. Four trials built as near-identical copies of one
+    common signal (small independent noise added) must produce an effective
+    independent trial count materially BELOW the raw trial count."""
+    rng = np.random.default_rng(3)
+    t_obs, m = 80, 4
+    common = rng.normal(size=t_obs)
+    matrix = np.column_stack([common + 0.01 * rng.normal(size=t_obs) for _ in range(m)])
+
+    result = mts.estimate_effective_independent_trials(matrix)
+    assert result["evaluable"] is True
+    assert result["average_pairwise_correlation"] > 0.9
+    assert result["effective_independent_trials"] < m
+
+
+def test_low_correlation_family_effective_n_exceeds_correlated_family():
+    """REQUIRED TEST 5."""
+    rng = np.random.default_rng(5)
+    t_obs, m = 200, 4
+    common = rng.normal(size=t_obs)
+    correlated = np.column_stack([common + 0.01 * rng.normal(size=t_obs) for _ in range(m)])
+    independent = np.column_stack([rng.normal(size=t_obs) for _ in range(m)])
+
+    n_correlated = mts.estimate_effective_independent_trials(correlated)
+    n_independent = mts.estimate_effective_independent_trials(independent)
+    assert n_correlated["evaluable"] is True and n_independent["evaluable"] is True
+    assert n_independent["effective_independent_trials"] > n_correlated["effective_independent_trials"]
+
+
+def test_duplicate_variants_do_not_behave_like_independent_trials():
+    """REQUIRED TEST 6. Literally duplicated return series (rho=1 exactly)
+    imply N-hat=1 -- degenerate, typed not_evaluable, never silently treated
+    as len(trials) independent draws."""
+    rng = np.random.default_rng(7)
+    base = rng.normal(size=50)
+    matrix = np.column_stack([base, base, base])  # exact duplicates
+
+    result = mts.estimate_effective_independent_trials(matrix)
+    assert result["evaluable"] is False
+    assert result["reason"] == mts.EFFECTIVE_TRIALS_DEGENERATE
+    assert result["average_pairwise_correlation"] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_ill_conditioned_correlation_estimate_not_evaluable():
+    """Appendix A.3's own warning: T < M(M-1)/2 means there are more
+    pairwise correlations to estimate than independent observation-pairs
+    available -- the paper calls estimating an average correlation
+    "pointless" in that regime. Must fail closed, never silently proceed
+    with raw M as if it were independent N."""
+    rng = np.random.default_rng(9)
+    t_obs, m = 3, 6  # threshold = 0.5*6*5 = 15 > 3
+    matrix = rng.normal(size=(t_obs, m))
+    result = mts.estimate_effective_independent_trials(matrix)
+    assert result["evaluable"] is False
+    assert result["reason"] == mts.ILL_CONDITIONED_CORRELATION
+
+
+def test_effective_independent_trial_count_is_distinct_from_raw_population(tmp_path):
+    """Direct proof (complements TEST 2) that raw_unique_trial_count and
+    effective_independent_trial_count are tracked as genuinely separate
+    numbers in the judge artifact, not just two names for the same value."""
+    db = tmp_path / "reg.sqlite3"
+    store = ResearchResultStore(db)
+    dates = _dates(80)
+    rng = np.random.default_rng(13)
+    common = rng.normal(size=80) * 0.01
+
+    for k in range(4):
+        noisy = common + 0.0001 * rng.normal(size=80)
+        _register_trial_with_result(
+            store, experiment_id="exp.raw_vs_effective", hypothesis_id="hyp", strategy_id=f"cand{k}",
+            run_dir=tmp_path / f"cand{k}", dates=dates, net_returns=list(noisy),
+        )
+
+    out = build_multiple_testing_judge(experiment_id="exp.raw_vs_effective", registry_db=db)
+    accounting = out["dsr_trial_accounting"]
+    assert accounting["raw_unique_trial_count"] == 4
+    assert accounting["numerically_defensible"] is True
+    assert accounting["effective_independent_trial_count"] < accounting["raw_unique_trial_count"]
+    assert accounting["trial_correlation_method"] == (
+        "bailey_lopez_de_prado_2014_appendix_a3_equal_weighted_average_pairwise_correlation"
+    )
+    for r in out["dsr_results"]:
+        assert r["trials_used_by_correction"] == accounting["raw_unique_trial_count"]
+        assert r["effective_independent_trials_used_by_correction"] == pytest.approx(
+            accounting["effective_independent_trial_count"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01 -- tightened comparison scope
+# ---------------------------------------------------------------------------
+
+
+def test_changing_cost_model_separates_comparison_scopes(tmp_path):
+    """REQUIRED TEST 10."""
+    db = tmp_path / "reg.sqlite3"
+    store = ResearchResultStore(db)
+    dates = _dates(20)
+
+    trial_a, _ = _register_trial_with_result(
+        store, experiment_id="exp.cost_scope", hypothesis_id="hyp", strategy_id="a",
+        run_dir=tmp_path / "a", dates=dates, net_returns=[0.01] * 10 + [-0.02] * 10, cost_bps=10.0,
+    )
+    trial_b, _ = _register_trial_with_result(
+        store, experiment_id="exp.cost_scope", hypothesis_id="hyp", strategy_id="b",
+        run_dir=tmp_path / "b", dates=dates, net_returns=[-0.005] * 10 + [0.01] * 10, cost_bps=10.0,
+    )
+    trial_diff_cost, _ = _register_trial_with_result(
+        store, experiment_id="exp.cost_scope", hypothesis_id="hyp", strategy_id="diffcost",
+        run_dir=tmp_path / "c", dates=dates, net_returns=[0.02] * 10 + [-0.01] * 10, cost_bps=25.0,
+    )
+
+    out = build_multiple_testing_judge(experiment_id="exp.cost_scope", registry_db=db)
+    assert set(out["included_trial_ids"]) == {trial_a, trial_b}
+    excluded = {e["trial_id"]: e["reason"] for e in out["excluded_trial_ids"]}
+    assert excluded[trial_diff_cost] == "incompatible_comparison_scope"
+
+
+def test_changing_execution_capacity_policy_separates_comparison_scopes(tmp_path):
+    """REQUIRED TEST 11."""
+    db = tmp_path / "reg.sqlite3"
+    store = ResearchResultStore(db)
+    dates = _dates(20)
+
+    trial_a, _ = _register_trial_with_result(
+        store, experiment_id="exp.capacity_scope", hypothesis_id="hyp", strategy_id="a",
+        run_dir=tmp_path / "a", dates=dates, net_returns=[0.01] * 10 + [-0.02] * 10,
+        capacity_policy="reduce_first_defer_increase_batch_v1",
+    )
+    trial_b, _ = _register_trial_with_result(
+        store, experiment_id="exp.capacity_scope", hypothesis_id="hyp", strategy_id="b",
+        run_dir=tmp_path / "b", dates=dates, net_returns=[-0.005] * 10 + [0.01] * 10,
+        capacity_policy="reduce_first_defer_increase_batch_v1",
+    )
+    trial_diff_capacity, _ = _register_trial_with_result(
+        store, experiment_id="exp.capacity_scope", hypothesis_id="hyp", strategy_id="diffcap",
+        run_dir=tmp_path / "c", dates=dates, net_returns=[0.02] * 10 + [-0.01] * 10,
+        capacity_policy="diagnostic_unbounded_v1",
+    )
+
+    out = build_multiple_testing_judge(experiment_id="exp.capacity_scope", registry_db=db)
+    assert set(out["included_trial_ids"]) == {trial_a, trial_b}
+    excluded = {e["trial_id"]: e["reason"] for e in out["excluded_trial_ids"]}
+    assert excluded[trial_diff_capacity] == "incompatible_comparison_scope"
+
+
+def test_changing_strategy_threshold_alone_stays_comparable(tmp_path):
+    """REQUIRED TEST 12. entry_threshold is a candidate-differentiating
+    strategy choice, not a measurement-basis assumption -- it must NOT by
+    itself make two trials incomparable."""
+    db = tmp_path / "reg.sqlite3"
+    store = ResearchResultStore(db)
+    dates = _dates(20)
+
+    trial_a, _ = _register_trial_with_result(
+        store, experiment_id="exp.threshold_scope", hypothesis_id="hyp", strategy_id="a",
+        run_dir=tmp_path / "a", dates=dates, net_returns=[0.01] * 10 + [-0.02] * 10, threshold=0.4,
+    )
+    trial_b, _ = _register_trial_with_result(
+        store, experiment_id="exp.threshold_scope", hypothesis_id="hyp", strategy_id="b",
+        run_dir=tmp_path / "b", dates=dates, net_returns=[-0.005] * 10 + [0.01] * 10, threshold=0.6,
+    )
+
+    out = build_multiple_testing_judge(experiment_id="exp.threshold_scope", registry_db=db)
+    assert set(out["included_trial_ids"]) == {trial_a, trial_b}
+    assert out["excluded_trial_ids"] == []
     assert out["holdout"] == {"status": "reserved_not_evaluated"}

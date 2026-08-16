@@ -147,35 +147,210 @@ def compute_trial_sharpe_stats(returns: np.ndarray) -> Dict[str, Any]:
     }
 
 
-def expected_max_sharpe(trial_sharpe_estimates: Sequence[float]) -> Dict[str, Any]:
-    """E[max_n{SR_n}] under N independent trials (Bailey & Lopez de Prado
-    2014, eq. for the expected maximum of N Sharpe-ratio estimates via
-    extreme value theory), using the OBSERVED cross-trial variance of the
-    supplied per-period Sharpe estimates as V[{SR_n}].
+def expected_max_sharpe(
+    trial_sharpe_estimates: Sequence[float], *, effective_independent_trials: float
+) -> Dict[str, Any]:
+    """SR_0, the DSR null-rejection benchmark (Bailey & Lopez de Prado 2014,
+    eq. 2's SR_0 term): the expected maximum Sharpe ratio one would observe
+    by chance alone under the null hypothesis that the TRUE Sharpe ratio is
+    zero for every trial. This is deliberately NOT eq. 1's general
+    E[max{SR_n}] ~= E[{SR_n}] + sqrt(V[{SR_n}]) * (...) -- SR_0 omits the
+    E[{SR_n}] term on purpose, because it is a REJECTION THRESHOLD computed
+    under H0 (true SR = 0 for every trial), not a forecast of the actually
+    observed maximum. Passing the OBSERVED cross-trial mean into this
+    threshold would silently leak the very selection bias DSR exists to
+    correct for.
 
-    Requires len(trial_sharpe_estimates) >= 2 -- the cross-trial variance
-    used by the correction is undefined for a single trial (there would be
-    no multiple-testing selection effect to correct for). Raises ValueError
-    in that case; callers must catch this and report a typed not_evaluable
-    result rather than let it propagate as an unhandled crash.
+    Two independent inputs, matching the paper's own N != M distinction
+    (Appendix A.3):
+      - V[{SR_n}], the OBSERVED cross-trial variance, is computed here from
+        `trial_sharpe_estimates` -- the actual, raw (dependent) per-trial
+        Sharpe estimates. This describes what was actually observed.
+      - `effective_independent_trials` (N) is the count plugged into the
+        extreme-value quantile terms Z^-1[1-1/N] / Z^-1[1-1/(Ne)]. It is
+        supplied by the caller (see estimate_effective_independent_trials)
+        and MAY be a non-integer real number -- the paper's eq. 9 does not
+        round it, and rounding here would fabricate false precision.
+    These two must never be conflated: dispersion comes from what was
+    observed across the raw M trials; correction strength comes from how
+    many of those trials the data suggests were genuinely independent.
+
+    Requires len(trial_sharpe_estimates) >= 2 (no cross-trial variance is
+    defined for one trial) and effective_independent_trials > 1 (N<=1 means
+    no multiple-testing selection effect exists to correct for -- callers
+    must resolve that via estimate_effective_independent_trials's own
+    not_evaluable path BEFORE calling this function, never by clamping N
+    here). Raises ValueError in either case; callers must catch this and
+    report a typed not_evaluable result rather than let it propagate.
     """
-    n = len(trial_sharpe_estimates)
-    if n < 2:
+    m = len(trial_sharpe_estimates)
+    if m < 2:
         raise ValueError("expected_max_sharpe requires at least 2 trial Sharpe estimates")
+    n = float(effective_independent_trials)
+    if not math.isfinite(n) or n <= 1.0:
+        raise ValueError(
+            f"expected_max_sharpe requires effective_independent_trials > 1, got {n!r}"
+        )
     arr = np.asarray(trial_sharpe_estimates, dtype=np.float64)
     if not np.all(np.isfinite(arr)):
         raise ValueError("expected_max_sharpe received non-finite Sharpe estimates")
     variance = float(np.var(arr, ddof=DDOF))
     if variance <= _ZERO_VARIANCE_EPS * _ZERO_VARIANCE_EPS:
-        # No cross-trial dispersion to correct for: every trial produced the
-        # identical per-period Sharpe estimate, so the expected maximum of N
-        # identical draws is just that shared value -- not a fabricated 0.0.
-        return {"expected_max_sharpe": float(np.mean(arr)), "variance_of_trial_sharpe": 0.0, "trials_used": n}
+        # Paper-faithful null benchmark (eq. 2): SR_0 = sqrt(V[{SR_n}]) *
+        # (...). With zero OBSERVED cross-trial dispersion, sqrt(0) = 0
+        # exactly -- SR_0 IS 0.0, not the shared observed Sharpe. There is
+        # no selection-bias inflation to correct for when every trial
+        # produced an identical estimate: nothing was "selected" over
+        # anything else, so the null-rejection threshold collapses to the
+        # plain (uncorrected) PSR benchmark of zero. (A prior implementation
+        # substituted the shared observed Sharpe here instead -- see
+        # test_zero_cross_trial_variance_benchmark_is_zero_not_observed_mean
+        # for the regression proof that behavior was wrong.)
+        return {
+            "expected_max_sharpe": 0.0,
+            "variance_of_trial_sharpe": 0.0,
+            "trials_used": m,
+            "effective_independent_trials": n,
+            "null_benchmark_basis": "zero_cross_trial_variance",
+        }
     sigma = math.sqrt(variance)
     z1 = norm_ppf(1.0 - 1.0 / n)
     z2 = norm_ppf(1.0 - 1.0 / (n * math.e))
     e_max = sigma * ((1.0 - EULER_MASCHERONI) * z1 + EULER_MASCHERONI * z2)
-    return {"expected_max_sharpe": float(e_max), "variance_of_trial_sharpe": variance, "trials_used": n}
+    return {
+        "expected_max_sharpe": float(e_max),
+        "variance_of_trial_sharpe": variance,
+        "trials_used": m,
+        "effective_independent_trials": n,
+        "null_benchmark_basis": "selection_adjusted",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Implied independent trial count (Bailey & Lopez de Prado 2014, Appendix
+# A.3, "ESTIMATING THE NUMBER OF INDEPENDENT TRIALS", eq. 7-9)
+# ---------------------------------------------------------------------------
+#
+# The paper is explicit that the N used in expected_max_sharpe/DSR is the
+# number of INDEPENDENT trials, not the raw number attempted (M). Given M
+# dependent trials, Appendix A.3 derives the "implied independent trials"
+# N-hat from the trials' average pairwise correlation rho-hat:
+#
+#   rho-hat = (2 * sum_{i<j} rho_ij) / (M * (M - 1))                  (eq. 8)
+#   N-hat   = rho-hat + (1 - rho-hat) * M                             (eq. 9)
+#
+# Boundary-faithful: rho-hat -> 1 collapses N-hat -> 1 (fully dependent
+# trials behave as one); rho-hat -> 0 leaves N-hat -> M (fully independent
+# trials are unpenalized). N-hat is not rounded to an integer -- eq. 9 is a
+# continuous real-valued estimator.
+#
+# The paper also warns (Appendix A.3, immediately after eq. 9): "in general
+# for short samples (T < 1/2 M(M-1)), the correlation matrix will be
+# numerically ill-conditioned... Estimating an average correlation is then
+# pointless, because there are more correlations {rho_ij} than independent
+# pairs of observations." This module treats that threshold as a hard,
+# typed not_evaluable gate rather than silently returning an estimate the
+# paper itself says is not numerically defensible.
+
+ILL_CONDITIONED_CORRELATION = "ill_conditioned_correlation_estimate"
+ZERO_VARIANCE_COLUMN = "zero_variance_column"
+NON_FINITE_CORRELATION_MATRIX = "non_finite_correlation_matrix"
+EFFECTIVE_TRIALS_DEGENERATE = "effective_independent_trials_degenerate"
+
+# Boundary epsilon for N-hat <= 1: an implied single independent trial (or
+# fewer, which the paper's own bounds do not actually permit for a valid
+# correlation matrix) has no multiple-testing selection effect left to
+# correct for -- mirrors this module's existing raw-trial-count n<2 gate.
+_EFFECTIVE_N_DEGENERATE_EPS = 1e-9
+
+
+def average_pairwise_correlation(returns_matrix: np.ndarray) -> Dict[str, Any]:
+    """Equal-weighted average pairwise correlation among the M columns of
+    `returns_matrix` (T chronologically-aligned observation rows x M trial
+    columns), per Bailey & Lopez de Prado 2014, Appendix A.3 eq. 7-8.
+
+    Column-order invariant by construction (a symmetric average over every
+    i<j pair). Row-order invariant PROVIDED the caller has already aligned
+    every column to the SAME chronological row index (Pearson correlation
+    is a paired-observation statistic -- any single permutation applied
+    identically to every column leaves every pairwise correlation, and
+    therefore the average, unchanged); this function does not itself sort
+    rows, matching multiple_testing_stats.combinatorial_symmetric_cv_pbo's
+    existing row-order contract.
+
+    Returns a typed not_evaluable result (never a silently-computed but
+    numerically indefensible estimate) when:
+      - T < M*(M-1)/2 -- the paper's own ill-conditioning warning (Appendix
+        A.3): with more pairwise correlations to estimate than independent
+        observation-pairs available, "estimating an average correlation is
+        pointless."
+      - any column has (numerically) zero variance -- Pearson correlation
+        against a constant series is undefined, not zero.
+    """
+    returns_matrix = np.asarray(returns_matrix, dtype=np.float64)
+    if returns_matrix.ndim != 2:
+        raise ValueError("returns_matrix must be 2-D (T observations x M candidates)")
+    t_obs, m = returns_matrix.shape
+    if m < 2:
+        raise ValueError("average_pairwise_correlation requires at least 2 candidate columns")
+    if not np.all(np.isfinite(returns_matrix)):
+        raise ValueError("returns_matrix contains non-finite values")
+
+    ill_conditioning_threshold = 0.5 * m * (m - 1)
+    base = {"trial_count": m, "observations": t_obs, "ill_conditioning_threshold": ill_conditioning_threshold}
+    if t_obs < ill_conditioning_threshold:
+        return {**base, "evaluable": False, "reason": ILL_CONDITIONED_CORRELATION}
+
+    std = np.std(returns_matrix, axis=0, ddof=DDOF)
+    if np.any(std <= _ZERO_VARIANCE_EPS):
+        return {**base, "evaluable": False, "reason": ZERO_VARIANCE_COLUMN}
+
+    corr = np.corrcoef(returns_matrix, rowvar=False)
+    if not np.all(np.isfinite(corr)):
+        return {**base, "evaluable": False, "reason": NON_FINITE_CORRELATION_MATRIX}
+
+    iu = np.triu_indices(m, k=1)
+    rho = float(np.mean(corr[iu]))
+    return {**base, "evaluable": True, "average_pairwise_correlation": rho}
+
+
+def estimate_effective_independent_trials(returns_matrix: np.ndarray) -> Dict[str, Any]:
+    """Implied independent trial count N-hat (Bailey & Lopez de Prado 2014,
+    Appendix A.3 eq. 9): N-hat = rho-hat + (1 - rho-hat) * M, where M is the
+    raw (dependent) trial count and rho-hat is the equal-weighted average
+    pairwise correlation among the M trials' return series (see
+    average_pairwise_correlation).
+
+    Returns a typed not_evaluable result (never a silent fallback to raw M)
+    when: the correlation estimate itself is not numerically defensible, or
+    the implied N-hat is degenerate (<= 1, e.g. duplicate/near-duplicate
+    candidates whose average correlation is ~1) -- an implied single
+    independent trial has no multiple-testing selection effect left to
+    correct for.
+    """
+    corr_result = average_pairwise_correlation(returns_matrix)
+    base = {"trial_count": corr_result["trial_count"], "observations": corr_result["observations"]}
+    if not corr_result["evaluable"]:
+        return {**base, "evaluable": False, "reason": corr_result["reason"]}
+
+    m = corr_result["trial_count"]
+    rho = corr_result["average_pairwise_correlation"]
+    n_hat = rho + (1.0 - rho) * m
+    if not math.isfinite(n_hat) or n_hat <= 1.0 + _EFFECTIVE_N_DEGENERATE_EPS:
+        return {
+            **base,
+            "evaluable": False,
+            "reason": EFFECTIVE_TRIALS_DEGENERATE,
+            "average_pairwise_correlation": rho,
+            "effective_independent_trials": float(n_hat) if math.isfinite(n_hat) else None,
+        }
+    return {
+        **base,
+        "evaluable": True,
+        "average_pairwise_correlation": rho,
+        "effective_independent_trials": float(n_hat),
+        "ill_conditioning_threshold": corr_result["ill_conditioning_threshold"],
+    }
 
 
 def probabilistic_sharpe_ratio(
