@@ -1171,6 +1171,153 @@ explicit instruction not to implement them.
 
 ---
 
+## 1I. RESEARCH-EXECUTION-PRICING-PARITY-01 (P7A) ADDENDUM (2026-08-15)
+
+Mission `RESEARCH-EXECUTION-PRICING-PARITY-01` (`P7A`) closed the confirmed
+Area F/K/N execution-price-model divergence between Python Research's
+economic evaluator and the accepted Rust conservative fill model. Baseline:
+local `main`, HEAD `81be5fcc4e98e2a1a48f7198fb3d939964a6bf3e` (== origin/main),
+working tree residue only `smoke_logs/`.
+
+**Verdict: `IMPLEMENTED_PENDING_REVIEW`** (per Section 15's `MANUAL_REVIEW_
+REQUIRED` classification for P7A — not self-certified `CLOSED`; an
+independent-review checkpoint per Section 14's Wave 2 entry is still
+required before promotion to `CLOSED`).
+
+**Divergence confirmed exactly as described.** Direct reading of
+`core-rs/crates/mqk-backtest/src/engine.rs::conservative_fill_price` (BUY @
+HIGH, SELL @ LOW, `effective_slippage_bps = slippage_bps + bar_spread_bps *
+volatility_mult_bps / 10_000`, integer-micros arithmetic) confirmed the
+mission's description precisely, including that neither `engine.rs` nor
+`BacktestBar::new` validates `high >= low` or `close` within `[low, high]` —
+Rust's forced-flatten (`flatten_all`) is confirmed as the one deliberate
+same-bar, close/mark-priced exception, unchanged.
+
+**Design: additive adverse-price cost, not a rewrite of return chronology.**
+Python's economic evaluator computes portfolio-weight interval returns from
+close-to-close price ratios (`_simulate_fold_execution`'s `gross_contrib`),
+structurally different from Rust's per-fill absolute-price model. Rather
+than redefine that architecture (a Section 19 hard-stop), P7A adds a NEW,
+additive cost component — `execution_price_cost` — computed only at the
+bar where an ordinary strategy-driven turnover event actually executes,
+equal to `abs(delta_weight) * abs(conservative_fill_price - close) / close`.
+This is added to `transaction_cost` alongside (not replacing) the existing
+bps-based commission; `EconomicWalkForwardSpec.normalized()` fail-closes if
+`cost_model.slippage_bps_per_side != 0` while the official pricing model is
+active, preventing double-charged slippage. Signal/fill chronology
+(`signal_ts < fill_ts`), cohort allocation, gross-cap enforcement, and the
+fold-end `force_flat_last_bar` exception are all structurally untouched —
+`execution_price_cost` is never computed for the forced-flatten exit path,
+mirroring Rust's `flatten_all` exception exactly.
+
+**New pricing protocol (`mqk_research.ml.execution_pricing`).** A pure,
+versioned module: `conservative_fill_price_micros` mirrors Rust's formula
+bit-for-bit in integer-micros arithmetic (research bars round-trip exactly
+through `round(price * 1_000_000)`, the same convention `bars_postgres.py`'s
+`MICROS_SCALE` already uses), plus a defense-in-depth bar-shape validation
+Rust itself does not perform. `ExecutionPricingSpec` carries two named,
+versioned models: `EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1` (the
+official parity model) and `EXECUTION_PRICING_MODEL_ID_CLOSE_ONLY_DIAGNOSTIC_V1`
+(the pre-P7A default — every existing caller/test that doesn't pass
+`execution_pricing` explicitly gets this, bit-for-bit unchanged behavior).
+`pricing_model_id`/`slippage_bps`/`volatility_mult_bps` are unconditionally
+folded into `economic_protocol_identity()`.
+
+**Bars provenance: versioned, additive high/low binding.** A NEW
+`canonical_pricing_bars_hash` (symbol, end_ts, close, high, low) is
+deliberately separate from the existing `canonical_semantic_bars_hash`
+(symbol, end_ts, close) that source-attestation/CA-evidence content
+addressing already depends on — widening that hash's formula in place would
+have silently reinterpreted every already-computed attestation/evidence
+hash, which the mission explicitly forbade. `build_bars_provenance_manifest`
+now additionally computes `canonical_pricing_bars_hash` (`None` when bars
+lack high/low — fully backward compatible with pre-P7A manifests). A new
+`require_bars_pricing_provenance` content-binds it, called only when the
+official pricing model is active. `build_economic_trial_identity` folds
+`canonical_pricing_bars_hash` into trial identity ONLY under the official
+model — a diagnostic-model trial's identity is proven (by direct test)
+unaffected by changing high/low, honoring the mission's "do not expand
+identity to unused data" instruction. `load_bars(require_pricing_columns=
+True)` fails closed on missing HIGH, missing LOW, non-finite values, `high <
+low`, and `close` outside `[low, high]` — the last two independent of
+whether Rust itself checks them (it does not).
+
+**No silent official/diagnostic conflation.** A new
+`economic_registry_integration.require_official_execution_pricing_parity`
+fail-closes unless `execution_pricing.pricing_model_id` is the official
+model — the diagnostic default can never satisfy it. Wiring this gate into
+`mqk-promotion::evaluator.rs` is explicitly P7C's scope, not P7A's; this
+function is the composable mechanism P7C (or any other caller asserting
+parity today) uses.
+
+**Cross-language golden proof.** A single shared fixture,
+`docs/research/fixtures/execution_pricing_golden_v1.json` (9 cases: BUY/SELL
+ordinary fills, zero slippage, nonzero flat slippage, nonzero volatility
+multiplier, wide bar, narrow bar, an integer-truncation edge), is consumed
+by both languages with no runtime cross-call: Python's
+`test_execution_pricing_parity_p7a.py::test_golden_vector_matches_rust_
+reference` asserts `conservative_fill_price_micros` against each case's
+independently hand-derived `expected_fill_price_micros`; Rust's
+`scenario_research_execution_pricing_parity_p7a.rs` runs the SAME cases
+through the real, unmodified `BacktestEngine::run` (not a reimplemented
+formula) and asserts the resulting `Fill.price_micros` against the same
+fixture values. Both pass; the real Rust engine independently reproduces
+every fixture value.
+
+**RED/negative-control proof.** `test_diagnostic_and_official_pricing_
+diverge_on_adversarial_bar` proves the pre-repair-equivalent diagnostic
+model (flat 5bps slippage) and the post-repair official model materially
+diverge (`0.0` vs `0.02` execution_price_cost, i.e. 200bps) on the same
+adversarial (wide-spread) bar — proving the fixture exercises the actual
+divergence, not an accidentally-matching pair of specs.
+
+**Rust changes: none to production code.** Only a new test file
+(`scenario_research_execution_pricing_parity_p7a.rs`) was added; `engine.rs`
+and `types.rs` are unmodified — no deterministic defect was found in the
+accepted Rust pricing implementation requiring a change, per Section 19.
+
+**Files changed:** `research-py/src/mqk_research/ml/execution_pricing.py`
+(new), `research-py/src/mqk_research/ml/economic_walkforward.py`
+(`ExecutionPricingSpec` wiring, `_row_execution_price_cost`, high/low fold
+frames, `load_bars` pricing-column validation), `research-py/src/mqk_research/
+data/bars_provenance.py` (`canonical_pricing_bars_hash`, `BarShapeInvalid`,
+`require_bars_pricing_provenance`), `research-py/src/mqk_research/ml/
+economic_registry_integration.py` (`require_official_execution_pricing_
+parity`, conditional identity binding), `research-py/tests/
+test_execution_pricing_parity_p7a.py` (new, 42 tests),
+`core-rs/crates/mqk-backtest/tests/scenario_research_execution_pricing_
+parity_p7a.rs` (new), `docs/research/fixtures/execution_pricing_golden_v1.json`
+(new).
+
+**Tests.** `test_execution_pricing_parity_p7a.py`: 42 passed (new).
+`test_economic_walkforward.py`: 63 passed, unchanged. `test_bars_
+provenance.py`: 36 passed, unchanged. `test_source_attestation.py` +
+`test_experiment_registry.py` + `test_multiple_testing_judge.py`: 125
+passed, unchanged. `test_evidence_boundary.py` + `test_holdout_ledger.py` +
+`test_ml_eval_walkforward_purged_holdout.py`: 54 passed, unchanged. Full
+`research-py` suite: **1382 passed, 7 skipped, 12 subtests passed** (was
+1340 in Section 1H; +42, zero regressions, skip count unchanged). Rust:
+`cargo test -p mqk-backtest` — **all suites pass** (the new golden-vector
+scenario plus every pre-existing scenario, unmodified). `git diff --check`:
+clean.
+
+**Gate status updates (Sections 12/14/15/16/16A/17/20):** P7A moves from
+`OPEN` to `IMPLEMENTED_PENDING_REVIEW` (not yet `CLOSED` — Wave 2's
+independent-review checkpoint has not occurred). `RESEARCH_BACKTEST_
+FOUNDATION_READY` (Section 16A) remains `NOT MET` — P7B and P7C are still
+`OPEN` and P7A itself is not yet `CLOSED`. `ECONOMIC EXECUTION`'s
+pricing-convention-reconciled half (Section 16) is implemented pending
+review; the robustness-gauntlet half (P9) remains `OPEN`.
+
+**Remaining blocker:** independent review of this patch (Section 14 Wave 2
+requirement). Next patch: P7B (`RESEARCH-WEIGHT-TO-SHARE-PARITY-01`), which
+this mission explicitly did not implement — P7A's cost-model changes were
+scoped to keep P7B's discrete weight→share translation entirely out of
+reach (see `require_official_execution_pricing_parity`'s docstring and the
+mission's own `COST SCOPE` section).
+
+---
+
 ## 2. Baseline
 
 ```
