@@ -160,6 +160,11 @@ accepted foundation.
   system's actual ingestion path, full corporate-action modeling in
   `research-py` is **not required for V1** — deferred consistently with
   Section 8's original judgment, now confirmed rather than assumed.
+  **CORRECTED 2026-08-15 (Section 1B, PATCH B): this conclusion was WRONG —
+  a confirmed raw_unadjusted convention is exactly the case where
+  corporate-action contamination is dangerous, not exempt from it. See
+  Section 1B for the fail-closed repair; the remaining gap is now a
+  required corporate-action evidence SOURCE, not a design decision.**
 
 **P8 implementation permission — granted.** All five gates in the mission's
 "P8 IMPLEMENTATION PERMISSION" section were satisfied: one consistent data
@@ -215,6 +220,241 @@ composition. `ALPHA_DISCOVERY_READY` now depends on
 **Not implemented in Wave 1** (correctly out of scope per mission brief):
 P7A/P7B/P7C, P9, P10. See the corrected roadmap (Section 12), dependency
 graph (Section 13), and waves (Section 14) below.
+
+---
+
+## 1B. WAVE-1-INDEPENDENT-REPAIR-01 ADDENDUM (2026-08-15)
+
+Mission `RESEARCH-BACKTEST-V1-WAVE-01-INDEPENDENT-REPAIR-01` executed two
+repair patches against two deterministic defects found during independent
+ChatGPT review of Wave 1 (Section 1A above). Both patches are local,
+unpushed, one commit each, sequenced strictly after Wave 1's four commits.
+
+**Patches executed, in order:**
+
+| Patch | Verdict | Commit (local, unpushed) |
+|---|---|---|
+| PATCH A `RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01` | **CLOSED** | `8bc4dbc2` |
+| PATCH B `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` | **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED** | `4f7e297e` |
+
+### PATCH A — corrected DSR trial-count semantics
+
+Root defect: `multiple_testing_stats.expected_max_sharpe` used the RAW
+attempted/evaluable trial count (M) directly as N inside the extreme-value
+quantile terms Z^-1[1-1/N] / Z^-1[1-1/(Ne)], as though every trial were
+independent. Bailey & López de Prado (2014), Appendix A.3 ("ESTIMATING THE
+NUMBER OF INDEPENDENT TRIALS"), is explicit that N must be the number of
+IMPLIED INDEPENDENT trials, derived from the trials' average pairwise
+correlation (eq. 7-9), not the raw count M whenever trials are dependent
+(the normal case — parameter variants of the same strategy family are
+almost always correlated).
+
+**Primary-source verification.** Fetched the actual paper
+(davidhbailey.com/dhbpapers/deflated-sharpe.pdf — David H. Bailey's own
+hosted copy), not a secondary summary. Appendix A.3 derives:
+- eq. 8: equal-weighted average pairwise correlation
+  `rho_hat = (2 * sum_{i<j} rho_ij) / (M*(M-1))`.
+- eq. 9: `N_hat = rho_hat + (1 - rho_hat) * M` — boundary-faithful
+  (`rho_hat -> 1` collapses `N_hat -> 1`; `rho_hat -> 0` leaves
+  `N_hat -> M`).
+- An explicit ill-conditioning warning immediately after eq. 9: for
+  `T < M(M-1)/2` (T = observations, M = trial count), "the correlation
+  matrix will be numerically ill-conditioned... estimating an average
+  correlation is then pointless."
+- Equation 2 (the DSR formula) defines `SR_0 = sqrt(V[{SR_n}]) * (...)`
+  under the null hypothesis of zero true Sharpe — it does NOT add the
+  observed cross-trial mean `E[{SR_n}]` (that additive term only appears
+  in the general eq. 1, not the null-rejection threshold SR_0).
+
+**Fixes implemented** (`research-py/src/mqk_research/ml/
+multiple_testing_stats.py`, `multiple_testing_judge.py`):
+1. New `average_pairwise_correlation()` / `estimate_effective_independent_
+   trials()` implementing eq. 7-9 exactly, using the SAME aligned daily OOS
+   NET return series (excess of daily risk-free) already loaded for PBO —
+   deterministic, no RNG, column/row-order invariant, and typed
+   `not_evaluable` (never a silent fallback to raw M) both when the
+   ill-conditioning threshold is breached and when the implied `N_hat <= 1`
+   (duplicate/near-duplicate candidates).
+2. `expected_max_sharpe()` now takes `effective_independent_trials` as an
+   explicit, separate parameter from the raw Sharpe-estimate list whose
+   LENGTH still determines the observed cross-trial variance basis — raw
+   population size and the N used by the correction are now structurally
+   distinct inputs, never conflated.
+3. Fixed the zero-cross-trial-variance branch: previously returned the
+   shared OBSERVED Sharpe as the benchmark; now returns `0.0` exactly, per
+   eq. 2's literal `sqrt(0) = 0`. A regression test proves the old behavior
+   was wrong, including a negative control under which the old (0.7-valued)
+   assertion now fails.
+4. `dsr_trial_accounting` — new top-level block in the judge artifact,
+   computed once and shared by every `dsr_results` entry:
+   `raw_unique_trial_count`, `effective_independent_trial_count`,
+   `average_pairwise_correlation`, `trial_correlation_method`,
+   `correlation_basis`, `ill_conditioning_threshold`,
+   `numerically_defensible`, `not_evaluable_reason`,
+   `dsr_trial_count_protocol_version`. The five P6-required registry-truth
+   fields (`registered_unique_trials`, `attempted_unique_trials`,
+   `economically_evaluable_trials`, `attempt_count`,
+   `evaluation_slice_count`) are UNCHANGED and untouched by this repair —
+   `dsr_trial_accounting` is a distinct, additional concept, not a
+   replacement.
+5. Comparison scope (`_comparison_key`) tightened to also require matching
+   `cost_model` (commission/slippage/diagnostic_zero_cost) and
+   `execution_capacity_policy` (`capacity_policy`, `fold_end_policy`) —
+   candidates measured under different cost/execution assumptions no
+   longer silently share one PBO/DSR population. `entry_threshold` and
+   other strategy-level signal-policy fields remain deliberately excluded
+   (candidate-differentiating, not measurement-basis).
+
+`test_multiple_testing_judge.py` grew from 32 to 43 tests (11 new/repair
+tests, including the required proofs: highly-correlated family effective-N
+< raw M, low-correlation family effective-N > correlated family, duplicate
+variants degenerate, column/row-order invariance of the new accounting
+block, cost/capacity-policy comparison-scope separation, threshold-alone
+non-separation). `test_experiment_registry.py` (47) and
+`test_economic_walkforward.py` (63) regressions unaffected (neither module
+touched by this patch).
+
+### PATCH B — durable bars provenance + corporate-action fail-closed gate
+
+**Root defect 1 (provenance not durable).** P8 Wave 1 attached price
+provenance to `bars_postgres.history()`'s returned DataFrame via
+`.attrs["price_provenance"]` — useful in-memory, but `.attrs` does not
+survive a `to_csv()`/`read_csv()` round trip, which is exactly how bars
+data reaches the registered economic evaluator (a `bars_csv` PATH, not a
+DataFrame). The registered economic trial identity
+(`build_economic_trial_identity`) never included provider identity,
+adjustment convention, corporate-action policy, or query-window/universe
+identity — only the raw artifact-file content hash.
+
+**Root defect 2 (raw prices + corporate actions).** P8 Wave 1 concluded
+corporate-action handling was "not required for V1" because the only
+verified convention is `raw_unadjusted`. That conclusion inverted the
+correct implication: RAW, UNADJUSTED price data is exactly the case where
+corporate-action contamination is dangerous (a 2-for-1 split reads as a
+~50% loss; dividends are omitted entirely from returns) — independently
+documented in this repo's own
+`core-rs/crates/mqk-backtest/src/corporate_actions.rs`. "Confirmed
+raw_unadjusted" should have raised the corporate-action requirement, not
+retired it.
+
+**Fixes implemented** (new module `research-py/src/mqk_research/data/
+bars_provenance.py`; `economic_walkforward.py`;
+`economic_registry_integration.py`):
+1. `build_bars_provenance_manifest()` — one durable, versioned,
+   content-addressed manifest (`schema_version=bars_provenance_manifest_v1`)
+   recording: provider IDs observed, resolved close column, price-
+   adjustment convention, corporate-action policy + evidence id + declared
+   forbidden periods, timeframe/window, symbol universe + universe mode
+   (`fixed_ex_ante` — the only supported mode; `point_in_time` is named but
+   explicitly UNSUPPORTED and fails closed), a **canonical semantic bars
+   hash** (sorted symbol/end_ts/close content — invariant to physical row
+   order), row count, and a SEPARATE physical `artifact_sha256`.
+2. `provenance_identity_fragment()` — the identity-relevant subset (excludes
+   `artifact_sha256`/`row_count`, which must NOT affect identity for a
+   byte-reordered-but-semantically-identical file) — folded into
+   `build_economic_trial_identity`'s `data_identity.bars_provenance`.
+   `bars_provenance` is now a REQUIRED (no-default) argument on both
+   `build_economic_trial_identity` and
+   `run_registered_economic_walkforward_eval` — the official registered
+   path cannot forget or skip the contract; omitting it is a `TypeError`.
+3. `require_registered_bars_provenance()` — fail-closed structural gate
+   (schema version, KNOWN price-adjustment convention, real (non-
+   diagnostic) corporate-action policy, supported universe mode) — checked
+   BEFORE any classification/economic evaluation runs.
+4. `check_corporate_action_integrity()` — fail-closed CONTENT preflight,
+   mirroring `mqk-backtest::CorporateActionPolicy`'s two-policy design
+   (`Allow`/`ForbidPeriods`) rather than building an adjustment-tables
+   subsystem: `adjusted_data` (valid only when the convention is one of an
+   explicitly-named, currently EMPTY verified-adjusted set — no adjusted
+   provider exists anywhere in this system today) or
+   `forbid_affected_periods` (valid only with a real evidence id and zero
+   actual bar-row overlap with the declared exclusion windows). Wired into
+   `run_economic_walkforward()` via an optional `provenance_manifest`
+   parameter, checked immediately after bars load and BEFORE any fold is
+   simulated — an integrity preflight, not a chronology change. A synthetic
+   2-for-1-split negative control (closes 100,100,50,50) proves the ~50%
+   apparent loss can never reach accepted economic evidence: it fails
+   closed both via a declared-but-unresolved exclusion and via the
+   no-protection-at-all path.
+5. Low-level `run_economic_walkforward()` keeps `provenance_manifest=None`
+   as an explicit, narrow diagnostic escape hatch for the pre-existing 63
+   synthetic-fixture tests in `test_economic_walkforward.py` (unmodified,
+   still pass) — the OFFICIAL registered path never uses this escape
+   hatch; `require_registered_bars_provenance` always runs first.
+
+**No authoritative corporate-action exclusion source exists anywhere in
+this repository** — confirmed by inspecting `core-rs/mqk-db/migrations/`
+(no corporate-action table in any migration) and `research-py` (no CA
+fixture/CSV anywhere, matching A9-A13's original finding). This means: for
+the REAL, currently-registered `raw_unadjusted` data, neither
+`adjusted_data` (no verified adjusted provider exists) nor
+`forbid_affected_periods` (no real exclusion evidence exists) can be
+honestly satisfied today — `require_registered_bars_provenance`/
+`check_corporate_action_integrity` correctly and intentionally refuse all
+real registered economic evaluation until that source exists. **This
+downgrades A9-A13/A17's "not required for V1" verdict to a hard, confirmed
+blocker**, and is why this patch is reported PARTIAL rather than COMPLETE
+(both the durable contract AND the fail-closed protection are fully
+implemented and tested — what's missing is the data source itself, which
+per the mission's own instruction must not be fabricated).
+
+Also confirmed, unchanged from Wave 1: `provider_id='unknown'` for ~6,170
+of ~8,302 `md_bars` rows (mostly a single real symbol, AAPL) is a separate,
+already-tracked attribution bug (`MARKET-DATA-PROVIDER-PROVENANCE-01`, not
+yet merged) — `require_registered_bars_provenance` correctly fails closed
+on those rows too (`price_adjustment_convention="unverifiable"`),
+compounding rather than substituting for the corporate-action blocker.
+
+22 new tests (`test_bars_provenance.py`) prove all 22 P8-required items:
+`.attrs` non-durability, registered-path requirement, 8 independent
+identity-change proofs (provider/convention/CA-policy/CA-evidence/bars-
+content/timeframe-range/symbol-universe/universe-mode), unsupported-PIT
+fail-closed, semantic-reorder-invariant-identity vs. artifact-hash-differs,
+result-independence, unknown-provider fail-closed, raw-unadjusted-without-
+protection fail-closed, the split negative control, ADJUSTED_DATA-valid-
+only-when-verified (via a dependency-injected test-only convention, since
+production has none), FORBID_AFFECTED_PERIODS content-level rejection,
+chronology/holdout untouched (full registered-path integration run), and
+identity determinism. Full `research-py` suite: **1215 passed, 7 skipped**
+(1193 Patch-A baseline + 22 new; zero regressions).
+
+### Audit corrections required by this addendum
+
+- **Section 5, Area A9-A13/A17**: "not required for V1" is WRONG — see
+  Root Defect 2 above. Corporate-action safety is now a hard, fail-closed
+  registered-path requirement; the remaining gap is a DATA SOURCE, not a
+  design decision.
+- **Section 5, Area E**: DSR trial-count N is now the paper's implied-
+  independent-trial estimate (Appendix A.3), not raw M. The
+  zero-cross-trial-variance benchmark is `0.0`, not the shared observed
+  Sharpe.
+- **Section 12 / 16 / 16A**: P6-CLOSURE and P8's Wave-1 entries should be
+  read as superseded by PATCH A (`8bc4dbc2`, CLOSED) and PATCH B
+  (`4f7e297e`, PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED) respectively.
+  `RESEARCH_BACKTEST_FOUNDATION_READY`'s "MULTIPLE TESTING" line item
+  remains MET (repaired, not reopened); its "DATA TRUTH" line item, and
+  `RESEARCH_BACKTEST_V1_COMPLETE`'s corresponding line item, are now
+  **NOT MET** — both were previously marked MET on the (incorrect) A9-A13/
+  A17 conclusion this addendum corrects. Official registered economic
+  evaluation on real data is fail-closed-blocked pending a corporate-action
+  evidence source.
+- **P7A** (`RESEARCH-EXECUTION-PRICING-PARITY-01`) and **P9**
+  (`BKT-ROBUSTNESS-GAUNTLET-01`) both depended on "the confirmed
+  raw_unadjusted convention" per Section 13's original dependency graph —
+  that convention is still confirmed, but P9 in particular should now
+  account for corporate-action exclusion as part of any real-candidate
+  robustness run, not just cost/execution-delay stress.
+
+**Next-wave entry condition update.** WAVE 2 (P7A/P7B/P7C) may still
+proceed on its own merits — none of the three touch bars data, and neither
+depends on the corporate-action blocker. Any future wave that intends to
+run the registered economic evaluator against REAL (non-synthetic) data
+remains blocked until a corporate-action evidence source is sourced and
+wired as `forbid_affected_periods` evidence. This is a new, explicit
+prerequisite this addendum adds to the roadmap — tracked here as
+**`BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`** (not yet scoped, not yet a
+patch — per the mission's own instruction, this addendum reports the
+blocker honestly rather than inventing a sourcing plan).
 
 ---
 
@@ -310,7 +550,7 @@ Legend: **C**=COMPLETE, **P**=PARTIAL, **M**=MISSING, **D**=DEFERRED_BY_DESIGN, 
 | A5 | Timestamp/timezone handling | **C** | UTC-explicit, fail-closed (`bars_postgres.py::_require_tz` raises on tz-naive; all feature/label modules `pd.to_datetime(..., utc=True)`). |
 | A6 | Duplicate-bar detection | **C** | `scanner/data_quality.py::REASON_DUPLICATE_BAR_TIMESTAMP`; also enforced independently in `economic_walkforward.py::load_bars` (fail-closed on duplicate `(symbol,end_ts)`). |
 | A7 | Missing-bar/gap handling | **P** | Exists at the scanner admission gate (`data_quality.py`) and 1D-only coverage reporting (`market_data_coverage.py`), but not wired into the feature/training path itself (`features/compute.py` just `dropna()`s incomplete rolling windows). |
-| A9/A10/A11 | Split/dividend/corporate-action handling | **M** | No corporate-action code exists in `research-py` at all. `mqk-backtest::corporate_actions.rs` exists in Rust with no Python bridge. |
+| A9/A10/A11 | Split/dividend/corporate-action handling | **M → PARTIAL-B-REPAIR** | No corporate-action ADJUSTMENT code exists in `research-py`. **2026-08-15 (Section 1B, PATCH B):** a fail-closed corporate-action PROTECTION gate now exists (`mqk_research.data.bars_provenance.check_corporate_action_integrity`, mirroring `mqk-backtest::corporate_actions.rs`'s Allow/ForbidPeriods design) — it correctly refuses real registered evaluation on raw_unadjusted data absent real exclusion evidence, rather than adjusting prices. No authoritative exclusion evidence source exists yet — see Section 1B's `BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`. |
 | A12/A13 | Symbol changes / delisting | **M** | No delist/rename mapping anywhere in `research-py`. |
 | A14–A16 | Point-in-time universe / survivorship protection | **P — confirmed Mode B, correctly scoped** | `universe/build.py` is asof-correct *given its inputs*, but has no mechanism to know which symbols existed-but-were-delisted before the asof date — survivorship bias depends entirely on what the caller supplies. **2026-08-15 (P8):** confirmed by direct code reading that this is unambiguously "Mode B" (fixed, explicit ex-ante universe per the mission's P8 definition) — `run_phase1_equity`'s entire symbol universe is the operator-supplied `--symbols` argument, recorded with its construction time (`asof_utc`) in the manifest; no code path anywhere claims dynamic/index-membership PIT semantics. Not an unresolved gap — a structural, now-documented fact. |
 | A17 | Adjusted vs. unadjusted price methodology | **M → P8-CLOSED** | Original finding: `bars_postgres.py:99` silently substituted the first present of `["close","c","close_micros","adj_close","close_adj"]` and relabeled it `"close"`, with no downstream field recording which convention was used. **2026-08-15:** verified the actual schema has never had an `adj_close`/`close_adj` column, and the only active provider (Alpaca) explicitly requests `adjustment=raw`; `bars_postgres.py` now computes and reports an explicit `price_adjustment_convention` (`"raw_unadjusted"` only when both the close column and every observed `provider_id` are independently verified, else `"unverifiable"`), plus a fail-closed `require_verified_price_provenance()` gate. See Section 1A. Not yet threaded into registered trial identity (deliberately out of Wave-1 scope). |
@@ -605,10 +845,12 @@ The candidate roadmap (Patch 6–10) was **directionally correct but incompletel
 
 | Patch ID | Objective | Status |
 |---|---|---|
-| **P6-CLOSURE** `RESEARCH-MULTIPLE-TESTING-JUDGE-01-CLOSURE` | Commit the existing, tested DSR/PBO implementation; add a CLI/pipeline entry point. | **CLOSED** (`fbb63fc7`) |
+| **P6-CLOSURE** `RESEARCH-MULTIPLE-TESTING-JUDGE-01-CLOSURE` | Commit the existing, tested DSR/PBO implementation; add a CLI/pipeline entry point. | **CLOSED** (`fbb63fc7`); DSR trial-count semantics repaired 2026-08-15 by **PATCH A** `RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01` (`8bc4dbc2`, CLOSED) — see Section 1B |
 | **P6B** `RESEARCH-HOLDOUT-CONSUMPTION-LEDGER-01` | Durable SQLite table + API recording when a dataset's reserved holdout region is opened/consumed, and by which trial/artifact. | **CLOSED** (`686614cc`) |
 | **P6C** `RESEARCH-LEGACY-TRAINING-BOUNDARY-01` | Fail-closed structural boundary preventing `ml/train.py`'s single-shot/global-fit output from being mistaken for promotion-grade OOS evidence. | **CLOSED** (`c643588d`) |
-| **P8** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01` | Verify and stamp the actual adjustment convention used by `md_bars`; add provider-identity capture; add provider-revision/backfill detection; make an explicit, documented decision on corporate-action/delisting scope for V1 based on what's found. | **CLOSED** (`2b87c400`), narrowly scoped |
+| **P8** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01` | Verify and stamp the actual adjustment convention used by `md_bars`; add provider-identity capture; add provider-revision/backfill detection; make an explicit, documented decision on corporate-action/delisting scope for V1 based on what's found. | **CLOSED** (`2b87c400`), narrowly scoped; corporate-action conclusion corrected 2026-08-15 by **PATCH B** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` (`4f7e297e`, **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED**) — see Section 1B |
+| **PATCH A** `RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01` | Correct DSR effective-independent-trial accounting per Bailey & López de Prado 2014 Appendix A.3; fix zero-cross-trial-variance null benchmark; tighten comparison scope. | **CLOSED** (`8bc4dbc2`) |
+| **PATCH B** `BKT-DATA-PROVENANCE-POINT-IN-TIME-01-REPAIR-01` | Durable bars provenance manifest + fail-closed corporate-action preflight, threaded into registered economic trial identity. | **PARTIAL — CORPORATE_ACTION_SOURCE_REQUIRED** (`4f7e297e`) |
 | **P7A** `RESEARCH-EXECUTION-PRICING-PARITY-01` | Reconcile execution-price-model divergence between Python and Rust (Area F/K/N: Python prices at close + flat symmetric bps; Rust prices worst-case HIGH/LOW + slippage). | **OPEN** |
 | **P7B** `RESEARCH-WEIGHT-TO-SHARE-PARITY-01` | Document/implement the weight→share-order translation layer bridging Python's continuous portfolio-weight semantics and Rust's discrete `qty: i64` share semantics (Area K1/K7). | **OPEN** |
 | **P7C** `PROMOTION-OOS-EVIDENCE-GATE-01` | Wire the Rust promotion gate (`mqk-promotion::evaluator.rs`) to actually consume Python walk-forward/OOS/multiple-testing evidence; absorbs the already-tracked `PROMOTION-WALKFORWARD-GATE-WIRING-01`. | **OPEN** |
@@ -718,7 +960,7 @@ section and the original Section 17 (full reasoning in Section 1A).
 
 All of the following must be true:
 
-- **DATA TRUTH:** dataset adjustment convention verified and stamped into a fail-closed provenance record (P8 — **MET**, narrowly scoped: verified at the `bars_postgres.py` query layer, not yet threaded into registered trial identity — see Section 1A); provider identity captured (P8 — **MET** in the same narrow sense; the DB's actual `provider_id` attribution gap for pre-existing rows is a separate, already-tracked issue this gate does not claim to have fixed).
+- **DATA TRUTH:** dataset adjustment convention verified and stamped into a fail-closed provenance record, now threaded into registered trial identity (PATCH B — durable manifest **MET**; see Section 1B); provider identity captured (**MET** in the same sense; the DB's actual `provider_id` attribution gap for pre-existing rows is a separate, already-tracked issue this gate does not claim to have fixed, and correctly fails closed on it). **CORRECTED 2026-08-15 (Section 1B): overall DATA TRUTH is NOT MET** — corporate-action safety is part of data truth for raw_unadjusted data, and no authoritative corporate-action evidence source exists yet, so official registered evaluation on real data is fail-closed-blocked.
 - **FEATURE CAUSALITY:** already met (Area B — no action required). **MET.**
 - **LABEL CAUSALITY:** already met (Area B — no action required). **MET.**
 - **WALK-FORWARD:** already met (Area C — no action required). **MET.**
@@ -735,7 +977,7 @@ All of the following must be true:
 - **PROMOTION EVIDENCE:** one composed dossier artifact exists per trial (P10 — **OPEN**).
 
 **REQUIRED_FOR_V1:** all of the above.
-**CURRENT STATUS (2026-08-15): NOT MET.** 8 of 15 line items MET; the remaining 7 all trace to P7A/P7B/P7C/P9/P10, none of which were in Wave 1's scope.
+**CURRENT STATUS (2026-08-15): NOT MET.** Originally 8 of 15 line items MET after Wave 1; the remaining 7 traced to P7A/P7B/P7C/P9/P10. **CORRECTED same day (Section 1B):** the DATA TRUTH line item's "MET" was based on the now-corrected A9-A13/A17 conclusion — it is **NOT MET** pending a corporate-action evidence source, so **7 of 15** line items are actually MET.
 **FUTURE_INSTITUTIONAL_ENHANCEMENT:** benchmark-relative comparison, bootstrap/permutation CIs, capacity/breakeven analysis, trade-level hit-rate/profit-factor.
 **FUTURE_MULTI_ASSET_IMPLEMENTATION:** everything in Section 10.6–10.9's `NEW_ASSET_ADAPTER`/`NEW_ASSET_SPECIFIC_ENGINE` columns.
 
@@ -762,8 +1004,11 @@ other words: `RESEARCH_BACKTEST_FOUNDATION_READY` = P6-CLOSURE + P6B + P6C +
 P8 + P7A + P7B + P7C + P9, all CLOSED. `RESEARCH_BACKTEST_V1_COMPLETE` =
 `RESEARCH_BACKTEST_FOUNDATION_READY` + P10.
 
-**Current status (2026-08-15): NOT MET.** P6-CLOSURE, P6B, P6C, P8 are
-CLOSED; P7A, P7B, P7C, P9 are OPEN.
+**Current status (2026-08-15): NOT MET.** P6-CLOSURE, P6B, P6C are CLOSED;
+P8 is CLOSED-but-narrowly-scoped with its corporate-action conclusion
+corrected same day (Section 1B) — **P8 is not sufficient for DATA TRUTH on
+its own** until `BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01` (Section 1B, not
+yet scoped) lands; P7A, P7B, P7C, P9 remain OPEN.
 
 ---
 
