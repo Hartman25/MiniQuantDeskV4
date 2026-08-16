@@ -103,6 +103,34 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 #     half-open [start_utc, end_utc). fetch_historical_bars now normalizes
 #     locally so a bar at or past end_utc, or before start_utc, never enters
 #     the canonical research dataset.
+#
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-02 (independent-review repair
+# of REPAIR-01's Defect 1 fix) closed a further defect: REPAIR-01's CA
+# discovery ceiling was max(asof, research_end) -- wrongly treating the bars
+# `asof` (Alpaca's documented entity/symbol-mapping-resolution parameter for
+# /v2/stocks/bars) as if it also bounded corporate-action evidence vintage.
+# Nothing in Alpaca's documentation ties `asof` to /v1/corporate-actions
+# `process_date` coverage; a corporate action can have process_date after
+# BOTH research_end and asof (e.g. ex_date=Jun28 inside the research window,
+# process_date=Jul02, with research_end=asof=Jun30) and REPAIR-01's ceiling
+# would miss it. The three concepts are kept explicitly separate:
+#   - bars_asof: entity/symbol-mapping identity, sent verbatim to
+#     /v2/stocks/bars `asof` (unchanged, still required -- Defect 2).
+#   - ca_discovery_cutoff_utc: the UTC extraction/retrieval instant through
+#     which /v1/corporate-actions process_date evidence was actually queried
+#     -- resolved ONCE, before either provider call, from the caller-supplied
+#     `retrieval_timestamp_utc` (or real wall-clock UTC now for a live
+#     extraction). See _resolve_ca_discovery_cutoff_utc /
+#     _ca_discovery_process_date_bounds.
+#   - the research interval [start_utc, end_utc) itself, unaffected.
+# Corporate-action evidence is a provider snapshot, not timeless truth (Alpaca
+# documents unbounded process_date delay -- see Defect 1 above) -- re-running
+# the SAME bars request/asof/research window at a LATER ca_discovery_cutoff_utc
+# can legitimately discover additional backfilled corporate actions; when it
+# does, the resulting corporate_action_evidence content (and therefore
+# corporate_action_evidence_id / source_attestation_id / trial identity) is
+# meant to change -- this is desired revision sensitivity, not a bug, and is
+# never suppressed by this module.
 
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
@@ -237,7 +265,10 @@ _COVERED_BY_ADJUSTMENT_ALL: FrozenSet[str] = frozenset(
 # equity/ETF's corporate-action history.
 CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC = pd.Timestamp("1900-01-01T00:00:00Z")
 
-CA_DISCOVERY_PROTOCOL_V1 = "process_date_full_history_through_asof_v1"
+# REPAIR-02: protocol name bumped from REPAIR-01's *_through_asof_v1 -- the
+# ceiling is no longer derived from bars_asof (see module header REPAIR-02
+# section); it is the resolved CA discovery snapshot cutoff.
+CA_DISCOVERY_PROTOCOL_V2 = "process_date_full_history_through_retrieval_snapshot_v2"
 
 
 class AlpacaCredentialsMissing(RuntimeError):
@@ -697,19 +728,34 @@ def find_requires_review_events(
     return sorted(hits, key=lambda e: (e["symbol"], e["action_type"], e["effective_start_ts"]))
 
 
+def _resolve_ca_discovery_cutoff_utc(retrieval_timestamp_utc: Optional[str]) -> pd.Timestamp:
+    """Resolve the CA discovery snapshot cutoff -- the UTC extraction/
+    retrieval instant through which /v1/corporate-actions process_date
+    evidence is queried (REPAIR-02). Deliberately NOT derived from bars
+    symbol-mapping `asof` or the research window's end_utc -- see module
+    header REPAIR-02 section. Resolved from the caller-supplied
+    `retrieval_timestamp_utc` when given (the determinism seam: passing the
+    same value across two extractions of identical underlying provider
+    content must yield an identical attestation), else real wall-clock UTC
+    now for a live extraction."""
+    ts = pd.Timestamp(retrieval_timestamp_utc) if retrieval_timestamp_utc else pd.Timestamp.now(tz="UTC")
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
 def _ca_discovery_process_date_bounds(
-    *, start_utc: pd.Timestamp, end_utc: pd.Timestamp, asof: str
+    *, ca_discovery_cutoff_utc: pd.Timestamp
 ) -> Tuple[pd.Timestamp, pd.Timestamp]:
-    """The PROCESS-DATE query window (Defect 1) proven broad enough to
-    discover every corporate action whose EFFECTIVE (ex_date-based) window
-    could intersect [start_utc, end_utc): floor is
+    """The PROCESS-DATE query window (Defect 1, corrected by REPAIR-02)
+    proven broad enough to discover every corporate action whose EFFECTIVE
+    (ex_date-based) window could intersect the research interval: floor is
     CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC (no documented process_date/ex_date
-    bound exists -- see module header), ceiling is the later of the explicit
-    ASOF and the research window's own end (covers both "process_date lands
-    after the research window" and any asof <= end_utc edge case)."""
-    asof_ts = pd.Timestamp(f"{asof}T00:00:00Z")
-    ceiling = max(asof_ts, end_utc.tz_convert("UTC"))
-    return CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC, ceiling
+    bound exists -- see module header), ceiling is the resolved CA discovery
+    snapshot cutoff (see _resolve_ca_discovery_cutoff_utc) -- NOT max(asof,
+    research_end); REPAIR-01's ceiling formula wrongly coupled corporate-
+    action evidence vintage to the bars entity/symbol-mapping `asof`, which
+    could miss a real event whose process_date lands after both asof and
+    research_end (see module header REPAIR-02 section)."""
+    return CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC, ca_discovery_cutoff_utc
 
 
 def _extract_research_bars_with_provenance_impl(
@@ -738,6 +784,12 @@ def _extract_research_bars_with_provenance_impl(
     symbols_norm = sorted({s.strip().upper() for s in symbols if s.strip()})
     asof = _require_resolved_asof(asof)
 
+    # REPAIR-02: resolve the CA discovery snapshot cutoff ONCE, before either
+    # provider call -- this is the extraction/retrieval instant this whole
+    # extraction is bound to, independent of bars_asof (see module header).
+    ca_discovery_cutoff_utc = _resolve_ca_discovery_cutoff_utc(retrieval_timestamp_utc)
+    retrieval_ts = ca_discovery_cutoff_utc.isoformat()
+
     bars_df, bars_meta = fetch_historical_bars(
         symbols=symbols_norm,
         start_utc=start_utc,
@@ -752,7 +804,7 @@ def _extract_research_bars_with_provenance_impl(
     )
 
     ca_discovery_start_utc, ca_discovery_end_utc = _ca_discovery_process_date_bounds(
-        start_utc=start_utc, end_utc=end_utc, asof=asof
+        ca_discovery_cutoff_utc=ca_discovery_cutoff_utc
     )
     ca_entries_discovered, ca_meta = fetch_corporate_actions(
         symbols=symbols_norm,
@@ -799,7 +851,6 @@ def _extract_research_bars_with_provenance_impl(
     )
 
     bars_hash = canonical_semantic_bars_hash(bars_df)
-    retrieval_ts = retrieval_timestamp_utc or pd.Timestamp.now(tz="UTC").isoformat()
 
     attestation = build_source_attestation(
         source_provider_id="alpaca",
@@ -818,9 +869,14 @@ def _extract_research_bars_with_provenance_impl(
         pagination_complete_bars=bars_meta["pagination_complete"],
         pagination_complete_corporate_actions=ca_meta["pagination_complete"],
         corporate_action_query_coverage={
-            "discovery_protocol": CA_DISCOVERY_PROTOCOL_V1,
-            "process_date_query_start_utc": ca_meta["requested_start_utc"],
-            "process_date_query_end_utc": ca_meta["requested_end_utc"],
+            # REPAIR-02: renamed from process_date_query_start_utc/
+            # process_date_query_end_utc -- these are the resolved CA
+            # discovery snapshot bounds (see _ca_discovery_process_date_bounds
+            # / _resolve_ca_discovery_cutoff_utc), never derived from `asof`
+            # (recorded separately below as its own attestation field).
+            "discovery_protocol": CA_DISCOVERY_PROTOCOL_V2,
+            "ca_discovery_start_utc": ca_meta["requested_start_utc"],
+            "ca_discovery_end_utc": ca_meta["requested_end_utc"],
             "research_window_start_utc": start_utc.tz_convert("UTC").isoformat(),
             "research_window_end_utc": end_utc.tz_convert("UTC").isoformat(),
             "requested_types": ca_meta["requested_types"],

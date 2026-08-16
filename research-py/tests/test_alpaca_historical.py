@@ -765,12 +765,210 @@ def test_ca_discovery_query_uses_full_history_floor_not_a_narrow_buffer():
     assert ca_call["params"]["start"] == "1900-01-01"
 
 
-def test_ca_discovery_query_end_covers_asof():
+def test_ca_discovery_query_end_is_retrieval_cutoff_not_asof():
+    """REPAIR-02: the CA discovery process-date ceiling is the resolved CA
+    discovery snapshot cutoff (retrieval_timestamp_utc), NEVER `asof` -- proves
+    REPAIR-01's defective max(asof, research_end) ceiling formula is gone.
+    asof is set to a date the ceiling must NOT equal; the CA query's `end`
+    must equal the distinct, later retrieval cutoff instead."""
     http = FakeHttp()
     _queue_clean_extraction(http)
-    _extract(http, asof="2021-03-01")
+    _extract(http, asof="2021-03-01", retrieval_timestamp_utc="2022-09-20T00:00:00Z")
     ca_call = next(c for c in http.calls if c["url"] == CA_URL)
-    assert ca_call["params"]["end"] == "2021-03-01"
+    assert ca_call["params"]["end"] == "2022-09-20"
+    assert ca_call["params"]["end"] != "2021-03-01"
+
+
+def test_ca_discovery_cutoff_independent_of_asof():
+    """REQUIRED TEST 6: changing bars_asof alone (retrieval cutoff pinned)
+    does not silently redefine the CA discovery cutoff."""
+    cutoffs = []
+    for asof in ("2021-03-01", "2021-06-15", "2021-12-31"):
+        http = FakeHttp()
+        _queue_clean_extraction(http)
+        _extract(http, asof=asof, retrieval_timestamp_utc="2022-09-20T00:00:00Z")
+        ca_call = next(c for c in http.calls if c["url"] == CA_URL)
+        cutoffs.append(ca_call["params"]["end"])
+    assert cutoffs == ["2022-09-20"] * 3
+
+
+def test_ca_discovery_cutoff_change_represented_in_source_contract():
+    """REQUIRED TEST 7: a changed CA discovery cutoff is represented in the
+    recorded provenance/source contract (corporate_action_query_coverage)."""
+    results = {}
+    for cutoff in ("2022-01-01T00:00:00Z", "2022-09-20T00:00:00Z"):
+        http = FakeHttp()
+        _queue_clean_extraction(http)
+        results[cutoff] = _extract(http, retrieval_timestamp_utc=cutoff)
+
+    coverage_a = results["2022-01-01T00:00:00Z"]["manifest"]["source_attestation"][
+        "corporate_action_query_coverage"
+    ]
+    coverage_b = results["2022-09-20T00:00:00Z"]["manifest"]["source_attestation"][
+        "corporate_action_query_coverage"
+    ]
+    assert coverage_a["ca_discovery_end_utc"] == "2022-01-01T00:00:00+00:00"
+    assert coverage_b["ca_discovery_end_utc"] == "2022-09-20T00:00:00+00:00"
+    assert coverage_a["ca_discovery_end_utc"] != coverage_b["ca_discovery_end_utc"]
+    assert coverage_a["discovery_protocol"] == ah.CA_DISCOVERY_PROTOCOL_V2
+
+
+def test_mission_scenario_ca_process_date_after_both_research_end_and_bars_asof_still_discovered():
+    """RED/GREEN proof for the REPAIR-02 defect, using the mission's exact
+    scenario: research_end=2020-06-30, bars_asof=2020-06-30 (== research_end,
+    deliberately NOT covering the event), event ex_date=2020-06-28 (inside
+    the research interval), event process_date=2020-07-02 (AFTER both
+    research_end and bars_asof), retrieval/extraction date=2026-08-15.
+
+    RED (documented, not re-executed): under REPAIR-01's formula, the CA
+    discovery ceiling would have been max(asof, research_end) =
+    max(2020-06-30, 2020-06-30) = 2020-06-30, which is strictly before the
+    event's process_date (2020-07-02) -- Alpaca's /v1/corporate-actions
+    filters by process_date, so that query would never have returned this
+    event and it would have been silently missed.
+
+    GREEN: REPAIR-02's ceiling is the resolved CA discovery cutoff
+    (2026-08-15, the extraction/retrieval instant), which is after the
+    event's process_date -- so the event is discovered."""
+    research_end = "2020-06-30"
+    bars_asof = "2020-06-30"
+    event_process_date = "2020-07-02"
+    retrieval_cutoff = "2026-08-15T00:00:00Z"
+
+    # RED proof: REPAIR-01's ceiling formula would not have covered the event.
+    old_ceiling = max(pd.Timestamp(f"{bars_asof}T00:00:00Z"), pd.Timestamp(f"{research_end}T00:00:00Z"))
+    assert old_ceiling < pd.Timestamp(f"{event_process_date}T00:00:00Z")
+
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2020-06-04T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {
+                "cash_dividends": [
+                    {
+                        "id": "d1",
+                        "symbol": "AAA",
+                        "cusip": "x",
+                        "rate": 0.1,
+                        "ex_date": "2020-06-28",
+                        "process_date": event_process_date,
+                    }
+                ]
+            }
+        ),
+    )
+    result = ah.extract_research_bars_with_provenance_diagnostic(
+        symbols=["AAA"],
+        start_utc=pd.Timestamp("2020-06-01T00:00:00Z"),
+        end_utc=pd.Timestamp(f"{research_end}T00:00:00Z"),
+        asof=bars_asof,
+        credentials=_creds(),
+        http_get=http,
+        retrieval_timestamp_utc=retrieval_cutoff,
+    )
+    entries = result["corporate_action_entries"]
+    assert len(entries) == 1
+    assert entries[0]["effective_start_ts"] == "2020-06-28"
+    # effective/ex-date lies inside the research interval [start_utc, end_utc)
+    assert pd.Timestamp("2020-06-01T00:00:00Z") <= pd.Timestamp("2020-06-28T00:00:00Z") < pd.Timestamp(
+        f"{research_end}T00:00:00Z"
+    )
+    # bars_asof remains explicitly sent to /v2/stocks/bars (Defect 2, unaffected)
+    bars_call = next(c for c in http.calls if c["url"] == BARS_URL)
+    assert bars_call["params"]["asof"] == bars_asof
+    # CA discovery ceiling actually used was the retrieval cutoff, not asof/research_end
+    ca_call = next(c for c in http.calls if c["url"] == CA_URL)
+    assert ca_call["params"]["end"] == "2026-08-15"
+
+
+def test_same_ca_discovery_snapshot_and_content_is_deterministic():
+    """REQUIRED TEST 10: re-running the SAME extraction (same provider
+    content, same explicitly-pinned retrieval/CA-discovery cutoff) produces
+    an identical attestation identity."""
+    pinned_cutoff = "2022-09-20T00:00:00Z"
+
+    http_a = FakeHttp()
+    _queue_clean_extraction(http_a)
+    result_a = _extract(http_a, retrieval_timestamp_utc=pinned_cutoff)
+
+    http_b = FakeHttp()
+    _queue_clean_extraction(http_b)
+    result_b = _extract(http_b, retrieval_timestamp_utc=pinned_cutoff)
+
+    assert (
+        result_a["manifest"]["source_attestation"]["attestation_id"]
+        == result_b["manifest"]["source_attestation"]["attestation_id"]
+    )
+    assert (
+        result_a["manifest"]["canonical_semantic_bars_hash"]
+        == result_b["manifest"]["canonical_semantic_bars_hash"]
+    )
+    assert (
+        result_a["manifest"]["corporate_action_evidence_id"]
+        == result_b["manifest"]["corporate_action_evidence_id"]
+    )
+
+
+def test_later_discovery_snapshot_with_additional_ca_changes_evidence_and_identity():
+    """REQUIRED TESTS 8/9: a later CA discovery snapshot that turns up an
+    ADDITIONAL provider-backfilled corporate action must change the semantic
+    corporate-action evidence, and that change must propagate into
+    provenance/trial identity (corporate_action_evidence_id,
+    source_attestation_id, and provenance_identity_fragment)."""
+    from mqk_research.data.bars_provenance import provenance_identity_fragment
+
+    def _queue_extraction_with_entries(http: FakeHttp, entries: List[Dict[str, Any]]) -> None:
+        http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z", c=100.0)]}))
+        http.queue(CA_URL, 200, _ca_page({"cash_dividends": entries}))
+
+    early_entry = {
+        "id": "d1",
+        "symbol": "AAA",
+        "cusip": "x",
+        "rate": 0.1,
+        "ex_date": "2021-01-09",
+        "process_date": "2021-01-10",
+    }
+    backfilled_entry = {
+        "id": "d2",
+        "symbol": "AAA",
+        "cusip": "x",
+        "rate": 0.2,
+        "ex_date": "2021-01-15",
+        "process_date": "2021-06-01",  # discovered only by the later snapshot
+    }
+
+    http_early = FakeHttp()
+    _queue_extraction_with_entries(http_early, [early_entry])
+    result_early = _extract(
+        http_early,
+        start_utc=pd.Timestamp("2021-01-01T00:00:00Z"),
+        end_utc=pd.Timestamp("2021-02-01T00:00:00Z"),
+        retrieval_timestamp_utc="2021-02-01T00:00:00Z",  # before the backfilled process_date
+    )
+
+    http_later = FakeHttp()
+    _queue_extraction_with_entries(http_later, [early_entry, backfilled_entry])
+    result_later = _extract(
+        http_later,
+        start_utc=pd.Timestamp("2021-01-01T00:00:00Z"),
+        end_utc=pd.Timestamp("2021-02-01T00:00:00Z"),
+        retrieval_timestamp_utc="2021-07-01T00:00:00Z",  # after the backfilled process_date
+    )
+
+    assert len(result_early["corporate_action_entries"]) == 1
+    assert len(result_later["corporate_action_entries"]) == 2
+
+    manifest_early = result_early["manifest"]
+    manifest_later = result_later["manifest"]
+    assert manifest_early["corporate_action_evidence_id"] != manifest_later["corporate_action_evidence_id"]
+    assert (
+        manifest_early["source_attestation"]["attestation_id"]
+        != manifest_later["source_attestation"]["attestation_id"]
+    )
+    assert provenance_identity_fragment(manifest_early) != provenance_identity_fragment(manifest_later)
 
 
 def test_ca_discovery_incomplete_pagination_fails_closed():
