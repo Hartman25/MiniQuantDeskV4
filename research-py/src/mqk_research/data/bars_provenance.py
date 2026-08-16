@@ -248,6 +248,32 @@ def canonical_semantic_bars_hash(bars: pd.DataFrame) -> str:
     return sha256_json(rows)
 
 
+def canonical_ca_query_semantic_content(coverage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The SEMANTIC subset of a source attestation's
+    `corporate_action_query_coverage` (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-
+    REPAIR-03 Defect 3): discovery protocol, the fixed historical discovery
+    floor, the research window, and the requested symbols/types -- everything
+    needed to prove WHAT was queried. Deliberately excludes
+    `ca_discovery_end_utc`: that field is the exact wall-clock CA discovery
+    snapshot cutoff (see alpaca_historical._resolve_ca_discovery_cutoff_utc),
+    audit metadata about WHEN the query ran, not part of what makes two
+    extractions the same research candidate -- re-running the identical
+    request at a later snapshot cutoff must not manufacture a new
+    source_attestation_id/trial identity by itself. A later snapshot that
+    genuinely discovers an additional/backfilled corporate action still
+    changes identity, but through corporate_action_evidence_id (a real
+    semantic fact), not through this clock field."""
+    coverage = coverage or {}
+    return {
+        "discovery_protocol": coverage.get("discovery_protocol"),
+        "ca_discovery_start_utc": coverage.get("ca_discovery_start_utc"),
+        "research_window_start_utc": coverage.get("research_window_start_utc"),
+        "research_window_end_utc": coverage.get("research_window_end_utc"),
+        "requested_types": coverage.get("requested_types"),
+        "symbols_requested": coverage.get("symbols_requested"),
+    }
+
+
 def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[str, Any]:
     """The canonical, hashable subset of a source attestation object
     (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) -- normalized field selection so
@@ -267,7 +293,13 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
     reruns) must share one semantic source_attestation_id; the raw hashes
     remain on the attestation object itself as audit-only evidence (see
     build_source_attestation), just outside canonical identity -- the same
-    treatment `retrieval_timestamp_utc` and `attestation_id` already get."""
+    treatment `retrieval_timestamp_utc` and `attestation_id` already get.
+
+    BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-03 (Defect 3): hashes only
+    the SEMANTIC subset of `corporate_action_query_coverage` (see
+    canonical_ca_query_semantic_content) -- the full coverage dict, including
+    its wall-clock ca_discovery_end_utc, remains on the attestation object
+    for audit but no longer participates in identity."""
     return {
         "schema_version": attestation.get("schema_version"),
         "source_provider_id": attestation.get("source_provider_id"),
@@ -285,7 +317,9 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
         "asof": attestation.get("asof"),
         "pagination_complete_bars": attestation.get("pagination_complete_bars"),
         "pagination_complete_corporate_actions": attestation.get("pagination_complete_corporate_actions"),
-        "corporate_action_query_coverage": attestation.get("corporate_action_query_coverage"),
+        "corporate_action_query_coverage": canonical_ca_query_semantic_content(
+            attestation.get("corporate_action_query_coverage")
+        ),
         "category_b_events_found": attestation.get("category_b_events_found"),
         "canonical_semantic_bars_hash": attestation.get("canonical_semantic_bars_hash"),
         "canonical_corporate_action_evidence_hash": attestation.get("canonical_corporate_action_evidence_hash"),
@@ -368,6 +402,62 @@ def build_source_attestation(
     return attestation
 
 
+def _require_consistent_ca_discovery_coverage(attestation: Dict[str, Any]) -> None:
+    """Fail-closed internal-consistency check (REPAIR-03): required
+    corporate-action discovery coverage fields must exist AND agree with the
+    rest of the same attestation's own claims -- a caller cannot merely hash
+    contradictory values into an internally-inconsistent-but-structurally-
+    present coverage object. Checks the recorded retrieval timestamp against
+    the recorded CA discovery cutoff, the recorded research window against
+    the recorded bars request range, and the recorded symbol set -- never
+    against the real current wall clock, so an old, still-valid artifact
+    never "expires" merely for being old."""
+    coverage = attestation.get("corporate_action_query_coverage")
+    if not isinstance(coverage, dict):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation is missing a corporate_action_query_coverage object"
+        )
+    required_fields = (
+        "discovery_protocol",
+        "ca_discovery_start_utc",
+        "ca_discovery_end_utc",
+        "research_window_start_utc",
+        "research_window_end_utc",
+        "requested_types",
+        "symbols_requested",
+    )
+    missing = [f for f in required_fields if coverage.get(f) in (None, "")]
+    if missing:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.corporate_action_query_coverage missing required field(s): "
+            f"{missing}"
+        )
+    if coverage.get("ca_discovery_end_utc") != attestation.get("retrieval_timestamp_utc"):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.corporate_action_query_coverage.ca_discovery_end_utc "
+            f"({coverage.get('ca_discovery_end_utc')!r}) does not agree with the attestation's own "
+            f"retrieval_timestamp_utc ({attestation.get('retrieval_timestamp_utc')!r}) -- both are meant "
+            "to record the same resolved CA discovery snapshot instant"
+        )
+    if coverage.get("research_window_start_utc") != attestation.get("requested_start_utc") or coverage.get(
+        "research_window_end_utc"
+    ) != attestation.get("requested_end_utc"):
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.corporate_action_query_coverage research window "
+            f"[{coverage.get('research_window_start_utc')!r}, {coverage.get('research_window_end_utc')!r}) "
+            f"does not agree with the attestation's own requested range "
+            f"[{attestation.get('requested_start_utc')!r}, {attestation.get('requested_end_utc')!r})"
+        )
+    coverage_symbols = {str(s).strip().upper() for s in coverage.get("symbols_requested") or []}
+    attested_symbols = {str(s).strip().upper() for s in attestation.get("symbols") or []}
+    if coverage_symbols != attested_symbols:
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.corporate_action_query_coverage.symbols_requested "
+            f"{sorted(coverage_symbols)!r} does not agree with the attestation's own symbols "
+            f"{sorted(attested_symbols)!r}"
+        )
+
+
 def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str, Any]) -> None:
     """Defect closure (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01): for a price
     convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION,
@@ -446,6 +536,7 @@ def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str,
             "must never rely on the provider's implicit current-day default (see "
             "mqk_research.data.alpaca_historical.fetch_historical_bars's required asof parameter)"
         )
+    _require_consistent_ca_discovery_coverage(attestation)
     expected_mode = _CONVENTION_REQUIRED_ADJUSTMENT_MODE.get(convention)
     if attestation.get("adjustment_mode") != expected_mode:
         raise SourceAttestationUnverifiable(

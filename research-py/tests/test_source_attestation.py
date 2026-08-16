@@ -66,7 +66,28 @@ def _clean_ca_evidence(bars: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _valid_attestation(bars: pd.DataFrame, evidence: Dict[str, Any], **overrides: Any) -> Dict[str, Any]:
-    symbols = sorted(bars["symbol"].unique().tolist())
+    """Builds an internally-consistent attestation: `corporate_action_query_
+    coverage`'s research-window/symbols/snapshot-cutoff fields are DERIVED
+    from whatever `symbols`/`requested_start_utc`/`requested_end_utc`/
+    `retrieval_timestamp_utc` overrides are supplied, so a test overriding
+    one of those fields alone (e.g. symbols=["BBB"]) still produces a
+    coverage object that agrees with it -- exercising the intended
+    downstream check rather than tripping the REPAIR-03 internal-consistency
+    check as an unrelated side effect. Pass `corporate_action_query_coverage`
+    explicitly to test that consistency check itself."""
+    symbols = overrides.get("symbols", sorted(bars["symbol"].unique().tolist()))
+    requested_start_utc = overrides.get("requested_start_utc", "2021-01-01T00:00:00+00:00")
+    requested_end_utc = overrides.get("requested_end_utc", "2021-02-01T00:00:00+00:00")
+    retrieval_timestamp_utc = overrides.get("retrieval_timestamp_utc", "2026-08-15T00:00:00+00:00")
+    default_coverage = {
+        "discovery_protocol": "process_date_full_history_through_retrieval_snapshot_v2",
+        "ca_discovery_start_utc": "1900-01-01T00:00:00+00:00",
+        "ca_discovery_end_utc": retrieval_timestamp_utc,
+        "research_window_start_utc": requested_start_utc,
+        "research_window_end_utc": requested_end_utc,
+        "requested_types": ["cash_dividend"],
+        "symbols_requested": symbols,
+    }
     kwargs: Dict[str, Any] = dict(
         source_provider_id="alpaca",
         extractor_id=TRUSTED_EXTRACTOR_ID,
@@ -74,8 +95,8 @@ def _valid_attestation(bars: pd.DataFrame, evidence: Dict[str, Any], **overrides
         api_endpoint_bars="https://data.alpaca.markets/v2/stocks/bars",
         api_endpoint_corporate_actions="https://data.alpaca.markets/v1/corporate-actions",
         symbols=symbols,
-        requested_start_utc="2021-01-01T00:00:00+00:00",
-        requested_end_utc="2021-02-01T00:00:00+00:00",
+        requested_start_utc=requested_start_utc,
+        requested_end_utc=requested_end_utc,
         returned_coverage_start_utc="2021-01-01T00:00:00+00:00",
         returned_coverage_end_utc="2021-02-01T00:00:00+00:00",
         adjustment_mode="all",
@@ -83,12 +104,12 @@ def _valid_attestation(bars: pd.DataFrame, evidence: Dict[str, Any], **overrides
         asof="2021-02-15",
         pagination_complete_bars=True,
         pagination_complete_corporate_actions=True,
-        corporate_action_query_coverage={"requested_start_utc": "2021-01-01T00:00:00+00:00"},
+        corporate_action_query_coverage=default_coverage,
         category_b_events_found=[],
         raw_response_content_hashes={"bars_pages": ["h1"], "corporate_action_pages": ["h2"]},
         canonical_semantic_bars_hash=canonical_semantic_bars_hash(bars),
         canonical_corporate_action_evidence_hash=corporate_action_evidence_id(evidence),
-        retrieval_timestamp_utc="2026-08-15T00:00:00+00:00",
+        retrieval_timestamp_utc=retrieval_timestamp_utc,
     )
     kwargs.update(overrides)
     return build_source_attestation(**kwargs)
@@ -380,6 +401,114 @@ def test_raw_response_hashes_remain_audit_visible_despite_exclusion_from_identit
         bars, evidence, raw_response_content_hashes={"bars_pages": ["p1", "p2"], "corporate_action_pages": ["c1"]}
     )
     assert attestation["raw_response_content_hashes"] == {"bars_pages": ["p1", "p2"], "corporate_action_pages": ["c1"]}
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-03 Defect 3 -- CA discovery
+# snapshot clock excluded from semantic identity; internal consistency
+# enforced on what remains.
+# ---------------------------------------------------------------------------
+
+
+def test_ca_discovery_end_utc_excluded_from_source_attestation_id():
+    """RED/GREEN proof: same semantic bars + same semantic CA evidence + same
+    asof + a DIFFERENT CA discovery snapshot cutoff must produce the SAME
+    source_attestation_id (REQUIRED TESTS 9/10). Pre-repair, ca_discovery_
+    end_utc sat inside the hashed corporate_action_query_coverage dict, so
+    this would have failed (a different cutoff meant a different hash);
+    post-repair, canonical_ca_query_semantic_content excludes it."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    att_a = _valid_attestation(bars, evidence, retrieval_timestamp_utc="2022-01-01T00:00:00+00:00")
+    att_b = _valid_attestation(bars, evidence, retrieval_timestamp_utc="2022-09-20T00:00:00+00:00")
+    assert (
+        att_a["corporate_action_query_coverage"]["ca_discovery_end_utc"]
+        != att_b["corporate_action_query_coverage"]["ca_discovery_end_utc"]
+    )
+    assert att_a["attestation_id"] == att_b["attestation_id"]
+
+
+def test_ca_discovery_coverage_still_audit_visible_despite_exclusion_from_identity():
+    """REQUIRED TEST 12: attestation objects still visibly record the
+    different audit snapshot cutoffs even though identity is unaffected."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(bars, evidence, retrieval_timestamp_utc="2022-09-20T00:00:00+00:00")
+    assert attestation["corporate_action_query_coverage"]["ca_discovery_end_utc"] == "2022-09-20T00:00:00+00:00"
+    assert attestation["retrieval_timestamp_utc"] == "2022-09-20T00:00:00+00:00"
+
+
+def test_ca_discovery_coverage_missing_fields_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(
+        bars, evidence, corporate_action_query_coverage={"discovery_protocol": "v2"}
+    )
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="missing required field"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_ca_discovery_coverage_retrieval_timestamp_mismatch_fails_official_gate():
+    """The recorded snapshot cutoff inside corporate_action_query_coverage
+    must agree with the attestation's own retrieval_timestamp_utc -- a
+    contradictory pair (both structurally present) must still fail closed."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    contradictory_coverage = {
+        "discovery_protocol": "process_date_full_history_through_retrieval_snapshot_v2",
+        "ca_discovery_start_utc": "1900-01-01T00:00:00+00:00",
+        "ca_discovery_end_utc": "2019-01-01T00:00:00+00:00",  # does not match retrieval_timestamp_utc below
+        "research_window_start_utc": "2021-01-01T00:00:00+00:00",
+        "research_window_end_utc": "2021-02-01T00:00:00+00:00",
+        "requested_types": ["cash_dividend"],
+        "symbols_requested": ["AAA"],
+    }
+    attestation = _valid_attestation(
+        bars,
+        evidence,
+        corporate_action_query_coverage=contradictory_coverage,
+        retrieval_timestamp_utc="2026-08-15T00:00:00+00:00",
+    )
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="does not agree with the attestation's own retrieval_timestamp_utc"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_ca_discovery_coverage_research_window_mismatch_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    contradictory_coverage = {
+        "discovery_protocol": "process_date_full_history_through_retrieval_snapshot_v2",
+        "ca_discovery_start_utc": "1900-01-01T00:00:00+00:00",
+        "ca_discovery_end_utc": "2026-08-15T00:00:00+00:00",
+        "research_window_start_utc": "1999-01-01T00:00:00+00:00",  # does not match requested_start_utc
+        "research_window_end_utc": "2021-02-01T00:00:00+00:00",
+        "requested_types": ["cash_dividend"],
+        "symbols_requested": ["AAA"],
+    }
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=contradictory_coverage)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="research window"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_ca_discovery_coverage_symbols_mismatch_fails_official_gate():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    contradictory_coverage = {
+        "discovery_protocol": "process_date_full_history_through_retrieval_snapshot_v2",
+        "ca_discovery_start_utc": "1900-01-01T00:00:00+00:00",
+        "ca_discovery_end_utc": "2026-08-15T00:00:00+00:00",
+        "research_window_start_utc": "2021-01-01T00:00:00+00:00",
+        "research_window_end_utc": "2021-02-01T00:00:00+00:00",
+        "requested_types": ["cash_dividend"],
+        "symbols_requested": ["ZZZ"],  # does not match attestation's own symbols=["AAA"]
+    }
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=contradictory_coverage)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="symbols_requested"):
+        check_corporate_action_integrity(bars, manifest)
 
 
 def test_different_semantic_bars_hash_changes_source_attestation_id():

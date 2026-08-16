@@ -131,6 +131,31 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 # corporate_action_evidence_id / source_attestation_id / trial identity) is
 # meant to change -- this is desired revision sensitivity, not a bug, and is
 # never suppressed by this module.
+#
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-03 (independent-review repair)
+# closed three further defects:
+#   - Defect 1 (shared helper could mint official authority): the former
+#     _extract_research_bars_with_provenance_impl accepted caller-supplied
+#     http_get/extractor_id/source_authority together, so a test (or any
+#     caller) could inject a fake transport and still claim
+#     SOURCE_AUTHORITY_OFFICIAL_PROVIDER. The shared core is now
+#     _neutral_extract: it performs retrieval/normalization/CA-filtering/
+#     evidence construction but structurally cannot accept an extractor_id or
+#     source_authority. Only the two public wrappers below mint an
+#     attestation, each with its own hard-coded identity (_mint_manifest).
+#   - Defect 2 (caller-selected snapshot clock): extract_research_bars_with_
+#     provenance no longer accepts retrieval_timestamp_utc. It resolves the
+#     CA discovery cutoff exactly once via _utc_now() (a monkeypatchable
+#     seam), same as the fixed _default_http_get transport seam.
+#     extract_research_bars_with_provenance_diagnostic keeps an explicit,
+#     honestly-named ca_discovery_cutoff_utc override for deterministic
+#     tests.
+#   - Defect 3 (snapshot clock leaking into semantic identity): bars_
+#     provenance.canonical_source_attestation_content now hashes only the
+#     SEMANTIC subset of corporate_action_query_coverage (protocol, discovery
+#     floor, research window, requested symbols/types) -- the wall-clock
+#     ca_discovery_end_utc stays on the attestation object for audit but no
+#     longer participates in source_attestation_id / trial identity.
 
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
@@ -728,17 +753,26 @@ def find_requires_review_events(
     return sorted(hits, key=lambda e: (e["symbol"], e["action_type"], e["effective_start_ts"]))
 
 
-def _resolve_ca_discovery_cutoff_utc(retrieval_timestamp_utc: Optional[str]) -> pd.Timestamp:
+def _utc_now() -> pd.Timestamp:
+    """Live wall-clock UTC seam, isolated to a single module-level function
+    (REPAIR-03 Defect 2) so a test can monkeypatch this one symbol to make
+    the OFFICIAL extraction path's snapshot clock deterministic, without the
+    public official signature accepting a caller-selectable override."""
+    return pd.Timestamp.now(tz="UTC")
+
+
+def _resolve_ca_discovery_cutoff_utc(ca_discovery_cutoff_utc: Optional[str]) -> pd.Timestamp:
     """Resolve the CA discovery snapshot cutoff -- the UTC extraction/
     retrieval instant through which /v1/corporate-actions process_date
     evidence is queried (REPAIR-02). Deliberately NOT derived from bars
     symbol-mapping `asof` or the research window's end_utc -- see module
     header REPAIR-02 section. Resolved from the caller-supplied
-    `retrieval_timestamp_utc` when given (the determinism seam: passing the
+    `ca_discovery_cutoff_utc` when given (the determinism seam: passing the
     same value across two extractions of identical underlying provider
-    content must yield an identical attestation), else real wall-clock UTC
-    now for a live extraction."""
-    ts = pd.Timestamp(retrieval_timestamp_utc) if retrieval_timestamp_utc else pd.Timestamp.now(tz="UTC")
+    content must yield an identical attestation) -- REPAIR-03: only the
+    DIAGNOSTIC wrapper ever supplies this; else real wall-clock UTC now (see
+    _utc_now) for a live extraction."""
+    ts = pd.Timestamp(ca_discovery_cutoff_utc) if ca_discovery_cutoff_utc else _utc_now()
     return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
 
 
@@ -758,7 +792,7 @@ def _ca_discovery_process_date_bounds(
     return CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC, ca_discovery_cutoff_utc
 
 
-def _extract_research_bars_with_provenance_impl(
+def _neutral_extract(
     *,
     symbols: Sequence[str],
     start_utc: pd.Timestamp,
@@ -769,25 +803,20 @@ def _extract_research_bars_with_provenance_impl(
     credentials: Optional[AlpacaCredentials],
     http_get: HttpGet,
     base_url: str,
-    extractor_id: str,
-    source_authority: str,
-    retrieval_timestamp_utc: Optional[str],
+    ca_discovery_cutoff_utc: pd.Timestamp,
 ) -> Dict[str, Any]:
-    """Shared extraction/orchestration body (Defect 3): NOT part of this
-    module's public surface. `extractor_id`/`source_authority` are supplied
-    by the caller-facing wrapper (extract_research_bars_with_provenance for
-    the OFFICIAL path, extract_research_bars_with_provenance_diagnostic for
-    the INTERNAL/diagnostic path) and are never derived from `http_get`/
-    `base_url` -- an injected diagnostic transport can never produce an
-    OFFICIAL attestation by construction, regardless of what URL it points
-    at."""
+    """AUTHORITY-NEUTRAL shared extraction core (REPAIR-03 Defect 1): bars
+    retrieval, CA retrieval/filtering, fail-closed review-required check, and
+    evidence/hash/coverage construction. Deliberately accepts NO
+    extractor_id/source_authority parameter -- those are official-vs-
+    diagnostic identity, minted only by _mint_manifest under a hard-coded
+    value chosen by whichever public wrapper below calls it, never threaded
+    through here. `ca_discovery_cutoff_utc` must already be resolved (REPAIR-
+    02: resolved exactly once by the caller, before this runs) -- this
+    function never touches the clock itself. Not part of this module's
+    public surface."""
     symbols_norm = sorted({s.strip().upper() for s in symbols if s.strip()})
     asof = _require_resolved_asof(asof)
-
-    # REPAIR-02: resolve the CA discovery snapshot cutoff ONCE, before either
-    # provider call -- this is the extraction/retrieval instant this whole
-    # extraction is bound to, independent of bars_asof (see module header).
-    ca_discovery_cutoff_utc = _resolve_ca_discovery_cutoff_utc(retrieval_timestamp_utc)
     retrieval_ts = ca_discovery_cutoff_utc.isoformat()
 
     bars_df, bars_meta = fetch_historical_bars(
@@ -850,7 +879,51 @@ def _extract_research_bars_with_provenance_impl(
         ],
     )
 
-    bars_hash = canonical_semantic_bars_hash(bars_df)
+    corporate_action_query_coverage = {
+        # REPAIR-02: these are the resolved CA discovery snapshot bounds (see
+        # _ca_discovery_process_date_bounds / _resolve_ca_discovery_cutoff_utc),
+        # never derived from `asof`. REPAIR-03: ca_discovery_end_utc is the
+        # exact wall-clock snapshot cutoff -- audit-only, deliberately
+        # excluded from bars_provenance.canonical_source_attestation_content's
+        # semantic hash (see that function's corporate_action_query_coverage
+        # handling) so it cannot manufacture a new trial identity by itself.
+        "discovery_protocol": CA_DISCOVERY_PROTOCOL_V2,
+        "ca_discovery_start_utc": ca_meta["requested_start_utc"],
+        "ca_discovery_end_utc": ca_meta["requested_end_utc"],
+        "research_window_start_utc": start_utc.tz_convert("UTC").isoformat(),
+        "research_window_end_utc": end_utc.tz_convert("UTC").isoformat(),
+        "requested_types": ca_meta["requested_types"],
+        "symbols_requested": ca_meta["symbols_requested"],
+    }
+
+    return {
+        "bars_df": bars_df,
+        "bars_meta": bars_meta,
+        "ca_meta": ca_meta,
+        "ca_entries": ca_entries,
+        "evidence": evidence,
+        "bars_hash": canonical_semantic_bars_hash(bars_df),
+        "retrieval_ts": retrieval_ts,
+        "corporate_action_query_coverage": corporate_action_query_coverage,
+        "symbols_norm": symbols_norm,
+        "timeframe": timeframe,
+        "feed": feed,
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+    }
+
+
+def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authority: str) -> Dict[str, Any]:
+    """Mint the OFFICIAL or DIAGNOSTIC source attestation + bars provenance
+    manifest from a _neutral_extract result (REPAIR-03 Defect 1):
+    `extractor_id`/`source_authority` are supplied here, by the caller-facing
+    wrapper, and are never derived from whatever transport produced
+    `neutral` -- an injected diagnostic transport can never produce an
+    OFFICIAL attestation by construction, regardless of what URL it points
+    at."""
+    bars_meta = neutral["bars_meta"]
+    ca_meta = neutral["ca_meta"]
+    evidence = neutral["evidence"]
 
     attestation = build_source_attestation(
         source_provider_id="alpaca",
@@ -858,38 +931,25 @@ def _extract_research_bars_with_provenance_impl(
         source_authority=source_authority,
         api_endpoint_bars=bars_meta["endpoint"],
         api_endpoint_corporate_actions=ca_meta["endpoint"],
-        symbols=symbols_norm,
+        symbols=neutral["symbols_norm"],
         requested_start_utc=bars_meta["requested_start_utc"],
         requested_end_utc=bars_meta["requested_end_utc"],
         returned_coverage_start_utc=bars_meta["returned_coverage_start_utc"],
         returned_coverage_end_utc=bars_meta["returned_coverage_end_utc"],
         adjustment_mode=ADJUSTMENT_ALL,
-        feed=feed,
+        feed=neutral["feed"],
         asof=bars_meta["resolved_asof"],
         pagination_complete_bars=bars_meta["pagination_complete"],
         pagination_complete_corporate_actions=ca_meta["pagination_complete"],
-        corporate_action_query_coverage={
-            # REPAIR-02: renamed from process_date_query_start_utc/
-            # process_date_query_end_utc -- these are the resolved CA
-            # discovery snapshot bounds (see _ca_discovery_process_date_bounds
-            # / _resolve_ca_discovery_cutoff_utc), never derived from `asof`
-            # (recorded separately below as its own attestation field).
-            "discovery_protocol": CA_DISCOVERY_PROTOCOL_V2,
-            "ca_discovery_start_utc": ca_meta["requested_start_utc"],
-            "ca_discovery_end_utc": ca_meta["requested_end_utc"],
-            "research_window_start_utc": start_utc.tz_convert("UTC").isoformat(),
-            "research_window_end_utc": end_utc.tz_convert("UTC").isoformat(),
-            "requested_types": ca_meta["requested_types"],
-            "symbols_requested": ca_meta["symbols_requested"],
-        },
+        corporate_action_query_coverage=neutral["corporate_action_query_coverage"],
         category_b_events_found=[],
         raw_response_content_hashes={
             "bars_pages": bars_meta["raw_response_content_hashes"],
             "corporate_action_pages": ca_meta["raw_response_content_hashes"],
         },
-        canonical_semantic_bars_hash=bars_hash,
+        canonical_semantic_bars_hash=neutral["bars_hash"],
         canonical_corporate_action_evidence_hash=corporate_action_evidence_id(evidence),
-        retrieval_timestamp_utc=retrieval_ts,
+        retrieval_timestamp_utc=neutral["retrieval_ts"],
     )
 
     price_provenance = {
@@ -911,20 +971,20 @@ def _extract_research_bars_with_provenance_impl(
         corporate_action_evidence_id=corporate_action_evidence_id(evidence),
         corporate_action_evidence=evidence,
         forbidden_periods=(),
-        timeframe=timeframe,
-        start_utc=start_utc.tz_convert("UTC").isoformat(),
-        end_utc=end_utc.tz_convert("UTC").isoformat(),
-        symbol_universe=symbols_norm,
+        timeframe=neutral["timeframe"],
+        start_utc=neutral["start_utc"].tz_convert("UTC").isoformat(),
+        end_utc=neutral["end_utc"].tz_convert("UTC").isoformat(),
+        symbol_universe=neutral["symbols_norm"],
         universe_mode=UNIVERSE_MODE_FIXED_EX_ANTE,
-        bars=bars_df,
+        bars=neutral["bars_df"],
         source_attestation=attestation,
     )
 
     return {
-        "bars": bars_df,
+        "bars": neutral["bars_df"],
         "manifest": manifest,
         "corporate_action_evidence": evidence,
-        "corporate_action_entries": ca_entries,
+        "corporate_action_entries": neutral["ca_entries"],
     }
 
 
@@ -937,19 +997,22 @@ def extract_research_bars_with_provenance(
     timeframe: str = DEFAULT_TIMEFRAME,
     feed: str = DEFAULT_FEED,
     credentials: Optional[AlpacaCredentials] = None,
-    retrieval_timestamp_utc: Optional[str] = None,
 ) -> Dict[str, Any]:
     """OFFICIAL, narrow entry point for fixed_ex_ante US equity/ETF research
-    extraction (Defect 3): fixed official Alpaca base URL, real HTTP
-    transport -- no injectable transport/base_url. Fetches adjustment=all
-    bars AND corporate-actions for the SAME symbol/range from Alpaca (CA
-    discovery is proven-superset, not window-bounded -- see Defect 1 /
-    _ca_discovery_process_date_bounds), requires an explicit `asof` (Defect
-    2 -- never Alpaca's implicit current-day default), fails closed
-    (CorporateActionReviewRequired) if any REQUIRES_FAIL_CLOSED_REVIEW event
-    intersects the request, and otherwise returns a fully-formed,
-    OFFICIAL-authority source-attested bars provenance manifest ready to
-    pass directly as `bars_provenance` to
+    extraction (Defect 3, hardened by REPAIR-03 Defect 1): fixed official
+    Alpaca base URL, real HTTP transport -- no injectable transport/base_url,
+    extractor_id, source_authority, or CA-discovery snapshot clock override
+    (REPAIR-03 Defect 2: the snapshot cutoff is resolved exactly once from
+    real wall-clock UTC now, via the monkeypatchable _utc_now seam -- an
+    ordinary caller can never claim an arbitrary stale/future OFFICIAL CA
+    discovery snapshot). Fetches adjustment=all bars AND corporate-actions
+    for the SAME symbol/range from Alpaca (CA discovery is proven-superset,
+    not window-bounded -- see Defect 1 / _ca_discovery_process_date_bounds),
+    requires an explicit `asof` (Defect 2 -- never Alpaca's implicit
+    current-day default), fails closed (CorporateActionReviewRequired) if
+    any REQUIRES_FAIL_CLOSED_REVIEW event intersects the request, and
+    otherwise returns a fully-formed, OFFICIAL-authority source-attested
+    bars provenance manifest ready to pass directly as `bars_provenance` to
     mqk_research.ml.economic_registry_integration.run_registered_economic_walkforward_eval
     -- no manual manifest fabrication required. Returns {"bars": DataFrame,
     "manifest": {...}, "corporate_action_evidence": {...},
@@ -959,7 +1022,8 @@ def extract_research_bars_with_provenance(
     extract_research_bars_with_provenance_diagnostic instead -- that path
     can never mint an attestation this function's OFFICIAL authority
     satisfies (see bars_provenance.SOURCE_AUTHORITY_OFFICIAL_PROVIDER)."""
-    return _extract_research_bars_with_provenance_impl(
+    ca_discovery_cutoff_utc = _resolve_ca_discovery_cutoff_utc(None)
+    neutral = _neutral_extract(
         symbols=symbols,
         start_utc=start_utc,
         end_utc=end_utc,
@@ -969,10 +1033,9 @@ def extract_research_bars_with_provenance(
         credentials=credentials,
         http_get=_default_http_get,
         base_url=ALPACA_DATA_BASE_URL,
-        extractor_id=EXTRACTOR_ID,
-        source_authority=SOURCE_AUTHORITY_OFFICIAL_PROVIDER,
-        retrieval_timestamp_utc=retrieval_timestamp_utc,
+        ca_discovery_cutoff_utc=ca_discovery_cutoff_utc,
     )
+    return _mint_manifest(neutral, extractor_id=EXTRACTOR_ID, source_authority=SOURCE_AUTHORITY_OFFICIAL_PROVIDER)
 
 
 def extract_research_bars_with_provenance_diagnostic(
@@ -986,7 +1049,7 @@ def extract_research_bars_with_provenance_diagnostic(
     feed: str = DEFAULT_FEED,
     credentials: Optional[AlpacaCredentials] = None,
     base_url: str = ALPACA_DATA_BASE_URL,
-    retrieval_timestamp_utc: Optional[str] = None,
+    ca_discovery_cutoff_utc: Optional[str] = None,
 ) -> Dict[str, Any]:
     """INTERNAL/DIAGNOSTIC extraction (Defect 3): the injectable-transport
     testability seam for deterministic, offline unit tests (`http_get` is
@@ -998,8 +1061,14 @@ def extract_research_bars_with_provenance_diagnostic(
     function can never satisfy bars_provenance._require_verified_source_attestation
     (see check_corporate_action_integrity's adjusted_data branch) and can
     never authorize OFFICIAL registered economic evaluation, regardless of
-    how realistic the injected transport/base_url/response content is."""
-    return _extract_research_bars_with_provenance_impl(
+    how realistic the injected transport/base_url/response content is.
+    `ca_discovery_cutoff_utc` (REPAIR-03: renamed from retrieval_timestamp_utc
+    -- it names what it actually is, the CA discovery snapshot cutoff, not a
+    generic retrieval timestamp) MAY be pinned explicitly so a test can model
+    a historical snapshot deterministically; omitted, it resolves to real
+    wall-clock UTC now, same as the official path."""
+    resolved_cutoff = _resolve_ca_discovery_cutoff_utc(ca_discovery_cutoff_utc)
+    neutral = _neutral_extract(
         symbols=symbols,
         start_utc=start_utc,
         end_utc=end_utc,
@@ -1009,10 +1078,9 @@ def extract_research_bars_with_provenance_diagnostic(
         credentials=credentials,
         http_get=http_get,
         base_url=base_url,
-        extractor_id=DIAGNOSTIC_EXTRACTOR_ID,
-        source_authority=SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC,
-        retrieval_timestamp_utc=retrieval_timestamp_utc,
+        ca_discovery_cutoff_utc=resolved_cutoff,
     )
+    return _mint_manifest(neutral, extractor_id=DIAGNOSTIC_EXTRACTOR_ID, source_authority=SOURCE_AUTHORITY_DIAGNOSTIC_SYNTHETIC)
 
 
 def write_research_extraction_artifacts(run_dir: Path, result: Dict[str, Any]) -> Dict[str, Path]:

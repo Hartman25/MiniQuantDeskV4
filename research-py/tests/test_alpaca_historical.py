@@ -572,17 +572,18 @@ def test_extraction_records_provider_identity_and_adjustment_mode():
     assert manifest["source_attestation"]["asof"] == ASOF
 
 
-def test_extraction_produces_manifest_that_passes_registered_gates_via_official_path():
-    """The registered gates (require_registered_bars_provenance /
-    check_corporate_action_integrity) must accept a manifest produced by the
-    OFFICIAL entry point. Exercised here through the real network-free
-    _extract_research_bars_with_provenance_impl body shared by both entry
-    points, but minted with the OFFICIAL extractor_id/source_authority --
-    see test_diagnostic_authority_cannot_pass_registered_gates below for the
-    contrasting diagnostic case."""
+def test_extraction_produces_manifest_that_passes_registered_gates_via_official_path(monkeypatch):
+    """REQUIRED TESTS 2/3: exercises the ACTUAL OFFICIAL public wrapper
+    (extract_research_bars_with_provenance) -- not the shared neutral core --
+    networklessly, by monkeypatching the module's fixed transport
+    (_default_http_get) and clock (_utc_now) seams. Its manifest must pass
+    the registered gates; see test_diagnostic_authority_cannot_pass_registered_gates
+    below for the contrasting diagnostic case."""
     http = FakeHttp()
     _queue_clean_extraction(http)
-    result = ah._extract_research_bars_with_provenance_impl(
+    monkeypatch.setattr(ah, "_default_http_get", http)
+    monkeypatch.setattr(ah, "_utc_now", lambda: pd.Timestamp("2026-08-15T00:00:00Z"))
+    result = ah.extract_research_bars_with_provenance(
         symbols=["AAA"],
         start_utc=WINDOW_START,
         end_utc=WINDOW_END,
@@ -590,14 +591,12 @@ def test_extraction_produces_manifest_that_passes_registered_gates_via_official_
         timeframe=ah.DEFAULT_TIMEFRAME,
         feed=ah.DEFAULT_FEED,
         credentials=_creds(),
-        http_get=http,
-        base_url=ah.ALPACA_DATA_BASE_URL,
-        extractor_id=ah.EXTRACTOR_ID,
-        source_authority="official_provider",
-        retrieval_timestamp_utc=None,
     )
     manifest = result["manifest"]
     bars = result["bars"]
+    assert manifest["source_attestation"]["extractor_id"] == ah.EXTRACTOR_ID
+    assert manifest["source_attestation"]["source_authority"] == "official_provider"
+    assert manifest["source_attestation"]["retrieval_timestamp_utc"] == "2026-08-15T00:00:00+00:00"
     require_registered_bars_provenance(manifest)
     require_bars_match_manifest(bars, manifest)
     check_corporate_action_integrity(bars, manifest)  # must not raise
@@ -621,13 +620,56 @@ def test_diagnostic_authority_cannot_pass_registered_gates():
 
 
 def test_official_entry_point_has_no_injectable_transport_params():
-    """REQUIRED TEST 8 (structural): the OFFICIAL public extraction function
-    accepts no http_get/base_url override at all."""
+    """REQUIRED TEST 1 (structural): the OFFICIAL public extraction function
+    accepts none of: http_get, base_url, extractor_id, source_authority, or
+    any caller-selectable CA-discovery-snapshot-clock override (REPAIR-03
+    Defect 2 -- neither the old retrieval_timestamp_utc name nor the
+    diagnostic path's ca_discovery_cutoff_utc name)."""
     import inspect
 
     sig = inspect.signature(ah.extract_research_bars_with_provenance)
-    assert "http_get" not in sig.parameters
-    assert "base_url" not in sig.parameters
+    forbidden = {
+        "http_get",
+        "base_url",
+        "extractor_id",
+        "source_authority",
+        "retrieval_timestamp_utc",
+        "ca_discovery_cutoff_utc",
+    }
+    assert forbidden.isdisjoint(sig.parameters)
+
+
+def test_neutral_extraction_core_has_no_authority_params():
+    """REQUIRED TESTS 5/6: the shared neutral extraction core (_neutral_
+    extract) cannot accept a caller-selected extractor_id/source_authority --
+    no callable path intended as the shared extraction seam takes both an
+    injectable transport AND caller-selected official authority."""
+    import inspect
+
+    sig = inspect.signature(ah._neutral_extract)
+    assert "extractor_id" not in sig.parameters
+    assert "source_authority" not in sig.parameters
+    assert "http_get" in sig.parameters  # still the injectable-transport seam
+
+
+def test_official_snapshot_clock_resolved_exactly_once(monkeypatch):
+    """REQUIRED TEST 7: the OFFICIAL CA discovery snapshot time is resolved
+    exactly once per extraction (_utc_now), never repeatedly inside one
+    extraction."""
+    http = FakeHttp()
+    _queue_clean_extraction(http)
+    call_count = {"n": 0}
+
+    def _fake_now() -> pd.Timestamp:
+        call_count["n"] += 1
+        return pd.Timestamp("2026-08-15T00:00:00Z")
+
+    monkeypatch.setattr(ah, "_default_http_get", http)
+    monkeypatch.setattr(ah, "_utc_now", _fake_now)
+    ah.extract_research_bars_with_provenance(
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds()
+    )
+    assert call_count["n"] == 1
 
 
 def test_extraction_fails_closed_on_uncovered_corporate_action_in_range():
@@ -767,13 +809,13 @@ def test_ca_discovery_query_uses_full_history_floor_not_a_narrow_buffer():
 
 def test_ca_discovery_query_end_is_retrieval_cutoff_not_asof():
     """REPAIR-02: the CA discovery process-date ceiling is the resolved CA
-    discovery snapshot cutoff (retrieval_timestamp_utc), NEVER `asof` -- proves
+    discovery snapshot cutoff (ca_discovery_cutoff_utc), NEVER `asof` -- proves
     REPAIR-01's defective max(asof, research_end) ceiling formula is gone.
     asof is set to a date the ceiling must NOT equal; the CA query's `end`
     must equal the distinct, later retrieval cutoff instead."""
     http = FakeHttp()
     _queue_clean_extraction(http)
-    _extract(http, asof="2021-03-01", retrieval_timestamp_utc="2022-09-20T00:00:00Z")
+    _extract(http, asof="2021-03-01", ca_discovery_cutoff_utc="2022-09-20T00:00:00Z")
     ca_call = next(c for c in http.calls if c["url"] == CA_URL)
     assert ca_call["params"]["end"] == "2022-09-20"
     assert ca_call["params"]["end"] != "2021-03-01"
@@ -786,7 +828,7 @@ def test_ca_discovery_cutoff_independent_of_asof():
     for asof in ("2021-03-01", "2021-06-15", "2021-12-31"):
         http = FakeHttp()
         _queue_clean_extraction(http)
-        _extract(http, asof=asof, retrieval_timestamp_utc="2022-09-20T00:00:00Z")
+        _extract(http, asof=asof, ca_discovery_cutoff_utc="2022-09-20T00:00:00Z")
         ca_call = next(c for c in http.calls if c["url"] == CA_URL)
         cutoffs.append(ca_call["params"]["end"])
     assert cutoffs == ["2022-09-20"] * 3
@@ -799,7 +841,7 @@ def test_ca_discovery_cutoff_change_represented_in_source_contract():
     for cutoff in ("2022-01-01T00:00:00Z", "2022-09-20T00:00:00Z"):
         http = FakeHttp()
         _queue_clean_extraction(http)
-        results[cutoff] = _extract(http, retrieval_timestamp_utc=cutoff)
+        results[cutoff] = _extract(http, ca_discovery_cutoff_utc=cutoff)
 
     coverage_a = results["2022-01-01T00:00:00Z"]["manifest"]["source_attestation"][
         "corporate_action_query_coverage"
@@ -866,7 +908,7 @@ def test_mission_scenario_ca_process_date_after_both_research_end_and_bars_asof_
         asof=bars_asof,
         credentials=_creds(),
         http_get=http,
-        retrieval_timestamp_utc=retrieval_cutoff,
+        ca_discovery_cutoff_utc=retrieval_cutoff,
     )
     entries = result["corporate_action_entries"]
     assert len(entries) == 1
@@ -891,11 +933,11 @@ def test_same_ca_discovery_snapshot_and_content_is_deterministic():
 
     http_a = FakeHttp()
     _queue_clean_extraction(http_a)
-    result_a = _extract(http_a, retrieval_timestamp_utc=pinned_cutoff)
+    result_a = _extract(http_a, ca_discovery_cutoff_utc=pinned_cutoff)
 
     http_b = FakeHttp()
     _queue_clean_extraction(http_b)
-    result_b = _extract(http_b, retrieval_timestamp_utc=pinned_cutoff)
+    result_b = _extract(http_b, ca_discovery_cutoff_utc=pinned_cutoff)
 
     assert (
         result_a["manifest"]["source_attestation"]["attestation_id"]
@@ -946,7 +988,7 @@ def test_later_discovery_snapshot_with_additional_ca_changes_evidence_and_identi
         http_early,
         start_utc=pd.Timestamp("2021-01-01T00:00:00Z"),
         end_utc=pd.Timestamp("2021-02-01T00:00:00Z"),
-        retrieval_timestamp_utc="2021-02-01T00:00:00Z",  # before the backfilled process_date
+        ca_discovery_cutoff_utc="2021-02-01T00:00:00Z",  # before the backfilled process_date
     )
 
     http_later = FakeHttp()
@@ -955,7 +997,7 @@ def test_later_discovery_snapshot_with_additional_ca_changes_evidence_and_identi
         http_later,
         start_utc=pd.Timestamp("2021-01-01T00:00:00Z"),
         end_utc=pd.Timestamp("2021-02-01T00:00:00Z"),
-        retrieval_timestamp_utc="2021-07-01T00:00:00Z",  # after the backfilled process_date
+        ca_discovery_cutoff_utc="2021-07-01T00:00:00Z",  # after the backfilled process_date
     )
 
     assert len(result_early["corporate_action_entries"]) == 1
