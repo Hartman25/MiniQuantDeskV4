@@ -26,7 +26,8 @@ fn bf(inner: Fill) -> BacktestFill {
     }
 }
 use mqk_promotion::{
-    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
+    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, PromotionOosEvidence,
+    StressSuiteResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,6 +96,7 @@ fn stress_suite_not_run_blocks_promotion() {
         report: good_report(),
         stress_suite: None,  // not run
         artifact_lock: None, // B6: not locked; test expects failure
+        oos_evidence: Some(PromotionOosEvidence::valid_for_testing("stress_not_run_trial")), // P7C: isolate stress gate
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -123,6 +125,7 @@ fn zero_scenarios_run_is_invalid_stress_suite() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(0)), // 0 scenarios — invalid
         artifact_lock: None,                            // B6: not locked; test expects failure
+        oos_evidence: Some(PromotionOosEvidence::valid_for_testing("zero_scenarios_trial")), // P7C: isolate stress gate
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -159,6 +162,7 @@ fn stress_suite_failed_scenarios_block_promotion() {
         report: good_report(),
         stress_suite: Some(suite),
         artifact_lock: None, // B6: not locked; test expects failure
+        oos_evidence: Some(PromotionOosEvidence::valid_for_testing("stress_failed_trial")), // P7C: isolate stress gate
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -196,6 +200,7 @@ fn stress_suite_passed_with_good_metrics_allows_promotion() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(3)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
+        oos_evidence: Some(PromotionOosEvidence::valid_for_testing("stress_passed_trial")), // P7C
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -261,6 +266,7 @@ fn partial_fills_profit_factor_computed_correctly() {
         report,
         stress_suite: Some(StressSuiteResult::pass(1)),
         artifact_lock: None, // B6: only checking metrics; decision.passed not tested
+        oos_evidence: None, // P7C: only checking metrics; decision.passed not tested
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -330,6 +336,7 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         report,
         stress_suite: Some(StressSuiteResult::pass(1)),
         artifact_lock: None, // B6: only checking metrics; decision.passed not tested
+        oos_evidence: None, // P7C: only checking metrics; decision.passed not tested
     };
 
     let decision = evaluate_promotion(&config, &input);

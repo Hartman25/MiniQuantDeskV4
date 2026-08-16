@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use mqk_portfolio::{Fill, Side};
 use uuid::Uuid;
 
+use crate::research_evidence::check_oos_evidence;
 use crate::types::{
     Candidate, PromotionConfig, PromotionDecision, PromotionInput, PromotionMetrics,
     PromotionReport, RunProvenance,
@@ -75,6 +76,14 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         }
         Some(_) => {} // passed with ≥ 1 scenarios — OK
     }
+
+    // P7C (PROMOTION-OOS-EVIDENCE-GATE-01) — structurally verified
+    // out-of-sample Research evidence gate. `input.oos_evidence = None`
+    // (or any individual fact within it not matching the accepted Python
+    // pipeline's protocol/status values) fails closed here — attractive
+    // historical metrics/provenance/artifact-lock/stress-suite results
+    // alone can never satisfy promotion without this.
+    fail_reasons.extend(check_oos_evidence(&input.oos_evidence));
 
     // PATCH F3 — Fail closed on NaN key metrics.
     //

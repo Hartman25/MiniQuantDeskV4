@@ -17,7 +17,7 @@ fn bf(inner: Fill) -> BacktestFill {
 }
 use mqk_promotion::{
     build_report, evaluate_promotion, write_promotion_report_json, ArtifactLock, PromotionConfig,
-    PromotionInput, StressSuiteResult,
+    PromotionInput, PromotionOosEvidence, StressSuiteResult,
 };
 
 /// Create an equity curve + fills that pass all thresholds.
@@ -83,6 +83,7 @@ fn passes_all_thresholds() {
         report,
         stress_suite: Some(StressSuiteResult::pass(1)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
+        oos_evidence: Some(PromotionOosEvidence::valid_for_testing("passes_all_thresholds_trial")), // P7C
     };
 
     let decision = evaluate_promotion(&config, &input);

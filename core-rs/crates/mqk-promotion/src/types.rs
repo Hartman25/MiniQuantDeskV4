@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::artifact_gate::ArtifactLock;
+use crate::research_evidence::PromotionOosEvidence;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -94,6 +95,16 @@ pub struct PromotionInput {
     /// Set to `Some(lock)` after calling [`crate::lock_artifact_from_str`]
     /// successfully on the run's manifest + audit log.
     pub artifact_lock: Option<ArtifactLock>, // Patch B6
+    /// P7C — structurally verified promotion-grade out-of-sample Research
+    /// evidence (PROMOTION-OOS-EVIDENCE-GATE-01).
+    ///
+    /// **Promotion is blocked if `None`** (no OOS evidence) or if any
+    /// individual fact within it fails to match the accepted Python
+    /// pipeline's protocol/status values — see
+    /// [`crate::research_evidence::check_oos_evidence`]. There is no
+    /// compatibility default equivalent to "evidence passed": `None` always
+    /// means FAIL.
+    pub oos_evidence: Option<PromotionOosEvidence>, // P7C
 }
 
 // ---------------------------------------------------------------------------

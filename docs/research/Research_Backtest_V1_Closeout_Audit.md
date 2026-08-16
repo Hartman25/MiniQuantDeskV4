@@ -1576,6 +1576,160 @@ independent-review checkpoint has not occurred for either). Next patch: P7C
 `require_official_weight_to_share_parity` (both required together) into the
 actual `mqk-promotion::evaluator.rs` gate.
 
+### 1K. PROMOTION-OOS-EVIDENCE-GATE-01 (P7C) (2026-08-15)
+
+**Verdict: `IMPLEMENTED_PENDING_REVIEW`.**
+
+**Mission.** `mqk-promotion::evaluate_promotion` gated historical backtest
+metrics, provenance, artifact locking, and the stress suite, but did not
+require promotion-grade out-of-sample Research evidence — a candidate with
+attractive historical metrics could reach a passing decision without proving
+the Research walk-forward/OOS contract. P7C closes that gap and absorbs the
+already-tracked `PROMOTION-WALKFORWARD-GATE-WIRING-01`.
+
+**Discovery finding.** `mqk-promotion` has ZERO production callers today —
+no crate in the workspace (`mqk-cli`, `mqk-daemon`, `mqk-gui`) depends on it
+(confirmed by `Cargo.toml` dependency search across `core-rs`). All 7
+`PromotionInput` construction sites are in `mqk-promotion`'s own test suite.
+This significantly narrowed the wiring surface (mission Section 6G's
+"minimum mechanical compile-safe change for daemon/GUI callers" caveat does
+not apply — there are none yet) without narrowing the actual gate logic,
+which lives entirely in `evaluate_promotion` and is fully live for whatever
+caller adopts this crate next.
+
+**Core rule.** `PromotionInput.oos_evidence: Option<PromotionOosEvidence>`
+(new field). `None` unconditionally fails closed — there is no
+`oos_evidence = Some(pass())` compatibility default anywhere. When `Some`,
+every one of `PromotionOosEvidence`'s 10 fields is checked independently
+against the EXACT accepted protocol/status string the real Python pipeline
+emits (`check_oos_evidence` in the new
+`core-rs/crates/mqk-promotion/src/research_evidence.rs`) — there is no
+single `passed`/`oos_passed` boolean anywhere in the type for a caller to
+simply assert; a hand-fabricated success claim cannot bypass the gate
+because there is no field to fabricate a bypass with.
+
+**Evidence shape consumed (extracted from, never re-derived from, the
+existing accepted artifacts):**
+
+- `economic_protocol_id` — must equal `"economic_walk_forward_v1"`
+  (`economic_walk_forward.json`'s own `protocol.protocol_id`; rejects a
+  relabeled `ml_train_meta_v1` global-fit shape — P6C's evidence boundary).
+- `folds_used` — must be `> 0`.
+- `holdout_status` — must equal `"reserved_not_evaluated"` (rejects any
+  other value, including a literal `"consumed"` status).
+- `execution_pricing_protocol_id` (P7A) — must equal
+  `"rust_conservative_bar_range_v1"`.
+- `weight_to_share_protocol_id` (P7B) — must equal
+  `Some("weight_to_share_v1")`.
+- `judge_status` — must equal `"evaluated"` (the multiple-testing judge's
+  own field). Deliberately NOT `"partially_evaluable"` — see
+  `research_evidence.rs`'s `REQUIRED_JUDGE_STATUS` doc comment for why: the
+  judge module documents "partially_evaluable" as meaning DSR or PBO failed
+  for the population as a whole, and neither the mission nor the judge
+  itself defines an accepted threshold for treating a partial result as
+  promotion-grade — fail closed rather than invent one.
+- `judge_trial_evaluable` — must be `true` (this candidate's own
+  `dsr_results[].evaluable`, matched by `trial_id`).
+- `pbo_status` — must equal `"evaluated"` (the judge's own
+  `pbo_result.status`).
+- `trial_included_in_judge_scope` — must be `true` (proves the candidate
+  was actually part of the judged comparison population, not a same-shaped
+  but unrelated bundle).
+- `economic_eval_id` — must be non-empty (cross-check basis against a
+  specific `economic_walk_forward.json`).
+
+**Structural verification, not re-derived statistics.** Per the mission's
+explicit rule, this gate never recomputes DSR/PBO/economic P&L in Rust — it
+consumes the ALREADY-COMPUTED evidence facts. `PromotionOosEvidence`'s field
+names and required values were derived by reading the real Python artifact
+schemas (`economic_walkforward.py`'s output dict,
+`multiple_testing_judge.py`'s `build_multiple_testing_judge` return shape),
+not invented.
+
+**Honest scope limit (what this gate does NOT verify).** Constructing a
+`PromotionOosEvidence` from the REAL `economic_walk_forward.json` /
+multiple-testing-judge JSON files on disk is NOT implemented by this patch —
+no Rust-side JSON-parsing bridge for those Python artifacts exists yet. This
+patch is the STRUCTURAL VERIFICATION layer (the actual gate, fully live in
+`evaluate_promotion`); a real file-parsing constructor that reads the
+artifacts and populates this struct truthfully is separate future work, not
+yet built. Until that constructor exists, any caller of `mqk-promotion`
+must itself honestly populate `PromotionOosEvidence` from real evidence —
+the gate cannot yet detect a caller that fabricates a `PromotionOosEvidence`
+value by hand instead of extracting it from a real artifact. This is a
+materially narrower claim than "P7C proves OOS evidence is real"; it proves
+"P7C proves OOS evidence, once honestly supplied, is structurally complete,
+correctly scoped, and passes every accepted protocol/status gate" — closing
+the FABRICATION-VIA-MISSING-CHECKS defect the mission targeted, not yet the
+separate FABRICATION-VIA-HAND-WRITTEN-STRUCT-INSTEAD-OF-REAL-FILE defect
+(which requires the not-yet-built parsing bridge to close).
+
+**Wiring.** `check_oos_evidence` runs inside `evaluate_promotion` itself
+(not an unused helper), contributing to the same `fail_reasons` accumulator
+as the provenance/artifact-lock/stress-suite gates, before the NaN-metrics
+short-circuit. `PromotionOosEvidence::valid_for_testing` (mirrors
+`ArtifactLock::new_for_testing`'s exact naming convention) provides
+structurally-valid synthetic evidence for the 15 pre-existing test-fixture
+construction sites (across 6 test files) that predate P7C and are not
+themselves testing the OOS-evidence gate — each was updated to either
+supply valid evidence (tests asserting `decision.passed`/`fail_reasons.is_empty()`)
+or explicitly `None` (the 2 sites that only check `decision.metrics`, never
+`decision.passed`).
+
+**Holdout rule.** `check_oos_evidence` performs a single string-equality
+check (`holdout_status == "reserved_not_evaluated"`) against the CALLER-
+SUPPLIED field — it never opens, reads, or scores any holdout data file
+itself. Proven by `evaluate_promotion_performs_no_io_or_holdout_access`
+(structural proof: two evaluations of identical in-memory input produce
+byte-identical decisions — no I/O, no hidden state).
+
+**Multiple-testing rule.** No DSR/PBO recomputation anywhere in
+`mqk-promotion`; `check_oos_evidence` only compares `judge_status`/
+`pbo_status`/`judge_trial_evaluable`/`trial_included_in_judge_scope`
+against the judge's own accepted output fields.
+
+**P7A/P7B parity rule.** Both required independently and simultaneously —
+`p7a_only_evidence_fails`/`p7b_only_evidence_fails` prove neither alone
+satisfies the gate.
+
+**Negative proof (Test 1).**
+`primary_negative_proof_no_oos_evidence_rejects_otherwise_perfect_candidate`:
+a candidate with real provenance, a valid `ArtifactLock`, a passing 3-scenario
+stress suite, and metrics clearing every lenient threshold is still rejected
+outright when `oos_evidence: None`.
+
+**Positive proof (Test 20).** `end_to_end_valid_candidate_passes_promotion`:
+the same candidate shape with a fully valid, hand-constructed-but-
+structurally-complete `PromotionOosEvidence` (not the `valid_for_testing`
+convenience constructor, to prove the real struct literal — not just the
+test helper — satisfies the gate) passes with zero fail reasons.
+
+**Files changed:** `core-rs/crates/mqk-promotion/src/research_evidence.rs`
+(new — `PromotionOosEvidence`, `check_oos_evidence`, `valid_for_testing`),
+`core-rs/crates/mqk-promotion/src/types.rs` (`PromotionInput.oos_evidence`
+field), `core-rs/crates/mqk-promotion/src/evaluator.rs` (gate wiring),
+`core-rs/crates/mqk-promotion/src/lib.rs` (exports),
+`core-rs/crates/mqk-promotion/tests/scenario_promotion_oos_evidence_gate_p7c.rs`
+(new, 25 tests covering the mission's 20 required scenarios), 6 pre-existing
+test files updated for compile-safety (`scenario_backtest_to_promotion_
+pipeline.rs`, `scenario_fail_below_threshold.rs`,
+`scenario_golden_artifact_hash_lock.rs`, `scenario_pass_above_threshold.rs`,
+`scenario_promotion_requires_partial_fill_stress.rs`,
+`scenario_tie_break_correctness.rs`), this document (Section 1K, this
+addendum).
+
+**Tests.** `scenario_promotion_oos_evidence_gate_p7c.rs`: 25 passed (new).
+`cargo test -p mqk-promotion`: 65 passed (was 40 pre-existing + 25 new),
+zero regressions across every pre-existing gate (provenance, artifact-lock,
+stress-suite, NaN-metrics, tie-break). `cargo test -p mqk-backtest`: all
+suites pass, unmodified (P7C touches `mqk-promotion` only). `git diff
+--check`: clean.
+
+**Gate status updates:** P7C moves from `OPEN` to
+`IMPLEMENTED_PENDING_REVIEW`. `RESEARCH_BACKTEST_FOUNDATION_READY` (Section
+16A) remains `NOT MET` — none of P7A/P7B/P7C is yet `CLOSED` (Wave 2's
+independent-review checkpoint has not occurred for any of the three).
+
 ---
 
 ## 2. Baseline

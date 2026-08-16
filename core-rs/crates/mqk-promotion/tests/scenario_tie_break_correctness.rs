@@ -17,7 +17,7 @@ fn bf(inner: Fill) -> BacktestFill {
 }
 use mqk_promotion::{
     pick_winner, select_best, ArtifactLock, Candidate, PromotionConfig, PromotionInput,
-    PromotionMetrics, StressSuiteResult,
+    PromotionMetrics, PromotionOosEvidence, StressSuiteResult,
 };
 
 /// Build a BacktestReport with deterministic (non-nil) provenance but synthetic equity/fills.
@@ -154,6 +154,7 @@ fn select_best_picks_correct_winner() {
                 report: report_with_provenance("candidate_c1", eq_1, make_profitable_fills()),
                 stress_suite: Some(StressSuiteResult::pass(1)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
+                oos_evidence: Some(PromotionOosEvidence::valid_for_testing("candidate_c1_trial")), // P7C
             },
         },
         Candidate {
@@ -164,6 +165,7 @@ fn select_best_picks_correct_winner() {
                 report: report_with_provenance("candidate_c2", eq_2, vec![]),
                 stress_suite: Some(StressSuiteResult::pass(1)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // needs lock; fails on metrics
+                oos_evidence: Some(PromotionOosEvidence::valid_for_testing("candidate_c2_trial")), // P7C: isolate MDD failure
             },
         },
         Candidate {
@@ -173,6 +175,7 @@ fn select_best_picks_correct_winner() {
                 report: report_with_provenance("candidate_c3", eq_3, make_profitable_fills()),
                 stress_suite: Some(StressSuiteResult::pass(1)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
+                oos_evidence: Some(PromotionOosEvidence::valid_for_testing("candidate_c3_trial")), // P7C
             },
         },
     ];
