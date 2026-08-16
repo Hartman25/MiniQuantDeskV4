@@ -1316,6 +1316,115 @@ scoped to keep P7B's discrete weight→share translation entirely out of
 reach (see `require_official_execution_pricing_parity`'s docstring and the
 mission's own `COST SCOPE` section).
 
+### 1I-REPAIR-01. RESEARCH-EXECUTION-PRICING-PARITY-01-REPAIR-01 (2026-08-15)
+
+**Independent review finding.** P7A (above) correctly reconciled the
+ADVERSE-PRICE component (fill vs close) with Rust's conservative fill
+model, but left `commission_bps_per_side` charged against CLOSE-priced
+turnover (`economics.compute_transaction_cost(turnover, one_way_cost_bps)`),
+whereas Rust's ordinary execution charges `commission.compute_fee(qty,
+fill_price)` — commission against the SAME conservative fill notional used
+for the adverse-price drag. This is a real, deterministic parity gap:
+P7A's own stated goal (execution-pricing parity between Python and Rust)
+was not fully met for the commission component. **Verdict remains
+`IMPLEMENTED_PENDING_REVIEW`** — this repair does not itself close P7A;
+it closes the one confirmed review finding against it. P7A is not
+self-certified `CLOSED` here either.
+
+**Repair: rescale commission by actual fill/close notional, official model
+only.** `_row_execution_price_cost` (P7A) is replaced by
+`_row_execution_pricing_components`, which returns BOTH the existing
+adverse-price cost and a new `fill_to_close_notional_ratio` (`fill / close`
+under the official model; always `1.0` under the diagnostic model or for a
+no-op delta). At the continuous-weight level used by this evaluator (no
+discrete share quantities — those remain P7B's scope, per the mission's
+explicit `do NOT introduce discrete share sizing` instruction), each
+execution row's `commission_notional = turnover * fill_to_close_ratio`
+replaces close-priced turnover as the commission basis:
+`commission_cost = commission_notional * commission_bps_per_side / 10_000`.
+`transaction_cost = commission_cost + execution_price_cost` under the
+official model — two auditable, additive components, both now visible as
+their own `commission_cost`/`execution_price_cost` columns in
+`economic_returns.csv`.
+
+**Diagnostic transaction-cost numerics: proven unchanged.** Under the diagnostic
+model, `fill_to_close_ratio` is always `1.0`, so the repair does NOT reuse
+the split commission/adverse-price formula there — it would risk a
+floating-point non-associativity divergence (`turnover*(a/1e4) +
+turnover*(b/1e4)` is not guaranteed bit-identical to
+`turnover*((a+b)/1e4)`). Instead the diagnostic path keeps calling the
+ORIGINAL single-expression `economics.compute_transaction_cost(turnover,
+one_way_cost_bps)` verbatim — proven by
+`test_diagnostic_pricing_transaction_cost_numerically_unchanged_by_repair`
+(exact equality, not `approx`).
+
+REPAIR-01 does add the `commission_cost` audit column to
+`economic_returns.csv`, including diagnostic runs. Therefore diagnostic
+artifact bytes and derived result/economic_eval identity may change across
+the schema addition even though transaction-cost/P&L numerics are unchanged.
+This does not alter trial identity: result artifacts are not
+candidate/trial-defining inputs.
+
+The purpose is to avoid falsely claiming that the entire diagnostic artifact
+is byte-identical. Only the diagnostic transaction-cost/P&L numerics are
+unchanged.
+
+**Forced fold-end flatten: unaffected, proven separately.** The
+`force_flat_last_bar` exit continues to use an unrescaled (ratio `1.0`)
+commission basis and zero adverse-price cost — mirroring Rust's
+`flatten_all`, which prices forced exits from mark/close only, never a
+conservative HIGH/LOW fill. Proven by
+`test_forced_fold_end_flatten_commission_remains_close_priced` on the same
+wide (+/-2) bar that WOULD trigger rescaling for an ordinary execution.
+
+**RED/negative-control proof.** The 4 new tests asserting on the new
+`commission_cost` column or its numeric consequence
+(`test_buy_commission_reflects_actual_fill_notional_not_close_turnover`,
+`test_sell_commission_reflects_actual_fill_notional_not_close_turnover`,
+`test_official_transaction_cost_exactly_composes_commission_and_adverse_
+price`, `test_forced_fold_end_flatten_commission_remains_close_priced`)
+were run against the currently-pushed pre-repair `economic_walkforward.py`
+(byte-identical to `HEAD`, restored via `git show HEAD:<path>` into the
+working file and back, not `git stash`/`reset`) and confirmed to fail with
+`KeyError: 'commission_cost'` — the pre-repair implementation has no
+mechanism to produce fill-notional-scaled commission at all. All 4 pass
+against the repaired code.
+
+**BUY proof.** close=100, fill=high=102, turnover=1, commission_bps=10:
+pre-repair commission = `1.0 * 10/10000 = 0.001`; repaired commission =
+`1.0 * (102/100) * 10/10000 = 0.00102`; repaired transaction_cost =
+`0.00102 + 0.02 = 0.02102` (pre-repair would compute `0.021`).
+
+**SELL proof.** A genuine mid-fold liquidation (not the forced-flatten
+exception): close=110, fill=low=108, turnover=1, commission_bps=10:
+commission = `1.0 * (108/110) * 10/10000 = 0.0009818...`; adverse cost =
+`|108-110|/110 = 0.0181818...`; transaction_cost = `0.0191636...`.
+
+**Files changed:** `research-py/src/mqk_research/ml/economic_walkforward.py`
+(`_row_execution_price_cost` → `_row_execution_pricing_components`,
+`_simulate_fold_execution` commission-notional plumbing, `_simulate_fold`
+official-vs-diagnostic transaction-cost branch, new `commission_cost`
+column), `research-py/tests/test_execution_pricing_parity_p7a.py` (+5
+tests), this document (Section 1I-REPAIR-01, this addendum).
+
+**Tests.** `test_execution_pricing_parity_p7a.py`: 47 passed (was 42; +5).
+`test_economic_walkforward.py`: 63 passed, unchanged. Provenance/registry
+regressions (`test_bars_provenance.py`, `test_source_attestation.py`,
+`test_experiment_registry.py`, `test_multiple_testing_judge.py`,
+`test_evidence_boundary.py`, `test_holdout_ledger.py`,
+`test_ml_eval_walkforward_purged_holdout.py`): 215 passed, unchanged. Full
+`research-py` suite: **1387 passed, 7 skipped, 12 subtests passed** (was
+1382 in Section 1I; +5, zero regressions, skip count unchanged). Rust:
+`cargo test -p mqk-backtest` — all suites pass, unmodified (this repair
+touches Python Research only; no Rust production or test code changed).
+`git diff --check`: clean.
+
+**Gate status:** unchanged from Section 1I — P7A remains
+`IMPLEMENTED_PENDING_REVIEW`, not `CLOSED`. This repair closes the one
+confirmed deterministic finding from the independent review; the
+Section 14 Wave 2 independent-review checkpoint is still the remaining
+blocker before P7A can move to `CLOSED`.
+
 ---
 
 ## 2. Baseline

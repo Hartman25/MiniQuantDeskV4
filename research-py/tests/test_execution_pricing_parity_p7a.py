@@ -644,3 +644,118 @@ def test_diagnostic_default_fails_official_parity_gate() -> None:
 
 def test_official_model_satisfies_official_parity_gate() -> None:
     require_official_execution_pricing_parity(_official_spec())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# RESEARCH-EXECUTION-PRICING-PARITY-01-REPAIR-01 — commission basis parity.
+#
+# P7A correctly reconciled the ADVERSE-PRICE (fill vs close) component but
+# left commission_bps_per_side charged against close-priced turnover
+# (economics.compute_transaction_cost(turnover, one_way_cost_bps)), whereas
+# Rust's ordinary execution charges commission.compute_fee(qty, fill_price)
+# -- i.e. against the SAME conservative fill notional used for the adverse-
+# price drag. REPAIR-01 rescales commission by each execution's own
+# fill/close notional ratio (_row_execution_pricing_components) under the
+# official model only; the diagnostic model and the forced fold-end
+# flatten exception are both unaffected (see their own tests below).
+# ---------------------------------------------------------------------------
+
+
+def test_buy_commission_reflects_actual_fill_notional_not_close_turnover(tmp_path: Path) -> None:
+    """BUY ordinary fill: close=100, fill=high=102 (zero slippage/vol),
+    turnover=1, commission_bps=10. Pre-repair (turnover * bps/10000) would
+    charge 1.0 * 10/10000 = 0.001. Post-repair, commission must reflect the
+    102/100 fill/close notional scaling: 1.0 * (102/100) * 10/10000 =
+    0.00102 -- a value the currently-pushed P7A implementation cannot
+    produce (it has no commission_cost column and its transaction_cost
+    numerically equals the unrescaled 0.001 + 0.02 = 0.021, not 0.02102)."""
+    returns = _run_hl_fixture(tmp_path, _official_spec())
+    day1 = returns.iloc[1]
+    assert day1["turnover"] == pytest.approx(1.0)
+    assert day1["execution_price_cost"] == pytest.approx(0.02, abs=1e-9)
+    expected_commission = 1.0 * (102.0 / 100.0) * (10.0 / 10_000.0)
+    assert day1["commission_cost"] == pytest.approx(expected_commission, abs=1e-12)
+    # RED under pre-repair P7A: transaction_cost there is 0.001 + 0.02 =
+    # 0.021, not this repaired 0.02102 (proves the repair, not a tautology).
+    assert day1["transaction_cost"] == pytest.approx(0.02102, abs=1e-9)
+    unrescaled_commission = 1.0 * (10.0 / 10_000.0)
+    assert day1["commission_cost"] != pytest.approx(unrescaled_commission, abs=1e-12)
+
+
+def test_sell_commission_reflects_actual_fill_notional_not_close_turnover(tmp_path: Path) -> None:
+    """SELL ordinary fill (an actual mid-fold liquidation, NOT the fold-end
+    forced flatten): AAA goes active on day0 (executes BUY on day1 @
+    high=102, close=100), then goes flat on day2's decision (executes SELL
+    on day3 @ low=108, close=110). By day4 (fold end) the position is
+    already flat, so this isolates the ordinary-SELL commission basis from
+    the forced-flatten exception entirely. commission must scale by
+    108/110, not close-priced turnover."""
+    days = pd.date_range("2021-01-01", periods=5, freq="D", tz="UTC")
+    closes = [100.0, 100.0, 110.0, 110.0, 110.0]
+    scores = [1.0, 1.0, 0.0, 0.0, 0.0]
+    bars_rows = [_bar_row_hl("AAA", d, c, c + 2.0, c - 2.0) for d, c in zip(days, closes)]
+    oos_rows = [_oos_row(1, "AAA", d, s) for d, s in zip(days, scores)]
+    folds = [_single_fold("2021-01-01", "2021-01-06")]
+    bars_path = _write_direct_fixture(tmp_path, folds=folds, oos_rows=oos_rows, bars_rows=bars_rows)
+    run_economic_walkforward(tmp_path, bars_csv=bars_path, spec=_official_spec())
+    returns = pd.read_csv(tmp_path / "eval" / "economic_returns.csv")
+
+    day3 = returns.iloc[3]
+    assert day3["turnover"] == pytest.approx(1.0)
+    expected_adverse = 1.0 * abs(108.0 - 110.0) / 110.0
+    assert day3["execution_price_cost"] == pytest.approx(expected_adverse, abs=1e-9)
+    expected_commission = 1.0 * (108.0 / 110.0) * (10.0 / 10_000.0)
+    assert day3["commission_cost"] == pytest.approx(expected_commission, abs=1e-12)
+    # RED under pre-repair P7A: transaction_cost there is
+    # 1.0*10/10000 + 0.018181... = 0.019181818..., not this repaired value.
+    assert day3["transaction_cost"] == pytest.approx(expected_commission + expected_adverse, abs=1e-12)
+    unrescaled_commission = 1.0 * (10.0 / 10_000.0)
+    assert day3["commission_cost"] != pytest.approx(unrescaled_commission, abs=1e-12)
+    # Day4 (fold end) is already flat -- no forced-flatten turnover at all,
+    # confirming the SELL fully closed the position on day3.
+    assert returns.iloc[4]["turnover"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_official_transaction_cost_exactly_composes_commission_and_adverse_price(
+    tmp_path: Path,
+) -> None:
+    """Official transaction_cost must exactly compose from the two
+    auditable components: actual-fill commission_cost + adverse
+    execution_price_cost, on EVERY row (not just the ones with turnover)."""
+    returns = _run_hl_fixture(tmp_path, _official_spec())
+    composed = returns["commission_cost"] + returns["execution_price_cost"]
+    pd.testing.assert_series_equal(
+        returns["transaction_cost"], composed, check_names=False, check_exact=True
+    )
+
+
+def test_forced_fold_end_flatten_commission_remains_close_priced(tmp_path: Path) -> None:
+    """Forced fold-end flatten (day4 of the BUY fixture, force_flat_last_bar)
+    must still have execution_price_cost == 0 (P7A, unchanged) AND its
+    commission_cost must remain close/mark-priced -- i.e. an UNRESCALED
+    turnover * commission_bps/10000, even though the official pricing model
+    is active and this is the same wide (+/-2) bar that WOULD trigger
+    conservative-fill rescaling for an ordinary execution."""
+    returns = _run_hl_fixture(tmp_path, _official_spec())
+    last_row = returns.iloc[-1]
+    assert last_row["turnover"] > 0.0
+    assert last_row["execution_price_cost"] == pytest.approx(0.0, abs=1e-12)
+    expected_close_priced_commission = float(last_row["turnover"]) * (10.0 / 10_000.0)
+    assert last_row["commission_cost"] == pytest.approx(expected_close_priced_commission, abs=1e-12)
+
+
+def test_diagnostic_pricing_transaction_cost_numerically_unchanged_by_repair(
+    tmp_path: Path,
+) -> None:
+    """Diagnostic close_only_diagnostic_v1 behavior must remain
+    byte/numerically unchanged by REPAIR-01: transaction_cost must equal
+    EXACTLY turnover * one_way_cost_bps / 10_000 (the original pre-repair,
+    pre-P7A formula), not the new commission/adverse-price decomposition
+    (which is scoped to the official model only)."""
+    returns = _run_hl_fixture(tmp_path, _spec(slippage_bps_per_side=5.0))
+    one_way_cost_bps = 10.0 + 5.0  # commission_bps_per_side + slippage_bps_per_side
+    expected = returns["turnover"] * (one_way_cost_bps / 10_000.0)
+    pd.testing.assert_series_equal(
+        returns["transaction_cost"], expected, check_names=False, check_exact=True
+    )
+    assert (returns["execution_price_cost"] == 0.0).all()

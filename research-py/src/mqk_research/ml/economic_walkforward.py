@@ -543,30 +543,45 @@ def _build_pending_events(
 _GROSS_TOL = 1e-9
 
 
-def _row_execution_price_cost(
+def _row_execution_pricing_components(
     delta_weight: float,
     close: float,
     high: Optional[float],
     low: Optional[float],
     execution_pricing: Optional[ExecutionPricingSpec],
-) -> float:
-    """P7A: the adverse-price cost of executing `delta_weight` worth of
-    gross exposure at THIS bar's conservative fill price instead of its
-    close. BUY (delta_weight > 0) uses HIGH, SELL (delta_weight < 0,
-    including ordinary decreases) uses LOW -- mirrors Rust's
-    conservative_fill_price side convention exactly. Always 0.0 under the
-    diagnostic pricing model (execution_pricing is None or not the official
-    model) -- existing callers/tests that never pass execution_pricing are
-    numerically unaffected. Only applies to ORDINARY strategy-driven
+) -> Tuple[float, float]:
+    """P7A + REPAIR-01: the two auditable pricing components of executing
+    `delta_weight` worth of gross exposure at THIS bar's conservative fill
+    price instead of its close. BUY (delta_weight > 0) uses HIGH, SELL
+    (delta_weight < 0, including ordinary decreases) uses LOW -- mirrors
+    Rust's conservative_fill_price side convention exactly.
+
+    Returns (adverse_price_cost, fill_to_close_notional_ratio):
+      - adverse_price_cost: `abs(delta_weight) * abs(fill - close) / close`
+        (unchanged from P7A) -- the return-series drag from filling away
+        from close.
+      - fill_to_close_notional_ratio: `fill / close` -- REPAIR-01. Mirrors
+        Rust's `commission.compute_fee(qty, fill_price)`, which charges
+        commission against ACTUAL FILL notional, not close notional. At the
+        continuous-weight level used here (no discrete share quantities --
+        those remain P7B), this ratio is how a caller rescales
+        close-priced turnover into fill-priced notional for the commission
+        calculation: `commission_notional = turnover * ratio`.
+
+    Both are always (0.0, 1.0) under the diagnostic pricing model
+    (execution_pricing is None or not the official model) or for a no-op
+    delta_weight -- existing callers/tests that never pass execution_pricing
+    are numerically unaffected. Only applies to ORDINARY strategy-driven
     executions (this function's only two call sites, both inside
     _simulate_fold_execution) -- the fold-end force_flat_last_bar exception
     in _simulate_fold is a separate code path that never calls this,
-    matching Rust's flatten_all exception (close/mark pricing, no
-    conservative HIGH/LOW slippage)."""
+    matching Rust's flatten_all exception (close/mark pricing for both the
+    adverse-price cost AND the commission basis -- no conservative HIGH/LOW
+    fill anywhere in a forced exit)."""
     if execution_pricing is None or not execution_pricing.is_official_parity_model:
-        return 0.0
+        return 0.0, 1.0
     if delta_weight == 0.0:
-        return 0.0
+        return 0.0, 1.0
     if high is None or low is None or pd.isna(high) or pd.isna(low):
         raise RuntimeError(
             "Fail-closed: official execution-pricing parity model requires a high/low value for "
@@ -581,7 +596,10 @@ def _row_execution_price_cost(
         slippage_bps=execution_pricing.slippage_bps,
         volatility_mult_bps=execution_pricing.volatility_mult_bps,
     )
-    return abs(delta_weight) * abs(fill - float(close)) / float(close)
+    close_f = float(close)
+    adverse_price_cost = abs(delta_weight) * abs(fill - close_f) / close_f
+    fill_to_close_ratio = fill / close_f
+    return adverse_price_cost, fill_to_close_ratio
 
 
 def _simulate_fold_execution(
@@ -692,6 +710,12 @@ def _simulate_fold_execution(
 
         turnover: Dict[str, float] = {s: 0.0 for s in present}
         execution_price_cost: Dict[str, float] = {s: 0.0 for s in present}
+        # REPAIR-01: commission_notional is turnover rescaled by the actual
+        # fill/close notional ratio (1.0 -- i.e. unrescaled -- under the
+        # diagnostic model or when no execution occurs this row); the caller
+        # (_simulate_fold) multiplies this by commission_bps_per_side/10000
+        # instead of charging commission against close-priced turnover.
+        commission_notional: Dict[str, float] = {s: 0.0 for s in present}
 
         # D: gross-reducing (and no-op) candidates execute unconditionally.
         for s in present:
@@ -701,13 +725,15 @@ def _simulate_fold_execution(
                 old_weight = executed_weight[s]
                 delta = candidate[s] - old_weight
                 turnover[s] = abs(delta)
-                execution_price_cost[s] = _row_execution_price_cost(
+                price_cost, fill_ratio = _row_execution_pricing_components(
                     delta,
                     close_frame.at[t, s],
                     high_frame.at[t, s] if high_frame is not None else None,
                     low_frame.at[t, s] if low_frame is not None else None,
                     execution_pricing,
                 )
+                execution_price_cost[s] = price_cost
+                commission_notional[s] = turnover[s] * fill_ratio
                 executed_weight[s] = candidate[s]
                 pending_idx[s] += 1
 
@@ -760,13 +786,15 @@ def _simulate_fold_execution(
                     old_weight = executed_weight[s]
                     member_delta = candidate[s] - old_weight
                     turnover[s] = abs(member_delta)
-                    execution_price_cost[s] = _row_execution_price_cost(
+                    price_cost, fill_ratio = _row_execution_pricing_components(
                         member_delta,
                         close_frame.at[t, s],
                         high_frame.at[t, s] if high_frame is not None else None,
                         low_frame.at[t, s] if low_frame is not None else None,
                         execution_pricing,
                     )
+                    execution_price_cost[s] = price_cost
+                    commission_notional[s] = turnover[s] * fill_ratio
                     executed_weight[s] = candidate[s]
                     pending_idx[s] += 1
                 gross += delta
@@ -788,6 +816,7 @@ def _simulate_fold_execution(
                 "interval_exposure": interval_exposure[s],
                 "executed_weight": executed_weight[s],
                 "execution_price_cost": execution_price_cost[s],
+                "commission_notional": commission_notional[s],
             })
 
     return rows_by_symbol, dict(executed_weight)
@@ -881,11 +910,13 @@ def _simulate_fold(
 
     P7A: `high_frame`/`low_frame` (only passed when
     spec.execution_pricing.is_official_parity_model) drive an ADDITIONAL
-    adverse-price cost component on top of transaction_cost -- see
-    _row_execution_price_cost / _simulate_fold_execution. The fold-end
-    force_flat_last_bar exit below deliberately never adds this component
-    (see its own comment) -- it is the forced-flatten exception, mirroring
-    Rust's flatten_all."""
+    adverse-price cost component on top of transaction_cost, and (REPAIR-01)
+    rescale the commission basis from close-priced to fill-priced turnover
+    -- see _row_execution_pricing_components / _simulate_fold_execution. The
+    fold-end force_flat_last_bar exit below deliberately never adds the
+    adverse-price component and always uses an unrescaled (ratio 1.0)
+    commission basis (see its own comment) -- it is the forced-flatten
+    exception, mirroring Rust's flatten_all."""
     bar_index = close_frame.index
     symbols = list(close_frame.columns)
     global_last_ts = bar_index[-1]
@@ -895,6 +926,12 @@ def _simulate_fold(
     turnover_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
     interval_exposure_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
     execution_price_cost_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
+    # REPAIR-01: turnover rescaled by each execution's own fill/close
+    # notional ratio (see _row_execution_pricing_components), summed per
+    # timestamp -- the basis commission_bps_per_side is charged against
+    # under the official pricing model (RESEARCH-EXECUTION-PRICING-PARITY-
+    # 01-REPAIR-01), instead of close-priced turnover.
+    commission_notional_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
     executed_weight_series: Dict[str, pd.Series] = {}
 
     rows_by_symbol, final_weight_by_symbol = _simulate_fold_execution(
@@ -929,6 +966,11 @@ def _simulate_fold(
                 rows[-1] = dict(rows[-1])
                 rows[-1]["turnover"] = rows[-1]["turnover"] + exit_turnover
                 rows[-1]["executed_weight"] = 0.0
+                # Close/mark-priced exit (ratio 1.0): added to whatever
+                # commission_notional this same row's own ordinary execution
+                # (if any) already accrued, never blended into a single
+                # rescaled ratio -- each component keeps its own true basis.
+                rows[-1]["commission_notional"] = rows[-1]["commission_notional"] + exit_turnover
                 final_weight = 0.0
         elif abs(final_weight) > 1e-12:
             rows.append({
@@ -938,6 +980,7 @@ def _simulate_fold(
                 "interval_exposure": abs(final_weight),
                 "executed_weight": 0.0,
                 "execution_price_cost": 0.0,
+                "commission_notional": abs(final_weight),
             })
             final_weight = 0.0
 
@@ -949,6 +992,7 @@ def _simulate_fold(
             turnover_by_ts[t] += r["turnover"]
             interval_exposure_by_ts[t] += r["interval_exposure"]
             execution_price_cost_by_ts[t] += r["execution_price_cost"]
+            commission_notional_by_ts[t] += r["commission_notional"]
             exec_index.append(t)
             exec_values.append(r["executed_weight"])
         executed_weight_series[s] = pd.Series(exec_values, index=pd.DatetimeIndex(exec_index))
@@ -968,12 +1012,35 @@ def _simulate_fold(
     execution_price_cost = pd.Series(
         [execution_price_cost_by_ts[t] for t in bar_index], index=bar_index
     )
-    # P7A: commission (compute_transaction_cost, still purely bps-of-
-    # turnover) and the directional adverse-price cost are two distinct,
+    # P7A + REPAIR-01 (RESEARCH-EXECUTION-PRICING-PARITY-01-REPAIR-01):
+    # commission and the directional adverse-price cost are two distinct,
     # additive components — see EconomicWalkForwardSpec.normalized()'s
     # double-charging guard, which requires cost_model.slippage_bps_per_side
-    # == 0 whenever execution_price_cost can be nonzero.
-    transaction_cost = economics.compute_transaction_cost(turnover, one_way_cost_bps) + execution_price_cost
+    # == 0 whenever execution_price_cost can be nonzero. Under the OFFICIAL
+    # rust_conservative_bar_range_v1 model, commission is charged against
+    # actual conservative fill-price notional (commission_notional, already
+    # rescaled per-row by fill/close — see _row_execution_pricing_components)
+    # rather than close-priced turnover, mirroring Rust's
+    # `commission.compute_fee(qty, fill_price)` where `fill_price` is the
+    # same conservative fill used for the return-series drag. The forced
+    # fold-end flatten exit's commission_notional is always its own
+    # close/mark-priced turnover (ratio 1.0), matching Rust's flatten_all.
+    # Under the diagnostic model, commission_notional == turnover for every
+    # row (ratio is always 1.0 there), so the ORIGINAL single-expression
+    # formula is used unchanged to guarantee bit-for-bit parity of the
+    # diagnostic transaction_cost series with pre-REPAIR-01 behavior
+    # (turnover * (a/10000) + turnover * (b/10000)
+    # is not guaranteed bit-identical to turnover * ((a+b)/10000) in
+    # floating point).
+    if spec.execution_pricing.is_official_parity_model:
+        commission_notional = pd.Series(
+            [commission_notional_by_ts[t] for t in bar_index], index=bar_index
+        )
+        commission_cost = commission_notional * (spec.cost_model.commission_bps_per_side / 10_000.0)
+        transaction_cost = commission_cost + execution_price_cost
+    else:
+        commission_cost = economics.compute_transaction_cost(turnover, one_way_cost_bps)
+        transaction_cost = commission_cost + execution_price_cost
     net_return = economics.compute_net_return_exact(gross_return, transaction_cost)
 
     gross_exposure = exposure_frame.abs().sum(axis=1)
@@ -993,6 +1060,7 @@ def _simulate_fold(
         "turnover": turnover.to_numpy(dtype=float),
         "transaction_cost": transaction_cost.to_numpy(dtype=float),
         "execution_price_cost": execution_price_cost.to_numpy(dtype=float),
+        "commission_cost": commission_cost.to_numpy(dtype=float),
         "net_return": net_return.to_numpy(dtype=float),
         "interval_exposure": interval_exposure.to_numpy(dtype=float),
         "gross_exposure": gross_exposure.to_numpy(dtype=float),
