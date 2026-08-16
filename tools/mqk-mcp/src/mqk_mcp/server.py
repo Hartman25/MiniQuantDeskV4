@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from .config import Settings
 from .filesystem import find_symbol as _find_symbol
@@ -14,7 +14,7 @@ from .git_tools import git_log as _git_log
 from .git_tools import git_show as _git_show
 from .git_tools import repo_status as _repo_status
 
-mcp = FastMCP("MiniQuantDesk Readonly")
+mcp = MCPServer("MiniQuantDesk Readonly")
 _settings: Settings | None = None
 
 
