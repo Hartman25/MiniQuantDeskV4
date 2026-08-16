@@ -1686,6 +1686,100 @@ INDEPENDENT_REVIEW` — this repair closes the three confirmed deterministic
 findings against it; it does not itself close P7B. `RESEARCH_BACKTEST_
 FOUNDATION_READY` remains `NOT MET`.
 
+### 1J-ADDENDUM-2. RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01 (2026-08-16)
+
+**Verdict: `IMPLEMENTED_PENDING_INDEPENDENT_REVIEW`.**
+
+**Mission.** Add genuine short-side capability to the Research/Backtest
+economic evaluator (Research-only — no Paper/Live/broker change) so the
+system can test bearish hypotheses, while preserving bit-for-bit
+reproduction of every existing long-only evaluation.
+
+**Design.** `SignalPolicySpec.direction_policy` — a new, versioned,
+mutually-exclusive discriminator: `long_only_v1` (default, ORIGINAL FROZEN
+behavior) vs `long_short_threshold_v1` (new). The two are structurally
+impossible to confuse: `long_only_v1` requires `long_only=True` and
+forbids `short_threshold`/`borrow_model`; `long_short_threshold_v1`
+requires `long_only=False` and a validated `0 <= short_threshold <
+entry_threshold(long) <= 1`. Both are always identity-bearing (added to
+`economic_protocol_identity`'s `signal_policy` fragment unconditionally,
+matching the established P7A/P7B "always identity-bearing" precedent).
+
+**Signal mapping.** Per decision frame, per symbol, MEMORYLESS (recomputed
+from the score every scored frame, not sticky/hysteresis — exactly like
+the original active/flat rule): `score >= entry_threshold` → LONG,
+`score <= short_threshold` → SHORT, otherwise → FLAT. No new predictive
+signal invented — reuses the SAME `ml_score` field the classifier already
+emits ([0,1] probability-like score); this patch adds CAPABILITY, not
+alpha.
+
+**Unification, not duplication.** `_build_pending_events`'s two-state
+`active_state: Dict[str,bool]` became a signed three-state
+`direction_state: Dict[str,int] ∈ {-1,0,+1}`, resolved by a new
+`_resolve_signal_direction` helper. `weight_each_magnitude *
+direction_state[s]` replaces the old `weight_each if active_state[s] else
+0.0` — since Python `bool` is an `int` subtype and `long_only_v1`'s
+direction_state is always `{0,1}`, this is bit-for-bit identical for the
+legacy branch (proof: `test_legacy_long_only_reproduces_previous_
+semantics`). Gross exposure is `sum(abs(weight_i))` for both policies
+(unchanged formula — coincides with the signed sum only when weights are
+non-negative).
+
+**Execution: one state machine, not two.** All signed target weights pass
+through the SAME repaired P7B-REPAIR-01 causal discrete translation and
+the SAME `_simulate_fold_execution` — no separate short simulator was
+built (mission Section 5D). One pre-existing bug was fixed as part of this
+wiring: `_simulate_fold_execution`'s gross-reducing-vs-gross-increasing
+branch classification compared raw signed weight
+(`candidate <= executed`), which is only correct when weights are
+non-negative. It now compares GROSS MAGNITUDE delta
+(`abs(candidate) - abs(executed)`) — an exact generalization, bit-for-bit
+identical to the old comparison whenever weights are `>= 0` (proof: full
+`test_weight_to_share_parity_p7b.py` + `test_economic_walkforward.py`
+suites pass unchanged after the fix). This was flagged as a known scope
+boundary in the P7B-REPAIR-01 addendum and is now closed.
+
+**Short economics.** SHORT OPEN = SELL (P7A conservative LOW fill); BUY TO
+COVER = BUY (P7A conservative HIGH fill) — same side convention the
+existing `_row_execution_pricing_components`/`_row_execution_pricing_
+components_discrete` already implement, unmodified. Commission on actual
+fill notional. Forced short flatten uses the SAME close/mark
+forced-flatten exception as long positions (mirrors Rust's `flatten_all`).
+
+**Borrow scope (mission Section 5F).** `borrow_model` defaults to
+`research_assumed_shortable_universe_v1` under `long_short_threshold_v1`
+(`None` under `long_only_v1` — never shorts, no assumption needed) —
+explicit, identity-bearing, Research-only. Does NOT claim real broker
+borrow/shortability is proven; Paper/Live short routing remains completely
+unimplemented and out of scope.
+
+**Multiple-testing compatibility (Section 5H).** No code change to
+`multiple_testing_judge.py` was needed: its existing `_comparison_key`
+already excludes `entry_threshold`/`long_only`/`sizing`/
+`max_gross_exposure` from the comparison key as "candidate-differentiating
+strategy choices" — `direction_policy` (and its new sibling fields) falls
+into the exact same category and was therefore already correctly excluded
+by the pre-existing design. Proof:
+`test_long_only_and_long_short_candidates_remain_mutually_comparable`
+(new).
+
+**Files changed:** `research-py/src/mqk_research/ml/economic_walkforward.py`
+(`SignalPolicySpec.direction_policy`/`short_threshold`/`borrow_model`,
+`_resolve_signal_direction`, unified `_build_pending_events`, gross-
+magnitude D/F classification fix in `_simulate_fold_execution`, identity
+fragment), `research-py/tests/test_long_short_economic_policy.py` (new, 20
+tests), this document.
+
+**Tests.** `test_long_short_economic_policy.py`: 20 passed (new).
+`test_weight_to_share_parity_p7b.py` + `test_economic_walkforward.py` +
+`test_execution_pricing_parity_p7a.py` + `test_multiple_testing_judge.py`
++ `test_evidence_boundary.py` + `test_bars_provenance.py`: 260 passed,
+unchanged. Full `research-py` suite: 1461 passed, 7 skipped, 12 subtests —
+zero regressions. `git diff --check`: clean. No Rust files touched.
+
+**Gate status:** new capability, `IMPLEMENTED_PENDING_INDEPENDENT_REVIEW`.
+Does not itself close P7B or affect P7A/P7C gate status.
+
 ### 1K. PROMOTION-OOS-EVIDENCE-GATE-01 (P7C) (2026-08-15)
 
 **Verdict: `IMPLEMENTED_PENDING_REVIEW`.**

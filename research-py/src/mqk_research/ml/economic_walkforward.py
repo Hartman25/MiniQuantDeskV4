@@ -112,6 +112,30 @@ from mqk_research.ml.weight_to_share import (
 PROTOCOL_ID = "economic_walk_forward_v1"
 CAPACITY_POLICY_ID = "reduce_first_defer_increase_batch_v1"
 
+# RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01: two mutually-exclusive, versioned
+# signal DIRECTION policies. `long_only_v1` is the original, still-frozen
+# behavior (bit-for-bit unchanged) -- existing artifacts/candidates that
+# never set `direction_policy` reproduce identically. `long_short_
+# threshold_v1` is new capability, gated behind an explicit, distinct
+# identity so a legacy long-only evaluation can never be confused with (or
+# silently reinterpreted as) a long/short one. See SignalPolicySpec.
+SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1 = "long_only_v1"
+SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1 = "long_short_threshold_v1"
+KNOWN_SIGNAL_DIRECTION_POLICY_IDS = frozenset(
+    {SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1, SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1}
+)
+
+# Research/Backtest-only scope declaration (mission Section 5F): this
+# economic evaluator has no point-in-time borrow/shortability history for
+# its Research universe. `long_short_threshold_v1` explicitly, permanently
+# assumes every symbol in the evaluated universe is shortable for the
+# purpose of THIS research measurement -- it does NOT prove real broker
+# borrow availability, and must never be read as authorizing Paper/Live
+# short execution (that remains a completely separate, unimplemented
+# routing/risk decision gated on real borrow/shortability data).
+BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1 = "research_assumed_shortable_universe_v1"
+KNOWN_BORROW_MODEL_IDS = frozenset({BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1})
+
 
 # ---------------------------------------------------------------------------
 # Specs
@@ -120,16 +144,40 @@ CAPACITY_POLICY_ID = "reduce_first_defer_increase_batch_v1"
 
 @dataclass(frozen=True)
 class SignalPolicySpec:
-    """Explicit, versioned signal-to-position policy. v1 is deliberately
-    narrow: long-only, threshold entry, equal-weight sizing across active
-    names, bounded gross exposure. See module docstring for why shorts are
-    out of scope (the current target is a binary bullish-forward-return
-    classifier; a short policy would be an uninvented, un-registered
-    strategy).
+    """Explicit, versioned signal-to-position policy.
+
+    `direction_policy` (RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01) selects
+    between two mutually-exclusive, distinctly-identified sub-protocols:
+
+    - `long_only_v1` (the default -- ORIGINAL, FROZEN behavior): threshold
+      entry, equal-weight sizing across ACTIVE names, bounded gross
+      exposure. `entry_threshold` is the sole activation threshold;
+      `long_only` must be True; `short_threshold`/`borrow_model` must be
+      unset. Every existing candidate/artifact that never set
+      `direction_policy` reproduces bit-for-bit identically under this
+      branch (see test_legacy_long_only_reproduces_previous_semantics).
+
+    - `long_short_threshold_v1` (NEW): a per-symbol score maps
+      deterministically, every decision frame, to one of three states --
+      `score >= entry_threshold` -> LONG, `score <= short_threshold` ->
+      SHORT, otherwise -> FLAT (mission Section 5B; NOT a hysteresis/
+      sticky-state rule -- every scored frame recomputes the state from
+      scratch, exactly like long_only_v1's own active/flat recomputation).
+      Requires `long_only=False` and `0 <= short_threshold <
+      entry_threshold <= 1`. `borrow_model` defaults to
+      BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1 (Research-only
+      scope declaration, see that constant's docstring) and is always
+      identity-bearing.
+
+    GROSS EXPOSURE (both direction policies): `max_gross_exposure` bounds
+    `sum(abs(weight_i))`, NEVER the signed sum -- a +0.5 long and a -0.5
+    short together consume gross 1.0, not 0.0 (mission Section 5C). Under
+    `long_only_v1` this coincides with the signed sum since weights are
+    always >= 0.
 
     MULTI-SYMBOL EQUAL-WEIGHT SIZING RULE: the DESIRED portfolio target
     (this policy) is recomputed at each decision frame from every symbol's
-    latest known active/flat state (see _build_pending_events) — never
+    latest known LONG/SHORT/FLAT state (see _build_pending_events) — never
     rescaled retroactively just because a sibling symbol lacked a bar. Each
     symbol's resulting target change then executes only at THAT symbol's
     own next bar — never inferred from a sibling's bar and never a fixed
@@ -143,10 +191,20 @@ class SignalPolicySpec:
     by DEFERRING the gross-increasing change until real capacity exists —
     rather than by rescaling other symbols' still-held positions (that
     would itself violate causality — see module docstring) or by failing
-    closed on an expected asynchronous pattern."""
+    closed on an expected asynchronous pattern. RESEARCH-LONG-SHORT-
+    ECONOMIC-POLICY-01: _simulate_fold_execution's gross-reducing-vs-
+    gross-increasing classification is by GROSS MAGNITUDE delta
+    (abs(candidate)-abs(executed)), not raw signed comparison -- a
+    long<->short sign flip at equal magnitude consumes no additional
+    capacity and executes unconditionally; an exact generalization that is
+    bit-for-bit identical to the prior long-only-only comparison whenever
+    weights are non-negative."""
 
     entry_threshold: float = 0.5
     long_only: bool = True
+    direction_policy: str = SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1
+    short_threshold: Optional[float] = None
+    borrow_model: Optional[str] = None
     sizing: str = "equal_weight_active"
     max_gross_exposure: float = 1.0
     fold_end_policy: str = "force_flat_last_bar"
@@ -154,12 +212,44 @@ class SignalPolicySpec:
     schema_version: str = "economic_signal_policy_v1"
 
     def normalized(self) -> "SignalPolicySpec":
-        if not self.long_only:
-            raise ValueError("economic_walk_forward_v1 supports only long_only=True")
+        if self.direction_policy not in KNOWN_SIGNAL_DIRECTION_POLICY_IDS:
+            raise ValueError(f"unsupported signal direction_policy: {self.direction_policy!r}")
+        entry_threshold = float(self.entry_threshold)
+        if not (0.0 <= entry_threshold <= 1.0):
+            raise ValueError("entry_threshold must be within [0,1]")
+
+        short_threshold: Optional[float]
+        borrow_model: Optional[str]
+        if self.direction_policy == SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1:
+            if not self.long_only:
+                raise ValueError(
+                    "economic_walk_forward_v1's long_only_v1 direction_policy requires long_only=True"
+                )
+            if self.short_threshold is not None:
+                raise ValueError("long_only_v1 direction_policy does not accept short_threshold")
+            if self.borrow_model is not None:
+                raise ValueError("long_only_v1 direction_policy does not accept borrow_model")
+            short_threshold = None
+            borrow_model = None
+        else:
+            if self.long_only:
+                raise ValueError(
+                    "long_short_threshold_v1 direction_policy requires long_only=False"
+                )
+            if self.short_threshold is None:
+                raise ValueError("long_short_threshold_v1 direction_policy requires short_threshold")
+            short_threshold = float(self.short_threshold)
+            if not (0.0 <= short_threshold < entry_threshold <= 1.0):
+                raise ValueError(
+                    "long_short_threshold_v1 requires 0 <= short_threshold < entry_threshold(long) "
+                    f"<= 1, got short_threshold={short_threshold!r} entry_threshold={entry_threshold!r}"
+                )
+            borrow_model = self.borrow_model or BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1
+            if borrow_model not in KNOWN_BORROW_MODEL_IDS:
+                raise ValueError(f"unsupported borrow_model: {borrow_model!r}")
+
         if self.sizing != "equal_weight_active":
             raise ValueError("economic_walk_forward_v1 supports only sizing='equal_weight_active'")
-        if not (0.0 <= float(self.entry_threshold) <= 1.0):
-            raise ValueError("entry_threshold must be within [0,1]")
         if float(self.max_gross_exposure) <= 0.0:
             raise ValueError("max_gross_exposure must be > 0")
         if self.fold_end_policy != "force_flat_last_bar":
@@ -170,9 +260,15 @@ class SignalPolicySpec:
             )
         return replace(
             self,
-            entry_threshold=float(self.entry_threshold),
+            entry_threshold=entry_threshold,
+            short_threshold=short_threshold,
+            borrow_model=borrow_model,
             max_gross_exposure=float(self.max_gross_exposure),
         )
+
+    @property
+    def is_long_short(self) -> bool:
+        return self.direction_policy == SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1
 
 
 @dataclass(frozen=True)
@@ -276,6 +372,13 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
         "signal_policy": {
             "entry_threshold": spec.signal_policy.entry_threshold,
             "long_only": spec.signal_policy.long_only,
+            # RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01: always identity-bearing
+            # -- a legacy long_only_v1 candidate and a long_short_
+            # threshold_v1 candidate must never share a trial_id even if
+            # every other field happened to coincide.
+            "direction_policy": spec.signal_policy.direction_policy,
+            "short_threshold": spec.signal_policy.short_threshold,
+            "borrow_model": spec.signal_policy.borrow_model,
             "sizing": spec.signal_policy.sizing,
             "max_gross_exposure": spec.signal_policy.max_gross_exposure,
             "fold_end_policy": spec.signal_policy.fold_end_policy,
@@ -509,6 +612,27 @@ def _build_fold_high_low_frames(
     return high_pivot, low_pivot
 
 
+def _resolve_signal_direction(score: float, signal_policy: SignalPolicySpec) -> int:
+    """RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01: deterministic, memoryless
+    per-symbol direction resolution for a single evaluated `score`, per
+    `signal_policy.direction_policy` -- returns +1 (long), -1 (short), or 0
+    (flat). Under `long_only_v1` this is exactly the original two-state
+    active/flat rule (never returns -1). Under `long_short_threshold_v1`
+    (mission Section 5B): `score >= entry_threshold` -> long, `score <=
+    short_threshold` -> short, otherwise -> flat. `SignalPolicySpec.
+    normalized()` already guarantees `0 <= short_threshold <
+    entry_threshold <= 1`, so these three ranges are mutually exclusive and
+    exhaustive."""
+    if signal_policy.direction_policy == SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1:
+        return 1 if score >= signal_policy.entry_threshold else 0
+    if score >= signal_policy.entry_threshold:
+        return 1
+    assert signal_policy.short_threshold is not None
+    if score <= signal_policy.short_threshold:
+        return -1
+    return 0
+
+
 def _build_pending_events(
     oos_fold: pd.DataFrame,
     symbols: List[str],
@@ -528,12 +652,25 @@ def _build_pending_events(
     A decision frame (one distinct decision_ts, aggregating every symbol
     scored at that instant — physical CSV row order within the frame does
     not matter) only produces new pending events for a symbol whose
-    long/flat ACTIVE STATE actually changes at that frame, OR for every
-    other symbol when someone else's active-state change alters the
-    equal-weight-active sizing denominator (a rebalance of everyone
-    currently active/target). A symbol not scored at a given frame keeps its
-    last known active state — it is never implicitly forced flat merely for
-    lacking a decision row at some other symbol's frame.
+    LONG/SHORT/FLAT DIRECTION STATE actually changes at that frame, OR for
+    every other symbol when someone else's direction-state change alters
+    the equal-weight-active sizing denominator (a rebalance of everyone
+    currently non-flat/target). A symbol not scored at a given frame keeps
+    its last known direction state — it is never implicitly forced flat
+    merely for lacking a decision row at some other symbol's frame.
+
+    RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01: `direction_state[s]` is a
+    SIGNED int in {-1, 0, +1} (short/flat/long), resolved fresh every
+    scored frame from `signal_policy.direction_policy` (see
+    SignalPolicySpec docstring) -- NOT a hysteresis/sticky-state rule.
+    Under `long_only_v1`, direction_state is always in {0, 1} (Python bool
+    IS an int subtype, so this is the EXACT same representation the
+    original active/flat logic used), and `weight_each_magnitude *
+    direction_state[s]` reduces to the original `weight_each if
+    active_state[s] else 0.0` bit-for-bit. Under `long_short_threshold_v1`,
+    the SAME equal-weight-active-count denominator now counts every
+    non-flat (long OR short) symbol, and gross exposure is consumed by
+    MAGNITUDE regardless of side (mission Section 5C).
 
     P7B-REPAIR-01 (SIGNAL-TIME SIZING, mission Section 4B): when `wts_spec`
     is engaged, `signal_time_target_qty` is computed HERE, exactly once, at
@@ -551,7 +688,7 @@ def _build_pending_events(
     decisions = oos_fold.pivot_table(index="decision_ts", columns="symbol", values="ml_score", aggfunc="last")
     decisions = decisions.reindex(columns=symbols).sort_index(kind="mergesort")
 
-    active_state: Dict[str, bool] = {s: False for s in symbols}
+    direction_state: Dict[str, int] = {s: 0 for s in symbols}
     last_issued_weight: Dict[str, float] = {s: 0.0 for s in symbols}
     pending_events: Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]] = {s: [] for s in symbols}
 
@@ -560,19 +697,19 @@ def _build_pending_events(
         for s in symbols:
             score = row[s]
             if pd.notna(score):
-                new_active = bool(float(score) >= signal_policy.entry_threshold)
-                if new_active != active_state[s]:
-                    active_state[s] = new_active
+                new_direction = _resolve_signal_direction(float(score), signal_policy)
+                if new_direction != direction_state[s]:
+                    direction_state[s] = new_direction
                     changed = True
         if not changed:
             continue
 
-        active_symbols = [s for s in symbols if active_state[s]]
-        weight_each = (
+        active_symbols = [s for s in symbols if direction_state[s] != 0]
+        weight_each_magnitude = (
             float(signal_policy.max_gross_exposure) / float(len(active_symbols)) if active_symbols else 0.0
         )
         for s in symbols:
-            new_weight = weight_each if active_state[s] else 0.0
+            new_weight = weight_each_magnitude * direction_state[s]
             if abs(new_weight - last_issued_weight[s]) > 1e-12:
                 signal_ts = pd.Timestamp(ts)
                 target_qty: Optional[int] = None
@@ -887,11 +1024,22 @@ def _simulate_fold_execution(
         qty_delta: Dict[str, int] = {s: 0 for s in present}
         qty_side: Dict[str, Optional[str]] = {s: None for s in present}
 
-        # D: gross-reducing (and no-op) candidates execute unconditionally.
+        # D: GROSS-reducing (and no-op) candidates execute unconditionally.
+        # RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01: classification is by GROSS
+        # MAGNITUDE delta (abs(candidate) - abs(executed)), not raw signed
+        # comparison -- a signed candidate can DECREASE magnitude while its
+        # raw value INCREASES (e.g. executed=-0.5 -> candidate=0.2 raises
+        # the raw value but reduces gross from 0.5 to 0.2), and a long<->
+        # short sign flip at equal magnitude (e.g. +0.5 -> -0.5) consumes NO
+        # additional capacity and must execute unconditionally too. This is
+        # an exact generalization: for long-only weights (always >= 0),
+        # abs(candidate)-abs(executed) == candidate-executed, so this
+        # produces bit-for-bit identical classification to the pre-existing
+        # long-only comparison.
         for s in present:
             if candidate[s] is None:
                 continue
-            if candidate[s] <= executed_weight[s] + _GROSS_TOL:
+            if abs(candidate[s]) <= abs(executed_weight[s]) + _GROSS_TOL:
                 old_weight = executed_weight[s]
                 delta = candidate[s] - old_weight
                 turnover[s] = abs(delta)
@@ -949,7 +1097,7 @@ def _simulate_fold_execution(
         # execute ahead of it.
         increase_symbols = [
             s for s in symbols
-            if candidate[s] is not None and candidate[s] > executed_weight[s] + _GROSS_TOL
+            if candidate[s] is not None and abs(candidate[s]) > abs(executed_weight[s]) + _GROSS_TOL
         ]
         cohorts: Dict[pd.Timestamp, List[str]] = {}
         for s in increase_symbols:
