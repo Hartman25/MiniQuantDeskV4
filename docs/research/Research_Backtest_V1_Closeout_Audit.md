@@ -1083,6 +1083,94 @@ explicit instruction not to implement them.
 
 ---
 
+## 1H. BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-04 ADDENDUM (2026-08-15)
+
+Independent review of Section 1G found one further deterministic defect:
+`_require_consistent_ca_discovery_coverage` verified that a
+`corporate_action_query_coverage` object was internally consistent, but never
+that it matched the TRUSTED CA discovery contract the official extractor
+actually uses. Mission `BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-04`
+closed it against the same commit chain. Baseline: local `main`, six commits
+ahead of `origin/main` HEAD `ec5a3fcd8ac3232fa5f057ae56a939a78971f083`
+(Sections 1D-1G's six commits).
+
+**Verdict: `COMPLETE`.**
+
+**Root defect.** An attestation could declare `source_authority=
+official_provider`, correct endpoints/provider/adjustment/asof, complete
+pagination, and `category_b_events_found=[]`, while its
+`corporate_action_query_coverage.requested_types` named only a handful of CA
+types (e.g. `["cash_dividend"]`) — never having queried mergers, redemptions,
+rights distributions, or any other Category-B type at all. REPAIR-03's
+consistency check could not catch this: it only checked that the coverage
+object's own fields agreed with each other and with the rest of the
+attestation, never that the CLAIMED contract matched the trusted one. The
+repo's own `test_source_attestation.py::_valid_attestation` happy-path
+fixture demonstrated the gap directly, building a "valid official"
+attestation with `requested_types=["cash_dividend"]` that passed the
+registered gate.
+
+**Fix — trusted contract mirror + validator.** `bars_provenance.py` gains
+`TRUSTED_CA_DISCOVERY_PROTOCOL_V2`, `TRUSTED_CA_DISCOVERY_FLOOR_UTC`, and
+`TRUSTED_CA_DISCOVERY_TYPES` — mirrored (not imported, to avoid a circular
+import: `alpaca_historical` already imports `bars_provenance`) from the
+extractor's actual `CA_DISCOVERY_PROTOCOL_V2` /
+`CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC` / `KNOWN_CORPORATE_ACTION_TYPES`. A new
+`_require_trusted_ca_discovery_contract`, run immediately after the REPAIR-03
+consistency check inside `_require_verified_source_attestation`, requires
+exact equality on protocol and discovery floor, an exact SET match (not a
+subset or superset) on `requested_types`, and `ca_discovery_end_utc >=
+requested_end_utc` (the resolved snapshot must cover the full claimed
+research interval — a snapshot predating the research window's end cannot
+honestly claim CA coverage for it). A cross-module regression test
+(`test_trusted_ca_discovery_contract_matches_extractor`) proves the mirror
+equals the extractor's real constants, so the two definitions cannot drift
+silently.
+
+**RED/GREEN proof.** `test_narrow_requested_types_fails_official_gate` shows
+`_require_consistent_ca_discovery_coverage` ALONE still accepts the narrow
+`["cash_dividend"]` attestation (RED — the pre-REPAIR-04 gap, reproduced
+directly rather than by reverting code), while the full official gate
+(adding `_require_trusted_ca_discovery_contract`) now rejects it (GREEN). Six
+further negative controls cover: one Category-B type omitted from an
+otherwise-complete set, an unverified extra type, wrong `discovery_protocol`,
+a narrower-than-1900 discovery floor, a snapshot cutoff earlier than
+`research_window_end`, and (positive) an exact-set match in reordered input
+order.
+
+**Test fixture discipline.** `test_source_attestation.py::_valid_attestation`
+no longer defaults to `requested_types=["cash_dividend"]` — its happy-path
+`corporate_action_query_coverage` now uses the complete
+`TRUSTED_CA_DISCOVERY_TYPES` set, matching what the official extractor
+actually queries. Tests exercising an incomplete/narrow/wrong contract build
+that invalid `corporate_action_query_coverage` explicitly via a new
+`_coverage()` helper.
+
+**Files changed:** `research-py/src/mqk_research/data/bars_provenance.py`
+(`TRUSTED_CA_DISCOVERY_*` constants, `_require_trusted_ca_discovery_contract`,
+wired into `_require_verified_source_attestation`),
+`tests/test_source_attestation.py` (fixture hardened to the complete type
+set; 8 new tests), `tests/test_alpaca_historical.py` (1 new cross-module
+regression test).
+
+**Tests.** `test_source_attestation.py`: 44 passed (was 37; +7 new: the RED/
+GREEN narrow-types proof plus six further negative/positive controls).
+`test_alpaca_historical.py`: 65 passed (was 64; +1 new: the cross-module
+trusted-contract regression). `test_bars_
+provenance.py` + `test_economic_walkforward.py` + `test_multiple_testing_
+judge.py`: 133 passed, unchanged. Full `research-py` suite: **1340 passed, 7
+skipped, 12 subtests passed** (zero regressions; skip count unchanged from
+Section 1G). `git diff --check`: clean. No provider query changed by this
+patch, so no new live-provider proof was performed; Section 1G's 1900-start
+read-only proof remains the accepted evidence for that floor.
+
+**Remaining blocker:** none for this repair's scope. Category-B
+corporate-action handling remains an explicit future patch, unchanged from
+Sections 1D-1G. P7/P9/P10 remain out of scope, per this repair mission's
+explicit instruction not to implement them.
+
+---
+
 ## 2. Baseline
 
 ```
