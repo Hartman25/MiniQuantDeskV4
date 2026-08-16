@@ -793,33 +793,39 @@ def _row_execution_pricing_components_discrete(
     high: Optional[float],
     low: Optional[float],
     execution_pricing: Optional[ExecutionPricingSpec],
-    equity_usd: float,
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, float]:
     """P7B-REPAIR-01 discrete-qty analogue of
     _row_execution_pricing_components (mission Section 4E "discrete shares
     must drive economics"): executing `delta_qty` signed shares at THIS
     bar's conservative fill price instead of its close. BUY (delta_qty > 0)
     uses HIGH, SELL (delta_qty < 0) uses LOW — identical side convention.
 
-    Returns (execution_price_cost, commission_notional, turnover_notional),
-    ALL already expressed as equity_usd-NORMALIZED RETURN-FRACTION
-    quantities (a dollar amount divided by `equity_usd`) so they compose,
-    unmodified, with the existing weight-space commission_cost/net_return
-    arithmetic in _simulate_fold. `turnover_notional` is always CLOSE-priced
-    (`abs(delta_qty) * close / equity_usd`) -- the intended rebalance size,
+    Returns (execution_price_cost, commission_notional, turnover_notional,
+    fill_price), the first three ALL RAW DOLLAR quantities (P7B-REPAIR-02,
+    mission Section 3G: a stateful wealth ledger needs real dollars, not a
+    value pre-divided by a FIXED equity_usd denominator -- see
+    _discrete_wealth_ledger_returns, which is the only place a discrete
+    dollar amount is ever turned into a return fraction, using the RUNNING
+    equity level, not this fixed constant). `turnover_notional` is always
+    CLOSE-priced (`abs(delta_qty) * close`) -- the intended rebalance size,
     mirroring continuous `turnover[s] = abs(delta_weight)` -- while
     `commission_notional` is FILL-priced under the official model (mirrors
     `commission_notional[s] = turnover[s] * fill_ratio`). Under the
     diagnostic pricing model (or delta_qty == 0), execution_price_cost is
     0.0 and commission_notional == turnover_notional (unrescaled, ratio
     1.0) -- mirrors _row_execution_pricing_components's own
-    diagnostic-model identity."""
+    diagnostic-model identity. `fill_price` is returned so a caller
+    (P7B-REPAIR-02's fill-time capacity check, mission Section 3D) can price
+    a PROPOSED order's notional at the actual conservative fill BEFORE
+    deciding whether to commit it -- this function is pure and has no side
+    effects, so calling it ahead of an accept/reject decision is safe even
+    if the order ends up rejected and its cost outputs discarded."""
     close_f = float(close)
     if delta_qty == 0:
-        return 0.0, 0.0, 0.0
-    turnover_notional = (abs(delta_qty) * close_f) / equity_usd
+        return 0.0, 0.0, 0.0, close_f
+    turnover_notional = abs(delta_qty) * close_f
     if execution_pricing is None or not execution_pricing.is_official_parity_model:
-        return 0.0, turnover_notional, turnover_notional
+        return 0.0, turnover_notional, turnover_notional, close_f
     if high is None or low is None or pd.isna(high) or pd.isna(low):
         raise RuntimeError(
             "Fail-closed: official execution-pricing parity model requires a high/low value for "
@@ -834,9 +840,83 @@ def _row_execution_pricing_components_discrete(
         slippage_bps=execution_pricing.slippage_bps,
         volatility_mult_bps=execution_pricing.volatility_mult_bps,
     )
-    adverse_price_cost = (abs(delta_qty) * abs(fill - close_f)) / equity_usd
-    commission_notional = (abs(delta_qty) * fill) / equity_usd
-    return adverse_price_cost, commission_notional, turnover_notional
+    adverse_price_cost = abs(delta_qty) * abs(fill - close_f)
+    commission_notional = abs(delta_qty) * fill
+    return adverse_price_cost, commission_notional, turnover_notional, fill
+
+
+def _discrete_wealth_ledger_returns(
+    bar_index: pd.Index,
+    dollar_gross_pnl: pd.Series,
+    dollar_transaction_cost: pd.Series,
+    initial_equity_usd: float,
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """P7B-REPAIR-02 (mission Section 3B/3C, defect A): the official
+    discrete-economics stateful wealth ledger. Each row's RETURN FRACTION is
+    this row's raw dollar P&L (all symbols, this timestamp) divided by the
+    RUNNING equity level as of the END of the prior row -- never a FIXED
+    initial-equity denominator, which corrupts the geometric compounding
+    _daily_aggregate/_summarize_series already perform on every
+    gross_return/net_return series (continuous or discrete alike):
+
+        r_t = dollar_pnl_t / equity_{t-1}
+        equity_t = equity_{t-1} * (1 + r_t) = equity_{t-1} + dollar_pnl_t
+
+    Two independent running ledgers are threaded -- `equity_gross` (mark-to-
+    market P&L only) and `equity_net` (P&L net of this row's execution
+    costs, subtracted as an exact dollar amount -- no multiplicative
+    approximation is needed here, unlike economics.compute_net_return_exact,
+    because both quantities are already true dollars, not equity-fraction
+    approximations) -- mirroring the existing gross_return/net_return
+    dual-series convention the continuous weight-space path already uses.
+
+    Example (mission Section 3C, no costs): qty=1000, equity=100_000,
+    prices 100 -> 110 -> 121 produce dollar P&L [+10_000, +11_000], hence
+    r = [0.10, 0.10] and a compounded total return of 1.10*1.10-1 = 0.21 --
+    NOT dollar_pnl/100_000 fixed-denominator fractions [0.10, 0.11], which
+    would wrongly geometrically compound to 0.221.
+
+    Returns (gross_return, net_return, transaction_cost) as FRACTIONAL
+    pd.Series sharing `bar_index` -- transaction_cost is re-expressed as
+    `dollar_cost_t / equity_net_{t-1}` (a cost-as-fraction-of-that-row's-net-
+    equity), purely for REPORTING parity with the continuous path's
+    fraction-of-weight transaction_cost column; it is not used to derive
+    net_return here (net_return is derived directly from exact dollars)."""
+    equity_gross = float(initial_equity_usd)
+    equity_net = float(initial_equity_usd)
+    gross_vals: List[float] = []
+    net_vals: List[float] = []
+    cost_frac_vals: List[float] = []
+    for t in bar_index:
+        dollar_pnl = float(dollar_gross_pnl.loc[t])
+        dollar_cost = float(dollar_transaction_cost.loc[t])
+
+        if equity_gross <= 0.0:
+            raise RuntimeError(
+                "Fail-closed: discrete gross wealth ledger equity is <= 0 -- cannot "
+                "compute a further return fraction"
+            )
+        r_gross = dollar_pnl / equity_gross
+        gross_vals.append(r_gross)
+        equity_gross = equity_gross + dollar_pnl
+
+        if equity_net <= 0.0:
+            raise RuntimeError(
+                "Fail-closed: discrete net wealth ledger equity is <= 0 -- cannot "
+                "compute a further return fraction"
+            )
+        dollar_net_pnl = dollar_pnl - dollar_cost
+        r_net = dollar_net_pnl / equity_net
+        net_vals.append(r_net)
+        cost_frac_vals.append(dollar_cost / equity_net)
+        equity_net = equity_net + dollar_net_pnl
+
+    idx = pd.DatetimeIndex(bar_index)
+    return (
+        pd.Series(gross_vals, index=idx),
+        pd.Series(net_vals, index=idx),
+        pd.Series(cost_frac_vals, index=idx),
+    )
 
 
 def _simulate_fold_execution(
@@ -848,6 +928,8 @@ def _simulate_fold_execution(
     low_frame: Optional[pd.DataFrame] = None,
     execution_pricing: Optional[ExecutionPricingSpec] = None,
     wts_spec: Optional[WeightToShareSpec] = None,
+    commission_bps_per_side: float = 0.0,
+    one_way_cost_bps: float = 0.0,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, float], Dict[str, int]]:
     """Joint, timestamp-frame causal execution/allocation state machine
     (capacity_policy=CAPACITY_POLICY_ID) sharing one portfolio-level gross-
@@ -946,27 +1028,73 @@ def _simulate_fold_execution(
     prev_close: Dict[str, Optional[float]] = {s: None for s in symbols}
     rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {s: [] for s in symbols}
 
+    # P7B-REPAIR-02 (mission Section 3D): fill-time capacity parity state,
+    # mirroring Rust's BacktestEngine -- `last_close` mirrors
+    # `self.last_prices` (most recent known mark per symbol, present or
+    # not); `equity_net_running` mirrors `compute_equity_micros` computed
+    # from cash+positions. Both are updated once per frame (see the
+    # `frame_equity_for_cap` assignment below and the frame-end update after
+    # the D/F sections), not recomputed from the downstream
+    # `_discrete_wealth_ledger_returns` pass -- that pass independently
+    # reconstructs the SAME dollar-additive ledger from the returned rows
+    # for REPORTING; this one exists only to gate admission DURING
+    # simulation, exactly as Rust's own equity/exposure figures are computed
+    # fresh at fill time rather than reused from a prior report.
+    last_close: Dict[str, Optional[float]] = {s: None for s in symbols}
+    equity_net_running = wts_spec.equity_usd if wts_spec is not None else None
+    frame_equity_for_cap: Optional[float] = None
+
+    def _current_gross_exposure_dollars() -> float:
+        return sum(abs(current_qty[sym]) * (last_close[sym] or 0.0) for sym in symbols)
+
     def _apply_discrete_execution(s: str, t: Any) -> Tuple[float, float, float, int, Optional[str]]:
         """Executes symbol `s`'s discrete side at frame `t` against whatever
         `candidate_qty[s]` was already resolved for this frame, mutating
-        `current_qty[s]` in place. Returns
+        `current_qty[s]` in place ONLY if admitted. Returns
         (qty_execution_price_cost, qty_commission_notional, qty_turnover,
         qty_delta, qty_side); all-zero/None no-op if wts_spec is disengaged,
-        `candidate_qty[s]` is None, or the resolved delta is zero."""
+        `candidate_qty[s]` is None, the resolved delta is zero, OR (P7B-
+        REPAIR-02, mission Section 3D/3F) the fill-time allocation-cap check
+        rejects a risk-increasing residual -- mirroring Rust's
+        `resolve_one_pending_order`: only the risk-INCREASING residual of a
+        (possibly reversing) delta is priced against current modeled
+        equity/gross-exposure at the ACTUAL conservative fill price, never
+        signal-time weight headroom. A rejected order performs no fill, no
+        commission, no price drag, and no position mutation -- signal-time
+        weight-space admission (frozen, unchanged) may have already deemed
+        this event admissible; the discrete evidence/economics are allowed
+        to diverge from the continuous baseline here by design (the same
+        divergence floor-rounding already produces elsewhere in this
+        translation layer)."""
         if wts_spec is None or candidate_qty.get(s) is None:
             return 0.0, 0.0, 0.0, 0, None
         target_qty = candidate_qty[s]
         assert target_qty is not None
         order = target_qty_to_order_delta(current_qty=current_qty[s], target_qty=target_qty)
         delta_qty = 0 if order is None else (order[1] if order[0] == "buy" else -order[1])
-        price_cost, commission, turnover_notional = _row_execution_pricing_components_discrete(
+        if delta_qty == 0:
+            return 0.0, 0.0, 0.0, 0, None
+        price_cost, commission, turnover_notional, fill_price = _row_execution_pricing_components_discrete(
             delta_qty,
             close_frame.at[t, s],
             high_frame.at[t, s] if high_frame is not None else None,
             low_frame.at[t, s] if low_frame is not None else None,
             execution_pricing,
-            wts_spec.equity_usd,
         )
+
+        reducing_capacity = max(0, -current_qty[s]) if delta_qty > 0 else max(0, current_qty[s])
+        reducing_qty = min(abs(delta_qty), reducing_capacity)
+        residual_increasing_qty = abs(delta_qty) - reducing_qty
+        if residual_increasing_qty > 0:
+            assert frame_equity_for_cap is not None
+            exposure = _current_gross_exposure_dollars()
+            proposed_notional = residual_increasing_qty * fill_price
+            allowed = frame_equity_for_cap * max_gross_exposure
+            if exposure + proposed_notional > allowed + _GROSS_TOL * max(frame_equity_for_cap, 1.0):
+                # Fail-closed admission: reject the WHOLE order, exactly as
+                # Rust does -- no partial fill, no state mutation, no cost.
+                return 0.0, 0.0, 0.0, 0, None
+
         current_qty[s] = target_qty
         side = None if delta_qty == 0 else ("buy" if delta_qty > 0 else "sell")
         return price_cost, commission, turnover_notional, delta_qty, side
@@ -988,10 +1116,15 @@ def _simulate_fold_execution(
             gross_contrib[s] = (
                 0.0 if prev_close[s] is None else executed_weight[s] * (c / prev_close[s] - 1.0)
             )
+            # P7B-REPAIR-02 (mission Section 3B, defect A): RAW DOLLAR
+            # mark-to-market P&L -- never pre-divided by a fixed equity_usd
+            # denominator. _discrete_wealth_ledger_returns is the only place
+            # a dollar amount becomes a return fraction, using the RUNNING
+            # equity level (not this constant).
             qty_gross_contrib[s] = (
                 0.0
                 if prev_close[s] is None or wts_spec is None
-                else current_qty[s] * (c - prev_close[s]) / wts_spec.equity_usd
+                else current_qty[s] * (c - prev_close[s])
             )
             interval_exposure[s] = abs(executed_weight[s])
 
@@ -1009,6 +1142,21 @@ def _simulate_fold_execution(
                 candidate_ts[s] = None
             pending_idx[s] = idx
             prev_close[s] = c
+            last_close[s] = c
+
+        # P7B-REPAIR-02 (mission Section 3D): marks are established (above)
+        # before any fill-time capacity decision this frame -- mirrors
+        # Rust's `resolve_pending_orders_for_batch` marking every symbol's
+        # last_prices before any cap check runs. `frame_equity_for_cap` is
+        # this frame's PRE-FILL equity: the running equity as of the prior
+        # frame's end, plus this frame's own mark-to-market gain on
+        # already-held (pre-fill) positions -- exactly what Rust's
+        # `compute_equity_micros` reflects immediately after marks update
+        # but before any of this frame's fills are applied.
+        if wts_spec is not None:
+            frame_equity_for_cap = equity_net_running + sum(
+                qty_gross_contrib[s] for s in present
+            )
 
         turnover: Dict[str, float] = {s: 0.0 for s in present}
         execution_price_cost: Dict[str, float] = {s: 0.0 for s in present}
@@ -1142,6 +1290,25 @@ def _simulate_fold_execution(
                 "after a frame's reductions/cohort execution"
             )
 
+        # P7B-REPAIR-02: advance the running equity ledger to this frame's
+        # end -- this frame's mark-to-market P&L (already captured in
+        # frame_equity_for_cap) minus this frame's REALIZED costs, the same
+        # official-vs-diagnostic cost-model selection _simulate_fold applies
+        # to build the returned transaction_cost series (kept in lockstep so
+        # the internal admission ledger and the downstream reported ledger
+        # agree on every dollar).
+        if wts_spec is not None:
+            frame_dollar_cost = 0.0
+            for s in present:
+                if execution_pricing is not None and execution_pricing.is_official_parity_model:
+                    frame_dollar_cost += (
+                        qty_commission_notional[s] * (commission_bps_per_side / 10_000.0)
+                        + qty_execution_price_cost[s]
+                    )
+                else:
+                    frame_dollar_cost += qty_turnover[s] * (one_way_cost_bps / 10_000.0)
+            equity_net_running = frame_equity_for_cap - frame_dollar_cost
+
         for s in present:
             rows_by_symbol[s].append({
                 "timestamp": t,
@@ -1152,6 +1319,16 @@ def _simulate_fold_execution(
                 "execution_price_cost": execution_price_cost[s],
                 "commission_notional": commission_notional[s],
                 "target_qty": current_qty[s] if wts_spec is not None else None,
+                # P7B-REPAIR-02 (mission Section 3D): the SIGNAL-TIME-FIXED
+                # candidate quantity for this frame's eligible decision (if
+                # any), distinct from `target_qty` above (the RESULTING
+                # current position after this row's admit/reject decision).
+                # A fill-time capacity rejection leaves `target_qty`
+                # unchanged from its prior value while `signal_target_qty`
+                # still truthfully reports what the signal asked for --
+                # proving admission/rejection is decided at FILL time, never
+                # by silently re-sizing the signal-time target.
+                "signal_target_qty": candidate_qty.get(s) if wts_spec is not None else None,
                 "qty_delta": qty_delta[s],
                 "qty_side": qty_side[s],
                 "qty_gross_contrib": qty_gross_contrib[s],
@@ -1302,6 +1479,8 @@ def _simulate_fold(
         low_frame=low_frame,
         execution_pricing=spec.execution_pricing,
         wts_spec=wts_spec,
+        commission_bps_per_side=spec.cost_model.commission_bps_per_side,
+        one_way_cost_bps=one_way_cost_bps,
     )
 
     weight_to_share_events_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
@@ -1345,7 +1524,7 @@ def _simulate_fold(
             if wts_spec is not None and final_qty != 0:
                 exit_qty_delta = -final_qty
                 exit_close = float(close_frame.at[global_last_ts, s])
-                exit_turnover_notional = (abs(final_qty) * exit_close) / wts_spec.equity_usd
+                exit_turnover_notional = abs(final_qty) * exit_close
                 rows[-1]["qty_turnover"] = rows[-1]["qty_turnover"] + exit_turnover_notional
                 rows[-1]["qty_commission_notional"] = (
                     rows[-1]["qty_commission_notional"] + exit_turnover_notional
@@ -1364,6 +1543,7 @@ def _simulate_fold(
                 "execution_price_cost": 0.0,
                 "commission_notional": abs(final_weight),
                 "target_qty": 0 if wts_spec is not None else None,
+                "signal_target_qty": 0 if wts_spec is not None else None,
                 "qty_delta": 0,
                 "qty_side": None,
                 "qty_gross_contrib": 0.0,
@@ -1374,7 +1554,7 @@ def _simulate_fold(
             if wts_spec is not None and final_qty != 0:
                 exit_qty_delta = -final_qty
                 exit_close = float(close_frame.at[global_last_ts, s])
-                exit_turnover_notional = (abs(final_qty) * exit_close) / wts_spec.equity_usd
+                exit_turnover_notional = abs(final_qty) * exit_close
                 exit_row["qty_turnover"] = exit_turnover_notional
                 exit_row["qty_commission_notional"] = exit_turnover_notional
                 exit_row["qty_delta"] = exit_qty_delta
@@ -1394,6 +1574,7 @@ def _simulate_fold(
                 {
                     "timestamp": r["timestamp"],
                     "target_qty": r["target_qty"],
+                    "signal_target_qty": r["signal_target_qty"],
                     "side": r["qty_side"],
                     "qty": abs(r["qty_delta"]),
                 }
@@ -1463,7 +1644,21 @@ def _simulate_fold(
     else:
         commission_cost = economics.compute_transaction_cost(turnover, one_way_cost_bps)
         transaction_cost = commission_cost + execution_price_cost
-    net_return = economics.compute_net_return_exact(gross_return, transaction_cost)
+
+    if wts_spec is not None:
+        # P7B-REPAIR-02 (defect A): at this point gross_return/transaction_cost
+        # are RAW DOLLAR series (see _row_execution_pricing_components_discrete
+        # / qty_gross_contrib above) -- economics.compute_net_return_exact
+        # assumes FRACTION-of-equity units (as the continuous weight-space
+        # path always supplies) and must never be called on dollars directly.
+        # The stateful wealth ledger converts dollars to return fractions
+        # using the RUNNING equity level, replacing gross_return/
+        # transaction_cost with their fractional forms in the same step.
+        gross_return, net_return, transaction_cost = _discrete_wealth_ledger_returns(
+            bar_index, gross_return, transaction_cost, wts_spec.equity_usd,
+        )
+    else:
+        net_return = economics.compute_net_return_exact(gross_return, transaction_cost)
 
     gross_exposure = exposure_frame.abs().sum(axis=1)
     active_positions = (exposure_frame.abs() > 1e-12).sum(axis=1)

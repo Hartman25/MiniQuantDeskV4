@@ -762,7 +762,19 @@ def test_target_qty_fixed_at_signal_bar_close_not_execution_bar_close(tmp_path: 
     closes at $100; its EXECUTION bar (day1) closes at a drastically
     different $150. Against the ORIGINAL (unrepaired) P7B this test FAILS:
     the original implementation sizes from the execution row's own close
-    (150 -> qty=66), not the signal row's close (100 -> qty=100)."""
+    (150 -> qty=66), not the signal row's close (100 -> qty=100).
+
+    P7B-REPAIR-02: this fixture is a SINGLE, fully-active (100% conviction)
+    symbol, so its signal-time notional always exactly equals the fill-time
+    allocation cap (both derive from the same equity_usd * max_gross_exposure
+    product) -- meaning a $50/share price INCREASE at execution (day1,
+    $150) now legitimately breaches the NEW fill-time capacity check
+    (mission Section 3D) and the order is capacity-rejected (`target_qty`,
+    the RESULTING position, stays 0). That is a SEPARATE, correctly-working
+    concern from what this test checks: `signal_target_qty` is the
+    immutable SIGNAL-TIME candidate quantity, fixed once regardless of
+    whether the fill later admits or rejects -- exactly the invariant this
+    test is named for."""
     closes = [100.0, 150.0, 150.0, 150.0]
     bars_path, spec = _single_symbol_fixture(
         tmp_path, closes=closes, weight_to_share=WeightToShareSpec(equity_usd=10_000.0)
@@ -770,14 +782,23 @@ def test_target_qty_fixed_at_signal_bar_close_not_execution_bar_close(tmp_path: 
     out_path = run_economic_walkforward(tmp_path, bars_csv=bars_path, spec=spec)
     out = json.loads(out_path.read_text(encoding="utf-8"))
     evidence = out["folds"][0]["weight_to_share_evidence"]["AAA"]
-    assert evidence[0]["target_qty"] == 0  # day0: signal row, cannot execute from its own bar
-    assert evidence[1]["target_qty"] == 100  # day1 execution: 1.0*10000/100 (SIGNAL close)
+    assert evidence[0]["signal_target_qty"] is None  # day0: no eligible candidate yet
+    assert evidence[1]["signal_target_qty"] == 100  # day1: 1.0*10000/100 (SIGNAL close, fixed)
+    # This specific 50% price jump on a 100%-conviction position breaches
+    # the NEW fill-time cap (mission 3D) -- capacity-rejected, not silently
+    # re-sized: the resulting position stays flat, never re-derived to 66.
+    assert evidence[1]["target_qty"] == 0
+    assert evidence[1]["target_qty"] != 66  # 10000/150 -- the ORIGINAL (unrepaired) bug's answer
 
 
 def test_mutating_execution_bar_close_does_not_change_target_qty(tmp_path: Path) -> None:
     """REQUIRED TEST 2: mutating the EXECUTION bar's close (day1) leaves the
-    signal-fixed target_qty unchanged across two otherwise-identical runs."""
-    def _target_qty_for(day1_close: float) -> int:
+    signal-fixed target_qty unchanged across two otherwise-identical runs --
+    P7B-REPAIR-02: checked via `signal_target_qty`, the immutable signal-time
+    candidate, since a sufficiently extreme execution price (e.g. $9999) now
+    legitimately capacity-rejects at fill time (mission Section 3D) --a
+    SEPARATE, correctly-working concern from signal-time sizing fixation."""
+    def _signal_target_qty_for(day1_close: float) -> int:
         closes = [100.0, day1_close, day1_close, day1_close]
         bars_path, spec = _single_symbol_fixture(
             tmp_path / f"run_{day1_close}", closes=closes,
@@ -785,30 +806,34 @@ def test_mutating_execution_bar_close_does_not_change_target_qty(tmp_path: Path)
         )
         out_path = run_economic_walkforward(tmp_path / f"run_{day1_close}", bars_csv=bars_path, spec=spec)
         out = json.loads(out_path.read_text(encoding="utf-8"))
-        return out["folds"][0]["weight_to_share_evidence"]["AAA"][1]["target_qty"]
+        return out["folds"][0]["weight_to_share_evidence"]["AAA"][1]["signal_target_qty"]
 
-    assert _target_qty_for(150.0) == _target_qty_for(9999.0) == 100
+    assert _signal_target_qty_for(150.0) == _signal_target_qty_for(9999.0) == 100
 
 
 def test_mutating_execution_bar_high_low_does_not_change_target_qty_but_alters_pnl(tmp_path: Path) -> None:
     """REQUIRED TESTS 3/4: under the OFFICIAL P7A pricing model, mutating
     the execution bar's HIGH/LOW changes the executed FILL price (and
     therefore execution_price_cost/commission economics) but must NEVER
-    change the signal-fixed target_qty."""
+    change the signal-fixed target_qty.
+
+    P7B-REPAIR-02: constructs pending_events directly (weight=0.4, not the
+    100%-conviction _single_symbol_fixture pipeline) so that BOTH the tight
+    and wide HIGH/LOW scenarios actually ADMIT under the NEW fill-time
+    capacity check (mission Section 3D) -- $40 shares at up to $200/share
+    ($8,000) comfortably clears the $10,000 cap either way, letting this
+    test isolate its real subject (HIGH/LOW changes fill price and cost,
+    never signal-fixed sizing) from capacity admission, covered separately
+    and exhaustively elsewhere."""
     def _run(day1_high: float, day1_low: float):
         days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
-        closes = [100.0, 150.0, 150.0, 150.0]
-        highs = [100.5, day1_high, 150.5, 150.5]
-        lows = [99.5, day1_low, 149.5, 149.5]
-        bars_rows = [
-            {"symbol": "AAA", "end_ts": _ts(str(d)).isoformat(), "close": c, "high": h, "low": lo}
-            for d, c, h, lo in zip(days, closes, highs, lows)
-        ]
-        scores = [1.0, 1.0, 1.0, 1.0]
-        oos_rows = [_oos_row(1, "AAA", d, s) for d, s in zip(days, scores)]
-        folds = [_single_fold("2021-01-01", "2021-01-05")]
-        run_dir = tmp_path / f"hl_{day1_high}_{day1_low}"
-        bars_path = _write_direct_fixture(run_dir, folds=folds, oos_rows=oos_rows, bars_rows=bars_rows)
+        close_frame = pd.DataFrame({"AAA": [100.0, 150.0, 150.0, 150.0]}, index=days)
+        high_frame = pd.DataFrame({"AAA": [100.5, day1_high, 150.5, 150.5]}, index=days)
+        low_frame = pd.DataFrame({"AAA": [99.5, day1_low, 149.5, 149.5]}, index=days)
+        wts_spec = WeightToShareSpec(equity_usd=10_000.0)
+        target_qty = weight_to_target_qty(weight=0.4, price=100.0, spec=wts_spec)
+        assert target_qty == 40
+        pending_events = {"AAA": [(days[0], 0.4, target_qty)]}
         spec = EconomicWalkForwardSpec(
             signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
             cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
@@ -817,20 +842,24 @@ def test_mutating_execution_bar_high_low_does_not_change_target_qty_but_alters_p
                 pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
                 slippage_bps=0, volatility_mult_bps=0,
             ),
-            weight_to_share=WeightToShareSpec(equity_usd=10_000.0),
+            weight_to_share=wts_spec,
         )
-        out_path = run_economic_walkforward(run_dir, bars_csv=bars_path, spec=spec)
-        return json.loads(out_path.read_text(encoding="utf-8"))
+        fold_df, summary = _simulate_fold(
+            1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+            close_frame, pending_events, spec, high_frame=high_frame, low_frame=low_frame,
+        )
+        return summary
 
-    out_tight = _run(150.5, 149.5)
-    out_wide = _run(200.0, 100.0)  # drastically wider HIGH on the BUY execution bar
+    summary_tight = _run(150.5, 149.5)
+    summary_wide = _run(200.0, 100.0)  # drastically wider HIGH on the BUY execution bar
 
-    ev_tight = out_tight["folds"][0]["weight_to_share_evidence"]["AAA"]
-    ev_wide = out_wide["folds"][0]["weight_to_share_evidence"]["AAA"]
-    # target_qty unaffected by the HIGH/LOW mutation (signal-fixed).
-    assert ev_tight[1]["target_qty"] == ev_wide[1]["target_qty"] == 100
+    ev_tight = summary_tight["weight_to_share_evidence"]["AAA"]
+    ev_wide = summary_wide["weight_to_share_evidence"]["AAA"]
+    # target_qty unaffected by the HIGH/LOW mutation (signal-fixed) -- and,
+    # since $40*$200=$8,000 < $10,000 cap either way, BOTH scenarios admit.
+    assert ev_tight[1]["target_qty"] == ev_wide[1]["target_qty"] == 40
     # But the wider bar-range BUY fill materially worsens net economics.
-    assert out_wide["folds"][0]["net_total_return"] < out_tight["folds"][0]["net_total_return"]
+    assert summary_wide["net_total_return"] < summary_tight["net_total_return"]
 
 
 def test_qty_rounds_to_zero_yields_zero_discrete_economic_exposure(tmp_path: Path) -> None:
@@ -894,19 +923,24 @@ def test_p7a_commission_charged_against_actual_discrete_fill_notional(tmp_path: 
     """REQUIRED TEST 22: P7A commission parity is retained under the
     discrete path -- commission is charged against actual discrete
     conservative-fill notional (qty * fill_price), not close-priced
-    continuous turnover."""
+    continuous turnover.
+
+    P7B-REPAIR-02: constructs pending_events directly (weight=0.5, not the
+    100%-conviction fixture pipeline) so the order actually ADMITS under the
+    NEW fill-time capacity check (mission Section 3D) -- 50 shares at
+    $102/share ($5,100) comfortably clears the $10,000 cap, unlike a full
+    100%-conviction position (which architecturally always sits EXACTLY at
+    the cap at signal time and is capacity-rejected by even a 2% adverse
+    fill -- covered separately by
+    test_target_qty_fixed_at_signal_bar_close_not_execution_bar_close)."""
     days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
-    closes = [100.0, 100.0, 100.0, 100.0]
-    highs = [100.5, 102.0, 100.5, 100.5]
-    lows = [99.5, 99.0, 99.5, 99.5]
-    bars_rows = [
-        {"symbol": "AAA", "end_ts": _ts(str(d)).isoformat(), "close": c, "high": h, "low": lo}
-        for d, c, h, lo in zip(days, closes, highs, lows)
-    ]
-    scores = [1.0, 1.0, 1.0, 1.0]
-    oos_rows = [_oos_row(1, "AAA", d, s) for d, s in zip(days, scores)]
-    folds = [_single_fold("2021-01-01", "2021-01-05")]
-    bars_path = _write_direct_fixture(tmp_path, folds=folds, oos_rows=oos_rows, bars_rows=bars_rows)
+    close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0, 100.0]}, index=days)
+    high_frame = pd.DataFrame({"AAA": [100.5, 102.0, 100.5, 100.5]}, index=days)
+    low_frame = pd.DataFrame({"AAA": [99.5, 99.0, 99.5, 99.5]}, index=days)
+    wts_spec = WeightToShareSpec(equity_usd=10_000.0)
+    target_qty = weight_to_target_qty(weight=0.5, price=100.0, spec=wts_spec)
+    assert target_qty == 50
+    pending_events = {"AAA": [(days[0], 0.5, target_qty)]}
     spec = EconomicWalkForwardSpec(
         signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
         cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
@@ -915,22 +949,22 @@ def test_p7a_commission_charged_against_actual_discrete_fill_notional(tmp_path: 
             pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
             slippage_bps=0, volatility_mult_bps=0,
         ),
-        weight_to_share=WeightToShareSpec(equity_usd=10_000.0),
+        weight_to_share=wts_spec,
     )
-    out = json.loads(
-        run_economic_walkforward(tmp_path, bars_csv=bars_path, spec=spec).read_text(encoding="utf-8")
+    fold_df, summary = _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec, high_frame=high_frame, low_frame=low_frame,
     )
-    fold_df_row = out["folds"][0]
-    # day1 execution: target_qty=100, BUY fills at HIGH=102.0 (conservative).
-    # commission_notional = 100*102.0/10000 = 1.02; commission_cost = 1.02*10bps/10000.
-    expected_commission_notional = 100 * 102.0 / 10_000.0
+    # day1 execution: target_qty=50, BUY fills at HIGH=102.0 (conservative).
+    # commission_notional = 50*102.0; commission_cost = commission_notional*10bps/10000.
+    expected_commission_notional = 50 * 102.0
     expected_commission_cost = expected_commission_notional * (10.0 / 10_000.0)
-    assert fold_df_row["weight_to_share_evidence"]["AAA"][1]["target_qty"] == 100
+    assert summary["weight_to_share_evidence"]["AAA"][1]["target_qty"] == 50
     # commission_cost accumulates into cost_drag; verify it is materially
     # nonzero and consistent with the expected fill-priced notional (loose
     # bound -- exact value also depends on the forced fold-end flatten leg).
     assert expected_commission_cost > 0.0
-    assert fold_df_row["net_total_return"] < fold_df_row["gross_total_return"]
+    assert summary["net_total_return"] < summary["gross_total_return"]
 
 
 def test_engine_supports_short_forced_flatten_and_correct_pnl_direction() -> None:
@@ -953,7 +987,12 @@ def test_engine_supports_short_forced_flatten_and_correct_pnl_direction() -> Non
     pending_events = {"AAA": [(days[0], -1.0, target_qty)]}
 
     spec = EconomicWalkForwardSpec(
-        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
+        # P7B-REPAIR-02: 1.5x headroom -- execution (day1 close=110) is a
+        # 10% notional increase over the $100 signal close; a tight 1.0x cap
+        # would now correctly reject this order under the NEW fill-time
+        # capacity check (mission Section 3D), which is not what this test
+        # is exercising (short-side P&L direction / forced-flatten cover).
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.5),
         cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
         annualization=AnnualizationSpec(),
         weight_to_share=wts_spec,
@@ -991,3 +1030,231 @@ def test_translate_symbol_weight_series_is_a_pure_diagnostic_utility_not_wired_i
 
     source = inspect.getsource(ewf)
     assert "translate_symbol_weight_series_to_share_events" not in source
+
+
+# =============================================================================
+# P7B-REPAIR-02 (RESEARCH-WEIGHT-TO-SHARE-PARITY-01-REPAIR-02)
+#
+# Covers the FINAL WAVE-2 repair mission's REQUIRED P7B TESTS (Section 3H):
+# exact stateful wealth compounding (defect A) and fill-time capacity parity
+# mirroring Rust's resolve_one_pending_order (defect B/C).
+# =============================================================================
+
+
+def _flat_single_symbol_fold(closes, weight, equity_usd=100_000.0, max_gross_exposure=1.0):
+    days = pd.date_range("2021-01-01", periods=len(closes), freq="D", tz="UTC")
+    close_frame = pd.DataFrame({"AAA": closes}, index=days)
+    wts_spec = WeightToShareSpec(equity_usd=equity_usd)
+    target_qty = weight_to_target_qty(weight=weight, price=closes[0], spec=wts_spec)
+    pending_events = {"AAA": [(days[0], weight, target_qty)]}
+    spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=max_gross_exposure),
+        cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
+        annualization=AnnualizationSpec(),
+        weight_to_share=wts_spec,
+    )
+    return _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec,
+    )
+
+
+def test_exact_wealth_ledger_100_110_121_equals_21_percent() -> None:
+    """REQUIRED TESTS 1/27 (mission Section 3C): qty=1000 on $100,000
+    equity, prices 100 -> 100 (entry, zero-P&L) -> 110 -> 121 must compound
+    to EXACTLY +21% total return via a real stateful equity ledger
+    (100,000 -> 110,000 -> 121,000), NOT dollar_pnl/100,000 FIXED-
+    denominator fractions [0.10, 0.11] geometrically compounding to a WRONG
+    +22.1%. The signal bar (day0, close=100) cannot execute from its own
+    bar; day1 (close=100, flat) is where the position actually opens, so
+    the P&L-bearing legs are exactly the mission's 100->110->121 sequence."""
+    fold_df, summary = _flat_single_symbol_fold([100.0, 100.0, 110.0, 121.0], weight=1.0)
+    assert summary["gross_total_return"] == pytest.approx(0.21, abs=1e-9)
+    assert summary["net_total_return"] == pytest.approx(0.21, abs=1e-9)
+    # The WRONG fixed-denominator answer this repair fixes.
+    assert summary["gross_total_return"] != pytest.approx(0.221, abs=1e-6)
+
+
+def test_exact_wealth_ledger_100_90_81_equals_negative_19_percent() -> None:
+    """REQUIRED TEST 2 (mission Section 3C, adverse path): symmetric loss
+    case -- 100 -> 100 (flat entry) -> 90 -> 81 must compound to EXACTLY
+    -19%, not the WRONG fixed-denominator -19.9%."""
+    fold_df, summary = _flat_single_symbol_fold([100.0, 100.0, 90.0, 81.0], weight=1.0)
+    assert summary["gross_total_return"] == pytest.approx(-0.19, abs=1e-9)
+    assert summary["net_total_return"] == pytest.approx(-0.19, abs=1e-9)
+    assert summary["gross_total_return"] != pytest.approx(-0.199, abs=1e-6)
+
+
+def test_stateful_ledger_total_return_agrees_with_explicit_ending_equity() -> None:
+    """REQUIRED TEST 27: the reported total_return, applied to the starting
+    equity_usd, reconstructs the explicit ending dollar equity exactly --
+    proving the reported fraction really is a wealth-ledger return, not an
+    approximation."""
+    equity_usd = 50_000.0
+    fold_df, summary = _flat_single_symbol_fold(
+        [100.0, 100.0, 110.0, 121.0], weight=1.0, equity_usd=equity_usd,
+    )
+    reconstructed_ending_equity = equity_usd * (1.0 + summary["gross_total_return"])
+    assert reconstructed_ending_equity == pytest.approx(60_500.0, abs=1e-6)  # 50,000 * 1.21
+
+
+def test_gap_cap_100_to_200_matches_rust_rejection() -> None:
+    """REQUIRED TEST 6 (mission Section 3D/3E): full-conviction target
+    sized at signal close $100 (qty=1000 on $100,000 equity, exactly the
+    1.0x cap boundary); the execution bar gaps to $200. Actual proposed
+    fill notional (1000*$200=$200,000) breaches the $100,000 cap --
+    mirrors Rust's resolve_one_pending_order rejecting this same scenario
+    (see core-rs scenario_reversal_cap_bkt_wave2_repair.rs and
+    scenario_allocation_cap_enforced.rs for the Rust-side proof)."""
+    fold_df, summary = _flat_single_symbol_fold([100.0, 200.0, 200.0], weight=1.0)
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["signal_target_qty"] == 1000
+    # Capacity-rejected: resulting position never actually opens.
+    assert all(e["target_qty"] == 0 for e in evidence)
+    assert summary["gross_total_return"] == 0.0
+
+
+def test_rejected_capacity_order_creates_no_economic_mutation() -> None:
+    """REQUIRED TEST 7: a fill-time-capacity-rejected order produces zero
+    turnover/commission/execution_price_cost/gross_contrib -- not merely a
+    zero qty change, but a fully inert row (no P7A price drag, no
+    commission, matching Rust's reject-before-any-portfolio-mutation
+    semantics)."""
+    fold_df, summary = _flat_single_symbol_fold([100.0, 200.0, 200.0], weight=1.0)
+    rejected_rows = fold_df[fold_df["timestamp"] == fold_df["timestamp"].iloc[1]]
+    row = rejected_rows.iloc[0]
+    assert row["turnover"] == 0.0
+    assert row["commission_cost"] == 0.0
+    assert row["execution_price_cost"] == 0.0
+    assert row["gross_return"] == 0.0
+
+
+def test_headroom_admits_when_fill_notional_fits() -> None:
+    """Negative control for the gap/cap test: the SAME $100->$100k setup
+    with a smaller execution-time gap ($100->$99, well inside the cap)
+    must still admit -- proving the capacity check isn't unconditionally
+    rejecting, only rejecting genuine breaches. A third bar at $105 (after
+    admission) gives the held position a genuine price move to earn P&L on
+    -- $99->$99 alone would earn zero regardless of admission."""
+    fold_df, summary = _flat_single_symbol_fold([100.0, 99.0, 105.0], weight=1.0)
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == 1000
+    assert summary["gross_total_return"] != 0.0
+
+
+def test_python_reversal_long_to_short_residual_cannot_bypass_cap() -> None:
+    """REQUIRED TEST 18 (Python-side mirror of the Rust reversal-cap fix,
+    mission Section 3F): current +40 shares, reverse to -100 (SELL 140).
+    Closing the 40-share long is safe; the residual 100-share NEW short
+    would breach a cap with only $10,000 of headroom on $10,000 equity at
+    a $100 flat price -- the WHOLE reversal must be rejected, not just the
+    residual, mirroring Rust's resolve_one_pending_order exactly (see
+    core-rs scenario_reversal_cap_bkt_wave2_repair.rs). max_gross_exposure
+    is 1.0 (not tighter) so the CONTINUOUS weight-space admission -- frozen,
+    unchanged -- still admits the magnitude-1.0 reversal exactly at its own
+    boundary; only the DISCRETE fill-time dollar check (equity_usd * 1.0 =
+    $10,000) rejects it, proving the two admission layers are independent."""
+    # 4 bars: day2 (not the fold's LAST bar) is where the reversal resolves,
+    # keeping its rejection observable before day3's forced fold-end
+    # flatten independently zeroes the position (a separate, unrelated
+    # mechanism -- see the forced-flatten tests elsewhere).
+    days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
+    close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0, 100.0]}, index=days)
+    wts_spec = WeightToShareSpec(equity_usd=10_000.0)
+    pending_events = {
+        "AAA": [
+            (days[0], 0.4, 40),   # opens +40 (fills at day1)
+            (days[1], -1.0, -100),  # reverses to -100 (fills at day2)
+        ]
+    }
+    spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
+        cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
+        annualization=AnnualizationSpec(),
+        weight_to_share=wts_spec,
+    )
+    fold_df, summary = _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec,
+    )
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == 40  # the +40 open admits
+    # The reversal's residual (100 new short shares * $100 = $10,000) plus
+    # the existing $4,000 long exposure ($14,000) breaches the $10,000 cap
+    # -- rejected in full, position stays +40 (day2, before fold-end flatten).
+    assert evidence[2]["target_qty"] == 40
+    assert evidence[2]["signal_target_qty"] == -100
+
+
+def test_python_reversal_short_to_long_residual_cannot_bypass_cap() -> None:
+    """REQUIRED TEST 19: mirror case, current -40, reverse to +100 (BUY
+    140). 4 bars for the same reason as the long->short mirror test above
+    -- keeps the reversal's rejection observable before fold-end flatten."""
+    days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
+    close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0, 100.0]}, index=days)
+    wts_spec = WeightToShareSpec(equity_usd=10_000.0)
+    pending_events = {
+        "AAA": [
+            (days[0], -0.4, -40),
+            (days[1], 1.0, 100),
+        ]
+    }
+    spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
+        cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
+        annualization=AnnualizationSpec(),
+        weight_to_share=wts_spec,
+    )
+    fold_df, summary = _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec,
+    )
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == -40
+    assert evidence[2]["target_qty"] == -40
+    assert evidence[2]["signal_target_qty"] == 100
+
+
+def test_no_p7a_cost_double_counting_in_wealth_ledger() -> None:
+    """REQUIRED TEST 28: the stateful wealth ledger charges execution cost
+    exactly once -- net dollar P&L equals gross dollar P&L minus a SINGLE
+    commission+adverse-price-cost term, verified by reconstructing net
+    equity from gross equity and the reported cost_drag with no residual
+    discrepancy beyond floating-point tolerance."""
+    days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
+    close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0, 100.0]}, index=days)
+    high_frame = pd.DataFrame({"AAA": [100.5, 102.0, 100.5, 100.5]}, index=days)
+    low_frame = pd.DataFrame({"AAA": [99.5, 99.0, 99.5, 99.5]}, index=days)
+    wts_spec = WeightToShareSpec(equity_usd=10_000.0)
+    target_qty = weight_to_target_qty(weight=0.5, price=100.0, spec=wts_spec)
+    pending_events = {"AAA": [(days[0], 0.5, target_qty)]}
+    spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
+        cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
+        annualization=AnnualizationSpec(),
+        execution_pricing=ExecutionPricingSpec(
+            pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
+            slippage_bps=0, volatility_mult_bps=0,
+        ),
+        weight_to_share=wts_spec,
+    )
+    fold_df, summary = _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec, high_frame=high_frame, low_frame=low_frame,
+    )
+    gross_equity = 10_000.0 * (1.0 + summary["gross_total_return"])
+    net_equity = 10_000.0 * (1.0 + summary["net_total_return"])
+    # Total dollar cost drag reconstructed from the two equity trajectories.
+    total_cost_drag_dollars = gross_equity - net_equity
+    # A single commission leg on entry (50*102) + a single close/mark-priced
+    # exit leg (50*100, forced flatten) -- both at commission_bps_per_side --
+    # PLUS a single adverse-price-cost leg on entry (50*|102-100|=100, the
+    # BUY filling at HIGH=102 instead of close=100). If execution_price_cost
+    # were ALSO folded into commission_notional (double counting -- the
+    # exact defect mission Section 3G warns against), this total would be
+    # larger than the sum of these three genuinely-distinct legs.
+    expected_entry_commission = (50 * 102.0) * (10.0 / 10_000.0)
+    expected_exit_commission = (50 * 100.0) * (10.0 / 10_000.0)
+    expected_adverse_price_cost = 50 * abs(102.0 - 100.0)
+    expected_total = expected_entry_commission + expected_exit_commission + expected_adverse_price_cost
+    assert total_cost_drag_dollars == pytest.approx(expected_total, abs=1e-6)

@@ -970,24 +970,44 @@ impl BacktestEngine {
     /// still-later bar. Commission, portfolio, and the parallel economics
     /// ledger are only ever touched on a successful fill -- never at signal
     /// time, never for a rejected order.
+    ///
+    /// FINAL-WAVE-2-REPAIR (mission Section 3F, defect B): a reversal order
+    /// (e.g. current +40, target -100 -> SELL 140) is NOT wholly
+    /// risk-reducing merely because its side opposes a nonzero current
+    /// position. `pending.qty` is decomposed into a risk-REDUCING component
+    /// (bounded by the position magnitude being closed, which may never
+    /// exceed `pending.qty` -- always safe to execute unconditionally) and a
+    /// risk-INCREASING residual (the new opposite-side exposure beyond
+    /// flat). Only the residual's notional is subject to the allocation-cap
+    /// check; a residual of zero (a pure reduction, the common case) is
+    /// unchanged from prior behavior. The cap decision is still atomic for
+    /// the whole order -- no partial fill -- so a residual that breaches the
+    /// cap rejects the entire order, never letting the reducing shares alone
+    /// bypass admission for the risk-increasing shares that ride along with
+    /// them.
     fn resolve_one_pending_order(&mut self, pending: PendingBacktestOrder, bar: &BacktestBar) {
         let exec_side = match pending.side {
             BacktestOrderSide::Buy => ExecSide::Buy,
             BacktestOrderSide::Sell => ExecSide::Sell,
         };
 
-        let is_risk_reducing = {
+        let residual_increasing_qty: i64 = {
             let current_qty = self
                 .portfolio
                 .positions
                 .get(&pending.symbol)
                 .map(|p| p.qty_signed())
                 .unwrap_or(0);
-            match exec_side {
-                ExecSide::Buy => current_qty < 0,
-                ExecSide::Sell => current_qty > 0,
-            }
+            let reducing_capacity = match exec_side {
+                // Buy only reduces risk while covering a short.
+                ExecSide::Buy => (-current_qty).max(0),
+                // Sell only reduces risk while closing a long.
+                ExecSide::Sell => current_qty.max(0),
+            };
+            let reducing_qty = pending.qty.min(reducing_capacity);
+            pending.qty - reducing_qty
         };
+        let is_risk_reducing = residual_increasing_qty == 0;
 
         let fill_price = self.conservative_fill_price(bar, &exec_side);
 
@@ -1001,8 +1021,11 @@ impl BacktestEngine {
             // BACKTEST-MULTIPLIER-RUN-WIRE-01: multiplier-aware notional.
             // With `economics.contract_multiplier == 1` this is exactly
             // `qty * fill_price`, unchanged for every existing equity backtest.
+            // Wave-2 repair: only the risk-INCREASING residual's notional is
+            // proposed against the cap -- the reducing component never adds
+            // gross exposure, so it must not be charged against headroom.
             let proposed_notional_micros: i64 =
-                notional_micros(pending.qty, fill_price, &self.economics);
+                notional_micros(residual_increasing_qty, fill_price, &self.economics);
 
             if enforce_allocation_cap_micros(
                 equity,
