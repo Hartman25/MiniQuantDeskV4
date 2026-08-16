@@ -1013,6 +1013,27 @@ def test_later_discovery_snapshot_with_additional_ca_changes_evidence_and_identi
     assert provenance_identity_fragment(manifest_early) != provenance_identity_fragment(manifest_later)
 
 
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-04 -- cross-module regression:
+# bars_provenance's mirrored TRUSTED_CA_DISCOVERY_* contract (which cannot
+# import this module -- alpaca_historical already imports bars_provenance)
+# must equal this extractor's actual query contract.
+# ---------------------------------------------------------------------------
+
+
+def test_trusted_ca_discovery_contract_matches_extractor():
+    """The values bars_provenance mirrors as the TRUSTED official CA
+    discovery contract must equal this extractor's actual constants -- if
+    either side drifts without updating the other, the official gate would
+    either wrongly reject real official output or wrongly trust an
+    under-scoped one."""
+    from mqk_research.data import bars_provenance as bp
+
+    assert bp.TRUSTED_CA_DISCOVERY_PROTOCOL_V2 == ah.CA_DISCOVERY_PROTOCOL_V2
+    assert bp.TRUSTED_CA_DISCOVERY_FLOOR_UTC == ah.CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC.isoformat()
+    assert bp.TRUSTED_CA_DISCOVERY_TYPES == ah.KNOWN_CORPORATE_ACTION_TYPES
+
+
 def test_ca_discovery_incomplete_pagination_fails_closed():
     """REQUIRED TEST R3: the broadened CA discovery query still fails closed
     if the provider never terminates pagination -- no silent partial

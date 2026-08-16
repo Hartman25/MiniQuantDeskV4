@@ -149,6 +149,39 @@ _CONVENTION_REQUIRED_ENDPOINTS: Dict[str, "tuple[str, str]"] = {
 
 SOURCE_ATTESTATION_SCHEMA_VERSION = "research_source_attestation_v1"
 
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-04: the trusted CA discovery
+# QUERY CONTRACT the OFFICIAL extractor (mqk_research.data.alpaca_historical)
+# actually uses -- mirrored here, not imported, because alpaca_historical
+# already imports this module (importing back would be circular). An
+# attestation's CLAIMED corporate_action_query_coverage must equal this
+# contract exactly (see _require_trusted_ca_discovery_contract), not merely
+# be hashed as-is -- otherwise an attestation could claim official authority
+# + complete pagination + zero category_b_events_found while never having
+# queried mergers/redemptions/rights/etc, silently defeating the Category-B
+# fail-closed guarantee. Kept in sync with the extractor's actual values by
+# test_alpaca_historical.py::test_trusted_ca_discovery_contract_matches_extractor.
+TRUSTED_CA_DISCOVERY_PROTOCOL_V2 = "process_date_full_history_through_retrieval_snapshot_v2"
+TRUSTED_CA_DISCOVERY_FLOOR_UTC = "1900-01-01T00:00:00+00:00"
+TRUSTED_CA_DISCOVERY_TYPES: FrozenSet[str] = frozenset(
+    {
+        "reverse_split",
+        "forward_split",
+        "unit_split",
+        "cash_dividend",
+        "stock_dividend",
+        "spin_off",
+        "cash_merger",
+        "stock_merger",
+        "stock_and_cash_merger",
+        "redemption",
+        "name_change",
+        "worthless_removal",
+        "rights_distribution",
+        "partial_call",
+        "reorganization",
+    }
+)
+
 # --- corporate-action policy (mirrors mqk-backtest::CorporateActionPolicy) ---
 CA_POLICY_ADJUSTED_DATA = "adjusted_data"
 CA_POLICY_FORBID_AFFECTED_PERIODS = "forbid_affected_periods"
@@ -458,6 +491,54 @@ def _require_consistent_ca_discovery_coverage(attestation: Dict[str, Any]) -> No
         )
 
 
+def _require_trusted_ca_discovery_contract(attestation: Dict[str, Any]) -> None:
+    """Fail-closed (REPAIR-04): an OFFICIAL attestation's CLAIMED CA
+    discovery query contract must equal the TRUSTED contract the official
+    extractor actually uses -- exact discovery protocol, the full-history
+    discovery floor, and the COMPLETE canonical corporate-action type
+    vocabulary (an exact set: neither a subset nor a superset containing an
+    unverified type is acceptable). Also requires the resolved CA discovery
+    snapshot cutoff to cover the full claimed research interval
+    (ca_discovery_end_utc >= requested_end_utc) -- a snapshot that predates
+    the end of the research window cannot honestly claim CA coverage for it.
+    MUST run after _require_consistent_ca_discovery_coverage, which already
+    proved the required fields are present and internally consistent."""
+    coverage = attestation["corporate_action_query_coverage"]
+    if coverage.get("discovery_protocol") != TRUSTED_CA_DISCOVERY_PROTOCOL_V2:
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.corporate_action_query_coverage.discovery_protocol="
+            f"{coverage.get('discovery_protocol')!r} is not the trusted official discovery protocol "
+            f"({TRUSTED_CA_DISCOVERY_PROTOCOL_V2!r})"
+        )
+    if coverage.get("ca_discovery_start_utc") != TRUSTED_CA_DISCOVERY_FLOOR_UTC:
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.corporate_action_query_coverage.ca_discovery_start_utc="
+            f"{coverage.get('ca_discovery_start_utc')!r} is not the trusted full-history discovery "
+            f"floor ({TRUSTED_CA_DISCOVERY_FLOOR_UTC!r}) -- a later/narrower floor cannot prove "
+            "complete corporate-action discovery coverage"
+        )
+    requested_types = {str(t).strip() for t in coverage.get("requested_types") or []}
+    if requested_types != TRUSTED_CA_DISCOVERY_TYPES:
+        missing = sorted(TRUSTED_CA_DISCOVERY_TYPES - requested_types)
+        unknown = sorted(requested_types - TRUSTED_CA_DISCOVERY_TYPES)
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.corporate_action_query_coverage.requested_types does not "
+            f"equal the trusted complete corporate-action type vocabulary -- missing={missing!r} "
+            f"unknown={unknown!r}. A subset (e.g. dividends/splits only) cannot prove Category-B "
+            "events (mergers, redemptions, rights distributions, ...) were actually queried; an "
+            "unverified extra type is equally untrusted."
+        )
+    ca_discovery_end = pd.Timestamp(coverage["ca_discovery_end_utc"])
+    research_window_end = pd.Timestamp(attestation["requested_end_utc"])
+    if ca_discovery_end < research_window_end:
+        raise SourceAttestationUnverifiable(
+            "Fail-closed: source_attestation.corporate_action_query_coverage.ca_discovery_end_utc "
+            f"({coverage['ca_discovery_end_utc']!r}) is earlier than the research window end "
+            f"({attestation['requested_end_utc']!r}) -- the CA discovery snapshot cannot honestly "
+            "claim coverage for a research interval it predates"
+        )
+
+
 def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str, Any]) -> None:
     """Defect closure (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01): for a price
     convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION,
@@ -537,6 +618,7 @@ def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str,
             "mqk_research.data.alpaca_historical.fetch_historical_bars's required asof parameter)"
         )
     _require_consistent_ca_discovery_coverage(attestation)
+    _require_trusted_ca_discovery_contract(attestation)
     expected_mode = _CONVENTION_REQUIRED_ADJUSTMENT_MODE.get(convention)
     if attestation.get("adjustment_mode") != expected_mode:
         raise SourceAttestationUnverifiable(

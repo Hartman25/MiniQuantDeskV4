@@ -24,6 +24,9 @@ from mqk_research.data.bars_provenance import (
     CA_POLICY_ADJUSTED_DATA,
     PRICE_CONVENTION_ALPACA_ALL_ADJUSTED,
     PRICE_CONVENTION_RAW_UNADJUSTED,
+    TRUSTED_CA_DISCOVERY_FLOOR_UTC,
+    TRUSTED_CA_DISCOVERY_PROTOCOL_V2,
+    TRUSTED_CA_DISCOVERY_TYPES,
     UNIVERSE_MODE_FIXED_EX_ANTE,
     BarsProvenanceUnverifiable,
     SourceAttestationUnverifiable,
@@ -80,12 +83,16 @@ def _valid_attestation(bars: pd.DataFrame, evidence: Dict[str, Any], **overrides
     requested_end_utc = overrides.get("requested_end_utc", "2021-02-01T00:00:00+00:00")
     retrieval_timestamp_utc = overrides.get("retrieval_timestamp_utc", "2026-08-15T00:00:00+00:00")
     default_coverage = {
-        "discovery_protocol": "process_date_full_history_through_retrieval_snapshot_v2",
-        "ca_discovery_start_utc": "1900-01-01T00:00:00+00:00",
+        "discovery_protocol": TRUSTED_CA_DISCOVERY_PROTOCOL_V2,
+        "ca_discovery_start_utc": TRUSTED_CA_DISCOVERY_FLOOR_UTC,
         "ca_discovery_end_utc": retrieval_timestamp_utc,
         "research_window_start_utc": requested_start_utc,
         "research_window_end_utc": requested_end_utc,
-        "requested_types": ["cash_dividend"],
+        # REPAIR-04: the happy-path fixture must use the COMPLETE trusted CA
+        # type vocabulary -- it is the actual official query contract, not an
+        # arbitrary sample. Tests that want an incomplete/narrow contract
+        # build that invalid state explicitly (see REPAIR-04 section below).
+        "requested_types": sorted(TRUSTED_CA_DISCOVERY_TYPES),
         "symbols_requested": symbols,
     }
     kwargs: Dict[str, Any] = dict(
@@ -509,6 +516,128 @@ def test_ca_discovery_coverage_symbols_mismatch_fails_official_gate():
     manifest = _valid_manifest(bars, source_attestation=attestation)
     with pytest.raises(SourceAttestationUnverifiable, match="symbols_requested"):
         check_corporate_action_integrity(bars, manifest)
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-04 -- official attestations
+# must claim the TRUSTED CA discovery query contract (protocol, full-history
+# floor, complete type vocabulary, snapshot covering the full research
+# window), not merely an internally-consistent one.
+# ---------------------------------------------------------------------------
+
+
+def _coverage(**overrides: Any) -> Dict[str, Any]:
+    base = {
+        "discovery_protocol": TRUSTED_CA_DISCOVERY_PROTOCOL_V2,
+        "ca_discovery_start_utc": TRUSTED_CA_DISCOVERY_FLOOR_UTC,
+        "ca_discovery_end_utc": "2026-08-15T00:00:00+00:00",
+        "research_window_start_utc": "2021-01-01T00:00:00+00:00",
+        "research_window_end_utc": "2021-02-01T00:00:00+00:00",
+        "requested_types": sorted(TRUSTED_CA_DISCOVERY_TYPES),
+        "symbols_requested": ["AAA"],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_narrow_requested_types_fails_official_gate():
+    """REQUIRED NEGATIVE CONTROL 2 + RED proof 9: an official-looking
+    attestation claiming only requested_types=["cash_dividend"] -- exactly
+    the pre-repair happy-path fixture's value -- must now be rejected. RED:
+    REPAIR-03's _require_consistent_ca_discovery_coverage ALONE (the
+    pre-REPAIR-04 gate) does not catch this -- it only checks field
+    presence/internal agreement, never completeness against the trusted
+    vocabulary -- proving the pre-repair gap described in the mission was
+    real. GREEN: the full official gate (adding REPAIR-04's
+    _require_trusted_ca_discovery_contract) rejects it."""
+    import mqk_research.data.bars_provenance as bp
+
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    narrow_coverage = _coverage(requested_types=["cash_dividend"])
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=narrow_coverage)
+
+    bp._require_consistent_ca_discovery_coverage(attestation)  # RED: must not raise
+
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="requested_types"):
+        check_corporate_action_integrity(bars, manifest)  # GREEN: must raise
+
+
+def test_requested_types_missing_one_category_b_type_fails_official_gate():
+    """REQUIRED NEGATIVE CONTROL 3: omitting a single Category-B type
+    (cash_merger) from an otherwise-complete requested_types set must still
+    fail closed."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    incomplete_types = sorted(TRUSTED_CA_DISCOVERY_TYPES - {"cash_merger"})
+    coverage = _coverage(requested_types=incomplete_types)
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=coverage)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="cash_merger"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_requested_types_unknown_extra_type_fails_official_gate():
+    """REQUIRED NEGATIVE CONTROL 4: a superset containing an unverified type
+    is equally untrusted as a subset -- must fail closed."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    extra_types = sorted(TRUSTED_CA_DISCOVERY_TYPES | {"totally_made_up_type"})
+    coverage = _coverage(requested_types=extra_types)
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=coverage)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="totally_made_up_type"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_wrong_discovery_protocol_fails_official_gate():
+    """REQUIRED NEGATIVE CONTROL 5."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    coverage = _coverage(discovery_protocol="process_date_full_history_through_retrieval_snapshot_v1")
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=coverage)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="discovery_protocol"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_narrower_discovery_floor_fails_official_gate():
+    """REQUIRED NEGATIVE CONTROL 6: a later/narrower discovery floor than the
+    trusted 1900-01-01 floor cannot prove complete CA discovery coverage."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    coverage = _coverage(ca_discovery_start_utc="2015-01-01T00:00:00+00:00")
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=coverage)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="ca_discovery_start_utc"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_ca_discovery_cutoff_earlier_than_research_window_end_fails_official_gate():
+    """REQUIRED NEGATIVE CONTROL 7: the resolved CA discovery snapshot cutoff
+    must cover the full claimed research interval -- a snapshot that
+    predates research_window_end cannot honestly claim CA coverage for it."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    early_cutoff = "2020-06-01T00:00:00+00:00"  # earlier than the default research_window_end (2021-02-01)
+    attestation = _valid_attestation(bars, evidence, retrieval_timestamp_utc=early_cutoff)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="ca_discovery_end_utc"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_requested_types_order_independent_passes_official_gate():
+    """REQUIRED NEGATIVE CONTROL 8: requested_types comparison is an exact
+    SET comparison -- a reordered (but complete) type list must still pass."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    reordered_types = sorted(TRUSTED_CA_DISCOVERY_TYPES, reverse=True)
+    coverage = _coverage(requested_types=reordered_types)
+    attestation = _valid_attestation(bars, evidence, corporate_action_query_coverage=coverage)
+    manifest = _valid_manifest(bars, source_attestation=attestation)
+    require_registered_bars_provenance(manifest)
+    check_corporate_action_integrity(bars, manifest)  # must not raise
 
 
 def test_different_semantic_bars_hash_changes_source_attestation_id():
