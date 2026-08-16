@@ -89,9 +89,51 @@ from mqk_research.ml.execution_pricing import to_micros
 # `EconomicWalkForwardSpec.weight_to_share` (its default, None) is the
 # diagnostic/legacy continuous-weight-only state and can never satisfy
 # `economic_registry_integration.require_official_weight_to_share_parity`.
+#
+# P7B-REPAIR-01 (RESEARCH-WEIGHT-TO-SHARE-PARITY-01-REPAIR-01): two
+# independent-review defects fixed against the SAME protocol_id (not a new
+# protocol -- a repair to what weight_to_share_v1 was always documented to
+# mean, mirroring how P7A-REPAIR-01 kept EXECUTION_PRICING_MODEL_ID_RUST_
+# CONSERVATIVE_V1 unchanged):
+#
+#   1. SIGNAL-TIME SIZING: the sizing price is now genuinely
+#      WEIGHT_TO_SHARE_PRICE_BASIS_V1 ("signal_row_close_v1") -- the close
+#      at the moment the target WEIGHT was decided, not the close of a
+#      later execution bar. This module never received a "later" price
+#      itself (it only ever sees the single `price` its caller supplies);
+#      the bug was entirely in economic_walkforward.py's caller passing the
+#      execution row's close instead of the signal row's close (see that
+#      module's docstring for the fix). This module now documents and
+#      enforces the CONTRACT: `price` passed here must always be the
+#      signal-time close, and target_qty computed here becomes permanently
+#      fixed at that instant -- a caller must never re-derive target_qty
+#      from a later bar for the same signal.
+#
+#   2. SIGNED TRANSLATION: `weight_to_target_qty` no longer rejects
+#      negative weights. Rust's `TargetPosition { qty: i64 }` and
+#      `targets_to_order_intents` were never long-only -- only
+#      economic_walk_forward_v1's SignalPolicySpec(long_only=True) is (a
+#      separate, still-frozen, still-long-only economic-signal-generation
+#      layer -- see SignalPolicySpec). Restricting THIS translation layer
+#      to reject negative weights removed capability Rust already has and
+#      that RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01 needs. Rounding is now
+#      magnitude-floor-then-restore-sign (WEIGHT_TO_SHARE_ROUNDING_POLICY_V1
+#      already documented this as "floor_toward_zero_magnitude_v1" --
+#      the name anticipated signed magnitude semantics even before the
+#      implementation supported them).
 
 WEIGHT_TO_SHARE_PROTOCOL_ID_V1 = "weight_to_share_v1"
 KNOWN_WEIGHT_TO_SHARE_PROTOCOL_IDS = frozenset({WEIGHT_TO_SHARE_PROTOCOL_ID_V1})
+
+# P7B-REPAIR-01 (mission Section 4G/4H): explicit, versioned evidence that
+# discrete signed target quantities actually drove the economic result for
+# a given fold/run, distinct from the weight_to_share_protocol_id itself
+# (which only asserts the TRANSLATION exists, not that it was economically
+# load-bearing). Set by economic_walkforward.py's per-fold summary whenever
+# spec.weight_to_share is engaged; a caller checking for "official parity"
+# evidence must look for this marker, not merely for a non-None
+# weight_to_share_protocol_id.
+DISCRETE_ECONOMICS_PROTOCOL_ID_V1 = "discrete_share_economic_path_v1"
 
 # Fixed-by-protocol-version assumptions: not independently configurable in
 # V1 (baked into WEIGHT_TO_SHARE_PROTOCOL_ID_V1 itself, exactly as
@@ -107,10 +149,15 @@ WEIGHT_TO_SHARE_PRICE_BASIS_V1 = "signal_row_close_v1"
 
 @dataclass(frozen=True)
 class WeightToShareSpec:
-    """Versioned weight->share translation protocol choice (P7B). Long-only,
-    whole-share, US equity/ETF V1 -- matches economic_walk_forward_v1's own
-    `SignalPolicySpec(long_only=True)` scope exactly; do not use for
-    non-equity/short-side candidates without a new versioned protocol_id.
+    """Versioned weight->share translation protocol choice (P7B). Whole-share,
+    US equity/ETF V1. SIGNED (P7B-REPAIR-01): a positive weight produces a
+    positive (long) target_qty, a negative weight produces a negative
+    (short) target_qty, mirroring Rust's signed `TargetPosition.qty: i64`
+    exactly -- this translator itself does not enforce long-only. Whether a
+    caller ever actually generates a negative weight is a SEPARATE, higher
+    layer decision (economic_walk_forward_v1's SignalPolicySpec is still
+    long-only; RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01 is the first caller
+    that can produce negative weights).
 
     `equity_usd`: fixed (non-compounding) nominal portfolio-equity basis in
     USD used as the sizing denominator (`notional = weight * equity_usd`).
@@ -183,13 +230,18 @@ def weight_to_share_protocol_identity(spec: Optional[WeightToShareSpec]) -> Dict
 
 
 def weight_to_target_qty(*, weight: float, price: Optional[float], spec: WeightToShareSpec) -> int:
-    """Deterministic long-only whole-share translation: a target WEIGHT
-    (fraction of `spec.equity_usd`) becomes a non-negative discrete target
-    share count.
+    """Deterministic SIGNED whole-share translation (P7B-REPAIR-01): a target
+    WEIGHT (signed fraction of `spec.equity_usd`) becomes a signed discrete
+    target share count -- positive weight -> positive (long) qty, negative
+    weight -> negative (short) qty, zero -> zero.
 
-    `price` is the SIZING price basis -- the row's own close, known at the
-    moment this target is generated (see module docstring CAUSALITY). It is
-    NEVER a future-bar HIGH/LOW/P7A-fill price.
+    `price` MUST be the SIZING price basis at SIGNAL TIME -- the close of
+    the bar in effect at the moment this target weight was decided, known
+    when this target is generated (see module docstring CAUSALITY/SIGNAL-
+    TIME SIZING). It is NEVER a later execution bar's
+    close/HIGH/LOW/P7A-fill price; the qty this function returns must be
+    treated as PERMANENTLY FIXED once computed -- a caller must never call
+    this again for the same signal with a different (later) price.
 
     `weight == 0.0` always returns `0` WITHOUT requiring a valid price (a
     full flatten needs no price reference, mirroring how P7A's forced-
@@ -198,23 +250,23 @@ def weight_to_target_qty(*, weight: float, price: Optional[float], spec: WeightT
     (raises) otherwise, mirroring `_row_execution_pricing_components`'s
     identical fail-closed-on-missing-price-for-an-executing-event pattern.
 
-    Formula (see module docstring for the Rust precedent this generalizes):
-        notional_micros = to_micros(weight * spec.equity_usd)
-        price_micros     = to_micros(price)
-        qty = notional_micros // price_micros   # floor -- never rounds up
-    then optionally capped by `max_target_qty` / `max_position_notional_usd`
-    (same min()-style clamping Rust's `apply_caps` uses), and floored at 0.
+    Formula (see module docstring for the Rust precedent this generalizes;
+    WEIGHT_TO_SHARE_ROUNDING_POLICY_V1 = "floor_toward_zero_magnitude_v1"):
+        magnitude_notional_micros = to_micros(abs(weight) * spec.equity_usd)
+        price_micros               = to_micros(price)
+        qty_magnitude = magnitude_notional_micros // price_micros  # floor
+        qty = sign(weight) * qty_magnitude
+    then `qty_magnitude` is optionally capped by `max_target_qty` /
+    `max_position_notional_usd` (same min()-style clamping Rust's
+    `apply_caps` uses -- caps bound MAGNITUDE regardless of side) before the
+    sign is restored. `+1.9` theoretical shares -> `+1` (never `+2`); `-1.9`
+    theoretical shares -> `-1` (never `-2`) -- truncation toward zero in
+    signed quantity, not toward negative infinity.
     """
     spec = spec.normalized()
     weight = float(weight)
     if not math.isfinite(weight):
         raise ValueError(f"weight_to_target_qty: weight must be finite, got {weight!r}")
-    if weight < 0.0:
-        raise ValueError(
-            f"weight_to_target_qty: negative weight rejected (weight={weight!r}) -- "
-            f"{WEIGHT_TO_SHARE_PROTOCOL_ID_V1} is long-only, matching economic_walk_forward_v1's "
-            "SignalPolicySpec(long_only=True)"
-        )
     if weight == 0.0:
         return 0
 
@@ -224,18 +276,20 @@ def weight_to_target_qty(*, weight: float, price: Optional[float], spec: WeightT
             f"price for a nonzero target weight (weight={weight!r}, price={price!r})"
         )
 
+    sign = 1 if weight > 0.0 else -1
     price_micros = to_micros(price)
-    notional_micros = to_micros(weight * spec.equity_usd)
-    qty = notional_micros // price_micros
+    magnitude_notional_micros = to_micros(abs(weight) * spec.equity_usd)
+    qty_magnitude = magnitude_notional_micros // price_micros
 
     if spec.max_target_qty is not None:
-        qty = min(qty, spec.max_target_qty)
+        qty_magnitude = min(qty_magnitude, spec.max_target_qty)
 
     if spec.max_position_notional_usd is not None:
         cap_notional_micros = to_micros(spec.max_position_notional_usd)
-        qty = min(qty, cap_notional_micros // price_micros)
+        qty_magnitude = min(qty_magnitude, cap_notional_micros // price_micros)
 
-    return int(max(qty, 0))
+    qty_magnitude = max(qty_magnitude, 0)
+    return int(sign * qty_magnitude)
 
 
 def target_qty_to_order_delta(*, current_qty: int, target_qty: int) -> Optional[Tuple[str, int]]:

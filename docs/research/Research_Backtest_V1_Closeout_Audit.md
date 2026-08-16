@@ -1576,6 +1576,116 @@ independent-review checkpoint has not occurred for either). Next patch: P7C
 `require_official_weight_to_share_parity` (both required together) into the
 actual `mqk-promotion::evaluator.rs` gate.
 
+### 1J-ADDENDUM. RESEARCH-WEIGHT-TO-SHARE-PARITY-01-REPAIR-01 (2026-08-16)
+
+**Verdict: `IMPLEMENTED_PENDING_INDEPENDENT_REVIEW`.** The original P7B
+implementation (Section 1J, commit `1e3cfe41`) is **`SUPERSEDED_LOCALLY_BY_
+REPAIR_01`** — independent ChatGPT review of the actual Wave-2 patch
+rejected it for three deterministic defects, not stylistic preferences.
+This addendum does not imply the original was independently accepted; it
+never was.
+
+**DEFECT P7B-1 — future price leakage.** The original translation ran
+AFTER `_simulate_fold_execution`, sizing `target_qty` from the EXECUTION
+row's own close (a later bar than the signal), while calling its own price
+basis `signal_row_close_v1` — the name always described the correct
+contract, the implementation did not honor it. **Fix:** `target_qty` is now
+computed inside `_build_pending_events`, once, at the moment each pending
+change is created, using the symbol's own close AT the signal timestamp
+(`close_frame.at[signal_ts, s]`) — never a later bar. It is carried
+immutably through `_simulate_fold_execution`'s discrete state and never
+recomputed. Proof: `test_target_qty_fixed_at_signal_bar_close_not_
+execution_bar_close`, `test_mutating_execution_bar_close_does_not_change_
+target_qty`, `test_mutating_execution_bar_high_low_does_not_change_target_
+qty_but_alters_pnl` (all new).
+
+**DEFECT P7B-2 — discrete shares were evidence-only.** `target_qty` was
+generated as an audit-trail appendix while gross/net return, turnover,
+commission basis, and P7A execution-price drag all still derived from
+continuous `executed_weight`. **Fix:** `_simulate_fold_execution` now
+threads a parallel discrete `current_qty` state in lockstep with the
+existing (frozen, unchanged) weight-space capacity-admission decisions;
+whenever the continuous engine executes a candidate, the discrete side
+computes `delta_qty = candidate_qty - current_qty` and prices that delta at
+the SAME bar's P7A conservative fill (`_row_execution_pricing_components_
+discrete`). `_simulate_fold` now sources `gross_return`/`turnover`/
+`execution_price_cost`/`commission_notional` from these `qty_*` fields
+whenever `weight_to_share` is engaged — continuous fields remain wired only
+for `interval_exposure`/`gross_exposure`/`active_positions` REPORTING and
+the capacity-admission decision itself (justified per mission Section 4F:
+floor-only rounding can only reduce a given event's own notional relative
+to the continuous target it was sized from, so a budget the continuous
+engine already proved satisfies `max_gross_exposure` is never exceeded by
+that event's discrete translation). A structural, non-self-asserted
+`discrete_economics_protocol_id: "discrete_share_economic_path_v1"` marker
+is stamped on every fold summary where this is engaged — a diagnostic run
+never carries it. Proof (CRITICAL):
+`test_qty_rounds_to_zero_yields_zero_discrete_economic_exposure` — a target
+that rounds to qty=0 yields exactly zero gross/net return despite material
+price drift and a fully-allocated continuous weight throughout; a
+negative-control diagnostic run on the identical price-drifting data proves
+nonzero return, ruling out a degenerate fixture. This test fails against
+the original (unrepaired) implementation. Also:
+`test_discrete_rounding_materially_alters_net_return_vs_continuous`,
+`test_p7a_commission_charged_against_actual_discrete_fill_notional`.
+
+**DEFECT P7B-3 — long-only translator.** `weight_to_target_qty` rejected
+`weight < 0.0`, removing signed capability Rust's `TargetPosition { qty:
+i64 }` already has. **Fix:** the translator is now fully signed — floor the
+MAGNITUDE (`abs(weight) * equity_usd // price`), then restore sign;
+`+1.9` theoretical shares → `+1`, `-1.9` → `-1` (truncation toward zero,
+never toward negative infinity). `WEIGHT_TO_SHARE_ROUNDING_POLICY_V1`
+("floor_toward_zero_magnitude_v1") is unchanged — the name always
+anticipated signed magnitude semantics. The economic SIGNAL-GENERATION
+layer (`SignalPolicySpec`) remains `long_only=True` and frozen in this
+patch — only the translation layer's capability changed. Proof: 9
+parametrized signed order-delta transitions covering every long/short/
+flatten/transition combination the mission requires (current 100→target
+40=SELL 60 … short→long 20=BUY 60), plus
+`test_engine_supports_short_forced_flatten_and_correct_pnl_direction`
+(constructs a negative-weight pending event directly against the private
+`_simulate_fold` engine — proving the ENGINE is short-capable ahead of
+RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01 formally wiring signed signal
+generation through the public API; a short position's discrete P&L is
+proven negative while price rises, and forced fold-end flatten correctly
+BUYS to cover).
+
+**Known scope boundary carried into RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01
+(not a P7B-REPAIR-01 defect):** `_simulate_fold_execution`'s D/F branch
+split (`candidate <= executed_weight` → unconditional; `candidate >
+executed_weight` → capacity-gated cohort) compares raw signed WEIGHT, not
+GROSS MAGNITUDE. This is exact and correct while `SignalPolicySpec.
+long_only=True` holds (weight is always `>= 0`, so the two comparisons
+coincide). It is NOT yet correct for a genuinely signed signal policy
+(e.g. a transition from a small long position directly to a larger-
+magnitude short could misclassify as "reducing" and bypass capacity
+gating). RESEARCH-LONG-SHORT-ECONOMIC-POLICY-01 must redefine this split
+in gross-magnitude terms before genuine short signals are admitted through
+the public pipeline.
+
+**Files changed:** `research-py/src/mqk_research/ml/weight_to_share.py`
+(signed `weight_to_target_qty`, `DISCRETE_ECONOMICS_PROTOCOL_ID_V1`),
+`research-py/src/mqk_research/ml/economic_walkforward.py`
+(`_build_pending_events` signal-time sizing, `_simulate_fold_execution`
+discrete state machine, `_row_execution_pricing_components_discrete`,
+`_simulate_fold` official-path field selection + discrete forced-flatten),
+`research-py/tests/test_weight_to_share_parity_p7b.py` (54 tests total,
+22 new/replaced), this document.
+
+**Tests.** `test_weight_to_share_parity_p7b.py`: 54 passed.
+`test_economic_walkforward.py` + `test_execution_pricing_parity_p7a.py` +
+`test_multiple_testing_judge.py` + `test_evidence_boundary.py` +
+`test_bars_provenance.py` + `test_source_attestation.py` +
+`test_alpaca_historical.py` (directly-affected callers): 295 passed,
+unchanged. Full `research-py` suite: 1441 passed, 7 skipped, 12 subtests
+passed — zero regressions. `git diff --check`: clean. No Rust files
+touched (pure Python change).
+
+**Gate status:** `weight_to_share_v1` (P7B) remains `IMPLEMENTED_PENDING_
+INDEPENDENT_REVIEW` — this repair closes the three confirmed deterministic
+findings against it; it does not itself close P7B. `RESEARCH_BACKTEST_
+FOUNDATION_READY` remains `NOT MET`.
+
 ### 1K. PROMOTION-OOS-EVIDENCE-GATE-01 (P7C) (2026-08-15)
 
 **Verdict: `IMPLEMENTED_PENDING_REVIEW`.**

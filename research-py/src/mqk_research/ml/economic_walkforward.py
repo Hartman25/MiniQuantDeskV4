@@ -17,9 +17,11 @@ from mqk_research.ml import economics
 from mqk_research.ml.execution_pricing import ExecutionPricingSpec, conservative_fill_price
 from mqk_research.ml.util_hash import file_record, sha256_json
 from mqk_research.ml.weight_to_share import (
+    DISCRETE_ECONOMICS_PROTOCOL_ID_V1,
     WeightToShareSpec,
-    translate_symbol_weight_series_to_share_events,
+    target_qty_to_order_delta,
     weight_to_share_protocol_identity,
+    weight_to_target_qty,
 )
 
 # RESEARCH-ECONOMIC-WALKFORWARD-01 (+ REPAIR-01)
@@ -508,12 +510,18 @@ def _build_fold_high_low_frames(
 
 
 def _build_pending_events(
-    oos_fold: pd.DataFrame, symbols: List[str], signal_policy: SignalPolicySpec
-) -> Dict[str, List[Tuple[pd.Timestamp, float]]]:
-    """Per-symbol, chronologically-ordered list of (signal_ts, desired_weight)
-    pending-change events — the DESIRED side of the desired/pending/executed
-    state machine (see module docstring). Does not decide WHEN or WHETHER a
-    symbol executes a change; that is a per-frame decision made later in
+    oos_fold: pd.DataFrame,
+    symbols: List[str],
+    signal_policy: SignalPolicySpec,
+    *,
+    close_frame: Optional[pd.DataFrame] = None,
+    wts_spec: Optional[WeightToShareSpec] = None,
+) -> Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]]:
+    """Per-symbol, chronologically-ordered list of
+    (signal_ts, desired_weight, signal_time_target_qty) pending-change
+    events — the DESIRED side of the desired/pending/executed state machine
+    (see module docstring). Does not decide WHEN or WHETHER a symbol
+    executes a change; that is a per-frame decision made later in
     _simulate_fold_execution, jointly across symbols, against each symbol's
     own bar timestamps and the shared max_gross_exposure budget.
 
@@ -525,13 +533,27 @@ def _build_pending_events(
     equal-weight-active sizing denominator (a rebalance of everyone
     currently active/target). A symbol not scored at a given frame keeps its
     last known active state — it is never implicitly forced flat merely for
-    lacking a decision row at some other symbol's frame."""
+    lacking a decision row at some other symbol's frame.
+
+    P7B-REPAIR-01 (SIGNAL-TIME SIZING, mission Section 4B): when `wts_spec`
+    is engaged, `signal_time_target_qty` is computed HERE, exactly once, at
+    the moment the event is created, using THIS symbol's own close AT
+    `signal_ts` (`close_frame.at[signal_ts, s]`) — never a later execution
+    bar's close/high/low. This value is then carried immutably through
+    `_simulate_fold_execution`'s discrete state machine; mutating any bar
+    strictly after `signal_ts` cannot change it, because it is never
+    recomputed after this point (no future-bar leakage — REQUIRED TESTS 2/3
+    in the repair mission). A weight of exactly 0.0 (flatten) always yields
+    `target_qty=0` without requiring a price, mirroring
+    `weight_to_target_qty`'s own price-optional-when-zero contract. `None`
+    (missing/NaN close at signal_ts) for a NONZERO weight fails closed via
+    `weight_to_target_qty`'s own fail-closed-on-missing-price behavior."""
     decisions = oos_fold.pivot_table(index="decision_ts", columns="symbol", values="ml_score", aggfunc="last")
     decisions = decisions.reindex(columns=symbols).sort_index(kind="mergesort")
 
     active_state: Dict[str, bool] = {s: False for s in symbols}
     last_issued_weight: Dict[str, float] = {s: 0.0 for s in symbols}
-    pending_events: Dict[str, List[Tuple[pd.Timestamp, float]]] = {s: [] for s in symbols}
+    pending_events: Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]] = {s: [] for s in symbols}
 
     for ts, row in decisions.iterrows():
         changed = False
@@ -552,7 +574,15 @@ def _build_pending_events(
         for s in symbols:
             new_weight = weight_each if active_state[s] else 0.0
             if abs(new_weight - last_issued_weight[s]) > 1e-12:
-                pending_events[s].append((pd.Timestamp(ts), new_weight))
+                signal_ts = pd.Timestamp(ts)
+                target_qty: Optional[int] = None
+                if wts_spec is not None:
+                    signal_price: Optional[float] = None
+                    if close_frame is not None and signal_ts in close_frame.index:
+                        raw = close_frame.at[signal_ts, s]
+                        signal_price = float(raw) if pd.notna(raw) else None
+                    target_qty = weight_to_target_qty(weight=new_weight, price=signal_price, spec=wts_spec)
+                pending_events[s].append((signal_ts, new_weight, target_qty))
                 last_issued_weight[s] = new_weight
 
     return pending_events
@@ -620,15 +650,68 @@ def _row_execution_pricing_components(
     return adverse_price_cost, fill_to_close_ratio
 
 
+def _row_execution_pricing_components_discrete(
+    delta_qty: int,
+    close: float,
+    high: Optional[float],
+    low: Optional[float],
+    execution_pricing: Optional[ExecutionPricingSpec],
+    equity_usd: float,
+) -> Tuple[float, float, float]:
+    """P7B-REPAIR-01 discrete-qty analogue of
+    _row_execution_pricing_components (mission Section 4E "discrete shares
+    must drive economics"): executing `delta_qty` signed shares at THIS
+    bar's conservative fill price instead of its close. BUY (delta_qty > 0)
+    uses HIGH, SELL (delta_qty < 0) uses LOW — identical side convention.
+
+    Returns (execution_price_cost, commission_notional, turnover_notional),
+    ALL already expressed as equity_usd-NORMALIZED RETURN-FRACTION
+    quantities (a dollar amount divided by `equity_usd`) so they compose,
+    unmodified, with the existing weight-space commission_cost/net_return
+    arithmetic in _simulate_fold. `turnover_notional` is always CLOSE-priced
+    (`abs(delta_qty) * close / equity_usd`) -- the intended rebalance size,
+    mirroring continuous `turnover[s] = abs(delta_weight)` -- while
+    `commission_notional` is FILL-priced under the official model (mirrors
+    `commission_notional[s] = turnover[s] * fill_ratio`). Under the
+    diagnostic pricing model (or delta_qty == 0), execution_price_cost is
+    0.0 and commission_notional == turnover_notional (unrescaled, ratio
+    1.0) -- mirrors _row_execution_pricing_components's own
+    diagnostic-model identity."""
+    close_f = float(close)
+    if delta_qty == 0:
+        return 0.0, 0.0, 0.0
+    turnover_notional = (abs(delta_qty) * close_f) / equity_usd
+    if execution_pricing is None or not execution_pricing.is_official_parity_model:
+        return 0.0, turnover_notional, turnover_notional
+    if high is None or low is None or pd.isna(high) or pd.isna(low):
+        raise RuntimeError(
+            "Fail-closed: official execution-pricing parity model requires a high/low value for "
+            "every bar with an executing discrete-share turnover event"
+        )
+    side = "buy" if delta_qty > 0 else "sell"
+    fill = conservative_fill_price(
+        high=float(high),
+        low=float(low),
+        close=close_f,
+        side=side,
+        slippage_bps=execution_pricing.slippage_bps,
+        volatility_mult_bps=execution_pricing.volatility_mult_bps,
+    )
+    adverse_price_cost = (abs(delta_qty) * abs(fill - close_f)) / equity_usd
+    commission_notional = (abs(delta_qty) * fill) / equity_usd
+    return adverse_price_cost, commission_notional, turnover_notional
+
+
 def _simulate_fold_execution(
     close_frame: pd.DataFrame,
-    pending_events: Dict[str, List[Tuple[pd.Timestamp, float]]],
+    pending_events: Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]],
     max_gross_exposure: float,
     *,
     high_frame: Optional[pd.DataFrame] = None,
     low_frame: Optional[pd.DataFrame] = None,
     execution_pricing: Optional[ExecutionPricingSpec] = None,
-) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, float]]:
+    wts_spec: Optional[WeightToShareSpec] = None,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, float], Dict[str, int]]:
     """Joint, timestamp-frame causal execution/allocation state machine
     (capacity_policy=CAPACITY_POLICY_ID) sharing one portfolio-level gross-
     exposure budget across every symbol in this fold.
@@ -684,17 +767,72 @@ def _simulate_fold_execution(
     behavior (the design guarantees ordinary asynchronous rebalances always
     resolve by deferral).
 
-    Returns (rows_by_symbol, final_weight_by_symbol). `rows_by_symbol[s]`
-    has one dict per s's own bar, same shape as the pre-REPAIR-02 per-symbol
-    rows: timestamp/gross_contrib/turnover/interval_exposure/executed_weight.
+    P7B-REPAIR-01 (mission Section 4E, "discrete shares must drive
+    economics"): when `wts_spec` is engaged, a PARALLEL discrete signed
+    share-quantity state (`current_qty`) is threaded alongside the
+    continuous `executed_weight` state, in perfect lockstep with the SAME
+    admission/deferral decisions the continuous engine already makes (gross
+    exposure ADMISSION stays entirely in weight space -- deliberately
+    unchanged/frozen, see mission Section 4F: floor-only rounding can only
+    ever reduce a given event's own notional relative to the continuous
+    weight target it was sized from, so a capacity budget the continuous
+    engine already proved satisfies max_gross_exposure is never exceeded by
+    the discrete translation of that SAME event). Each pending event's
+    `target_qty` (the 3rd tuple element) was already fixed, once, at SIGNAL
+    time (see _build_pending_events) -- this function only ever reads it,
+    never recomputes it from an execution-time price. Whenever the
+    continuous engine actually executes a candidate (in D or in F), the
+    discrete side computes `delta_qty = candidate_qty[s] - current_qty[s]`
+    and prices that delta at THIS bar's P7A conservative fill (mirrors
+    Rust's `targets_to_order_intents` delta convention exactly). Per-bar
+    `qty_gross_contrib[s]` is earned from `current_qty[s]` HELD BEFORE this
+    bar's execution (identical convention to the continuous `gross_contrib`)
+    -- a target that rounds to qty=0 therefore earns exactly zero economic
+    exposure regardless of `executed_weight`, closing the evidence-only gap
+    (mission Section 4B/4E, REQUIRED TEST 20).
+
+    Returns (rows_by_symbol, final_weight_by_symbol, final_qty_by_symbol).
+    `rows_by_symbol[s]` has one dict per s's own bar, carrying BOTH the
+    legacy continuous fields (timestamp/gross_contrib/turnover/
+    interval_exposure/executed_weight/execution_price_cost/
+    commission_notional, bit-for-bit unchanged when wts_spec is None) AND,
+    when `wts_spec` is engaged, the discrete evidence/economics fields
+    (target_qty/qty_delta/qty_side/qty_gross_contrib/qty_turnover/
+    qty_execution_price_cost/qty_commission_notional).
     """
     symbols = list(close_frame.columns)
     bar_index = close_frame.index
 
     executed_weight: Dict[str, float] = {s: 0.0 for s in symbols}
+    current_qty: Dict[str, int] = {s: 0 for s in symbols}
     pending_idx: Dict[str, int] = {s: 0 for s in symbols}
     prev_close: Dict[str, Optional[float]] = {s: None for s in symbols}
     rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {s: [] for s in symbols}
+
+    def _apply_discrete_execution(s: str, t: Any) -> Tuple[float, float, float, int, Optional[str]]:
+        """Executes symbol `s`'s discrete side at frame `t` against whatever
+        `candidate_qty[s]` was already resolved for this frame, mutating
+        `current_qty[s]` in place. Returns
+        (qty_execution_price_cost, qty_commission_notional, qty_turnover,
+        qty_delta, qty_side); all-zero/None no-op if wts_spec is disengaged,
+        `candidate_qty[s]` is None, or the resolved delta is zero."""
+        if wts_spec is None or candidate_qty.get(s) is None:
+            return 0.0, 0.0, 0.0, 0, None
+        target_qty = candidate_qty[s]
+        assert target_qty is not None
+        order = target_qty_to_order_delta(current_qty=current_qty[s], target_qty=target_qty)
+        delta_qty = 0 if order is None else (order[1] if order[0] == "buy" else -order[1])
+        price_cost, commission, turnover_notional = _row_execution_pricing_components_discrete(
+            delta_qty,
+            close_frame.at[t, s],
+            high_frame.at[t, s] if high_frame is not None else None,
+            low_frame.at[t, s] if low_frame is not None else None,
+            execution_pricing,
+            wts_spec.equity_usd,
+        )
+        current_qty[s] = target_qty
+        side = None if delta_qty == 0 else ("buy" if delta_qty > 0 else "sell")
+        return price_cost, commission, turnover_notional, delta_qty, side
 
     for t in bar_index:
         present = [s for s in symbols if pd.notna(close_frame.at[t, s])]
@@ -702,14 +840,21 @@ def _simulate_fold_execution(
             continue
 
         gross_contrib: Dict[str, float] = {}
+        qty_gross_contrib: Dict[str, float] = {}
         interval_exposure: Dict[str, float] = {}
         candidate: Dict[str, Optional[float]] = {}
+        candidate_qty: Dict[str, Optional[int]] = {}
         candidate_ts: Dict[str, Optional[pd.Timestamp]] = {}
 
         for s in present:
             c = float(close_frame.at[t, s])
             gross_contrib[s] = (
                 0.0 if prev_close[s] is None else executed_weight[s] * (c / prev_close[s] - 1.0)
+            )
+            qty_gross_contrib[s] = (
+                0.0
+                if prev_close[s] is None or wts_spec is None
+                else current_qty[s] * (c - prev_close[s]) / wts_spec.equity_usd
             )
             interval_exposure[s] = abs(executed_weight[s])
 
@@ -719,9 +864,11 @@ def _simulate_fold_execution(
                 idx += 1
             if idx < len(events) and events[idx][0] < t:
                 candidate[s] = events[idx][1]
+                candidate_qty[s] = events[idx][2]
                 candidate_ts[s] = events[idx][0]
             else:
                 candidate[s] = None
+                candidate_qty[s] = None
                 candidate_ts[s] = None
             pending_idx[s] = idx
             prev_close[s] = c
@@ -734,6 +881,11 @@ def _simulate_fold_execution(
         # (_simulate_fold) multiplies this by commission_bps_per_side/10000
         # instead of charging commission against close-priced turnover.
         commission_notional: Dict[str, float] = {s: 0.0 for s in present}
+        qty_turnover: Dict[str, float] = {s: 0.0 for s in present}
+        qty_execution_price_cost: Dict[str, float] = {s: 0.0 for s in present}
+        qty_commission_notional: Dict[str, float] = {s: 0.0 for s in present}
+        qty_delta: Dict[str, int] = {s: 0 for s in present}
+        qty_side: Dict[str, Optional[str]] = {s: None for s in present}
 
         # D: gross-reducing (and no-op) candidates execute unconditionally.
         for s in present:
@@ -754,6 +906,13 @@ def _simulate_fold_execution(
                 commission_notional[s] = turnover[s] * fill_ratio
                 executed_weight[s] = candidate[s]
                 pending_idx[s] += 1
+                (
+                    qty_execution_price_cost[s],
+                    qty_commission_notional[s],
+                    qty_turnover[s],
+                    qty_delta[s],
+                    qty_side[s],
+                ) = _apply_discrete_execution(s, t)
 
         # E: actual gross after this frame's reductions.
         gross = sum(abs(w) for w in executed_weight.values())
@@ -774,9 +933,11 @@ def _simulate_fold_execution(
                 idx += 1
             if idx < len(events) and events[idx][0] < t:
                 candidate[s] = events[idx][1]
+                candidate_qty[s] = events[idx][2]
                 candidate_ts[s] = events[idx][0]
             else:
                 candidate[s] = None
+                candidate_qty[s] = None
                 candidate_ts[s] = None
             # NOTE: pending_idx[s] intentionally NOT persisted here.
 
@@ -815,6 +976,13 @@ def _simulate_fold_execution(
                     commission_notional[s] = turnover[s] * fill_ratio
                     executed_weight[s] = candidate[s]
                     pending_idx[s] += 1
+                    (
+                        qty_execution_price_cost[s],
+                        qty_commission_notional[s],
+                        qty_turnover[s],
+                        qty_delta[s],
+                        qty_side[s],
+                    ) = _apply_discrete_execution(s, t)
                 gross += delta
             # else: defer the entire cohort — pending_idx left untouched, so
             # every member is retried at its own next bar.
@@ -835,9 +1003,16 @@ def _simulate_fold_execution(
                 "executed_weight": executed_weight[s],
                 "execution_price_cost": execution_price_cost[s],
                 "commission_notional": commission_notional[s],
+                "target_qty": current_qty[s] if wts_spec is not None else None,
+                "qty_delta": qty_delta[s],
+                "qty_side": qty_side[s],
+                "qty_gross_contrib": qty_gross_contrib[s],
+                "qty_turnover": qty_turnover[s],
+                "qty_execution_price_cost": qty_execution_price_cost[s],
+                "qty_commission_notional": qty_commission_notional[s],
             })
 
-    return rows_by_symbol, dict(executed_weight)
+    return rows_by_symbol, dict(executed_weight), dict(current_qty)
 
 
 def _daily_aggregate(rows: pd.DataFrame) -> pd.DataFrame:
@@ -911,7 +1086,7 @@ def _simulate_fold(
     fold_no: int,
     boundaries: Dict[str, Any],
     close_frame: pd.DataFrame,
-    pending_events: Dict[str, List[Tuple[pd.Timestamp, float]]],
+    pending_events: Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]],
     spec: EconomicWalkForwardSpec,
     *,
     high_frame: Optional[pd.DataFrame] = None,
@@ -934,7 +1109,18 @@ def _simulate_fold(
     fold-end force_flat_last_bar exit below deliberately never adds the
     adverse-price component and always uses an unrescaled (ratio 1.0)
     commission basis (see its own comment) -- it is the forced-flatten
-    exception, mirroring Rust's flatten_all."""
+    exception, mirroring Rust's flatten_all.
+
+    P7B-REPAIR-01: gross_return/turnover/execution_price_cost/
+    commission_notional (the actual P&L-bearing series) are sourced from the
+    DISCRETE qty_* fields _simulate_fold_execution already computed whenever
+    `spec.weight_to_share` is engaged -- discrete shares DRIVE the economic
+    result, continuous weight-space fields remain wired for
+    interval_exposure/gross_exposure/active_positions REPORTING and for the
+    (frozen, unchanged) capacity ADMISSION decision only. When
+    `spec.weight_to_share` is None, every field/formula below is
+    bit-for-bit identical to pre-repair behavior (uses the continuous
+    fields exclusively) -- existing diagnostic callers are unaffected."""
     bar_index = close_frame.index
     symbols = list(close_frame.columns)
     global_last_ts = bar_index[-1]
@@ -952,24 +1138,30 @@ def _simulate_fold(
     commission_notional_by_ts: Dict[pd.Timestamp, float] = {t: 0.0 for t in bar_index}
     executed_weight_series: Dict[str, pd.Series] = {}
 
-    rows_by_symbol, final_weight_by_symbol = _simulate_fold_execution(
+    # P7B (RESEARCH-WEIGHT-TO-SHARE-PARITY-01-REPAIR-01): normalized once,
+    # before _simulate_fold_execution runs, so a validation error (e.g. bad
+    # equity_usd) fails closed before any simulation work starts, and so the
+    # discrete state machine inside _simulate_fold_execution can thread it
+    # directly (signal-time sizing requires wts_spec to be available AT
+    # simulation time now, not applied post-hoc).
+    wts_spec = spec.weight_to_share.normalized() if spec.weight_to_share is not None else None
+
+    rows_by_symbol, final_weight_by_symbol, final_qty_by_symbol = _simulate_fold_execution(
         close_frame,
         pending_events,
         spec.signal_policy.max_gross_exposure,
         high_frame=high_frame,
         low_frame=low_frame,
         execution_pricing=spec.execution_pricing,
+        wts_spec=wts_spec,
     )
 
-    # P7B (RESEARCH-WEIGHT-TO-SHARE-PARITY-01): normalized once, outside the
-    # loop, so a validation error (e.g. bad equity_usd) fails closed before
-    # any per-symbol translation work starts.
-    wts_spec = spec.weight_to_share.normalized() if spec.weight_to_share is not None else None
     weight_to_share_events_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
 
     for s in symbols:
         rows = rows_by_symbol[s]
         final_weight = final_weight_by_symbol[s]
+        final_qty = final_qty_by_symbol[s]
 
         # force_flat_last_bar (the only supported fold_end_policy — enforced
         # by SignalPolicySpec.normalized): liquidate any still-held position
@@ -984,10 +1176,16 @@ def _simulate_fold(
         # flatten_all) — it never adds execution_price_cost, ordinary/
         # strategy-driven turnover already carries whatever
         # _simulate_fold_execution computed for it.
+        #
+        # P7B-REPAIR-01: the discrete flatten is gated independently on
+        # `final_qty != 0` (NOT on `final_weight`) -- a tiny weight that
+        # already rounded to qty=0 must exit with ZERO discrete turnover/
+        # cost, even though the continuous weight-space flatten still fires
+        # (REQUIRED TEST 20's zero-exposure guarantee extends to fold-end).
         if rows and rows[-1]["timestamp"] == global_last_ts:
+            rows[-1] = dict(rows[-1])
             if abs(final_weight) > 1e-12:
                 exit_turnover = abs(final_weight)
-                rows[-1] = dict(rows[-1])
                 rows[-1]["turnover"] = rows[-1]["turnover"] + exit_turnover
                 rows[-1]["executed_weight"] = 0.0
                 # Close/mark-priced exit (ratio 1.0): added to whatever
@@ -996,8 +1194,20 @@ def _simulate_fold(
                 # rescaled ratio -- each component keeps its own true basis.
                 rows[-1]["commission_notional"] = rows[-1]["commission_notional"] + exit_turnover
                 final_weight = 0.0
-        elif abs(final_weight) > 1e-12:
-            rows.append({
+            if wts_spec is not None and final_qty != 0:
+                exit_qty_delta = -final_qty
+                exit_close = float(close_frame.at[global_last_ts, s])
+                exit_turnover_notional = (abs(final_qty) * exit_close) / wts_spec.equity_usd
+                rows[-1]["qty_turnover"] = rows[-1]["qty_turnover"] + exit_turnover_notional
+                rows[-1]["qty_commission_notional"] = (
+                    rows[-1]["qty_commission_notional"] + exit_turnover_notional
+                )
+                rows[-1]["qty_delta"] = rows[-1]["qty_delta"] + exit_qty_delta
+                rows[-1]["qty_side"] = "buy" if exit_qty_delta > 0 else "sell"
+                rows[-1]["target_qty"] = 0
+                final_qty = 0
+        elif abs(final_weight) > 1e-12 or (wts_spec is not None and final_qty != 0):
+            exit_row: Dict[str, Any] = {
                 "timestamp": global_last_ts,
                 "gross_contrib": 0.0,
                 "turnover": abs(final_weight),
@@ -1005,38 +1215,58 @@ def _simulate_fold(
                 "executed_weight": 0.0,
                 "execution_price_cost": 0.0,
                 "commission_notional": abs(final_weight),
-            })
+                "target_qty": 0 if wts_spec is not None else None,
+                "qty_delta": 0,
+                "qty_side": None,
+                "qty_gross_contrib": 0.0,
+                "qty_turnover": 0.0,
+                "qty_execution_price_cost": 0.0,
+                "qty_commission_notional": 0.0,
+            }
+            if wts_spec is not None and final_qty != 0:
+                exit_qty_delta = -final_qty
+                exit_close = float(close_frame.at[global_last_ts, s])
+                exit_turnover_notional = (abs(final_qty) * exit_close) / wts_spec.equity_usd
+                exit_row["qty_turnover"] = exit_turnover_notional
+                exit_row["qty_commission_notional"] = exit_turnover_notional
+                exit_row["qty_delta"] = exit_qty_delta
+                exit_row["qty_side"] = "buy" if exit_qty_delta > 0 else "sell"
+                final_qty = 0
+            rows.append(exit_row)
             final_weight = 0.0
 
-        # P7B: translated AFTER the forced-flatten mutation above, so the
-        # fold-end flatten (if any) is correctly seen as executed_weight=0.0
-        # here too -- a full flatten needs no price (see weight_to_target_qty
-        # docstring), so the priceless forced-exit row never fails closed on
-        # a missing close. Uses each row's own close (the SAME close already
-        # used for that row's gross_return/turnover above) as the sizing
-        # price -- never a later row's price (no future-bar leakage).
         if wts_spec is not None:
-            price_rows: List[Dict[str, Any]] = []
-            for r in rows:
-                close_val = close_frame.at[r["timestamp"], s]
-                price_rows.append({
+            # P7B-REPAIR-01: evidence assembled directly from the causal
+            # per-row discrete state _simulate_fold_execution/the fold-end
+            # flatten above already computed -- NOT a post-hoc re-derivation
+            # from each row's own (execution-time) close. `target_qty` was
+            # fixed once, at SIGNAL time, in _build_pending_events; nothing
+            # here ever recomputes it from a later bar.
+            weight_to_share_events_by_symbol[s] = [
+                {
                     "timestamp": r["timestamp"],
-                    "close": float(close_val) if pd.notna(close_val) else None,
-                    "executed_weight": r["executed_weight"],
-                })
-            weight_to_share_events_by_symbol[s] = translate_symbol_weight_series_to_share_events(
-                price_rows, wts_spec
-            )
+                    "target_qty": r["target_qty"],
+                    "side": r["qty_side"],
+                    "qty": abs(r["qty_delta"]),
+                }
+                for r in rows
+            ]
 
         exec_index: List[pd.Timestamp] = []
         exec_values: List[float] = []
         for r in rows:
             t = r["timestamp"]
-            gross_by_ts[t] += r["gross_contrib"]
-            turnover_by_ts[t] += r["turnover"]
+            if wts_spec is not None:
+                gross_by_ts[t] += r["qty_gross_contrib"]
+                turnover_by_ts[t] += r["qty_turnover"]
+                execution_price_cost_by_ts[t] += r["qty_execution_price_cost"]
+                commission_notional_by_ts[t] += r["qty_commission_notional"]
+            else:
+                gross_by_ts[t] += r["gross_contrib"]
+                turnover_by_ts[t] += r["turnover"]
+                execution_price_cost_by_ts[t] += r["execution_price_cost"]
+                commission_notional_by_ts[t] += r["commission_notional"]
             interval_exposure_by_ts[t] += r["interval_exposure"]
-            execution_price_cost_by_ts[t] += r["execution_price_cost"]
-            commission_notional_by_ts[t] += r["commission_notional"]
             exec_index.append(t)
             exec_values.append(r["executed_weight"])
         executed_weight_series[s] = pd.Series(exec_values, index=pd.DatetimeIndex(exec_index))
@@ -1132,6 +1362,12 @@ def _simulate_fold(
             ]
             for s, events in weight_to_share_events_by_symbol.items()
         }
+        # P7B-REPAIR-01 (mission Section 4G): structural, non-self-asserted
+        # proof that discrete shares actually drove THIS fold's economics --
+        # distinct from weight_to_share_protocol_id, which only asserts the
+        # translation exists. A caller checking for official parity looks
+        # for this marker.
+        summary["discrete_economics_protocol_id"] = DISCRETE_ECONOMICS_PROTOCOL_ID_V1
     return fold_df, summary
 
 
@@ -1202,7 +1438,11 @@ def run_economic_walkforward(
             high_frame, low_frame = _build_fold_high_low_frames(
                 bars, symbols, boundaries["test_start"], boundaries["test_end"]
             )
-        pending_events = _build_pending_events(oos_fold, symbols, spec.signal_policy)
+        wts_spec_for_signal_pricing = spec.weight_to_share.normalized() if spec.weight_to_share is not None else None
+        pending_events = _build_pending_events(
+            oos_fold, symbols, spec.signal_policy,
+            close_frame=close_frame, wts_spec=wts_spec_for_signal_pricing,
+        )
         fold_df, fold_summary = _simulate_fold(
             fold_no, boundaries, close_frame, pending_events, spec,
             high_frame=high_frame, low_frame=low_frame,
