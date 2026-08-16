@@ -576,6 +576,204 @@ Repair commit: `5bba8d6c58a4d2a509fbd86882cd8f9013a24b56`
 
 ---
 
+## 1D. BKT-RESEARCH-MARKET-DATA-AUTHORITY-01 ADDENDUM (2026-08-15)
+
+Mission `BKT-RESEARCH-MARKET-DATA-AUTHORITY-01` closes the remaining
+`DATA_SOURCE_BLOCKED` gap Section 1C left open: **an actual, trusted,
+repeatable historical-data SOURCE** satisfying the P8/PATCH-B/PATCH-C
+CONTRACT, not just the contract's verification machinery. Executed against
+the SAME commit chain, HEAD `5bba8d6c58a4d2a509fbd86882cd8f9013a24b56`.
+
+**Verdict: `COMPLETE`.** Official US-equity/ETF research now has a trusted,
+repeatable path to obtain corporate-action-safe historical economic bars
+for any requested symbol/range whose corporate-action history is limited
+to forward/reverse splits, cash dividends, and spin-offs (the set Alpaca's
+own documentation confirms `adjustment=all` covers) — verified against
+Alpaca's live production API using this box's existing paper credentials,
+not just mocked fixtures. Any symbol/range containing a corporate action
+outside that documented set (mergers, redemptions, name changes, rights
+distributions, unit splits, stock dividends, worthless removals, partial
+calls, reorganizations) remains **honestly fail-closed-blocked** — this is
+intentional, per the mission's explicit "do not guess" instruction, not a
+residual gap.
+
+**Official documentation verified (Firecrawl, 2026-08-15, against
+`docs.alpaca.markets`):**
+- `GET https://data.alpaca.markets/v2/stocks/bars` — `adjustment` accepts
+  `raw` (default), `split`, `dividend`, `spin-off`, `all` ("apply all above
+  adjustments"), confirming the mission's expected contract exactly.
+- `GET https://data.alpaca.markets/v1/corporate-actions` — full OpenAPI
+  schema fetched and used verbatim (not guessed): 15 action types
+  (`reverse_split`, `forward_split`, `unit_split`, `cash_dividend`,
+  `stock_dividend`, `spin_off`, `cash_merger`, `stock_merger`,
+  `stock_and_cash_merger`, `redemption`, `name_change`, `worthless_removal`,
+  `rights_distribution`, `partial_call`, `reorganization`), each with its
+  own required-field shape (symbol field(s), `process_date`, and — for six
+  of the fifteen types — `ex_date`).
+
+**Chosen adjustment semantics.** `adjustment=all` is the sole historical
+bars authority for the new research path (never `raw`, never a partial
+combination) — matches the mission's stated preference and keeps exactly
+one convention to reason about. Corporate-action coverage classification
+is deliberately conservative: only `forward_split`, `reverse_split`,
+`cash_dividend`, `spin_off` are `COVERED_BY_ADJUSTMENT`; every other type
+— explicitly including `unit_split` and `stock_dividend`, which read as
+"the same as split/dividend" but are never named in Alpaca's adjustment
+documentation — is `REQUIRES_FAIL_CLOSED_REVIEW`. No type's classification
+was guessed from its name.
+
+**New research-only data authority** (`research-py/src/mqk_research/data/
+alpaca_historical.py`): fetches directly from Alpaca's Market Data API
+(never through `md_bars`) so `adjustment=all` can be used without touching
+`core-rs/crates/mqk-md/src/alpaca_provider.rs` (still `adjustment=raw`,
+unchanged) or any Paper/live runtime path. `extract_research_bars_with_
+provenance()` is the single official entry point: fetches complete,
+deterministically-normalized bars AND corporate-action evidence for the
+identical symbol/range, fails closed (`CorporateActionReviewRequired`) if
+any `REQUIRES_FAIL_CLOSED_REVIEW` event intersects the request — checked
+against the corporate-action entries directly, so a bar simply being
+absent on the event date cannot bypass the check — and otherwise returns a
+complete `bars_provenance` manifest ready to pass straight into
+`run_registered_economic_walkforward_eval(bars_csv=..., bars_provenance=
+result["manifest"])`; no manual manifest fabrication required. A thin
+`mqk-research extract-alpaca-bars` CLI subcommand writes the four
+deterministic artifacts (`research_bars.csv`, `research_bars_provenance.
+json`, `corporate_actions.json`, `corporate_actions_provenance.json`).
+
+**Trusted-source-attestation contract (the actual defect closure).** The
+mission's explicit target defect — `build_corporate_action_evidence(
+source_provider_id="made-up", ..., corporate_action_entries=[])` (or
+equivalently, a hand-typed `price_adjustment_convention=
+"alpaca_all_adjusted_v1"`) must NOT authorize an official run merely for
+being internally hash-consistent — required a NEW verification layer
+`mqk_research.data.bars_provenance` didn't have before this mission: a
+convention name is not self-authorizing. `alpaca_all_adjusted_v1` was
+added to `_KNOWN_ADJUSTED_CONVENTIONS` (an explicit, auditable seam
+addition, not a broadening of silent trust) but simultaneously added to a
+new `_CONVENTIONS_REQUIRING_SOURCE_ATTESTATION` set: for those
+conventions, `check_corporate_action_integrity`'s `adjusted_data` branch
+now also calls `_require_verified_source_attestation()`, which demands a
+real, content-addressed `source_attestation` object (`build_source_
+attestation`) whose declared id is independently recomputed (never
+trusted), whose `extractor_id` is in a narrow trusted allowlist (only
+`mqk_research.data.alpaca_historical.v1`), whose `adjustment_mode` matches
+what the convention requires, whose pagination is complete on both bars
+and corporate-actions retrieval, whose `category_b_events_found` is
+empty, and whose bars-hash / corporate-action-evidence-hash / symbol /
+date coverage all independently bind to what's actually being evaluated.
+`source_attestation_id` was folded into `provenance_identity_fragment`
+(and therefore registered trial identity and the multiple-testing judge's
+comparison-scope key), exactly like `corporate_action_evidence_id` already
+was. `require_registered_bars_provenance` also gained an earlier,
+structural copy of the same "convention alone is not enough" check, so a
+hand-built manifest fails at the STRUCTURAL gate before even reaching
+`check_corporate_action_integrity`.
+
+**Synthetic-vs-official evidence boundary.** Unchanged, and now doubly
+enforced for the adjusted-data path: `_KNOWN_ADJUSTED_CONVENTIONS` still
+serves test-only monkeypatched conventions (e.g.
+`split_dividend_adjusted_test_only`, used by the pre-existing `test_bars_
+provenance.py` fixtures) with no attestation requirement at all —
+`_CONVENTIONS_REQUIRING_SOURCE_ATTESTATION` is scoped to
+`alpaca_all_adjusted_v1` only, so none of PATCH B/C's 58 existing tests
+needed to change.
+
+**Fixed-universe behavior.** Unchanged (`universe_mode=fixed_ex_ante`
+only); the extractor records the exact symbol set, its content-derived
+`symbol_universe_id`, and `universe_mode` in every manifest it produces,
+same as the pre-existing contract required.
+
+**Unsupported CA behavior.** A `REQUIRES_FAIL_CLOSED_REVIEW` event
+intersecting the requested symbol/range raises
+`CorporateActionReviewRequired` for the WHOLE request — bars are never
+silently dropped for the affected symbol/period, per the mission's
+explicit instruction. The operator must narrow the symbol universe or
+date range (or wait for a future patch adding explicit handling for that
+event type).
+
+**Raw-data fallback behavior.** Unchanged from PATCH B/C:
+`raw_unadjusted` + `forbid_affected_periods` remains defined, tested, and
+still requires a real, content-addressed `corporate_action_evidence`
+object — no live source in this repository calls it with real data today,
+same as before this mission. This mission's new path is `adjusted_data`
++ `alpaca_all_adjusted_v1`, not a change to the raw path's status.
+
+**Live verification (optional, opt-in, read-only — no trading operations,
+no credentials logged).** Using this box's existing `ALPACA_API_KEY_PAPER`
+/ `ALPACA_API_SECRET_PAPER` (never printed), three ad hoc live GET-only
+checks were run against production Alpaca (not committed as part of the
+automated test suite, matching the mission's "normal tests must not
+require network access" instruction): (1) `fetch_historical_bars`/
+`fetch_corporate_actions` against real AAPL data succeeded, correctly
+reporting real 2020 dividend/split events; (2) the full `extract_research_
+bars_with_provenance` → `require_registered_bars_provenance` →
+`require_bars_match_manifest` → `check_corporate_action_integrity` chain
+passed end to end against real AAPL bars; (3) a window spanning AAPL's
+real 2020-08-31 4-for-1 forward split was extracted successfully with
+`adjustment=all` — the returned closes are continuous (~$121→$130) across
+the split date with no artificial ~4x jump, empirically confirming both
+Alpaca's adjustment behavior and this module's `COVERED_BY_ADJUSTMENT`
+classification of `forward_split` against real data, not just a mocked
+fixture.
+
+**Files changed:** `research-py/src/mqk_research/data/bars_provenance.py`
+(source-attestation contract, additive), `research-py/src/mqk_research/
+data/alpaca_historical.py` (new), `research-py/src/mqk_research/cli.py`
+(new `extract-alpaca-bars` subcommand), `research-py/tests/test_alpaca_
+historical.py` (new, 41 tests), `research-py/tests/test_source_
+attestation.py` (new, 23 tests). `eval_walkforward.py` and `economic_
+walkforward.py` were NOT touched — zero risk to the accepted foundation
+(Section 4) or the frozen future-execution/holdout chronology.
+
+**Tests.** 64 new tests (41 + 23), all using injected fake HTTP transports
+— zero real network access in the automated suite. Negative-control
+proof: `check_corporate_action_integrity`'s new `_require_verified_
+source_attestation` call was temporarily removed and the 12
+source-attestation-dependent tests in `test_source_attestation.py` were
+confirmed to fail (not vacuously pass) before the guard was restored.
+Full `research-py` suite: **1295 passed, 7 skipped, 12 subtests passed**
+(1231 PATCH-C baseline + 64 new; zero regressions; skip count unchanged).
+
+**Audit corrections required by this addendum:**
+- Section 1B/1C's `DATA_SOURCE_BLOCKED` status is now resolved for the
+  `adjustment=all` / category-A-only case. `BKT-CORPORATE-ACTION-
+  EVIDENCE-SOURCE-01`, as originally scoped in Section 1B (a `forbid_
+  affected_periods` exclusion-evidence source for `raw_unadjusted` data),
+  is superseded by this mission's `adjusted_data` path per the mission
+  brief's own stated preference ("prefer adjustment=all") — the raw path
+  itself remains exactly as fail-closed as PATCH C left it.
+- Section 5 Area A9-A13/A17: upgrade from "PARTIAL-B-REPAIR"/"P8-CLOSED"
+  to **RESOLVED for the adjusted-data path** — a trusted, live-verified
+  extraction authority now exists; still correctly fail-closed for
+  category-B corporate actions and for any symbol/range this extractor
+  has not been asked to cover.
+- Section 16A (`RESEARCH_BACKTEST_FOUNDATION_READY`): the "DATA TRUTH"
+  line item's blocking condition ("P8 is not sufficient for DATA TRUTH on
+  its own until `BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01` lands") is now
+  **MET** for the adjusted-data path this mission delivers. P7A, P7B,
+  P7C, P9 remain the sole remaining OPEN items for that gate — unchanged,
+  not addressed by this mission (P7/P9/P10 were explicitly out of scope
+  per the mission brief).
+
+**Remaining data blockers:** none for the `adjustment=all` /
+category-A-only case this mission targeted. Category-B corporate actions
+(mergers, redemptions, name changes, rights distributions, unit splits,
+stock dividends, worthless removals, partial calls, reorganizations)
+remain unhandled by design — a future patch could add explicit,
+provider-verified handling for specific category-B types (e.g. a verified
+merger-chain-splicing policy) if a real research need arises, but
+inventing that now would be exactly the kind of guessing this mission was
+told not to do.
+
+**Recommended next wave:** WAVE 2 (P7A/P7B/P7C — parity contract) remains
+the correctly-sequenced next step per Section 20, now with one fewer
+caveat: any WAVE 2/P9 work that wants to run the registered economic
+evaluator against real historical data can now do so (for symbols/ranges
+without category-B events) via `mqk_research.data.alpaca_historical`
+instead of being blocked outright.
+
+---
+
 ## 2. Baseline
 
 ```
