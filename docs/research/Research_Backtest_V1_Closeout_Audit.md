@@ -774,6 +774,131 @@ instead of being blocked outright.
 
 ---
 
+## 1E. BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 ADDENDUM (2026-08-15)
+
+Independent review of Section 1D found four deterministic defects. Mission
+`BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01` closed all four against
+the same commit chain. Baseline for this repair: `origin/main` HEAD
+`ec5a3fcd8ac3232fa5f057ae56a939a78971f083` (`docs: streamline Claude
+repository operating contract`) — the mqk-mcp read-only-tooling merge
+(`96ab22a4`) sitting between this repair's baseline and Section 1D's
+original `5bba8d6c` is unrelated, reviewed history confined to
+`tools/mqk-mcp/`.
+
+**Verdict: `COMPLETE`.**
+
+**Corrected CA discovery semantics (Defect 1).** Alpaca's
+`/v1/corporate-actions` `start`/`end` filter by `process_date`, and Alpaca's
+own Developer Relations team confirms (forum.alpaca.markets/t/
+querying-corporate-actions-by-ex-date-rather-than-process-date/17724,
+verified 2026-08-15) that `process_date` "can be several days (or more)
+after the `ex_date`" — no documented bound exists. A query window bounded
+by the research range (Section 1D's original behavior) could therefore
+silently miss an event whose `ex_date`/effective window falls inside the
+research range but whose `process_date` lands after it. Per the mission's
+decision hierarchy (no documented bound ⇒ query full provider-supported
+history, not a guessed buffer), `extract_research_bars_with_provenance` now
+queries corporate actions for the requested symbols across
+`[CA_DISCOVERY_PROCESS_DATE_FLOOR_UTC ("1900-01-01"), max(asof, research
+end)]` — a proven process_date superset — and filters the result locally by
+EFFECTIVE (`ex_date`-based) window intersection with the research range
+(`_filter_entries_intersecting_range`) before it ever reaches the
+review-required gate or corporate-action evidence. The actual discovery
+query range and protocol (`CA_DISCOVERY_PROTOCOL_V1`) are serialized into
+`source_attestation.corporate_action_query_coverage`, so a manifest records
+*how* completeness was established, not just an unverifiable claim of it.
+
+**Explicit ASOF contract (Defect 2).** `fetch_historical_bars` now requires
+an explicit, caller-resolved `asof` (`YYYY-MM-DD`) and always sends it to
+Alpaca's `/v2/stocks/bars` — never the provider's implicit current-day
+default. The resolved value is recorded verbatim in `source_attestation.
+asof`, which already participated in `canonical_source_attestation_content`
+before this repair, so two otherwise-identical extractions with different
+ASOF values already produced different `source_attestation_id`/trial
+identity, and the SAME ASOF with the same semantic data remains
+deterministic — no separate identity-plumbing change was needed, only
+making the value real. The CLI's `extract-alpaca-bars` subcommand gained a
+required `--asof YYYY-MM-DD` flag, resolved and printed before extraction
+runs (repo convention: required, not implicitly defaulted, matching how
+`--asof-utc` already works for the `features`/`universe`/`targets`/`run`
+subcommands). `bars_provenance._require_verified_source_attestation` now
+also independently rejects any attestation missing an explicit `asof`.
+
+**Official-vs-diagnostic source authority (Defect 3).** The single
+`extract_research_bars_with_provenance(..., http_get=..., base_url=...)`
+entry point — which let an injected test transport exercise the same code
+path that mints an OFFICIAL, trusted attestation — is now two functions
+sharing one private orchestration body
+(`_extract_research_bars_with_provenance_impl`):
+`extract_research_bars_with_provenance` (OFFICIAL: fixed
+`ALPACA_DATA_BASE_URL`, real HTTP transport, **no** `http_get`/`base_url`
+parameters at all — verified by a structural test asserting they are absent
+from the signature) and `extract_research_bars_with_provenance_diagnostic`
+(INTERNAL: `http_get` is a required parameter with no default, forcing an
+explicit injected fake; every unit test in `test_alpaca_historical.py` now
+goes through this path). The two entry points hard-code, not
+caller-parameterize, a new `source_authority` field on every attestation
+(`SOURCE_AUTHORITY_OFFICIAL_PROVIDER` vs `SOURCE_AUTHORITY_DIAGNOSTIC_
+SYNTHETIC`); `_require_verified_source_attestation` independently rejects
+any attestation whose `source_authority` is not
+`SOURCE_AUTHORITY_OFFICIAL_PROVIDER`, in addition to (not instead of) the
+pre-existing `extractor_id` allowlist check. The same gate now also
+independently verifies `source_provider_id == "alpaca"` and that
+`api_endpoint_bars`/`api_endpoint_corporate_actions` equal the exact
+official Alpaca endpoints for the `alpaca_all_adjusted_v1` convention — a
+fake provider id or a fake/attacker endpoint string on an otherwise
+internally-consistent attestation now fails the same way a fake
+`extractor_id` already did.
+
+**Semantic-vs-transport identity distinction (Defect 4).**
+`raw_response_content_hashes` (per-page provider-response hashes) is a
+transport/pagination-boundary fact, not a semantic research fact, and has
+been removed from `canonical_source_attestation_content` — the same
+treatment `retrieval_timestamp_utc` and `attestation_id` already received.
+Two extractions with byte-identical semantic bars and corporate-action
+evidence that merely paginated differently now share one semantic
+`source_attestation_id`/trial identity; the raw per-page hashes remain on
+the attestation object itself as durable, always-visible audit evidence,
+just outside canonical identity. `source_authority` was added to the
+identity-bearing set alongside the pre-existing fields.
+
+**Provider end-inclusive / internal-exclusive normalization.** Alpaca's
+`/v2/stocks/bars` `end` parameter is documented INCLUSIVE (verified
+2026-08-15); this repo's internal research contract is the half-open
+`[start_utc, end_utc)`. `fetch_historical_bars` now filters every returned
+row to `start_utc <= end_ts < end_utc` locally before any duplicate/
+non-finite check, sort, or hashing — a bar landing exactly at (or past)
+`end_utc`, or (defensively) before `start_utc`, can never enter the
+canonical dataset, semantic hash, or economic evaluation.
+
+**Final market-data authority status.** Unchanged from Section 1D's
+`adjustment=all` / category-A-only scope, now with a *proven* (not merely
+asserted) corporate-action discovery guarantee, an explicit non-implicit
+ASOF, a hardened official/diagnostic authority boundary, and transport
+artifacts correctly excluded from semantic identity. Category-B corporate
+actions remain honestly fail-closed-blocked by design, unchanged.
+
+**Files changed:** `research-py/src/mqk_research/data/bars_provenance.py`
+(`source_authority` field + trusted-profile checks + explicit-asof check +
+raw-hash exclusion from canonical identity), `research-py/src/mqk_research/
+data/alpaca_historical.py` (CA discovery floor/protocol, required `asof`,
+official/diagnostic split, provider end-boundary normalization),
+`research-py/src/mqk_research/cli.py` (required `--asof`),
+`research-py/tests/test_alpaca_historical.py` and `research-py/tests/
+test_source_attestation.py` (updated to the diagnostic entry point +
+required `asof`; new coverage for all four defects and the end-boundary
+normalization).
+
+**Tests.** Full `research-py` suite: **1319 passed, 7 skipped, 12 subtests
+passed** (zero regressions; skip count unchanged from Section 1D).
+
+**Remaining blocker:** none for this repair's scope. Category-B
+corporate-action handling remains an explicit future patch, unchanged from
+Section 1D. P7A/P7B/P7C/P9/P10 remain out of scope, per this repair
+mission's explicit instruction not to implement them.
+
+---
+
 ## 2. Baseline
 
 ```
