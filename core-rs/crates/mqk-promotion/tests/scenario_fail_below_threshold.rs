@@ -1,5 +1,5 @@
 use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
-use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput, PromotionOosEvidence};
+use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput, VerifiedPromotionOosEvidence};
 
 /// Synthetic equity curve that clearly violates at least 2 thresholds:
 /// - Flat equity => CAGR ≈ 0 (fails min_cagr = 0.10)
@@ -30,6 +30,8 @@ fn fails_when_below_multiple_thresholds() {
         min_cagr: 0.10,
         min_profit_factor: 1.0,
         min_profitable_months_pct: 0.50,
+        min_deflated_sharpe_ratio: 0.0,
+        max_probability_backtest_overfitting: 1.0,
     };
 
     let input = PromotionInput {
@@ -37,7 +39,7 @@ fn fails_when_below_multiple_thresholds() {
         report,
         stress_suite: None,
         artifact_lock: None, // B6: not locked; test expects failure
-        oos_evidence: Some(PromotionOosEvidence::valid_for_testing("test_trial")), // P7C: isolate metrics failure
+        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("test_trial")), // P7C: isolate metrics failure
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -93,6 +95,8 @@ fn fails_with_large_drawdown() {
         min_cagr: 0.0,
         min_profit_factor: 0.0,
         min_profitable_months_pct: 0.0,
+        min_deflated_sharpe_ratio: 0.0,
+        max_probability_backtest_overfitting: 1.0,
     };
 
     let input = PromotionInput {
@@ -100,7 +104,7 @@ fn fails_with_large_drawdown() {
         report,
         stress_suite: None,
         artifact_lock: None, // B6: not locked; test expects failure
-        oos_evidence: Some(PromotionOosEvidence::valid_for_testing("test_trial")), // P7C: isolate metrics failure
+        oos_evidence: Some(VerifiedPromotionOosEvidence::valid_for_testing("test_trial")), // P7C: isolate metrics failure
     };
 
     let decision = evaluate_promotion(&config, &input);

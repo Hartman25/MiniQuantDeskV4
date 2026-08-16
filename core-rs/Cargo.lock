@@ -1940,12 +1940,14 @@ version = "0.1.0"
 name = "mqk-promotion"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "mqk-artifacts",
  "mqk-audit",
  "mqk-backtest",
  "mqk-portfolio",
  "serde",
  "serde_json",
+ "sha2",
  "uuid",
 ]
 

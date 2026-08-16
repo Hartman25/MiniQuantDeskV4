@@ -1934,6 +1934,98 @@ suites pass, unmodified (P7C touches `mqk-promotion` only). `git diff
 16A) remains `NOT MET` — none of P7A/P7B/P7C is yet `CLOSED` (Wave 2's
 independent-review checkpoint has not occurred for any of the three).
 
+### 1K-ADDENDUM. PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-01 (2026-08-16)
+
+**Verdict: `IMPLEMENTED_PENDING_INDEPENDENT_REVIEW`.** The original P7C
+implementation (Section 1K, commit `16b7445a`) is **`SUPERSEDED_LOCALLY_BY_
+REPAIR_01`** — independent ChatGPT review of the actual Wave-2 patch
+rejected it: `PromotionOosEvidence` was public, all-`pub`-field, and
+`Deserialize`-able, so a caller could hand-populate every one of its ten
+"checked" facts without a single real Research artifact existing anywhere.
+The original positive test demonstrated exactly this weakness by manually
+constructing a "valid" struct literal.
+
+**Core fix.** `PromotionOosEvidence` is REMOVED entirely, replaced by
+[`VerifiedPromotionOosEvidence`] — a type with PRIVATE fields, `Serialize`
+but deliberately NOT `Deserialize` (a derived `Deserialize` impl would
+itself be a construction bypass, since `serde`'s codegen is expanded in the
+struct's own defining scope and can set private fields regardless of
+external visibility). The ONLY production construction path is
+`research_evidence::verify_promotion_oos_evidence(trial_id,
+economic_walk_forward_json, economic_daily_returns_csv, judge_json) ->
+Result<VerifiedPromotionOosEvidence, Vec<String>>`, which parses the REAL
+artifact content and extracts every fact from IT, never from a caller's
+claim. A `valid_for_testing` escape hatch remains, plainly named and
+mirroring `ArtifactLock::new_for_testing`'s existing convention exactly.
+
+**What is verified (all from `serde_json::Value`, matched by exact JSON
+path — no Rust-side re-derivation of Research semantics):**
+
+- Economic artifact: `protocol.protocol_id`, `aggregate.folds_used > 0`,
+  `holdout.status`, `execution_pricing.pricing_model_id`,
+  `weight_to_share.weight_to_share_protocol_id`, `ids.economic_eval_id`.
+- **Hash binding #1:** the economic artifact's own recorded
+  `outputs.economic_daily_returns_csv.sha256` must equal the SHA-256 of the
+  actually-supplied daily-returns bytes.
+- **Hash binding #2:** the judge artifact's `input_artifacts[trial_id]`
+  entry must record an `economic_walk_forward_json_sha256` equal to the
+  SHA-256 of the actually-supplied economic JSON TEXT, and an
+  `economic_daily_returns_csv_sha256` equal to the same daily-returns hash
+  above — structurally impossible to pair mismatched/stale/mutated
+  artifacts and still pass.
+- Judge artifact: `judge_status == "evaluated"`, `holdout.status`,
+  `trial_id ∈ included_trial_ids` (positively included, never merely
+  absent from `excluded_trial_ids`), `economic_eval_id ∈
+  input_economic_result_ids`, `dsr_results[trial_id].evaluable == true`
+  with a finite `deflated_sharpe_ratio`, `pbo_result.status ==
+  "evaluated"` with a finite `pbo`.
+
+**Explicit DSR/PBO promotion policy (mission Section 6G).**
+`PromotionConfig` gains two REQUIRED fields:
+`min_deflated_sharpe_ratio`/`max_probability_backtest_overfitting` (both
+`[0,1]`, validated fail-closed by `evaluate_promotion` itself — an
+out-of-range config value fails every candidate rather than silently
+widening the gate). "Successfully evaluated" (`judge_status ==
+"evaluated"`) is never conflated with "statistically acceptable" — the
+verified DSR/PBO numbers are compared against these EXPLICIT, caller-
+configured thresholds; no hidden constant was invented.
+
+**Hash-binding negative-control proof (mission Section 6E, the
+previously-missing load-bearing proof).**
+`mutated_economic_artifact_content_fails_hash_binding` and
+`mutated_daily_returns_csv_fails_hash_binding` each mutate exactly one byte
+of real (fixture) artifact content and prove the verifier rejects it;
+`wrong_nonempty_economic_eval_id_fails` proves a non-empty-but-wrong ID is
+rejected (closing the original's "only empty ID rejected" gap).
+
+**Files changed:** `core-rs/crates/mqk-promotion/src/research_evidence.rs`
+(rewritten), `core-rs/crates/mqk-promotion/src/types.rs`
+(`PromotionInput.oos_evidence` type change, `PromotionConfig` new fields),
+`core-rs/crates/mqk-promotion/src/evaluator.rs` (gate rewiring + threshold
+checks), `core-rs/crates/mqk-promotion/src/lib.rs` (exports),
+`core-rs/crates/mqk-promotion/Cargo.toml` (`sha2`, `hex`), 6 pre-existing
+test files updated for the type rename + new config fields,
+`scenario_promotion_oos_evidence_gate_p7c.rs` replaced by
+`scenario_promotion_oos_evidence_gate_p7c_repair_01.rs` (36 tests), this
+document.
+
+**Tests.** `scenario_promotion_oos_evidence_gate_p7c_repair_01.rs`: 36
+passed (new). `cargo test -p mqk-promotion`: 71 passed across all 8 test
+files (11 + 14 + 1 + 36 + 6 + 3 in the scenario suites, 0 unit), zero
+regressions in any pre-existing gate. `git diff --check`: clean.
+
+**Discovery finding (unchanged from original P7C):** `mqk-promotion` still
+has ZERO production callers in the workspace (confirmed by `Cargo.toml`
+dependency search across `core-rs` — no crate depends on `mqk-promotion`).
+Every `PromotionInput`/`PromotionConfig` construction site is this crate's
+own test suite. The API itself remains safe for the first future caller —
+there is no `oos_evidence = Some(pass())`-shaped bypass anywhere in
+production code.
+
+**Gate status:** P7C remains `IMPLEMENTED_PENDING_INDEPENDENT_REVIEW` —
+this repair closes the three confirmed deterministic findings against it;
+it does not itself close P7C.
+
 ---
 
 ## 2. Baseline

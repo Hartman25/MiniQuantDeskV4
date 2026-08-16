@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::artifact_gate::ArtifactLock;
-use crate::research_evidence::PromotionOosEvidence;
+use crate::research_evidence::VerifiedPromotionOosEvidence;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -25,6 +25,17 @@ pub struct PromotionConfig {
     pub min_profit_factor: f64,
     /// Minimum fraction of profitable months (0..1).
     pub min_profitable_months_pct: f64,
+    /// P7C-REPAIR-01 (mission Section 6G): minimum required Deflated/
+    /// Probabilistic Sharpe Ratio (a probability, [0,1]) from the verified
+    /// multiple-testing judge evidence for THIS candidate. Explicit,
+    /// versioned, required -- no hidden threshold constant.
+    /// `evaluate_promotion` fails closed if this is outside `[0,1]`.
+    pub min_deflated_sharpe_ratio: f64,
+    /// P7C-REPAIR-01: maximum allowed Probability of Backtest Overfitting
+    /// (`[0,1]`) from the verified multiple-testing judge evidence for the
+    /// comparison population this candidate belongs to. `evaluate_promotion`
+    /// fails closed if this is outside `[0,1]`.
+    pub max_probability_backtest_overfitting: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -95,16 +106,16 @@ pub struct PromotionInput {
     /// Set to `Some(lock)` after calling [`crate::lock_artifact_from_str`]
     /// successfully on the run's manifest + audit log.
     pub artifact_lock: Option<ArtifactLock>, // Patch B6
-    /// P7C — structurally verified promotion-grade out-of-sample Research
-    /// evidence (PROMOTION-OOS-EVIDENCE-GATE-01).
+    /// P7C-REPAIR-01 — structurally VERIFIED promotion-grade out-of-sample
+    /// Research evidence (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-01).
     ///
-    /// **Promotion is blocked if `None`** (no OOS evidence) or if any
-    /// individual fact within it fails to match the accepted Python
-    /// pipeline's protocol/status values — see
-    /// [`crate::research_evidence::check_oos_evidence`]. There is no
-    /// compatibility default equivalent to "evidence passed": `None` always
-    /// means FAIL.
-    pub oos_evidence: Option<PromotionOosEvidence>, // P7C
+    /// **Promotion is blocked if `None`** (no OOS evidence). The only way
+    /// to obtain `Some(VerifiedPromotionOosEvidence)` in production code is
+    /// [`crate::research_evidence::verify_promotion_oos_evidence`], which
+    /// hash-binds and structurally verifies the real Research artifacts —
+    /// there is no compatibility default equivalent to "evidence passed",
+    /// and no caller-populated struct that can satisfy this field.
+    pub oos_evidence: Option<VerifiedPromotionOosEvidence>, // P7C-REPAIR-01
 }
 
 // ---------------------------------------------------------------------------

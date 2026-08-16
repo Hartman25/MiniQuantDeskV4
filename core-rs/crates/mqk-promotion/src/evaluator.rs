@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use mqk_portfolio::{Fill, Side};
 use uuid::Uuid;
 
-use crate::research_evidence::check_oos_evidence;
 use crate::types::{
     Candidate, PromotionConfig, PromotionDecision, PromotionInput, PromotionMetrics,
     PromotionReport, RunProvenance,
@@ -77,13 +76,63 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         Some(_) => {} // passed with ≥ 1 scenarios — OK
     }
 
-    // P7C (PROMOTION-OOS-EVIDENCE-GATE-01) — structurally verified
-    // out-of-sample Research evidence gate. `input.oos_evidence = None`
-    // (or any individual fact within it not matching the accepted Python
-    // pipeline's protocol/status values) fails closed here — attractive
-    // historical metrics/provenance/artifact-lock/stress-suite results
-    // alone can never satisfy promotion without this.
-    fail_reasons.extend(check_oos_evidence(&input.oos_evidence));
+    // P7C-REPAIR-01 (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-01) — the config
+    // thresholds themselves must be sane before they gate anything: an
+    // out-of-range threshold (e.g. a negative min_deflated_sharpe_ratio, or
+    // a max_probability_backtest_overfitting > 1.0) would make this gate
+    // trivially pass-through, defeating its entire purpose. Fail closed on
+    // a misconfigured PromotionConfig rather than silently letting it widen
+    // the gate.
+    if !(0.0..=1.0).contains(&config.min_deflated_sharpe_ratio) {
+        fail_reasons.push(format!(
+            "Invalid PromotionConfig: min_deflated_sharpe_ratio must be within [0,1], got {}",
+            config.min_deflated_sharpe_ratio
+        ));
+    }
+    if !(0.0..=1.0).contains(&config.max_probability_backtest_overfitting) {
+        fail_reasons.push(format!(
+            "Invalid PromotionConfig: max_probability_backtest_overfitting must be within [0,1], \
+             got {}",
+            config.max_probability_backtest_overfitting
+        ));
+    }
+
+    // P7C-REPAIR-01 — structurally VERIFIED out-of-sample Research evidence
+    // gate. `input.oos_evidence = None` fails closed unconditionally —
+    // attractive historical metrics/provenance/artifact-lock/stress-suite
+    // results alone can never satisfy promotion without this. `Some(ev)`
+    // already proves (by construction — see
+    // `research_evidence::verify_promotion_oos_evidence`) that every
+    // structural/hash-binding/candidate-inclusion check passed; the only
+    // remaining decision here is whether the VERIFIED DSR/PBO numbers meet
+    // the configured statistical acceptability thresholds — "successfully
+    // evaluated" is never conflated with "acceptable".
+    match &input.oos_evidence {
+        None => {
+            fail_reasons.push(
+                "OOS evidence missing: PromotionInput.oos_evidence is None -- verified, \
+                 promotion-grade out-of-sample Research evidence is required (P7C-REPAIR-01); \
+                 historical backtest metrics alone are never sufficient"
+                    .to_string(),
+            );
+        }
+        Some(ev) => {
+            if ev.deflated_sharpe_ratio() < config.min_deflated_sharpe_ratio {
+                fail_reasons.push(format!(
+                    "Deflated Sharpe Ratio {:.6} < min {:.6}",
+                    ev.deflated_sharpe_ratio(),
+                    config.min_deflated_sharpe_ratio
+                ));
+            }
+            if ev.probability_of_backtest_overfitting() > config.max_probability_backtest_overfitting {
+                fail_reasons.push(format!(
+                    "Probability of Backtest Overfitting {:.6} > max {:.6}",
+                    ev.probability_of_backtest_overfitting(),
+                    config.max_probability_backtest_overfitting
+                ));
+            }
+        }
+    }
 
     // PATCH F3 — Fail closed on NaN key metrics.
     //

@@ -8,7 +8,7 @@ pub use evaluator::{
     build_report, check_metrics_finite, compute_metrics, evaluate_promotion, pick_winner,
     select_best,
 };
-pub use research_evidence::{check_oos_evidence, PromotionOosEvidence}; // P7C
+pub use research_evidence::{verify_promotion_oos_evidence, VerifiedPromotionOosEvidence}; // P7C-REPAIR-01
 pub use types::{
     write_promotion_report_json, Candidate, PromotionConfig, PromotionDecision, PromotionInput,
     PromotionMetrics, PromotionReport, RunProvenance, StressSuiteResult,
