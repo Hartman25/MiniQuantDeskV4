@@ -977,6 +977,112 @@ explicit instruction not to implement them.
 
 ---
 
+## 1G. BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-03 ADDENDUM (2026-08-15)
+
+Independent review of Sections 1D-1F found three further deterministic
+defects: a shared private extraction helper could still mint OFFICIAL
+authority given an injected transport; the OFFICIAL public function accepted
+a caller-selected CA discovery snapshot clock; and the resolved snapshot
+clock leaked into semantic source/trial identity. Mission
+`BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-03` closed all three against
+the same commit chain. Baseline: local `main`, four commits ahead of
+`origin/main` HEAD `ec5a3fcd8ac3232fa5f057ae56a939a78971f083` (Sections
+1D-1F's four commits).
+
+**Verdict: `COMPLETE`.**
+
+**Defect 1 — shared helper could mint official authority.**
+`_extract_research_bars_with_provenance_impl` accepted caller-supplied
+`http_get`/`extractor_id`/`source_authority` together; a test (or any caller)
+could inject a fake transport and still request
+`SOURCE_AUTHORITY_OFFICIAL_PROVIDER`, and the module's one "official path"
+unit test did exactly that. Fix: the shared core is now `_neutral_extract`
+(retrieval/normalization/CA-filtering/evidence construction only) which
+structurally cannot accept `extractor_id`/`source_authority` — no such
+parameters exist on it. A separate `_mint_manifest(neutral, *, extractor_id,
+source_authority)` mints the attestation; `extract_research_bars_with_
+provenance` calls it with hard-coded official identity and the fixed
+`_default_http_get`/`ALPACA_DATA_BASE_URL`, `extract_research_bars_with_
+provenance_diagnostic` with hard-coded diagnostic identity and the caller's
+injected transport. The former bypass test was replaced with a test that
+exercises the real `extract_research_bars_with_provenance` wrapper,
+monkeypatching only the module's `_default_http_get`/`_utc_now` seams.
+
+**Defect 2 — caller-selected snapshot clock.** `extract_research_bars_with_
+provenance` accepted `retrieval_timestamp_utc`, letting an ordinary official
+caller claim an arbitrary stale/future CA discovery snapshot. Fix: the
+parameter is removed from the official signature; the CA discovery cutoff is
+resolved exactly once via a new `_utc_now()` seam (real wall-clock UTC,
+monkeypatchable for tests). The diagnostic wrapper's equivalent parameter was
+renamed `ca_discovery_cutoff_utc` (naming what it is, not pretending to be a
+generic retrieval timestamp) and remains freely injectable for deterministic
+tests.
+
+**Defect 3 — snapshot clock leaking into semantic identity.**
+`canonical_source_attestation_content` hashed the entire
+`corporate_action_query_coverage` dict, including `ca_discovery_end_utc` —
+the resolved wall-clock snapshot cutoff. Two extractions with byte-identical
+bars/CA evidence/asof/provider contract but different snapshot cutoffs
+therefore produced different `source_attestation_id` / trial identity, purely
+from re-running at a different moment. Fix: a new
+`canonical_ca_query_semantic_content` selects only the semantic subset
+(discovery protocol, discovery floor, research window, requested
+symbols/types) for hashing; the full coverage dict, including
+`ca_discovery_end_utc`, remains on the attestation object for audit.
+RED/GREEN proof (`test_ca_discovery_end_utc_excluded_from_source_attestation_id`):
+pre-repair the two attestation IDs would have differed; post-repair they are
+identical. Revision sensitivity is preserved unchanged: a later snapshot that
+discovers a genuinely additional/backfilled corporate action still changes
+`corporate_action_evidence_id` → `source_attestation_id` (Section 1F's
+mechanism, untouched).
+
+**Consistency hardening.** `bars_provenance._require_consistent_ca_discovery_
+coverage` (new) additionally requires, for OFFICIAL gate verification, that
+`corporate_action_query_coverage`'s required fields are present AND agree
+with the rest of the same attestation (`ca_discovery_end_utc` ==
+`retrieval_timestamp_utc`; research window == requested range; requested
+symbols == attested symbols) — a structurally-present-but-internally-
+contradictory coverage object fails closed rather than being hashed as-is.
+This check never compares to real current wall-clock time, so an old, still-
+valid artifact does not expire merely for being old.
+
+**Real provider floor proof.** One read-only `fetch_corporate_actions` call
+against Alpaca's live `/v1/corporate-actions` (symbol `AAPL`, `start=
+1900-01-01`, `end=`the resolved live snapshot) using this repo's existing
+`ALPACA_API_KEY_PAPER`/`ALPACA_API_SECRET_PAPER` convention: HTTP success,
+pagination completed, 44 corporate-action entries returned. No broker/order/
+account-mutation endpoint was called; no credentials were logged or printed.
+
+**Files changed:** `research-py/src/mqk_research/data/alpaca_historical.py`
+(`_neutral_extract` + `_mint_manifest` replace `_extract_research_bars_with_
+provenance_impl`; `_utc_now` seam; official signature drops
+`retrieval_timestamp_utc`; diagnostic parameter renamed
+`ca_discovery_cutoff_utc`), `bars_provenance.py`
+(`canonical_ca_query_semantic_content`,
+`_require_consistent_ca_discovery_coverage`), `tests/test_alpaca_historical.py`
+(official-wrapper bypass test replaced; structural neutral-core/official-
+signature tests; snapshot-resolved-once test; diagnostic parameter rename),
+`tests/test_source_attestation.py` (`_valid_attestation` now derives an
+internally-consistent `corporate_action_query_coverage`; identity-exclusion
+RED/GREEN proof; four new consistency-violation tests).
+
+**Tests.** `test_alpaca_historical.py`: 64 passed (was 62; +2 new: neutral-
+core structural check, snapshot-resolved-once check; several others
+renamed/rewritten in place). `test_source_attestation.py`: 37 passed (was 31;
++6 new: identity-exclusion RED/GREEN proof, audit-visibility proof, four
+consistency-violation checks). `test_bars_provenance.py` +
+`test_economic_walkforward.py` + `test_multiple_testing_judge.py`: 133
+passed, unchanged. Full `research-py` suite: **1332 passed, 7 skipped, 12
+subtests passed** (zero regressions; skip count unchanged from Section 1F).
+`git diff --check`: clean.
+
+**Remaining blocker:** none for this repair's scope. Category-B
+corporate-action handling remains an explicit future patch, unchanged from
+Sections 1D-1F. P7/P9/P10 remain out of scope, per this repair mission's
+explicit instruction not to implement them.
+
+---
+
 ## 2. Baseline
 
 ```
