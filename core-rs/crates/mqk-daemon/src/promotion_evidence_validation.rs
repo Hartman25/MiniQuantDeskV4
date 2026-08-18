@@ -102,7 +102,7 @@ fn read_bounded<R: std::io::Read>(mut reader: R, max_bytes: u64) -> Result<Vec<u
 /// comment for why a path-based reopen is unsound here). UTF-8 decoding
 /// happens only after the bounded byte read completes, so an invalid-UTF-8
 /// file is refused distinctly from an over-size one.
-fn read_bounded_file_string(
+pub(crate) fn read_bounded_file_string(
     file: std::fs::File,
     display_path: &Path,
     max_bytes: u64,
@@ -563,7 +563,7 @@ fn read_json<T: serde::de::DeserializeOwned>(
 /// `Path::is_file()` on the un-canonicalized join alone, and never trusts a
 /// `PathBuf` returned from an earlier check as proof of what a later open
 /// will return.
-fn open_confined_regular_child(
+pub(crate) fn open_confined_regular_child(
     child: &Path,
     root_canon: &Path,
     candidate_canon: &Path,

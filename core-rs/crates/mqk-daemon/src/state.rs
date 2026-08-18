@@ -639,6 +639,38 @@ pub struct AppState {
     /// (`truth_state="path_rejected"`) — this route never reads an
     /// arbitrary file path.
     pub strategy_review_artifact_root: String,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01: trusted, operator-configured
+    /// path to the durable Research SQLite registry (the same database
+    /// `mqk_research.exp_distributed.storage.ResearchResultStore` writes --
+    /// see `mqk_promotion::research_registry::load_research_authority`).
+    ///
+    /// Sourced ONLY from `MQK_RESEARCH_REGISTRY_DB` -- never from request
+    /// JSON, a query parameter, or any other caller-suppliable value; there
+    /// is no fixed-path fallback. `None` means the P7C research-evidence
+    /// gate is not configured on this daemon, and every evidence-requiring
+    /// promotion transition fails closed (see
+    /// `routes::strategy_promotions::strategy_promotion_transition`).
+    pub research_registry_db_path: Option<String>,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01: root directory the P7C
+    /// research-evidence gate reads `research_evidence_dir` /
+    /// `research_judge_artifact_path` from. A requested path that does not
+    /// resolve inside this root is refused -- same canonicalize+root-prefix
+    /// pattern as `strategy_review_artifact_root`. Sourced ONLY from
+    /// `MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT`; no fixed-path fallback.
+    pub research_evidence_artifact_root: Option<String>,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01: explicit, versioned minimum
+    /// Deflated/Probabilistic Sharpe Ratio the P7C gate requires (mirrors
+    /// `mqk_promotion::PromotionConfig::min_deflated_sharpe_ratio`). Sourced
+    /// ONLY from `MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO`; no hidden
+    /// default -- `None` fails the gate closed rather than silently
+    /// widening it.
+    pub research_min_deflated_sharpe_ratio: Option<f64>,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01: explicit, versioned maximum
+    /// Probability of Backtest Overfitting the P7C gate allows (mirrors
+    /// `mqk_promotion::PromotionConfig::max_probability_backtest_overfitting`).
+    /// Sourced ONLY from `MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING`;
+    /// no hidden default.
+    pub research_max_probability_backtest_overfitting: Option<f64>,
     /// DATA-INGEST-GUI-SYNC-ALL-01: Filesystem path to the canonical instrument registry.
     ///
     /// Read at route-time (not cached) by GET /api/v1/ingest/tracked-equities.
@@ -1773,6 +1805,19 @@ impl AppState {
                 .unwrap_or_else(|_| "exports/strategy_scans".to_string()),
             strategy_review_artifact_root: std::env::var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT")
                 .unwrap_or_else(|_| "exports/strategy_reviews".to_string()),
+            research_registry_db_path: std::env::var("MQK_RESEARCH_REGISTRY_DB").ok(),
+            research_evidence_artifact_root: std::env::var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT")
+                .ok(),
+            research_min_deflated_sharpe_ratio: std::env::var(
+                "MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO",
+            )
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok()),
+            research_max_probability_backtest_overfitting: std::env::var(
+                "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING",
+            )
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok()),
             instrument_registry_path: std::env::var("MQK_INSTRUMENT_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             instrument_registry_v2_path: std::env::var("MQK_INSTRUMENT_REGISTRY_V2_PATH").ok(),

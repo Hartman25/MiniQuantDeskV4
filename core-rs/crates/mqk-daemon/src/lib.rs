@@ -30,6 +30,7 @@ pub mod parity_evidence;
 pub mod pre_event_flatten;
 pub mod promotion_evidence_validation;
 pub mod promotion_gate;
+pub mod research_evidence_gate;
 pub mod routes;
 pub mod runtime_opportunity_allocation;
 pub mod runtime_opportunity_artifact;

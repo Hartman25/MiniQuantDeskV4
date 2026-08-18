@@ -6586,6 +6586,13 @@ pub struct StrategyPromotionCheckResponse {
 /// against the actual review artifact content -- this route never trusts a
 /// caller's claim that a candidate is `paper_candidate`.
 ///
+/// PROMOTION-WALKFORWARD-GATE-WIRING-01: the same evidence-requiring
+/// transitions additionally require `research_trial_id`,
+/// `research_evidence_dir`, and `research_judge_artifact_path` -- verified,
+/// AUTHORITY-anchored Research out-of-sample evidence (P7C) is required
+/// ADDITIONALLY to (never instead of) the scanner/review evidence above. See
+/// [`crate::research_evidence_gate`].
+///
 /// `effective_at_utc` (and `expires_at_utc` when present) are caller-
 /// injected RFC3339 timestamps -- no `now()` is read on this route.
 #[derive(Debug, Clone, Deserialize)]
@@ -6599,6 +6606,21 @@ pub struct StrategyPromotionTransitionRequest {
     /// Required when the requested transition needs fresh evidence.
     /// Must resolve inside `MQK_STRATEGY_REVIEW_ARTIFACT_ROOT`.
     pub review_dir: Option<String>,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01: required alongside `review_dir`
+    /// for evidence-requiring transitions. The Research trial identity this
+    /// transition claims to be backed by -- an identity claim only, never
+    /// trusted on its own; independently verified against the daemon's
+    /// trusted Research registry (`MQK_RESEARCH_REGISTRY_DB`, never this
+    /// request) by [`crate::research_evidence_gate::evaluate_research_evidence_gate`].
+    pub research_trial_id: Option<String>,
+    /// Directory containing `economic_walk_forward.json` and
+    /// `economic_daily_returns.csv` for `research_trial_id`. Must resolve
+    /// inside `MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT`.
+    pub research_evidence_dir: Option<String>,
+    /// Path to the multiple-testing judge artifact JSON covering
+    /// `research_trial_id`. Must resolve inside
+    /// `MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT`.
+    pub research_judge_artifact_path: Option<String>,
     pub effective_at_utc: String,
     pub expires_at_utc: Option<String>,
     pub initiated_by: String,

@@ -135,6 +135,104 @@ fn write_paper_candidate_fixture(out_dir: &std::path::Path, strategy_id: &str) -
     write_review_artifacts(out_dir, &output).expect("write closure-proof fixture")
 }
 
+/// PROMOTION-WALKFORWARD-GATE-WIRING-01: a fully self-consistent,
+/// registry-anchored P7C evidence bundle for `strategy_id`, written under
+/// `root`. Mirrors `mqk-promotion/tests/common`'s exact artifact shapes
+/// (also duplicated, for the same "no cross-crate test visibility" reason,
+/// in `scenario_strategy_promotion_routes_01.rs`).
+struct ResearchEvidenceFixture {
+    trial_id: String,
+    evidence_dir: PathBuf,
+    judge_path: PathBuf,
+}
+
+fn write_research_evidence_fixture(root: &std::path::Path, seed: &str) -> ResearchEvidenceFixture {
+    use sha2::{Digest, Sha256};
+
+    let trial_id = format!("trial_{seed}");
+    let experiment_id = format!("exp_{seed}");
+    let economic_eval_id = format!("econ_eval_{seed}");
+
+    let evidence_dir = root.join(format!("research_evidence_{seed}"));
+    std::fs::create_dir_all(&evidence_dir).expect("create research evidence dir");
+
+    let daily_csv = b"date,net_daily_return\n2021-01-01,0.0010\n2021-01-02,0.0021\n".to_vec();
+    let daily_sha = hex::encode(Sha256::digest(&daily_csv));
+    std::fs::write(evidence_dir.join("economic_daily_returns.csv"), &daily_csv)
+        .expect("write daily returns csv");
+
+    let economic_json = format!(
+        r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}},"folds":[{{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}}]}}"#
+    );
+    let economic_sha = hex::encode(Sha256::digest(economic_json.as_bytes()));
+    std::fs::write(evidence_dir.join("economic_walk_forward.json"), &economic_json)
+        .expect("write economic artifact");
+
+    let judge_json = format!(
+        r#"{{"schema_version":"multiple_testing_judge_v1","protocol":{{"protocol_id":"research_multiple_testing_judge_v1"}},"comparison_scope":{{"experiment_id":"{experiment_id}"}},"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":0.85}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
+    );
+    let judge_sha = hex::encode(Sha256::digest(judge_json.as_bytes()));
+    let judge_path = root.join(format!("judge_{seed}.json"));
+    std::fs::write(&judge_path, &judge_json).expect("write judge artifact");
+
+    let registry_db_path = root.join("research_registry.sqlite3");
+    let conn = rusqlite::Connection::open(&registry_db_path).expect("open registry db");
+    conn.execute_batch(
+        "
+        create table if not exists research_trials (
+            trial_id text primary key,
+            experiment_id text not null,
+            hypothesis_id text not null
+        );
+        create table if not exists research_attempts (
+            attempt_id text primary key,
+            trial_id text not null,
+            status text not null,
+            result_id text
+        );
+        create table if not exists research_judge_artifacts (
+            judge_artifact_sha256 text primary key,
+            judge_id text not null,
+            experiment_id text not null,
+            hypothesis_id text,
+            canonical_judge_json text
+        );
+        ",
+    )
+    .expect("create registry schema");
+    conn.execute(
+        "insert into research_trials (trial_id, experiment_id, hypothesis_id) values (?1, ?2, ?3)",
+        rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}")],
+    )
+    .expect("insert research_trials row");
+    conn.execute(
+        "insert into research_attempts (attempt_id, trial_id, status, result_id) \
+         values (?1, ?2, 'succeeded', ?3)",
+        rusqlite::params![format!("{trial_id}:att0001"), trial_id, economic_eval_id],
+    )
+    .expect("insert research_attempts row");
+    conn.execute(
+        "insert into research_judge_artifacts \
+         (judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json) \
+         values (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            judge_sha,
+            format!("judge_{seed}"),
+            experiment_id,
+            Option::<String>::None,
+            judge_json,
+        ],
+    )
+    .expect("insert research_judge_artifacts row");
+    drop(conn);
+
+    ResearchEvidenceFixture {
+        trial_id,
+        evidence_dir,
+        judge_path,
+    }
+}
+
 async fn seed_registry(pool: &sqlx::PgPool, strategy_id: &str) {
     let ts = Utc::now();
     mqk_db::upsert_strategy_registry_entry(
@@ -239,12 +337,24 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     let root = std::env::temp_dir().join(format!("mqk_closure_proof_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("create fixture root");
     std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
+    // PROMOTION-WALKFORWARD-GATE-WIRING-01: trusted config for the P7C
+    // research-evidence gate (Gate 4c), required in addition to the
+    // review-artifact evidence above for the shadow_approved transition
+    // below.
+    std::env::set_var(
+        "MQK_RESEARCH_REGISTRY_DB",
+        root.join("research_registry.sqlite3"),
+    );
+    std::env::set_var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT", &root);
+    std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.0");
+    std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "1.0");
 
     // --- Step 1: register the strategy. -----------------------------------
     seed_registry(&pool, &strategy_id).await;
 
     // --- Step 2: write a real paper_candidate review artifact fixture. ----
     let review_dir = write_paper_candidate_fixture(&root, &strategy_id);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
 
     let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
         pool.clone(),
@@ -260,6 +370,9 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
             "timeframe_secs": TIMEFRAME_SECS,
             "target_state": "shadow_approved",
             "review_dir": review_dir.to_str().unwrap(),
+            "research_trial_id": research.trial_id,
+            "research_evidence_dir": research.evidence_dir.to_str().unwrap(),
+            "research_judge_artifact_path": research.judge_path.to_str().unwrap(),
             "effective_at_utc": Utc::now().to_rfc3339(),
             "expires_at_utc": null,
             "initiated_by": "closure-proof-operator",

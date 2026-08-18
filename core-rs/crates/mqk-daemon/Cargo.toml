@@ -60,6 +60,11 @@ mqk-backtest = { path = "../mqk-backtest" }
 mqk-artifacts = { path = "../mqk-artifacts" }
 # DATA-INGEST-GUI-SYNC-ALL-01: read-only instrument registry access for tracked-equities route
 mqk-md = { path = "../mqk-md" }
+# PROMOTION-WALKFORWARD-GATE-WIRING-01: production caller of
+# verify_promotion_oos_evidence -- see src/research_evidence_gate.rs. No
+# dependency cycle: mqk-promotion depends only on mqk-artifacts/mqk-audit/
+# mqk-backtest/mqk-portfolio, none of which depend on mqk-daemon.
+mqk-promotion = { path = "../mqk-promotion" }
 reqwest.workspace = true
 # BRK-00R-05: Alpaca paper WebSocket transport.
 tokio-tungstenite.workspace = true
@@ -95,6 +100,9 @@ http-body-util = "0.1"
 bytes = "1"
 # B6: temp policy files for capital budget gate proof tests
 tempfile = "3"
+# PROMOTION-WALKFORWARD-GATE-WIRING-01 tests: synthetic Research registry DB
+# fixtures (same crate+version pairing already vetted in mqk-promotion).
+rusqlite = { version = "0.30", features = ["bundled"] }
 # FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 3: activates
 # mqk_db::run_isolated / create_disposable_test_db / DisposableTestDb
 # (mqk-db's test_support module) for this crate's own tests and hermetic

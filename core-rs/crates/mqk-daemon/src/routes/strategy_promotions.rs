@@ -619,9 +619,35 @@ pub(crate) async fn strategy_promotion_transition(
     // anyway), which would silently break idempotency by minting a
     // different id for what the client considers "the same request".
     let review_dir_raw = body.review_dir.as_deref().unwrap_or("").trim().to_string();
+    // PROMOTION-WALKFORWARD-GATE-WIRING-01: the three P7C fields are
+    // client-supplied request content that materially changes the
+    // transition's evidentiary basis, exactly like `review_dir` above --
+    // included in the deterministic seed so two requests differing only in
+    // which Research trial/evidence they claim can never collide on the
+    // same `transition_id`.
+    let research_trial_id_raw = body
+        .research_trial_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let research_evidence_dir_raw = body
+        .research_evidence_dir
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let research_judge_artifact_path_raw = body
+        .research_judge_artifact_path
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let seed = format!(
         "mqk-strategy-promotion-transition.v1|strategy_id={strategy_id}|symbol={symbol}|\
          timeframe_secs={timeframe_secs}|target_state={target_state}|review_dir={review_dir_raw}|\
+         research_trial_id={research_trial_id_raw}|research_evidence_dir={research_evidence_dir_raw}|\
+         research_judge_artifact_path={research_judge_artifact_path_raw}|\
          effective_at_utc={}|expires_at_utc={:?}|initiated_by={initiated_by}|reason={}",
         effective_at_utc.to_rfc3339(),
         expires_at_utc.map(|t| t.to_rfc3339()),
@@ -790,6 +816,88 @@ pub(crate) async fn strategy_promotion_transition(
     } else {
         None
     };
+
+    // Gate 4c (PROMOTION-WALKFORWARD-GATE-WIRING-01): verified Research
+    // out-of-sample evidence (P7C), required ADDITIONALLY to (never instead
+    // of) Gate 4's scanner/review evidence above -- runs in the exact same
+    // `transition_requires_evidence` branch, so a transition that does not
+    // require evidence at all is unaffected. `evaluate_research_evidence_gate`
+    // reads `research_registry_db_path` / `research_evidence_artifact_root` /
+    // the two thresholds ONLY from trusted daemon config (`st`) -- never
+    // from this request -- so nothing in `body` can select an alternate
+    // registry, artifact root, or acceptance threshold.
+    if transition_requires_evidence(previous_state.as_deref(), &target_state) {
+        let (research_trial_id, research_evidence_dir, research_judge_artifact_path) = match (
+            body.research_trial_id.as_deref(),
+            body.research_evidence_dir.as_deref(),
+            body.research_judge_artifact_path.as_deref(),
+        ) {
+            (Some(t), Some(d), Some(j))
+                if !t.trim().is_empty() && !d.trim().is_empty() && !j.trim().is_empty() =>
+            {
+                (t, d, j)
+            }
+            _ => {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::BAD_REQUEST,
+                    accepted: false,
+                    disposition: "evidence_invalid",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state,
+                    target_state,
+                    transition_id: None,
+                    blockers: vec![
+                        "research_trial_id, research_evidence_dir, and \
+                         research_judge_artifact_path are all required for this transition \
+                         (PROMOTION-WALKFORWARD-GATE-WIRING-01: verified Research out-of-sample \
+                         evidence is required in addition to review-artifact evidence)"
+                            .to_string(),
+                    ],
+                });
+            }
+        };
+        match crate::research_evidence_gate::evaluate_research_evidence_gate(
+            &st,
+            research_trial_id,
+            research_evidence_dir,
+            research_judge_artifact_path,
+        ) {
+            crate::research_evidence_gate::ResearchEvidenceGateOutcome::Passed {
+                trial_id,
+                economic_eval_id,
+                deflated_sharpe_ratio,
+                probability_of_backtest_overfitting,
+            } => {
+                tracing::info!(
+                    strategy_id = %strategy_id,
+                    symbol = %symbol,
+                    timeframe_secs,
+                    research_trial_id = %trial_id,
+                    research_economic_eval_id = %economic_eval_id,
+                    deflated_sharpe_ratio,
+                    probability_of_backtest_overfitting,
+                    "PROMOTION-WALKFORWARD-GATE-WIRING-01: verified Research OOS evidence accepted \
+                     for shadow_approved transition",
+                );
+            }
+            crate::research_evidence_gate::ResearchEvidenceGateOutcome::Rejected { blockers } => {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::BAD_REQUEST,
+                    accepted: false,
+                    disposition: "evidence_invalid",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state,
+                    target_state,
+                    transition_id: None,
+                    blockers,
+                });
+            }
+        }
+    }
 
     // STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase D): derive
     // evidence lineage server-side, never from the request. A
