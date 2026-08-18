@@ -1350,13 +1350,24 @@ pub async fn fetch_autonomous_daily_operation_event_at_sequence(
 /// regardless of whether `now_utc` falls inside the operation's persisted
 /// window (e.g. a `stopping` operation past its own close is still
 /// relevant).
-pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 6] = [
+///
+/// AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-AMBIGUITY-SCOPING-01:
+/// `evidence_degraded` deliberately does NOT appear in this list (see
+/// [`fetch_relevant_open_autonomous_daily_operation`]'s own doc comment for
+/// the narrower, evidence-gated clause that replaces it). `evidence_degraded`
+/// is the one state whose unconditional inclusion here was observed to
+/// durably wedge every later market-date's operation behind a prior-date row
+/// that never obtained runtime/execution authority and never will (its
+/// window is permanently closed) -- a genuinely different failure shape from
+/// `controller_degraded` (a control-plane/process problem, still always
+/// relevant here) or an in-progress `running`/`stopping`/`recovery_retrying`
+/// operation.
+pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 5] = [
     STATE_RUNNING,
     STATE_RECOVERY_RETRYING,
     STATE_STOPPING,
     STATE_STOP_RETRYING,
     STATE_CONTROLLER_DEGRADED,
-    STATE_EVIDENCE_DEGRADED,
 ];
 
 /// Bounded row cap for [`fetch_relevant_open_autonomous_daily_operation`].
@@ -1375,6 +1386,21 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 /// any of:
 /// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active,
 ///   recovering, or stopping lifecycle in progress), or
+/// - its `state` is `evidence_degraded` AND it carries any run/execution
+///   evidence (`run_id is not null`, or `started_at_utc is not null`, or
+///   `bars_dispatched <> 0`) -- AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-
+///   AMBIGUITY-SCOPING-01. An `evidence_degraded` row with genuine
+///   unresolved execution/broker evidence stays unconditionally relevant
+///   forever, exactly like the unconditional states above -- this clause
+///   narrows nothing for that shape. Only an `evidence_degraded` row that
+///   never obtained runtime/execution authority (no run ever bound, no bar
+///   ever dispatched) falls through to the date-window clause below like
+///   `manual_intervention_required` already does, so a prior-market-date
+///   row of this exact no-run shape cannot durably wedge every later
+///   market-date's operation behind it once its own window has closed. A
+///   same-day `evidence_degraded` row of this shape is unaffected: `now_utc`
+///   still falls inside its own persisted window via the next clause, so it
+///   still blocks exactly as conservatively as before.
 /// - `now_utc` falls within its persisted
 ///   `preopen_start_utc ..= postclose_finalize_utc` window, or
 /// - it durably bound a run (`run_id is not null`) that has no durable
@@ -1408,7 +1434,11 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
           and adapter_id = $2
           and state not in ($3, $4, $5)
           and (
-            state in ($6, $7, $8, $9, $10, $11)
+            state in ($6, $7, $8, $9, $10)
+            or (
+              state = $11
+              and (run_id is not null or started_at_utc is not null or bars_dispatched <> 0)
+            )
             or ($12 >= preopen_start_utc and $12 <= postclose_finalize_utc)
             or (run_id is not null and stopped_at_utc is null)
           )

@@ -1237,6 +1237,154 @@ async fn relevant_open_lookup_stale_manual_row_cannot_shadow_running_current_row
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-AMBIGUITY-SCOPING-01: a prior-
+// market-date `evidence_degraded` row that never obtained runtime/execution
+// authority must not durably shadow a later date's real operation -- but an
+// `evidence_degraded` row carrying genuine run/execution evidence, or one
+// from the *current* market date, must still block exactly as
+// conservatively as `manual_intervention_required` already does.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stale_no_run_evidence_degraded_row_cannot_shadow_running_current_row(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    // A stale historical row reaching evidence_degraded via the real
+    // production path for "session closed before any runtime ever started"
+    // (awaiting_preopen -> stopping -> evidence_degraded), with zero run
+    // evidence: no run_id, no started_at_utc, bars_dispatched = 0.
+    let stale_id = seed_operation_for_date(&pool, "relopen-ed-stale", yesterday).await;
+    let stale_ts = session_bounds(yesterday).0;
+    let stale_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stale_id)
+        .await?
+        .expect("row must exist");
+    let stale_row = advance_one(&pool, &stale_row, STATE_STOPPING, stale_ts).await?;
+    record_stopped_at(&pool, stale_id, stale_ts).await?;
+    let stale_row = advance_one(
+        &pool,
+        &stale_row,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        stale_ts,
+    )
+    .await?;
+    assert_eq!(stale_row.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    assert!(stale_row.run_id.is_none(), "fixture precondition: no run ever started");
+
+    // Today's current row: running.
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-stale", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-stale",
+        current_ts,
+    )
+    .await?
+    .expect("the running current row must be found");
+    assert_eq!(
+        found.operation_id, current_id,
+        "a stale no-run evidence_degraded row must never shadow the running current row"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_evidence_degraded_row_with_run_evidence_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    // A prior-day row that DID obtain a real run (the "mid-run degrade"
+    // shape: running -> evidence_degraded directly, never touching
+    // stopping) -- genuine unresolved execution evidence must still fail
+    // closed regardless of date, exactly like an unstopped bound run
+    // already does via the `run_id is not null and stopped_at_utc is null`
+    // clause.
+    let stale_id = seed_operation_for_date(&pool, "relopen-ed-active", yesterday).await;
+    let stale_ts = session_bounds(yesterday).0;
+    let stale_run_id = Uuid::new_v4();
+    let running = advance_to_running(&pool, stale_id, stale_run_id, stale_ts).await?;
+    let degraded = advance_one(
+        &pool,
+        &running,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        stale_ts,
+    )
+    .await?;
+    assert_eq!(degraded.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    assert!(degraded.run_id.is_some(), "fixture precondition: a real run was bound");
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-active", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-active",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "an evidence_degraded row with real run evidence must still fail closed as ambiguous, \
+         even from a prior date; got {result:?}"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_same_day_no_run_evidence_degraded_still_found() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    // A same-day evidence_degraded row with zero run evidence must still be
+    // found via the date-window clause -- this route's narrowing must never
+    // silently ignore evidence_degraded outright, only date-scope it the
+    // same way manual_intervention_required is already scoped.
+    let operation_id = seed_operation_for_date(&pool, "relopen-ed-sameday", today).await;
+    let ts = session_bounds(today).0;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let row = advance_one(&pool, &row, STATE_STOPPING, ts).await?;
+    record_stopped_at(&pool, operation_id, ts).await?;
+    let degraded = advance_one(&pool, &row, mqk_db::STATE_EVIDENCE_DEGRADED, ts).await?;
+    assert!(degraded.run_id.is_none(), "fixture precondition: no run ever started");
+
+    let inside_window = ts + ChronoDuration::hours(1);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-sameday",
+        inside_window,
+    )
+    .await?
+    .expect("a same-day evidence_degraded row must still be found while inside its own window");
+    assert_eq!(found.operation_id, operation_id);
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn relevant_open_lookup_multiple_active_rows_fail_closed() -> anyhow::Result<()> {
