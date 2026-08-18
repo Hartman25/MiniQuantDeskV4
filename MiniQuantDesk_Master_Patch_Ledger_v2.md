@@ -1,5 +1,11 @@
 # MiniQuantDesk V4 — Master Patch Ledger and Handoff
 
+> **HISTORICAL / TECHNICAL RECORD** (noted by `DOCS-TRACKER-CLEANUP-01`, 2026-08-17)
+>
+> This document is retained for technical history/evidence (21k+ lines of prior session prompts and closure records) and for a hard script dependency (`scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1` reads this exact path/content).
+>
+> **Current completion status and remaining work are authoritative only in `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`.** Do not treat any status claim below as current without cross-checking that file first.
+
 **Purpose:** Preserve all active, queued, parked, and recently closed MiniQuantDesk patches so future ChatGPT / Claude / Codex sessions do not lose context.
 
 **Primary operating rule:** Work from the **current local repo/worktree only**. Do not trust prior chat claims, screenshots, docs, patch labels, or memory unless the current repo, live daemon API, DB rows, artifacts, tests, scripts, or command output proves it.

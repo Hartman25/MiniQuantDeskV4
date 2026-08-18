@@ -1,5 +1,11 @@
 # MiniQuantDesk V4 — Active Patch Ledger
 
+> **HISTORICAL / TECHNICAL RECORD** (noted by `DOCS-TRACKER-CLEANUP-01`, 2026-08-17)
+>
+> This is a 2026-04-25 planning snapshot, already noted as superseded by `docs/audits/multi_asset_completion_audit.md`. Its "Immediate Active" hardening items predate four months of subsequent work reflected in the current ledger; its backlog-derived sections (§2) are drawn from `miniquantdesk_future_backlog_brainstorm.md`, which remains the retained source for that material.
+>
+> **Current completion status and remaining work are authoritative only in `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`.**
+
 Generated from:
 - Current hostile repo audit findings from the 2026-04-25 audit pass.
 - `miniquantdesk_future_backlog_brainstorm.md` uploaded 2026-04-25.
