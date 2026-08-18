@@ -3383,7 +3383,15 @@ async fn matching_local_runtime_active(
 /// `persist_autonomous_daily_finalization_blocker` seam -- never a
 /// fabricated empty configuration, never a second, coordinator-owned
 /// blocker writer.
-async fn handle_outcome_finalization(
+// Visibility note (AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-FINALIZATION-01):
+// `pub(crate)` solely so `routes::autonomous_daily_operator`'s narrow,
+// explicit stale-operation finalize route can invoke the exact same
+// finalization codepath ordinary coordinator ticks use, on a specific
+// operation record the ambiguity-detecting `fetch_relevant_open_
+// autonomous_daily_operation` can never select for a normal tick once more
+// than one PAPER/adapter operation is simultaneously "relevant". No logic
+// in this function changed for that route's sake.
+pub(crate) async fn handle_outcome_finalization(
     state: &Arc<AppState>,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,

@@ -57,11 +57,17 @@ use crate::state::AppState;
 
 use mqk_db::{
     AutonomousDailyOperationRecord, AutonomousDailyTransitionOutcome,
-    TransitionAutonomousDailyOperationArgs, STATE_MANUAL_INTERVENTION_REQUIRED,
-    STATE_PREPARING_DATA,
+    TransitionAutonomousDailyOperationArgs, STATE_EVIDENCE_DEGRADED,
+    STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA,
+};
+
+use crate::state::autonomous_daily_coordinator::{
+    handle_outcome_finalization, AutonomousDailyCoordinatorTickOutcome,
 };
 
 const CANONICAL_ROUTE: &str = "/api/v1/autonomous/daily-operation/retry";
+const CANONICAL_ROUTE_FINALIZE_STALE: &str =
+    "/api/v1/autonomous/daily-operation/finalize-stale";
 
 // ---------------------------------------------------------------------------
 // §14 — closed-set manual-intervention retry eligibility classification
@@ -640,6 +646,258 @@ pub(crate) async fn autonomous_daily_operation_retry(
                 .into_response()
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/autonomous/daily-operation/finalize-stale
+// ---------------------------------------------------------------------------
+//
+// AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-FINALIZATION-01: a narrow,
+// explicit operator action to finalize a PRIOR-DAY operation stuck in
+// `evidence_degraded` with `stopped_at_utc` already set -- the exact
+// precondition `autonomous_daily_coordinator::dispatch_by_state` already
+// requires before routing to `handle_outcome_finalization` for any
+// operation it processes. This route exists only because
+// `fetch_relevant_open_autonomous_daily_operation` (deliberately, per its
+// own doc comment) never date-window-scopes `evidence_degraded` the way it
+// does `manual_intervention_required`: a stale prior-day row in that state
+// is "always relevant" and makes every later day's ordinary coordinator
+// tick fail closed with an ambiguity error before any per-operation
+// handler -- including the one that would otherwise finalize the stale row
+// itself -- ever runs. A human must explicitly point at the exact stale
+// operation_id to break that deadlock.
+//
+// This route invents no new finalization semantics. It calls the exact
+// same `handle_outcome_finalization` ordinary coordinator ticks call, on
+// the exact operation record identified by `operation_id`, and nothing
+// else -- not a second classifier, not a direct SQL write.
+//
+// Safety (defense in depth -- every check independently sufficient to
+// refuse with zero mutation):
+//   - PAPER only (mirrors the retry route's own §24 gate).
+//   - `state` must be exactly `evidence_degraded` -- an active/in-progress
+//     operation is in some other state (`running`, `preparing_data`,
+//     `awaiting_open`, ...) and is refused by this check alone.
+//   - `stopped_at_utc` must already be set -- the same precondition
+//     `dispatch_by_state`'s own `evidence_degraded` arm requires before it
+//     will ever route to finalization; never set by this route itself.
+//   - `now_utc` must be at or past the operation's own
+//     `effective_operation_close_utc` -- the exact field/direction the
+//     existing retry route already uses (inverted: that route refuses once
+//     the window has closed; this route refuses unless it has). This
+//     structurally prevents ever pointing this route at the current
+//     trading day's live operation.
+//   - reuses `check_prestart_retry_safety` unmodified: refuses on any
+//     `run_id`, `started_at_utc`, `bars_dispatched`, `last_dispatched_bar_ts`,
+//     bar-dispatch-claim, or validated run-lineage evidence -- the same
+//     zero-economic-activity bar the retry route enforces.
+//   - never touches arm/halt/reconcile/kill-switch state; never starts a
+//     runtime; never submits an order -- `handle_outcome_finalization` has
+//     no such capability, and this route adds none.
+pub(crate) async fn autonomous_daily_operation_finalize_stale(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AutonomousDailyOperationRetryRequest>,
+) -> Response {
+    let now_utc = st.daily_data_readiness_now().await;
+
+    let Some(pool) = st.db.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(finalize_stale_base_response(body.operation_id, "backend_unavailable")),
+        )
+            .into_response();
+    };
+
+    let operation = match mqk_db::fetch_autonomous_daily_operation_by_id(&pool, body.operation_id)
+        .await
+    {
+        Ok(Some(op)) => op,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(finalize_stale_base_response(body.operation_id, "not_found")),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!("autonomous_daily_operation_finalize_stale: fetch failed: {err}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(finalize_stale_base_response(body.operation_id, "backend_unavailable")),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(expected_market_date) = &body.expected_market_date {
+        if operation.market_date.format("%Y-%m-%d").to_string() != *expected_market_date {
+            return (
+                StatusCode::CONFLICT,
+                Json(finalize_stale_refusal_response(
+                    &operation,
+                    "not_recoverable",
+                    "expected_market_date does not match the target operation's market_date",
+                )),
+            )
+                .into_response();
+        }
+    }
+
+    if !operation.deployment_mode.eq_ignore_ascii_case("PAPER") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(finalize_stale_refusal_response(
+                &operation,
+                "not_authorized",
+                "stale finalization is refused for a non-paper deployment_mode",
+            )),
+        )
+            .into_response();
+    }
+
+    if operation.state != STATE_EVIDENCE_DEGRADED {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_refusal_response(
+                &operation,
+                "not_evidence_degraded",
+                "operation is not currently in evidence_degraded",
+            )),
+        )
+            .into_response();
+    }
+
+    if operation.stopped_at_utc.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_refusal_response(
+                &operation,
+                "not_stopped",
+                "operation has no stopped_at_utc; not eligible for finalization",
+            )),
+        )
+            .into_response();
+    }
+
+    // Structural guard: this route may only ever act on an operation whose
+    // own session window has already closed -- it can never be pointed at
+    // the current trading day's live operation, regardless of what other
+    // checks might (incorrectly) pass.
+    if now_utc < operation.effective_operation_close_utc {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_refusal_response(
+                &operation,
+                "session_not_closed",
+                "operation's session window has not yet closed; refused",
+            )),
+        )
+            .into_response();
+    }
+
+    match check_prestart_retry_safety(&pool, &operation).await {
+        Ok(PrestartRetrySafety::Safe) => {}
+        Ok(PrestartRetrySafety::UnsafeActivity) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(finalize_stale_refusal_response(
+                    &operation,
+                    "not_recoverable",
+                    "operation has runtime activity attached; not eligible for stale finalization",
+                )),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!(
+                "autonomous_daily_operation_finalize_stale: prestart retry safety check failed: {err}"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(finalize_stale_base_response(operation.operation_id, "backend_unavailable")),
+            )
+                .into_response();
+        }
+    }
+
+    let previous_state = operation.state.clone();
+    let previous_reason_code = operation.state_reason_code.clone();
+    let operation_id = operation.operation_id;
+
+    match handle_outcome_finalization(&st, &pool, operation, now_utc).await {
+        Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeFinalized {
+            operation_id,
+            outcome_reason_code,
+            ..
+        }) => {
+            let mut resp = finalize_stale_base_response(operation_id, "finalized");
+            resp.previous_state = Some(previous_state);
+            resp.new_state = Some("completed_no_trade_or_completed_with_activity".to_string());
+            resp.previous_reason_code = previous_reason_code;
+            resp.message = Some(format!(
+                "stale operation finalized via the ordinary coordinator finalization path; \
+                 outcome_reason_code={outcome_reason_code}"
+            ));
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeAlreadyFinalized { state, outcome_reason_code }) => {
+            let mut resp = finalize_stale_base_response(operation_id, "already_finalized");
+            resp.previous_state = Some(previous_state);
+            resp.new_state = Some(state);
+            resp.previous_reason_code = previous_reason_code;
+            resp.message = Some(outcome_reason_code.unwrap_or_default());
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Ok(other) => {
+            let mut resp = finalize_stale_base_response(operation_id, "not_finalized_this_call");
+            resp.previous_state = Some(previous_state);
+            resp.previous_reason_code = previous_reason_code;
+            resp.message = Some(format!(
+                "finalization was not reached this call: {other:?}"
+            ));
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(err) => {
+            tracing::error!("autonomous_daily_operation_finalize_stale: finalization failed: {err}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(finalize_stale_base_response(operation_id, "backend_unavailable")),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn finalize_stale_base_response(
+    operation_id: Uuid,
+    truth_state: &str,
+) -> AutonomousDailyOperationRetryResponse {
+    AutonomousDailyOperationRetryResponse {
+        canonical_route: CANONICAL_ROUTE_FINALIZE_STALE.to_string(),
+        truth_state: truth_state.to_string(),
+        operation_id: operation_id.to_string(),
+        previous_state: None,
+        new_state: None,
+        previous_reason_code: None,
+        runtime_started: false,
+        arm_modified: false,
+        halt_changed: false,
+        reconcile_changed: false,
+        orders_submitted: 0,
+        message: None,
+    }
+}
+
+fn finalize_stale_refusal_response(
+    operation: &AutonomousDailyOperationRecord,
+    truth_state: &str,
+    message: impl Into<String>,
+) -> AutonomousDailyOperationRetryResponse {
+    let mut resp = finalize_stale_base_response(operation.operation_id, truth_state);
+    resp.previous_state = Some(operation.state.clone());
+    resp.previous_reason_code = operation.state_reason_code.clone();
+    resp.message = Some(message.into());
+    resp
 }
 
 #[cfg(test)]
