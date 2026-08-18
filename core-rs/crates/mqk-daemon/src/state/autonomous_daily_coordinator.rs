@@ -2032,7 +2032,10 @@ pub async fn dispatch_by_state(
         // unchanged.
         mqk_db::STATE_EVIDENCE_DEGRADED => {
             if operation.stopped_at_utc.is_some() {
-                handle_outcome_finalization(state, pool, operation, now_utc).await
+                match attempt_evidence_degraded_recovery(state, pool, &operation, now_utc).await? {
+                    Some(outcome) => Ok(outcome),
+                    None => handle_outcome_finalization(state, pool, operation, now_utc).await,
+                }
             } else {
                 Ok(
                     AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
@@ -2080,6 +2083,13 @@ fn bounded_static_reason(reason_code: &str) -> &'static str {
         "controller_degraded_missing_run_id" => "controller_degraded_missing_run_id",
         "unresolved_outbox_at_run_reconcile" => "unresolved_outbox_at_run_reconcile",
         "reconcile_dirty" => "reconcile_dirty",
+        "evidence_degraded_recovery_unresolved_outbox" => {
+            "evidence_degraded_recovery_unresolved_outbox"
+        }
+        "evidence_degraded_recovery_unresolved_inbox" => {
+            "evidence_degraded_recovery_unresolved_inbox"
+        }
+        "evidence_degraded_recovery_reconcile_dirty" => "evidence_degraded_recovery_reconcile_dirty",
         _ => "manual_intervention_required",
     }
 }
@@ -2494,7 +2504,14 @@ pub async fn attempt_canonical_start(
             {
                 Ok(AutonomousDailyTransitionOutcome::Applied(_))
                 | Ok(AutonomousDailyTransitionOutcome::AlreadyApplied(_)) => {
-                    if from_state == STATE_RECOVERY_RETRYING {
+                    // A fresh run under an already-`evidence_degraded`
+                    // operation is a recovery, not this operation's first
+                    // start of the day -- reported the same as
+                    // `recovery_retrying`'s own successful restart.
+                    if matches!(
+                        from_state,
+                        STATE_RECOVERY_RETRYING | mqk_db::STATE_EVIDENCE_DEGRADED
+                    ) {
                         Ok(AutonomousDailyCoordinatorTickOutcome::Recovered { run_id })
                     } else {
                         Ok(AutonomousDailyCoordinatorTickOutcome::Started { run_id })
@@ -2872,120 +2889,22 @@ pub async fn handle_running(
     }
 
     // No local runtime. Determine whether the durable run row is still
-    // active (a crash-window inconsistency: manual) or genuinely terminal
-    // (eligible for recovery).
-    let run_row = match mqk_db::fetch_run(pool, expected_run_id).await {
-        Ok(row) => row,
-        Err(_err) => {
-            let newly_applied = apply_manual_if_changed(
-                pool,
-                &operation,
-                "run_row_fetch_failed",
-                None,
-                now_utc,
-                "failed to fetch the durable run row while reconciling running-state ownership",
-                mqk_db::STATE_CONTROLLER_DEGRADED,
-            )
-            .await?;
-            return Ok(
-                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                    reason_code: "run_row_fetch_failed",
-                    newly_applied,
-                },
-            );
-        }
-    };
-    let run_is_active = matches!(
-        run_row.status,
-        mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
-    );
-    if run_is_active {
-        let newly_applied = apply_manual_if_changed(
-            pool,
-            &operation,
-            "durable_active_run_without_local_owner",
-            None,
-            now_utc,
-            "the durable run row is still armed/running but no local runtime owns it",
-            mqk_db::STATE_CONTROLLER_DEGRADED,
-        )
-        .await?;
-        return Ok(
-            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "durable_active_run_without_local_owner",
-                newly_applied,
-            },
-        );
-    }
-
-    // REPAIR 9: resolve durable DISARMED truth before scheduling any
-    // recovery retry — never postponed until the next canonical start
-    // attempt, and never auto-armed merely to perform this read.
-    // Reaching `running` at all guarantees a prior successful
-    // `try_autonomous_arm_typed` call, which always re-persists `ARMED` on
-    // success -- so a missing arm-state row here is not real evidence of a
-    // durable DISARMED transition (that would conflate "never armed" with
-    // "explicitly disarmed"); only an explicit non-`ARMED` row counts.
-    let durable_disarmed = match mqk_db::load_arm_state(pool).await {
-        Ok(Some((ref state_str, _))) => state_str != "ARMED",
-        Ok(None) => false,
-        Err(_err) => {
-            let newly_applied = apply_manual_if_changed(
-                pool,
-                &operation,
-                "arm_state_read_failed",
-                None,
-                now_utc,
-                "failed to read durable arm state while reconciling an ended run; failing \
-                 closed rather than scheduling an unsafe recovery",
-                mqk_db::STATE_CONTROLLER_DEGRADED,
-            )
-            .await?;
-            return Ok(
-                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                    reason_code: "arm_state_read_failed",
-                    newly_applied,
-                },
-            );
-        }
-    };
-
-    // `integrity.disarmed` (in-memory) is deliberately not consulted here:
-    // it is the fail-closed default at every daemon boot, not evidence of
-    // an unsafe termination on its own. The durable DB arm-state row
-    // (`durable_disarmed` above) is the authoritative truth for this check.
-    let unsafe_termination = durable_disarmed
-        || {
-            let ig = state.integrity.read().await;
-            ig.halted
-        }
-        || matches!(
-            state.alpaca_ws_continuity().await,
-            super::AlpacaWsContinuityState::GapDetected { .. }
-        );
-    if unsafe_termination {
-        let reason_code: &'static str = if durable_disarmed {
-            "durable_arm_disarmed"
-        } else {
-            "runtime_ended_unsafely"
-        };
-        let newly_applied = apply_manual_if_changed(
-            pool,
-            &operation,
-            reason_code,
-            None,
-            now_utc,
-            "the local runtime ended via an operator halt/kill-switch, a durable DISARMED arm \
-             state, or a WS continuity gap; this is never automatically retried",
-            mqk_db::STATE_CONTROLLER_DEGRADED,
-        )
-        .await?;
-        return Ok(
-            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code,
-                newly_applied,
-            },
-        );
+    // active/halted (a crash-window inconsistency: manual) or genuinely,
+    // safely terminal (eligible for recovery). Shared with the
+    // `evidence_degraded` same-session recovery path
+    // (`attempt_evidence_degraded_recovery`) so a future new unsafe-
+    // termination signal added here is never silently absent there.
+    if let Some(outcome) = check_terminated_run_safe_to_recover(
+        state,
+        pool,
+        &operation,
+        expected_run_id,
+        now_utc,
+        mqk_db::STATE_CONTROLLER_DEGRADED,
+    )
+    .await?
+    {
+        return Ok(outcome);
     }
 
     // Terminal run, no unsafe-termination truth, session still open:
@@ -3011,6 +2930,363 @@ pub async fn handle_running(
     )
     .await?;
     Ok(AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled)
+}
+
+/// Extracted from [`handle_running`] (PAPER-SOAK-4DAY-20260818-01 EVIDENCE-
+/// DEGRADED-RECOVERY-01): the one shared proof that a run with no matching
+/// local runtime handle is genuinely, *safely* terminal — never merely
+/// "not currently `ARMED`/`RUNNING`" (that would also pass a durably
+/// `HALTED` run, whose sticky halt is never safe to route back toward
+/// `running`), and never ended via an unsafe-termination signal (a durable
+/// `DISARMED` arm state, an operator halt/kill-switch, or a WS continuity
+/// gap). Returns `Ok(None)` when the run is proven safely terminal;
+/// `Ok(Some(outcome))` with the caller's own legal degraded `target`
+/// otherwise. The caller is responsible for the "local runtime still
+/// exactly matches this run" short-circuit first — that is a legitimate
+/// success case for a caller whose own current state is `running`, but is
+/// itself a contradiction for a caller (`evidence_degraded`) that should
+/// never have a matching local runtime at all, so it is not shared here.
+async fn check_terminated_run_safe_to_recover(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    expected_run_id: Uuid,
+    now_utc: DateTime<Utc>,
+    target: &'static str,
+) -> anyhow::Result<Option<AutonomousDailyCoordinatorTickOutcome>> {
+    let run_row = match mqk_db::fetch_run(pool, expected_run_id).await {
+        Ok(row) => row,
+        Err(_err) => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "run_row_fetch_failed",
+                None,
+                now_utc,
+                "failed to fetch the durable run row while reconciling run ownership",
+                target,
+            )
+            .await?;
+            return Ok(Some(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "run_row_fetch_failed",
+                    newly_applied,
+                },
+            ));
+        }
+    };
+    // Strictly `Stopped` -- not merely "not Armed/Running". A durably
+    // `HALTED` run (reachable via the sticky, non-CAS-guarded `halt_run`)
+    // must never be treated as safe to recover just because it is also not
+    // "active"; it is grouped with the active case under the same existing
+    // reason code, since neither shape is a safely proven stop.
+    let run_is_safely_terminal = matches!(run_row.status, mqk_db::RunStatus::Stopped);
+    if !run_is_safely_terminal {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "durable_active_run_without_local_owner",
+            None,
+            now_utc,
+            "the durable run row is not durably STOPPED (still armed/running, or durably \
+             HALTED) but no local runtime owns it",
+            target,
+        )
+        .await?;
+        return Ok(Some(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "durable_active_run_without_local_owner",
+                newly_applied,
+            },
+        ));
+    }
+
+    // REPAIR 9: resolve durable DISARMED truth before ever presenting a run
+    // as safe to recover — never postponed until the next canonical start
+    // attempt, and never auto-armed merely to perform this read.
+    let durable_disarmed = match mqk_db::load_arm_state(pool).await {
+        Ok(Some((ref state_str, _))) => state_str != "ARMED",
+        Ok(None) => false,
+        Err(_err) => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "arm_state_read_failed",
+                None,
+                now_utc,
+                "failed to read durable arm state while reconciling an ended run; failing \
+                 closed rather than scheduling an unsafe recovery",
+                target,
+            )
+            .await?;
+            return Ok(Some(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "arm_state_read_failed",
+                    newly_applied,
+                },
+            ));
+        }
+    };
+
+    // `integrity.disarmed` (in-memory) is deliberately not consulted here:
+    // it is the fail-closed default at every daemon boot, not evidence of
+    // an unsafe termination on its own. The durable DB arm-state row
+    // (`durable_disarmed` above) is the authoritative truth for this check.
+    let unsafe_termination = durable_disarmed
+        || {
+            let ig = state.integrity.read().await;
+            ig.halted
+        }
+        || matches!(
+            state.alpaca_ws_continuity().await,
+            super::AlpacaWsContinuityState::GapDetected { .. }
+        );
+    if unsafe_termination {
+        let reason_code: &'static str = if durable_disarmed {
+            "durable_arm_disarmed"
+        } else {
+            "runtime_ended_unsafely"
+        };
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            reason_code,
+            None,
+            now_utc,
+            "the local runtime ended via an operator halt/kill-switch, a durable DISARMED arm \
+             state, or a WS continuity gap; this is never automatically retried",
+            target,
+        )
+        .await?;
+        return Ok(Some(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code,
+                newly_applied,
+            },
+        ));
+    }
+
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-4DAY-20260818-01 EVIDENCE-DEGRADED-RECOVERY-01 — same-session
+// recovery from `evidence_degraded` back to `running`
+// ---------------------------------------------------------------------------
+//
+// `evidence_degraded` -> `running` is a legal edge in the durable operation
+// state graph (`mqk_db::is_legal_operation_transition`) that, before this
+// repair, no production caller ever requested. The graph's own commentary
+// distinguishes two distinct shapes of `evidence_degraded`:
+//
+//   - mid-run (`stopped_at_utc IS NULL`, reached only from `running` via a
+//     critical evidence fault): never finalization-eligible, stays exactly
+//     where it is pending manual intervention. This repair does not touch
+//     that shape at all -- unchanged.
+//   - post-stop (`stopped_at_utc` set, reached via `stopping`/`stop_retrying`
+//     -> the E2B classifier's `EvidenceBlocked` outcome): the "finalization-
+//     evidence-gap" case -- the run genuinely ended, but the day's outcome
+//     cannot yet be proven. Of the eight closed `unknown_*` reason codes,
+//     exactly one (`unknown_incomplete_bar_coverage`) describes a condition
+//     that can legitimately clear with more time inside the same session
+//     (bars may still arrive before the session's own window closes); every
+//     other reason is a genuine identity/data/safety contradiction that
+//     stays manual. This function is the missing recovery attempt for that
+//     one narrow, closed case -- a fresh run under the *same* operation_id
+//     (never a duplicate daily operation), gated on the identical run-
+//     termination-safety proof `handle_running` already requires before
+//     ever scheduling `recovery_retrying`, plus this operation's own zero-
+//     unresolved-outbox / zero-unresolved-inbox / clean-global-reconcile
+//     proof. `classify_autonomous_daily_outcome` and
+//     `apply_evidence_degraded_blocker` are completely unmodified; a row
+//     that is not recovery-eligible this tick falls through to exactly the
+//     existing `handle_outcome_finalization` behavior.
+// ---------------------------------------------------------------------------
+
+/// `Ok(None)`: recovery does not apply this tick -- the caller must fall
+/// through to the existing `handle_outcome_finalization` behavior,
+/// unchanged. `Ok(Some(outcome))`: a recovery decision was made this tick
+/// (scheduled, attempted, or refused with a specific diagnostic reason).
+async fn attempt_evidence_degraded_recovery(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Option<AutonomousDailyCoordinatorTickOutcome>> {
+    // Exactly one closed reason code is recovery-eligible. Every other
+    // `unknown_*` reason (identity unavailable, run lineage unavailable,
+    // unresolved dispatch claim, missing evaluation evidence, order
+    // evidence conflict, database unavailable, or -- critically --
+    // `unknown_runtime_stop_unproven`, where attempting a fresh start could
+    // race a still-ambiguous prior runtime) is never eligible here.
+    if operation.state_reason_code.as_deref()
+        != Some(super::autonomous_daily_outcome::REASON_UNKNOWN_INCOMPLETE_BAR_COVERAGE)
+    {
+        return Ok(None);
+    }
+    // Never attempt a fresh start once today's own valid session window is
+    // over -- there is no time left to observe bars, and finalization
+    // remains the sole authority for a session that has genuinely ended.
+    if now_utc > operation.postclose_finalize_utc {
+        return Ok(None);
+    }
+
+    if let Some(expected_run_id) = operation.run_id {
+        // `evidence_degraded` never legitimately has a matching (or any)
+        // local runtime handle -- unlike `running`'s own recovery path,
+        // there is no "still exactly this run" success case to short-
+        // circuit here; any local ownership at all is a contradiction with
+        // this operation's own durable `stopped_at_utc` truth.
+        if state.locally_owned_run_id().await.is_some() {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "runtime_run_id_mismatch",
+                None,
+                now_utc,
+                "a local runtime handle exists while this operation's durable state says its \
+                 prior run already stopped; failing closed rather than assuming which is true",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
+            return Ok(Some(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "runtime_run_id_mismatch",
+                    newly_applied,
+                },
+            ));
+        }
+
+        if let Some(outcome) = check_terminated_run_safe_to_recover(
+            state,
+            pool,
+            operation,
+            expected_run_id,
+            now_utc,
+            STATE_MANUAL_INTERVENTION_REQUIRED,
+        )
+        .await?
+        {
+            return Ok(Some(outcome));
+        }
+
+        let unacked = mqk_db::outbox_list_unacked_for_run(pool, expected_run_id)
+            .await
+            .context("attempt_evidence_degraded_recovery: outbox_list_unacked_for_run failed")?;
+        if !unacked.is_empty() {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "evidence_degraded_recovery_unresolved_outbox",
+                None,
+                now_utc,
+                "the prior run is durably STOPPED, but it still has unacked outbox rows; never \
+                 attempting a fresh start while an order may still be in flight",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
+            return Ok(Some(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "evidence_degraded_recovery_unresolved_outbox",
+                    newly_applied,
+                },
+            ));
+        }
+
+        let unapplied = mqk_db::inbox_load_unapplied_for_run(pool, expected_run_id)
+            .await
+            .context("attempt_evidence_degraded_recovery: inbox_load_unapplied_for_run failed")?;
+        if !unapplied.is_empty() {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "evidence_degraded_recovery_unresolved_inbox",
+                None,
+                now_utc,
+                "the prior run is durably STOPPED, but it still has unapplied inbox rows; never \
+                 attempting a fresh start while broker evidence is not fully applied",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
+            return Ok(Some(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "evidence_degraded_recovery_unresolved_inbox",
+                    newly_applied,
+                },
+            ));
+        }
+    }
+
+    let reconcile_dirty = match mqk_db::load_reconcile_status_state(pool)
+        .await
+        .context("attempt_evidence_degraded_recovery: load_reconcile_status_state failed")?
+    {
+        Some(r) => {
+            r.status != "ok"
+                || r.mismatched_positions != 0
+                || r.mismatched_orders != 0
+                || r.mismatched_fills != 0
+        }
+        // No durable reconcile status at all is not evidence of agreement --
+        // fail closed rather than assume clean.
+        None => true,
+    };
+    if reconcile_dirty {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "evidence_degraded_recovery_reconcile_dirty",
+            None,
+            now_utc,
+            "the global broker/local reconcile status is not currently clean; never attempting \
+             a fresh start while local/broker truth may disagree",
+            STATE_MANUAL_INTERVENTION_REQUIRED,
+        )
+        .await?;
+        return Ok(Some(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "evidence_degraded_recovery_reconcile_dirty",
+                newly_applied,
+            },
+        ));
+    }
+
+    // Every proof clean: this tick may schedule or perform a fresh start,
+    // exactly mirroring `running`'s own `recovery_retrying` two-phase
+    // pattern (schedule a bounded backoff first; a later, due tick performs
+    // the real canonical start call) -- without inventing a dedicated
+    // intermediate DB state, by self-looping the retry-timing fields while
+    // `state` remains `evidence_degraded`.
+    if operation.next_retry_utc.is_none() {
+        let next_retry =
+            next_retry_at(now_utc, (operation.start_attempt_count.max(0) as u64) + 1);
+        mqk_db::record_retry_timing(
+            pool,
+            operation.operation_id,
+            Some(next_retry),
+            Some("evidence_degraded_recovery_scheduled"),
+            now_utc,
+        )
+        .await?;
+        return Ok(Some(AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled));
+    }
+
+    // `attempt_canonical_start` re-checks `next_retry_utc` itself and
+    // returns `RetryNotDue` cheaply (no arm/start call) if called early --
+    // reused unmodified, including its own operator-managed-run guard, its
+    // typed arm call, its atomic running-transition CAS (which itself
+    // re-validates `is_legal_operation_transition`), and its own retry-
+    // backoff scheduling on failure.
+    Ok(Some(
+        attempt_canonical_start(
+            state,
+            pool,
+            operation.clone(),
+            now_utc,
+            mqk_db::STATE_EVIDENCE_DEGRADED,
+        )
+        .await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------

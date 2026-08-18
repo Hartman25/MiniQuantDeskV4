@@ -164,6 +164,14 @@ const UNSAFE_RUNTIME_HISTORY_REASON_CODES: &[&str] = &[
     "native_strategy_bootstrap_failed",
     "readiness_evidence_persist_failed",
     "readiness_run_link_persist_failed",
+    // PAPER-SOAK-4DAY-20260818-01 EVIDENCE-DEGRADED-RECOVERY-01: reasons the
+    // new `evidence_degraded -> running` same-session recovery attempt
+    // (`autonomous_daily_coordinator::attempt_evidence_degraded_recovery`)
+    // escalates to `manual_intervention_required` on. Never operator-
+    // retryable without deeper investigation.
+    "evidence_degraded_recovery_unresolved_outbox",
+    "evidence_degraded_recovery_unresolved_inbox",
+    "evidence_degraded_recovery_reconcile_dirty",
 ];
 
 pub(crate) fn classify_manual_retry_eligibility(
