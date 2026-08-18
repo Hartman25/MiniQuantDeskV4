@@ -158,6 +158,20 @@ class ResearchResultStore:
                     consumed_at text,
                     schema_version text not null
                 );
+
+                create table if not exists research_judge_artifacts (
+                    judge_artifact_sha256 text primary key,
+                    judge_id text not null,
+                    experiment_id text not null,
+                    hypothesis_id text,
+                    artifact_path text,
+                    schema_version text not null,
+                    protocol_id text not null
+                );
+                create index if not exists idx_research_judge_artifacts_judge_id
+                    on research_judge_artifacts(judge_id);
+                create index if not exists idx_research_judge_artifacts_scope
+                    on research_judge_artifacts(experiment_id, hypothesis_id);
                 """
             )
             connection.commit()
@@ -405,6 +419,128 @@ class ResearchResultStore:
                 (trial_id, experiment_id, hypothesis_id, strategy_id, protocol_id, identity_json, REGISTRY_SCHEMA_VERSION),
             )
             connection.commit()
+
+    # ------------------------------------------------------------------
+    # P7C-REPAIR-03 (FINAL WAVE-2 BLOCKER REPAIR, Patch B)
+    #
+    # Durable judge-artifact registry, additive to RESEARCH-EXPERIMENT-
+    # REGISTRY-01's hypothesis/trial/attempt tables above, sharing the same
+    # SQLite authority. This is what `mqk-promotion`'s Rust verifier
+    # (`research_registry::load_research_authority`) reads read-only to
+    # establish that a supplied judge artifact was genuinely produced by a
+    # real judge run, not fabricated by a caller who merely kept three
+    # artifacts internally hash-consistent.
+    # ------------------------------------------------------------------
+
+    def register_judge_artifact(
+        self,
+        *,
+        judge_id: str,
+        experiment_id: str,
+        hypothesis_id: Optional[str],
+        artifact_path: Optional[str],
+        judge_artifact_sha256: str,
+        schema_version: str,
+        protocol_id: str,
+    ) -> None:
+        """Idempotently register a multiple-testing judge artifact's durable
+        identity, called from `mqk_research.ml.multiple_testing_judge.
+        build_multiple_testing_judge` once its DSR/PBO values are finalized
+        (see that function's own docs).
+
+        `judge_artifact_sha256` must be the SAME canonical-JSON SHA-256
+        (parse -> sort keys -> compact-serialize -> hash) the Rust verifier
+        recomputes from the actual judge artifact bytes it is handed — see
+        `mqk_research.exp_distributed.hashing.canonical_json` /
+        `mqk_promotion::research_evidence::verify_promotion_oos_evidence`'s
+        own hashing, which this must match exactly (both round-trip through
+        a sorted-key, no-whitespace JSON form, so registering a
+        Python-side hash of the same underlying values matches Rust's
+        independently-recomputed hash byte for byte).
+
+        Keyed by `judge_artifact_sha256`, NOT `judge_id` — `judge_id` is
+        deliberately CONTENT-LIGHT (see `build_multiple_testing_judge`'s own
+        `judge_id_basis` docs: it excludes every DSR/PBO NUMERIC output by
+        design, so a re-run with an unchanged registry/population/protocol
+        but a genuinely different numeric result — e.g. a different
+        `cscv_target_block_count` — legitimately keeps the SAME `judge_id`
+        while producing a DIFFERENT canonical artifact and hash). Two rows
+        may therefore share a `judge_id`; this is expected, not a collision.
+        Only an exact `judge_artifact_sha256` match with DIFFERENT other
+        fields is a genuine failure (SHA-256 collision on differing content
+        is not something to silently trust). A no-op if the row already
+        exists with identical content (idempotent — safe to call from a
+        retried judge build)."""
+        if not judge_id.strip():
+            raise ValueError("judge_id is required")
+        if not experiment_id.strip():
+            raise ValueError("experiment_id is required")
+        if not judge_artifact_sha256.strip():
+            raise ValueError("judge_artifact_sha256 is required")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                select judge_id, experiment_id, hypothesis_id, artifact_path,
+                       schema_version, protocol_id
+                from research_judge_artifacts where judge_artifact_sha256=?
+                """,
+                (judge_artifact_sha256,),
+            ).fetchone()
+            if row is not None:
+                if tuple(row) != (
+                    judge_id,
+                    experiment_id,
+                    hypothesis_id,
+                    artifact_path,
+                    schema_version,
+                    protocol_id,
+                ):
+                    raise RuntimeError(
+                        f"judge_artifact_sha256 collision with conflicting canonical identity: "
+                        f"{judge_artifact_sha256!r}"
+                    )
+                return
+            connection.execute(
+                """
+                insert into research_judge_artifacts (
+                    judge_artifact_sha256, judge_id, experiment_id, hypothesis_id,
+                    artifact_path, schema_version, protocol_id
+                ) values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    judge_artifact_sha256,
+                    judge_id,
+                    experiment_id,
+                    hypothesis_id,
+                    artifact_path,
+                    schema_version,
+                    protocol_id,
+                ),
+            )
+            connection.commit()
+
+    def get_judge_artifact(self, judge_artifact_sha256: str) -> Dict[str, Any]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "select * from research_judge_artifacts where judge_artifact_sha256=?",
+                (judge_artifact_sha256,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown judge_artifact_sha256: {judge_artifact_sha256}")
+        return dict(row)
+
+    def list_judge_artifacts_for_judge_id(self, judge_id: str) -> List[Dict[str, Any]]:
+        """`judge_id` is content-light and may legitimately map to several
+        distinct registered artifacts (different DSR/PBO numeric outputs
+        under the same registry/population/protocol identity) — see
+        `register_judge_artifact`'s own docs."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "select * from research_judge_artifacts where judge_id=? "
+                "order by judge_artifact_sha256 asc",
+                (judge_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def begin_attempt(
         self,

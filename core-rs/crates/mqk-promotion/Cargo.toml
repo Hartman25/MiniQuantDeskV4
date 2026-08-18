@@ -13,6 +13,8 @@ serde_json = "1"
 sha2 = "0.10"   # P7C-REPAIR-01: hash-bind verified OOS evidence to actual artifact bytes
 hex = "0.4"     # P7C-REPAIR-01
 uuid = { version = "1", features = ["serde", "v5"] }  # RunProvenance + provenance gates
+rusqlite = { version = "0.30", features = ["bundled"] }  # P7C-REPAIR-03: read-only durable Research registry access
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }      # Patch B6 tests: AuditWriter::append
+tempfile = "3"    # P7C-REPAIR-03 tests: synthetic registry DB fixtures

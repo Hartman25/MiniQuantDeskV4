@@ -1,10 +1,15 @@
+use std::path::Path;
+
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::research_registry::load_research_authority;
+
 // ============================================================================
 // P7C-REPAIR-01 (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-01)
 // P7C-REPAIR-02 (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-02)
+// P7C-REPAIR-03 (FINAL WAVE-2 BLOCKER REPAIR, Patch B)
 // ============================================================================
 //
 // DEFECT FIXED (REPAIR-01): the original P7C (`PromotionOosEvidence`, now
@@ -31,20 +36,32 @@ use sha2::{Digest, Sha256};
 // AUTHORITY (that the bundle corresponds to any REAL registered Research
 // trial/attempt/judge run) -- a caller could still fabricate all three
 // artifacts, keep every hash internally consistent, and pass. Fixed by
-// requiring a [`ResearchAttemptAuthority`] parameter: a durable-registry
-// excerpt (in production, built by the caller from `ResearchResultStore`'s
-// `research_trials`/`research_attempts` tables -- see that struct's own
-// docs) that the supplied artifacts must match, including the FULL judge
-// artifact's own SHA-256 (catching a mutated DSR/PBO numeric OUTPUT, not
-// merely mutated inputs -- input-hash binding alone cannot). Also closes:
-// the missing `discrete_share_economic_path_v1` requirement (an
-// evidence-only P7B artifact, lacking real discrete economics, could
-// otherwise still satisfy this gate) and incomplete judge structural
-// validation (schema_version/protocol_id/comparison_scope were never
-// checked). REPAIR-02 also removes the `valid_for_testing` production
-// bypass entirely (mission Section 5A) -- every test now constructs
-// evidence through this real verifier with valid synthetic artifact bytes
-// and a matching authority record (see `tests/common/mod.rs`).
+// requiring an authority record that the supplied artifacts must match,
+// including the FULL judge artifact's own SHA-256 (catching a mutated
+// DSR/PBO numeric OUTPUT, not merely mutated inputs -- input-hash binding
+// alone cannot). Also closes: the missing `discrete_share_economic_path_v1`
+// requirement (an evidence-only P7B artifact, lacking real discrete
+// economics, could otherwise still satisfy this gate) and incomplete judge
+// structural validation (schema_version/protocol_id/comparison_scope were
+// never checked). REPAIR-02 also removes the `valid_for_testing` production
+// bypass entirely (mission Section 5A).
+//
+// DEFECT FIXED (REPAIR-03): REPAIR-02's `ResearchAttemptAuthority` was
+// itself a public, all-`pub`-field struct constructible by any caller with
+// plain struct-literal syntax -- the verifier trusted it, but nothing
+// stopped a caller from fabricating an internally self-consistent bundle
+// (matching `trial_id`/`economic_eval_id`/judge SHA-256, every hash
+// checking out) and simply TYPING those same three strings into an
+// authority literal. FIX: authority is no longer caller-supplied at all.
+// `verify_promotion_oos_evidence` now takes a `registry_db_path` and
+// establishes authority itself by querying the durable Research SQLite
+// registry read-only -- see [`crate::research_registry::load_research_authority`]
+// for exactly what is checked (trial registered, a succeeded attempt with
+// matching `result_id`, a registered judge artifact whose canonical SHA-256
+// matches the ACTUAL supplied judge JSON and whose experiment/hypothesis
+// belongs to this trial). There is no public constructor for an authority
+// value anywhere in this crate; a caller cannot manufacture authority by
+// typing strings, only by having a real row in the real registry.
 
 /// Required `economic_protocol_id` value -- see
 /// `mqk_research.ml.economic_walkforward.PROTOCOL_ID`. A candidate whose
@@ -105,45 +122,10 @@ pub const REQUIRED_JUDGE_SCHEMA_VERSION: &str = "multiple_testing_judge_v1";
 /// `mqk_research.ml.multiple_testing_judge.PROTOCOL_ID`.
 pub const REQUIRED_JUDGE_PROTOCOL_ID: &str = "research_multiple_testing_judge_v1";
 
-/// P7C-REPAIR-02 (mission Section 5C/5D): the durable Research-registry
-/// authority a promotion evidence bundle must be anchored to. Internal
-/// hash-consistency between the three supplied artifacts (REPAIR-01) proves
-/// only that they are mutually consistent -- never that they correspond to
-/// any REAL registered Research trial/attempt/judge run. A caller could
-/// otherwise fabricate all three artifacts, keep every internal hash
-/// consistent, and still pass.
-///
-/// In production this is built by the CALLER from the real Research
-/// registry (`mqk_research.exp_distributed.storage.ResearchResultStore`'s
-/// `research_trials`/`research_attempts` tables -- the only place a
-/// genuine trial_id/economic_eval_id pairing and a genuine judge-artifact
-/// hash can come from, since the judge is itself built by querying that
-/// same registry, see `multiple_testing_judge.build_multiple_testing_judge`).
-/// This crate deliberately has NO database dependency of its own (adding
-/// one would be a new cross-language, cross-database integration this
-/// mission does not authorize -- see CLAUDE.md Section 30 "smallest
-/// correct implementation" / "reuses existing seams"); it only verifies
-/// that the SUPPLIED artifact bytes match what this authority record
-/// durably claims.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResearchAttemptAuthority {
-    /// Must equal the `trial_id` being verified.
-    pub trial_id: String,
-    /// The durably-registered `research_attempts.result_id` for the
-    /// SELECTED SUCCESSFUL attempt of `trial_id` -- must equal the economic
-    /// artifact's own `ids.economic_eval_id`.
-    pub economic_eval_id: String,
-    /// SHA-256 (lowercase hex) of the FULL judge artifact's CANONICAL JSON
-    /// form (parse -> re-serialize with sorted keys -> hash -- see
-    /// `verify_promotion_oos_evidence`'s own hashing, which this must
-    /// match exactly), as durably recorded when the judge ran. This is
-    /// what catches a mutated DSR/PBO numeric OUTPUT (mission Section
-    /// 5D/5F) -- REPAIR-01's input-hash binding only proves the judge's
-    /// own recorded INPUT hashes match, never that the judge's OWN output
-    /// values are the ones a durable record actually produced. Canonical
-    /// (not raw-bytes) so pure field reordering does not change the hash.
-    pub judge_artifact_sha256: String,
-}
+// P7C-REPAIR-03: the caller-suppliable `ResearchAttemptAuthority` struct
+// that used to live here is gone. Authority is now established exclusively
+// by `crate::research_registry::load_research_authority`, which reads the
+// durable Research SQLite registry read-only -- see that module's own docs.
 
 /// Non-forgeable, structurally VERIFIED OOS evidence for one promotion
 /// candidate. Every field was extracted from, and cross-checked against,
@@ -240,15 +222,22 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
 /// human-readable reason per failing check (stable order, never a single
 /// opaque failure):
 ///
-/// AUTHORITY (P7C-REPAIR-02, checked FIRST -- mission Section 5C/5D):
-///   - `authority.trial_id` == the supplied `trial_id`
-///   - `authority.economic_eval_id` == the economic artifact's own
+/// AUTHORITY (P7C-REPAIR-02/-03, established as soon as each fact it needs
+/// has been extracted -- mission Section 5C/5D): established by
+/// [`crate::research_registry::load_research_authority`] reading the durable
+/// Research SQLite registry at `registry_db_path` READ-ONLY -- never from a
+/// caller-suppliable struct:
+///   - `research_trials` contains `trial_id`
+///   - a `research_attempts` row for `trial_id` has `status = 'succeeded'`
+///     and `result_id` equal to the economic artifact's own
 ///     `ids.economic_eval_id`
-///   - `authority.judge_artifact_sha256` == SHA-256 of the FULL supplied
-///     `judge_json` bytes -- this is what a caller CANNOT satisfy merely by
-///     keeping the three artifacts internally self-consistent; it requires
-///     a durable record produced when the judge actually ran (see
-///     [`ResearchAttemptAuthority`])
+///   - a `research_judge_artifacts` row's `judge_artifact_sha256` equals the
+///     canonical SHA-256 of the FULL supplied `judge_json`, and belongs to
+///     `trial_id`'s own registered experiment/hypothesis -- this is what a
+///     caller CANNOT satisfy merely by keeping the three artifacts
+///     internally self-consistent; it requires a durable registry row
+///     produced when the judge actually ran (see
+///     [`crate::research_registry::load_research_authority`])
 ///
 /// STRUCTURAL (economic artifact):
 ///   - `protocol.protocol_id` == [`REQUIRED_ECONOMIC_PROTOCOL_ID`]
@@ -291,15 +280,16 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
 ///     and a finite `deflated_sharpe_ratio`
 ///   - `pbo_result.status` == [`REQUIRED_PBO_STATUS`] with a finite `pbo`
 ///
-/// Performs ZERO holdout scoring and ZERO filesystem/network/database I/O
-/// -- pure parsing of caller-supplied in-memory content (including
-/// `authority`, which the caller is responsible for having genuinely
-/// derived from the durable Research registry -- see
-/// [`ResearchAttemptAuthority`]'s own docs). The caller is responsible for
-/// reading these three byte/string buffers from disk exactly once each
-/// (this function never re-reads or re-resolves a path).
+/// Performs ZERO holdout scoring, but DOES perform one read-only database
+/// query (P7C-REPAIR-03): opening `registry_db_path` to establish AUTHORITY
+/// -- see [`crate::research_registry::load_research_authority`]. No
+/// filesystem write, network access, or holdout access ever occurs. The
+/// caller is responsible for reading the three artifact byte/string buffers
+/// from disk exactly once each (this function never re-reads or re-resolves
+/// an artifact path; `registry_db_path` is the one path this function does
+/// open itself, strictly read-only).
 pub fn verify_promotion_oos_evidence(
-    authority: &ResearchAttemptAuthority,
+    registry_db_path: &Path,
     trial_id: &str,
     economic_walk_forward_json: &str,
     economic_daily_returns_csv: &[u8],
@@ -309,13 +299,6 @@ pub fn verify_promotion_oos_evidence(
     let trial_id = trial_id.trim();
     if trial_id.is_empty() {
         errs.push("OOS evidence rejected: trial_id is empty".to_string());
-    }
-    if authority.trial_id != trial_id {
-        errs.push(format!(
-            "OOS evidence rejected: authority.trial_id {:?} does not match supplied trial_id \
-             {trial_id:?} -- this authority record does not anchor this candidate",
-            authority.trial_id
-        ));
     }
 
     let econ: Value = match serde_json::from_str(economic_walk_forward_json) {
@@ -337,7 +320,7 @@ pub fn verify_promotion_oos_evidence(
         }
     };
 
-    // Full judge artifact authority hash (mission Section 5D/5F): hashed
+    // Full judge artifact canonical hash (mission Section 5D/5F): hashed
     // from the CANONICAL re-serialization of the parsed judge Value, not
     // the raw input bytes -- this crate's serde_json (no "preserve_order"
     // feature anywhere in the workspace) represents JSON objects as
@@ -346,19 +329,14 @@ pub fn verify_promotion_oos_evidence(
     // reordering (REQUIRED TEST 34/mission 5K item 33) while remaining
     // fully sensitive to any genuine content change -- including a
     // mutated DSR/PBO numeric OUTPUT (mission Section 5D/5F), which
-    // REPAIR-01's input-hash binding alone could never catch.
+    // REPAIR-01's input-hash binding alone could never catch. P7C-REPAIR-03:
+    // this is the SAME hash `mqk_research.ml.multiple_testing_judge.
+    // build_multiple_testing_judge` computes and durably registers via
+    // `ResearchResultStore.register_judge_artifact` -- compared against the
+    // registry below, not against a caller-suppliable claim.
     let canonical_judge_bytes = serde_json::to_vec(&judge)
         .expect("a successfully-parsed serde_json::Value always re-serializes");
     let actual_judge_sha256 = sha256_hex(&canonical_judge_bytes);
-    if authority.judge_artifact_sha256 != actual_judge_sha256 {
-        errs.push(format!(
-            "OOS evidence rejected: authority.judge_artifact_sha256 {:?} does not match the \
-             actual supplied judge artifact's canonical SHA-256 {actual_judge_sha256:?} -- this \
-             judge artifact (including its DSR/PBO numeric output) is not the one durably \
-             registered for this candidate",
-            authority.judge_artifact_sha256
-        ));
-    }
 
     // ---- economic_walk_forward.json structural checks ----
     let economic_protocol_id = get_str(&econ, &["protocol", "protocol_id"]).unwrap_or_default();
@@ -447,13 +425,22 @@ pub fn verify_promotion_oos_evidence(
              evidence bundle against a specific economic_walk_forward.json artifact"
                 .to_string(),
         );
-    } else if authority.economic_eval_id != economic_eval_id {
-        errs.push(format!(
-            "OOS evidence rejected: authority.economic_eval_id {:?} does not match the economic \
-             artifact's own ids.economic_eval_id {economic_eval_id:?} -- this economic artifact \
-             is not the one durably registered for this candidate's selected successful attempt",
-            authority.economic_eval_id
-        ));
+    }
+
+    // P7C-REPAIR-03: AUTHORITY -- establish, from the durable Research
+    // registry's own rows (never from a caller-suppliable claim), that
+    // `trial_id` is registered, that a succeeded attempt of it has
+    // `result_id == economic_eval_id`, and that a registered judge artifact
+    // whose canonical SHA-256 matches the ACTUAL supplied judge JSON belongs
+    // to this trial's own experiment/hypothesis. See
+    // `crate::research_registry::load_research_authority`.
+    if let Err(authority_errs) = load_research_authority(
+        registry_db_path,
+        trial_id,
+        &economic_eval_id,
+        &actual_judge_sha256,
+    ) {
+        errs.extend(authority_errs);
     }
 
     // ---- hash binding #1: economic artifact <-> actual daily-returns bytes ----

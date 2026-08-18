@@ -8,7 +8,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from mqk_research.exp_distributed.hashing import canonical_json, short_hash
+from mqk_research.exp_distributed.hashing import (
+    canonical_json,
+    canonical_json_bytes,
+    sha256_bytes,
+    short_hash,
+)
 from mqk_research.exp_distributed.storage import ResearchResultStore
 from mqk_research.ml import multiple_testing_stats as mts
 from mqk_research.ml.economic_walkforward import PROTOCOL_ID as ECONOMIC_PROTOCOL_ID
@@ -443,7 +448,7 @@ def build_multiple_testing_judge(
     else:
         judge_status = "partially_evaluable" if economically_evaluable_trials >= 1 else "not_evaluable"
 
-    return {
+    judge_artifact = {
         "schema_version": spec.schema_version,
         "protocol": {"protocol_id": spec.protocol_id},
         "scope": {"experiment_id": experiment_id, "hypothesis_id": hypothesis_id},
@@ -460,6 +465,30 @@ def build_multiple_testing_judge(
         "judge_status": judge_status,
         "ids": {"judge_id": judge_id},
     }
+
+    # P7C-REPAIR-03: durably register this judge artifact's canonical
+    # identity NOW, with its final DSR/PBO values already computed above --
+    # this is what `mqk-promotion`'s Rust verifier reads read-only to
+    # establish AUTHORITY for a promotion candidate (see
+    # `mqk_research.exp_distributed.storage.ResearchResultStore.
+    # register_judge_artifact` and `research_registry::load_research_authority`
+    # on the Rust side). The hash is computed the SAME way the Rust verifier
+    # independently recomputes it from the actual judge JSON it is handed
+    # (canonical: parse -> sort keys -> compact-serialize -> SHA-256), so a
+    # caller cannot mutate a DSR/PBO numeric output after the fact and still
+    # match this registered hash.
+    judge_artifact_sha256 = sha256_bytes(canonical_json_bytes(judge_artifact))
+    store.register_judge_artifact(
+        judge_id=judge_id,
+        experiment_id=experiment_id,
+        hypothesis_id=hypothesis_id,
+        artifact_path=None,
+        judge_artifact_sha256=judge_artifact_sha256,
+        schema_version=spec.schema_version,
+        protocol_id=spec.protocol_id,
+    )
+
+    return judge_artifact
 
 
 # RESEARCH-MULTIPLE-TESTING-JUDGE-01-REPAIR-01 -- DSR trial-count protocol
