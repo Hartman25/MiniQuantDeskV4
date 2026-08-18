@@ -40,7 +40,7 @@ The equity/ETF paper-trading core (orchestrator, OMS state machine, outbox/inbox
 **NOT READY, and cannot become ready without new work.** `LiveCapital` cold-start is hard-gated behind a trust-chain proof (`live_trust_complete`) that is **hardcoded `false`** in `research-py`'s TV-03 pipeline — this is by design, not a bug, and correctly enforced at both the advisory and cold-start-enforcement layers. Separately, live account truth is wrong today: `buying_power` is aliased to `cash` rather than pulled from Alpaca's real `buying_power`/`daytrading_buying_power` fields, which is economically dangerous for a margin account. No live-capital smoke-test tooling exists. A prior memory record claiming "daemon defaults to real Alpaca WS unless forced to paper" is **stale** — current default (`Paper`/`Paper`) is fail-closed and safe; this session is correcting that memory record.
 
 ### Current Research/Backtest Verdict
-**WAVE_2 IMPLEMENTED_PENDING_INDEPENDENT_REVIEW** (updated by `MASTER-LEDGER-CONSOLIDATION-01`, 2026-08-17; see §24 for full detail). The DSR/PBO multiple-testing promotion-evidence gate (P7A execution pricing → P7B weight-to-share/discrete economics → P7C durable registry-anchored OOS evidence gate) is implemented and locally tested at HEAD `b80749bd`, superseding the previously-tracked `PROMOTION-WALKFORWARD-GATE-WIRING-01` Lane B item (now closed as superseded — see §24). This has **not** been independently reviewed and must not be treated as accepted. `docs/research/Research_Backtest_V1_Closeout_Audit.md` (dated 2026-08-15) predates this chain's later commits and is stale on this point — see the precedence note above. P9 (robustness gauntlet) and P10 (final acceptance) remain fully `OPEN`, blocked on Wave-2 acceptance.
+**WAVE_2 INDEPENDENTLY_ACCEPTED_LOCALLY — NOT PUSHED** (corrected by `MASTER-LEDGER-TRUTH-REPAIR-01`, 2026-08-17, after independent review; see §24 for full detail). The DSR/PBO multiple-testing promotion-evidence gate (P7A execution pricing → P7B weight-to-share/discrete economics → P7C durable registry-anchored OOS evidence gate) is implemented, locally tested, and independently reviewed and accepted at HEAD `b80749bd` (commits `81dcf621` P7B-REPAIR-03 and `b80749bd` P7C-REPAIR-04). This is a materially stronger MECHANISM than the original `PROMOTION-WALKFORWARD-GATE-WIRING-01` scope, but it has **no production caller** — `PROMOTION-WALKFORWARD-GATE-WIRING-01` is corrected back to `READY` (see §5, §24) to track wiring the accepted `verify_promotion_oos_evidence` mechanism into the actual daemon/operator promotion path. `docs/research/Research_Backtest_V1_Closeout_Audit.md` (dated 2026-08-15) predates this chain's later commits and is stale on this point — see the precedence note above. `origin/main` still equals `f8357ebc`; Wave 2 is accepted locally but **not pushed**. P9 (robustness gauntlet) remains `OPEN`, blocked on the Wave-2 push; P10 (final acceptance) remains `OPEN`, blocked on P9 **and** on `PROMOTION-WALKFORWARD-GATE-WIRING-01` closing (production wiring). `RESEARCH_BACKTEST_V1_COMPLETE` is **NOT MET**.
 
 ### Closest Subsystems to Completion
 Core Execution/OMS (~97%), Database Layer (~97%), Reconciliation (~97%), Risk System (~95%), Paper Trading Lifecycle (~95%), Backtesting Engine (~95%), Test Infrastructure (~95%).
@@ -49,9 +49,9 @@ Core Execution/OMS (~97%), Database Layer (~97%), Reconciliation (~97%), Risk Sy
 Live Capital Trading (~40%, gated by design but genuinely far from proven), CLI/Daemon control-plane parity (~60%, no CLI path to arm/halt/clear the live daemon), Discord/Alerting coverage (~70%, multi-channel routing built but unused, no data-staleness/daily-summary pushes), Options/Futures/Forex (~5%, enum + risk-multiplier stub only, explicitly gated off).
 
 ### Active Patch Counts
-READY: 32 · BLOCKED: 4 · DEFERRED: 8 · IMPLEMENTED_PENDING_REVIEW: 0 · CLOSED (this session): 1
+READY: 33 · BLOCKED: 4 · DEFERRED: 8 · IMPLEMENTED_PENDING_REVIEW: 0 · CLOSED (this session): 0
 
-*Counts above cover Lanes A-F (Paper/equity/GUI/live/multi-asset/maintainability) as recorded by the 2026-08-10 `FULL-REPO-COMPLETION-AUDIT-01` audit and updated for exactly one confirmed change (`PROMOTION-WALKFORWARD-GATE-WIRING-01`: READY → CLOSED/superseded, see §24) — they were not otherwise re-verified by `MASTER-LEDGER-CONSOLIDATION-01`. Research/Backtest (P7-P10, §24) and Operations Resilience (OPS-*, §25) are tracked separately and are NOT included in these counts: as of 2026-08-17, Research/Backtest has 1 item `IMPLEMENTED_PENDING_INDEPENDENT_REVIEW` and 2 `OPEN` (P9, P10); OPS-* has 3 `OPEN` and 1 `DEFERRED`.*
+*Counts above cover Lanes A-F (Paper/equity/GUI/live/multi-asset/maintainability) as recorded by the 2026-08-10 `FULL-REPO-COMPLETION-AUDIT-01` audit. `MASTER-LEDGER-CONSOLIDATION-01` (2026-08-17) had incorrectly reclassified `PROMOTION-WALKFORWARD-GATE-WIRING-01` as `CLOSED — SUPERSEDED`; `MASTER-LEDGER-TRUTH-REPAIR-01` (2026-08-17, same day, this correction) restores it to `READY` (see §5, §24) because the accepted P7C mechanism has no production caller yet. Otherwise these counts were not re-verified this session. Research/Backtest (P7-P10, §24) and Operations Resilience (OPS-*, §25) are tracked separately and are NOT included in these counts: as of 2026-08-17 (post independent review), Research/Backtest has Wave 2 (P7A/P7B/P7C) `INDEPENDENTLY_ACCEPTED_LOCALLY — NOT PUSHED` and 2 items `OPEN` (P9, P10); OPS-* has 3 `OPEN` and 1 `DEFERRED`.*
 
 ### GREEN / YELLOW / RED Patch Counts
 GREEN: 27 · YELLOW: 12 · RED: 7
@@ -90,7 +90,7 @@ No patch in this ledger lacks a classification.
 | 11 | Config / Deployment / Secrets | ~90% — layered YAML, mode-aware secret resolution, redaction all proven; no containerized deployment path (undocumented decision). | PROVEN COMPLETE | 1 | GREEN | B |
 | 12 | Daemon / Autonomous Operations | ~90% — 12 lifecycle defects closed, extensive coordinator machinery; lease/TTL asymmetry and the uncommitted fence remain. | IMPLEMENTED BUT INCOMPLETE | 1 | RED | D |
 | 13 | Dynamic Strategy Selection | ~85% — extensive fail-closed machinery for paper dispatch; live promotion correctly hard-pinned false; doc staleness and thin dedicated test coverage. | PARTIAL / SCAFFOLDED (by design for live) | 3 | GREEN | B |
-| 14 | Strategy Research / Promotion | ~92% (updated 2026-08-17, see §24) — gate mechanics (NaN, tie-break, artifact-lock, stress-suite, provenance) fully proven fail-closed; DSR/PBO multiple-testing OOS-evidence gate now implemented and registry-anchored (`mqk-promotion::verify_promotion_oos_evidence`), superseding the walk-forward-wiring gap; **not yet independently reviewed** (Wave 2); robustness gauntlet (P9) and final acceptance (P10) remain open. | IMPLEMENTED_PENDING_INDEPENDENT_REVIEW (gate) / OPEN (P9, P10) | 2 (P9, P10 — see §24) | GREEN | B |
+| 14 | Strategy Research / Promotion | ~92% (corrected 2026-08-17, `MASTER-LEDGER-TRUTH-REPAIR-01`, see §24) — gate mechanics (NaN, tie-break, artifact-lock, stress-suite, provenance) fully proven fail-closed; DSR/PBO multiple-testing OOS-evidence gate now implemented and registry-anchored (`mqk-promotion::verify_promotion_oos_evidence`), **independently reviewed and accepted locally, not yet pushed** (Wave 2); it has no production caller — production wiring (`PROMOTION-WALKFORWARD-GATE-WIRING-01`, `READY`), robustness gauntlet (P9), and final acceptance (P10) all remain open. | INDEPENDENTLY_ACCEPTED_LOCALLY — NOT PUSHED (gate mechanism) / OPEN (production wiring, P9, P10) | 3 (`PROMOTION-WALKFORWARD-GATE-WIRING-01`, P9, P10 — see §5, §24) | GREEN | B |
 | 15 | Data Ingestion (equities) | ~85% — provider registry, job system, cancellation, readiness gates proven; no retry/backoff on Alpaca/Kraken transient failures. | PROVEN COMPLETE (core) / IMPLEMENTED BUT INCOMPLETE (resilience) | 2 | YELLOW/GREEN | D/B |
 | 16 | GUI Operator Console | ~92% — truth-state hard-block discipline consistently enforced repo-wide; one real gap (409 response body dropped before reaching operator). | PROVEN COMPLETE (discipline) / 1 defect | 1 | GREEN | B |
 | 17 | Strategy Engines (signal logic) | ~80% — 4 strategies wired, dispatchable, and registered; 3 of 4 have zero unit tests; no stop-loss/take-profit exists anywhere in the crate. | IMPLEMENTED BUT INCOMPLETE (engine complete, alpha unproven) | 4 | GREEN | B |
@@ -113,7 +113,7 @@ No patch in this ledger lacks a classification.
 3. **Strategy engine unit tests** (3 patches, mean-reversion/volatility-breakout/swing-momentum) — mechanical, GREEN, closes a real coverage gap on strategies currently dispatchable in production with zero direct proof.
 4. **README snapshot refresh** — docs-only, GREEN, trivial, prevents new operators from trusting a 3-week-stale status claim.
 5. **Broker dead-code cleanup** (`client.rs`/`config.rs` in `mqk-broker-alpaca`) — deletion or explicit re-wiring, GREEN, removes confusing uncompiled duplicate code.
-6. ~~**Walk-forward promotion gate wiring**~~ — **SUPERSEDED as of 2026-08-17**, see §24: `PROMOTION-WALKFORWARD-GATE-WIRING-01` is CLOSED (superseded by the P7C DSR/PBO OOS-evidence gate, pending independent review). Next fastest Research/Backtest opportunity is the `P7C-REPAIR-04` independent review itself (no implementation work, review-only).
+6. **Walk-forward promotion gate production wiring** (`PROMOTION-WALKFORWARD-GATE-WIRING-01`, corrected back to `READY` 2026-08-17, see §5/§24) — the accepted P7C DSR/PBO OOS-evidence mechanism (`verify_promotion_oos_evidence` / `VerifiedPromotionOosEvidence`) has no production caller yet; wiring it into the real daemon/operator promotion path is the fastest remaining Research/Backtest opportunity once Wave 2 is pushed to `origin/main`.
 7. **Live account truth fix** (`LIVE-ACCOUNT-TRUTH-01`) — S-sized, unlocks correct buying-power reporting for both the eventual live path and (cosmetically) paper.
 8. **Live-shadow smoke tooling** (`LIVE-TINY-CAPITAL-SMOKE-01`) — M-sized, GREEN, builds the evidence-accumulation tooling that the live trust-chain gate will eventually need as input, at zero capital risk.
 
@@ -576,13 +576,48 @@ git diff --check
 **Exact CLOSED End State:** N/A while DEFERRED — reopen as three separate S-patches only on explicit operator decision.
 **Acceptance History:** N/A (deferred, not started).
 
-#### PROMOTION-WALKFORWARD-GATE-WIRING-01 — Wire walk-forward split proof into the Rust promotion gate
+#### PROMOTION-WALKFORWARD-GATE-WIRING-01 — Wire the accepted OOS-evidence verifier into the production research → promotion path
 
-**Status:** CLOSED — SUPERSEDED (`MASTER-LEDGER-CONSOLIDATION-01`, 2026-08-17) · **Priority:** P1 (historical) · **Paper Impact:** GREEN (promotion output is a report artifact; no portfolio/risk/execution/broker writes) · **Subsystem:** mqk-promotion
+**Status:** READY (corrected by `MASTER-LEDGER-TRUTH-REPAIR-01`, 2026-08-17) · **Priority:** P1 · **Paper Impact:** GREEN (promotion output is a report artifact; no portfolio/risk/execution/broker writes) · **Subsystem:** mqk-promotion / mqk-daemon
 
-**Supersession note (2026-08-17):** This entry's exact proposed mechanism (`PromotionInput.walk_forward_evidence: Option<WalkForwardEvidence>`) was never implemented. Instead, the P7A→P7C research-promotion program (commits `3e2d926b`..`b80749bd` on `main`, see §24) delivered a materially stronger mechanism achieving the same Acceptance Criteria below and more: `PromotionInput.oos_evidence: Option<VerifiedPromotionOosEvidence>` (`core-rs/crates/mqk-promotion/src/types.rs`), populated only by `mqk_promotion::verify_promotion_oos_evidence` (`research_evidence.rs`), which hash-binds three real Research artifacts (`economic_walk_forward.json`, the DSR/PBO multiple-testing judge JSON, and the daily-returns CSV) to each other and to durable SQLite registry rows (`research_trials`/`research_attempts`/`research_judge_artifacts`, written only by the real Python registry write path), and fails closed on `None` (`evaluator.rs`, reason `"OOS evidence missing"`). All four original Acceptance Criteria are met: (1) `PromotionInput` carries an evidence field — a stronger, non-forgeable one; (2) `None` fails closed with a dedicated reason; (3) pre-existing promotion gate tests (`scenario_nan_metric_fails_promotion.rs`, `scenario_tie_break_correctness.rs`, `scenario_golden_artifact_hash_lock.rs`, `scenario_promotion_requires_partial_fill_stress.rs`) remain present and green (`cargo test -p mqk-promotion`: 61+6+3 passed, 0 failed — see this session's Patch A validation); (4) a new negative-control test suite exists (`scenario_promotion_oos_evidence_gate_p7c_repair_01.rs`, 68 tests). **This is IMPLEMENTED_PENDING_INDEPENDENT_REVIEW at the P7C-REPAIR-04 level (Wave 2), not yet independently accepted** — do not treat "gate exists" as "gate accepted." Do not reopen this entry's original scope; if Wave-2 review finds a genuine defect, track it under the P7C lineage in §24, not here.
+**Correction note (2026-08-17):** `MASTER-LEDGER-CONSOLIDATION-01` (earlier the same day) incorrectly reclassified this entry `CLOSED — SUPERSEDED`, reasoning that the P7A→P7C research-promotion program (commits `3e2d926b`..`b80749bd` on `main`, see §24) delivered `PromotionInput.oos_evidence: Option<VerifiedPromotionOosEvidence>` (`core-rs/crates/mqk-promotion/src/types.rs`), populated only by `mqk_promotion::verify_promotion_oos_evidence` (`research_evidence.rs`), which hash-binds real Research artifacts to durable SQLite registry rows (`research_trials`/`research_attempts`/`research_judge_artifacts`) and fails closed on `None`, and treated that as fully superseding this entry's scope. That was wrong: P7C-REPAIR-04's own record states there is **no production call site** for `verify_promotion_oos_evidence` outside `mqk-promotion` tests, and review of the full Wave-2 patch chain confirms it never modified `mqk-daemon`. The production strategy-promotion daemon path still uses its older scanner/review-artifact validation surface. P7C implemented and hardened a stronger mechanism than this entry's original proposed one — it did **not** finish the production-wiring invariant this entry tracks. Restored to `READY`.
 
-**Original entry (historical, retained for context):**
+**Updated Current Source Truth (2026-08-17):**
+- P7C's OOS evidence verifier (`verify_promotion_oos_evidence`) is implemented and independently accepted locally (Wave 2 — commits `81dcf621` P7B-REPAIR-03 and `b80749bd` P7C-REPAIR-04 — not yet pushed; see §24).
+- `VerifiedPromotionOosEvidence` cannot be caller-constructed (hash-bound to durable Research registry rows).
+- Research registry / attempt / judge authority (`research_trials`/`research_attempts`/`research_judge_artifacts`) is accepted.
+- **But no production caller currently invokes `verify_promotion_oos_evidence`.**
+- No trusted production Research registry DB path is currently wired into this promotion path.
+- The daemon/operator promotion flow does not yet construct `PromotionInput.oos_evidence` from the accepted P7C verifier.
+
+**Problem:** A strong, accepted OOS-evidence mechanism exists, but it is not enforced at the authoritative production promotion boundary — a strategy can still be promoted today without ever passing through `verify_promotion_oos_evidence`.
+**Why This Matters:** This is the single largest correctness gap in the research→promotion pipeline; it directly affects the credibility of any strategy ever promoted. `RESEARCH_BACKTEST_V1_COMPLETE` cannot be met while it stays open (see §24).
+**Dependencies:** Wave 2 (P7A/P7B/P7C, including `P7C-REPAIR-04`) `INDEPENDENTLY_ACCEPTED_LOCALLY` — met. Wave 2 push to `origin/main` — **not yet done; do not begin implementation before Wave 2 is pushed** (see §24/§26 for the full dependency ordering).
+**Remaining mission (do not redesign P7C):**
+```text
+real Research artifacts
+    -> trusted Research registry DB path
+    -> verify_promotion_oos_evidence
+    -> VerifiedPromotionOosEvidence
+    -> PromotionInput.oos_evidence
+    -> evaluate_promotion
+    -> promotion decision
+```
+No caller-generated bypass. The Research registry path must come from trusted application/config state, not request/evidence JSON. Missing/unavailable/mismatched evidence fails closed.
+**In Scope:** Construct `PromotionInput.oos_evidence` in the real daemon/operator promotion flow from a trusted, application/config-sourced Research registry path, calling `verify_promotion_oos_evidence`. **Out of Scope:** Redesigning P7C, changing `verify_promotion_oos_evidence`'s signature/verification logic, changing the Research registry schema.
+**Likely Files / Surfaces:** `core-rs/crates/mqk-daemon/src/routes/strategy_promotions.rs` (or wherever `PromotionInput` is currently constructed for the production promotion flow), `core-rs/crates/mqk-promotion/src/research_evidence.rs`, `core-rs/crates/mqk-promotion/src/types.rs`.
+**Required Implementation Rules:** No caller-generated bypass; the Research registry path must come from trusted application/config state, not request/evidence JSON; missing/unavailable/mismatched evidence fails closed (`PromotionInput.oos_evidence: None` blocks promotion exactly as it does today in `evaluator.rs`).
+**Safety / Compatibility Requirements:** Must not change behavior for already-promoted strategies retroactively; must not weaken or bypass any P7A/P7B/P7C invariant (FROZEN per §24 — do not reopen the mechanism itself).
+**Required Negative Controls:** A production promotion attempt with no trusted registry path resolvable, or with tampered/mismatched registry evidence, fails closed with a dedicated reason.
+**Required Positive Controls:** A real Research artifact chain, written by the actual Python registry write path, flows through the daemon promotion route and produces a `PromotionInput.oos_evidence` that `evaluate_promotion` accepts.
+**Required Regression Tests:** All existing `mqk-promotion` gate tests (`scenario_nan_metric_fails_promotion.rs`, `scenario_tie_break_correctness.rs`, `scenario_golden_artifact_hash_lock.rs`, `scenario_promotion_requires_partial_fill_stress.rs`, `scenario_promotion_oos_evidence_gate_p7c_repair_01.rs`) remain green.
+**Required Validation:** `cargo test -p mqk-promotion`; `cargo test -p mqk-daemon` (promotion route scenarios).
+**Forbidden Validation / Side Effects:** No real broker call, no live/paper DB write outside test fixtures.
+**Acceptance Criteria:** 1) The real production promotion route constructs `PromotionInput.oos_evidence` via `verify_promotion_oos_evidence` from a trusted registry path. 2) A missing/unavailable/mismatched registry path fails closed with a dedicated reason. 3) All existing promotion gate tests (P7A-P7C) remain green. 4) A new negative-control test proves the production route itself fails closed on unwired/unavailable evidence — not just the library function in isolation.
+**Exact CLOSED End State:** CLOSED when no production-path strategy promotion can proceed without a real, registry-verified `verify_promotion_oos_evidence` result, proven end-to-end through the actual daemon route, with all pre-existing promotion tests green.
+**Acceptance History:** PENDING / PENDING / PENDING / PENDING.
+
+**Original entry (historical, retained for context — its exact proposed field name, `walk_forward_evidence: Option<WalkForwardEvidence>`, was never implemented; superseded by the stronger `oos_evidence: Option<VerifiedPromotionOosEvidence>` mechanism, but the production-wiring gap it identified is real and is what the entry above now tracks):**
 **Current Source Truth:** `mqk-promotion/src/evaluator.rs::evaluate_promotion` has no field or check for in-sample/out-of-sample separation. Walk-forward split logic exists only in `research-py/src/mqk_research/scanner/walkforward.py`, `walkforward_runner.py`, `eval_walkforward.py` — not consumed by the Rust gate. A single-period backtest can currently pass every Rust promotion gate (NaN, tie-break, artifact-lock, stress-suite, provenance) with zero walk-forward proof.
 **Problem:** Overfitting protection is optional and upstream-only, not enforced at the authoritative promotion boundary.
 **Why This Matters:** This is the single largest correctness gap in the research→promotion pipeline; it directly affects the credibility of any strategy ever promoted.
@@ -757,6 +792,27 @@ git diff --check
 **Required Validation:** None.
 **Acceptance Criteria:** Doc exists and states the decision unambiguously.
 **Exact CLOSED End State:** CLOSED when committed.
+**Acceptance History:** PENDING / PENDING / PENDING / PENDING.
+
+#### DOCS-TRACKER-RETIREMENT-01 — Finish retiring redundant historical tracker documents
+
+**Status:** OPEN · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Documentation / repository hygiene
+
+**Context (added 2026-08-17, `MASTER-LEDGER-TRUTH-REPAIR-01`):** A prior `DOCS-TRACKER-CLEANUP-01` session safely deleted zero documents because real blockers were found — a correct fail-closed deletion decision, not a defect. That session's original cleanup objective remains partially open and is tracked here so it is not lost.
+
+**Purpose:** Finish retiring redundant historical tracker documents once their remaining dependencies/content are safely migrated.
+
+**Confirmed current blockers:**
+
+1. `MiniQuantDesk_Master_Patch_Ledger_v2.md` — cannot currently be deleted because `scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1` reads that exact path and checks historical status content. Future retirement work must: inspect that guard's actual historical-proof requirement; move the durable proof to an appropriate retained technical/spec/evidence source, OR intentionally update the guard to the new authoritative ledger only if semantically truthful; prove the guard still fails on the intended negative controls; only then remove the hard path dependency and consider deleting the old ledger. Do NOT weaken or simply delete the guard to enable cleanup.
+2. `ACTIVE_PATCH_LEDGER_20260425.md` — not deleted because full migration/deduplication of its backlog-derived content was not proven. Future retirement work must: inventory its unique actionable items; compare against current repo truth/master ledger; migrate only genuinely remaining items; preserve required technical history elsewhere if necessary; then delete if fully redundant.
+3. `core-rs/mqk-gui/GUI_PATCH_TRACKER.md` — intentionally retained as a narrow GUI-specific detailed tracker. Its authority must remain scoped to GUI patch detail only; overall backlog/status remains master-ledger authoritative.
+
+**In Scope:** The three retirement sub-tasks above, executed only once their stated blockers are genuinely cleared. **Out of Scope:** Weakening any guard; deleting any tracker before its blocker is proven cleared; performing the retirement work itself as part of this ledger-truth-repair patch (this entry only records the open item).
+**Likely Files:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `ACTIVE_PATCH_LEDGER_20260425.md`, `scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`, `core-rs/mqk-gui/GUI_PATCH_TRACKER.md`.
+**Required Validation:** The specific guard(s) touched must still fail on their intended negative controls after any change; `git diff --check`.
+**Acceptance Criteria:** No unique actionable work lost; no guard weakened; no dangling references; old v2 ledger removed only after its hard dependency is eliminated; obsolete April ledger removed only after unique backlog migration is proven; this master ledger remains the sole repository-wide backlog authority.
+**Exact CLOSED End State:** CLOSED when all three sub-blockers are cleared per their stated conditions and the corresponding documents are either migrated-and-deleted or explicitly re-scoped, with the acceptance criteria above proven.
 **Acceptance History:** PENDING / PENDING / PENDING / PENDING.
 
 #### OFFICIAL-DUAL-MODE-LAUNCHER-01 — Official Paper/Live dual-mode launcher (scripts/windows/Start-MiniQuantDesk.ps1)
@@ -1324,7 +1380,7 @@ STATE-RS-LEAN-OUT-01 first sub-patch (dedupe alert blocks) (Lane F)
 Critical paths:
 - **Paper operational maturity:** fully achieved (PAPER_SOAK_GO); `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` is CLOSED — zero open Lane A items remain.
 - **Live trading:** `LIVE-TINY-CAPITAL-SMOKE-01` → `LIVE-TRUST-CHAIN-SHADOW-CAPTURE-01` → `-PARITY-SCORER-01` → `-EVIDENCE-SIGNER-01` → `LIVE-CAPITAL-EXTERNAL-PROOF-01` is the entire critical path; nothing else blocks live capital.
-- **Backtesting / research pipeline:** `PROMOTION-WALKFORWARD-GATE-WIRING-01` is CLOSED (superseded, see §24). The gate mechanism itself is implemented (Wave 2) but **pending independent review**; the remaining critical path is `P7C-REPAIR-04 independent review` → `Wave 2 acceptance + push` → `P9 (BKT-ROBUSTNESS-GAUNTLET-01)` → `P10 (RESEARCH-BACKTEST-FINAL-ACCEPTANCE-01)` — see §26 for the full near-term roadmap.
+- **Backtesting / research pipeline:** `PROMOTION-WALKFORWARD-GATE-WIRING-01` is `READY` (corrected 2026-08-17, `MASTER-LEDGER-TRUTH-REPAIR-01`, see §5/§24) — the gate mechanism itself is implemented and independently accepted locally (Wave 2), but has no production caller yet. Remaining critical path: `Wave 2 acceptance + push to origin/main` → `PROMOTION-WALKFORWARD-GATE-WIRING-01` (production wiring) → `P9 (BKT-ROBUSTNESS-GAUNTLET-01)` → `P10 (RESEARCH-BACKTEST-FINAL-ACCEPTANCE-01)` — see §26 for the full near-term roadmap.
 - **GUI completion:** `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01` is a standalone fix with no dependencies.
 - **Multi-symbol equities:** `MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`, `MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`, `MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01` are independent of each other; none blocks another.
 - **Multi-asset:** entirely blocked on a design/decomposition pass that has not happened yet; not on any other ledger item.
@@ -1380,7 +1436,7 @@ A `CLOSED` patch must not be reopened merely because further hardening is imagin
 
 **Backtest Complete** means: the engine simulates fills conservatively with real transaction costs and no lookahead; metrics (Sharpe, drawdown, profit factor) are computed identically to the promotion gate's own scoring; artifacts are deterministic and DB-persisted; the GUI renders real equity curves and trade tables from those artifacts, not mock data; and the CLI/daemon expose the same capability. **Current state: met.**
 
-**Research Pipeline Complete** means: Backtest Complete, plus: promotion gates fail closed on missing provenance, artifact-lock, and stress-suite evidence; and walk-forward/out-of-sample validation is enforced at the same authoritative gate, not left as an optional upstream step. **Current state (updated 2026-08-17, see §24): OOS/DSR/PBO enforcement is implemented at the authoritative Rust gate (`PromotionInput.oos_evidence`, fails closed on `None`) but not yet independently reviewed (Wave 2 = `IMPLEMENTED_PENDING_INDEPENDENT_REVIEW`); a robustness gauntlet (P9) and final acceptance composition (P10) remain open before this bar can be called met.**
+**Research Pipeline Complete** means: Backtest Complete, plus: promotion gates fail closed on missing provenance, artifact-lock, and stress-suite evidence; and walk-forward/out-of-sample validation is enforced at the same authoritative gate, not left as an optional upstream step, in the real production path — not merely implemented and tested in isolation. **Current state (corrected 2026-08-17, `MASTER-LEDGER-TRUTH-REPAIR-01`, see §24): the OOS/DSR/PBO MECHANISM (`verify_promotion_oos_evidence` / `PromotionInput.oos_evidence`, fails closed on `None`) is implemented and independently accepted locally (Wave 2 = `INDEPENDENTLY_ACCEPTED_LOCALLY — NOT PUSHED`), but PRODUCTION WIRING is `OPEN` — no production caller invokes it yet (`PROMOTION-WALKFORWARD-GATE-WIRING-01`, status `READY`, see §5). Wave 2 push, production wiring, a robustness gauntlet (P9), and final acceptance composition (P10) all remain before this bar can be called met.**
 
 **GUI/Operator Console Complete** means: every screen carrying snapshot data has an explicit `truth_state`; every live-data screen hard-blocks on unproven truth; every operator action route returns and *displays* a structured, actionable response including on failure; and no friendly defaults ever substitute for unproven state. **Current state: met** except the one 409-body-drop defect (`GUI-OPERATOR-ACTION-409-BODY-SURFACE-01`).
 
@@ -1419,8 +1475,8 @@ PAPER SOAK GO (PAPER_SOAK_GO, no known blocker; Lane A fence CLOSED at e44e3ddd)
         |         GUI-OPERATOR-ACTION-409-BODY-SURFACE-01
         |         CLI-DAEMON-CONTROL-PASSTHROUGH-01
         |         STRATEGY-*-UNIT-TESTS-01 (x3)
-        |         (PROMOTION-WALKFORWARD-GATE-WIRING-01 — CLOSED/superseded 2026-08-17, see §24;
-        |          Research/Backtest now follows its own P7-P10 chain, independent of Lane B)
+        |         (PROMOTION-WALKFORWARD-GATE-WIRING-01 — corrected back to READY 2026-08-17, see §5/§24;
+        |          gates on Wave 2 push to origin/main per §26 — do not start before Wave 2 is pushed)
         |         README-SNAPSHOT-REFRESH-01
         |         BROKER-ALPACA-DEAD-CODE-CLEANUP-01
         |         (remaining Lane B doc/test items)
@@ -1453,9 +1509,9 @@ This audit did not find any active ledger item that duplicates already-closed wo
 
 No ledger patch ID from the legacy `v2.md` history was found to conflict with or require reopening based on this audit — all previously-closed patches referenced by memory that this audit was able to cross-check against current source (halt-fence lineage, partial-fill dedup, TradeActivity schema, calendar unification, multi-symbol dispatch phases 2-6, dynamic-selection Phase 7A-7C) remain consistent with committed HEAD.
 
-**Superseded by `MASTER-LEDGER-CONSOLIDATION-01` (2026-08-17):**
+**Historical, corrected the same day — `MASTER-LEDGER-CONSOLIDATION-01`'s 2026-08-17 reclassification of item 3 below was itself incorrect and was corrected by `MASTER-LEDGER-TRUTH-REPAIR-01` (2026-08-17). This entry is now a historical record of the incorrect reclassification, not current status — see §5 for the authoritative current entry (`READY`):**
 
-3. **`PROMOTION-WALKFORWARD-GATE-WIRING-01`** (was `READY`, Lane B) — superseded, not implemented as originally scoped. The P7A-P7C research-promotion program delivered a stronger DSR/PBO registry-anchored OOS-evidence gate achieving the same acceptance criteria. See the patch's own updated entry (Lane B, above) and §24 for full evidence. Status: `CLOSED — SUPERSEDED`.
+3. **`PROMOTION-WALKFORWARD-GATE-WIRING-01`** (originally `READY`, Lane B) — `MASTER-LEDGER-CONSOLIDATION-01` (2026-08-17) incorrectly marked this `CLOSED — SUPERSEDED`, reasoning that the P7A-P7C research-promotion program's accepted DSR/PBO registry-anchored OOS-evidence mechanism (`verify_promotion_oos_evidence`) fully achieved this patch's acceptance criteria. That mechanism exists and is independently accepted locally (not yet pushed), but P7C-REPAIR-04's own record confirms it has **no production call site** — the daemon promotion route was never wired to it. `MASTER-LEDGER-TRUTH-REPAIR-01` (same day) corrected the status back to `READY`.
 
 ---
 
@@ -1465,7 +1521,7 @@ No ledger patch ID from the legacy `v2.md` history was found to conflict with or
 |---|---|---|---|---|---|---|
 | 1 | `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01` | B | GREEN | P1 | Real operator-safety defect, one file, no dependencies. | NONE |
 | 2 | `CLI-DAEMON-CONTROL-PASSTHROUGH-01` | B | GREEN | P1 | Closes the incident-response CLI/HTTP parity gap; pure passthrough, low risk. | NONE |
-| 3 | `P7C-REPAIR-04` independent review (Wave 2) | — (Research) | GREEN | P1 | Not an implementation patch — review-only. Supersedes the closed `PROMOTION-WALKFORWARD-GATE-WIRING-01`; see §24. Unblocks P9. | NONE |
+| 3 | `PROMOTION-WALKFORWARD-GATE-WIRING-01` | B | GREEN | P1 | Corrected back to `READY` 2026-08-17 (see §5/§24) — wires the accepted P7C OOS-evidence mechanism (`verify_promotion_oos_evidence`) into the production promotion route; Wave 2 independent review is complete (`81dcf621`, `b80749bd` accepted) but not yet pushed to `origin/main`. Unblocks P9. | Wave 2 pushed to `origin/main` |
 | 4 | `LIVE-ACCOUNT-TRUTH-01` | C | YELLOW | P1 | Real-money-relevant defect; should land early in the live-development branch. | NONE |
 | 5 | `LIVE-TINY-CAPITAL-SMOKE-01` | C | GREEN | P1 | Zero capital risk, unlocks the entire live-trust-chain sequence. | NONE |
 | 6 | `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01` | B | GREEN | P2 | Closes a real proof gap on a currently-dispatchable strategy. | NONE |
@@ -1857,17 +1913,30 @@ New file, added only after all three defects passed individually: `scenario_auto
 |---|---|---|
 | **P7A** — execution pricing / commission parity | **ACCEPTED, PUSHED** (`origin/main` tip) | Commits `3e2d926b`..`f8357ebc`; `origin/main` HEAD is exactly `f8357ebca81c3177a323393c749d06e2e17986e9` — P7A's final commit. `REQUIRED_EXECUTION_PRICING_PROTOCOL_ID = "rust_conservative_bar_range_v1"` enforced in `research_evidence.rs`. |
 | **P7B** — weight-to-share / discrete economics parity | **INDEPENDENTLY ACCEPTED LOCALLY, not pushed** | Commits `1e3cfe41`, `be1c6220`, `99e806e3`(long-short, see below), `221feb45`, `b079d6b5`, `81dcf621` (P7B-REPAIR-03, final reversal-arithmetic repair — independent review accepted the final prospective-gross reversal arithmetic per mission record). `REQUIRED_WEIGHT_TO_SHARE_PROTOCOL_ID = "weight_to_share_v1"` and `REQUIRED_DISCRETE_ECONOMICS_PROTOCOL_ID = "discrete_share_economic_path_v1"` both enforced. **FROZEN — do not reopen** absent a deterministic contradiction (CLAUDE.md §6). |
-| **LONG-SHORT economic policy** | **INDEPENDENTLY ACCEPTED LOCALLY** | Commits `99e806e3` (versioned long/short economic policy), `b079d6b5` (legacy identity preservation). `mqk-promotion` is deliberately agnostic to long-only vs long/short (proven by `both_legacy_long_only_and_new_long_short_shapes_verify_identically`). **FROZEN — legacy identity compatibility, long/short threshold mapping, score terminology, and signed-share behavior must not be reopened** absent deterministic contradiction. |
-| **P7C** — durable, registry-anchored OOS evidence gate | **IMPLEMENTED_PENDING_INDEPENDENT_REVIEW (Wave 2)** | Chain: `16b7445a` (REPAIR-01, require verified OOS evidence) → `19fc44d5` (REPAIR-02, verify OOS artifacts + statistical thresholds) → `b185d91b`/`cbcf9c10` (REPAIR-03, anchor to durable Research registry) → **`b80749bd` (REPAIR-04, stabilize cross-language judge authority — this session)**. Each REPAIR superseded the previous within the same chain; only REPAIR-04 at `b80749bd` is current. **NOT accepted** — Wave 2 remains `PENDING_INDEPENDENT_REVIEW` until reviewed. |
+| **LONG-SHORT economic policy** | **INDEPENDENTLY ACCEPTED LOCALLY, not pushed** | Commits `99e806e3` (versioned long/short economic policy), `b079d6b5` (legacy identity preservation). `mqk-promotion` is deliberately agnostic to long-only vs long/short (proven by `both_legacy_long_only_and_new_long_short_shapes_verify_identically`). **FROZEN — legacy identity compatibility, long/short threshold mapping, score terminology, and signed-share behavior must not be reopened** absent deterministic contradiction. |
+| **P7C** — durable, registry-anchored OOS evidence gate | **INDEPENDENTLY_ACCEPTED_LOCALLY, not pushed** (corrected 2026-08-17, `MASTER-LEDGER-TRUTH-REPAIR-01`, after independent review) | Chain: `16b7445a` (REPAIR-01, require verified OOS evidence) → `19fc44d5` (REPAIR-02, verify OOS artifacts + statistical thresholds) → `b185d91b`/`cbcf9c10` (REPAIR-03, anchor to durable Research registry) → **`b80749bd` (REPAIR-04, stabilize cross-language judge authority)**. Each REPAIR superseded the previous within the same chain; only REPAIR-04 at `b80749bd` is current. |
 
-**P7C-REPAIR-04 summary (this session, commit `b80749bd`):** fixed a genuine cross-language canonicalization defect — Python `json.dumps` and Rust `serde_json` are not guaranteed to format every float identically (`1e-06` vs `1e-6`), so the prior REPAIR-03 mechanism (Rust rehashing the supplied judge JSON and comparing to the Python-registered hash) could falsely reject a genuinely authoritative artifact. Fixed by durably persisting Python's exact canonical judge text (`canonical_judge_json` column, additive migration) alongside its hash, and having Rust verify per-row integrity against that stored text before doing a same-language (Rust-side) semantic comparison against the supplied artifact. 7 new Rust tests + 5 new Python tests added (exponent-format interoperability, semantic numeric mutation, registry-integrity tampering in both directions, missing canonical text, conflicting/identical re-registration). `cargo test -p mqk-promotion`: 70 passed / 0 failed. `pytest research-py/tests/test_judge_artifact_canonical_registry.py research-py/tests/test_multiple_testing_judge.py research-py/tests/test_experiment_registry.py research-py/tests/test_exp_distributed.py`: 93 passed / 0 failed.
+**MECHANISM vs. PRODUCTION WIRING vs. `RESEARCH_BACKTEST_V1_COMPLETE` — do not conflate these:**
+- **MECHANISM:** `verify_promotion_oos_evidence` / `VerifiedPromotionOosEvidence` — implemented and **independently accepted locally** (Wave 2, this table). `origin/main` still equals `f8357ebc`; **not pushed**.
+- **PRODUCTION WIRING:** **OPEN** — no production caller invokes `verify_promotion_oos_evidence` today; the daemon promotion route does not construct `PromotionInput.oos_evidence` from it. Tracked by `PROMOTION-WALKFORWARD-GATE-WIRING-01` (§5, status `READY`).
+- **`RESEARCH_BACKTEST_V1_COMPLETE`:** **NOT MET.** Requires Wave 2 pushed + `PROMOTION-WALKFORWARD-GATE-WIRING-01` CLOSED + P9 CLOSED + P10 CLOSED.
 
-**Supersedes:** `PROMOTION-WALKFORWARD-GATE-WIRING-01` (Lane B, §5) — see that entry's own updated status and §13.
+**P7C-REPAIR-04 summary (commit `b80749bd`) — implementation-agent evidence, focused-test counts:** fixed a genuine cross-language canonicalization defect — Python `json.dumps` and Rust `serde_json` are not guaranteed to format every float identically (`1e-06` vs `1e-6`), so the prior REPAIR-03 mechanism (Rust rehashing the supplied judge JSON and comparing to the Python-registered hash) could falsely reject a genuinely authoritative artifact. Fixed by durably persisting Python's exact canonical judge text (`canonical_judge_json` column, additive migration) alongside its hash, and having Rust verify per-row integrity against that stored text before doing a same-language (Rust-side) semantic comparison against the supplied artifact. 7 new Rust tests + 5 new Python tests added (exponent-format interoperability, semantic numeric mutation, registry-integrity tampering in both directions, missing canonical text, conflicting/identical re-registration). These focused counts (`cargo test -p mqk-promotion`: 70 passed / 0 failed; targeted `pytest` on 4 files: 93 passed / 0 failed) are implementation-agent evidence from the REPAIR-04 implementation session itself — see the canonical acceptance-boundary validation block below for the totals the independent review actually evaluated.
+
+**Independent review & final acceptance-boundary validation (2026-08-17):** ChatGPT independently reviewed and accepted commits `81dcf621` (P7B-REPAIR-03) and `b80749bd` (P7C-REPAIR-04) by diff inspection — this was a review of the code, not an independent re-run of the test suite. The following are the implementation-agent's full test-suite totals from the completed controller validation report at HEAD `b80749bd`, recorded here as the canonical acceptance-boundary evidence (superseding the narrower focused counts above where they conflict):
+- `mqk-promotion`: **101 passed / 0 failed**.
+- full `research-py`: **1490 passed / 7 skipped / 0 failed** (+ 12 subtests passed).
+- `mqk-backtest`: **265 passed / 0 failed**.
+- `mqk-execution`: **108 passed / 0 failed**.
+
+**Status distinction:** Wave 2 (P7B + LONG-SHORT + P7C) is `INDEPENDENTLY_ACCEPTED_LOCALLY — NOT PUSHED`. It is **not** `PUSHED` or `PUSHED_VERIFIED` — `origin/main` remains `f8357ebc` until the operator actually pushes.
+
+**Supersedes (mechanism only, not the production-wiring invariant):** the original proposed mechanism in `PROMOTION-WALKFORWARD-GATE-WIRING-01` (Lane B, §5) — that entry's production-wiring gap remains open; see its own current entry (status `READY`) and §13.
 
 ### P9 — `BKT-ROBUSTNESS-GAUNTLET-01`
 
 **Status:** OPEN (not started) · **Priority:** P1 · **Paper Impact:** GREEN (research-only, no execution/portfolio/broker path) · **Subsystem:** research-py / mqk-promotion
-**Dependencies:** Wave 2 (P7C-REPAIR-04) independent acceptance — do not start before Wave 2 is `CLOSED`, not merely implemented.
+**Dependencies:** Wave 2 (P7C-REPAIR-04) is independently accepted locally but **not pushed** — do not start before Wave 2 is pushed to `origin/main`.
 **Required scope:**
 - 2x / 3x cost stress
 - execution-delay stress
@@ -1883,20 +1952,23 @@ New file, added only after all three defects passed individually: `scenario_auto
 ### P10 — `RESEARCH-BACKTEST-FINAL-ACCEPTANCE-01`
 
 **Status:** OPEN (not started) · **Priority:** P1 · **Paper Impact:** GREEN · **Subsystem:** research-py / mqk-promotion / docs
-**Dependencies:** P9 `CLOSED`.
+**Dependencies:** `PROMOTION-WALKFORWARD-GATE-WIRING-01` `CLOSED` (production wiring proven) **and** P9 `CLOSED`.
 **Purpose:** compose existing evidence (not re-derive it) into a final Research/Backtest completion record: Git SHA identity, environment/dependency identity, any genuinely still-missing Research CLI entrypoints, and the final `RESEARCH_BACKTEST_V1_COMPLETE` determination.
 **Explicit constraint:** P10 does not create a parallel evidence/dossier/registry framework — it composes what P7/P9 already produced using existing seams (the Research SQLite registry, existing artifact hashing/provenance conventions).
 
 ### Dependency chain
 
 ```text
-Wave 2 (P7C-REPAIR-04, commit b80749bd)
+Wave 2 (P7A + P7B + P7C, commit b80749bd)
     |
     v
-INDEPENDENT REVIEW  (blocking — not yet done)
+INDEPENDENT REVIEW  (DONE 2026-08-17 — 81dcf621, b80749bd ACCEPTED locally)
     |
     v
-Wave 2 ACCEPTED + pushed to origin/main
+Wave 2 pushed to origin/main  (NOT YET DONE — origin/main still = f8357ebc)
+    |
+    v
+PROMOTION-WALKFORWARD-GATE-WIRING-01  (production wiring — status READY, see §5)
     |
     v
 P9  BKT-ROBUSTNESS-GAUNTLET-01
@@ -1949,14 +2021,17 @@ See §26 for how this chain connects to Operations Resilience and the eventual a
 
 ## 26. Near-Term Roadmap (Post Wave-2 → Autonomous Paper Soak)
 
-*Added by `MASTER-LEDGER-CONSOLIDATION-01`, 2026-08-17. This chain is independent of — and must not preempt — the ongoing Lane A-F equity/Paper program (§5-§14), unless current repo truth shows a direct dependency. In particular, broad multi-asset work, cosmetic GUI work, unnecessary infrastructure, or strategy proliferation must not preempt this path.*
+*Added by `MASTER-LEDGER-CONSOLIDATION-01`, 2026-08-17; corrected by `MASTER-LEDGER-TRUTH-REPAIR-01`, 2026-08-17 (inserted the production-wiring step below, which the consolidation pass omitted). This chain is independent of — and must not preempt — the ongoing Lane A-F equity/Paper program (§5-§14), unless current repo truth shows a direct dependency. In particular, broad multi-asset work, cosmetic GUI work, unnecessary infrastructure, or strategy proliferation must not preempt this path.*
 
 ```text
 CURRENT
-P7C-REPAIR-04 independent review
+Wave 2 (P7A+P7B+P7C) independent review — DONE, ACCEPTED LOCALLY (81dcf621, b80749bd)
         |
         v
-Wave 2 acceptance + push to origin/main
+Wave 2 acceptance + push to origin/main  (NOT YET DONE)
+        |
+        v
+PROMOTION-WALKFORWARD-GATE-WIRING-01  (production wiring — status READY, see §5)
         |
         v
 P9  BKT-ROBUSTNESS-GAUNTLET-01
