@@ -1116,9 +1116,19 @@ def _simulate_fold_execution(
         if residual_increasing_qty > 0:
             assert frame_equity_for_cap is not None
             exposure = _current_gross_exposure_dollars()
+            # P7B-REPAIR-03: prospective-gross parity, mirroring Rust's
+            # `resolve_one_pending_order`. The reducing component closes
+            # exposure that `_current_gross_exposure_dollars` already counts
+            # (at the current mark -- the same convention that function
+            # itself uses), so that closed slice must come OUT of the base
+            # before the risk-increasing residual is added in, or a
+            # reversal's own closed exposure is double-counted against
+            # headroom it no longer occupies.
+            closing_exposure = reducing_qty * (last_close[s] or 0.0)
+            prospective_exposure = exposure - closing_exposure
             proposed_notional = residual_increasing_qty * fill_price
             allowed = frame_equity_for_cap * max_gross_exposure
-            if exposure + proposed_notional > allowed + _GROSS_TOL * max(frame_equity_for_cap, 1.0):
+            if prospective_exposure + proposed_notional > allowed + _GROSS_TOL * max(frame_equity_for_cap, 1.0):
                 # Fail-closed admission: reject the WHOLE order, exactly as
                 # Rust does -- no partial fill, no state mutation, no cost.
                 return 0.0, 0.0, 0.0, 0, None

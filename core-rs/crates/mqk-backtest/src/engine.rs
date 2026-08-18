@@ -980,9 +980,14 @@ impl BacktestEngine {
     /// risk-INCREASING residual (the new opposite-side exposure beyond
     /// flat). Only the residual's notional is subject to the allocation-cap
     /// check; a residual of zero (a pure reduction, the common case) is
-    /// unchanged from prior behavior. The cap decision is still atomic for
-    /// the whole order -- no partial fill -- so a residual that breaches the
-    /// cap rejects the entire order, never letting the reducing shares alone
+    /// unchanged from prior behavior. P7B-REPAIR-03: the base gross exposure
+    /// the residual is checked against is *prospective*, not merely current
+    /// -- the reducing component's own current-mark exposure comes out of
+    /// the base first, so a reversal is judged on the position it will
+    /// actually hold, not on current-plus-new with the closed side hidden by
+    /// signed netting. The cap decision is still atomic for the whole order
+    /// -- no partial fill -- so a residual that breaches the prospective cap
+    /// rejects the entire order, never letting the reducing shares alone
     /// bypass admission for the risk-increasing shares that ride along with
     /// them.
     fn resolve_one_pending_order(&mut self, pending: PendingBacktestOrder, bar: &BacktestBar) {
@@ -991,7 +996,7 @@ impl BacktestEngine {
             BacktestOrderSide::Sell => ExecSide::Sell,
         };
 
-        let residual_increasing_qty: i64 = {
+        let (reducing_qty, residual_increasing_qty): (i64, i64) = {
             let current_qty = self
                 .portfolio
                 .positions
@@ -1005,7 +1010,7 @@ impl BacktestEngine {
                 ExecSide::Sell => current_qty.max(0),
             };
             let reducing_qty = pending.qty.min(reducing_capacity);
-            pending.qty - reducing_qty
+            (reducing_qty, pending.qty - reducing_qty)
         };
         let is_risk_reducing = residual_increasing_qty == 0;
 
@@ -1018,6 +1023,23 @@ impl BacktestEngine {
                 &self.last_prices,
             );
             let exposure = compute_exposure_micros(&self.portfolio.positions, &self.last_prices);
+            // P7B-REPAIR-03: prospective-gross parity. The reducing component
+            // closes existing exposure that `exposure.gross_exposure_micros`
+            // already counts (at the current mark -- the same convention
+            // `compute_exposure_micros` itself uses), so that closed slice
+            // must come OUT of the base before the risk-increasing residual
+            // is added in. Netting only the reducing component's own signed
+            // quantity against its own current mark, and never touching any
+            // other symbol's contribution, is what keeps gross exposure from
+            // being hidden by signed netting while still crediting a
+            // reversal for the risk it is actually closing.
+            let mark_micros = *self.last_prices.get(&pending.symbol).unwrap_or(&0);
+            let closing_exposure_micros: i64 = {
+                let product = (reducing_qty as i128) * (mark_micros as i128);
+                product.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+            };
+            let prospective_gross_exposure_micros =
+                exposure.gross_exposure_micros.saturating_sub(closing_exposure_micros);
             // BACKTEST-MULTIPLIER-RUN-WIRE-01: multiplier-aware notional.
             // With `economics.contract_multiplier == 1` this is exactly
             // `qty * fill_price`, unchanged for every existing equity backtest.
@@ -1029,7 +1051,7 @@ impl BacktestEngine {
 
             if enforce_allocation_cap_micros(
                 equity,
-                exposure.gross_exposure_micros,
+                prospective_gross_exposure_micros,
                 proposed_notional_micros,
                 self.config.max_gross_exposure_mult_micros,
             )

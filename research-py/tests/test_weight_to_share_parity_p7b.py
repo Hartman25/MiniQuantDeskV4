@@ -1142,29 +1142,24 @@ def test_headroom_admits_when_fill_notional_fits() -> None:
     assert summary["gross_total_return"] != 0.0
 
 
-def test_python_reversal_long_to_short_residual_cannot_bypass_cap() -> None:
-    """REQUIRED TEST 18 (Python-side mirror of the Rust reversal-cap fix,
-    mission Section 3F): current +40 shares, reverse to -100 (SELL 140).
-    Closing the 40-share long is safe; the residual 100-share NEW short
-    would breach a cap with only $10,000 of headroom on $10,000 equity at
-    a $100 flat price -- the WHOLE reversal must be rejected, not just the
-    residual, mirroring Rust's resolve_one_pending_order exactly (see
-    core-rs scenario_reversal_cap_bkt_wave2_repair.rs). max_gross_exposure
-    is 1.0 (not tighter) so the CONTINUOUS weight-space admission -- frozen,
-    unchanged -- still admits the magnitude-1.0 reversal exactly at its own
-    boundary; only the DISCRETE fill-time dollar check (equity_usd * 1.0 =
-    $10,000) rejects it, proving the two admission layers are independent."""
-    # 4 bars: day2 (not the fold's LAST bar) is where the reversal resolves,
-    # keeping its rejection observable before day3's forced fold-end
-    # flatten independently zeroes the position (a separate, unrelated
-    # mechanism -- see the forced-flatten tests elsewhere).
+def _reversal_fold(open_weight, open_qty, reversal_weight, reversal_qty, equity_usd):
+    """Shared 4-bar single-symbol reversal harness for items 1-6: day0
+    signals the open (fills day1), day1 signals the reversal (fills day2,
+    NOT the fold's last bar -- day3 exists so the reversal's fill/reject
+    outcome is observable before fold-end forced flatten independently
+    zeroes the position, a separate unrelated mechanism). `max_gross_exposure`
+    is held fixed at 1.0 so the CONTINUOUS weight-space admission layer
+    (frozen, unchanged by this repair) stays constant across every boundary
+    variant below; only `equity_usd` moves the DISCRETE fill-time dollar cap
+    (equity_usd * 1.0), keeping the two admission layers independent -- same
+    property the original P7B-REPAIR-02 test documented."""
     days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
     close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0, 100.0]}, index=days)
-    wts_spec = WeightToShareSpec(equity_usd=10_000.0)
+    wts_spec = WeightToShareSpec(equity_usd=equity_usd)
     pending_events = {
         "AAA": [
-            (days[0], 0.4, 40),   # opens +40 (fills at day1)
-            (days[1], -1.0, -100),  # reverses to -100 (fills at day2)
+            (days[0], open_weight, open_qty),
+            (days[1], reversal_weight, reversal_qty),
         ]
     }
     spec = EconomicWalkForwardSpec(
@@ -1173,32 +1168,93 @@ def test_python_reversal_long_to_short_residual_cannot_bypass_cap() -> None:
         annualization=AnnualizationSpec(),
         weight_to_share=wts_spec,
     )
-    fold_df, summary = _simulate_fold(
+    return _simulate_fold(
         1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
         close_frame, pending_events, spec,
     )
+
+
+# ---------------------------------------------------------------------------
+# REQUIRED TESTS 18-19 / P7B-REPAIR-03 items 1-6 (mission FINAL WAVE-2
+# BLOCKER REPAIR, Patch A): long(+40)->short(-100) and its short->long
+# mirror, at three cap boundaries. Prospective gross = current $4,000 -
+# closing $4,000 + residual $10,000 = $10,000 -- exactly at a $10,000 cap,
+# which the pre-repair check wrongly computed as $4,000 + $10,000 = $14,000
+# and rejected. That wrong expectation is REPLACED here (item 2/5, boundary
+# allow) rather than kept, per the mission; items 1/4 and 3/6 add the
+# below-cap and above-cap boundary siblings mirroring the Rust proof exactly
+# (core-rs scenario_reversal_cap_bkt_wave2_repair.rs).
+# ---------------------------------------------------------------------------
+
+
+def test_item1_python_long_to_short_below_cap_allows() -> None:
+    fold_df, summary = _reversal_fold(0.4, 40, -1.0, -100, equity_usd=11_000.0)
     evidence = summary["weight_to_share_evidence"]["AAA"]
-    assert evidence[1]["target_qty"] == 40  # the +40 open admits
-    # The reversal's residual (100 new short shares * $100 = $10,000) plus
-    # the existing $4,000 long exposure ($14,000) breaches the $10,000 cap
-    # -- rejected in full, position stays +40 (day2, before fold-end flatten).
-    assert evidence[2]["target_qty"] == 40
+    assert evidence[1]["target_qty"] == 40
+    assert evidence[2]["target_qty"] == -100
     assert evidence[2]["signal_target_qty"] == -100
 
 
-def test_python_reversal_short_to_long_residual_cannot_bypass_cap() -> None:
-    """REQUIRED TEST 19: mirror case, current -40, reverse to +100 (BUY
-    140). 4 bars for the same reason as the long->short mirror test above
-    -- keeps the reversal's rejection observable before fold-end flatten."""
-    days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
-    close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0, 100.0]}, index=days)
-    wts_spec = WeightToShareSpec(equity_usd=10_000.0)
-    pending_events = {
-        "AAA": [
-            (days[0], -0.4, -40),
-            (days[1], 1.0, 100),
-        ]
-    }
+def test_item2_python_long_to_short_exactly_cap_allows() -> None:
+    """This is the exact scenario the pre-repair test wrongly asserted as
+    rejected ($4,000 + $10,000 = $14,000). The correct prospective gross is
+    $4,000 - $4,000 + $10,000 = $10,000, which sits exactly at the cap and
+    must be allowed -- mirrors Rust's item2_long_to_short_exactly_cap_allows."""
+    fold_df, summary = _reversal_fold(0.4, 40, -1.0, -100, equity_usd=10_000.0)
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == 40
+    assert evidence[2]["target_qty"] == -100
+    assert evidence[2]["signal_target_qty"] == -100
+
+
+def test_item3_python_long_to_short_above_cap_rejects() -> None:
+    fold_df, summary = _reversal_fold(0.4, 40, -1.0, -100, equity_usd=9_000.0)
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == 40
+    assert evidence[2]["target_qty"] == 40  # rejected -- position stays +40
+    assert evidence[2]["signal_target_qty"] == -100
+
+
+def test_item4_python_short_to_long_below_cap_allows() -> None:
+    fold_df, summary = _reversal_fold(-0.4, -40, 1.0, 100, equity_usd=11_000.0)
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == -40
+    assert evidence[2]["target_qty"] == 100
+    assert evidence[2]["signal_target_qty"] == 100
+
+
+def test_item5_python_short_to_long_exactly_cap_allows() -> None:
+    fold_df, summary = _reversal_fold(-0.4, -40, 1.0, 100, equity_usd=10_000.0)
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == -40
+    assert evidence[2]["target_qty"] == 100
+    assert evidence[2]["signal_target_qty"] == 100
+
+
+def test_item6_python_short_to_long_above_cap_rejects() -> None:
+    fold_df, summary = _reversal_fold(-0.4, -40, 1.0, 100, equity_usd=9_000.0)
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == -40
+    assert evidence[2]["target_qty"] == -40  # rejected -- position stays -40
+    assert evidence[2]["signal_target_qty"] == 100
+
+
+# ---------------------------------------------------------------------------
+# Item 7: pure reduction is unaffected -- `residual_increasing_qty == 0`
+# skips the discrete cap check entirely, so a full close must still execute
+# even under a cap so tight that treating the closing notional as a fresh
+# risk-increasing order (the pre-P7B-REPAIR-02 bug) would have rejected it.
+# ---------------------------------------------------------------------------
+
+
+def test_item7_python_pure_reduction_bypasses_cap_unchanged() -> None:
+    days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
+    close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0]}, index=days)
+    # Exactly enough to admit the $4,000 open; a naive re-check of the full
+    # $4,000 closing notional against the post-open $4,000 existing gross
+    # ($8,000) would blow this cap if reduction weren't bypassed entirely.
+    wts_spec = WeightToShareSpec(equity_usd=4_000.0)
+    pending_events = {"AAA": [(days[0], 0.4, 40), (days[1], 0.0, 0)]}
     spec = EconomicWalkForwardSpec(
         signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
         cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
@@ -1210,9 +1266,168 @@ def test_python_reversal_short_to_long_residual_cannot_bypass_cap() -> None:
         close_frame, pending_events, spec,
     )
     evidence = summary["weight_to_share_evidence"]["AAA"]
-    assert evidence[1]["target_qty"] == -40
-    assert evidence[2]["target_qty"] == -40
-    assert evidence[2]["signal_target_qty"] == 100
+    assert evidence[1]["target_qty"] == 40
+    assert evidence[2]["target_qty"] == 0, "pure reduction must bypass the allocation cap entirely"
+
+
+# ---------------------------------------------------------------------------
+# Item 8: pure increase from flat is unaffected by this repair -- reducing
+# qty is always zero when there is no existing opposing position, so
+# prospective gross collapses to the pre-repair `0 + residual` formula.
+# ---------------------------------------------------------------------------
+
+
+def _pure_increase_fold(equity_usd):
+    # 3 bars, not 2: day1 (where the open admits/rejects) must not be the
+    # fold's LAST bar, or the forced fold-end flatten immediately collapses
+    # an admitted position back to 0 on that same row -- same reason the
+    # reversal fixtures above use 4 bars instead of 3.
+    days = pd.date_range("2021-01-01", periods=3, freq="D", tz="UTC")
+    close_frame = pd.DataFrame({"AAA": [100.0, 100.0, 100.0]}, index=days)
+    wts_spec = WeightToShareSpec(equity_usd=equity_usd)
+    pending_events = {"AAA": [(days[0], 0.4, 40)]}
+    spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
+        cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
+        annualization=AnnualizationSpec(),
+        weight_to_share=wts_spec,
+    )
+    return _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec,
+    )
+
+
+def test_item8_python_pure_increase_exactly_cap_allows() -> None:
+    fold_df, summary = _pure_increase_fold(equity_usd=4_000.0)  # cap == $4,000, exact fit
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == 40
+
+
+def test_item8_python_pure_increase_above_cap_rejects() -> None:
+    fold_df, summary = _pure_increase_fold(equity_usd=3_900.0)  # cap $3,900, just short
+    evidence = summary["weight_to_share_evidence"]["AAA"]
+    assert evidence[1]["target_qty"] == 0
+    assert evidence[1]["signal_target_qty"] == 40
+
+
+# ---------------------------------------------------------------------------
+# Item 9: an unrelated symbol's exposure must remain fully counted -- the
+# fix only nets out the reversed/reducing symbol's own closing slice, never
+# another symbol's contribution to gross exposure. AAA opens 20 @ $100
+# ($2,000, held static) while BBB opens fresh 100 shares ($10,000, a pure
+# increase, not a reversal). Correct prospective gross = $2,000 (AAA) +
+# $10,000 (BBB) = $12,000. Cap set to $11,000: correct behavior rejects BBB;
+# a bug that dropped AAA's exposure from the base would see only $10,000 and
+# incorrectly allow it.
+# ---------------------------------------------------------------------------
+
+
+def test_item9_python_unrelated_symbol_exposure_remains_counted() -> None:
+    days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
+    close_frame = pd.DataFrame(
+        {"AAA": [100.0, 100.0, 100.0, 100.0], "BBB": [100.0, 100.0, 100.0, 100.0]}, index=days
+    )
+    wts_spec = WeightToShareSpec(equity_usd=11_000.0)  # cap $11,000 (equity_usd * max_gross_exposure)
+    # `max_gross_exposure` (below) is a SINGLE field doing double duty: it is
+    # both the frozen CONTINUOUS weight-space admission cap AND the
+    # multiplier on `equity_usd` that sets the DISCRETE dollar cap under
+    # test here -- raising it to give BBB continuous headroom would also
+    # loosen the very dollar cap this test exists to exercise. Instead, the
+    # signal WEIGHTS are kept small (0.1 each; decoupled from qty, which
+    # `_apply_discrete_execution` sizes independently via the explicit qty
+    # in each pending_events tuple) so the continuous gate never binds,
+    # while `max_gross_exposure` stays at 1.0 and `equity_usd` alone drives
+    # the $11,000 boundary being tested.
+    pending_events = {
+        "AAA": [(days[0], 0.1, 20)],   # opens 20 (fills day1), held static thereafter
+        "BBB": [(days[1], 0.1, 100)],  # opens 100 (fills day2, after AAA is already filled)
+    }
+    spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
+        cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
+        annualization=AnnualizationSpec(),
+        weight_to_share=wts_spec,
+    )
+    fold_df, summary = _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec,
+    )
+    aaa = summary["weight_to_share_evidence"]["AAA"]
+    bbb = summary["weight_to_share_evidence"]["BBB"]
+    assert aaa[1]["target_qty"] == 20
+    assert bbb[2]["target_qty"] == 0, (
+        "BBB must be rejected once AAA's static $2,000 exposure is correctly counted "
+        "against the $11,000 cap alongside BBB's own $10,000 residual"
+    )
+    assert bbb[2]["signal_target_qty"] == 100
+
+
+# ---------------------------------------------------------------------------
+# Item 10: multi-symbol reversal -- prospective gross must equal the other
+# symbol's untouched gross plus the reversed symbol's own prospective final
+# gross. AAA opens 20 @ $100 ($2,000, static) while BBB opens +40 then
+# reverses to -100 (BBB's own prospective final gross = $4,000 - $4,000 +
+# $10,000 = $10,000, per items 1-3). Correct total = $2,000 + $10,000 =
+# $12,000.
+# ---------------------------------------------------------------------------
+
+
+def _multi_symbol_reversal_fold(equity_usd):
+    days = pd.date_range("2021-01-01", periods=4, freq="D", tz="UTC")
+    close_frame = pd.DataFrame(
+        {"AAA": [100.0, 100.0, 100.0, 100.0], "BBB": [100.0, 100.0, 100.0, 100.0]}, index=days
+    )
+    wts_spec = WeightToShareSpec(equity_usd=equity_usd)
+    # Same decoupling as item 9's `pending_events` comment: `max_gross_exposure`
+    # sets BOTH the continuous weight-space cap and the discrete dollar cap's
+    # multiplier, so it must stay at 1.0 for `equity_usd` alone to control the
+    # boundary under test. BBB's reversal weight magnitude (0.2 -> 0.1) is
+    # chosen to DECREASE, not increase -- the same "gross-reducing candidates
+    # execute unconditionally" classification pure reductions use (item 7) --
+    # so the continuous layer never gates it at all, regardless of AAA's
+    # static weight. The qty (-100, unchanged) is what actually drives the
+    # discrete dollar math being tested, sized independently of the weight.
+    pending_events = {
+        "AAA": [(days[0], 0.1, 20)],                          # static, held throughout
+        "BBB": [(days[0], 0.2, 40), (days[1], -0.1, -100)],   # opens, then reverses (fills day2)
+    }
+    spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5, max_gross_exposure=1.0),
+        cost_model=CostModelSpec(commission_bps_per_side=0.0, slippage_bps_per_side=0.0, diagnostic_zero_cost=True),
+        annualization=AnnualizationSpec(),
+        weight_to_share=wts_spec,
+    )
+    return _simulate_fold(
+        1, {"test_start": days[0], "test_end": days[-1] + pd.Timedelta(days=1)},
+        close_frame, pending_events, spec,
+    )
+
+
+def test_item10_python_multi_symbol_reversal_exactly_cap_allows() -> None:
+    fold_df, summary = _multi_symbol_reversal_fold(equity_usd=12_000.0)  # cap $12,000
+    aaa = summary["weight_to_share_evidence"]["AAA"]
+    bbb = summary["weight_to_share_evidence"]["BBB"]
+    assert aaa[1]["target_qty"] == 20
+    assert bbb[1]["target_qty"] == 40
+    assert bbb[2]["target_qty"] == -100, (
+        "AAA $2,000 + BBB prospective $10,000 = $12,000 sits exactly at the $12,000 cap"
+    )
+    assert bbb[2]["signal_target_qty"] == -100
+
+
+def test_item10_python_multi_symbol_reversal_above_cap_rejects() -> None:
+    fold_df, summary = _multi_symbol_reversal_fold(equity_usd=11_000.0)  # cap $11,000
+    aaa = summary["weight_to_share_evidence"]["AAA"]
+    bbb = summary["weight_to_share_evidence"]["BBB"]
+    assert aaa[1]["target_qty"] == 20
+    assert bbb[1]["target_qty"] == 40
+    assert bbb[2]["target_qty"] == 40, (
+        "AAA $2,000 + BBB prospective $10,000 = $12,000 breaches the $11,000 cap -- "
+        "a bug that ignored AAA's static exposure would see only BBB's $10,000 and "
+        "incorrectly allow this"
+    )
+    assert bbb[2]["signal_target_qty"] == -100
 
 
 def test_no_p7a_cost_double_counting_in_wealth_ledger() -> None:
