@@ -114,6 +114,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1987,12 +1988,41 @@ pub async fn dispatch_by_state(
                 outcome_reason_code: operation.outcome.clone(),
             },
         ),
-        mqk_db::STATE_CONTROLLER_DEGRADED => Ok(
-            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "controller_degraded",
-                newly_applied: false,
-            },
-        ),
+        // AUTONOMOUS-DAILY-CONTROLLER-DEGRADED-RECOVERY-01: `controller_degraded`
+        // must not be a permanent re-projection stub. Every applicable tick
+        // re-reads the authoritative durable run row via the same
+        // `reconcile_durable_run_without_local_owner` helper `handle_session_
+        // close`/`retry_stop` already use for this exact question ("is the
+        // run genuinely terminal, or still active without a local owner?"),
+        // and selects the existing legal next transition from current truth
+        // -- never a hardcoded favorable outcome. A run still armed/running,
+        // an unacked outbox row, or a dirty global reconcile status all fail
+        // closed (to `manual_intervention_required`, a legal edge from
+        // `controller_degraded`); only a terminal run with zero unresolved
+        // economic evidence legally advances to `stopping`.
+        mqk_db::STATE_CONTROLLER_DEGRADED => {
+            let Some(expected_run_id) = operation.run_id else {
+                let newly_applied = apply_manual_if_changed(
+                    pool,
+                    &operation,
+                    "controller_degraded_missing_run_id",
+                    None,
+                    now_utc,
+                    "operation is controller_degraded but carries no run_id to reconcile \
+                     against; failing closed rather than guessing",
+                    STATE_MANUAL_INTERVENTION_REQUIRED,
+                )
+                .await?;
+                return Ok(
+                    AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                        reason_code: "controller_degraded_missing_run_id",
+                        newly_applied,
+                    },
+                );
+            };
+            reconcile_durable_run_without_local_owner(pool, &operation, expected_run_id, now_utc)
+                .await
+        }
         // E3.2: `evidence_degraded` with a durable `stopped_at_utc` is the
         // post-stop finalization-evidence-gap case (E1 contract §3.3) --
         // route to E2B's recovery/classification helper so a later tick can
@@ -2047,6 +2077,9 @@ fn bounded_static_reason(reason_code: &str) -> &'static str {
         "run_row_fetch_failed" => "run_row_fetch_failed",
         "running_operation_missing_run_id" => "running_operation_missing_run_id",
         "arm_state_read_failed" => "arm_state_read_failed",
+        "controller_degraded_missing_run_id" => "controller_degraded_missing_run_id",
+        "unresolved_outbox_at_run_reconcile" => "unresolved_outbox_at_run_reconcile",
+        "reconcile_dirty" => "reconcile_dirty",
         _ => "manual_intervention_required",
     }
 }
@@ -3053,8 +3086,75 @@ async fn reconcile_durable_run_without_local_owner(
         );
     }
 
-    // Terminal durable run: safe to record stopped without ever calling
-    // the canonical stop path.
+    // AUTONOMOUS-DAILY-CONTROLLER-DEGRADED-RECOVERY-01: a terminal run row
+    // alone is not sufficient proof that it is safe to present this
+    // operation as stopped -- an unacked outbox row (still PENDING/CLAIMED/
+    // DISPATCHING/SENT/FAILED/AMBIGUOUS) means an order may still be in
+    // flight to or from the broker with no local runtime left to resolve
+    // it, and a dirty global reconcile status means local/broker truth is
+    // not currently known to agree. Both fail closed, never silently
+    // ignored, applying to every caller of this helper (session-close,
+    // stop-retry, and the controller_degraded same-state refresh alike).
+    let unacked = mqk_db::outbox_list_unacked_for_run(pool, expected_run_id)
+        .await
+        .context("reconcile_durable_run_without_local_owner: outbox_list_unacked_for_run failed")?;
+    if !unacked.is_empty() {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "unresolved_outbox_at_run_reconcile",
+            None,
+            now_utc,
+            "the durable run row is terminal, but it still has unacked outbox rows; failing \
+             closed rather than presenting this operation as safely stopped",
+            target,
+        )
+        .await?;
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "unresolved_outbox_at_run_reconcile",
+                newly_applied,
+            },
+        );
+    }
+
+    let reconcile_dirty = match mqk_db::load_reconcile_status_state(pool)
+        .await
+        .context("reconcile_durable_run_without_local_owner: load_reconcile_status_state failed")?
+    {
+        Some(r) => {
+            r.status != "ok"
+                || r.mismatched_positions != 0
+                || r.mismatched_orders != 0
+                || r.mismatched_fills != 0
+        }
+        // No durable reconcile status at all is not evidence of agreement --
+        // fail closed rather than assume clean.
+        None => true,
+    };
+    if reconcile_dirty {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "reconcile_dirty",
+            None,
+            now_utc,
+            "the durable run row is terminal, but the global broker/local reconcile status is \
+             not currently clean; failing closed rather than presenting this operation as \
+             safely stopped",
+            target,
+        )
+        .await?;
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "reconcile_dirty",
+                newly_applied,
+            },
+        );
+    }
+
+    // Terminal durable run, zero unresolved economic evidence: safe to
+    // record stopped without ever calling the canonical stop path.
     let updated = if matches!(
         operation.state.as_str(),
         STATE_STOPPING | STATE_STOP_RETRYING
