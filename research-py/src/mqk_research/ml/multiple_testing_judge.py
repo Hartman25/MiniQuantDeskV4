@@ -10,7 +10,6 @@ import pandas as pd
 
 from mqk_research.exp_distributed.hashing import (
     canonical_json,
-    canonical_json_bytes,
     sha256_bytes,
     short_hash,
 )
@@ -466,24 +465,31 @@ def build_multiple_testing_judge(
         "ids": {"judge_id": judge_id},
     }
 
-    # P7C-REPAIR-03: durably register this judge artifact's canonical
+    # P7C-REPAIR-03/-04: durably register this judge artifact's canonical
     # identity NOW, with its final DSR/PBO values already computed above --
     # this is what `mqk-promotion`'s Rust verifier reads read-only to
     # establish AUTHORITY for a promotion candidate (see
     # `mqk_research.exp_distributed.storage.ResearchResultStore.
     # register_judge_artifact` and `research_registry::load_research_authority`
-    # on the Rust side). The hash is computed the SAME way the Rust verifier
-    # independently recomputes it from the actual judge JSON it is handed
-    # (canonical: parse -> sort keys -> compact-serialize -> SHA-256), so a
-    # caller cannot mutate a DSR/PBO numeric output after the fact and still
-    # match this registered hash.
-    judge_artifact_sha256 = sha256_bytes(canonical_json_bytes(judge_artifact))
+    # on the Rust side). REPAIR-04: the canonical TEXT and its SHA-256 are
+    # derived from the SAME `canonical_json` call and persisted TOGETHER --
+    # never canonicalized once for the text and separately reconstructed for
+    # the hash. Rust never tries to reproduce this exact byte formatting
+    # itself (Python's `json.dumps` and Rust's `serde_json` are not
+    # guaranteed to agree on every float's spelling, e.g. `1e-06` vs `1e-6`
+    # for the same value); it reads this stored text back, verifies its own
+    # hash matches `judge_artifact_sha256`, and compares PARSED JSON VALUES
+    # against the actual supplied judge artifact using its own
+    # canonicalization instead.
+    canonical_judge_json = canonical_json(judge_artifact)
+    judge_artifact_sha256 = sha256_bytes(canonical_judge_json.encode("utf-8"))
     store.register_judge_artifact(
         judge_id=judge_id,
         experiment_id=experiment_id,
         hypothesis_id=hypothesis_id,
         artifact_path=None,
         judge_artifact_sha256=judge_artifact_sha256,
+        canonical_judge_json=canonical_judge_json,
         schema_version=spec.schema_version,
         protocol_id=spec.protocol_id,
     )

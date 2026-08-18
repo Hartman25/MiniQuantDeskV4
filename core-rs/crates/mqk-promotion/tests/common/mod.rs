@@ -18,14 +18,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// Matches `verify_promotion_oos_evidence`'s own canonical judge-artifact
-/// hashing exactly (parse -> re-serialize via serde_json::Value, which
-/// sorts object keys since this workspace never enables serde_json's
-/// "preserve_order" feature -> hash) -- see that function's own doc
-/// comment on why the authority hash must be canonical, not raw-bytes.
+/// P7C-REPAIR-04: the registry now stores the exact canonical judge TEXT a
+/// row's `judge_artifact_sha256` was computed from (mirroring production,
+/// where that text is Python's own `canonical_json` output) -- so a test
+/// fixture registers `sha256(json_str.as_bytes())` directly over the
+/// literal text it also stores as `canonical_judge_json`, never a
+/// Rust-reserialized form. This is the SAME relationship
+/// `research_registry::find_matching_judge_row` verifies against each row's
+/// own primary key.
 pub fn canonical_json_sha256(json_str: &str) -> String {
-    let value: serde_json::Value = serde_json::from_str(json_str).expect("valid JSON fixture");
-    sha256_hex(&serde_json::to_vec(&value).expect("Value always re-serializes"))
+    sha256_hex(json_str.as_bytes())
 }
 
 /// A temporary, real SQLite Research registry -- the same minimal schema
@@ -60,7 +62,8 @@ pub fn new_registry_db() -> RegistryDb {
             judge_artifact_sha256 text primary key,
             judge_id text not null,
             experiment_id text not null,
-            hypothesis_id text
+            hypothesis_id text,
+            canonical_judge_json text
         );
         ",
     )
@@ -87,18 +90,26 @@ pub fn register_succeeded_attempt(db_path: &Path, attempt_id: &str, trial_id: &s
     .expect("insert research_attempts row");
 }
 
+/// `canonical_judge_json` is the exact text this row's `judge_artifact_sha256`
+/// claims to be the hash of -- pass `None` to simulate a historical row
+/// written before P7C-REPAIR-04 (untrusted; see
+/// `research_registry::find_matching_judge_row`), or a text whose hash
+/// deliberately does NOT equal `judge_artifact_sha256` to simulate registry
+/// corruption/tampering.
 pub fn register_judge_artifact(
     db_path: &Path,
     judge_artifact_sha256: &str,
     judge_id: &str,
     experiment_id: &str,
     hypothesis_id: Option<&str>,
+    canonical_judge_json: Option<&str>,
 ) {
     let conn = Connection::open(db_path).expect("open registry db");
     conn.execute(
         "insert into research_judge_artifacts \
-         (judge_artifact_sha256, judge_id, experiment_id, hypothesis_id) values (?1, ?2, ?3, ?4)",
-        rusqlite::params![judge_artifact_sha256, judge_id, experiment_id, hypothesis_id],
+         (judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json) \
+         values (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json],
     )
     .expect("insert research_judge_artifacts row");
 }
@@ -135,7 +146,14 @@ pub fn valid_oos_evidence_for_testing(trial_id: &str) -> VerifiedPromotionOosEvi
     // hypothesis_id=None -- this judge run is scoped to the whole
     // experiment, which covers the trial regardless of its own
     // hypothesis_id (see `research_registry::load_research_authority`).
-    register_judge_artifact(&registry.path, &judge_sha, &format!("judge_{trial_id}"), &experiment_id, None);
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        &format!("judge_{trial_id}"),
+        &experiment_id,
+        None,
+        Some(&judge_json),
+    );
 
     verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &judge_json)
         .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")

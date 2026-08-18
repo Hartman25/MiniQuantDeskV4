@@ -70,6 +70,7 @@ impl Fixture {
             &format!("judge_{}_reregistered", self.trial_id),
             &self.experiment_id,
             None,
+            Some(&self.judge_json),
         );
     }
 }
@@ -110,6 +111,7 @@ fn valid_fixture(trial_id: &str) -> Fixture {
         &format!("judge_{trial_id}"),
         &experiment_id,
         None,
+        Some(&judge_json),
     );
 
     Fixture {
@@ -547,7 +549,7 @@ fn registered_trial_wrong_economic_eval_id_fails() {
     // Registered attempt's result_id is a DIFFERENT id than the economic
     // artifact's own economic_eval_id.
     register_succeeded_attempt(&registry.path, &format!("{trial_id}:att0001"), trial_id, "econ_eval_a_different_run");
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None);
+    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, Some(&judge_json));
 
     let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &judge_json)
         .unwrap_err();
@@ -597,7 +599,14 @@ fn registered_judge_wrong_experiment_hypothesis_fails() {
         "econ_eval_wrong_scope_judge_trial",
     );
     let judge_sha = canonical_json_sha256(&f.judge_json);
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", "a_totally_different_experiment", None);
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        "judge_x",
+        "a_totally_different_experiment",
+        None,
+        Some(&f.judge_json),
+    );
 
     let errs = verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
         .unwrap_err();
@@ -624,7 +633,14 @@ fn registered_judge_scoped_to_specific_hypothesis_must_match_trials_own() {
     );
     let judge_sha = canonical_json_sha256(&f.judge_json);
     // Judge scoped to a DIFFERENT specific hypothesis within the SAME experiment.
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &f.experiment_id, Some("hyp_beta"));
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        "judge_x",
+        &f.experiment_id,
+        Some("hyp_beta"),
+        Some(&f.judge_json),
+    );
 
     let errs = verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
         .unwrap_err();
@@ -649,11 +665,236 @@ fn registered_judge_scoped_to_whole_experiment_covers_any_hypothesis() {
         "econ_eval_experiment_scoped_trial",
     );
     let judge_sha = canonical_json_sha256(&f.judge_json);
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &f.experiment_id, None);
+    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &f.experiment_id, None, Some(&f.judge_json));
 
     let result =
         verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json);
     assert!(result.is_ok(), "got: {result:?}");
+}
+
+// ---------------------------------------------------------------------------
+// P7C-REPAIR-04 — cross-language canonical judge-authority hardening
+// (mission Section 3G, REQUIRED TESTS 1-7). Python's `json.dumps` and
+// Rust's `serde_json` are not guaranteed to format every float identically
+// (e.g. "1e-06" vs "1e-6" for the SAME value) -- authority must be
+// established by comparing PARSED JSON VALUES against the registry's own
+// stored canonical text (itself integrity-checked against its own hash),
+// never by recomputing a hash of the supplied JSON with this crate's own
+// serializer.
+// ---------------------------------------------------------------------------
+
+/// Registers trial + succeeded attempt only (no judge row) -- returns
+/// `(economic_json, daily_csv, economic_eval_id, experiment_id, registry)`.
+fn base_authority_fixture(trial_id: &str) -> (String, Vec<u8>, String, String, RegistryDb) {
+    let daily_csv = b"date,net_daily_return\n2021-01-01,0.0010\n".to_vec();
+    let daily_sha = sha256_hex(&daily_csv);
+    let economic_eval_id = format!("econ_eval_{trial_id}");
+    let experiment_id = format!("exp_{trial_id}");
+
+    let economic_json = format!(
+        r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}},"folds":[{{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}}]}}"#
+    );
+
+    let registry = new_registry_db();
+    register_trial(&registry.path, trial_id, &experiment_id, "hyp");
+    register_succeeded_attempt(&registry.path, &format!("{trial_id}:att0001"), trial_id, &economic_eval_id);
+
+    (economic_json, daily_csv, economic_eval_id, experiment_id, registry)
+}
+
+/// A fully structurally-valid judge JSON text for `trial_id`, with a
+/// caller-chosen literal spelling (`dsr_literal`, e.g. `"1e-06"`, `"1e-6"`,
+/// `"2e-6"`, `"0.85"`) for the candidate's `deflated_sharpe_ratio` field.
+fn judge_json_with_dsr_literal(
+    trial_id: &str,
+    experiment_id: &str,
+    economic_eval_id: &str,
+    economic_sha: &str,
+    daily_sha: &str,
+    dsr_literal: &str,
+) -> String {
+    format!(
+        r#"{{"schema_version":"multiple_testing_judge_v1","protocol":{{"protocol_id":"research_multiple_testing_judge_v1"}},"comparison_scope":{{"experiment_id":"{experiment_id}"}},"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":{dsr_literal}}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
+    )
+}
+
+/// REQUIRED TEST 1 — the registry's stored canonical text spells a number
+/// as "1e-06" (a plausible Python `canonical_json` exponent form); the
+/// supplied judge JSON spells the SAME semantic value as "1e-6". Must
+/// verify -- a canonicalization-format mismatch must not reject a
+/// genuinely matching artifact merely because Python and Rust format
+/// floats differently.
+#[test]
+fn exponent_format_interoperability_positive_proof() {
+    let trial_id = "exp_format_trial";
+    let (economic_json, daily_csv, economic_eval_id, experiment_id, registry) =
+        base_authority_fixture(trial_id);
+    let economic_sha = sha256_hex(economic_json.as_bytes());
+    let daily_sha = sha256_hex(&daily_csv);
+
+    let registered_text =
+        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "1e-06");
+    let judge_sha = sha256_hex(registered_text.as_bytes());
+    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, Some(&registered_text));
+
+    let supplied_text = registered_text.replace("1e-06", "1e-6");
+    assert_ne!(supplied_text, registered_text, "sanity: spelling actually differs");
+
+    let ev = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &supplied_text)
+        .expect("semantically-identical exponent-format spelling must verify");
+    assert!((ev.deflated_sharpe_ratio() - 1e-6).abs() < 1e-15);
+}
+
+/// REQUIRED TEST 2 — registered "1e-06", supplied "2e-6": a genuinely
+/// DIFFERENT numeric value, not merely a different spelling. Must fail.
+#[test]
+fn semantic_numeric_mutation_fails() {
+    let trial_id = "numeric_mutation_trial";
+    let (economic_json, daily_csv, economic_eval_id, experiment_id, registry) =
+        base_authority_fixture(trial_id);
+    let economic_sha = sha256_hex(economic_json.as_bytes());
+    let daily_sha = sha256_hex(&daily_csv);
+
+    let registered_text =
+        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "1e-06");
+    let judge_sha = sha256_hex(registered_text.as_bytes());
+    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, Some(&registered_text));
+
+    let supplied_text = registered_text.replace("1e-06", "2e-6");
+
+    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &supplied_text)
+        .unwrap_err();
+    assert!(
+        reasons_contain(&errs, "no research_judge_artifacts row"),
+        "a genuinely different numeric value must not verify: {errs:?}"
+    );
+}
+
+/// REQUIRED TEST 3 — the AUTHORITATIVE (registered) canonical text's
+/// top-level field order differs from the SUPPLIED judge JSON's, yet both
+/// parse to the same JSON value. Complements
+/// `json_field_ordering_does_not_alter_verification_result` (which
+/// reorders only the supplied side) by reordering the REGISTERED side.
+#[test]
+fn registered_canonical_text_field_order_does_not_alter_verification_result() {
+    let f = valid_fixture("registry_order_trial");
+    let value: serde_json::Value = serde_json::from_str(&f.judge_json).unwrap();
+    let obj = value.as_object().unwrap();
+    let mut reversed = serde_json::Map::new();
+    for (k, v) in obj.iter().rev() {
+        reversed.insert(k.clone(), v.clone());
+    }
+    let reversed_text = serde_json::to_string(&serde_json::Value::Object(reversed)).unwrap();
+    assert_ne!(reversed_text, f.judge_json, "sanity: ordering actually differs");
+
+    let registry = new_registry_db();
+    register_trial(&registry.path, &f.trial_id, &f.experiment_id, "hyp");
+    register_succeeded_attempt(
+        &registry.path,
+        &format!("{}:att0001", f.trial_id),
+        &f.trial_id,
+        &format!("econ_eval_{}", f.trial_id),
+    );
+    let reversed_sha = sha256_hex(reversed_text.as_bytes());
+    register_judge_artifact(&registry.path, &reversed_sha, "judge_x", &f.experiment_id, None, Some(&reversed_text));
+
+    // Supply the ORIGINAL (non-reversed) judge_json -- must still match the
+    // reversed-field-order REGISTERED text.
+    let result = verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json);
+    assert!(result.is_ok(), "got: {result:?}");
+}
+
+/// REQUIRED TEST 4 — the SUPPLIED judge JSON carries added insignificant
+/// whitespace/pretty-printing relative to the registered compact canonical
+/// text. Must still verify.
+#[test]
+fn insignificant_whitespace_does_not_alter_verification_result() {
+    let f = valid_fixture("whitespace_trial");
+    let value: serde_json::Value = serde_json::from_str(&f.judge_json).unwrap();
+    let pretty = serde_json::to_string_pretty(&value).unwrap();
+    assert_ne!(pretty, f.judge_json, "sanity: whitespace actually differs");
+
+    let result = verify_promotion_oos_evidence(&f.registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &pretty);
+    assert!(result.is_ok(), "got: {result:?}");
+}
+
+/// REQUIRED TEST 5 — `canonical_judge_json` is stored differently from what
+/// its OWN `judge_artifact_sha256` primary key actually hashes to (the
+/// row's internal integrity is broken). Must never be trusted, even though
+/// the SUPPLIED judge JSON is byte-identical to the genuine (correctly
+/// hashed) text.
+#[test]
+fn registry_canonical_text_hash_mismatch_fails_closed() {
+    let trial_id = "registry_text_tamper_trial";
+    let (economic_json, daily_csv, economic_eval_id, experiment_id, registry) =
+        base_authority_fixture(trial_id);
+    let economic_sha = sha256_hex(economic_json.as_bytes());
+    let daily_sha = sha256_hex(&daily_csv);
+
+    let genuine_text =
+        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.85");
+    let genuine_sha = sha256_hex(genuine_text.as_bytes());
+    let tampered_text =
+        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.99");
+    // Registered under the CORRECT (genuine) sha, but the stored text does
+    // not hash to it -- a corrupted/tampered row.
+    register_judge_artifact(&registry.path, &genuine_sha, "judge_x", &experiment_id, None, Some(&tampered_text));
+
+    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &genuine_text)
+        .unwrap_err();
+    assert!(reasons_contain(&errs, "no research_judge_artifacts row"), "got: {errs:?}");
+}
+
+/// REQUIRED TEST 6 — same integrity contract as TEST 5, from the opposite
+/// direction: a genuinely valid row is registered, then its
+/// `judge_artifact_sha256` primary key is tampered with directly while its
+/// `canonical_judge_json` text is left untouched.
+#[test]
+fn registry_sha_tampered_after_registration_fails_closed() {
+    let trial_id = "registry_sha_tamper_trial";
+    let (economic_json, daily_csv, economic_eval_id, experiment_id, registry) =
+        base_authority_fixture(trial_id);
+    let economic_sha = sha256_hex(economic_json.as_bytes());
+    let daily_sha = sha256_hex(&daily_csv);
+
+    let genuine_text =
+        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.85");
+    let genuine_sha = sha256_hex(genuine_text.as_bytes());
+    register_judge_artifact(&registry.path, &genuine_sha, "judge_x", &experiment_id, None, Some(&genuine_text));
+
+    {
+        let conn = rusqlite::Connection::open(&registry.path).expect("open registry db");
+        conn.execute(
+            "update research_judge_artifacts set judge_artifact_sha256 = ?1 where judge_artifact_sha256 = ?2",
+            rusqlite::params!["tampered_sha_does_not_match_text", genuine_sha],
+        )
+        .expect("tamper with judge_artifact_sha256");
+    }
+
+    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &genuine_text)
+        .unwrap_err();
+    assert!(reasons_contain(&errs, "no research_judge_artifacts row"), "got: {errs:?}");
+}
+
+/// REQUIRED TEST 7 — simulates a historical row written before
+/// P7C-REPAIR-04 (`canonical_judge_json` is `NULL`). Must never be trusted,
+/// no matter how well the supplied judge JSON otherwise matches.
+#[test]
+fn missing_canonical_text_registry_row_fails_closed() {
+    let trial_id = "missing_canonical_text_trial";
+    let (economic_json, daily_csv, economic_eval_id, experiment_id, registry) =
+        base_authority_fixture(trial_id);
+    let economic_sha = sha256_hex(economic_json.as_bytes());
+    let daily_sha = sha256_hex(&daily_csv);
+
+    let judge_text =
+        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.85");
+    let judge_sha = sha256_hex(judge_text.as_bytes());
+    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, None);
+
+    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &judge_text)
+        .unwrap_err();
+    assert!(reasons_contain(&errs, "no research_judge_artifacts row"), "got: {errs:?}");
 }
 
 #[test]

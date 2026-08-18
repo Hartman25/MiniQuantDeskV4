@@ -10,6 +10,7 @@ use crate::research_registry::load_research_authority;
 // P7C-REPAIR-01 (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-01)
 // P7C-REPAIR-02 (PROMOTION-OOS-EVIDENCE-GATE-01-REPAIR-02)
 // P7C-REPAIR-03 (FINAL WAVE-2 BLOCKER REPAIR, Patch B)
+// P7C-REPAIR-04 (FINAL WAVE-2 + MASTER-LEDGER CONSOLIDATION, Patch A)
 // ============================================================================
 //
 // DEFECT FIXED (REPAIR-01): the original P7C (`PromotionOosEvidence`, now
@@ -57,11 +58,25 @@ use crate::research_registry::load_research_authority;
 // establishes authority itself by querying the durable Research SQLite
 // registry read-only -- see [`crate::research_registry::load_research_authority`]
 // for exactly what is checked (trial registered, a succeeded attempt with
-// matching `result_id`, a registered judge artifact whose canonical SHA-256
+// matching `result_id`, a registered judge artifact whose canonical content
 // matches the ACTUAL supplied judge JSON and whose experiment/hypothesis
 // belongs to this trial). There is no public constructor for an authority
 // value anywhere in this crate; a caller cannot manufacture authority by
 // typing strings, only by having a real row in the real registry.
+//
+// DEFECT FIXED (REPAIR-04): REPAIR-03's authority match compared a
+// Rust-recomputed hash of the SUPPLIED judge JSON (re-serialized via this
+// crate's own `serde_json`) against the registry's stored hash. Python's
+// `json.dumps` (which produced the hash actually registered) and Rust's
+// `serde_json` are not guaranteed to format every float identically -- the
+// SAME value can be spelled `1e-06` by Python and `1e-6` by Rust -- so a
+// genuinely authoritative, unmutated judge artifact could hash differently
+// and be falsely rejected. FIX: this function no longer computes or passes
+// a Rust-side hash of the supplied judge JSON for lookup purposes at all;
+// it hands the PARSED judge `Value` to `load_research_authority`, which
+// compares it against the registry's own stored canonical text (itself
+// integrity-checked against its own hash) using ONE canonicalization --
+// see that module's own docs.
 
 /// Required `economic_protocol_id` value -- see
 /// `mqk_research.ml.economic_walkforward.PROTOCOL_ID`. A candidate whose
@@ -171,7 +186,7 @@ impl VerifiedPromotionOosEvidence {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
@@ -231,12 +246,13 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
 ///   - a `research_attempts` row for `trial_id` has `status = 'succeeded'`
 ///     and `result_id` equal to the economic artifact's own
 ///     `ids.economic_eval_id`
-///   - a `research_judge_artifacts` row's `judge_artifact_sha256` equals the
-///     canonical SHA-256 of the FULL supplied `judge_json`, and belongs to
-///     `trial_id`'s own registered experiment/hypothesis -- this is what a
-///     caller CANNOT satisfy merely by keeping the three artifacts
-///     internally self-consistent; it requires a durable registry row
-///     produced when the judge actually ran (see
+///   - a `research_judge_artifacts` row's registered canonical content
+///     (integrity-verified against its own `judge_artifact_sha256`) is
+///     semantically identical to the FULL supplied `judge_json`, and
+///     belongs to `trial_id`'s own registered experiment/hypothesis -- this
+///     is what a caller CANNOT satisfy merely by keeping the three
+///     artifacts internally self-consistent; it requires a durable registry
+///     row produced when the judge actually ran (see
 ///     [`crate::research_registry::load_research_authority`])
 ///
 /// STRUCTURAL (economic artifact):
@@ -319,24 +335,6 @@ pub fn verify_promotion_oos_evidence(
             return Err(errs);
         }
     };
-
-    // Full judge artifact canonical hash (mission Section 5D/5F): hashed
-    // from the CANONICAL re-serialization of the parsed judge Value, not
-    // the raw input bytes -- this crate's serde_json (no "preserve_order"
-    // feature anywhere in the workspace) represents JSON objects as
-    // BTreeMap internally, so re-serializing always sorts keys
-    // (recursively). This makes the hash invariant to pure field
-    // reordering (REQUIRED TEST 34/mission 5K item 33) while remaining
-    // fully sensitive to any genuine content change -- including a
-    // mutated DSR/PBO numeric OUTPUT (mission Section 5D/5F), which
-    // REPAIR-01's input-hash binding alone could never catch. P7C-REPAIR-03:
-    // this is the SAME hash `mqk_research.ml.multiple_testing_judge.
-    // build_multiple_testing_judge` computes and durably registers via
-    // `ResearchResultStore.register_judge_artifact` -- compared against the
-    // registry below, not against a caller-suppliable claim.
-    let canonical_judge_bytes = serde_json::to_vec(&judge)
-        .expect("a successfully-parsed serde_json::Value always re-serializes");
-    let actual_judge_sha256 = sha256_hex(&canonical_judge_bytes);
 
     // ---- economic_walk_forward.json structural checks ----
     let economic_protocol_id = get_str(&econ, &["protocol", "protocol_id"]).unwrap_or_default();
@@ -427,19 +425,25 @@ pub fn verify_promotion_oos_evidence(
         );
     }
 
-    // P7C-REPAIR-03: AUTHORITY -- establish, from the durable Research
+    // P7C-REPAIR-03/-04: AUTHORITY -- establish, from the durable Research
     // registry's own rows (never from a caller-suppliable claim), that
     // `trial_id` is registered, that a succeeded attempt of it has
     // `result_id == economic_eval_id`, and that a registered judge artifact
-    // whose canonical SHA-256 matches the ACTUAL supplied judge JSON belongs
-    // to this trial's own experiment/hypothesis. See
-    // `crate::research_registry::load_research_authority`.
-    if let Err(authority_errs) = load_research_authority(
-        registry_db_path,
-        trial_id,
-        &economic_eval_id,
-        &actual_judge_sha256,
-    ) {
+    // whose registered canonical content matches the ACTUAL supplied judge
+    // JSON belongs to this trial's own experiment/hypothesis. REPAIR-04:
+    // the supplied judge `Value` is passed through directly rather than
+    // hashed with this crate's own serializer first -- Python's
+    // `json.dumps` and Rust's `serde_json` are not guaranteed to format
+    // every float identically (e.g. `1e-06` vs `1e-6` for the same value),
+    // so a Rust-side re-hash of the supplied JSON could never reliably
+    // match a hash Python computed from its own canonical text. See
+    // `crate::research_registry::load_research_authority`, which instead
+    // reads the registry's OWN stored canonical text, verifies its
+    // integrity against its own `judge_artifact_sha256`, and compares
+    // PARSED JSON VALUES using a single (Rust-side) canonicalization.
+    if let Err(authority_errs) =
+        load_research_authority(registry_db_path, trial_id, &economic_eval_id, &judge)
+    {
         errs.extend(authority_errs);
     }
 

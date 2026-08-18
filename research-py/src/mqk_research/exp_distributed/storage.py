@@ -166,7 +166,8 @@ class ResearchResultStore:
                     hypothesis_id text,
                     artifact_path text,
                     schema_version text not null,
-                    protocol_id text not null
+                    protocol_id text not null,
+                    canonical_judge_json text
                 );
                 create index if not exists idx_research_judge_artifacts_judge_id
                     on research_judge_artifacts(judge_id);
@@ -186,6 +187,22 @@ class ResearchResultStore:
             if "artifact_evidence_json" not in existing_columns:
                 connection.execute(
                     "alter table research_attempt_slices add column artifact_evidence_json text"
+                )
+                connection.commit()
+            # P7C-REPAIR-04: a pre-existing DB file created before this column
+            # existed has research_judge_artifacts without it -- same
+            # additive-upgrade rule as artifact_evidence_json above. A row
+            # written before this upgrade has no canonical text and must
+            # never be trusted as registry authority (see
+            # research_registry::load_research_authority on the Rust side,
+            # which fails closed on a NULL/empty canonical_judge_json rather
+            # than reconstructing/backfilling one from caller input).
+            judge_artifact_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(research_judge_artifacts)").fetchall()
+            }
+            if "canonical_judge_json" not in judge_artifact_columns:
+                connection.execute(
+                    "alter table research_judge_artifacts add column canonical_judge_json text"
                 )
                 connection.commit()
 
@@ -440,6 +457,7 @@ class ResearchResultStore:
         hypothesis_id: Optional[str],
         artifact_path: Optional[str],
         judge_artifact_sha256: str,
+        canonical_judge_json: str,
         schema_version: str,
         protocol_id: str,
     ) -> None:
@@ -448,15 +466,22 @@ class ResearchResultStore:
         build_multiple_testing_judge` once its DSR/PBO values are finalized
         (see that function's own docs).
 
-        `judge_artifact_sha256` must be the SAME canonical-JSON SHA-256
-        (parse -> sort keys -> compact-serialize -> hash) the Rust verifier
-        recomputes from the actual judge artifact bytes it is handed — see
-        `mqk_research.exp_distributed.hashing.canonical_json` /
-        `mqk_promotion::research_evidence::verify_promotion_oos_evidence`'s
-        own hashing, which this must match exactly (both round-trip through
-        a sorted-key, no-whitespace JSON form, so registering a
-        Python-side hash of the same underlying values matches Rust's
-        independently-recomputed hash byte for byte).
+        P7C-REPAIR-04: persists BOTH the exact canonical JSON TEXT
+        (`canonical_judge_json`) and its SHA-256 (`judge_artifact_sha256`),
+        both derived from the SAME `mqk_research.exp_distributed.hashing.
+        canonical_json` call on the caller's side — never reconstructed
+        separately. This is the authority the Rust verifier
+        (`mqk_promotion::research_registry::load_research_authority`) reads:
+        it recomputes SHA-256 over the stored TEXT itself (proving registry
+        integrity) and then compares the stored text's PARSED JSON VALUE
+        against the actual supplied judge artifact's parsed value using its
+        own (Rust) canonicalization — never by re-deriving Python's exact
+        byte formatting, which Python's `json.dumps` and Rust's `serde_json`
+        are not guaranteed to agree on for every float (e.g. `1e-06` vs
+        `1e-6` for the same numeric value). Storing the literal text this
+        registry produced is what makes that same-language comparison
+        possible on the Rust side without ever having to reproduce Python's
+        formatting there.
 
         Keyed by `judge_artifact_sha256`, NOT `judge_id` — `judge_id` is
         deliberately CONTENT-LIGHT (see `build_multiple_testing_judge`'s own
@@ -467,21 +492,25 @@ class ResearchResultStore:
         while producing a DIFFERENT canonical artifact and hash). Two rows
         may therefore share a `judge_id`; this is expected, not a collision.
         Only an exact `judge_artifact_sha256` match with DIFFERENT other
-        fields is a genuine failure (SHA-256 collision on differing content
-        is not something to silently trust). A no-op if the row already
-        exists with identical content (idempotent — safe to call from a
-        retried judge build)."""
+        fields (including `canonical_judge_json`) is a genuine failure —
+        registration under an immutable authority key must fail closed on
+        conflicting content rather than silently overwrite trusted evidence
+        (a caller bug or genuine SHA-256 collision, either way not something
+        to silently trust). A no-op if the row already exists with identical
+        content (idempotent — safe to call from a retried judge build)."""
         if not judge_id.strip():
             raise ValueError("judge_id is required")
         if not experiment_id.strip():
             raise ValueError("experiment_id is required")
         if not judge_artifact_sha256.strip():
             raise ValueError("judge_artifact_sha256 is required")
+        if not canonical_judge_json.strip():
+            raise ValueError("canonical_judge_json is required")
         with closing(self._connect()) as connection:
             row = connection.execute(
                 """
                 select judge_id, experiment_id, hypothesis_id, artifact_path,
-                       schema_version, protocol_id
+                       schema_version, protocol_id, canonical_judge_json
                 from research_judge_artifacts where judge_artifact_sha256=?
                 """,
                 (judge_artifact_sha256,),
@@ -494,6 +523,7 @@ class ResearchResultStore:
                     artifact_path,
                     schema_version,
                     protocol_id,
+                    canonical_judge_json,
                 ):
                     raise RuntimeError(
                         f"judge_artifact_sha256 collision with conflicting canonical identity: "
@@ -504,8 +534,8 @@ class ResearchResultStore:
                 """
                 insert into research_judge_artifacts (
                     judge_artifact_sha256, judge_id, experiment_id, hypothesis_id,
-                    artifact_path, schema_version, protocol_id
-                ) values (?, ?, ?, ?, ?, ?, ?)
+                    artifact_path, schema_version, protocol_id, canonical_judge_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     judge_artifact_sha256,
@@ -515,6 +545,7 @@ class ResearchResultStore:
                     artifact_path,
                     schema_version,
                     protocol_id,
+                    canonical_judge_json,
                 ),
             )
             connection.commit()
