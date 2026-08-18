@@ -1386,21 +1386,48 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 /// any of:
 /// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active,
 ///   recovering, or stopping lifecycle in progress), or
-/// - its `state` is `evidence_degraded` AND it carries any run/execution
-///   evidence (`run_id is not null`, or `started_at_utc is not null`, or
-///   `bars_dispatched <> 0`) -- AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-
-///   AMBIGUITY-SCOPING-01. An `evidence_degraded` row with genuine
-///   unresolved execution/broker evidence stays unconditionally relevant
-///   forever, exactly like the unconditional states above -- this clause
-///   narrows nothing for that shape. Only an `evidence_degraded` row that
-///   never obtained runtime/execution authority (no run ever bound, no bar
-///   ever dispatched) falls through to the date-window clause below like
-///   `manual_intervention_required` already does, so a prior-market-date
-///   row of this exact no-run shape cannot durably wedge every later
-///   market-date's operation behind it once its own window has closed. A
-///   same-day `evidence_degraded` row of this shape is unaffected: `now_utc`
+/// - its `state` is `evidence_degraded` AND it is NOT proven safe to
+///   release from unconditional relevance -- AUTONOMOUS-DAILY-EVIDENCE-
+///   DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01. This clause deliberately
+///   separates two questions the original `evidence_degraded` design
+///   conflated: whether the day's *evidence classification* is truthful
+///   (`state`/`state_reason_code` -- e.g. `unknown_incomplete_bar_coverage`
+///   for a run with zero observed bars -- is never touched or reinterpreted
+///   here) versus whether this row still holds *current lifecycle
+///   authority* over `(deployment_mode, adapter_id)` and must therefore
+///   block a later date's operation. `run_id is not null` alone is NOT
+///   sufficient proof of the latter (a prior AMBIGUITY-SCOPING-01 revision
+///   used exactly that heuristic, which incorrectly kept blocking forever
+///   any operation that ever bound a run, even one since proven to have
+///   zero economic consequence). A row is proven safe to release only when
+///   ALL of:
+///   - `stopped_at_utc is not null` (some reviewed stop path recorded
+///     completion -- but this alone is insufficient: `retry_stop`'s
+///     canonical-stop-success path records it via `state.
+///     stop_execution_runtime()`, which stops the local dispatch loop and
+///     says nothing about outstanding broker orders), AND
+///   - either `run_id is null` (never obtained execution authority at
+///     all -- the original stale-with-no-run shape), or, when a run_id is
+///     bound, ALL of:
+///     - the referenced `runs` row's `status = 'STOPPED'` exactly (not
+///       `'HALTED'` -- a halt is a safety-relevant event that must stay
+///       visible, never silently released), AND
+///     - zero unacked `oms_outbox` rows exist for that `run_id` (mirrors
+///       `outbox_list_unacked_for_run`'s exact status set), AND
+///     - the current global `sys_reconcile_status_state` is clean
+///       (`status = 'ok'` and every mismatch counter is zero; no row at
+///       all is never treated as clean).
+///   A `controller_degraded`-repaired operation that reaches
+///   `evidence_degraded` after `reconcile_durable_run_without_local_owner`
+///   already proved these same facts (AUTONOMOUS-DAILY-CONTROLLER-
+///   DEGRADED-RECOVERY-01) is therefore released once its own market date
+///   has passed; a same-day row of this exact shape is unaffected (`now_utc`
 ///   still falls inside its own persisted window via the next clause, so it
-///   still blocks exactly as conservatively as before.
+///   still blocks exactly as conservatively as before); a genuinely mid-run
+///   degraded row (`running -> evidence_degraded` directly, `stopped_at_utc`
+///   never set) or one with any unresolved outbox/reconcile evidence stays
+///   unconditionally relevant forever, exactly like the unconditional
+///   states above.
 /// - `now_utc` falls within its persisted
 ///   `preopen_start_utc ..= postclose_finalize_utc` window, or
 /// - it durably bound a run (`run_id is not null`) that has no durable
@@ -1437,7 +1464,31 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
             state in ($6, $7, $8, $9, $10)
             or (
               state = $11
-              and (run_id is not null or started_at_utc is not null or bars_dispatched <> 0)
+              and not (
+                stopped_at_utc is not null
+                and (
+                  run_id is null
+                  or (
+                    exists (
+                      select 1 from runs r
+                      where r.run_id = sys_autonomous_daily_operations.run_id
+                        and r.status = 'STOPPED'
+                    )
+                    and not exists (
+                      select 1 from oms_outbox o
+                      where o.run_id = sys_autonomous_daily_operations.run_id
+                        and o.status <> 'ACKED'
+                    )
+                    and exists (
+                      select 1 from sys_reconcile_status_state rs
+                      where rs.status = 'ok'
+                        and rs.mismatched_positions = 0
+                        and rs.mismatched_orders = 0
+                        and rs.mismatched_fills = 0
+                    )
+                  )
+                )
+              )
             )
             or ($12 >= preopen_start_utc and $12 <= postclose_finalize_utc)
             or (run_id is not null and stopped_at_utc is null)

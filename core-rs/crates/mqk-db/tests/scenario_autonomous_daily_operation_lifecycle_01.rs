@@ -27,6 +27,10 @@ use mqk_db::{
     STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA, STATE_RECOVERY_RETRYING,
     STATE_RUNNING, STATE_START_RETRYING, STATE_STOPPING,
 };
+use mqk_db::{
+    arm_run, begin_run, insert_run, persist_reconcile_status_state, stop_run, NewRun,
+    PersistReconcileStatusState,
+};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +65,21 @@ fn session_bounds(
     let preopen = open - ChronoDuration::minutes(30);
     let postclose = close + ChronoDuration::minutes(15);
     (open, close, preopen, postclose)
+}
+
+fn unique_suffix() -> String {
+    Uuid::new_v4().to_string().replace('-', "")[..10].to_string()
+}
+
+async fn cleanup_run(pool: &sqlx::PgPool, run_id: Uuid) {
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
 }
 
 async fn cleanup_operation(pool: &sqlx::PgPool, operation_id: Uuid) {
@@ -1382,6 +1401,261 @@ async fn relevant_open_lookup_same_day_no_run_evidence_degraded_still_found() ->
     assert_eq!(found.operation_id, operation_id);
 
     cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-EVIDENCE-DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01:
+// a bound run_id alone is not proof of unresolved economic authority --
+// only a genuinely terminal run with zero unresolved outbox/reconcile
+// evidence may be released from unconditional relevance. These three
+// tests exercise exactly the proof-based checks added to this query
+// (a real `runs` row, driven through insert_run/arm_run/begin_run/
+// stop_run -- never a raw UPDATE).
+// ---------------------------------------------------------------------------
+
+async fn reset_reconcile_status_clean(pool: &sqlx::PgPool, now: DateTime<Utc>) -> anyhow::Result<()> {
+    persist_reconcile_status_state(
+        pool,
+        &PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(now),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+            updated_at_utc: now,
+        },
+    )
+    .await
+}
+
+fn new_run_fixture(run_id: Uuid, now: DateTime<Utc>) -> NewRun {
+    NewRun {
+        run_id,
+        engine_id: "mqk-daemon".to_string(),
+        mode: "PAPER".to_string(),
+        started_at_utc: now,
+        git_hash: "TEST".to_string(),
+        config_hash: "TEST".to_string(),
+        config_json: serde_json::json!({}),
+        host_fingerprint: "test-host".to_string(),
+    }
+}
+
+/// Seed an evidence_degraded operation, from yesterday, bound to a real
+/// `runs` row -- reaching evidence_degraded via the real "mid-run degrade"
+/// path (`running -> evidence_degraded` directly) and then, separately,
+/// recording `stopped_at_utc` via `record_stopped_at` (mirroring
+/// `reconcile_durable_run_without_local_owner`'s own terminal-branch call)
+/// -- so the fixture matches exactly what AUTONOMOUS-DAILY-CONTROLLER-
+/// DEGRADED-RECOVERY-01 produces in production for a `controller_degraded`
+/// operation whose run turned out to be safely stopped.
+async fn seed_stopped_evidence_degraded_with_run(
+    pool: &sqlx::PgPool,
+    seed: &str,
+    market_date: NaiveDate,
+    run_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let (open, _close, _preopen, _postclose) = session_bounds(market_date);
+    let operation_id = seed_operation_for_date(pool, seed, market_date).await;
+    let running = advance_to_running(pool, operation_id, run_id, open).await?;
+    let degraded_args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: running.state.clone(),
+        expected_state_version: running.state_version,
+        new_state: mqk_db::STATE_EVIDENCE_DEGRADED.to_string(),
+        reason_code: Some("unknown_incomplete_bar_coverage".to_string()),
+        blocker_signature: None,
+        occurred_at_utc: open,
+        run_id: None,
+        bounded_detail: "test setup: -> evidence_degraded (unknown_incomplete_bar_coverage)"
+            .to_string(),
+    };
+    let degraded = match transition_autonomous_daily_operation(pool, &degraded_args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert_eq!(degraded.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    record_stopped_at(pool, operation_id, open).await?;
+    Ok(operation_id)
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_with_unacked_outbox_still_blocks() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // genuinely STOPPED
+
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-outbox", yesterday, run_id)
+            .await?;
+
+    // A SENT-but-not-yet-ACKED order still associated with the now-stopped
+    // run -- an order may still be in flight; this must never be silently
+    // released.
+    sqlx::query(
+        "insert into oms_outbox (run_id, idempotency_key, order_json, status, created_at_utc, \
+         sent_at_utc) values ($1, $2, '{}'::jsonb, 'SENT', $3, $3)",
+    )
+    .bind(run_id)
+    .bind(format!("test-unresolved-{}", unique_suffix()))
+    .bind(open)
+    .execute(&pool)
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-outbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-outbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopped run with an unacked outbox row must still fail closed as ambiguous; \
+         got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_with_dirty_reconcile_still_blocks() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-dirty", yesterday, run_id)
+            .await?;
+
+    persist_reconcile_status_state(
+        &pool,
+        &PersistReconcileStatusState {
+            status: "dirty",
+            last_run_at_utc: Some(open),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 1,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: Some("test: simulated position disagreement"),
+            updated_at_utc: open,
+        },
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-dirty", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-dirty",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopped run with a dirty global reconcile status must still fail closed as \
+         ambiguous; got {result:?}"
+    );
+
+    reset_reconcile_status_clean(&pool, current_ts).await?;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_zero_activity_clean_reconcile_is_released(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // genuinely STOPPED, zero orders ever created
+
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-released", yesterday, run_id)
+            .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-released", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-released",
+        current_ts,
+    )
+    .await?
+    .expect("the running current row must be found");
+    assert_eq!(
+        found.operation_id, current_id,
+        "a proven-terminal, zero-activity, clean-reconcile evidence_degraded row must be \
+         released and never shadow the current running operation"
+    );
+
+    // The stale row's own evidence classification must remain completely
+    // untouched -- this repair separates lifecycle authority from evidence
+    // truth, it never rewrites history.
+    let stale_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stale_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(stale_row.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    assert_eq!(
+        stale_row.state_reason_code.as_deref(),
+        Some("unknown_incomplete_bar_coverage")
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
     Ok(())
 }
 
