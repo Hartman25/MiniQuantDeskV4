@@ -1348,24 +1348,31 @@ pub async fn fetch_autonomous_daily_operation_event_at_sequence(
 
 /// States this lookup treats as an active lifecycle in progress -- relevant
 /// regardless of whether `now_utc` falls inside the operation's persisted
-/// window (e.g. a `stopping` operation past its own close is still
-/// relevant).
+/// window.
 ///
 /// AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-AMBIGUITY-SCOPING-01:
 /// `evidence_degraded` deliberately does NOT appear in this list (see
 /// [`fetch_relevant_open_autonomous_daily_operation`]'s own doc comment for
 /// the narrower, evidence-gated clause that replaces it). `evidence_degraded`
-/// is the one state whose unconditional inclusion here was observed to
+/// was the first state whose unconditional inclusion here was observed to
 /// durably wedge every later market-date's operation behind a prior-date row
 /// that never obtained runtime/execution authority and never will (its
 /// window is permanently closed) -- a genuinely different failure shape from
 /// `controller_degraded` (a control-plane/process problem, still always
-/// relevant here) or an in-progress `running`/`stopping`/`recovery_retrying`
-/// operation.
-pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 5] = [
+/// relevant here) or an in-progress `running`/`recovery_retrying` operation.
+///
+/// PAPER-SOAK-STALE-STOPPING-RELEASE-01: `stopping` does NOT appear here
+/// either, for the identical reason. A row whose last-ever CAS transition
+/// lands back on `stopping` (the `stopping -> evidence_degraded -> stopping`
+/// reconciliation shape) is exactly as capable of wedging a later date's
+/// operation forever as a stuck `evidence_degraded` row -- there is nothing
+/// about the `stopping` label itself that proves unresolved runtime/OMS
+/// authority; that proof lives entirely in the run/outbox/reconcile evidence
+/// the shared release clause already checks. `stopping` now shares that
+/// exact evidence-gated clause alongside `evidence_degraded`.
+pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 4] = [
     STATE_RUNNING,
     STATE_RECOVERY_RETRYING,
-    STATE_STOPPING,
     STATE_STOP_RETRYING,
     STATE_CONTROLLER_DEGRADED,
 ];
@@ -1384,11 +1391,12 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 ///
 /// A row is relevant when it is not terminal (`completed*` excluded) and
 /// any of:
-/// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active,
-///   recovering, or stopping lifecycle in progress), or
-/// - its `state` is `evidence_degraded` AND it is NOT proven safe to
-///   release from unconditional relevance -- AUTONOMOUS-DAILY-EVIDENCE-
-///   DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01. This clause deliberately
+/// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active
+///   or recovering lifecycle in progress), or
+/// - its `state` is `stopping` or `evidence_degraded` AND it is NOT proven
+///   safe to release from unconditional relevance -- AUTONOMOUS-DAILY-
+///   EVIDENCE-DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01, extended to
+///   `stopping` by PAPER-SOAK-STALE-STOPPING-RELEASE-01. This clause deliberately
 ///   separates two questions the original `evidence_degraded` design
 ///   conflated: whether the day's *evidence classification* is truthful
 ///   (`state`/`state_reason_code` -- e.g. `unknown_incomplete_bar_coverage`
@@ -1461,9 +1469,9 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
           and adapter_id = $2
           and state not in ($3, $4, $5)
           and (
-            state in ($6, $7, $8, $9, $10)
+            state in ($6, $7, $9, $10)
             or (
-              state = $11
+              state in ($8, $11)
               and not (
                 stopped_at_utc is not null
                 and (
