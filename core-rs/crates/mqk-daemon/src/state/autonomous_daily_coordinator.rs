@@ -1912,9 +1912,16 @@ pub async fn dispatch_by_state(
     // `evidence_degraded` operation whose runtime already durably stopped
     // (`stopped_at_utc` set -- the post-stop finalization-evidence-gap shape
     // E3.2 routes into `attempt_evidence_degraded_recovery`/
-    // `handle_outcome_finalization` via the dedicated arm below) already had
-    // its "safe to present as stopped" proof established once, durably.
-    // Routing it back through `handle_session_close` every tick instead
+    // `handle_outcome_finalization` via the dedicated arm below) has
+    // `stopped_at_utc` proving only that the autonomous runtime stop
+    // obligation was durably recorded/satisfied for this operation --
+    // nothing more. It is not proof of zero unacked outbox, a clean
+    // reconcile, or any other recovery-safety predicate; those remain
+    // independently (and repeatedly) checked by their own authorities every
+    // tick -- `attempt_evidence_degraded_recovery`'s own outbox/inbox/
+    // reconcile checks, and (REPAIR-01) its own
+    // `effective_operation_close_utc` fresh-start boundary. Routing this
+    // shape back through `handle_session_close` every tick instead
     // re-requests `stopping` from `reconcile_durable_run_without_local_
     // owner`, which `handle_stopping` then immediately reclassifies back to
     // `evidence_degraded` -- an unbounded oscillation, never a fresh proof
@@ -3146,10 +3153,20 @@ async fn attempt_evidence_degraded_recovery(
     {
         return Ok(None);
     }
-    // Never attempt a fresh start once today's own valid session window is
-    // over -- there is no time left to observe bars, and finalization
-    // remains the sole authority for a session that has genuinely ended.
-    if now_utc > operation.postclose_finalize_utc {
+    // AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01-REPAIR-01:
+    // recovery is a fresh start, so it is gated on the same
+    // `effective_operation_close_utc` boundary every other fresh-start path
+    // in this file already enforces (D2.17 and its siblings) -- never on
+    // `postclose_finalize_utc`. `postclose_finalize_utc` is a *later*
+    // grace-period deadline for an in-progress *stop* to finish
+    // (`handle_stopping`'s own boundary); it was never a legal start
+    // boundary. Gating this check on it alone left the full
+    // `postclose_finalize_delay` window (15 minutes) after close during
+    // which this arm could still schedule or genuinely attempt a fresh
+    // start -- there is no time left to observe bars once the session's own
+    // close has passed, and finalization remains the sole authority from
+    // that instant on.
+    if now_utc >= operation.effective_operation_close_utc {
         return Ok(None);
     }
 

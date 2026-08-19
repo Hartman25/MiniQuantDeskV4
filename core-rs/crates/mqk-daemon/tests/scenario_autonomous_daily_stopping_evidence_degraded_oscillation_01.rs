@@ -20,6 +20,20 @@
 //! observed live on 2026-08-18 (operation `6aaa0349-e49c-5e2b-aa41-
 //! 0439ec59b1a7`, state_version climbing past 330 with zero economic
 //! activity).
+//!
+//! REPAIR-01 (independent review finding, closed by `t3` below): the
+//! original fix exempted `evidence_degraded_already_stopped` from D2.17
+//! unconditionally once `now_utc >= effective_operation_close_utc`, routing
+//! every such tick into the dedicated `attempt_evidence_degraded_recovery`
+//! arm instead. That arm declined recovery only once
+//! `now_utc > postclose_finalize_utc` -- a *later*, 15-minute-wider boundary
+//! than `effective_operation_close_utc` -- leaving the interval
+//! `[effective_operation_close_utc, postclose_finalize_utc]` able to
+//! schedule or genuinely attempt a fresh start after the session's own
+//! close, violating the accepted "no new runtime start at or after
+//! `effective_operation_close_utc`" invariant enforced everywhere else in
+//! this file. Repaired by gating `attempt_evidence_degraded_recovery`
+//! itself on `effective_operation_close_utc`.
 
 use std::sync::Arc;
 
@@ -530,6 +544,224 @@ async fn t2_closed_session_still_fail_closed_on_unacked_outbox() -> anyhow::Resu
     assert_ne!(after.state, mqk_db::STATE_RUNNING);
 
     cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 3. REPAIR-01 -- THE INDEPENDENT-REVIEW GAP: this is the load-bearing test.
+//    A single tick at `effective_operation_close_utc + 1s`, strictly before
+//    `postclose_finalize_utc` (a 15-minute grace window), on the exact same
+//    genuine post-stop `evidence_degraded` / `unknown_incomplete_bar_
+//    coverage` fixture as `t1`, must never schedule or attempt recovery.
+//    Before this repair, `attempt_evidence_degraded_recovery` declined only
+//    once `now_utc > postclose_finalize_utc` -- leaving this entire window
+//    able to recover after the session's own close, contradicting the
+//    accepted "no new runtime start at or after `effective_operation_close_
+//    utc`" invariant enforced everywhere else in this file.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t3_effective_close_plus_1s_before_postclose_finalize_never_recovers() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    let adapter_id = format!("ev-deg-osc-t3-{}", unique_suffix());
+    let (plan, operation_id, run_id, _seed_now) = build_fixture(&pool, &adapter_id).await?;
+
+    let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        seeded.state,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        "fixture precondition"
+    );
+    assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
+    assert_eq!(
+        seeded.state_reason_code.as_deref(),
+        Some(REASON_INCOMPLETE_BAR_COVERAGE),
+        "fixture precondition: the exact recovery-eligible reason code"
+    );
+
+    let now = plan.effective_operation_close_utc + Duration::seconds(1);
+    assert!(
+        now < seeded.postclose_finalize_utc,
+        "fixture precondition: this tick must land strictly inside the \
+         [effective_operation_close_utc, postclose_finalize_utc] grace window this repair closes"
+    );
+
+    let outbox_before = outbox_row_count_for_run(&pool, run_id).await?;
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    let outcome = dispatch_by_state(&st, &pool, seeded, &plan, now).await?;
+
+    assert!(
+        !matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled
+                | AutonomousDailyCoordinatorTickOutcome::Recovered { .. }
+        ),
+        "a tick strictly between effective_operation_close_utc and postclose_finalize_utc must \
+         never schedule or attempt recovery -- the session's own close already forbids a fresh \
+         start regardless of the later stop-grace deadline; got {outcome:?}"
+    );
+
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_ne!(
+        after.state,
+        mqk_db::STATE_RUNNING,
+        "no new runtime may ever start at or after effective_operation_close_utc"
+    );
+    assert_eq!(
+        after.run_id,
+        Some(run_id),
+        "no fresh run_id may ever be created/bound at or after effective_operation_close_utc"
+    );
+    assert!(
+        after.next_retry_utc.is_none(),
+        "no recovery retry may ever be durably scheduled at or after \
+         effective_operation_close_utc"
+    );
+
+    let outbox_after = outbox_row_count_for_run(&pool, run_id).await?;
+    assert_eq!(
+        outbox_after, outbox_before,
+        "no outbox/economic action may ever be produced by a tick past effective close"
+    );
+    assert_eq!(
+        outbox_after, 0,
+        "the fixture's terminal run never produced an order"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 4. Mid-run `evidence_degraded` (`stopped_at_utc` still `None`), same
+//    effective-close+1s instant: the D2.17 exemption never applies to this
+//    shape (unchanged by this repair), so it must still follow canonical
+//    `handle_session_close` behavior and fail closed on the still-active run
+//    rather than ever be routed into recovery.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t4_mid_run_evidence_degraded_stopped_at_none_still_session_closes() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ev-deg-osc-t4-{}", unique_suffix());
+    reset_env();
+    set_resolvable_assignment_env("AAPL");
+    let seed_now = weekday_at(15, 0);
+    reset_reconcile_status_clean(&pool, seed_now).await?;
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None).await?;
+    let (plan, assignment_identity, runtime_binding_identity, operation_id) =
+        resolve_identity_for_env(&adapter_id, "AAPL", seed_now);
+    seed_operation_row(
+        &pool,
+        &plan,
+        operation_id,
+        &adapter_id,
+        &assignment_identity,
+        &runtime_binding_identity,
+        seed_now,
+    )
+    .await?;
+    let run_id = Uuid::new_v4();
+    mqk_db::insert_run(&pool, &new_run(run_id, seed_now)).await?;
+    mqk_db::arm_run(&pool, run_id).await?;
+    mqk_db::begin_run(&pool, run_id).await?; // left ARMED/RUNNING -- genuinely mid-run, never stopped
+
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: row.state.clone(),
+        expected_state_version: row.state_version,
+        new_state: mqk_db::STATE_START_RETRYING.to_string(),
+        reason_code: None,
+        blocker_signature: None,
+        occurred_at_utc: seed_now,
+        run_id: None,
+        bounded_detail: "test setup: -> start_retrying".to_string(),
+    };
+    let row = match mqk_db::transition_autonomous_daily_operation(&pool, &args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    let args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: row.state.clone(),
+        expected_state_version: row.state_version,
+        new_state: mqk_db::STATE_RUNNING.to_string(),
+        reason_code: None,
+        blocker_signature: None,
+        occurred_at_utc: seed_now,
+        run_id: Some(run_id),
+        bounded_detail: "test setup: -> running".to_string(),
+    };
+    let row = match mqk_db::transition_autonomous_daily_operation(&pool, &args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    // Mid-run critical evidence fault: running -> evidence_degraded directly
+    // (a legal edge -- see `is_legal_operation_transition`), `stopped_at_utc`
+    // deliberately never recorded.
+    let args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: row.state.clone(),
+        expected_state_version: row.state_version,
+        new_state: mqk_db::STATE_EVIDENCE_DEGRADED.to_string(),
+        reason_code: Some(REASON_INCOMPLETE_BAR_COVERAGE.to_string()),
+        blocker_signature: None,
+        occurred_at_utc: seed_now,
+        run_id: Some(run_id),
+        bounded_detail: "test setup: -> evidence_degraded (mid-run critical evidence fault)"
+            .to_string(),
+    };
+    let seeded = match mqk_db::transition_autonomous_daily_operation(&pool, &args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert!(seeded.stopped_at_utc.is_none(), "fixture precondition");
+
+    let now = plan.effective_operation_close_utc + Duration::seconds(1);
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    let outcome = dispatch_by_state(&st, &pool, seeded, &plan, now).await?;
+
+    assert!(
+        !matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled
+                | AutonomousDailyCoordinatorTickOutcome::Recovered { .. }
+        ),
+        "a mid-run evidence_degraded row (stopped_at_utc still None) must never be routed into \
+         recovery -- the D2.17 exemption never applies to it; got {outcome:?}"
+    );
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "durable_active_run_without_local_owner",
+                ..
+            }
+        ),
+        "a still-active run with no local owner at session close must fail closed via the \
+         unchanged handle_session_close path; got {outcome:?}"
+    );
+
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(after.state, mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED);
+
+    cleanup_operation(&pool, operation_id).await;
+    let _ = mqk_db::halt_run(&pool, run_id, now).await;
     cleanup_run(&pool, run_id).await;
     Ok(())
 }
