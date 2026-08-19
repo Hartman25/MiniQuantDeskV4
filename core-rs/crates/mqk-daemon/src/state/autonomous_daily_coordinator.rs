@@ -1907,7 +1907,29 @@ pub async fn dispatch_by_state(
     // D2.17: close handling takes priority over every other state-specific
     // action once the effective operation window has closed, for every
     // state that has not already reached stopping/manual/terminal truth.
+    //
+    // AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01: an
+    // `evidence_degraded` operation whose runtime already durably stopped
+    // (`stopped_at_utc` set -- the post-stop finalization-evidence-gap shape
+    // E3.2 routes into `attempt_evidence_degraded_recovery`/
+    // `handle_outcome_finalization` via the dedicated arm below) already had
+    // its "safe to present as stopped" proof established once, durably.
+    // Routing it back through `handle_session_close` every tick instead
+    // re-requests `stopping` from `reconcile_durable_run_without_local_
+    // owner`, which `handle_stopping` then immediately reclassifies back to
+    // `evidence_degraded` -- an unbounded oscillation, never a fresh proof
+    // (`apply_evidence_degraded_blocker`'s CAS is a genuine no-op once the
+    // reason/signature is unchanged, so the dedicated arm converges; this
+    // guard is what prevented that arm from ever being reached post-close).
+    // A mid-run `evidence_degraded` row (`stopped_at_utc` still `None`) is
+    // deliberately NOT exempted here: its runtime may still be genuinely
+    // active and must still be stopped by `handle_session_close` at close,
+    // exactly as before.
+    let evidence_degraded_already_stopped = operation.state.as_str()
+        == mqk_db::STATE_EVIDENCE_DEGRADED
+        && operation.stopped_at_utc.is_some();
     if now_utc >= plan.effective_operation_close_utc
+        && !evidence_degraded_already_stopped
         && !matches!(
             operation.state.as_str(),
             STATE_STOPPING
