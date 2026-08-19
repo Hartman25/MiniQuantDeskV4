@@ -1370,10 +1370,22 @@ pub async fn fetch_autonomous_daily_operation_event_at_sequence(
 /// authority; that proof lives entirely in the run/outbox/reconcile evidence
 /// the shared release clause already checks. `stopping` now shares that
 /// exact evidence-gated clause alongside `evidence_degraded`.
-pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 4] = [
+///
+/// PAPER-SOAK-STALE-STOP-STATE-RELEASE-REPAIR-01: `stop_retrying` does NOT
+/// appear here either, for the identical reason. A durable
+/// `state = stop_retrying, stopped_at_utc != null` row is a legal shape --
+/// a stop-retry attempt may successfully stop the bound runtime and durably
+/// record `stopped_at_utc` while the CAS state transition never advances
+/// past `stop_retrying` (process/session end before the next finalization
+/// tick). Leaving `stop_retrying` unconditionally relevant left exactly the
+/// same collision open that `stopping` had: a stale prior-day
+/// `stop_retrying` row could still wedge a later date's operation behind
+/// "2 equally authoritative active operations found" forever. `stop_retrying`
+/// now shares the same evidence-gated clause as `stopping` and
+/// `evidence_degraded`.
+pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 3] = [
     STATE_RUNNING,
     STATE_RECOVERY_RETRYING,
-    STATE_STOP_RETRYING,
     STATE_CONTROLLER_DEGRADED,
 ];
 
@@ -1393,11 +1405,13 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 /// any of:
 /// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active
 ///   or recovering lifecycle in progress), or
-/// - its `state` is `stopping` or `evidence_degraded` AND it is NOT proven
-///   safe to release from unconditional relevance -- AUTONOMOUS-DAILY-
-///   EVIDENCE-DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01, extended to
-///   `stopping` by PAPER-SOAK-STALE-STOPPING-RELEASE-01. This clause deliberately
-///   separates two questions the original `evidence_degraded` design
+/// - its `state` is `stopping`, `stop_retrying`, or `evidence_degraded` AND
+///   it is NOT proven safe to release from unconditional relevance --
+///   AUTONOMOUS-DAILY-EVIDENCE-DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01,
+///   extended to `stopping` by PAPER-SOAK-STALE-STOPPING-RELEASE-01 and to
+///   `stop_retrying` by PAPER-SOAK-STALE-STOP-STATE-RELEASE-REPAIR-01. This
+///   clause deliberately separates two questions the original
+///   `evidence_degraded` design
 ///   conflated: whether the day's *evidence classification* is truthful
 ///   (`state`/`state_reason_code` -- e.g. `unknown_incomplete_bar_coverage`
 ///   for a run with zero observed bars -- is never touched or reinterpreted
@@ -1469,9 +1483,9 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
           and adapter_id = $2
           and state not in ($3, $4, $5)
           and (
-            state in ($6, $7, $9, $10)
+            state in ($6, $7, $10)
             or (
-              state in ($8, $11)
+              state in ($8, $9, $11)
               and not (
                 stopped_at_utc is not null
                 and (
