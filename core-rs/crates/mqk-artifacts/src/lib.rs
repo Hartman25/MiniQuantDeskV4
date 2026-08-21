@@ -2,10 +2,17 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use mqk_portfolio::Side;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+pub mod backtest_report_artifact; // BKT-PROMOTION-ARTIFACT-AUTHORITY-01
+pub use backtest_report_artifact::{
+    load_canonical_backtest_report, write_canonical_backtest_report, BacktestReportArtifact,
+    BacktestReportArtifactError, BACKTEST_REPORT_ARTIFACT_SCHEMA_VERSION,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
@@ -32,6 +39,19 @@ pub struct RunManifest {
     /// behavior every pre-existing manifest's run actually had.
     #[serde(default)]
     pub economics: ManifestEconomics,
+    /// BKT-PROMOTION-ARTIFACT-AUTHORITY-01: the execution/replay semantic
+    /// that produced this run's fills (see
+    /// `mqk_backtest::BACKTEST_EXECUTION_MODEL_ID`), mirrored from
+    /// [`mqk_backtest::BacktestReport::execution_model_id`] so
+    /// `backtest_report.json` can be cross-validated against the manifest
+    /// without opening the canonical report first. `#[serde(default)]` lets
+    /// manifests written before this field existed keep parsing (empty
+    /// string means "not recorded", not "empty by real value" -- see
+    /// [`backtest_report_artifact::load_canonical_backtest_report`]).
+    /// Empty for live/paper run manifests, which have no backtest execution
+    /// model and never call `write_backtest_report`.
+    #[serde(default)]
+    pub execution_model_id: String,
 }
 
 /// Truthful backtest-economics metadata recorded on `manifest.json`.
@@ -179,6 +199,10 @@ pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtif
         // shared by the live/paper run CLI). Backtest callers correct this
         // to the run's real economics via `write_backtest_report`.
         economics: ManifestEconomics::default_equity(),
+        // Likewise unknown at init time (this function runs before/without
+        // a BacktestReport for live/paper callers); backtest callers correct
+        // this via `write_backtest_report`.
+        execution_model_id: String::new(),
     };
 
     let manifest_path = run_dir.join("manifest.json");
@@ -1252,33 +1276,70 @@ pub fn write_backtest_report(
     fs::write(&report_md_path, report_md)
         .with_context(|| format!("write report.md failed: {}", report_md_path.display()))?;
 
-    // BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: correct manifest.json's
-    // economics block to this run's real economics. Skipped (not
+    // BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01 / BKT-PROMOTION-ARTIFACT-
+    // AUTHORITY-01: correct manifest.json's `economics` and
+    // `execution_model_id` fields to this run's real values. Skipped (not
     // fabricated) when no manifest.json exists yet -- some callers in this
     // crate's own tests write artifacts directly into a bare temp dir
     // without first calling `init_run_artifacts`.
     let manifest_path = run_dir.join("manifest.json");
-    if manifest_path.exists() {
-        merge_manifest_economics(
+    let manifest_present = manifest_path.exists();
+    if manifest_present {
+        merge_manifest_completion_metadata(
             &manifest_path,
             &ManifestEconomics::from_backtest_economics(&report.economics),
+            &report.execution_model_id,
         )
         .with_context(|| {
             format!(
-                "merge manifest economics failed: {}",
+                "merge manifest completion metadata failed: {}",
                 manifest_path.display()
             )
         })?;
     }
 
+    // BKT-PROMOTION-ARTIFACT-AUTHORITY-01: canonical, schema-versioned,
+    // lossless BacktestReport authority. Always written -- does not require
+    // manifest.json, so ad-hoc test callers that write straight into a bare
+    // temp dir still get a loadable canonical artifact.
+    let canonical_report_path = backtest_report_artifact::write_canonical_backtest_report(
+        run_dir, report,
+    )
+    .with_context(|| {
+        format!(
+            "write canonical backtest_report.json failed: {}",
+            run_dir.display()
+        )
+    })?;
+
+    // Completion audit event -- written LAST, only once every other
+    // canonical artifact this run needs for promotion evidence (orders,
+    // fills, equity curve, metrics, manifest, canonical report) has been
+    // durably written. Only emitted when this run_dir was initialized via
+    // `init_run_artifacts` (manifest.json + audit.jsonl present); ad-hoc
+    // bare-temp-dir test callers do not get a synthesized audit trail.
+    if manifest_present {
+        write_backtest_completion_audit_event(run_dir, report, &canonical_report_path)
+            .with_context(|| {
+                format!(
+                    "write backtest completion audit event failed: {}",
+                    run_dir.display()
+                )
+            })?;
+    }
+
     Ok(())
 }
 
-/// Read-parse-merge-write `manifest.json`'s `economics` key in place.
-/// Additive only -- every other field `init_run_artifacts` (or a later
-/// provenance augmentation such as the daemon's md_bars source merge) wrote
-/// is left untouched.
-fn merge_manifest_economics(manifest_path: &Path, economics: &ManifestEconomics) -> Result<()> {
+/// Read-parse-merge-write `manifest.json`'s `economics` and
+/// `execution_model_id` keys in place. Additive only -- every other field
+/// `init_run_artifacts` (or a later provenance augmentation such as the
+/// daemon's md_bars source merge) wrote is left untouched.
+fn merge_manifest_completion_metadata(
+    manifest_path: &Path,
+    economics: &ManifestEconomics,
+    execution_model_id: &str,
+) -> Result<()> {
     let raw = fs::read_to_string(manifest_path)
         .with_context(|| format!("read manifest failed: {}", manifest_path.display()))?;
     let mut value: serde_json::Value = serde_json::from_str(&raw)
@@ -1293,9 +1354,66 @@ fn merge_manifest_economics(manifest_path: &Path, economics: &ManifestEconomics)
         "economics".to_string(),
         serde_json::to_value(economics).context("serialize manifest economics failed")?,
     );
+    obj.insert(
+        "execution_model_id".to_string(),
+        serde_json::Value::String(execution_model_id.to_string()),
+    );
     let pretty = serde_json::to_string_pretty(&value).context("serialize manifest failed")?;
     fs::write(manifest_path, format!("{pretty}\n"))
         .with_context(|| format!("write manifest failed: {}", manifest_path.display()))?;
+    Ok(())
+}
+
+/// Append the single completion audit event for a finished backtest run.
+///
+/// Idempotent: if `audit.jsonl` already carries content (e.g. a prior call
+/// to `write_backtest_report` for this same `run_dir` already appended the
+/// event), this is a no-op rather than a second chain-breaking append.
+fn write_backtest_completion_audit_event(
+    run_dir: &Path,
+    report: &mqk_backtest::BacktestReport,
+    canonical_report_path: &Path,
+) -> Result<()> {
+    let audit_path = run_dir.join("audit.jsonl");
+    let existing = fs::read_to_string(&audit_path).unwrap_or_default();
+    if !existing.trim().is_empty() {
+        return Ok(());
+    }
+
+    let canonical_bytes = fs::read(canonical_report_path).with_context(|| {
+        format!(
+            "read canonical report for audit hash: {}",
+            canonical_report_path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&canonical_bytes);
+    let canonical_report_sha256 = hex::encode(hasher.finalize());
+
+    let mut writer = mqk_audit::AuditWriter::new(&audit_path, true)
+        .with_context(|| format!("open audit writer failed: {}", audit_path.display()))?;
+
+    let payload = serde_json::json!({
+        "run_id": report.run_id,
+        "strategy_name": report.strategy_name,
+        "config_id": report.config_id,
+        "input_data_hash": report.input_data_hash,
+        "execution_model_id": report.execution_model_id,
+        "halted": report.halted,
+        "halt_reason": report.halt_reason,
+        "canonical_report_sha256": canonical_report_sha256,
+        "canonical_report_schema_version": BACKTEST_REPORT_ARTIFACT_SCHEMA_VERSION,
+    });
+
+    writer
+        .append(report.run_id, "backtest", "backtest_run_completed", payload)
+        .with_context(|| {
+            format!(
+                "append completion audit event failed: {}",
+                audit_path.display()
+            )
+        })?;
+
     Ok(())
 }
 

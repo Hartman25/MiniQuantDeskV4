@@ -18,3 +18,5 @@ rusqlite = { version = "0.30", features = ["bundled"] }  # P7C-REPAIR-03: read-o
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }      # Patch B6 tests: AuditWriter::append
 tempfile = "3"    # P7C-REPAIR-03 tests: synthetic registry DB fixtures
+chrono = { version = "0.4" }   # BKT-PROMOTION-ARTIFACT-AUTHORITY-01 tests: init_run_artifacts now_utc
+mqk-strategy = { path = "../mqk-strategy" }   # BKT-PROMOTION-ARTIFACT-AUTHORITY-01 tests: real BacktestEngine fixture

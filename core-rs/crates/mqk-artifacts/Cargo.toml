@@ -8,11 +8,15 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"   # BKT-PROMOTION-ARTIFACT-AUTHORITY-01: hash-bind completion audit event to canonical report bytes
+hex = "0.4"     # BKT-PROMOTION-ARTIFACT-AUTHORITY-01
 uuid = { version = "1", features = ["serde", "v4"] }
 
+mqk-audit = { path = "../mqk-audit" }        # BKT-PROMOTION-ARTIFACT-AUTHORITY-01: completion audit event
 mqk-backtest = { path = "../mqk-backtest" }
 mqk-portfolio = { path = "../mqk-portfolio" }
 
 [dev-dependencies]
 mqk-strategy = { path = "../mqk-strategy" }
 serde_json = "1"
+tempfile = "3"

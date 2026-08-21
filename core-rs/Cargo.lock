@@ -1740,11 +1740,15 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "hex",
+ "mqk-audit",
  "mqk-backtest",
  "mqk-portfolio",
  "mqk-strategy",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "uuid",
 ]
 
@@ -1954,11 +1958,13 @@ version = "0.1.0"
 name = "mqk-promotion"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hex",
  "mqk-artifacts",
  "mqk-audit",
  "mqk-backtest",
  "mqk-portfolio",
+ "mqk-strategy",
  "rusqlite",
  "serde",
  "serde_json",
