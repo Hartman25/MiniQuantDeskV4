@@ -1994,6 +1994,59 @@ RESEARCH_BACKTEST_V1_COMPLETE
 
 See §26 for how this chain connects to Operations Resilience and the eventual autonomous Paper soak.
 
+### Post-V1 Research Capability Backlog — Vibe-Trading Comparative Audit
+
+*Added by `RESEARCH-VIBE-GAP-BACKLOG-01`, 2026-08-21, docs-only.*
+
+**Everything in this subsection is POST-V1 work.** Nothing here is `READY` while `RESEARCH_BACKTEST_V1_COMPLETE` is false, unless an entry's own dependency line states something even stronger. These entries must not preempt:
+- `PROMOTION-WALKFORWARD-GATE-WIRING-01` (§5, §24)
+- P9 `BKT-ROBUSTNESS-GAUNTLET-01` (§24)
+- P10 `RESEARCH-BACKTEST-FINAL-ACCEPTANCE-01` (§24)
+- autonomous Paper operational validation (§26)
+
+Existing frozen contracts remain authoritative over every entry below: `fwd_ret` (or any other prediction label) is a label, not executable P&L, unless an accepted protocol explicitly says otherwise; execution must remain causal; the final holdout remains reserved unless a mission explicitly authorizes consumption, and consumed holdout data is never fresh again; trial != attempt != evaluation slice, and retries/windows do not manufacture unique trials; result values never define trial identity; promotion evidence remains OOS/cost/execution-aware. None of these entries reopens or weakens any of them.
+
+**Do not import or copy Vibe-Trading implementation code as part of any entry below.** The comparative audit that produced this backlog identified concepts/capabilities only — every entry is a from-scratch, asset-neutral, deterministic design against this repo's own contracts and seams.
+
+#### 1. `RESEARCH-FACTOR-CONTRACT-AND-REGISTRY-01`
+**Status:** DEFERRED — POST `RESEARCH_BACKTEST_V1_COMPLETE`
+**Purpose:** Create an asset-neutral, deterministic factor research contract and registry. Identity must cover semantic formula/source/version, required inputs, warmup, timeframe/universe compatibility, parameters, implementation identity, and relevant data/provenance.
+**Constraints:** Do NOT add a giant factor zoo in this patch. Do NOT treat result values as identity. Do NOT touch execution/Paper/Live.
+
+#### 2. `RESEARCH-FACTOR-IC-IR-QUANTILE-BENCH-01`
+**Status:** BLOCKED
+**Dependencies:** `RESEARCH_BACKTEST_V1_COMPLETE`; `RESEARCH-FACTOR-CONTRACT-AND-REGISTRY-01`.
+**Purpose:** Cross-sectional Spearman IC, IC mean/IR, positive-period ratio, horizon decay, quantile returns/equity, top-minus-bottom spread, coverage/missingness, and deterministic registered artifacts. Research evidence only; never a promotion bypass.
+
+#### 3. `RESEARCH-FACTOR-NULL-CONTROLS-01`
+**Status:** BLOCKED
+**Dependencies:** `RESEARCH-FACTOR-IC-IR-QUANTILE-BENCH-01`.
+**Purpose:** Deterministic within-date shuffled/null-factor falsification controls.
+**Hard invariant:** random seeds/permutations/control repetitions are evaluation slices under the same hypothesis/trial context and MUST NOT manufacture independent trials.
+
+#### 4. `RESEARCH-POINT-IN-TIME-UNIVERSE-01`
+**Status:** DEFERRED / CONDITIONAL
+**Dependencies:** `RESEARCH_BACKTEST_V1_COMPLETE`; `RESEARCH-FACTOR-CONTRACT-AND-REGISTRY-01`.
+**Purpose:** Provide explicit point-in-time universe membership/provenance for broad historical cross-sectional research. A declared fixed universe remains legal and must stay explicitly identified as `fixed_declared_universe`. No fixed current constituent list may be represented as point-in-time history. Required BEFORE broad survivorship-sensitive factor claims, but must not block small fixed-universe research.
+
+#### 5. `RESEARCH-FACTOR-FDR-01`
+**Status:** BLOCKED
+**Dependencies:** `RESEARCH-FACTOR-IC-IR-QUANTILE-BENCH-01`, plus an actual multi-hypothesis factor experiment requiring family-wise discovery analysis.
+**Purpose:** Benjamini-Hochberg/FDR over registered factor hypotheses.
+**Hard invariant:** FDR is additive diagnostics/discovery control and DOES NOT replace DSR/PBO or the existing promotion authority.
+
+#### 6. `BKT-LIQUIDITY-IMPACT-CAPACITY-01`
+**Status:** DEFERRED — POST `RESEARCH_BACKTEST_V1_COMPLETE`
+**Purpose:** Optional Research/Backtest ADV participation limits, liquidity-dependent impact stress, unfilled/capacity evidence, and strategy capital/capacity curves.
+**Hard invariant:** must not modify Paper/runtime/broker/live execution behavior. No generic impact formula may be treated as production calibration without real evidence. Activate before making meaningful strategy-scalability/capacity claims.
+
+#### 7. `RESEARCH-FACTOR-EXPOSURE-ATTRIBUTION-01`
+**Status:** BLOCKED
+**Dependencies:** `RESEARCH-FACTOR-IC-IR-QUANTILE-BENCH-01`, and at least one real multi-symbol factor/strategy candidate worth diagnosing.
+**Purpose:** Diagnose common market/style exposures such as size, value, momentum, volatility, and liquidity, and separate those exposures from residual strategy return. Diagnostic only; not a new promotion authority.
+
+**Ideas intentionally not yet issued patch IDs:** point-in-time fundamental-data research; portfolio optimizers; event-study framework; Brinson/performance attribution; richer strategy-discovery UI; scheduled/agentic research loops. Each of these becomes a patch only when a concrete hypothesis/product need creates a deterministic requirement — speculative capability must not be turned into owed infrastructure.
+
 ---
 
 ## 25. Operations Resilience Backlog (`OPS-*`)
