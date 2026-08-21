@@ -946,6 +946,92 @@ pub async fn clear_halted_run_and_reset_stale_claims(
 }
 
 // ---------------------------------------------------------------------------
+// PAPER-SOAK-REPAIR-20260819-ORPHANED-RUN-RECOVERY-01
+// ---------------------------------------------------------------------------
+
+/// Typed outcome of [`stop_run_if_evidence_clean`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopRunIfEvidenceCleanOutcome {
+    /// The run was durably `ARMED`/`RUNNING` with zero unacked outbox rows
+    /// and a clean global reconcile status; it is now `STOPPED`.
+    Stopped,
+    /// Refused: the run was not durably `ARMED`/`RUNNING` at the instant
+    /// checked (already `STOPPED`, `HALTED`, or a concurrent transition
+    /// landed first). Zero mutation.
+    NotActive { actual_status: String },
+    /// Refused: at least one outbox row for this run has not reached
+    /// `ACKED` — an order may still be in flight to or from the broker with
+    /// no local runtime left to resolve it. Zero mutation.
+    UnacknowledgedOutbox { unacked_count: usize },
+    /// Refused: the global reconcile status is not clean (or has never been
+    /// recorded), so local/broker truth is not currently known to agree.
+    /// Zero mutation.
+    ReconcileDirty,
+}
+
+/// Safely stop a durable `ARMED`/`RUNNING` run that has no local runtime
+/// owner (the crash/reboot residue shape: a daemon process died mid-session
+/// and the durable `runs` row was never terminated), but only when the
+/// exact same unacked-outbox and global-reconcile evidence already trusted
+/// by `reconcile_durable_run_without_local_owner`
+/// (`mqk-daemon::state::autonomous_daily_coordinator`) is clean for it.
+///
+/// This function has no notion of in-process runtime ownership — callers
+/// are responsible for independently proving "no local owner" (e.g. via
+/// `AppState::locally_owned_run_id`) before calling it. It must never be
+/// invoked against a run this process is still actively driving; doing so
+/// would race the exact runtime this run is currently running.
+///
+/// CAS-guarded exactly like [`stop_run`] (reused directly, not
+/// reimplemented): the underlying `UPDATE` only applies when `status` is
+/// still `ARMED` or `RUNNING`, so a concurrent `halt_run` landing first is
+/// never silently overwritten. Zero mutation on any refusal — the
+/// unacked-outbox and reconcile checks run strictly before the CAS
+/// transition, and neither is ever inferred from an empty/absent row: no
+/// durable reconcile status at all (`None`) is `ReconcileDirty`, not clean.
+pub async fn stop_run_if_evidence_clean(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<StopRunIfEvidenceCleanOutcome> {
+    let run = fetch_run(pool, run_id).await?;
+    if !matches!(run.status, RunStatus::Armed | RunStatus::Running) {
+        return Ok(StopRunIfEvidenceCleanOutcome::NotActive {
+            actual_status: run.status.as_str().to_string(),
+        });
+    }
+
+    let unacked = crate::orders::outbox_list_unacked_for_run(pool, run_id)
+        .await
+        .context("stop_run_if_evidence_clean: outbox_list_unacked_for_run failed")?;
+    if !unacked.is_empty() {
+        return Ok(StopRunIfEvidenceCleanOutcome::UnacknowledgedOutbox {
+            unacked_count: unacked.len(),
+        });
+    }
+
+    let reconcile_clean = match crate::reconcile_state::load_reconcile_status_state(pool)
+        .await
+        .context("stop_run_if_evidence_clean: load_reconcile_status_state failed")?
+    {
+        Some(r) => {
+            r.status == "ok"
+                && r.mismatched_positions == 0
+                && r.mismatched_orders == 0
+                && r.mismatched_fills == 0
+        }
+        // No durable reconcile status at all is not evidence of agreement --
+        // fail closed rather than assume clean.
+        None => false,
+    };
+    if !reconcile_clean {
+        return Ok(StopRunIfEvidenceCleanOutcome::ReconcileDirty);
+    }
+
+    stop_run(pool, run_id).await?;
+    Ok(StopRunIfEvidenceCleanOutcome::Stopped)
+}
+
+// ---------------------------------------------------------------------------
 // PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01 — atomic runtime safety-halt authority
 // ---------------------------------------------------------------------------
 
