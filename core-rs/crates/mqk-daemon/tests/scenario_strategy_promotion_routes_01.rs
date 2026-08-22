@@ -330,6 +330,124 @@ fn write_research_evidence_fixture_with_strategy(
     }
 }
 
+/// REAL-RESEARCH-PROMOTION-E2E-CLOSURE-01: runs the REAL Research
+/// production pipeline (`mqk_research.ml.real_research_promotion_e2e_cli`,
+/// a thin wrapper around the frozen, accepted
+/// `run_registered_economic_walkforward_eval` + `build_multiple_testing_judge`
+/// entry points -- never a parallel/hand-rolled implementation) for one or
+/// more real, registered trials sharing ONE `strategy_id`/experiment/
+/// registry/judge artifact. `entry_thresholds.len()` real economic
+/// walk-forward evaluations run (a real, seeded classifier trains and a
+/// real causal walk-forward executes each time -- only the input DATASET
+/// is synthetic); a real multiple-testing judge is then built once over
+/// that whole population and its exact canonical JSON is written to
+/// `root`'s own tree (root-bound, matching `research_evidence_gate`'s own
+/// requirement). Returns one [`ResearchEvidenceFixture`] per trial, in
+/// `--entry-thresholds` order, all sharing the SAME `registry_db_path` and
+/// `judge_path` -- callers select which trial supplies P7C vs P9 evidence.
+///
+/// A single-trial population is never DSR-evaluable (`m < 2`, see
+/// `multiple_testing_judge.py`), so callers needing a genuinely
+/// `evaluable`/`evaluated` judge for their chosen trial must supply at
+/// least two `entry_thresholds` even if only `trials[0]` is ultimately used
+/// for a promotion decision -- the other trial(s) exist only to give the
+/// judge a real comparison population, exactly as a real deployment would.
+fn write_real_research_evidence_via_production_pipeline(
+    root: &Path,
+    seed: &str,
+    strategy_id: &str,
+    entry_thresholds: &[f64],
+) -> Vec<ResearchEvidenceFixture> {
+    // Must match `set_research_evidence_env`'s hardcoded `MQK_RESEARCH_REGISTRY_DB`
+    // path exactly -- each test uses its own fresh `root`, so this is safe.
+    let registry_db_path = root.join("research_registry.sqlite3");
+    let run_root = root.join(format!("real_research_runs_{seed}"));
+    let judge_path = root.join(format!("real_research_judge_{seed}.json"));
+    let experiment_id = format!("exp.{seed}");
+    let hypothesis_id = format!("hyp.{seed}");
+    let thresholds_arg = entry_thresholds
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let src_dir = research_py_root().join("src");
+    let output = std::process::Command::new("python")
+        .env("PYTHONPATH", &src_dir)
+        .args([
+            "-m",
+            "mqk_research.ml.real_research_promotion_e2e_cli",
+            "--registry-db",
+            &registry_db_path.display().to_string(),
+            "--run-root",
+            &run_root.display().to_string(),
+            "--experiment-id",
+            &experiment_id,
+            "--hypothesis-id",
+            &hypothesis_id,
+            "--strategy-id",
+            strategy_id,
+            "--entry-thresholds",
+            &thresholds_arg,
+            "--periods-days",
+            "560",
+            "--steps",
+            "10",
+            "--judge-out",
+            &judge_path.display().to_string(),
+        ])
+        .output()
+        .expect("failed to spawn real_research_promotion_e2e_cli");
+    assert!(
+        output.status.success(),
+        "real_research_promotion_e2e_cli failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "real_research_promotion_e2e_cli produced unparseable stdout: {e}; stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(
+        parsed["status"], "ok",
+        "real_research_promotion_e2e_cli reported non-ok status: {parsed}"
+    );
+    assert_eq!(
+        parsed["judge_status"], "evaluated",
+        "fixture precondition: the real judge must be genuinely 'evaluated' \
+         (not merely 'partially_evaluable') for these tests to exercise the real \
+         gates meaningfully: {parsed}"
+    );
+
+    let trials = parsed["trials"].as_array().expect("trials array");
+    assert_eq!(trials.len(), entry_thresholds.len());
+    trials
+        .iter()
+        .map(|t| {
+            assert_eq!(
+                t["dsr_evaluable"], true,
+                "fixture precondition: every real trial's DSR must be evaluable: {t}"
+            );
+            let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
+            let economic_json_path =
+                PathBuf::from(t["economic_walk_forward_json"].as_str().expect("path"));
+            let evidence_dir = economic_json_path
+                .parent()
+                .expect("economic_walk_forward_json has a parent dir")
+                .to_path_buf();
+            ResearchEvidenceFixture {
+                registry_db_path: registry_db_path.clone(),
+                evidence_dir,
+                judge_path: judge_path.clone(),
+                trial_id,
+            }
+        })
+        .collect()
+}
+
 /// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01: trusted daemon config for the
 /// backtest-evidence gate (`backtest_evidence_gate::evaluate_backtest_evidence_gate`),
 /// alongside the Research env vars above. `root` doubles as the artifact
@@ -883,6 +1001,136 @@ async fn same_strategy_different_research_trial_for_p9_vs_p7c_is_rejected() {
         &research_a.trial_id, // P7C evidence: Trial A
         research_a.evidence_dir.to_str().unwrap(),
         research_a.judge_path.to_str().unwrap(),
+        &run_id.to_string(), // P9 evidence (bound above): Trial B
+    );
+    let (status, resp_body) = call(router, post_json_req(TRANSITION_ROUTE, None, body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json = parse_json(resp_body);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "evidence_invalid");
+    assert!(
+        json["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str().unwrap().contains("Research trial binding mismatch")),
+        "got: {json}"
+    );
+}
+
+/// REAL-RESEARCH-PROMOTION-E2E-CLOSURE-01 (positive proof): Research
+/// evidence for this candidate is produced ENTIRELY by the real production
+/// pipeline (`run_registered_economic_walkforward_eval` +
+/// `build_multiple_testing_judge`, via `real_research_promotion_e2e_cli`)
+/// -- never hand-written canonical Research result JSON. The SAME real,
+/// registered trial supplies both P7C/OOS evidence and (via
+/// `write_real_backtest_evidence`) P9 `dsr_pbo_sensitivity` evidence.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn real_research_production_trial_used_for_both_p7c_and_p9_passes() {
+    let root = temp_dir("real_research_e2e_positive");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+
+    // Two real trials registered so the real judge has a genuine comparison
+    // population (a single-trial population is never DSR-evaluable) --
+    // only trials[0] is actually used for this candidate's promotion
+    // decision, for both P7C and P9.
+    let research = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let trial = &research[0];
+
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &trial.trial_id,
+        &trial.registry_db_path,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let router = routes::build_router(st);
+
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &trial.trial_id,
+        trial.evidence_dir.to_str().unwrap(),
+        trial.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    let (status, resp_body) = call(router, post_json_req(TRANSITION_ROUTE, None, body)).await;
+    let json = parse_json(resp_body.clone());
+    assert_eq!(status, StatusCode::OK, "got: {json}");
+    assert_eq!(json["accepted"], true);
+    assert_eq!(json["disposition"], "transitioned");
+    assert_eq!(json["previous_state"], serde_json::Value::Null);
+    assert_eq!(json["target_state"], "shadow_approved");
+    assert!(json["transition_id"].is_string());
+}
+
+/// REAL-RESEARCH-PROMOTION-E2E-CLOSURE-01 (mandatory negative control,
+/// item 1, real-production-pipeline variant): TWO real trials produced by
+/// the real Research production pipeline, sharing ONE real judge / real
+/// comparison population / SAME strategy_id -- trial A supplies P7C, trial
+/// B supplies P9. Must be rejected. Complements
+/// `same_strategy_different_research_trial_for_p9_vs_p7c_is_rejected`
+/// (hand-registered-but-real-`ResearchResultStore` variant) with the fully
+/// real-artifact-content variant this patch adds.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn real_research_production_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
+    let root = temp_dir("real_research_e2e_negative");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+
+    let research = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_negative",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let trial_a = &research[0];
+    let trial_b = &research[1];
+    assert_ne!(trial_a.trial_id, trial_b.trial_id);
+
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &trial_b.trial_id,
+        &trial_b.registry_db_path,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let router = routes::build_router(st);
+
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &trial_a.trial_id, // P7C evidence: Trial A
+        trial_a.evidence_dir.to_str().unwrap(),
+        trial_a.judge_path.to_str().unwrap(),
         &run_id.to_string(), // P9 evidence (bound above): Trial B
     );
     let (status, resp_body) = call(router, post_json_req(TRANSITION_ROUTE, None, body)).await;
