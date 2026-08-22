@@ -86,6 +86,11 @@ impl StressSuiteArtifact {
         !self.scenarios.is_empty() && self.scenarios.iter().all(|s| s.passed)
     }
 
+    /// Number of recorded scenarios that passed.
+    pub fn scenarios_passed(&self) -> usize {
+        self.scenarios.iter().filter(|s| s.passed).count()
+    }
+
     /// Human-readable descriptions of failed scenarios (empty when all passed).
     pub fn failed_scenario_descriptions(&self) -> Vec<String> {
         self.scenarios
