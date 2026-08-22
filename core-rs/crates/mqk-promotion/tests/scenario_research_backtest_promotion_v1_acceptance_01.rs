@@ -14,18 +14,45 @@
 //! without caller fabrication, cross-candidate evidence, or bypassing any
 //! gate -- and that the negative paths fail closed.
 //!
-//! Scope note: this proves the complete chain up to and including
-//! `evaluate_promotion`. It deliberately does NOT exercise the actual HTTP
-//! `POST /api/v1/strategy/promotions/transition` route or a real Postgres
-//! instance -- PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE already
-//! unit-tests every gate that route calls
-//! (`mqk-daemon::backtest_evidence_gate`, `research_evidence_gate`), and
-//! its own commit already documents, honestly, that the DB-backed
-//! integration tests were not run this session (no `MQK_DATABASE_URL`
-//! configured; a pre-existing local test-DB migration-checksum drift is
-//! independently tracked in the ledger). Re-asserting that same limitation
-//! here would not increase confidence; this file instead proves the parts
-//! that ARE exercisable without a live Postgres.
+//! P10-RESEARCH-BACKTEST-FINAL-ACCEPTANCE-REPAIR-01: this file proves the
+//! chain up to and including `evaluate_promotion` using synthetic-but-real
+//! (non-fabricated engine, real artifact writers) evidence with a wide
+//! matrix of positive/negative wiring checks. It deliberately does NOT
+//! itself exercise the actual HTTP `POST /api/v1/strategy/promotions/
+//! transition` route or a real Postgres instance -- that would duplicate,
+//! not strengthen, coverage that already exists as real, DB-backed,
+//! non-fabricated proof in `mqk-daemon`'s own test suite:
+//!
+//!   - `mqk-daemon/tests/scenario_strategy_promotion_routes_01.rs` --
+//!     `valid_paper_candidate_creates_first_transition` and 26 sibling
+//!     positive/negative-control tests, each running a REAL
+//!     `BacktestEngine`/`swing_momentum` candidate through the REAL
+//!     production evidence writers (`mqk_artifacts::write_backtest_report`/
+//!     `write_canonical_stress_suite`/`write_canonical_robustness_gauntlet`/
+//!     `finalize_canonical_robustness_gauntlet_with_sensitivity`, the last
+//!     backed by a genuine Python DSR/PBO sensitivity subprocess -- never a
+//!     fabricated `RobustnessScenarioOutcome`), then the REAL Axum route
+//!     (`tower::oneshot`, no mock) against a real disposable Postgres.
+//!   - `mqk-daemon/tests/scenario_strategy_promotion_closure_proof_01f.rs`
+//!     -- `closure_proof_full_lifecycle_through_real_routes`: the complete
+//!     no-state -> shadow_approved -> paper_approved -> active_paper ->
+//!     demoted lifecycle through the same real route/DB, reading Postgres
+//!     back after the evidence-requiring transition to confirm the
+//!     persisted lineage (`evidence_transition_id`, `evidence_fingerprint`)
+//!     identifies the exact evidence judged.
+//!
+//! Both landed in commit `37649200` ("promotion: prove canonical postgres
+//! transition end to end", PRODUCTION-PROMOTION-DB-E2E-01), which also
+//! contains this proof's own bypass audit: exactly one production caller of
+//! `insert_strategy_promotion_transition_serialized`, mounted at exactly
+//! one route. Together, this file plus that suite constitute the complete
+//! P10 acceptance chain: Research registry/trial -> OOS/economic evidence
+//! -> real Backtest -> production promotion-evidence finalization -> exact
+//! stress protocol -> complete P9 -> candidate-bound evidence resolution ->
+//! canonical `evaluate_promotion` -> real HTTP daemon promotion transition
+//! -> atomic Postgres state + evidence lineage. Superseding the prior
+//! `RESEARCH-BACKTEST-FINAL-ACCEPTANCE-01` (commit `41c19cc7`), whose own
+//! scope note honestly flagged the HTTP/Postgres gap this now closes.
 //!
 //! Also out of scope, by design: "winner-only registration forbidden" and
 //! "final holdout remains reserved" are `research-py` (Python)
