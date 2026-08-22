@@ -14,6 +14,12 @@ pub use backtest_report_artifact::{
     BacktestReportArtifactError, BACKTEST_REPORT_ARTIFACT_SCHEMA_VERSION,
 };
 
+pub mod stress_suite_artifact; // PROMOTION-STRESS-SUITE-AUTHORITY-01
+pub use stress_suite_artifact::{
+    load_canonical_stress_suite, write_canonical_stress_suite, StressSuiteArtifact,
+    StressSuiteArtifactError, STRESS_SUITE_ARTIFACT_SCHEMA_VERSION,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
     pub schema_version: i32,

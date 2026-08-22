@@ -23,6 +23,7 @@ pub mod regime;
 pub mod strategy_lab;
 pub mod strategy_scan_review;
 pub mod strategy_scanner;
+pub mod stress_suite; // PROMOTION-STRESS-SUITE-AUTHORITY-01
 pub mod sweep;
 pub mod types;
 
@@ -60,6 +61,10 @@ pub use strategy_scanner::{
     StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode, StrategyScanTruthState,
     DEFAULT_MIN_BARS,
 };
+pub use stress_suite::{
+    run_backtest_stress_suite, StressScenarioOutcome, StressSuiteRunOutput,
+    STRESS_SUITE_PROTOCOL_VERSION,
+}; // PROMOTION-STRESS-SUITE-AUTHORITY-01
 pub use sweep::{
     rank_sweep_results, run_sweep, sweep_row_from_report, SweepError, SweepGrid, SweepPoint,
     SweepRowResult, SWEEP_MAX_COMBINATIONS,
