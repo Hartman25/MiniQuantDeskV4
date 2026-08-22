@@ -171,6 +171,15 @@ pub struct RobustnessEvidence {
     pub failed_scenarios: Vec<String>,
     /// Names of scenarios still deferred (empty when `is_complete`).
     pub deferred_scenarios: Vec<String>,
+    /// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: the exact Research
+    /// `trial_id` the `dsr_pbo_sensitivity` scenario's evidence was computed
+    /// against (mirrors
+    /// `mqk_artifacts::RobustnessGauntletArtifact::dsr_pbo_sensitivity_research_trial_id`).
+    /// `None` means no binding proof exists for this evidence (scenario
+    /// absent, or recorded before this field existed) -- `evaluate_promotion`
+    /// treats that identically to a genuine mismatch against
+    /// `oos_evidence.trial_id()`: fail closed, never assume agreement.
+    pub dsr_pbo_sensitivity_research_trial_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

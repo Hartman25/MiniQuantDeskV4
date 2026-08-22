@@ -87,6 +87,12 @@ pub fn dsr_pbo_sensitivity_scenario(
     block_counts: &[u32],
 ) -> RobustnessScenarioOutcome {
     let name = DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string();
+    // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: this scenario's evidence
+    // is always computed against exactly `trial_id`, regardless of outcome
+    // (evaluated, not_evaluable, or error) -- recorded on every returned
+    // outcome so a later promotion decision can prove which Research trial
+    // this P9 evidence came from, not merely which strategy_id.
+    let research_trial_id = Some(trial_id.to_string());
 
     if block_counts.is_empty() {
         return RobustnessScenarioOutcome {
@@ -95,6 +101,7 @@ pub fn dsr_pbo_sensitivity_scenario(
             passed: false,
             reason: Some("block_counts must be non-empty".to_string()),
             detail: "block_counts must be non-empty".to_string(),
+            research_trial_id,
         };
     }
     let block_counts_arg = block_counts
@@ -130,6 +137,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 passed: false,
                 reason: Some(reason.clone()),
                 detail: reason,
+                research_trial_id,
             };
         }
     };
@@ -150,6 +158,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 passed: false,
                 reason: Some(reason.clone()),
                 detail: reason,
+                research_trial_id,
             };
         }
     };
@@ -176,6 +185,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 passed: false,
                 reason: Some(reason.clone()),
                 detail: reason,
+                research_trial_id,
             };
         }
     }
@@ -205,6 +215,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                         detail: format!(
                             "block_counts={block_counts:?}, dsr_range={dr:.6}, pbo_range={pr:.6}"
                         ),
+                        research_trial_id,
                     }
                 }
                 _ => {
@@ -215,6 +226,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                         passed: false,
                         reason: Some(reason.clone()),
                         detail: reason,
+                        research_trial_id,
                     }
                 }
             }
@@ -234,6 +246,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 passed: false,
                 reason: Some(reason.clone()),
                 detail: reason,
+                research_trial_id,
             }
         }
         _ => {
@@ -249,6 +262,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 passed: false,
                 reason: Some(full.clone()),
                 detail: full,
+                research_trial_id,
             }
         }
     }

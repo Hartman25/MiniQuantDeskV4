@@ -88,7 +88,7 @@ fn passes_all_thresholds() {
         stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
         oos_evidence: Some(common::valid_oos_evidence_for_testing("passes_all_thresholds_trial")), // P7C
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("passes_all_thresholds_trial")),
     };
 
     let decision = evaluate_promotion(&config, &input);

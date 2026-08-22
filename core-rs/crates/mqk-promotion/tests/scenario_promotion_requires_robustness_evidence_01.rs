@@ -94,6 +94,7 @@ fn robustness_evidence_wrong_protocol_blocks_promotion() {
         all_applicable_passed: true,
         failed_scenarios: Vec::new(),
         deferred_scenarios: Vec::new(),
+        dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -114,6 +115,7 @@ fn robustness_evidence_incomplete_blocks_promotion() {
         all_applicable_passed: true, // every scenario that DID run passed
         failed_scenarios: Vec::new(),
         deferred_scenarios: vec!["dsr_pbo_sensitivity".to_string()],
+        dsr_pbo_sensitivity_research_trial_id: None, // scenario itself is still deferred
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -134,6 +136,7 @@ fn robustness_evidence_failed_scenario_blocks_promotion() {
         all_applicable_passed: false,
         failed_scenarios: vec!["symbol_leave_one_out: excluding ES breaches conservative bar".to_string()],
         deferred_scenarios: Vec::new(),
+        dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -151,6 +154,7 @@ fn robustness_evidence_complete_and_passed_allows_promotion() {
         all_applicable_passed: true,
         failed_scenarios: Vec::new(),
         deferred_scenarios: Vec::new(),
+        dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 

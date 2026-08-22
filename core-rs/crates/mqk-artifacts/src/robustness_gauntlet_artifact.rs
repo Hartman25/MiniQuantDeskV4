@@ -40,6 +40,16 @@ struct RobustnessScenarioOutcomeDto {
     passed: bool,
     reason: Option<String>,
     detail: String,
+    /// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: durable mirror of
+    /// [`mqk_backtest::RobustnessScenarioOutcome::research_trial_id`].
+    /// `#[serde(default)]` so an artifact written before this field existed
+    /// still loads (as `None`) instead of failing malformed-JSON parsing --
+    /// [`RobustnessGauntletArtifact::dsr_pbo_sensitivity_research_trial_id`]
+    /// then correctly reports "no binding proof" for that legacy artifact,
+    /// which the promotion gate treats as fail-closed exactly like a
+    /// genuine mismatch.
+    #[serde(default)]
+    research_trial_id: Option<String>,
 }
 
 impl From<&mqk_backtest::RobustnessScenarioOutcome> for RobustnessScenarioOutcomeDto {
@@ -50,6 +60,7 @@ impl From<&mqk_backtest::RobustnessScenarioOutcome> for RobustnessScenarioOutcom
             passed: s.passed,
             reason: s.reason.clone(),
             detail: s.detail.clone(),
+            research_trial_id: s.research_trial_id.clone(),
         }
     }
 }
@@ -110,6 +121,19 @@ impl RobustnessGauntletArtifact {
 
     pub fn deferred_scenario_names(&self) -> Vec<String> {
         self.deferred.iter().map(|d| d.name.clone()).collect()
+    }
+
+    /// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: the exact Research
+    /// `trial_id` the `dsr_pbo_sensitivity` scenario's evidence was computed
+    /// against, if that scenario is present and carries one. `None` when the
+    /// scenario is absent/deferred, or when it was recorded before this
+    /// field existed -- either way, "no binding proof", never a bare claim
+    /// promotion can rely on.
+    pub fn dsr_pbo_sensitivity_research_trial_id(&self) -> Option<&str> {
+        self.scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME)
+            .and_then(|s| s.research_trial_id.as_deref())
     }
 
     /// Mirrors `mqk_backtest::RobustnessGauntletOutput::is_complete`: true
@@ -390,7 +414,13 @@ pub fn finalize_canonical_robustness_gauntlet_with_sensitivity(
         let prev_matches = prev.applicable == sensitivity.applicable
             && prev.passed == sensitivity.passed
             && prev.reason == sensitivity.reason
-            && prev.detail == sensitivity.detail;
+            && prev.detail == sensitivity.detail
+            // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: two finalizations
+            // with coincidentally identical applicable/passed/reason/detail
+            // but a DIFFERENT research_trial_id are never the "same" replay
+            // -- silently keeping the first trial's id would defeat the
+            // whole point of binding this evidence to a specific trial.
+            && prev.research_trial_id == sensitivity.research_trial_id;
         if prev_matches {
             return Ok(path); // idempotent replay -- already finalized identically
         }
@@ -436,6 +466,11 @@ pub fn finalize_canonical_robustness_gauntlet_with_sensitivity(
         "scenarios_run": merged.scenarios.len(),
         "all_applicable_passed": merged.all_applicable_passed(),
         "is_complete": merged.is_complete(),
+        // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: explicit in the
+        // audit payload (not merely inside the hashed JSON body) so the
+        // exact Research trial this finalization bound is directly
+        // queryable from audit.jsonl without loading/parsing the artifact.
+        "dsr_pbo_sensitivity_research_trial_id": sensitivity.research_trial_id,
         "robustness_gauntlet_sha256": robustness_gauntlet_sha256,
         "robustness_gauntlet_schema_version": ROBUSTNESS_GAUNTLET_ARTIFACT_SCHEMA_VERSION,
     });

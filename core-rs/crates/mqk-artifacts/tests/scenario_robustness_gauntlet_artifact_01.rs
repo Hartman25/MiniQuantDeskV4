@@ -264,6 +264,7 @@ fn rga01i_loaded_artifact_complete_after_dsr_pbo_merged() {
         passed: true,
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some("rga01i_test_trial".to_string()),
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
 
@@ -285,6 +286,7 @@ fn fake_sensitivity(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome {
         passed,
         reason: if passed { None } else { Some("dsr_range exceeded ceiling".to_string()) },
         detail: "test-fabricated finalize-seam outcome".to_string(),
+        research_trial_id: Some("fake_sensitivity_trial".to_string()),
     }
 }
 
@@ -370,6 +372,84 @@ fn rga01l_finalize_rejects_conflicting_sensitivity() {
         !loaded.failed_scenario_descriptions().iter().any(|d| d.starts_with("dsr_pbo_sensitivity")),
         "the rejected conflicting (failed) result must never have applied: {:?}",
         loaded.failed_scenario_descriptions()
+    );
+
+    cleanup(&run_dir);
+}
+
+/// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: a finalization retry with
+/// otherwise-IDENTICAL applicable/passed/reason/detail but a DIFFERENT
+/// `research_trial_id` must still be refused as conflicting -- silently
+/// keeping the first trial's binding would defeat the whole point of
+/// recording which Research trial produced this evidence.
+#[test]
+fn rga01p_finalize_rejects_same_content_different_trial_id() {
+    let (report, run_dir, config, bars) =
+        run_and_persist("finalize_trial_conflict", "RgaFinalizeTrialConflict");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaFinalizeTrialConflict" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let mut first = fake_sensitivity(true);
+    first.research_trial_id = Some("trial_a".to_string());
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &first).unwrap();
+
+    let mut second = fake_sensitivity(true); // same applicable/passed/reason/detail
+    second.research_trial_id = Some("trial_b".to_string()); // different trial
+    let err =
+        finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &second).unwrap_err();
+    assert_eq!(err, RobustnessGauntletFinalizeError::ConflictingSensitivityResult);
+
+    // The original binding (trial_a) must remain untouched.
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must still load");
+    assert_eq!(
+        loaded.dsr_pbo_sensitivity_research_trial_id(),
+        Some("trial_a"),
+        "the rejected conflicting trial binding must never have applied"
+    );
+
+    cleanup(&run_dir);
+}
+
+/// The canonical resolver accessor round-trips the exact trial_id recorded
+/// at finalization time, and reports `None` before finalization.
+#[test]
+fn rga01q_dsr_pbo_sensitivity_research_trial_id_accessor() {
+    let (report, run_dir, config, bars) =
+        run_and_persist("finalize_trial_accessor", "RgaFinalizeTrialAccessor");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaFinalizeTrialAccessor" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+    assert_eq!(
+        load_canonical_robustness_gauntlet(&run_dir)
+            .unwrap()
+            .dsr_pbo_sensitivity_research_trial_id(),
+        None,
+        "no binding proof exists before dsr_pbo_sensitivity is finalized"
+    );
+
+    let mut sensitivity = fake_sensitivity(true);
+    sensitivity.research_trial_id = Some("rga01q_trial".to_string());
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &sensitivity).unwrap();
+
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load after finalize");
+    assert_eq!(
+        loaded.dsr_pbo_sensitivity_research_trial_id(),
+        Some("rga01q_trial")
+    );
+
+    // The audit event also carries it explicitly (not merely inside the
+    // hashed JSON body), directly queryable without parsing the artifact.
+    let audit_jsonl = fs::read_to_string(run_dir.join("audit.jsonl")).unwrap();
+    let finalized_line = audit_jsonl
+        .lines()
+        .find(|l| l.contains("robustness_gauntlet_finalized"))
+        .expect("finalized audit event must exist");
+    assert!(
+        finalized_line.contains("\"dsr_pbo_sensitivity_research_trial_id\":\"rga01q_trial\""),
+        "audit payload must carry the trial binding explicitly: {finalized_line}"
     );
 
     cleanup(&run_dir);

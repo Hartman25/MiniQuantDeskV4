@@ -299,5 +299,8 @@ fn robustness_evidence_from_artifact(a: &RobustnessGauntletArtifact) -> Robustne
         all_applicable_passed: a.all_applicable_passed(),
         failed_scenarios: a.failed_scenario_descriptions(),
         deferred_scenarios: a.deferred_scenario_names(),
+        dsr_pbo_sensitivity_research_trial_id: a
+            .dsr_pbo_sensitivity_research_trial_id()
+            .map(|s| s.to_string()),
     }
 }

@@ -181,6 +181,39 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         Some(_) => {} // complete, protocol-matching, every applicable scenario passed -- OK
     }
 
+    // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01 — the P7C/OOS evidence
+    // and the P9 DSR/PBO sensitivity evidence must come from the EXACT SAME
+    // Research trial, never merely the same strategy_id. Checked only when
+    // both `oos_evidence` and `robustness_evidence` are themselves present
+    // (their own absence already produced a fail_reason above); a missing
+    // `dsr_pbo_sensitivity_research_trial_id` (legacy artifact, or the
+    // scenario never finalized) is treated identically to a genuine
+    // mismatch -- there is no binding proof either way, so promotion must
+    // never assume the two evidence sources agree.
+    if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
+        match re.dsr_pbo_sensitivity_research_trial_id.as_deref() {
+            Some(bound_trial_id) if bound_trial_id == ev.trial_id() => {} // same trial -- OK
+            Some(bound_trial_id) => {
+                fail_reasons.push(format!(
+                    "Research trial binding mismatch: P9 dsr_pbo_sensitivity evidence was \
+                     computed for research_trial_id {bound_trial_id:?}, but P7C/OOS evidence was \
+                     verified for research_trial_id {:?} -- both must be the SAME Research trial, \
+                     never merely the same strategy_id",
+                    ev.trial_id()
+                ));
+            }
+            None => {
+                fail_reasons.push(format!(
+                    "Research trial binding missing: P9 robustness evidence carries no \
+                     dsr_pbo_sensitivity_research_trial_id -- cannot prove it was computed for \
+                     the same Research trial ({:?}) as the P7C/OOS evidence; promotion requires \
+                     that proof, never an assumed match",
+                    ev.trial_id()
+                ));
+            }
+        }
+    }
+
     // PATCH F3 — Fail closed on NaN key metrics.
     //
     // Float comparisons involving NaN always return `false` in Rust, so a NaN

@@ -149,6 +149,7 @@ fn run_and_persist_full(
     bars: Vec<BacktestBar>,
     qty: i64,
     sell_at_idx: u64,
+    research_trial_id: &str,
 ) -> (BacktestReport, PathBuf) {
     let config = cfg_with_wide_cap();
     let initial_cash = config.initial_cash_micros;
@@ -205,6 +206,7 @@ fn run_and_persist_full(
         passed: true,
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some(research_trial_id.to_string()),
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet must succeed");
@@ -327,7 +329,7 @@ fn lenient_promotion_config() -> PromotionConfig {
 #[test]
 fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     let (report, root) =
-        run_and_persist_full("full_chain", "P10FullChain", profitable_bars(), 5, 25);
+        run_and_persist_full("full_chain", "P10FullChain", profitable_bars(), 5, 25, "trial_full_chain");
 
     // Backtest evidence (report + artifact_lock + stress_suite), resolved
     // by the exact candidate-bound seam the production route uses.
@@ -384,8 +386,14 @@ fn p10b_cross_candidate_identity_is_distinguishable() {
     // research_evidence_gate independently perform in production
     // (PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE) -- proven here
     // against REAL resolved data, not a mock.
-    let (report, root) =
-        run_and_persist_full("cross_candidate", "P10CrossCandidate", profitable_bars(), 5, 25);
+    let (report, root) = run_and_persist_full(
+        "cross_candidate",
+        "P10CrossCandidate",
+        profitable_bars(),
+        5,
+        25,
+        "trial_cross_candidate",
+    );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
 
     // Research evidence registered under a DIFFERENT strategy_id.
@@ -409,8 +417,14 @@ fn p10b_cross_candidate_identity_is_distinguishable() {
 
 #[test]
 fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
-    let (report, root) =
-        run_and_persist_full("fragile_with_research", "P10FragileWithResearch", fragile_bars(), 100, 3);
+    let (report, root) = run_and_persist_full(
+        "fragile_with_research",
+        "P10FragileWithResearch",
+        fragile_bars(),
+        100,
+        3,
+        "trial_fragile_with_research",
+    );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
     assert!(!bundle.stress_suite.passed, "fixture precondition: this candidate's real stress suite must fail");
 
@@ -431,6 +445,127 @@ fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
     assert!(
         !decision.passed,
         "genuinely valid Research evidence must NOT compensate for a real failed stress suite"
+    );
+
+    cleanup(&root);
+}
+
+// ---------------------------------------------------------------------------
+// 4. PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: same strategy_id,
+//    DIFFERENT Research trial for P9 vs P7C must be rejected
+// ---------------------------------------------------------------------------
+
+/// Confirmed defect this patch closes: the production finalizer only ever
+/// verified `Research trial strategy_id == BacktestReport.strategy_name` --
+/// never that the SAME trial produced both the P7C/OOS evidence and the P9
+/// DSR/PBO sensitivity evidence. Trial A and Trial B here are both genuine,
+/// independently valid, registry-anchored Research trials registered under
+/// the SAME `strategy_id` -- proving the defect is not "an invalid trial
+/// slipped through" but "two otherwise-legitimate trials under the same
+/// strategy were silently mixed".
+#[test]
+fn p10d_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
+    let strategy_id = "P10TrialBindingSharedStrategy";
+
+    // P9 dsr_pbo_sensitivity evidence bound to Trial B.
+    let (report, root) = run_and_persist_full(
+        "trial_binding",
+        strategy_id,
+        profitable_bars(),
+        5,
+        25,
+        "trial_trial_binding_b",
+    );
+    let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
+    assert!(bundle.robustness_evidence.is_complete);
+    assert!(bundle.robustness_evidence.all_applicable_passed);
+    assert_eq!(
+        bundle.robustness_evidence.dsr_pbo_sensitivity_research_trial_id.as_deref(),
+        Some("trial_trial_binding_b")
+    );
+
+    // Trial A supplies the P7C/OOS evidence -- a real, independently valid,
+    // registry-anchored Research trial under the SAME strategy_id as Trial B.
+    let (registry_path_a, econ_a, daily_a, judge_a, trial_a_id) =
+        build_real_research_evidence("trial_binding_a", strategy_id);
+    let oos_evidence =
+        verify_promotion_oos_evidence(&registry_path_a, &trial_a_id, &econ_a, &daily_a, &judge_a)
+            .expect("Trial A's evidence is genuinely, independently valid");
+    assert_eq!(oos_evidence.strategy_id(), strategy_id);
+
+    // Trial B is ALSO real and independently registered under the SAME
+    // strategy_id -- proving Trial B is not "invalid", merely not the SAME
+    // trial that produced the P7C evidence above.
+    let (registry_path_b, econ_b, daily_b, judge_b, trial_b_id) =
+        build_real_research_evidence("trial_binding_b", strategy_id);
+    let trial_b_evidence =
+        verify_promotion_oos_evidence(&registry_path_b, &trial_b_id, &econ_b, &daily_b, &judge_b)
+            .expect("Trial B's evidence is also genuinely, independently valid");
+    assert_eq!(trial_b_evidence.strategy_id(), strategy_id);
+    assert_ne!(trial_a_id, trial_b_id);
+
+    let input = PromotionInput {
+        initial_equity_micros: bundle.initial_equity_micros,
+        report: bundle.report,
+        stress_suite: Some(bundle.stress_suite),
+        artifact_lock: Some(bundle.artifact_lock),
+        oos_evidence: Some(oos_evidence),
+        robustness_evidence: Some(bundle.robustness_evidence),
+    };
+    let decision = evaluate_promotion(&lenient_promotion_config(), &input);
+    assert!(
+        !decision.passed,
+        "P9 evidence from a DIFFERENT Research trial than P7C, even under the SAME \
+         strategy_id, must never satisfy promotion: {:?}",
+        decision.fail_reasons
+    );
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(
+        reasons.contains("Research trial binding mismatch"),
+        "got: {reasons}"
+    );
+
+    cleanup(&root);
+}
+
+/// Positive control for the same gate: Trial A supplies BOTH the P7C
+/// evidence AND the P9 sensitivity evidence -- promotion must not be blocked
+/// by the trial-binding gate.
+#[test]
+fn p10e_same_trial_for_p9_and_p7c_is_accepted() {
+    let strategy_id = "P10TrialBindingSameTrialStrategy";
+
+    let (report, root) = run_and_persist_full(
+        "trial_binding_same",
+        strategy_id,
+        profitable_bars(),
+        5,
+        25,
+        "trial_trial_binding_same",
+    );
+    let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
+
+    let (registry_path, econ_json, daily_csv, judge_json, trial_id) =
+        build_real_research_evidence("trial_binding_same", strategy_id);
+    assert_eq!(trial_id, "trial_trial_binding_same");
+    let oos_evidence =
+        verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
+            .expect("evidence must be genuinely valid");
+
+    let input = PromotionInput {
+        initial_equity_micros: bundle.initial_equity_micros,
+        report: bundle.report,
+        stress_suite: Some(bundle.stress_suite),
+        artifact_lock: Some(bundle.artifact_lock),
+        oos_evidence: Some(oos_evidence),
+        robustness_evidence: Some(bundle.robustness_evidence),
+    };
+    let decision = evaluate_promotion(&lenient_promotion_config(), &input);
+    assert!(
+        decision.passed,
+        "the SAME trial supplying both P7C and P9 evidence must satisfy the trial-binding \
+         gate: {:?}",
+        decision.fail_reasons
     );
 
     cleanup(&root);

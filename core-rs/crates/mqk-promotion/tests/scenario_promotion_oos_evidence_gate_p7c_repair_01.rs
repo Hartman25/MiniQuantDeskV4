@@ -1338,12 +1338,21 @@ fn otherwise_valid_input(
     strategy_name: &str,
     oos_evidence: Option<VerifiedPromotionOosEvidence>,
 ) -> PromotionInput {
+    // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: bind the fabricated P9
+    // robustness evidence to the SAME trial_id as `oos_evidence` (when
+    // present) so this file's OOS-evidence-gate tests stay isolated from the
+    // separate trial-binding gate; a placeholder is fine when `oos_evidence`
+    // is `None` since that gate never runs in that case.
+    let robustness_trial_id = oos_evidence
+        .as_ref()
+        .map(|ev| ev.trial_id().to_string())
+        .unwrap_or_else(|| "otherwise_valid_input_no_oos_trial".to_string());
     PromotionInput {
         initial_equity_micros: 1_000_000_000,
         report: good_report(strategy_name),
         stress_suite: Some(StressSuiteResult::pass(3, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
         oos_evidence,
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(&robustness_trial_id)),
     }
 }

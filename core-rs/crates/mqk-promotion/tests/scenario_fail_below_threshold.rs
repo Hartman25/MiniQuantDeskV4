@@ -42,7 +42,7 @@ fn fails_when_below_multiple_thresholds() {
         stress_suite: None,
         artifact_lock: None, // B6: not locked; test expects failure
         oos_evidence: Some(common::valid_oos_evidence_for_testing("test_trial")), // P7C: isolate metrics failure
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("test_trial")),
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -108,7 +108,7 @@ fn fails_with_large_drawdown() {
         stress_suite: None,
         artifact_lock: None, // B6: not locked; test expects failure
         oos_evidence: Some(common::valid_oos_evidence_for_testing("test_trial")), // P7C: isolate metrics failure
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("test_trial")),
     };
 
     let decision = evaluate_promotion(&config, &input);

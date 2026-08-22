@@ -73,15 +73,35 @@ pub fn new_registry_db() -> RegistryDb {
 }
 
 /// `strategy_id` is deterministically derived from `trial_id` (never
-/// configurable by callers here) -- no existing call site in this crate's
-/// test suite needs a specific value, only a valid non-null one, so this
-/// keeps every pre-existing `register_trial` call site unchanged.
+/// configurable by callers here) -- no existing call site of THIS function
+/// needs a specific value, only a valid non-null one.
 pub fn register_trial(db_path: &Path, trial_id: &str, experiment_id: &str, hypothesis_id: &str) {
+    register_trial_with_strategy(
+        db_path,
+        trial_id,
+        experiment_id,
+        hypothesis_id,
+        &format!("strategy_for_{trial_id}"),
+    )
+}
+
+/// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: like [`register_trial`],
+/// but with an explicit `strategy_id` -- used by
+/// [`valid_oos_evidence_for_testing_with_strategy`] and the same-strategy,
+/// different-trial negative control (two genuinely distinct, individually
+/// valid Research trials registered under the SAME `strategy_id`).
+pub fn register_trial_with_strategy(
+    db_path: &Path,
+    trial_id: &str,
+    experiment_id: &str,
+    hypothesis_id: &str,
+    strategy_id: &str,
+) {
     let conn = Connection::open(db_path).expect("open registry db");
     conn.execute(
         "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id) \
          values (?1, ?2, ?3, ?4)",
-        rusqlite::params![trial_id, experiment_id, hypothesis_id, format!("strategy_for_{trial_id}")],
+        rusqlite::params![trial_id, experiment_id, hypothesis_id, strategy_id],
     )
     .expect("insert research_trials row");
 }
@@ -126,6 +146,19 @@ pub fn register_judge_artifact(
 /// paths the verifier reads, and registers matching trial/attempt/judge
 /// rows in a real temporary registry database.
 pub fn valid_oos_evidence_for_testing(trial_id: &str) -> VerifiedPromotionOosEvidence {
+    valid_oos_evidence_for_testing_with_strategy(trial_id, &format!("strategy_for_{trial_id}"))
+}
+
+/// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: like
+/// [`valid_oos_evidence_for_testing`], but registers `trial_id` under an
+/// explicit, caller-chosen `strategy_id` rather than the deterministic
+/// per-trial default -- lets a test register two genuinely distinct,
+/// individually valid trials under the SAME `strategy_id` (the exact shape
+/// the "same strategy, different trial" negative control needs).
+pub fn valid_oos_evidence_for_testing_with_strategy(
+    trial_id: &str,
+    strategy_id: &str,
+) -> VerifiedPromotionOosEvidence {
     let daily_csv = b"date,net_daily_return\n2021-01-01,0.0010\n2021-01-02,0.0021\n".to_vec();
     let daily_sha = sha256_hex(&daily_csv);
     let economic_eval_id = format!("econ_eval_{trial_id}");
@@ -142,7 +175,13 @@ pub fn valid_oos_evidence_for_testing(trial_id: &str) -> VerifiedPromotionOosEvi
     let judge_sha = canonical_json_sha256(&judge_json);
 
     let registry = new_registry_db();
-    register_trial(&registry.path, trial_id, &experiment_id, &format!("hyp_{trial_id}"));
+    register_trial_with_strategy(
+        &registry.path,
+        trial_id,
+        &experiment_id,
+        &format!("hyp_{trial_id}"),
+        strategy_id,
+    );
     register_succeeded_attempt(
         &registry.path,
         &format!("{trial_id}:att0001"),
@@ -172,12 +211,20 @@ pub fn valid_oos_evidence_for_testing(trial_id: &str) -> VerifiedPromotionOosEvi
 /// evidence), so a direct struct literal is the genuine, non-shortcut
 /// construction path here -- unlike `valid_oos_evidence_for_testing`, there
 /// is no separate "real verifier" this bypasses.
-pub fn valid_robustness_evidence_for_testing() -> mqk_promotion::RobustnessEvidence {
+///
+/// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: `research_trial_id` is the
+/// exact trial this P9 evidence is bound to (mirrors
+/// `RobustnessEvidence::dsr_pbo_sensitivity_research_trial_id`) -- callers
+/// pass the SAME trial_id used for `valid_oos_evidence_for_testing` in the
+/// same `PromotionInput` so `evaluate_promotion`'s trial-binding gate
+/// accepts the pair.
+pub fn valid_robustness_evidence_for_testing(research_trial_id: &str) -> mqk_promotion::RobustnessEvidence {
     mqk_promotion::RobustnessEvidence {
         protocol_version: mqk_promotion::REQUIRED_ROBUSTNESS_PROTOCOL_VERSION.to_string(),
         is_complete: true,
         all_applicable_passed: true,
         failed_scenarios: Vec::new(),
         deferred_scenarios: Vec::new(),
+        dsr_pbo_sensitivity_research_trial_id: Some(research_trial_id.to_string()),
     }
 }

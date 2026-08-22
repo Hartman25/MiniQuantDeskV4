@@ -355,6 +355,7 @@ fn rg01h_is_complete_only_after_dsr_pbo_sensitivity_is_merged() {
         passed: true,
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some("rg01h_test_trial".to_string()),
     });
     assert!(merged.deferred.is_empty(), "merging must clear the deferred entry");
     assert!(merged.is_complete(), "must be complete once every required scenario is present");
