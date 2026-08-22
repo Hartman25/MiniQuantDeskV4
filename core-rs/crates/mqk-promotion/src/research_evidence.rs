@@ -162,11 +162,21 @@ pub struct VerifiedPromotionOosEvidence {
     /// `pbo_result.pbo` (a population-level CSCV result, not per-trial;
     /// `pbo_result.status` was verified `"evaluated"` first).
     probability_of_backtest_overfitting: f64,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: this trial's own
+    /// registered `strategy_id`, read from the durable Research registry
+    /// (never a caller claim) -- see
+    /// `crate::research_registry::VerifiedResearchAuthority::strategy_id`.
+    strategy_id: String,
 }
 
 impl VerifiedPromotionOosEvidence {
     pub fn trial_id(&self) -> &str {
         &self.trial_id
+    }
+
+    /// This trial's own registered `strategy_id` (`research_trials.strategy_id`).
+    pub fn strategy_id(&self) -> &str {
+        &self.strategy_id
     }
 
     pub fn economic_eval_id(&self) -> &str {
@@ -441,10 +451,10 @@ pub fn verify_promotion_oos_evidence(
     // reads the registry's OWN stored canonical text, verifies its
     // integrity against its own `judge_artifact_sha256`, and compares
     // PARSED JSON VALUES using a single (Rust-side) canonicalization.
-    if let Err(authority_errs) =
-        load_research_authority(registry_db_path, trial_id, &economic_eval_id, &judge)
-    {
-        errs.extend(authority_errs);
+    let mut research_strategy_id: Option<String> = None;
+    match load_research_authority(registry_db_path, trial_id, &economic_eval_id, &judge) {
+        Ok(authority) => research_strategy_id = Some(authority.strategy_id),
+        Err(authority_errs) => errs.extend(authority_errs),
     }
 
     // ---- hash binding #1: economic artifact <-> actual daily-returns bytes ----
@@ -633,5 +643,7 @@ pub fn verify_promotion_oos_evidence(
             .expect("no errs means every field above was successfully extracted"),
         probability_of_backtest_overfitting: probability_of_backtest_overfitting
             .expect("no errs means every field above was successfully extracted"),
+        strategy_id: research_strategy_id
+            .expect("no errs means load_research_authority returned Ok above"),
     })
 }

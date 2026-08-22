@@ -50,7 +50,8 @@ pub fn new_registry_db() -> RegistryDb {
         create table research_trials (
             trial_id text primary key,
             experiment_id text not null,
-            hypothesis_id text not null
+            hypothesis_id text not null,
+            strategy_id text not null
         );
         create table research_attempts (
             attempt_id text primary key,
@@ -71,11 +72,16 @@ pub fn new_registry_db() -> RegistryDb {
     RegistryDb { dir, path }
 }
 
+/// `strategy_id` is deterministically derived from `trial_id` (never
+/// configurable by callers here) -- no existing call site in this crate's
+/// test suite needs a specific value, only a valid non-null one, so this
+/// keeps every pre-existing `register_trial` call site unchanged.
 pub fn register_trial(db_path: &Path, trial_id: &str, experiment_id: &str, hypothesis_id: &str) {
     let conn = Connection::open(db_path).expect("open registry db");
     conn.execute(
-        "insert into research_trials (trial_id, experiment_id, hypothesis_id) values (?1, ?2, ?3)",
-        rusqlite::params![trial_id, experiment_id, hypothesis_id],
+        "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id) \
+         values (?1, ?2, ?3, ?4)",
+        rusqlite::params![trial_id, experiment_id, hypothesis_id, format!("strategy_for_{trial_id}")],
     )
     .expect("insert research_trials row");
 }

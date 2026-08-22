@@ -248,7 +248,8 @@ fn write_research_evidence_fixture(root: &Path, seed: &str) -> ResearchEvidenceF
         create table if not exists research_trials (
             trial_id text primary key,
             experiment_id text not null,
-            hypothesis_id text not null
+            hypothesis_id text not null,
+            strategy_id text not null
         );
         create table if not exists research_attempts (
             attempt_id text primary key,
@@ -267,8 +268,9 @@ fn write_research_evidence_fixture(root: &Path, seed: &str) -> ResearchEvidenceF
     )
     .expect("create registry schema");
     conn.execute(
-        "insert into research_trials (trial_id, experiment_id, hypothesis_id) values (?1, ?2, ?3)",
-        rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}")],
+        "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id) \
+         values (?1, ?2, ?3, ?4)",
+        rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}"), seed],
     )
     .expect("insert research_trials row");
     conn.execute(

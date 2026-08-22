@@ -62,6 +62,13 @@ pub struct BacktestEvidenceBundle {
     pub report: BacktestReport,
     pub artifact_lock: ArtifactLock,
     pub stress_suite: StressSuiteResult,
+    /// The run's starting cash, for [`crate::PromotionInput::initial_equity_micros`].
+    /// `BacktestReport` itself carries no such field (it's a config value,
+    /// not engine output), so this is read from the SAME hash-chained
+    /// `backtest_run_completed` audit event already verified for
+    /// [`BacktestEvidenceResolveError::ReportContentHashMismatch`] --
+    /// tamper-evident via the same mechanism, not a second trust path.
+    pub initial_equity_micros: i64,
 }
 
 /// Every way [`resolve_backtest_evidence`] fails closed. Each variant names
@@ -95,6 +102,9 @@ pub enum BacktestEvidenceResolveError {
     /// the SHA-256 of the actual on-disk `backtest_report.json` -- the file
     /// was edited after the audit event was written.
     ReportContentHashMismatch,
+    /// The `backtest_run_completed` event has no valid (non-negative
+    /// integer) `initial_cash_micros` field.
+    ReportInitialEquityMissing,
     /// `manifest.json` + `audit.jsonl` did not pass
     /// [`crate::lock_artifact_from_str`] -- see [`LockError`].
     ArtifactLockFailed(LockError),
@@ -124,6 +134,10 @@ impl std::fmt::Display for BacktestEvidenceResolveError {
             Self::ReportContentHashMismatch => write!(
                 f,
                 "backtest_report.json content hash disagrees with the audited hash (tampered after write)"
+            ),
+            Self::ReportInitialEquityMissing => write!(
+                f,
+                "backtest_run_completed audit event has no valid initial_cash_micros"
             ),
             Self::ArtifactLockFailed(e) => write!(f, "artifact lock failed: {e}"),
             Self::StressSuite(e) => write!(f, "stress suite evidence invalid: {e}"),
@@ -187,6 +201,7 @@ pub fn resolve_backtest_evidence(
         hex::encode(hasher.finalize())
     };
     let mut found_report_event = false;
+    let mut initial_equity_micros: Option<i64> = None;
     for line in audit_jsonl.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -208,10 +223,13 @@ pub fn resolve_backtest_evidence(
         if recorded != actual_sha256 {
             return Err(BacktestEvidenceResolveError::ReportContentHashMismatch);
         }
+        initial_equity_micros = ev.payload.get("initial_cash_micros").and_then(|v| v.as_i64());
     }
     if !found_report_event {
         return Err(BacktestEvidenceResolveError::ReportAuditEventMissing);
     }
+    let initial_equity_micros =
+        initial_equity_micros.ok_or(BacktestEvidenceResolveError::ReportInitialEquityMissing)?;
 
     // --- StressSuiteResult authority ---
     let stress_artifact =
@@ -223,6 +241,7 @@ pub fn resolve_backtest_evidence(
         report,
         artifact_lock,
         stress_suite,
+        initial_equity_micros,
     })
 }
 

@@ -1015,6 +1015,110 @@ pub async fn resolve_evidence_lineage(
     fetch_promotion_transition_by_id(pool, evidence_transition_id).await
 }
 
+// ---------------------------------------------------------------------------
+// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: durable evidence
+// lineage (migration 0065)
+// ---------------------------------------------------------------------------
+//
+// A deliberately SEPARATE write/read pair, not new fields on
+// `InsertStrategyPromotionTransitionArgs`/`StrategyPromotionTransitionRecord`
+// -- those two types are constructed by struct literal in over a dozen
+// call sites across `mqk-daemon`'s test suite for purposes entirely
+// unrelated to Research/Backtest evidence lineage (fleet/decision/outbox
+// fixtures). Adding required fields there would force an unrelated,
+// mechanical edit to every one of those call sites for a "narrow"
+// migration. `record_promotion_transition_lineage_v2` is called by the
+// route immediately after `insert_strategy_promotion_transition_serialized`
+// returns `Inserted`, in the same request -- a best-effort UPDATE, not a
+// second phase of the atomic insert: these five columns are audit/lineage
+// metadata only (never read back to gate legality or state), so a
+// (practically never expected) failure here is logged and does not fail
+// the already-successful transition response.
+
+/// Durable Research/Backtest evidence lineage for one promotion transition.
+/// `None` in every field for a transition that predates migration 0065, or
+/// one that was not evidence-bearing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromotionEvidenceLineageV2 {
+    pub research_trial_id: Option<String>,
+    pub research_economic_eval_id: Option<String>,
+    pub research_deflated_sharpe_ratio: Option<f64>,
+    pub research_probability_backtest_overfitting: Option<f64>,
+    pub backtest_run_id: Option<Uuid>,
+}
+
+/// Record the verified Research/Backtest evidence lineage that authorized
+/// `transition_id`'s decision. Identity pointers and judged statistics
+/// only -- never a copy of the underlying artifact bytes (see migration
+/// 0065's own doc comment).
+#[allow(clippy::too_many_arguments)]
+pub async fn record_promotion_transition_lineage_v2(
+    pool: &PgPool,
+    transition_id: Uuid,
+    research_trial_id: &str,
+    research_economic_eval_id: &str,
+    research_deflated_sharpe_ratio: f64,
+    research_probability_backtest_overfitting: f64,
+    backtest_run_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        update sys_strategy_promotion_transitions
+        set research_trial_id = $2,
+            research_economic_eval_id = $3,
+            research_deflated_sharpe_ratio = $4,
+            research_probability_backtest_overfitting = $5,
+            backtest_run_id = $6
+        where transition_id = $1
+        "#,
+    )
+    .bind(transition_id)
+    .bind(research_trial_id)
+    .bind(research_economic_eval_id)
+    .bind(research_deflated_sharpe_ratio)
+    .bind(research_probability_backtest_overfitting)
+    .bind(backtest_run_id)
+    .execute(pool)
+    .await
+    .context("record_promotion_transition_lineage_v2 failed")?;
+    Ok(())
+}
+
+/// Read back the durable evidence lineage for one transition. `Ok(None)`
+/// means `transition_id` does not exist at all -- distinct from
+/// `Ok(Some(PromotionEvidenceLineageV2 { .. all None .. }))`, which means
+/// the row exists but has no recorded lineage (pre-0065 or non-evidence-
+/// bearing transition).
+pub async fn fetch_promotion_transition_lineage_v2(
+    pool: &PgPool,
+    transition_id: Uuid,
+) -> Result<Option<PromotionEvidenceLineageV2>> {
+    let row = sqlx::query(
+        r#"
+        select research_trial_id, research_economic_eval_id,
+               research_deflated_sharpe_ratio, research_probability_backtest_overfitting,
+               backtest_run_id
+        from sys_strategy_promotion_transitions
+        where transition_id = $1
+        "#,
+    )
+    .bind(transition_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_promotion_transition_lineage_v2 failed")?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some(PromotionEvidenceLineageV2 {
+        research_trial_id: row.try_get("research_trial_id")?,
+        research_economic_eval_id: row.try_get("research_economic_eval_id")?,
+        research_deflated_sharpe_ratio: row.try_get("research_deflated_sharpe_ratio")?,
+        research_probability_backtest_overfitting: row
+            .try_get("research_probability_backtest_overfitting")?,
+        backtest_run_id: row.try_get("backtest_run_id")?,
+    }))
+}
+
 #[cfg(test)]
 mod fingerprint_v2_shape_tests {
     use super::*;

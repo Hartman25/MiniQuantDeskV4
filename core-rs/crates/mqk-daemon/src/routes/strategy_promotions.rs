@@ -817,27 +817,80 @@ pub(crate) async fn strategy_promotion_transition(
         None
     };
 
-    // Gate 4c (PROMOTION-WALKFORWARD-GATE-WIRING-01): verified Research
-    // out-of-sample evidence (P7C), required ADDITIONALLY to (never instead
-    // of) Gate 4's scanner/review evidence above -- runs in the exact same
+    // Gate 4c/4d (PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE):
+    // resolve REAL canonical Backtest evidence AND verified Research
+    // out-of-sample evidence for THIS SAME candidate, then route the
+    // complete decision through the canonical `mqk_promotion::
+    // evaluate_promotion` -- required ADDITIONALLY to (never instead of)
+    // Gate 4's scanner/review evidence above. Runs in the exact same
     // `transition_requires_evidence` branch, so a transition that does not
-    // require evidence at all is unaffected. `evaluate_research_evidence_gate`
-    // reads `research_registry_db_path` / `research_evidence_artifact_root` /
-    // the two thresholds ONLY from trusted daemon config (`st`) -- never
-    // from this request -- so nothing in `body` can select an alternate
-    // registry, artifact root, or acceptance threshold.
-    if transition_requires_evidence(previous_state.as_deref(), &target_state) {
-        let (research_trial_id, research_evidence_dir, research_judge_artifact_path) = match (
-            body.research_trial_id.as_deref(),
-            body.research_evidence_dir.as_deref(),
-            body.research_judge_artifact_path.as_deref(),
+    // require evidence at all is unaffected. Every gate below reads its
+    // registry/artifact-root/policy-threshold config ONLY from trusted
+    // daemon config (`st`) -- never from this request -- so nothing in
+    // `body` can select an alternate registry, artifact root, or
+    // acceptance threshold.
+    //
+    // Repairs the independent-review findings against `242cb7c3`:
+    // (1) cross-candidate authority -- both gates below independently
+    //     cross-check their resolved evidence's own strategy identity
+    //     against `strategy_id`, never just trusting a caller-supplied id
+    //     claim to imply the evidence describes the same candidate;
+    // (2) parallel/partial promotion policy -- DSR/PBO and every other
+    //     promotion gate (metrics, artifact lock, stress suite, provenance)
+    //     are now decided in ONE place, `evaluate_promotion`, not
+    //     re-implemented ad hoc in this route;
+    // (3) missing durable Research lineage -- the verified DSR/PBO and
+    //     Backtest run_id are persisted (see Gate 5 below), not merely
+    //     logged;
+    // (4) missing canonical backtest-evidence seam -- closed by
+    //     PROMOTION-BACKTEST-EVIDENCE-SEAM-01 (`resolve_backtest_evidence`).
+    let promotion_lineage = if transition_requires_evidence(previous_state.as_deref(), &target_state)
+    {
+        let (research_trial_id, research_evidence_dir, research_judge_artifact_path, backtest_run_id) =
+            match (
+                body.research_trial_id.as_deref(),
+                body.research_evidence_dir.as_deref(),
+                body.research_judge_artifact_path.as_deref(),
+                body.backtest_run_id.as_deref(),
+            ) {
+                (Some(t), Some(d), Some(j), Some(b))
+                    if !t.trim().is_empty()
+                        && !d.trim().is_empty()
+                        && !j.trim().is_empty()
+                        && !b.trim().is_empty() =>
+                {
+                    (t, d, j, b)
+                }
+                _ => {
+                    return transition_response(TransitionResponseArgs {
+                        status: StatusCode::BAD_REQUEST,
+                        accepted: false,
+                        disposition: "evidence_invalid",
+                        strategy_id,
+                        symbol,
+                        timeframe_secs,
+                        previous_state,
+                        target_state,
+                        transition_id: None,
+                        blockers: vec![
+                            "research_trial_id, research_evidence_dir, \
+                             research_judge_artifact_path, and backtest_run_id are all required \
+                             for this transition (PROMOTION-WALKFORWARD-GATE-WIRING-01: verified \
+                             Research out-of-sample evidence AND canonical Backtest evidence are \
+                             both required in addition to review-artifact evidence)"
+                                .to_string(),
+                        ],
+                    });
+                }
+            };
+
+        let backtest_bundle = match crate::backtest_evidence_gate::evaluate_backtest_evidence_gate(
+            &st,
+            backtest_run_id,
+            &strategy_id,
         ) {
-            (Some(t), Some(d), Some(j))
-                if !t.trim().is_empty() && !d.trim().is_empty() && !j.trim().is_empty() =>
-            {
-                (t, d, j)
-            }
-            _ => {
+            crate::backtest_evidence_gate::BacktestEvidenceGateOutcome::Passed { bundle } => bundle,
+            crate::backtest_evidence_gate::BacktestEvidenceGateOutcome::Rejected { blockers } => {
                 return transition_response(TransitionResponseArgs {
                     status: StatusCode::BAD_REQUEST,
                     accepted: false,
@@ -848,39 +901,20 @@ pub(crate) async fn strategy_promotion_transition(
                     previous_state,
                     target_state,
                     transition_id: None,
-                    blockers: vec![
-                        "research_trial_id, research_evidence_dir, and \
-                         research_judge_artifact_path are all required for this transition \
-                         (PROMOTION-WALKFORWARD-GATE-WIRING-01: verified Research out-of-sample \
-                         evidence is required in addition to review-artifact evidence)"
-                            .to_string(),
-                    ],
+                    blockers,
                 });
             }
         };
-        match crate::research_evidence_gate::evaluate_research_evidence_gate(
+
+        let oos_evidence = match crate::research_evidence_gate::evaluate_research_evidence_gate(
             &st,
+            &strategy_id,
             research_trial_id,
             research_evidence_dir,
             research_judge_artifact_path,
         ) {
-            crate::research_evidence_gate::ResearchEvidenceGateOutcome::Passed {
-                trial_id,
-                economic_eval_id,
-                deflated_sharpe_ratio,
-                probability_of_backtest_overfitting,
-            } => {
-                tracing::info!(
-                    strategy_id = %strategy_id,
-                    symbol = %symbol,
-                    timeframe_secs,
-                    research_trial_id = %trial_id,
-                    research_economic_eval_id = %economic_eval_id,
-                    deflated_sharpe_ratio,
-                    probability_of_backtest_overfitting,
-                    "PROMOTION-WALKFORWARD-GATE-WIRING-01: verified Research OOS evidence accepted \
-                     for shadow_approved transition",
-                );
+            crate::research_evidence_gate::ResearchEvidenceGateOutcome::Passed { oos_evidence } => {
+                oos_evidence
             }
             crate::research_evidence_gate::ResearchEvidenceGateOutcome::Rejected { blockers } => {
                 return transition_response(TransitionResponseArgs {
@@ -896,8 +930,97 @@ pub(crate) async fn strategy_promotion_transition(
                     blockers,
                 });
             }
+        };
+
+        // Canonical promotion policy config -- trusted daemon config ONLY.
+        let policy = match (
+            st.promotion_min_sharpe,
+            st.promotion_max_mdd,
+            st.promotion_min_cagr,
+            st.promotion_min_profit_factor,
+            st.promotion_min_profitable_months_pct,
+            st.research_min_deflated_sharpe_ratio,
+            st.research_max_probability_backtest_overfitting,
+        ) {
+            (
+                Some(min_sharpe),
+                Some(max_mdd),
+                Some(min_cagr),
+                Some(min_profit_factor),
+                Some(min_profitable_months_pct),
+                Some(min_deflated_sharpe_ratio),
+                Some(max_probability_backtest_overfitting),
+            ) => mqk_promotion::PromotionConfig {
+                min_sharpe,
+                max_mdd,
+                min_cagr,
+                min_profit_factor,
+                min_profitable_months_pct,
+                min_deflated_sharpe_ratio,
+                max_probability_backtest_overfitting,
+            },
+            _ => {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::BAD_REQUEST,
+                    accepted: false,
+                    disposition: "evidence_invalid",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state,
+                    target_state,
+                    transition_id: None,
+                    blockers: vec![
+                        "promotion policy rejected: this daemon does not have every \
+                         MQK_PROMOTION_* / MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO / \
+                         MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING threshold configured \
+                         -- the canonical promotion policy cannot be evaluated"
+                            .to_string(),
+                    ],
+                });
+            }
+        };
+
+        let promotion_input = mqk_promotion::PromotionInput {
+            initial_equity_micros: backtest_bundle.initial_equity_micros,
+            report: backtest_bundle.report.clone(),
+            stress_suite: Some(backtest_bundle.stress_suite.clone()),
+            artifact_lock: Some(backtest_bundle.artifact_lock.clone()),
+            oos_evidence: Some(*oos_evidence.clone()),
+        };
+        let decision = mqk_promotion::evaluate_promotion(&policy, &promotion_input);
+        if !decision.passed {
+            return transition_response(TransitionResponseArgs {
+                status: StatusCode::BAD_REQUEST,
+                accepted: false,
+                disposition: "evidence_invalid",
+                strategy_id,
+                symbol,
+                timeframe_secs,
+                previous_state,
+                target_state,
+                transition_id: None,
+                blockers: decision.fail_reasons,
+            });
         }
-    }
+
+        tracing::info!(
+            strategy_id = %strategy_id,
+            symbol = %symbol,
+            timeframe_secs,
+            research_trial_id = %oos_evidence.trial_id(),
+            research_economic_eval_id = %oos_evidence.economic_eval_id(),
+            deflated_sharpe_ratio = oos_evidence.deflated_sharpe_ratio(),
+            probability_of_backtest_overfitting = oos_evidence.probability_of_backtest_overfitting(),
+            backtest_run_id = %backtest_bundle.run_id,
+            "PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: canonical evaluate_promotion \
+             accepted verified Research + Backtest evidence for shadow_approved transition",
+        );
+
+        Some((oos_evidence, backtest_bundle.run_id))
+    } else {
+        None
+    };
 
     // STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase D): derive
     // evidence lineage server-side, never from the request. A
@@ -958,18 +1081,43 @@ pub(crate) async fn strategy_promotion_transition(
     // Gate 5: atomic, serialized insert (STRATEGY-PROMOTION-REGISTRY-
     // CLOSURE-REPAIR-01 Phase B) -- the only insert path this route uses.
     match insert_strategy_promotion_transition_serialized(db, &args).await {
-        Ok(TransitionInsertOutcome::Inserted(_)) => transition_response(TransitionResponseArgs {
-            status: StatusCode::OK,
-            accepted: true,
-            disposition: "transitioned",
-            strategy_id,
-            symbol,
-            timeframe_secs,
-            previous_state,
-            target_state,
-            transition_id: Some(transition_id),
-            blockers: Vec::new(),
-        }),
+        Ok(TransitionInsertOutcome::Inserted(_)) => {
+            // Gate 5b: durable evidence lineage (PROMOTION-WALKFORWARD-
+            // GATE-WIRING-01-REPAIR-CLOSURE, migration 0065). Best-effort:
+            // these columns are audit/lineage metadata only, never read
+            // back to gate legality or state, so a failure here is logged
+            // and does not fail the already-successful transition.
+            if let Some((oos_evidence, backtest_run_id)) = promotion_lineage.as_ref() {
+                if let Err(err) = mqk_db::record_promotion_transition_lineage_v2(
+                    db,
+                    transition_id,
+                    oos_evidence.trial_id(),
+                    oos_evidence.economic_eval_id(),
+                    oos_evidence.deflated_sharpe_ratio(),
+                    oos_evidence.probability_of_backtest_overfitting(),
+                    *backtest_run_id,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "record_promotion_transition_lineage_v2 failed for transition_id={}: {err}",
+                        transition_id
+                    );
+                }
+            }
+            transition_response(TransitionResponseArgs {
+                status: StatusCode::OK,
+                accepted: true,
+                disposition: "transitioned",
+                strategy_id,
+                symbol,
+                timeframe_secs,
+                previous_state,
+                target_state,
+                transition_id: Some(transition_id),
+                blockers: Vec::new(),
+            })
+        }
         Ok(TransitionInsertOutcome::Duplicate(existing)) => {
             transition_response(TransitionResponseArgs {
                 status: StatusCode::OK,

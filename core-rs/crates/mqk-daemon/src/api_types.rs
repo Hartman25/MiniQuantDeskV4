@@ -6621,6 +6621,17 @@ pub struct StrategyPromotionTransitionRequest {
     /// `research_trial_id`. Must resolve inside
     /// `MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT`.
     pub research_judge_artifact_path: Option<String>,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: required
+    /// alongside the Research fields above for evidence-requiring
+    /// transitions. The candidate identity (a `BacktestReport::run_id`
+    /// UUID) whose canonical, durable `BacktestReport`/`ArtifactLock`/
+    /// `StressSuiteResult` evidence this transition claims to be backed by
+    /// -- an identity claim only, never trusted on its own; independently
+    /// resolved and cross-candidate-bound to `strategy_id` by
+    /// [`crate::backtest_evidence_gate::evaluate_backtest_evidence_gate`]
+    /// against the daemon's trusted artifact root
+    /// (`MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT`, never this request).
+    pub backtest_run_id: Option<String>,
     pub effective_at_utc: String,
     pub expires_at_utc: Option<String>,
     pub initiated_by: String,

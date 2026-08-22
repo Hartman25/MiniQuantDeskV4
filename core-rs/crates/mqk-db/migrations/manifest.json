@@ -398,6 +398,12 @@
       "path": "0064_arm_state_reason_execution_loop_tick_failure.sql",
       "status": "applied",
       "intent": "PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01: add 'ExecutionLoopTickFailure' to the sys_arm_state.reason CHECK constraint so mqk-daemon's execution-loop supervisor generic tick-error fallback (persist_execution_loop_safety_halt) can durably disarm through halt_and_disarm_run_if_active instead of failing the fenced halt write with a constraint violation. Additive only, no other constraint or column change."
+    },
+    {
+      "id": "0065",
+      "path": "0065_strategy_promotion_evidence_lineage_v2.sql",
+      "status": "applied",
+      "intent": "PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: add nullable research_trial_id/research_economic_eval_id/research_deflated_sharpe_ratio/research_probability_backtest_overfitting/backtest_run_id to sys_strategy_promotion_transitions, closing the missing-durable-Research-lineage gap independent review of 242cb7c3 found (DSR/PBO were only ever logged, never persisted) and adding the first durable pointer to canonical Backtest evidence (PROMOTION-BACKTEST-EVIDENCE-SEAM-01's run_id). Identity pointers and judged statistics only, never a copy of underlying artifact bytes. Additive only, no existing column or constraint from 0046/0047/0058 altered."
     }
   ]
 }

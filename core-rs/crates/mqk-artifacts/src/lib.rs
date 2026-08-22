@@ -1325,7 +1325,12 @@ pub fn write_backtest_report(
     // `init_run_artifacts` (manifest.json + audit.jsonl present); ad-hoc
     // bare-temp-dir test callers do not get a synthesized audit trail.
     if manifest_present {
-        write_backtest_completion_audit_event(run_dir, report, &canonical_report_path)
+        write_backtest_completion_audit_event(
+            run_dir,
+            report,
+            &canonical_report_path,
+            initial_cash_micros,
+        )
             .with_context(|| {
                 format!(
                     "write backtest completion audit event failed: {}",
@@ -1379,6 +1384,7 @@ fn write_backtest_completion_audit_event(
     run_dir: &Path,
     report: &mqk_backtest::BacktestReport,
     canonical_report_path: &Path,
+    initial_cash_micros: i64,
 ) -> Result<()> {
     let audit_path = run_dir.join("audit.jsonl");
     let existing = fs::read_to_string(&audit_path).unwrap_or_default();
@@ -1409,6 +1415,15 @@ fn write_backtest_completion_audit_event(
         "halt_reason": report.halt_reason,
         "canonical_report_sha256": canonical_report_sha256,
         "canonical_report_schema_version": BACKTEST_REPORT_ARTIFACT_SCHEMA_VERSION,
+        // PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: the run's
+        // starting cash -- BacktestReport itself carries no such field (it
+        // is a BacktestConfig value, not engine output), and config_id is
+        // only a hash, not the config's actual values. Recording it here,
+        // inside the SAME hash-chained completion event, gives
+        // PromotionInput.initial_equity_micros a tamper-evident source
+        // (see mqk_promotion::resolve_backtest_evidence) without changing
+        // backtest_report.json's own schema.
+        "initial_cash_micros": initial_cash_micros,
     });
 
     writer

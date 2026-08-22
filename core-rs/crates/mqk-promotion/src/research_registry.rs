@@ -106,6 +106,13 @@ pub(crate) struct VerifiedResearchAuthority {
     pub(crate) trial_id: String,
     pub(crate) economic_eval_id: String,
     pub(crate) judge_artifact_sha256: String,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: this trial's own
+    /// registered `strategy_id` (`research_trials.strategy_id`, `not null`).
+    /// Lets a caller (the production promotion route) prove this Research
+    /// evidence was produced for the SAME strategy identity as the
+    /// promotion candidate being decided, closing the cross-candidate
+    /// authority gap independent review found in `242cb7c3`.
+    pub(crate) strategy_id: String,
 }
 
 /// Open the registry read-only and establish authority for `trial_id`
@@ -136,14 +143,14 @@ pub(crate) fn load_research_authority(
     };
 
     // ---- 1. research_trials contains trial_id ----
-    let trial_row = query_two_col_row(
+    let trial_row = query_three_col_row(
         &conn,
-        "select experiment_id, hypothesis_id from research_trials where trial_id = ?1",
+        "select experiment_id, hypothesis_id, strategy_id from research_trials where trial_id = ?1",
         [trial_id],
         &mut errs,
         "research_trials",
     );
-    let (experiment_id, hypothesis_id) = match trial_row {
+    let (experiment_id, hypothesis_id, strategy_id) = match trial_row {
         Some(v) => v,
         None => {
             if !errs.iter().any(|e| e.contains("research_trials")) {
@@ -224,6 +231,7 @@ pub(crate) fn load_research_authority(
         economic_eval_id: economic_eval_id.to_string(),
         judge_artifact_sha256: registered_judge_sha256
             .expect("no errs means the judge row was matched and scope-verified above"),
+        strategy_id,
     })
 }
 
@@ -257,7 +265,7 @@ pub(crate) fn load_research_authority(
 /// (two different, integrity-verified rows can never share identical
 /// content, since identical content hashes identically). Query failures
 /// (missing table/column) are pushed into `errs` as fail-closed schema
-/// errors, matching [`query_two_col_row`]/[`row_exists`]'s own contract.
+/// errors, matching [`query_three_col_row`]/[`row_exists`]'s own contract.
 fn find_matching_judge_row(
     conn: &Connection,
     supplied_judge: &Value,
@@ -332,13 +340,21 @@ fn find_matching_judge_row(
 /// as a fail-closed registry error pushed into `errs` -- a stale/wrong
 /// registry path must never be indistinguishable from "genuinely no
 /// matching row".
-fn query_two_col_row<P: ToSql, const N: usize>(
+/// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: three-column
+/// variant of [`query_two_col_row`], used only for the trial row's
+/// `(experiment_id, hypothesis_id, strategy_id)` -- `research_trials`'s own
+/// already-existing, always-populated `strategy_id not null` column,
+/// closing the cross-candidate authority gap (a Research trial's registered
+/// strategy was never previously read, let alone checked against the
+/// promotion request's `strategy_id`). Purely additive: no existing query,
+/// column, or check in this module changes.
+fn query_three_col_row<P: ToSql, const N: usize>(
     conn: &Connection,
     sql: &str,
     params: [P; N],
     errs: &mut Vec<String>,
     table_name: &str,
-) -> Option<(String, Option<String>)> {
+) -> Option<(String, Option<String>, String)> {
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(e) => {
@@ -353,7 +369,8 @@ fn query_two_col_row<P: ToSql, const N: usize>(
         .query_row(rusqlite::params_from_iter(params.iter()), |row| {
             let a: String = row.get(0)?;
             let b: Option<String> = row.get(1)?;
-            Ok((a, b))
+            let c: String = row.get(2)?;
+            Ok((a, b, c))
         })
         .optional()
     {
@@ -367,7 +384,7 @@ fn query_two_col_row<P: ToSql, const N: usize>(
     }
 }
 
-/// Same fail-closed schema-error handling as [`query_two_col_row`], but for
+/// Same fail-closed schema-error handling as [`query_three_col_row`], but for
 /// a plain existence check (`select 1 from ... limit 1`).
 fn row_exists<P: ToSql, const N: usize>(
     conn: &Connection,

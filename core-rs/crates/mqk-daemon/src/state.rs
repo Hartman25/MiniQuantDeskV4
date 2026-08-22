@@ -671,6 +671,31 @@ pub struct AppState {
     /// Sourced ONLY from `MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING`;
     /// no hidden default.
     pub research_max_probability_backtest_overfitting: Option<f64>,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: root directory
+    /// `mqk_promotion::resolve_backtest_evidence` searches for a candidate's
+    /// canonical `BacktestReport`/`ArtifactLock`/`StressSuiteResult`
+    /// evidence (`<this_root>/<backtest_run_id>/`, the exact convention
+    /// `mqk_artifacts::init_run_artifacts` writes every run to). Sourced
+    /// ONLY from `MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT` -- never from request
+    /// JSON; `None` means the backtest-evidence gate is not configured on
+    /// this daemon, and every evidence-requiring promotion transition fails
+    /// closed.
+    pub backtest_evidence_artifact_root: Option<String>,
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: explicit,
+    /// versioned promotion metrics thresholds (mirrors
+    /// `mqk_promotion::PromotionConfig`'s five metrics fields; DSR/PBO reuse
+    /// the existing `research_min_deflated_sharpe_ratio`/
+    /// `research_max_probability_backtest_overfitting` fields above rather
+    /// than duplicating them). Sourced ONLY from `MQK_PROMOTION_MIN_SHARPE`
+    /// / `MQK_PROMOTION_MAX_MDD` / `MQK_PROMOTION_MIN_CAGR` /
+    /// `MQK_PROMOTION_MIN_PROFIT_FACTOR` /
+    /// `MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT`; no hidden default -- any
+    /// one missing fails the gate closed rather than silently widening it.
+    pub promotion_min_sharpe: Option<f64>,
+    pub promotion_max_mdd: Option<f64>,
+    pub promotion_min_cagr: Option<f64>,
+    pub promotion_min_profit_factor: Option<f64>,
+    pub promotion_min_profitable_months_pct: Option<f64>,
     /// DATA-INGEST-GUI-SYNC-ALL-01: Filesystem path to the canonical instrument registry.
     ///
     /// Read at route-time (not cached) by GET /api/v1/ingest/tracked-equities.
@@ -1815,6 +1840,25 @@ impl AppState {
             .and_then(|s| s.trim().parse::<f64>().ok()),
             research_max_probability_backtest_overfitting: std::env::var(
                 "MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING",
+            )
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok()),
+            backtest_evidence_artifact_root: std::env::var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT")
+                .ok(),
+            promotion_min_sharpe: std::env::var("MQK_PROMOTION_MIN_SHARPE")
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok()),
+            promotion_max_mdd: std::env::var("MQK_PROMOTION_MAX_MDD")
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok()),
+            promotion_min_cagr: std::env::var("MQK_PROMOTION_MIN_CAGR")
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok()),
+            promotion_min_profit_factor: std::env::var("MQK_PROMOTION_MIN_PROFIT_FACTOR")
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok()),
+            promotion_min_profitable_months_pct: std::env::var(
+                "MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT",
             )
             .ok()
             .and_then(|s| s.trim().parse::<f64>().ok()),

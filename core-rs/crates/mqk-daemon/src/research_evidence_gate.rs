@@ -26,7 +26,7 @@
 
 use std::path::Path;
 
-use mqk_promotion::verify_promotion_oos_evidence;
+use mqk_promotion::{verify_promotion_oos_evidence, VerifiedPromotionOosEvidence};
 
 use crate::promotion_evidence_validation::{open_confined_regular_child, read_bounded_file_string};
 use crate::state::AppState;
@@ -47,10 +47,13 @@ const MAX_JUDGE_ARTIFACT_JSON_BYTES: u64 = 16 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub enum ResearchEvidenceGateOutcome {
     Passed {
-        trial_id: String,
-        economic_eval_id: String,
-        deflated_sharpe_ratio: f64,
-        probability_of_backtest_overfitting: f64,
+        /// The full, non-forgeable, structurally VERIFIED evidence --
+        /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: this is
+        /// what the route now feeds directly into
+        /// `mqk_promotion::PromotionInput.oos_evidence`, so the canonical
+        /// `evaluate_promotion` (not this gate) makes the final DSR/PBO
+        /// policy decision -- no parallel/partial promotion policy.
+        oos_evidence: Box<VerifiedPromotionOosEvidence>,
     },
     Rejected {
         blockers: Vec<String>,
@@ -79,6 +82,7 @@ fn reject(msg: impl Into<String>) -> ResearchEvidenceGateOutcome {
 /// a request body contains.
 pub fn evaluate_research_evidence_gate(
     st: &AppState,
+    strategy_id: &str,
     trial_id: &str,
     research_evidence_dir: &str,
     research_judge_artifact_path: &str,
@@ -100,30 +104,6 @@ pub fn evaluate_research_evidence_gate(
              MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT configured",
         );
     };
-    let Some(min_dsr) = st.research_min_deflated_sharpe_ratio else {
-        return reject(
-            "research-evidence gate rejected: this daemon has no \
-             MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO configured",
-        );
-    };
-    let Some(max_pbo) = st.research_max_probability_backtest_overfitting else {
-        return reject(
-            "research-evidence gate rejected: this daemon has no \
-             MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING configured",
-        );
-    };
-    if !(0.0..=1.0).contains(&min_dsr) {
-        return reject(format!(
-            "research-evidence gate rejected: MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO must be \
-             within [0,1], got {min_dsr}"
-        ));
-    }
-    if !(0.0..=1.0).contains(&max_pbo) {
-        return reject(format!(
-            "research-evidence gate rejected: MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING \
-             must be within [0,1], got {max_pbo}"
-        ));
-    }
 
     let root_canon = match std::fs::canonicalize(Path::new(artifact_root)) {
         Ok(p) => p,
@@ -210,33 +190,34 @@ pub fn evaluate_research_evidence_gate(
         Err(errs) => return ResearchEvidenceGateOutcome::Rejected { blockers: errs },
     };
 
-    // "Successfully evaluated" is never conflated with "acceptable" -- see
-    // mqk_promotion::evaluator's identical comment for the same distinction.
-    let mut blockers = Vec::new();
-    if verified.deflated_sharpe_ratio() < min_dsr {
-        blockers.push(format!(
-            "research-evidence gate rejected: Deflated Sharpe Ratio {:.6} < min {:.6}",
-            verified.deflated_sharpe_ratio(),
-            min_dsr
+    // Cross-candidate authority (PROMOTION-WALKFORWARD-GATE-WIRING-01-
+    // REPAIR-CLOSURE): this trial's own registered strategy_id
+    // (research_trials.strategy_id, read by the durable registry, never a
+    // caller claim) must agree with the promotion identity actually being
+    // decided -- a valid Research trial for a DIFFERENT strategy must never
+    // be accepted here.
+    if verified.strategy_id().trim() != strategy_id {
+        return reject(format!(
+            "research-evidence gate rejected: registered trial strategy_id {:?} does not match \
+             promotion candidate strategy_id {strategy_id:?} -- cross-candidate evidence is \
+             never accepted",
+            verified.strategy_id()
         ));
-    }
-    if verified.probability_of_backtest_overfitting() > max_pbo {
-        blockers.push(format!(
-            "research-evidence gate rejected: Probability of Backtest Overfitting {:.6} > max \
-             {:.6}",
-            verified.probability_of_backtest_overfitting(),
-            max_pbo
-        ));
-    }
-    if !blockers.is_empty() {
-        return ResearchEvidenceGateOutcome::Rejected { blockers };
     }
 
+    // DSR/PBO threshold acceptance is no longer decided here --
+    // PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: the route now
+    // feeds this verified evidence into `mqk_promotion::PromotionInput.
+    // oos_evidence` and lets the canonical `evaluate_promotion` make that
+    // decision against `PromotionConfig`'s thresholds, alongside every
+    // other promotion gate (metrics, artifact lock, stress suite,
+    // provenance) -- closing the "parallel/partial promotion policy" gap
+    // independent review of `242cb7c3` found. "Successfully evaluated" is
+    // still never conflated with "acceptable": this function's Passed
+    // outcome means only that the evidence is genuine and correctly bound,
+    // not that it clears any threshold.
     ResearchEvidenceGateOutcome::Passed {
-        trial_id: verified.trial_id().to_string(),
-        economic_eval_id: verified.economic_eval_id().to_string(),
-        deflated_sharpe_ratio: verified.deflated_sharpe_ratio(),
-        probability_of_backtest_overfitting: verified.probability_of_backtest_overfitting(),
+        oos_evidence: Box::new(verified),
     }
 }
 
@@ -272,11 +253,21 @@ mod tests {
         _dir: tempfile::TempDir,
         st: crate::state::AppState,
         trial_id: String,
+        strategy_id: String,
         evidence_dir: std::path::PathBuf,
         judge_path: std::path::PathBuf,
     }
 
     fn build_fixture(seed: &str) -> Fixture {
+        build_fixture_with_strategy(seed, &format!("strategy_{seed}"))
+    }
+
+    /// PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE: variant with an
+    /// explicit `strategy_id` -- used by cross-candidate binding tests that
+    /// need to construct a Research trial registered under a KNOWN, chosen
+    /// strategy identity (to prove a mismatch against a different promotion
+    /// candidate's strategy_id is rejected).
+    fn build_fixture_with_strategy(seed: &str, strategy_id: &str) -> Fixture {
         let dir = tempfile::tempdir().expect("create temp root");
         let root = dir.path().to_path_buf();
 
@@ -313,7 +304,8 @@ mod tests {
             create table research_trials (
                 trial_id text primary key,
                 experiment_id text not null,
-                hypothesis_id text not null
+                hypothesis_id text not null,
+                strategy_id text not null
             );
             create table research_attempts (
                 attempt_id text primary key,
@@ -332,8 +324,9 @@ mod tests {
         )
         .expect("create registry schema");
         conn.execute(
-            "insert into research_trials (trial_id, experiment_id, hypothesis_id) values (?1, ?2, ?3)",
-            rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}")],
+            "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id) \
+             values (?1, ?2, ?3, ?4)",
+            rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}"), strategy_id],
         )
         .expect("insert research_trials row");
         conn.execute(
@@ -370,6 +363,7 @@ mod tests {
             _dir: dir,
             st,
             trial_id,
+            strategy_id: strategy_id.to_string(),
             evidence_dir,
             judge_path,
         }
@@ -387,22 +381,40 @@ mod tests {
         let f = build_fixture("genuine_pass");
         let outcome = evaluate_research_evidence_gate(
             &f.st,
+            &f.strategy_id,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
         );
         match outcome {
-            ResearchEvidenceGateOutcome::Passed {
-                trial_id,
-                deflated_sharpe_ratio,
-                probability_of_backtest_overfitting,
-                ..
-            } => {
-                assert_eq!(trial_id, f.trial_id);
-                assert!((deflated_sharpe_ratio - 0.85).abs() < 1e-9);
-                assert!((probability_of_backtest_overfitting - 0.15).abs() < 1e-9);
+            ResearchEvidenceGateOutcome::Passed { oos_evidence } => {
+                assert_eq!(oos_evidence.trial_id(), f.trial_id);
+                assert!((oos_evidence.deflated_sharpe_ratio() - 0.85).abs() < 1e-9);
+                assert!(
+                    (oos_evidence.probability_of_backtest_overfitting() - 0.15).abs() < 1e-9
+                );
+                assert_eq!(oos_evidence.strategy_id(), f.strategy_id);
             }
             other => panic!("expected Passed, got {other:?}"),
+        }
+        unset_all_research_env();
+    }
+
+    #[test]
+    fn cross_candidate_strategy_id_mismatch_is_rejected() {
+        let f = build_fixture_with_strategy("cross_candidate", "Real_Owner_Strategy");
+        let outcome = evaluate_research_evidence_gate(
+            &f.st,
+            "Some_Other_Strategy",
+            &f.trial_id,
+            f.evidence_dir.to_str().unwrap(),
+            f.judge_path.to_str().unwrap(),
+        );
+        match outcome {
+            ResearchEvidenceGateOutcome::Rejected { blockers } => {
+                assert!(blockers.iter().any(|b| b.contains("cross-candidate")));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
         }
         unset_all_research_env();
     }
@@ -418,6 +430,7 @@ mod tests {
         drop(_guard);
         let outcome = evaluate_research_evidence_gate(
             &st,
+            &f.strategy_id,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -437,26 +450,7 @@ mod tests {
         drop(_guard);
         let outcome = evaluate_research_evidence_gate(
             &st,
-            &f.trial_id,
-            f.evidence_dir.to_str().unwrap(),
-            f.judge_path.to_str().unwrap(),
-        );
-        assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
-        unset_all_research_env();
-    }
-
-    #[test]
-    fn missing_threshold_config_fails_closed() {
-        let f = build_fixture("missing_thresholds");
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO");
-        std::env::remove_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING");
-        let st = crate::state::AppState::new_with_operator_auth(
-            crate::state::OperatorAuthMode::ExplicitDevNoToken,
-        );
-        drop(_guard);
-        let outcome = evaluate_research_evidence_gate(
-            &st,
+            &f.strategy_id,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -470,63 +464,12 @@ mod tests {
         let f = build_fixture("unregistered_trial");
         let outcome = evaluate_research_evidence_gate(
             &f.st,
+            &f.strategy_id,
             "trial_that_was_never_registered",
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
         );
         assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
-        unset_all_research_env();
-    }
-
-    #[test]
-    fn dsr_below_threshold_is_rejected() {
-        let f = build_fixture("dsr_below");
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Fixture's dsr is 0.85 -- raise the bar above it.
-        std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.99");
-        let st = crate::state::AppState::new_with_operator_auth(
-            crate::state::OperatorAuthMode::ExplicitDevNoToken,
-        );
-        drop(_guard);
-        let outcome = evaluate_research_evidence_gate(
-            &st,
-            &f.trial_id,
-            f.evidence_dir.to_str().unwrap(),
-            f.judge_path.to_str().unwrap(),
-        );
-        match outcome {
-            ResearchEvidenceGateOutcome::Rejected { blockers } => {
-                assert!(blockers.iter().any(|b| b.contains("Deflated Sharpe Ratio")));
-            }
-            other => panic!("expected Rejected, got {other:?}"),
-        }
-        unset_all_research_env();
-    }
-
-    #[test]
-    fn pbo_above_threshold_is_rejected() {
-        let f = build_fixture("pbo_above");
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Fixture's pbo is 0.15 -- lower the bar below it.
-        std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "0.01");
-        let st = crate::state::AppState::new_with_operator_auth(
-            crate::state::OperatorAuthMode::ExplicitDevNoToken,
-        );
-        drop(_guard);
-        let outcome = evaluate_research_evidence_gate(
-            &st,
-            &f.trial_id,
-            f.evidence_dir.to_str().unwrap(),
-            f.judge_path.to_str().unwrap(),
-        );
-        match outcome {
-            ResearchEvidenceGateOutcome::Rejected { blockers } => {
-                assert!(blockers
-                    .iter()
-                    .any(|b| b.contains("Probability of Backtest Overfitting")));
-            }
-            other => panic!("expected Rejected, got {other:?}"),
-        }
         unset_all_research_env();
     }
 
@@ -546,6 +489,7 @@ mod tests {
         .expect("copy daily returns outside root");
         let outcome = evaluate_research_evidence_gate(
             &f.st,
+            &f.strategy_id,
             &f.trial_id,
             outside.path().to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -567,6 +511,7 @@ mod tests {
         std::fs::copy(&f.judge_path, &outside_judge).expect("copy judge artifact outside root");
         let outcome = evaluate_research_evidence_gate(
             &f.st,
+            &f.strategy_id,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             outside_judge.to_str().unwrap(),
@@ -588,6 +533,7 @@ mod tests {
         std::fs::write(&f.judge_path, mutated).unwrap();
         let outcome = evaluate_research_evidence_gate(
             &f.st,
+            &f.strategy_id,
             &f.trial_id,
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
@@ -601,6 +547,7 @@ mod tests {
         let f = build_fixture("blank_trial_id");
         let outcome = evaluate_research_evidence_gate(
             &f.st,
+            &f.strategy_id,
             "   ",
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),

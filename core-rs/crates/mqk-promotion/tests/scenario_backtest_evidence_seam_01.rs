@@ -185,6 +185,64 @@ fn bes01a_valid_candidate_resolves_complete_bundle() {
     assert!(!bundle.artifact_lock.git_hash.is_empty());
     assert!(bundle.stress_suite.passed);
     assert_eq!(bundle.stress_suite.scenarios_run, 3);
+    assert_eq!(
+        bundle.initial_equity_micros,
+        cfg_with_wide_cap().initial_cash_micros,
+        "initial_equity_micros must come from the real run's starting cash"
+    );
+
+    cleanup(&root);
+}
+
+#[test]
+fn bes01m_missing_initial_equity_in_audit_event_rejected() {
+    let (report, root, _config, _bars) =
+        run_and_persist_full("missing_equity", "BesMissingEquity", healthy_bars(), 1, 3);
+    let run_dir = root.join(report.run_id.to_string());
+
+    // Strip initial_cash_micros from the backtest_run_completed audit event
+    // WITHOUT touching canonical_report_sha256 -- simulates a pre-
+    // PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE audit event that
+    // predates this field. Recompute hash_self via mqk_audit's own
+    // compute_event_hash (never a hand-rolled reimplementation) so the
+    // chain itself still verifies -- this test targets the missing-field
+    // check specifically, not the hash-chain check.
+    // The run_dir has TWO chained events (backtest_run_completed then
+    // stress_suite_completed) -- mutating the first requires re-chaining
+    // every later event too (hash_prev/hash_self cascade), via mqk_audit's
+    // own compute_event_hash, never hand-rolled.
+    let audit_path = run_dir.join("audit.jsonl");
+    let content = std::fs::read_to_string(&audit_path).unwrap();
+    let mut events: Vec<mqk_audit::AuditEvent> = content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let target_idx = events
+        .iter()
+        .position(|e| e.event_type == "backtest_run_completed")
+        .expect("backtest_run_completed event must exist");
+    events[target_idx]
+        .payload
+        .as_object_mut()
+        .unwrap()
+        .remove("initial_cash_micros");
+    let mut prev_hash: Option<String> = None;
+    for (i, ev) in events.iter_mut().enumerate() {
+        if i > 0 {
+            ev.hash_prev = prev_hash.clone();
+        }
+        ev.hash_self = Some(mqk_audit::compute_event_hash(ev).unwrap());
+        prev_hash = ev.hash_self.clone();
+    }
+    let rewritten = events
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&audit_path, format!("{rewritten}\n")).unwrap();
+
+    let err = resolve_backtest_evidence(&root, report.run_id).unwrap_err();
+    assert_eq!(err, BacktestEvidenceResolveError::ReportInitialEquityMissing);
 
     cleanup(&root);
 }
