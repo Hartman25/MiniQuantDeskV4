@@ -102,6 +102,26 @@ impl RobustnessGauntletArtifact {
     pub fn deferred_scenario_names(&self) -> Vec<String> {
         self.deferred.iter().map(|d| d.name.clone()).collect()
     }
+
+    /// Mirrors `mqk_backtest::RobustnessGauntletOutput::is_complete`: true
+    /// iff `deferred` is empty and every
+    /// `mqk_backtest::REQUIRED_ROBUSTNESS_SCENARIO_NAMES` entry is present
+    /// in `scenarios` by name. A structurally valid (protocol-checked,
+    /// hash-verified) but INCOMPLETE artifact -- e.g. written before
+    /// `dsr_pbo_sensitivity` was merged in -- still loads successfully;
+    /// completeness is a separate, explicit check callers gating promotion
+    /// on P9 evidence must make themselves (mirrors this artifact-vs-policy
+    /// separation already used by `stress_suite_artifact`/`evaluate_promotion`).
+    pub fn is_complete(&self) -> bool {
+        if !self.deferred.is_empty() {
+            return false;
+        }
+        let present: std::collections::BTreeSet<&str> =
+            self.scenarios.iter().map(|s| s.name.as_str()).collect();
+        mqk_backtest::REQUIRED_ROBUSTNESS_SCENARIO_NAMES
+            .iter()
+            .all(|required| present.contains(required))
+    }
 }
 
 impl From<&RobustnessGauntletOutput> for RobustnessGauntletArtifact {
@@ -129,6 +149,13 @@ pub enum RobustnessGauntletArtifactError {
     MissingArtifact,
     MalformedJson(String),
     UnsupportedSchemaVersion(u32),
+    /// `protocol_version` does not equal
+    /// [`mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION`] -- an
+    /// artifact produced under a different (older, newer, or fabricated)
+    /// gauntlet protocol can never satisfy the current protocol's evidence
+    /// requirement. PROMOTION-STRESS-AUTHORITY-REPAIR-01 wave / P9
+    /// completion repair.
+    UnsupportedProtocolVersion(String),
     ZeroScenarios,
     RunIdMismatch { manifest: Uuid, artifact: Uuid },
     StrategyNameMismatch { manifest: String, artifact: String },
@@ -148,6 +175,10 @@ impl std::fmt::Display for RobustnessGauntletArtifactError {
             Self::UnsupportedSchemaVersion(v) => {
                 write!(f, "robustness_gauntlet.json schema_version {v} unsupported")
             }
+            Self::UnsupportedProtocolVersion(v) => write!(
+                f,
+                "robustness_gauntlet.json protocol_version {v:?} is not the required P9 protocol"
+            ),
             Self::ZeroScenarios => write!(f, "robustness_gauntlet.json recorded zero scenarios"),
             Self::RunIdMismatch { manifest, artifact } => write!(
                 f,
@@ -282,6 +313,11 @@ pub fn load_canonical_robustness_gauntlet(
     }
     if artifact.scenarios.is_empty() {
         return Err(RobustnessGauntletArtifactError::ZeroScenarios);
+    }
+    if artifact.protocol_version != mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION {
+        return Err(RobustnessGauntletArtifactError::UnsupportedProtocolVersion(
+            artifact.protocol_version.clone(),
+        ));
     }
     if artifact.run_id != manifest.run_id {
         return Err(RobustnessGauntletArtifactError::RunIdMismatch {

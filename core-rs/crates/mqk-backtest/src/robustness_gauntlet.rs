@@ -45,18 +45,36 @@
 //!   instruction, if this placebo scores as well as or better than the real
 //!   signal, that is reported as a genuine finding (`passed: false`) --
 //!   never tuned away.
-//! - **DSR/PBO sensitivity** — DEFERRED. Computing DSR/PBO at all requires
-//!   `mqk_research.ml.multiple_testing_judge` (Python); this Rust crate only
-//!   ever VERIFIES an already-computed judge artifact
-//!   (`mqk_promotion::verify_promotion_oos_evidence`), it has no judge
-//!   implementation to re-run under perturbation. Recorded in
-//!   [`RobustnessGauntletOutput::deferred`], not fabricated.
-//! - **conservative P7A/P7B execution/capacity stress** — DEFERRED. P7A
-//!   (`RESEARCH-EXECUTION-PRICING-PARITY-01`) and P7B
-//!   (`RESEARCH-WEIGHT-TO-SHARE-PARITY-01`) are themselves still `OPEN` in
-//!   the ledger (not implemented in this or any prior wave) -- a stress
-//!   scenario conditioned on their own machinery cannot be built before
-//!   they exist. Recorded in [`RobustnessGauntletOutput::deferred`].
+//! - **conservative execution/capacity stress** — implemented here as
+//!   [`conservative_capacity_stress_scenario`]: re-runs under the SAME
+//!   accepted `BacktestConfig::conservative_defaults()` daily-loss/max-
+//!   drawdown ratios `stress_suite::conservative_risk_limits` already uses,
+//!   combined with a halved `max_gross_exposure_mult_micros` and any
+//!   candidate-declared per-position caps (never a fabricated cap the
+//!   candidate didn't already opt into) -- simulating reduced market
+//!   capacity/liquidity on top of conservative risk limits.
+//! - **DSR/PBO sensitivity** — PROMOTION-STRESS-AUTHORITY-REPAIR-01 wave
+//!   correction: an earlier version of this module deferred this item,
+//!   reasoning P7A/P7B were themselves still `OPEN`. That was WRONG -- the
+//!   ledger records P7A (`RESEARCH-EXECUTION-PRICING-PARITY-01`) and P7B
+//!   (`RESEARCH-WEIGHT-TO-SHARE-PARITY-01`) as `ACCEPTED`/`ACCEPTED_LOCALLY,
+//!   PUSHED` and FROZEN. Implemented via cross-language orchestration
+//!   (`crate::dsr_pbo_sensitivity::dsr_pbo_sensitivity_scenario`), which
+//!   shells out to `research-py`'s `mqk_research.ml.dsr_pbo_sensitivity_cli`
+//!   -- itself only calling the existing, FROZEN
+//!   `mqk_research.ml.multiple_testing_judge.build_multiple_testing_judge`
+//!   multiple times under different `cscv_target_block_count` values (never
+//!   redefining DSR/PBO statistics in Rust). Deliberately NOT included in
+//!   [`run_robustness_gauntlet`] itself (a pure, engine-only function) --
+//!   it needs subprocess/filesystem I/O the caller must supply trusted
+//!   application/config state for (Python executable, `research-py` root,
+//!   registry path), exactly like every other Research-registry-touching
+//!   seam in this codebase. Callers assembling the complete P9 artifact
+//!   call it separately and merge the result via
+//!   [`RobustnessGauntletOutput::merge_dsr_pbo_sensitivity`]; until merged,
+//!   it remains honestly recorded in [`RobustnessGauntletOutput::deferred`]
+//!   (never silently absent) and [`RobustnessGauntletOutput::is_complete`]
+//!   reports `false`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -71,6 +89,22 @@ use crate::types::{BacktestBar, BacktestConfig, BacktestReport};
 use crate::BacktestEngine;
 
 pub const ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION: &str = "bkt_robustness_gauntlet_v1";
+
+/// Every scenario name required under [`ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION`]
+/// for a P9 artifact to be [`RobustnessGauntletOutput::is_complete`].
+/// Deliberately excludes `cost_stress_2x`/`cost_stress_3x` -- those are
+/// `PROMOTION-STRESS-SUITE-AUTHORITY-01`'s own required scenarios
+/// (`mqk_backtest::REQUIRED_SCENARIO_NAMES`), a separate durable authority
+/// this module reuses rather than duplicates (see module docs above).
+pub const REQUIRED_ROBUSTNESS_SCENARIO_NAMES: &[&str] = &[
+    "execution_delay_stress",
+    "symbol_leave_one_out",
+    "month_and_regime_concentration",
+    "parameter_neighborhood_execution",
+    "placebo_temporal_offset",
+    "conservative_capacity_stress",
+    crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME,
+];
 
 /// The conservative max-drawdown ceiling every re-run scenario is judged
 /// against, shared with `stress_suite`'s own pass criterion (computed from
@@ -208,6 +242,44 @@ impl RobustnessGauntletOutput {
         let applicable: Vec<&RobustnessScenarioOutcome> =
             self.scenarios.iter().filter(|s| s.applicable).collect();
         !applicable.is_empty() && applicable.iter().all(|s| s.passed)
+    }
+
+    /// True iff every scenario REQUIRED under [`ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION`]
+    /// ([`REQUIRED_ROBUSTNESS_SCENARIO_NAMES`]) is present in `scenarios` by
+    /// name AND `deferred` is empty.
+    ///
+    /// Distinct from [`Self::all_applicable_passed`]: completeness is about
+    /// EVIDENCE COVERAGE (every required slice was genuinely evaluated one
+    /// way or another -- pass, fail, or an honest `applicable: false` -- not
+    /// silently missing or still deferred), never about whether the
+    /// candidate's own numbers were good. A candidate can be complete and
+    /// still fail (`all_applicable_passed() == false`); it can never be
+    /// incomplete and reported as a promotion-grade pass -- callers must
+    /// check both.
+    pub fn is_complete(&self) -> bool {
+        if !self.deferred.is_empty() {
+            return false;
+        }
+        let present: std::collections::BTreeSet<&str> =
+            self.scenarios.iter().map(|s| s.name.as_str()).collect();
+        REQUIRED_ROBUSTNESS_SCENARIO_NAMES
+            .iter()
+            .all(|required| present.contains(required))
+    }
+
+    /// Merge a separately-computed
+    /// [`crate::dsr_pbo_sensitivity::dsr_pbo_sensitivity_scenario`] result
+    /// into this output: appends it to `scenarios` and removes the matching
+    /// entry from `deferred` (a no-op if none exists), so
+    /// [`Self::is_complete`] can become `true` once every required scenario
+    /// has genuinely been evaluated. Never call this with a scenario whose
+    /// `name` is not [`crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME`]
+    /// -- kept name-agnostic only to avoid a redundant assertion the type
+    /// system doesn't otherwise need.
+    pub fn merge_dsr_pbo_sensitivity(mut self, outcome: RobustnessScenarioOutcome) -> Self {
+        self.deferred.retain(|d| d.name != outcome.name);
+        self.scenarios.push(outcome);
+        self
     }
 }
 
@@ -512,6 +584,60 @@ fn placebo_temporal_offset_scenario(
     }
 }
 
+/// Build the `conservative_capacity_stress` adversarial config: the SAME
+/// accepted conservative daily-loss/max-drawdown ratios
+/// `stress_suite::conservative_risk_limits_config` uses, combined with a
+/// halved `max_gross_exposure_mult_micros` and any candidate-declared
+/// per-position caps -- reduced market capacity/liquidity on top of
+/// conservative risk limits. Never fabricates a per-position cap the
+/// candidate didn't already opt into (`None` stays `None`).
+fn conservative_capacity_config(base: &BacktestConfig) -> BacktestConfig {
+    let conservative = BacktestConfig::conservative_defaults();
+    let daily_loss_fraction = if conservative.initial_cash_micros > 0 {
+        conservative.daily_loss_limit_micros as f64 / conservative.initial_cash_micros as f64
+    } else {
+        0.0
+    };
+    let mut cfg = base.clone();
+    cfg.daily_loss_limit_micros = (base.initial_cash_micros as f64 * daily_loss_fraction) as i64;
+    cfg.max_drawdown_limit_micros =
+        (base.initial_cash_micros as f64 * conservative_max_drawdown_fraction()) as i64;
+    cfg.max_gross_exposure_mult_micros = (base.max_gross_exposure_mult_micros / 2).max(1);
+    cfg.sizing.max_target_qty = base.sizing.max_target_qty.map(|q| (q / 2).max(1));
+    cfg.sizing.max_position_notional_usd =
+        base.sizing.max_position_notional_usd.map(|n| (n / 2).max(1));
+    cfg
+}
+
+fn conservative_capacity_stress_scenario(
+    base_config: &BacktestConfig,
+    bars: &[BacktestBar],
+    make_strategy: &impl Fn() -> Box<dyn Strategy>,
+) -> RobustnessScenarioOutcome {
+    let name = "conservative_capacity_stress".to_string();
+    let initial_cash = base_config.initial_cash_micros;
+    let cfg = conservative_capacity_config(base_config);
+    match run_with_strategy(cfg, bars, make_strategy()) {
+        Ok(report) => {
+            let (passed, detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
+            RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed,
+                reason: if passed { None } else { Some(detail.clone()) },
+                detail,
+            }
+        }
+        Err(e) => RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(e.clone()),
+            detail: e,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -531,26 +657,18 @@ pub fn run_robustness_gauntlet(
         month_and_regime_concentration_scenario(baseline, bars),
         parameter_neighborhood_scenario(base_config, bars, &make_strategy),
         placebo_temporal_offset_scenario(baseline, base_config, bars, &make_strategy),
+        conservative_capacity_stress_scenario(base_config, bars, &make_strategy),
     ];
 
-    let deferred = vec![
-        DeferredScenario {
-            name: "dsr_pbo_sensitivity".to_string(),
-            reason: "requires re-running mqk_research.ml.multiple_testing_judge (Python) under \
-                     perturbation; this crate only verifies an already-computed judge artifact \
-                     (mqk_promotion::verify_promotion_oos_evidence), it has no judge \
-                     implementation to re-run"
-                .to_string(),
-        },
-        DeferredScenario {
-            name: "conservative_p7a_p7b_execution_capacity_stress".to_string(),
-            reason: "P7A (RESEARCH-EXECUTION-PRICING-PARITY-01) and P7B \
-                     (RESEARCH-WEIGHT-TO-SHARE-PARITY-01) are themselves still OPEN in the \
-                     ledger (not implemented in any prior wave) -- a stress scenario \
-                     conditioned on their own machinery cannot be built before they exist"
-                .to_string(),
-        },
-    ];
+    let deferred = vec![DeferredScenario {
+        name: crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string(),
+        reason: "requires subprocess/filesystem I/O (Python executable, research-py root, \
+                 registry path) this pure, engine-only function does not accept as input -- \
+                 call crate::dsr_pbo_sensitivity::dsr_pbo_sensitivity_scenario separately and \
+                 merge it in via RobustnessGauntletOutput::merge_dsr_pbo_sensitivity before \
+                 treating this artifact as complete (see RobustnessGauntletOutput::is_complete)"
+            .to_string(),
+    }];
 
     RobustnessGauntletOutput {
         protocol_version: ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION.to_string(),

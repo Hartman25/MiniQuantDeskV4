@@ -299,7 +299,7 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     let candidate_dir = root.join(report.run_id.to_string());
     let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&candidate_dir)
         .expect("robustness gauntlet must be resolvable as part of the evidence chain");
-    assert_eq!(gauntlet.scenarios_run(), 5);
+    assert_eq!(gauntlet.scenarios_run(), 6);
 
     // Research OOS evidence: a real SQLite registry, strategy_id matching
     // this SAME candidate's report.strategy_name -- the cross-candidate

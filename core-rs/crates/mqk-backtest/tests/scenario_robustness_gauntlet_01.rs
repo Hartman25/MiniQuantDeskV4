@@ -15,6 +15,11 @@
 //!   directional signal from its own temporally-decorrelated version.
 //! - Two identical inputs produce byte-identical gauntlet output
 //!   (determinism -- no RNG anywhere).
+//! - `conservative_capacity_stress` is a real, present scenario that a
+//!   healthy candidate clears.
+//! - `is_complete()` is `false` until a separately-computed
+//!   `dsr_pbo_sensitivity` outcome is merged in via
+//!   `merge_dsr_pbo_sensitivity`, then `true`.
 
 use mqk_backtest::{
     run_robustness_gauntlet, BacktestBar, BacktestConfig, BacktestEngine, BacktestReport,
@@ -177,12 +182,18 @@ fn rg01a_healthy_single_symbol_candidate_reports_leave_one_out_not_applicable() 
         .unwrap();
     assert!(!leave_one_out.applicable, "single-symbol run must report not-applicable");
 
-    assert_eq!(output.deferred.len(), 2, "DSR/PBO and P7A/B stress must be honestly deferred");
+    assert_eq!(
+        output.deferred.len(),
+        1,
+        "DSR/PBO sensitivity is honestly deferred by this pure, engine-only function -- it \
+         requires separate subprocess/filesystem composition, see \
+         dsr_pbo_sensitivity_scenario/merge_dsr_pbo_sensitivity"
+    );
     assert!(output.deferred.iter().any(|d| d.name == "dsr_pbo_sensitivity"));
-    assert!(output
-        .deferred
-        .iter()
-        .any(|d| d.name == "conservative_p7a_p7b_execution_capacity_stress"));
+    assert!(
+        !output.is_complete(),
+        "must not be complete until dsr_pbo_sensitivity is merged in"
+    );
 }
 
 #[test]
@@ -300,4 +311,51 @@ fn rg01e_healthy_candidate_clears_every_applicable_scenario() {
         }
     }
     assert!(output.all_applicable_passed());
+}
+
+#[test]
+fn rg01g_conservative_capacity_stress_present_and_passes_for_healthy_candidate() {
+    let bars = healthy_single_symbol_bars();
+    let (report, config) = run(
+        &bars,
+        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 }),
+    );
+
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
+    });
+
+    let capacity = output
+        .scenarios
+        .iter()
+        .find(|s| s.name == "conservative_capacity_stress")
+        .expect("conservative_capacity_stress must be a real, present scenario");
+    assert!(capacity.applicable);
+    assert!(capacity.passed, "healthy candidate must clear reduced-capacity conservative bar: {capacity:?}");
+}
+
+#[test]
+fn rg01h_is_complete_only_after_dsr_pbo_sensitivity_is_merged() {
+    use mqk_backtest::RobustnessScenarioOutcome;
+
+    let bars = healthy_single_symbol_bars();
+    let (report, config) = run(
+        &bars,
+        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 }),
+    );
+
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
+    });
+    assert!(!output.is_complete(), "must be incomplete before DSR/PBO sensitivity is merged");
+
+    let merged = output.merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
+        name: "dsr_pbo_sensitivity".to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+    });
+    assert!(merged.deferred.is_empty(), "merging must clear the deferred entry");
+    assert!(merged.is_complete(), "must be complete once every required scenario is present");
 }

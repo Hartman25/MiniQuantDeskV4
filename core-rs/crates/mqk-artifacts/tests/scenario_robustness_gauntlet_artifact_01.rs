@@ -105,7 +105,12 @@ fn rga01a_real_round_trip() {
 
     let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load");
     assert_eq!(loaded.scenarios_run(), output.scenarios.len());
-    assert_eq!(loaded.deferred_scenario_names().len(), 2);
+    assert_eq!(
+        loaded.deferred_scenario_names().len(),
+        1,
+        "only dsr_pbo_sensitivity is deferred by this pure, engine-only run -- \
+         conservative_capacity_stress is now a real scenario"
+    );
 
     cleanup(&run_dir);
 }
@@ -191,6 +196,77 @@ fn rga01f_write_is_idempotent() {
 
     let verify = mqk_audit::verify_hash_chain_str(&audit_jsonl).unwrap();
     assert!(matches!(verify, mqk_audit::VerifyResult::Valid { .. }));
+
+    cleanup(&run_dir);
+}
+
+/// Same "consistent, not tampered" construction as
+/// `scenario_stress_suite_authority_01.rs`'s `bsaa01l`: mutating
+/// `RobustnessGauntletOutput.protocol_version` BEFORE writing means the
+/// resulting JSON and its audit hash agree perfectly; only the structural
+/// protocol-identity check can reject it.
+#[test]
+fn rga01g_wrong_protocol_version_rejected() {
+    let (report, run_dir, config, bars) = run_and_persist("wrong_protocol", "RgaWrongProtocol");
+    let mut output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaWrongProtocol" })
+    });
+    output.protocol_version = "bkt_robustness_gauntlet_v0_fabricated".to_string();
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let err = load_canonical_robustness_gauntlet(&run_dir).unwrap_err();
+    assert_eq!(
+        err,
+        RobustnessGauntletArtifactError::UnsupportedProtocolVersion(
+            "bkt_robustness_gauntlet_v0_fabricated".to_string()
+        )
+    );
+    cleanup(&run_dir);
+}
+
+/// A loaded artifact from `run_robustness_gauntlet` alone (before
+/// `dsr_pbo_sensitivity` is merged in) is structurally VALID (loads
+/// successfully) but not COMPLETE -- `is_complete()` is a separate,
+/// explicit check, never conflated with "loads without error".
+#[test]
+fn rga01h_loaded_artifact_incomplete_until_dsr_pbo_merged() {
+    let (report, run_dir, config, bars) = run_and_persist("incomplete", "RgaIncomplete");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaIncomplete" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load");
+    assert!(
+        !loaded.is_complete(),
+        "must be incomplete: dsr_pbo_sensitivity was never merged before writing"
+    );
+
+    cleanup(&run_dir);
+}
+
+/// Once `dsr_pbo_sensitivity` is merged in before writing, the loaded
+/// artifact reports `is_complete() == true`.
+#[test]
+fn rga01i_loaded_artifact_complete_after_dsr_pbo_merged() {
+    use mqk_backtest::RobustnessScenarioOutcome;
+
+    let (report, run_dir, config, bars) = run_and_persist("complete", "RgaComplete");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaComplete" })
+    })
+    .merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
+        name: "dsr_pbo_sensitivity".to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load");
+    assert!(loaded.is_complete(), "must be complete once dsr_pbo_sensitivity is merged in");
+    assert!(loaded.deferred_scenario_names().is_empty());
 
     cleanup(&run_dir);
 }

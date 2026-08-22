@@ -15,6 +15,7 @@
 //! - FIFO portfolio accounting via mqk-portfolio
 
 pub mod corporate_actions; // Patch B4
+pub mod dsr_pbo_sensitivity; // P9 BKT-ROBUSTNESS-GAUNTLET-01 / PROMOTION-STRESS-AUTHORITY-REPAIR-01
 mod economics; // BACKTEST-MULTIPLIER-MARGIN-01
 mod engine;
 pub mod loader;
@@ -62,9 +63,14 @@ pub use strategy_scanner::{
     StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode, StrategyScanTruthState,
     DEFAULT_MIN_BARS,
 };
+pub use dsr_pbo_sensitivity::{
+    dsr_pbo_sensitivity_scenario, DEFAULT_BLOCK_COUNTS, DSR_MAX_SENSITIVITY_RANGE,
+    DSR_PBO_SENSITIVITY_SCENARIO_NAME, PBO_MAX_SENSITIVITY_RANGE,
+};
 pub use robustness_gauntlet::{
     run_robustness_gauntlet, DeferredScenario, RobustnessGauntletOutput,
-    RobustnessScenarioOutcome, ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION,
+    RobustnessScenarioOutcome, REQUIRED_ROBUSTNESS_SCENARIO_NAMES,
+    ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION,
 }; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub use stress_suite::{
     run_backtest_stress_suite, StressScenarioOutcome, StressSuiteRunOutput,
