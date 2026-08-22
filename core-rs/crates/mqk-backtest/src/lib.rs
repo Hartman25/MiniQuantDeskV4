@@ -63,10 +63,7 @@ pub use strategy_scanner::{
     StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode, StrategyScanTruthState,
     DEFAULT_MIN_BARS,
 };
-pub use dsr_pbo_sensitivity::{
-    dsr_pbo_sensitivity_scenario, DEFAULT_BLOCK_COUNTS, DSR_MAX_SENSITIVITY_RANGE,
-    DSR_PBO_SENSITIVITY_SCENARIO_NAME, PBO_MAX_SENSITIVITY_RANGE,
-};
+pub use dsr_pbo_sensitivity::{dsr_pbo_sensitivity_scenario, DSR_PBO_SENSITIVITY_SCENARIO_NAME};
 pub use robustness_gauntlet::{
     run_robustness_gauntlet, DeferredScenario, RobustnessGauntletOutput,
     RobustnessScenarioOutcome, REQUIRED_ROBUSTNESS_SCENARIO_NAMES,

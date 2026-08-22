@@ -1252,6 +1252,8 @@ pub fn run_finalize_robustness_sensitivity(
     research_py_root: String,
     python: String,
     block_counts: String,
+    dsr_max_sensitivity_range: f64,
+    pbo_max_sensitivity_range: f64,
 ) -> Result<()> {
     let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
     let run_dir = Path::new(&artifact_root).join(run_id.to_string());
@@ -1276,6 +1278,8 @@ pub fn run_finalize_robustness_sensitivity(
         &trial_id,
         &existing.strategy_name,
         &block_counts,
+        dsr_max_sensitivity_range,
+        pbo_max_sensitivity_range,
     );
 
     println!("scenario_name={}", sensitivity.name);

@@ -31,20 +31,19 @@ use crate::robustness_gauntlet::RobustnessScenarioOutcome;
 /// `robustness_gauntlet::REQUIRED_ROBUSTNESS_SCENARIO_NAMES`.
 pub const DSR_PBO_SENSITIVITY_SCENARIO_NAME: &str = "dsr_pbo_sensitivity";
 
-/// Default CSCV block-count grid perturbed across. Fixed and versioned as
-/// part of `robustness_gauntlet::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION` --
-/// changing it changes what evidence this scenario represents.
-pub const DEFAULT_BLOCK_COUNTS: &[u32] = &[8, 10, 12];
-
-/// Maximum allowed spread (max - min) in Deflated Sharpe Ratio across the
-/// block-count grid before this scenario reports a genuine sensitivity
-/// finding. Per the placebo scenario's own precedent: a candidate whose
-/// DSR/PBO swings with an arbitrary CSCV partitioning choice is reported as
-/// found, never tuned away by loosening this ceiling.
-pub const DSR_MAX_SENSITIVITY_RANGE: f64 = 0.25;
-/// Same discipline as [`DSR_MAX_SENSITIVITY_RANGE`], for PBO (a
-/// probability, so this ceiling is itself bounded to `[0, 1]`).
-pub const PBO_MAX_SENSITIVITY_RANGE: f64 = 0.25;
+// P9-P7A-P7B-REAL-STRESS-01: this module previously baked in a CSCV
+// block-count default (`[8, 10, 12]`) and DSR/PBO sensitivity acceptance
+// ceilings (`0.25`/`0.25`) as `pub const`s with no accepted Research/
+// promotion-policy source establishing those specific numbers -- an
+// independent review correctly flagged them as hidden, unauthorized policy.
+// `block_counts` was already a required caller-supplied parameter (see
+// below); `dsr_max_sensitivity_range`/`pbo_max_sensitivity_range` are now
+// ALSO required parameters -- there is no in-crate default to fall back to,
+// so a caller (the `mqk-cli` `FinalizeRobustnessSensitivity` command) must
+// supply an explicit value or the CLI itself fails closed (no
+// `default_value`, see `mqk-cli/src/main.rs`). This module still never
+// decides WHAT that policy value should be -- only that it must be named
+// explicitly, every time, by whoever finalizes P9 evidence for a candidate.
 
 /// Run the DSR/PBO sensitivity scenario for `trial_id` against
 /// `registry_db`, re-running the frozen judge once per entry in
@@ -69,15 +68,25 @@ pub const PBO_MAX_SENSITIVITY_RANGE: f64 = 0.25;
 /// candidate's P9 evidence -- an operator supplying the wrong `--trial-id`
 /// at finalization time is caught here, not only later at promotion time.
 ///
-/// Fails closed: a spawn failure, unparseable output, a `strategy_id`
-/// mismatch, or a genuine CLI error (bad registry, unknown trial) all
-/// become `applicable: true, passed: false` with the real reason -- never
-/// silently skipped. A structurally too-small comparison population
+/// `dsr_max_sensitivity_range`/`pbo_max_sensitivity_range` are the
+/// EXPLICIT, caller-supplied acceptance ceilings for the DSR/PBO spread
+/// across `block_counts` (P9-P7A-P7B-REAL-STRESS-01: no hidden in-crate
+/// default -- see module docs). `pbo_max_sensitivity_range` must lie in
+/// `[0, 1]` (PBO is a probability); `dsr_max_sensitivity_range` must be
+/// finite and `>= 0.0`. An out-of-range value is reported as a genuine
+/// `applicable: true, passed: false` misconfiguration -- never silently
+/// clamped or defaulted -- before any subprocess is spawned.
+///
+/// Fails closed: an invalid threshold, a spawn failure, unparseable output,
+/// a `strategy_id` mismatch, or a genuine CLI error (bad registry, unknown
+/// trial) all become `applicable: true, passed: false` with the real reason
+/// -- never silently skipped. A structurally too-small comparison population
 /// (mirroring the frozen judge's own `insufficient_candidates_for_cscv` /
 /// `insufficient_trial_population_for_correction` reason codes) is the ONE
 /// case reported as genuinely inapplicable (`applicable: false`) rather
 /// than a failure, matching `symbol_leave_one_out_scenario`'s own
 /// precedent for an honest "does not apply to this candidate."
+#[allow(clippy::too_many_arguments)]
 pub fn dsr_pbo_sensitivity_scenario(
     python_executable: &str,
     research_py_root: &Path,
@@ -85,8 +94,41 @@ pub fn dsr_pbo_sensitivity_scenario(
     trial_id: &str,
     expected_strategy_id: &str,
     block_counts: &[u32],
+    dsr_max_sensitivity_range: f64,
+    pbo_max_sensitivity_range: f64,
 ) -> RobustnessScenarioOutcome {
     let name = DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string();
+    // PROMOTION-STRESS-AUTHORITY-REPAIR-01 / P9-P7A-P7B-REAL-STRESS-01:
+    // validate the caller-supplied policy thresholds BEFORE any I/O -- an
+    // invalid ceiling is a real misconfiguration, never silently accepted.
+    if !dsr_max_sensitivity_range.is_finite() || dsr_max_sensitivity_range < 0.0 {
+        let reason = format!(
+            "invalid dsr_max_sensitivity_range policy value: {dsr_max_sensitivity_range} \
+             (must be finite and >= 0.0)"
+        );
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(reason.clone()),
+            detail: reason,
+            research_trial_id: Some(trial_id.to_string()),
+        };
+    }
+    if !pbo_max_sensitivity_range.is_finite() || !(0.0..=1.0).contains(&pbo_max_sensitivity_range) {
+        let reason = format!(
+            "invalid pbo_max_sensitivity_range policy value: {pbo_max_sensitivity_range} \
+             (must be finite and within [0, 1] -- PBO is a probability)"
+        );
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(reason.clone()),
+            detail: reason,
+            research_trial_id: Some(trial_id.to_string()),
+        };
+    }
     // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: this scenario's evidence
     // is always computed against exactly `trial_id`, regardless of outcome
     // (evaluated, not_evaluable, or error) -- recorded on every returned
@@ -197,7 +239,8 @@ pub fn dsr_pbo_sensitivity_scenario(
             let pbo_range = value.get("pbo_range").and_then(|v| v.as_f64());
             match (dsr_range, pbo_range) {
                 (Some(dr), Some(pr)) => {
-                    let passed = dr <= DSR_MAX_SENSITIVITY_RANGE && pr <= PBO_MAX_SENSITIVITY_RANGE;
+                    let passed =
+                        dr <= dsr_max_sensitivity_range && pr <= pbo_max_sensitivity_range;
                     RobustnessScenarioOutcome {
                         name,
                         applicable: true,
@@ -207,13 +250,15 @@ pub fn dsr_pbo_sensitivity_scenario(
                         } else {
                             Some(format!(
                                 "DSR/PBO too sensitive to CSCV block-count choice: dsr_range={dr:.6} \
-                                 (ceiling {DSR_MAX_SENSITIVITY_RANGE}), pbo_range={pr:.6} \
-                                 (ceiling {PBO_MAX_SENSITIVITY_RANGE}) -- reported as found, not \
+                                 (ceiling {dsr_max_sensitivity_range}), pbo_range={pr:.6} \
+                                 (ceiling {pbo_max_sensitivity_range}) -- reported as found, not \
                                  tuned away"
                             ))
                         },
                         detail: format!(
-                            "block_counts={block_counts:?}, dsr_range={dr:.6}, pbo_range={pr:.6}"
+                            "block_counts={block_counts:?}, dsr_range={dr:.6} \
+                             (ceiling {dsr_max_sensitivity_range}), pbo_range={pr:.6} \
+                             (ceiling {pbo_max_sensitivity_range})"
                         ),
                         research_trial_id,
                     }
@@ -265,5 +310,102 @@ pub fn dsr_pbo_sensitivity_scenario(
                 research_trial_id,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P9-P7A-P7B-REAL-STRESS-01: an invalid `dsr_max_sensitivity_range`
+    /// fails closed BEFORE any subprocess is spawned -- proven here without
+    /// a real python (unlike `scenario_dsr_pbo_sensitivity_01.rs`'s
+    /// `#[ignore]`d integration tests) since the invalid-python-executable
+    /// path is never reached.
+    #[test]
+    fn negative_dsr_max_sensitivity_range_fails_closed_before_any_spawn() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            &[8, 10],
+            -0.01,
+            0.25,
+        );
+        assert!(outcome.applicable);
+        assert!(!outcome.passed);
+        assert!(
+            outcome.reason.unwrap_or_default().contains("invalid dsr_max_sensitivity_range"),
+            "must name the exact invalid parameter"
+        );
+    }
+
+    #[test]
+    fn nan_dsr_max_sensitivity_range_fails_closed() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            &[8, 10],
+            f64::NAN,
+            0.25,
+        );
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap_or_default().contains("invalid dsr_max_sensitivity_range"));
+    }
+
+    #[test]
+    fn pbo_max_sensitivity_range_above_one_fails_closed() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            &[8, 10],
+            0.25,
+            1.5, // PBO is a probability -- must be within [0, 1]
+        );
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap_or_default().contains("invalid pbo_max_sensitivity_range"));
+    }
+
+    #[test]
+    fn negative_pbo_max_sensitivity_range_fails_closed() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            &[8, 10],
+            0.25,
+            -0.01,
+        );
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap_or_default().contains("invalid pbo_max_sensitivity_range"));
+    }
+
+    /// Every rejected outcome (including invalid-threshold rejections) still
+    /// carries `research_trial_id` -- PROMOTION-RESEARCH-BACKTEST-TRIAL-
+    /// BINDING-01 requires this on every returned outcome, not only the
+    /// evaluated/not_evaluable ones.
+    #[test]
+    fn invalid_threshold_outcome_still_carries_research_trial_id() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "trial_xyz",
+            "some_strategy",
+            &[8, 10],
+            -1.0,
+            0.25,
+        );
+        assert_eq!(outcome.research_trial_id.as_deref(), Some("trial_xyz"));
     }
 }

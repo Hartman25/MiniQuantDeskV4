@@ -498,8 +498,24 @@ enum BacktestCmd {
         python: String,
 
         /// Comma-separated CSCV block-count grid (each value even, >= 4).
-        #[arg(long, default_value = "8,10,12")]
+        /// P9-P7A-P7B-REAL-STRESS-01: no default -- an operator must
+        /// explicitly choose this grid every time; there is no accepted
+        /// Research/promotion policy establishing one universal grid.
+        #[arg(long)]
         block_counts: String,
+
+        /// Maximum allowed spread (max - min) in Deflated Sharpe Ratio
+        /// across `block_counts` before this scenario reports a genuine
+        /// sensitivity finding. P9-P7A-P7B-REAL-STRESS-01: required, no
+        /// default -- there is no accepted source establishing a specific
+        /// ceiling; the operator/Research-policy owner must supply one.
+        #[arg(long)]
+        dsr_max_sensitivity_range: f64,
+
+        /// Same as `dsr_max_sensitivity_range`, for Probability of Backtest
+        /// Overfitting (must be in `[0, 1]`).
+        #[arg(long)]
+        pbo_max_sensitivity_range: f64,
     },
 }
 
@@ -1440,6 +1456,8 @@ async fn run_cli() -> Result<()> {
                 research_py_root,
                 python,
                 block_counts,
+                dsr_max_sensitivity_range,
+                pbo_max_sensitivity_range,
             } => {
                 run_finalize_robustness_sensitivity(
                     artifact_root,
@@ -1449,6 +1467,8 @@ async fn run_cli() -> Result<()> {
                     research_py_root,
                     python,
                     block_counts,
+                    dsr_max_sensitivity_range,
+                    pbo_max_sensitivity_range,
                 )?;
             }
         },

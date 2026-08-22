@@ -387,6 +387,8 @@ fn write_real_backtest_evidence(
         &trial_id,
         &report.strategy_name,
         &[8, 10],
+        0.25, // test-fixture-only threshold; not asserted as accepted policy
+        0.25,
     );
     mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
         &init_result.run_dir,

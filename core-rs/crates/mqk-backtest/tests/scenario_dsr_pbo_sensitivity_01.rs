@@ -96,6 +96,8 @@ fn dpsr01a_never_attempted_trial_is_genuinely_inapplicable() {
         "rust_it_never_attempted",
         "only",
         &[8, 10],
+        0.25, // test-fixture-only threshold; not asserted as accepted policy
+        0.25,
     );
 
     assert_eq!(outcome.name, "dsr_pbo_sensitivity");
@@ -132,6 +134,8 @@ fn dpsr01b_unknown_trial_id_is_a_real_failure_not_a_silent_pass() {
         "totally_unknown_trial_id",
         "only",
         &[8, 10],
+        0.25, // test-fixture-only threshold; not asserted as accepted policy
+        0.25,
     );
 
     assert_eq!(outcome.name, "dsr_pbo_sensitivity");
@@ -163,6 +167,8 @@ fn dpsr01c_bad_python_executable_fails_closed_not_a_panic() {
         "trial_for_bad_python_test",
         "only",
         &[8, 10],
+        0.25, // test-fixture-only threshold; not asserted as accepted policy
+        0.25,
     );
 
     assert!(outcome.applicable);
@@ -196,6 +202,8 @@ fn dpsr01d_research_trial_strategy_mismatch_is_rejected() {
         "rust_it_mismatch_trial",
         "a_completely_different_backtest_strategy",
         &[8, 10],
+        0.25, // test-fixture-only threshold; not asserted as accepted policy
+        0.25,
     );
 
     assert_eq!(outcome.name, "dsr_pbo_sensitivity");
