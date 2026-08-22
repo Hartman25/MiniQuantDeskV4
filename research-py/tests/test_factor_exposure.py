@@ -25,12 +25,22 @@ from mqk_research.factors.exposure import (
 )
 
 
+_FAR_FUTURE_LABEL_END = "2099-01-01T00:00:00+00:00"
+
+
 def _periods(n):
     return [f"2024-01-{d:02d}T00:00:00+00:00" for d in range(1, n + 1)]
 
 
 def _symbols(n):
     return [f"SYM{i}" for i in range(n)]
+
+
+def _with_causal_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["information_cutoff_ts_utc"] = df["period_ts_utc"]
+    df["label_end_ts_utc"] = _FAR_FUTURE_LABEL_END
+    return df
 
 
 def _size_proxy_dataset(n_symbols=6, n_periods=8) -> pd.DataFrame:
@@ -43,7 +53,7 @@ def _size_proxy_dataset(n_symbols=6, n_periods=8) -> pd.DataFrame:
             rows.append(
                 {"symbol": sym, "period_ts_utc": period, "factor_value": size, "label_fwd_ret": size, "size": size}
             )
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _independent_factor_dataset(n_symbols=6, n_periods=8, seed=3) -> pd.DataFrame:
@@ -56,7 +66,7 @@ def _independent_factor_dataset(n_symbols=6, n_periods=8, seed=3) -> pd.DataFram
         size_perm = rng.permutation(n_symbols).astype(float)
         for sym, fv, sz in zip(_symbols(n_symbols), factor_perm, size_perm):
             rows.append({"symbol": sym, "period_ts_utc": period, "factor_value": fv, "label_fwd_ret": fv, "size": sz})
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _schema() -> ExposureSchema:

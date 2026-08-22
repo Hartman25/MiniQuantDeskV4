@@ -31,12 +31,22 @@ from mqk_research.factors.registry import begin_factor_evaluation, finalize_fact
 from mqk_research.factors.contracts import FactorEvaluationResult
 
 
+_FAR_FUTURE_LABEL_END = "2099-01-01T00:00:00+00:00"
+
+
 def _periods(n):
     return [f"2024-01-{d:02d}T00:00:00+00:00" for d in range(1, n + 1)]
 
 
 def _symbols(n):
     return [f"SYM{i}" for i in range(n)]
+
+
+def _with_causal_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["information_cutoff_ts_utc"] = df["period_ts_utc"]
+    df["label_end_ts_utc"] = _FAR_FUTURE_LABEL_END
+    return df
 
 
 def _signal_dataset(n_symbols=6, n_periods=10, seed=1) -> pd.DataFrame:
@@ -46,7 +56,7 @@ def _signal_dataset(n_symbols=6, n_periods=10, seed=1) -> pd.DataFrame:
         perm = rng.permutation(n_symbols).astype(float)
         for sym, val in zip(_symbols(n_symbols), perm):
             rows.append({"symbol": sym, "period_ts_utc": period, "factor_value": val, "label_fwd_ret": val})
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _noise_dataset(n_symbols=6, n_periods=10, seed=99) -> pd.DataFrame:
@@ -57,7 +67,7 @@ def _noise_dataset(n_symbols=6, n_periods=10, seed=99) -> pd.DataFrame:
         lv = rng.permutation(n_symbols).astype(float)
         for sym, f, l in zip(_symbols(n_symbols), fv, lv):
             rows.append({"symbol": sym, "period_ts_utc": period, "factor_value": f, "label_fwd_ret": l})
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _spec(name="f1") -> FactorSpec:
@@ -145,7 +155,9 @@ def test_empirical_pvalue_deterministic_on_repeat():
 def test_empirical_pvalue_requires_succeeded_report():
     df = _signal_dataset()
     not_evaluable = evaluate_factor_ic_ir(
-        pd.DataFrame({"symbol": ["A"], "period_ts_utc": ["2024-01-01T00:00:00+00:00"], "factor_value": [1.0], "label_fwd_ret": [1.0]}),
+        _with_causal_columns(
+            pd.DataFrame({"symbol": ["A"], "period_ts_utc": ["2024-01-01T00:00:00+00:00"], "factor_value": [1.0], "label_fwd_ret": [1.0]})
+        ),
         n_quantiles=2,
         min_cross_section=2,
     )

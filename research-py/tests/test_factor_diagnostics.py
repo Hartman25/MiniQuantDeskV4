@@ -25,8 +25,10 @@ from mqk_research.factors.contracts import (
 from mqk_research.factors.diagnostics import (
     NOT_EVALUABLE_ALL_MISSING_FACTOR_VALUES,
     NOT_EVALUABLE_DUPLICATE_OBSERVATION,
+    NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET,
     NOT_EVALUABLE_INSUFFICIENT_CROSS_SECTION,
     NOT_EVALUABLE_INSUFFICIENT_PERIODS,
+    NOT_EVALUABLE_MISSING_CAUSAL_METADATA,
     NOT_EVALUABLE_NON_FINITE_INPUT,
     NOT_EVALUABLE_TIME_ORDER_VIOLATION,
     NOT_EVALUABLE_UNUSABLE_LABEL_POPULATION,
@@ -40,6 +42,11 @@ from mqk_research.factors.diagnostics import (
 N_SYMBOLS = 6
 N_PERIODS = 8
 
+# Fixed causal columns for fixtures that don't specifically exercise
+# causality: cutoff == period_ts_utc (satisfies cutoff <= period) and a
+# far-future label_end (satisfies period < label_end) for every row.
+_FAR_FUTURE_LABEL_END = "2099-01-01T00:00:00+00:00"
+
 
 def _periods():
     return [f"2024-01-{d:02d}T00:00:00+00:00" for d in range(1, N_PERIODS + 1)]
@@ -47,6 +54,13 @@ def _periods():
 
 def _symbols():
     return [f"SYM{i}" for i in range(N_SYMBOLS)]
+
+
+def _with_causal_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["information_cutoff_ts_utc"] = df["period_ts_utc"]
+    df["label_end_ts_utc"] = _FAR_FUTURE_LABEL_END
+    return df
 
 
 def _monotonic_dataset(*, reversed_: bool = False) -> pd.DataFrame:
@@ -58,7 +72,7 @@ def _monotonic_dataset(*, reversed_: bool = False) -> pd.DataFrame:
             rows.append(
                 {"symbol": sym, "period_ts_utc": period, "factor_value": factor_value, "label_fwd_ret": label}
             )
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _null_like_dataset(seed: int = 7) -> pd.DataFrame:
@@ -69,7 +83,7 @@ def _null_like_dataset(seed: int = 7) -> pd.DataFrame:
         label_values = rng.permutation(N_SYMBOLS).astype(float)
         for sym, fv, lv in zip(_symbols(), factor_values, label_values):
             rows.append({"symbol": sym, "period_ts_utc": period, "factor_value": fv, "label_fwd_ret": lv})
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _constant_factor_dataset() -> pd.DataFrame:
@@ -79,7 +93,7 @@ def _constant_factor_dataset() -> pd.DataFrame:
             rows.append(
                 {"symbol": sym, "period_ts_utc": period, "factor_value": 1.0, "label_fwd_ret": float(i)}
             )
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 # -- perfect / reversed / null synthetic controls -------------------------
@@ -186,10 +200,112 @@ def test_insufficient_cross_section_not_evaluable():
             rows.append(
                 {"symbol": f"SYM{i}", "period_ts_utc": period, "factor_value": float(i), "label_fwd_ret": float(i)}
             )
-    df = pd.DataFrame(rows)
+    df = _with_causal_columns(pd.DataFrame(rows))
     report = evaluate_factor_ic_ir(df, n_quantiles=2, min_cross_section=3)
     assert report.status == EVAL_STATUS_NOT_EVALUABLE
     assert report.reason == NOT_EVALUABLE_INSUFFICIENT_CROSS_SECTION
+
+
+def test_missing_causal_cutoff_on_usable_row_fails_closed():
+    # RESEARCH-FACTOR-DIAGNOSTICS-CAUSALITY-AND-NUMERICS-01: a usable row
+    # (non-null factor/label) with a missing cutoff must fail closed, not be
+    # silently treated as "no causal claim made".
+    df = _monotonic_dataset()
+    df.loc[0, "information_cutoff_ts_utc"] = None
+    report = evaluate_factor_ic_ir(df, n_quantiles=3, min_cross_section=3)
+    assert report.status == EVAL_STATUS_NOT_EVALUABLE
+    assert report.reason == NOT_EVALUABLE_MISSING_CAUSAL_METADATA
+    assert report.metrics == {}
+
+
+def test_missing_causal_label_end_on_usable_row_fails_closed():
+    df = _monotonic_dataset()
+    df.loc[0, "label_end_ts_utc"] = None
+    report = evaluate_factor_ic_ir(df, n_quantiles=3, min_cross_section=3)
+    assert report.status == EVAL_STATUS_NOT_EVALUABLE
+    assert report.reason == NOT_EVALUABLE_MISSING_CAUSAL_METADATA
+
+
+def test_unparseable_causal_cutoff_fails_closed():
+    df = _monotonic_dataset()
+    df.loc[0, "information_cutoff_ts_utc"] = "not-a-timestamp"
+    report = evaluate_factor_ic_ir(df, n_quantiles=3, min_cross_section=3)
+    assert report.status == EVAL_STATUS_NOT_EVALUABLE
+    assert report.reason == NOT_EVALUABLE_MISSING_CAUSAL_METADATA
+
+
+# -- Spearman rank evaluability/IC are invariant to positive rescaling -----
+# RESEARCH-FACTOR-DIAGNOSTICS-CAUSALITY-AND-NUMERICS-01
+
+def test_rank_evaluability_and_ic_are_scale_invariant():
+    df = _monotonic_dataset()
+    scaled = df.copy()
+    scaled["factor_value"] = scaled["factor_value"] * 1e-12
+    report = evaluate_factor_ic_ir(df, n_quantiles=3, min_cross_section=3)
+    report_scaled = evaluate_factor_ic_ir(scaled, n_quantiles=3, min_cross_section=3)
+    assert report.status == report_scaled.status == EVAL_STATUS_SUCCEEDED
+    assert report.metrics["mean_ic"] == pytest.approx(report_scaled.metrics["mean_ic"])
+
+
+def test_reversed_predictor_evaluability_and_ic_are_scale_invariant():
+    df = _monotonic_dataset(reversed_=True)
+    scaled = df.copy()
+    scaled["factor_value"] = scaled["factor_value"] * 1e-12
+    report = evaluate_factor_ic_ir(df, n_quantiles=3, min_cross_section=3)
+    report_scaled = evaluate_factor_ic_ir(scaled, n_quantiles=3, min_cross_section=3)
+    assert report.status == report_scaled.status == EVAL_STATUS_SUCCEEDED
+    assert report.metrics["mean_ic"] == pytest.approx(report_scaled.metrics["mean_ic"])
+
+
+# -- an empty required tail quantile bucket under ties fails closed --------
+# RESEARCH-FACTOR-DIAGNOSTICS-CAUSALITY-AND-NUMERICS-01
+
+def _tied_quantile_dataset(n_periods: int = 4) -> pd.DataFrame:
+    """factor_value = [1, 2, 2, 2, 2] every period: non-constant (real
+    variance), but average-rank tie-breaking under n_quantiles=5 leaves the
+    top bucket with no observation."""
+    rows = []
+    factor_values = [1.0, 2.0, 2.0, 2.0, 2.0]
+    label_values = [0.0, 1.0, 2.0, 3.0, 4.0]
+    for period in _periods()[:n_periods]:
+        for i, (fv, lv) in enumerate(zip(factor_values, label_values)):
+            rows.append({"symbol": f"SYM{i}", "period_ts_utc": period, "factor_value": fv, "label_fwd_ret": lv})
+    return _with_causal_columns(pd.DataFrame(rows))
+
+
+def test_tied_factor_values_empty_tail_bucket_fails_closed():
+    df = _tied_quantile_dataset()
+    report = evaluate_factor_ic_ir(df, n_quantiles=5)
+    assert report.status == EVAL_STATUS_NOT_EVALUABLE
+    assert report.reason == NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET
+    assert report.metrics == {}
+
+
+def test_no_succeeded_report_ever_contains_nan_or_inf():
+    import json
+    import math
+
+    df = _tied_quantile_dataset()
+    report = evaluate_factor_ic_ir(df, n_quantiles=5)
+    # not_evaluable here (empty tail bucket), so metrics must be empty --
+    # this is the direct regression proof for the historical NaN leak.
+    assert report.metrics == {}
+
+    ok_report = evaluate_factor_ic_ir(_monotonic_dataset(), n_quantiles=3, min_cross_section=3)
+    assert ok_report.status == EVAL_STATUS_SUCCEEDED
+    flat = json.loads(json.dumps(ok_report.to_dict()))
+
+    def _assert_finite(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                _assert_finite(v)
+        elif isinstance(node, list):
+            for v in node:
+                _assert_finite(v)
+        elif isinstance(node, float):
+            assert not math.isnan(node) and not math.isinf(node)
+
+    _assert_finite(flat)
 
 
 def test_insufficient_periods_not_evaluable():

@@ -44,7 +44,12 @@ FACTOR_VALUE_COL = "factor_value"
 LABEL_COL = "label_fwd_ret"
 CUTOFF_COL = "information_cutoff_ts_utc"
 LABEL_END_COL = "label_end_ts_utc"
-_REQUIRED_COLUMNS = (SYMBOL_COL, PERIOD_COL, FACTOR_VALUE_COL, LABEL_COL)
+# RESEARCH-FACTOR-DIAGNOSTICS-CAUSALITY-AND-NUMERICS-01: both causal columns
+# are structurally required (like symbol/period/factor_value/label_fwd_ret)
+# -- a promotion-grade diagnostic must never be able to report `succeeded`
+# without proving information_cutoff <= period < label_end for every row it
+# actually used.
+_REQUIRED_COLUMNS = (SYMBOL_COL, PERIOD_COL, FACTOR_VALUE_COL, LABEL_COL, CUTOFF_COL, LABEL_END_COL)
 
 NOT_EVALUABLE_ZERO_VARIANCE_FACTOR = "zero_variance_factor"
 NOT_EVALUABLE_INSUFFICIENT_CROSS_SECTION = "insufficient_cross_section"
@@ -54,6 +59,15 @@ NOT_EVALUABLE_UNUSABLE_LABEL_POPULATION = "unusable_label_population"
 NOT_EVALUABLE_NON_FINITE_INPUT = "non_finite_input"
 NOT_EVALUABLE_DUPLICATE_OBSERVATION = "duplicate_symbol_period_observation"
 NOT_EVALUABLE_TIME_ORDER_VIOLATION = "time_order_violation"
+NOT_EVALUABLE_MISSING_CAUSAL_METADATA = "missing_causal_metadata"
+NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET = "empty_quantile_bucket"
+
+# Generic rank-degeneracy tolerance: RELATIVE ONLY (no absolute floor), so
+# constancy detection is invariant to multiplying all values by any positive
+# constant (see _is_effectively_constant). The exact-collinear OLS residual
+# numerical-dust case is a distinct problem handled at the neutralization
+# seam (mqk_research.factors.exposure.neutralize_factor), never here.
+_RANK_DEGENERACY_REL_TOL = 1e-9
 
 
 def _parse_ts(value: Any) -> datetime:
@@ -97,16 +111,24 @@ def _quantile_buckets(values: np.ndarray, n_quantiles: int) -> np.ndarray:
 
 
 def _is_effectively_constant(values: np.ndarray) -> bool:
-    """True if `values` has no real variance -- exact zero OR floating-point
-    dust at the scale of the data (e.g. an OLS residual for an exactly
-    collinear fit lands at ~1e-16, never exact 0.0, but its rank order is
-    pure numerical noise, not signal). An absolute-only threshold would
-    misfire on genuinely tiny-scale data, so the tolerance is relative to
-    the data's own magnitude."""
+    """True if `values` has no real variance, relative to the data's OWN
+    magnitude only -- no absolute floor. This makes constancy detection
+    (and therefore Spearman rank evaluability) invariant to multiplying
+    every value by any positive constant: scaling `values` by k scales both
+    `scale` and `std` by k, leaving std/scale unchanged. A genuinely
+    ordered factor at any scale (e.g. 1e-12) is therefore never misclassified
+    as constant.
+
+    This is NOT where exact-collinear OLS residual numerical dust is
+    handled -- that requires comparing the residual's magnitude to the
+    ORIGINAL (pre-residual) regression scale, which this function has no
+    access to. See mqk_research.factors.exposure.neutralize_factor, which
+    zeroes genuine collinear dust at the neutralization seam before it ever
+    reaches this generic evaluator."""
     if values.size == 0:
         return True
     scale = float(np.max(np.abs(values)))
-    tol = max(1e-9, scale * 1e-9)
+    tol = scale * _RANK_DEGENERACY_REL_TOL
     return float(np.std(values)) <= tol
 
 
@@ -134,14 +156,18 @@ def evaluate_factor_ic_ir(
     """Deterministic cross-sectional Spearman rank IC + quantile diagnostics.
 
     `observations` must contain columns: symbol, period_ts_utc, factor_value,
-    label_fwd_ret (the diagnostic forward LABEL, never executable P&L).
-    Optional columns: information_cutoff_ts_utc, label_end_ts_utc -- when
-    present, causality is checked (cutoff <= period_ts < label_end_ts).
+    label_fwd_ret (the diagnostic forward LABEL, never executable P&L),
+    information_cutoff_ts_utc, label_end_ts_utc. Every USABLE row (non-null
+    factor_value and label_fwd_ret) must carry a present, parseable value for
+    both causal columns proving information_cutoff_ts_utc <= period_ts_utc <
+    label_end_ts_utc -- this evaluator never reports `succeeded` without that
+    proof for every row it actually used.
 
     Missing columns are a caller/programmer error and raise ValueError.
     Everything else degenerate (zero variance, insufficient cross section,
-    duplicate rows, non-finite values, time-order violations, ...) fails
-    closed to a typed not_evaluable report -- never silently to IC=0.
+    duplicate rows, non-finite values, missing/unparseable causal metadata,
+    time-order violations, ...) fails closed to a typed not_evaluable report
+    -- never silently to IC=0.
     """
     if direction not in (DIRECTION_HIGHER_IS_BETTER, DIRECTION_LOWER_IS_BETTER):
         raise ValueError(f"unknown direction: {direction!r}")
@@ -170,22 +196,29 @@ def evaluate_factor_ic_ir(
     if bool(non_finite_mask.any()):
         return _not_evaluable(NOT_EVALUABLE_NON_FINITE_INPUT)
 
-    if CUTOFF_COL in df.columns or LABEL_END_COL in df.columns:
-        for _, row in df.iterrows():
-            period_ts = _parse_ts(row[PERIOD_COL])
-            if CUTOFF_COL in df.columns and pd.notna(row[CUTOFF_COL]):
-                if _parse_ts(row[CUTOFF_COL]) > period_ts:
-                    return _not_evaluable(NOT_EVALUABLE_TIME_ORDER_VIOLATION)
-            if LABEL_END_COL in df.columns and pd.notna(row[LABEL_END_COL]):
-                if _parse_ts(row[LABEL_END_COL]) <= period_ts:
-                    return _not_evaluable(NOT_EVALUABLE_TIME_ORDER_VIOLATION)
-
     if bool(df[FACTOR_VALUE_COL].isna().all()):
         return _not_evaluable(NOT_EVALUABLE_ALL_MISSING_FACTOR_VALUES)
     if bool(df[LABEL_COL].isna().all()):
         return _not_evaluable(NOT_EVALUABLE_UNUSABLE_LABEL_POPULATION)
 
     usable = df.dropna(subset=[FACTOR_VALUE_COL, LABEL_COL])
+
+    # Causal proof is required for every USABLE row (rows already excluded
+    # for missing factor/label values contribute nothing downstream, so a
+    # missing causal timestamp on one of THOSE rows is not a defect here).
+    for _, row in usable.iterrows():
+        cutoff_raw = row[CUTOFF_COL]
+        label_end_raw = row[LABEL_END_COL]
+        if pd.isna(cutoff_raw) or pd.isna(label_end_raw):
+            return _not_evaluable(NOT_EVALUABLE_MISSING_CAUSAL_METADATA)
+        try:
+            period_ts = _parse_ts(row[PERIOD_COL])
+            cutoff_ts = _parse_ts(cutoff_raw)
+            label_end_ts = _parse_ts(label_end_raw)
+        except ValueError:
+            return _not_evaluable(NOT_EVALUABLE_MISSING_CAUSAL_METADATA)
+        if cutoff_ts > period_ts or label_end_ts <= period_ts:
+            return _not_evaluable(NOT_EVALUABLE_TIME_ORDER_VIOLATION)
 
     top_bucket = n_quantiles - 1 if direction == DIRECTION_HIGHER_IS_BETTER else 0
     bottom_bucket = 0 if direction == DIRECTION_HIGHER_IS_BETTER else n_quantiles - 1
@@ -217,8 +250,17 @@ def evaluate_factor_ic_ir(
             continue
 
         buckets = _quantile_buckets(factor_values, n_quantiles)
-        top_ret = float(label_values[buckets == top_bucket].mean())
-        bottom_ret = float(label_values[buckets == bottom_bucket].mean())
+        top_mask = buckets == top_bucket
+        bottom_mask = buckets == bottom_bucket
+        if not bool(top_mask.any()) or not bool(bottom_mask.any()):
+            # Average-rank tie-breaking can leave a required tail bucket
+            # empty (e.g. [1,2,2,2,2] with n_quantiles=5) -- exclude the
+            # period deterministically rather than let mean() over an empty
+            # slice silently produce NaN in a `succeeded` report.
+            excluded_periods[period_key] = NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET
+            continue
+        top_ret = float(label_values[top_mask].mean())
+        bottom_ret = float(label_values[bottom_mask].mean())
 
         per_period_ic[period_key] = ic
         per_period_top[period_key] = top_ret
@@ -234,6 +276,8 @@ def evaluate_factor_ic_ir(
             return _not_evaluable(NOT_EVALUABLE_UNUSABLE_LABEL_POPULATION)
         if reasons == {NOT_EVALUABLE_INSUFFICIENT_CROSS_SECTION}:
             return _not_evaluable(NOT_EVALUABLE_INSUFFICIENT_CROSS_SECTION)
+        if reasons == {NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET}:
+            return _not_evaluable(NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET)
         return _not_evaluable(NOT_EVALUABLE_INSUFFICIENT_PERIODS)
     if period_count < min_periods:
         return _not_evaluable(NOT_EVALUABLE_INSUFFICIENT_PERIODS)

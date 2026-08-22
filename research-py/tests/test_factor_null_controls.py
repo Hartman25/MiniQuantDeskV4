@@ -35,6 +35,9 @@ from mqk_research.factors.null_controls import (
 from mqk_research.factors.registry import begin_factor_evaluation, list_factors, register_factor
 
 
+_FAR_FUTURE_LABEL_END = "2099-01-01T00:00:00+00:00"
+
+
 def _symbols(n: int):
     return [f"SYM{i}" for i in range(n)]
 
@@ -43,12 +46,19 @@ def _periods(n: int):
     return [f"2024-01-{d:02d}T00:00:00+00:00" for d in range(1, n + 1)]
 
 
+def _with_causal_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["information_cutoff_ts_utc"] = df["period_ts_utc"]
+    df["label_end_ts_utc"] = _FAR_FUTURE_LABEL_END
+    return df
+
+
 def _monotonic_dataset(n_symbols=6, n_periods=8) -> pd.DataFrame:
     rows = []
     for period in _periods(n_periods):
         for i, sym in enumerate(_symbols(n_symbols)):
             rows.append({"symbol": sym, "period_ts_utc": period, "factor_value": float(i), "label_fwd_ret": float(i)})
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _null_like_dataset(n_symbols=6, n_periods=8, seed=7) -> pd.DataFrame:
@@ -59,7 +69,7 @@ def _null_like_dataset(n_symbols=6, n_periods=8, seed=7) -> pd.DataFrame:
         lv = rng.permutation(n_symbols).astype(float)
         for sym, f, l in zip(_symbols(n_symbols), fv, lv):
             rows.append({"symbol": sym, "period_ts_utc": period, "factor_value": f, "label_fwd_ret": l})
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _temporally_shuffled_signal_dataset(n_symbols=6, n_periods=12, seed=123) -> pd.DataFrame:
@@ -75,7 +85,7 @@ def _temporally_shuffled_signal_dataset(n_symbols=6, n_periods=12, seed=123) -> 
         perm = rng.permutation(n_symbols).astype(float)
         for sym, val in zip(_symbols(n_symbols), perm):
             rows.append({"symbol": sym, "period_ts_utc": period, "factor_value": val, "label_fwd_ret": val})
-    return pd.DataFrame(rows)
+    return _with_causal_columns(pd.DataFrame(rows))
 
 
 def _spec() -> FactorSpec:
@@ -247,8 +257,10 @@ def test_compare_real_vs_null_requires_succeeded_reports():
     df = _monotonic_dataset()
     real = evaluate_factor_ic_ir(df, **_eval_kwargs())
     not_evaluable = evaluate_factor_ic_ir(
-        pd.DataFrame(
-            {"symbol": ["A"], "period_ts_utc": ["2024-01-01T00:00:00+00:00"], "factor_value": [1.0], "label_fwd_ret": [1.0]}
+        _with_causal_columns(
+            pd.DataFrame(
+                {"symbol": ["A"], "period_ts_utc": ["2024-01-01T00:00:00+00:00"], "factor_value": [1.0], "label_fwd_ret": [1.0]}
+            )
         ),
         n_quantiles=2,
         min_cross_section=2,

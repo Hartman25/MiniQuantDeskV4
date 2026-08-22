@@ -44,6 +44,18 @@ NOT_EVALUABLE_SINGULAR_EXPOSURE_MATRIX = "singular_exposure_design_matrix"
 NOT_EVALUABLE_INSUFFICIENT_PERIODS_FOR_NEUTRALIZATION = "insufficient_periods_for_neutralization"
 NOT_EVALUABLE_BASELINE_NOT_EVALUABLE = "baseline_not_evaluable"
 
+# RESEARCH-FACTOR-DIAGNOSTICS-CAUSALITY-AND-NUMERICS-01: an exactly (or
+# near-exactly) collinear per-period fit leaves an OLS residual that is pure
+# floating-point dust (~1e-16), never exact 0.0, but whose apparent "rank
+# order" is numerical noise, not signal. Comparing that dust to ITS OWN
+# scale cannot distinguish it from genuine tiny-scale signal (dust vs dust
+# looks like real relative variation). The only sound comparison is against
+# the ORIGINAL pre-residual regression scale -- this is the one place in the
+# factor pipeline allowed to do that, per CLAUDE.md/mission: the generic
+# rank evaluator (diagnostics._is_effectively_constant) stays purely
+# relative-to-its-own-data and must never carry this absolute-feeling floor.
+_RESIDUAL_DUST_REL_TOL = 1e-9
+
 
 @dataclass(frozen=True)
 class ExposureSchema:
@@ -144,6 +156,15 @@ def neutralize_factor(
         y = group[FACTOR_VALUE_COL].to_numpy(dtype=np.float64)
         coef, _, _, _ = np.linalg.lstsq(design, y, rcond=None)
         residual = y - design @ coef
+        # Exact-collinear numerical dust: the residual is dust RELATIVE TO
+        # THE ORIGINAL FACTOR SCALE for this period, not relative to its own
+        # (also-tiny) internal spread -- force it to exact zero so the
+        # generic rank evaluator deterministically treats it as constant
+        # rather than as accidental sub-machine-epsilon "signal".
+        y_scale = float(np.max(np.abs(y))) if y.size else 0.0
+        residual_scale = float(np.max(np.abs(residual))) if residual.size else 0.0
+        if y_scale > 0.0 and residual_scale <= y_scale * _RESIDUAL_DUST_REL_TOL:
+            residual = np.zeros_like(residual)
         neutralized_group = group.copy()
         neutralized_group[FACTOR_VALUE_COL] = residual
         parts.append(neutralized_group)
