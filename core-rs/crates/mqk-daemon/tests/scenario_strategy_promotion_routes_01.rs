@@ -205,7 +205,6 @@ fn set_research_evidence_env(root: &Path) {
 /// whatever root `set_research_evidence_env` was called with). Mirrors
 /// `mqk-promotion/tests/common`'s exact artifact shapes.
 struct ResearchEvidenceFixture {
-    #[allow(dead_code)]
     registry_db_path: PathBuf,
     evidence_dir: PathBuf,
     judge_path: PathBuf,
@@ -213,6 +212,22 @@ struct ResearchEvidenceFixture {
 }
 
 fn write_research_evidence_fixture(root: &Path, seed: &str) -> ResearchEvidenceFixture {
+    write_research_evidence_fixture_with_strategy(root, seed, seed)
+}
+
+/// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: like
+/// [`write_research_evidence_fixture`], but registers the trial under an
+/// explicit `strategy_id` distinct from `seed` -- lets a test register TWO
+/// genuinely distinct, individually real, registry-anchored trials under
+/// the SAME `strategy_id` (calling this twice with the same `root` but
+/// different `seed`s accumulates both trials in the one shared
+/// `research_registry.sqlite3`, since the registry path is not
+/// `seed`-dependent).
+fn write_research_evidence_fixture_with_strategy(
+    root: &Path,
+    seed: &str,
+    strategy_id: &str,
+) -> ResearchEvidenceFixture {
     use sha2::{Digest, Sha256};
 
     let trial_id = format!("trial_{seed}");
@@ -241,58 +256,71 @@ fn write_research_evidence_fixture(root: &Path, seed: &str) -> ResearchEvidenceF
     let judge_path = root.join(format!("judge_{seed}.json"));
     std::fs::write(&judge_path, &judge_json).expect("write judge artifact");
 
+    // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01 / REAL-RESEARCH-TO-
+    // PROMOTION-E2E-01: registered via the REAL `ResearchResultStore`
+    // production methods (research-py, real Python subprocess), never a
+    // hand-rolled `rusqlite` schema. A hand-rolled minimal schema (trial_id/
+    // experiment_id/hypothesis_id/strategy_id columns only) satisfies
+    // `verify_promotion_oos_evidence`'s own narrow reads, but silently
+    // diverges from the REAL registry schema `dsr_pbo_sensitivity_cli.py`
+    // (via `ResearchResultStore`) reads when P9 evidence for this SAME
+    // trial is finalized against this SAME registry file -- e.g. a missing
+    // `protocol_id` column breaks the real reader outright. Using the real
+    // store here means both P7C (this function) and P9
+    // (`write_real_backtest_evidence`) evidence for one trial are always
+    // read from the one real, production-shaped registry.
     let registry_db_path = root.join("research_registry.sqlite3");
-    let conn = rusqlite::Connection::open(&registry_db_path).expect("open registry db");
-    conn.execute_batch(
-        "
-        create table if not exists research_trials (
-            trial_id text primary key,
-            experiment_id text not null,
-            hypothesis_id text not null,
-            strategy_id text not null
-        );
-        create table if not exists research_attempts (
-            attempt_id text primary key,
-            trial_id text not null,
-            status text not null,
-            result_id text
-        );
-        create table if not exists research_judge_artifacts (
-            judge_artifact_sha256 text primary key,
-            judge_id text not null,
-            experiment_id text not null,
-            hypothesis_id text,
-            canonical_judge_json text
-        );
-        ",
-    )
-    .expect("create registry schema");
-    conn.execute(
-        "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id) \
-         values (?1, ?2, ?3, ?4)",
-        rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}"), seed],
-    )
-    .expect("insert research_trials row");
-    conn.execute(
-        "insert into research_attempts (attempt_id, trial_id, status, result_id) \
-         values (?1, ?2, 'succeeded', ?3)",
-        rusqlite::params![format!("{trial_id}:att0001"), trial_id, economic_eval_id],
-    )
-    .expect("insert research_attempts row");
-    conn.execute(
-        "insert into research_judge_artifacts \
-         (judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json) \
-         values (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            judge_sha,
-            format!("judge_{seed}"),
-            experiment_id,
-            Option::<String>::None,
-            judge_json,
-        ],
-    )
-    .expect("insert research_judge_artifacts row");
-    drop(conn);
+    let hypothesis_id = format!("hyp_{seed}");
+    let judge_id = format!("judge_{seed}");
+    let script = format!(
+        "from pathlib import Path\n\
+         from mqk_research.exp_distributed.storage import ResearchResultStore\n\
+         from mqk_research.ml.economic_walkforward import PROTOCOL_ID as ECON_PROTOCOL_ID\n\
+         store = ResearchResultStore(Path({registry_db}))\n\
+         store.register_hypothesis(hypothesis_id={hypothesis_id}, experiment_id={experiment_id})\n\
+         store.register_trial(\n\
+         \ttrial_id={trial_id}, experiment_id={experiment_id}, hypothesis_id={hypothesis_id},\n\
+         \tstrategy_id={strategy_id}, protocol_id=ECON_PROTOCOL_ID, identity={{'minimal': True}},\n\
+         )\n\
+         attempt_id, _ = store.begin_attempt(trial_id={trial_id}, origin='daemon_route_it_fixture')\n\
+         store.finalize_attempt(\n\
+         \tattempt_id, status='succeeded', result_id={economic_eval_id},\n\
+         \tartifact_paths={{'economic_walk_forward': {economic_path}}},\n\
+         \tresult_summary={{'folds_used': 3}},\n\
+         )\n\
+         judge_json = Path({judge_path}).read_text(encoding='utf-8')\n\
+         store.register_judge_artifact(\n\
+         \tjudge_id={judge_id}, experiment_id={experiment_id}, hypothesis_id=None,\n\
+         \tartifact_path={judge_path}, judge_artifact_sha256={judge_sha},\n\
+         \tcanonical_judge_json=judge_json, schema_version='multiple_testing_judge_v1',\n\
+         \tprotocol_id='research_multiple_testing_judge_v1',\n\
+         )\n",
+        registry_db = py_str_literal(&registry_db_path.display().to_string()),
+        hypothesis_id = py_str_literal(&hypothesis_id),
+        experiment_id = py_str_literal(&experiment_id),
+        trial_id = py_str_literal(&trial_id),
+        strategy_id = py_str_literal(strategy_id),
+        economic_eval_id = py_str_literal(&economic_eval_id),
+        economic_path = py_str_literal(
+            &evidence_dir.join("economic_walk_forward.json").display().to_string()
+        ),
+        judge_path = py_str_literal(&judge_path.display().to_string()),
+        judge_id = py_str_literal(&judge_id),
+        judge_sha = py_str_literal(&judge_sha),
+    );
+    let src_dir = research_py_root().join("src");
+    let output = std::process::Command::new("python")
+        .env("PYTHONPATH", &src_dir)
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("failed to spawn python real-registry fixture-builder");
+    assert!(
+        output.status.success(),
+        "real-registry fixture-builder script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     ResearchEvidenceFixture {
         registry_db_path,
@@ -377,41 +405,11 @@ fn research_py_root() -> PathBuf {
         .join("research-py")
 }
 
+/// Safe Python string-literal encoding for embedding a Rust `&str` into an
+/// inline `python -c` script -- JSON string escaping is a valid subset of
+/// Python string-literal escaping for the plain paths/identifiers used here.
 fn py_str_literal(s: &str) -> String {
     serde_json::to_string(s).expect("string always serializes")
-}
-
-/// Real Python subprocess, `ResearchResultStore` directly -- mirrors
-/// `mqk-backtest`'s own `scenario_dsr_pbo_sensitivity_01.rs` fixture
-/// builder. Registers ONE trial with zero attempts under `strategy_id`.
-fn register_dsr_trial(registry_db: &Path, trial_id: &str, strategy_id: &str) {
-    let script = format!(
-        "from pathlib import Path\n\
-         from mqk_research.exp_distributed.storage import ResearchResultStore\n\
-         from mqk_research.ml.economic_walkforward import PROTOCOL_ID\n\
-         store = ResearchResultStore(Path({db}))\n\
-         store.register_hypothesis(hypothesis_id='hyp', experiment_id='exp.daemon_route_it')\n\
-         store.register_trial(\n\
-         \ttrial_id={trial_id}, experiment_id='exp.daemon_route_it', hypothesis_id='hyp',\n\
-         \tstrategy_id={strategy_id}, protocol_id=PROTOCOL_ID, identity={{'minimal': True}},\n\
-         )\n",
-        db = py_str_literal(&registry_db.display().to_string()),
-        trial_id = py_str_literal(trial_id),
-        strategy_id = py_str_literal(strategy_id),
-    );
-    let src_dir = research_py_root().join("src");
-    let output = std::process::Command::new("python")
-        .env("PYTHONPATH", &src_dir)
-        .arg("-c")
-        .arg(&script)
-        .output()
-        .expect("failed to spawn python fixture-builder");
-    assert!(
-        output.status.success(),
-        "fixture-builder script failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 /// Options for [`write_real_backtest_evidence`] -- every knob a caller
@@ -449,10 +447,21 @@ impl Default for RealEvidenceOptions {
 /// `mqk-cli`'s `backtest csv` + `finalize-robustness-sensitivity` call.
 /// Returns the candidate's `run_id`. `artifact_root` must be the SAME root
 /// `set_backtest_evidence_env` configured.
+///
+/// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: `research_trial_id`/
+/// `research_registry_db` MUST be the EXACT SAME trial_id and registry a
+/// paired [`write_research_evidence_fixture`] call already registered --
+/// this function no longer registers a separate, differently-named trial
+/// in a separate registry file for P9 (the confirmed defect: P7C and P9
+/// evidence silently came from two different trials). The trial is
+/// expected to already exist in `research_registry_db` (with its
+/// `strategy_id` matching `report.strategy_name`, always `"swing_momentum"`
+/// for the real plugin this function always runs) by the time this is
+/// called.
 fn write_real_backtest_evidence(
     artifact_root: &Path,
-    dsr_registry_db: &Path,
-    strategy_id: &str,
+    research_trial_id: &str,
+    research_registry_db: &Path,
     symbol: &str,
     opts: RealEvidenceOptions,
 ) -> Uuid {
@@ -477,9 +486,7 @@ fn write_real_backtest_evidence(
     // `evaluate_backtest_evidence_gate`'s cross-candidate check below
     // compares the daemon route's `strategy_id` against, and what
     // `dsr_pbo_sensitivity_scenario`'s own cross-candidate check compares
-    // the Research trial's `strategy_id` against. `strategy_id` (the
-    // parameter here) is used ONLY to namespace this test's DSR trial_id so
-    // parallel test fixtures never collide in the shared SQLite registry.
+    // the Research trial's `strategy_id` against.
 
     let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
     engine
@@ -525,13 +532,11 @@ fn write_real_backtest_evidence(
             .expect("write_canonical_robustness_gauntlet");
 
         if opts.finalize_sensitivity {
-            let trial_id = format!("trial_for_{strategy_id}");
-            register_dsr_trial(dsr_registry_db, &trial_id, &report.strategy_name);
             let sensitivity = mqk_backtest::dsr_pbo_sensitivity_scenario(
                 "python",
                 &research_py_root(),
-                dsr_registry_db,
-                &trial_id,
+                research_registry_db,
+                research_trial_id,
                 &report.strategy_name,
                 &[8, 10],
                 0.25, // test-fixture-only threshold; not asserted as accepted policy
@@ -793,8 +798,8 @@ async fn valid_paper_candidate_creates_first_transition() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -824,6 +829,75 @@ async fn valid_paper_candidate_creates_first_transition() {
     assert_eq!(json["previous_state"], serde_json::Value::Null);
     assert_eq!(json["target_state"], "shadow_approved");
     assert!(json["transition_id"].is_string());
+}
+
+/// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01 (REQUIRED NEGATIVE CONTROL,
+/// REAL-RESEARCH-TO-PROMOTION-E2E-01 item 1): Trial A and Trial B are both
+/// real, independently registered Research trials under the SAME
+/// `strategy_id`, in the SAME real registry (via `ResearchResultStore`,
+/// never hand-inserted rows). Trial A supplies the P7C/OOS evidence; Trial
+/// B supplies the P9 `dsr_pbo_sensitivity` evidence. Through the REAL HTTP
+/// route against a real disposable Postgres, this must be rejected -- proof
+/// that the confirmed defect (P7C and P9 evidence silently coming from two
+/// different trials) is closed end to end, not merely at the unit-test
+/// level (see `mqk-promotion`'s own
+/// `scenario_research_backtest_promotion_v1_acceptance_01.rs::p10d`).
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn same_strategy_different_research_trial_for_p9_vs_p7c_is_rejected() {
+    let root = temp_dir("trial_binding_mismatch");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+
+    // Trial A: real, registered, supplies P7C/OOS evidence.
+    let research_a =
+        write_research_evidence_fixture_with_strategy(&root, "trialbind_a", &strategy_id);
+    // Trial B: ALSO real, ALSO independently registered under the SAME
+    // strategy_id (same shared registry file) -- supplies P9 sensitivity.
+    let research_b =
+        write_research_evidence_fixture_with_strategy(&root, "trialbind_b", &strategy_id);
+    assert_ne!(research_a.trial_id, research_b.trial_id);
+
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &research_b.trial_id,
+        &research_b.registry_db_path,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let router = routes::build_router(st);
+
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research_a.trial_id, // P7C evidence: Trial A
+        research_a.evidence_dir.to_str().unwrap(),
+        research_a.judge_path.to_str().unwrap(),
+        &run_id.to_string(), // P9 evidence (bound above): Trial B
+    );
+    let (status, resp_body) = call(router, post_json_req(TRANSITION_ROUTE, None, body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json = parse_json(resp_body);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "evidence_invalid");
+    assert!(
+        json["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str().unwrap().contains("Research trial binding mismatch")),
+        "got: {json}"
+    );
 }
 
 #[tokio::test]
@@ -1146,8 +1220,8 @@ async fn valid_transition_visible_on_read_routes() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1215,8 +1289,8 @@ async fn history_remains_visible_after_later_transition() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1312,8 +1386,8 @@ async fn duplicate_transition_request_is_idempotent() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1373,8 +1447,8 @@ async fn tradable_live_always_false() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1483,8 +1557,8 @@ async fn cross_candidate_backtest_evidence_strategy_mismatch_is_rejected() {
     // name ("swing_momentum"), never under `strategy_id` above.
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1579,8 +1653,8 @@ async fn missing_backtest_evidence_artifact_root_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1630,8 +1704,8 @@ async fn missing_stress_evidence_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1665,8 +1739,8 @@ async fn missing_p9_robustness_evidence_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1705,8 +1779,8 @@ async fn incomplete_p9_missing_dsr_pbo_sensitivity_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1746,8 +1820,8 @@ async fn failed_p9_scenario_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: bars_that_fail_concentration(&symbol),
@@ -1784,8 +1858,8 @@ async fn artifact_tamper_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1827,8 +1901,8 @@ async fn dsr_below_threshold_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1878,8 +1952,8 @@ async fn pbo_above_threshold_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1931,8 +2005,8 @@ async fn duplicate_retry_with_mismatched_backtest_run_id_is_rejected() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),

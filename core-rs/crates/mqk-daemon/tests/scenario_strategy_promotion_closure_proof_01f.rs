@@ -145,6 +145,7 @@ fn write_paper_candidate_fixture(
 /// in `scenario_strategy_promotion_routes_01.rs`).
 struct ResearchEvidenceFixture {
     trial_id: String,
+    registry_db_path: PathBuf,
     evidence_dir: PathBuf,
     judge_path: PathBuf,
 }
@@ -178,61 +179,69 @@ fn write_research_evidence_fixture(root: &std::path::Path, seed: &str) -> Resear
     let judge_path = root.join(format!("judge_{seed}.json"));
     std::fs::write(&judge_path, &judge_json).expect("write judge artifact");
 
+    // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01 / REAL-RESEARCH-TO-
+    // PROMOTION-E2E-01: registered via the REAL `ResearchResultStore`
+    // production methods (research-py, real Python subprocess), never a
+    // hand-rolled `rusqlite` schema -- see the identical fix and rationale
+    // in `scenario_strategy_promotion_routes_01.rs`'s own copy of this
+    // function (a hand-rolled minimal schema silently diverges from the
+    // real registry schema `dsr_pbo_sensitivity_cli.py` reads for P9).
     let registry_db_path = root.join("research_registry.sqlite3");
-    let conn = rusqlite::Connection::open(&registry_db_path).expect("open registry db");
-    conn.execute_batch(
-        "
-        create table if not exists research_trials (
-            trial_id text primary key,
-            experiment_id text not null,
-            hypothesis_id text not null,
-            strategy_id text not null
-        );
-        create table if not exists research_attempts (
-            attempt_id text primary key,
-            trial_id text not null,
-            status text not null,
-            result_id text
-        );
-        create table if not exists research_judge_artifacts (
-            judge_artifact_sha256 text primary key,
-            judge_id text not null,
-            experiment_id text not null,
-            hypothesis_id text,
-            canonical_judge_json text
-        );
-        ",
-    )
-    .expect("create registry schema");
-    conn.execute(
-        "insert into research_trials (trial_id, experiment_id, hypothesis_id, strategy_id) \
-         values (?1, ?2, ?3, ?4)",
-        rusqlite::params![trial_id, experiment_id, format!("hyp_{seed}"), seed],
-    )
-    .expect("insert research_trials row");
-    conn.execute(
-        "insert into research_attempts (attempt_id, trial_id, status, result_id) \
-         values (?1, ?2, 'succeeded', ?3)",
-        rusqlite::params![format!("{trial_id}:att0001"), trial_id, economic_eval_id],
-    )
-    .expect("insert research_attempts row");
-    conn.execute(
-        "insert into research_judge_artifacts \
-         (judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json) \
-         values (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            judge_sha,
-            format!("judge_{seed}"),
-            experiment_id,
-            Option::<String>::None,
-            judge_json,
-        ],
-    )
-    .expect("insert research_judge_artifacts row");
-    drop(conn);
+    let hypothesis_id = format!("hyp_{seed}");
+    let judge_id = format!("judge_{seed}");
+    let script = format!(
+        "from pathlib import Path\n\
+         from mqk_research.exp_distributed.storage import ResearchResultStore\n\
+         from mqk_research.ml.economic_walkforward import PROTOCOL_ID as ECON_PROTOCOL_ID\n\
+         store = ResearchResultStore(Path({registry_db}))\n\
+         store.register_hypothesis(hypothesis_id={hypothesis_id}, experiment_id={experiment_id})\n\
+         store.register_trial(\n\
+         \ttrial_id={trial_id}, experiment_id={experiment_id}, hypothesis_id={hypothesis_id},\n\
+         \tstrategy_id={strategy_id}, protocol_id=ECON_PROTOCOL_ID, identity={{'minimal': True}},\n\
+         )\n\
+         attempt_id, _ = store.begin_attempt(trial_id={trial_id}, origin='closure_proof_it_fixture')\n\
+         store.finalize_attempt(\n\
+         \tattempt_id, status='succeeded', result_id={economic_eval_id},\n\
+         \tartifact_paths={{'economic_walk_forward': {economic_path}}},\n\
+         \tresult_summary={{'folds_used': 3}},\n\
+         )\n\
+         judge_json = Path({judge_path}).read_text(encoding='utf-8')\n\
+         store.register_judge_artifact(\n\
+         \tjudge_id={judge_id}, experiment_id={experiment_id}, hypothesis_id=None,\n\
+         \tartifact_path={judge_path}, judge_artifact_sha256={judge_sha},\n\
+         \tcanonical_judge_json=judge_json, schema_version='multiple_testing_judge_v1',\n\
+         \tprotocol_id='research_multiple_testing_judge_v1',\n\
+         )\n",
+        registry_db = py_str_literal(&registry_db_path.display().to_string()),
+        hypothesis_id = py_str_literal(&hypothesis_id),
+        experiment_id = py_str_literal(&experiment_id),
+        trial_id = py_str_literal(&trial_id),
+        strategy_id = py_str_literal(seed),
+        economic_eval_id = py_str_literal(&economic_eval_id),
+        economic_path = py_str_literal(
+            &evidence_dir.join("economic_walk_forward.json").display().to_string()
+        ),
+        judge_path = py_str_literal(&judge_path.display().to_string()),
+        judge_id = py_str_literal(&judge_id),
+        judge_sha = py_str_literal(&judge_sha),
+    );
+    let src_dir = research_py_root().join("src");
+    let output = std::process::Command::new("python")
+        .env("PYTHONPATH", &src_dir)
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("failed to spawn python real-registry fixture-builder");
+    assert!(
+        output.status.success(),
+        "real-registry fixture-builder script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     ResearchEvidenceFixture {
         trial_id,
+        registry_db_path,
         evidence_dir,
         judge_path,
     }
@@ -279,39 +288,6 @@ fn py_str_literal(s: &str) -> String {
     serde_json::to_string(s).expect("string always serializes")
 }
 
-/// Real Python subprocess, `ResearchResultStore` directly -- mirrors
-/// `mqk-backtest`'s own `scenario_dsr_pbo_sensitivity_01.rs` fixture
-/// builder. Registers ONE trial with zero attempts under `strategy_id`.
-fn register_dsr_trial(registry_db: &std::path::Path, trial_id: &str, strategy_id: &str) {
-    let script = format!(
-        "from pathlib import Path\n\
-         from mqk_research.exp_distributed.storage import ResearchResultStore\n\
-         from mqk_research.ml.economic_walkforward import PROTOCOL_ID\n\
-         store = ResearchResultStore(Path({db}))\n\
-         store.register_hypothesis(hypothesis_id='hyp', experiment_id='exp.closure_proof_it')\n\
-         store.register_trial(\n\
-         \ttrial_id={trial_id}, experiment_id='exp.closure_proof_it', hypothesis_id='hyp',\n\
-         \tstrategy_id={strategy_id}, protocol_id=PROTOCOL_ID, identity={{'minimal': True}},\n\
-         )\n",
-        db = py_str_literal(&registry_db.display().to_string()),
-        trial_id = py_str_literal(trial_id),
-        strategy_id = py_str_literal(strategy_id),
-    );
-    let src_dir = research_py_root().join("src");
-    let output = std::process::Command::new("python")
-        .env("PYTHONPATH", &src_dir)
-        .arg("-c")
-        .arg(&script)
-        .output()
-        .expect("failed to spawn python fixture-builder");
-    assert!(
-        output.status.success(),
-        "fixture-builder script failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 /// Run a REAL `BacktestEngine`, write the REAL, genuinely complete evidence
 /// set (manifest, audit, `backtest_report.json`, `stress_suite.json`,
 /// `robustness_gauntlet.json` -- finalized with a REAL DSR/PBO sensitivity
@@ -323,8 +299,8 @@ fn register_dsr_trial(registry_db: &std::path::Path, trial_id: &str, strategy_id
 /// promotion identity itself (see the test below).
 fn write_real_backtest_evidence(
     artifact_root: &std::path::Path,
-    dsr_registry_db: &std::path::Path,
-    dsr_trial_seed: &str,
+    research_trial_id: &str,
+    research_registry_db: &std::path::Path,
     symbol: &str,
 ) -> Uuid {
     use mqk_strategy::engines::register_builtin_strategies_with_sizing;
@@ -378,13 +354,11 @@ fn write_real_backtest_evidence(
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet");
 
-    let trial_id = format!("trial_for_{dsr_trial_seed}");
-    register_dsr_trial(dsr_registry_db, &trial_id, &report.strategy_name);
     let sensitivity = mqk_backtest::dsr_pbo_sensitivity_scenario(
         "python",
         &research_py_root(),
-        dsr_registry_db,
-        &trial_id,
+        research_registry_db,
+        research_trial_id,
         &report.strategy_name,
         &[8, 10],
         0.25, // test-fixture-only threshold; not asserted as accepted policy
@@ -542,8 +516,8 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     let research = write_research_evidence_fixture(&root, &strategy_id);
     let backtest_run_id = write_real_backtest_evidence(
         &root,
-        &root.join("dsr_registry.sqlite3"),
-        &strategy_id,
+        &research.trial_id,
+        &research.registry_db_path,
         &symbol,
     );
 
