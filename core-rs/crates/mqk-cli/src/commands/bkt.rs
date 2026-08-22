@@ -1392,6 +1392,74 @@ pub fn run_finalize_p7a_p7b_replay_stress(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// FINAL-P9-ROBUSTNESS-SEMANTICS-01: genuine shuffled placebo finalization
+// ---------------------------------------------------------------------------
+
+/// Merge the real genuine shuffled placebo result for a Research trial into
+/// an existing candidate's `robustness_gauntlet.json`, produced earlier by
+/// the SAME candidate's real backtest execution (`mqk backtest csv`/`db`).
+/// Mirrors [`run_finalize_p7a_p7b_replay_stress`] exactly -- a genuinely
+/// separate production phase, same cross-candidate authority check, same
+/// merge seam (generalized to accept any of the three deferred scenarios).
+pub fn run_finalize_genuine_shuffled_placebo(
+    artifact_root: String,
+    run_id: String,
+    registry_db: String,
+    trial_id: String,
+    economic_eval_id: String,
+    research_py_root: String,
+    python: String,
+    placebo_out_dir: String,
+) -> Result<()> {
+    let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
+    let run_dir = Path::new(&artifact_root).join(run_id.to_string());
+
+    let existing = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
+        format!(
+            "existing robustness_gauntlet.json must already be real and structurally valid \
+             at {} -- run the real backtest (mqk backtest csv/db with --out-dir) first",
+            run_dir.display()
+        )
+    })?;
+
+    let placebo = mqk_backtest::genuine_shuffled_placebo_scenario(
+        &python,
+        Path::new(&research_py_root),
+        Path::new(&registry_db),
+        &trial_id,
+        &economic_eval_id,
+        &existing.strategy_name,
+        Path::new(&placebo_out_dir),
+    );
+
+    println!("scenario_name={}", placebo.name);
+    println!("applicable={}", placebo.applicable);
+    println!("passed={}", placebo.passed);
+    if let Some(reason) = &placebo.reason {
+        println!("reason={reason}");
+    }
+
+    let path =
+        mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &placebo)
+            .with_context(|| {
+                format!(
+                    "finalize_canonical_robustness_gauntlet_with_sensitivity failed for {}",
+                    run_dir.display()
+                )
+            })?;
+
+    let finalized = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir)
+        .context("re-loading the finalized artifact failed")?;
+
+    println!("finalized_artifact={}", path.display());
+    println!("scenarios_run={}", finalized.scenarios_run());
+    println!("is_complete={}", finalized.is_complete());
+    println!("all_applicable_passed={}", finalized.all_applicable_passed());
+
+    Ok(())
+}
+
 fn parse_u32_list(s: &str) -> Result<Vec<u32>> {
     s.split(',')
         .map(|v| v.trim())

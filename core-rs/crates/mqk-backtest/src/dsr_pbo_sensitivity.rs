@@ -149,6 +149,31 @@ pub fn dsr_pbo_sensitivity_scenario(
             evidence: None,
         };
     }
+    // FINAL-P9-ROBUSTNESS-SEMANTICS-01 Section A: a sensitivity grid with
+    // fewer than 2 DISTINCT block counts (`[8]`, or `[8, 8]`) cannot measure
+    // sensitivity at all -- every re-run would trivially share the same (or
+    // an unvaried) result, producing dsr_range/pbo_range == 0 by
+    // construction rather than genuine evidence of insensitivity. This is a
+    // structural requirement failure, not a not_evaluable/inapplicable
+    // candidate property -- it fails BEFORE any subprocess is spawned.
+    let distinct_block_counts: std::collections::BTreeSet<u32> = block_counts.iter().copied().collect();
+    if distinct_block_counts.len() < 2 {
+        let reason = format!(
+            "block_counts must contain at least 2 DISTINCT values to measure sensitivity \
+             (got {block_counts:?}, {} distinct) -- a single-value or duplicate-only grid \
+             trivially reports zero sensitivity by construction, never genuine evidence",
+            distinct_block_counts.len()
+        );
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(reason.clone()),
+            detail: reason,
+            research_trial_id,
+            evidence: None,
+        };
+    }
     let block_counts_arg = block_counts
         .iter()
         .map(|b| b.to_string())
@@ -326,6 +351,64 @@ pub fn dsr_pbo_sensitivity_scenario(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FINAL-P9-ROBUSTNESS-SEMANTICS-01: a single-value block_counts grid
+    /// fails closed before any subprocess is spawned.
+    #[test]
+    fn single_value_block_counts_fails_closed_before_any_spawn() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            &[8],
+            0.25,
+            0.25,
+        );
+        assert!(outcome.applicable);
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap_or_default().contains("2 DISTINCT values"));
+    }
+
+    /// A duplicate-only grid (`[8, 8]`) is exactly as unevaluable as a
+    /// single value -- 2 raw entries but 1 distinct value.
+    #[test]
+    fn duplicate_only_block_counts_fails_closed() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            &[8, 8],
+            0.25,
+            0.25,
+        );
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap_or_default().contains("2 DISTINCT values"));
+    }
+
+    /// A structurally valid, genuinely distinct 2-value grid must NOT be
+    /// rejected by this check (it fails later, at spawn, for an unrelated
+    /// reason -- proving this check doesn't over-reject).
+    #[test]
+    fn two_distinct_block_counts_passes_the_distinctness_check() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            &[8, 10],
+            0.25,
+            0.25,
+        );
+        assert!(
+            !outcome.reason.unwrap_or_default().contains("DISTINCT"),
+            "a genuinely distinct grid must not be rejected for distinctness"
+        );
+    }
 
     /// P9-P7A-P7B-REAL-STRESS-01: an invalid `dsr_max_sensitivity_range`
     /// fails closed BEFORE any subprocess is spawned -- proven here without

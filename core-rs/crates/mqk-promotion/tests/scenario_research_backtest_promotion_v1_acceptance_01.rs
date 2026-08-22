@@ -228,6 +228,21 @@ fn run_and_persist_full(
         evidence: Some(serde_json::json!({
             "baseline_economic_eval_id": research_economic_eval_id,
         })),
+    })
+    // FINAL-P9-ROBUSTNESS-SEMANTICS-01: the genuine shuffled placebo -- real
+    // cross-language wiring proven separately (mqk-backtest's own
+    // genuine_shuffled_placebo.rs + research-py's
+    // test_genuine_shuffled_placebo.py); this P10 chain test only needs a
+    // genuinely COMPLETE P9 artifact, same rationale as the two scenarios
+    // above.
+    .merge_dsr_pbo_sensitivity(mqk_backtest::RobustnessScenarioOutcome {
+        name: mqk_backtest::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME.to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some(research_trial_id.to_string()),
+        evidence: None,
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet must succeed");
@@ -374,8 +389,9 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
         .expect("robustness gauntlet must be resolvable as part of the evidence chain");
     assert_eq!(
         gauntlet.scenarios_run(),
-        8,
-        "6 pure scenarios + merged dsr_pbo_sensitivity + merged p7a_p7b_economic_replay_stress"
+        9,
+        "6 pure scenarios + merged dsr_pbo_sensitivity + merged p7a_p7b_economic_replay_stress + \
+         merged genuine_shuffled_placebo"
     );
     assert!(bundle.robustness_evidence.is_complete);
     assert!(bundle.robustness_evidence.all_applicable_passed);

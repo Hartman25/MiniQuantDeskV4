@@ -110,9 +110,10 @@ fn rga01a_real_round_trip() {
     assert_eq!(loaded.scenarios_run(), output.scenarios.len());
     assert_eq!(
         loaded.deferred_scenario_names().len(),
-        2,
-        "dsr_pbo_sensitivity and p7a_p7b_economic_replay_stress are deferred by this pure, \
-         engine-only run -- conservative_capacity_stress is now a real scenario"
+        3,
+        "dsr_pbo_sensitivity, p7a_p7b_economic_replay_stress, and genuine_shuffled_placebo are \
+         deferred by this pure, engine-only run -- conservative_capacity_stress is now a real \
+         scenario"
     );
 
     cleanup(&run_dir);
@@ -227,6 +228,32 @@ fn rga01g_wrong_protocol_version_rejected() {
     cleanup(&run_dir);
 }
 
+/// FINAL-P9-ROBUSTNESS-SEMANTICS-01: the literal OLD `bkt_robustness_
+/// gauntlet_v1` protocol string (the pre-this-mission contract) must be
+/// rejected exactly like any other non-current protocol -- the P9 contract
+/// materially changed (genuine placebo, month/year/regime concentration,
+/// edge-collapse, distinct DSR grid), so a v1 artifact can never silently
+/// satisfy the new v2 promotion requirement.
+#[test]
+fn rga01n_old_v1_protocol_version_rejected() {
+    let (report, run_dir, config, bars) = run_and_persist("old_v1_protocol", "RgaOldV1Protocol");
+    let mut output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaOldV1Protocol" })
+    });
+    output.protocol_version = "bkt_robustness_gauntlet_v1".to_string();
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let err = load_canonical_robustness_gauntlet(&run_dir).unwrap_err();
+    assert_eq!(
+        err,
+        RobustnessGauntletArtifactError::UnsupportedProtocolVersion(
+            "bkt_robustness_gauntlet_v1".to_string()
+        ),
+        "the old v1 protocol string must be rejected exactly like any other stale protocol"
+    );
+    cleanup(&run_dir);
+}
+
 /// A loaded artifact from `run_robustness_gauntlet` alone (before
 /// `dsr_pbo_sensitivity` is merged in) is structurally VALID (loads
 /// successfully) but not COMPLETE -- `is_complete()` is a separate,
@@ -275,11 +302,20 @@ fn rga01i_loaded_artifact_complete_after_dsr_pbo_merged() {
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("rga01i_test_trial".to_string()),
         evidence: None,
+    })
+    .merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
+        name: "genuine_shuffled_placebo".to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some("rga01i_test_trial".to_string()),
+        evidence: None,
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
 
     let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load");
-    assert!(loaded.is_complete(), "must be complete once both deferred scenarios are merged in");
+    assert!(loaded.is_complete(), "must be complete once every deferred scenario is merged in");
     assert!(loaded.deferred_scenario_names().is_empty());
 
     cleanup(&run_dir);
@@ -313,6 +349,18 @@ fn fake_p7a_p7b_stress(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome 
     }
 }
 
+fn fake_genuine_shuffled_placebo(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome {
+    mqk_backtest::RobustnessScenarioOutcome {
+        name: mqk_backtest::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME.to_string(),
+        applicable: true,
+        passed,
+        reason: if passed { None } else { Some("placebo performed as well or better".to_string()) },
+        detail: "test-fabricated finalize-seam outcome".to_string(),
+        research_trial_id: Some("fake_sensitivity_trial".to_string()),
+        evidence: None,
+    }
+}
+
 /// The real production two-phase flow: `write_canonical_robustness_gauntlet`
 /// (inline, at backtest-execution time) produces a structurally valid but
 /// INCOMPLETE artifact; `finalize_canonical_robustness_gauntlet_with_sensitivity`
@@ -333,9 +381,12 @@ fn rga01j_finalize_merges_sensitivity_into_incomplete_artifact() {
     let stress = fake_p7a_p7b_stress(true);
     finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &stress)
         .expect("finalize must succeed against a structurally valid existing artifact");
+    let placebo = fake_genuine_shuffled_placebo(true);
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &placebo)
+        .expect("finalize must succeed against a structurally valid existing artifact");
 
     let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load after finalize");
-    assert!(loaded.is_complete(), "must be complete after merging both deferred scenarios");
+    assert!(loaded.is_complete(), "must be complete after merging every deferred scenario");
     assert!(
         !loaded.failed_scenario_descriptions().iter().any(|d| d.starts_with("dsr_pbo_sensitivity")),
         "the merged sensitivity scenario passed and must not appear as failed: {:?}",
@@ -343,8 +394,8 @@ fn rga01j_finalize_merges_sensitivity_into_incomplete_artifact() {
     );
     assert_eq!(
         loaded.scenarios_run(),
-        8,
-        "6 pure scenarios + 2 finalized deferred scenarios"
+        9,
+        "6 pure scenarios + 3 finalized deferred scenarios"
     );
 
     cleanup(&run_dir);

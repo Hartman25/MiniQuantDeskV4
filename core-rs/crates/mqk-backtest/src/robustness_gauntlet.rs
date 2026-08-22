@@ -88,7 +88,18 @@ use crate::sweep::{run_sweep, SweepGrid};
 use crate::types::{BacktestBar, BacktestConfig, BacktestReport};
 use crate::BacktestEngine;
 
-pub const ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION: &str = "bkt_robustness_gauntlet_v1";
+/// FINAL-P9-ROBUSTNESS-SEMANTICS-01: the P9 contract materially changed --
+/// distinct-block-count-required DSR/PBO sensitivity, a genuine shuffled
+/// placebo (replacing temporal-offset as the required placebo evidence),
+/// month+year+regime concentration (not just month + whole-run regime
+/// context), and edge-collapse semantics on execution-delay/leave-one-out/
+/// parameter-neighborhood/cost-stress -- so this is a NEW protocol version,
+/// never a silent reinterpretation of `bkt_robustness_gauntlet_v1`. Old v1
+/// artifacts remain on disk and human/audit-readable, but
+/// `load_canonical_robustness_gauntlet`'s own protocol-version check (and
+/// therefore canonical promotion) requires this exact v2 string -- a v1
+/// artifact can never satisfy final promotion.
+pub const ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION: &str = "bkt_robustness_gauntlet_v2";
 
 /// Every scenario name required under [`ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION`]
 /// for a P9 artifact to be [`RobustnessGauntletOutput::is_complete`].
@@ -99,7 +110,7 @@ pub const ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION: &str = "bkt_robustness_gauntlet_
 pub const REQUIRED_ROBUSTNESS_SCENARIO_NAMES: &[&str] = &[
     "execution_delay_stress",
     "symbol_leave_one_out",
-    "month_and_regime_concentration",
+    "month_year_regime_concentration",
     "parameter_neighborhood_execution",
     "placebo_temporal_offset",
     "conservative_capacity_stress",
@@ -110,6 +121,12 @@ pub const REQUIRED_ROBUSTNESS_SCENARIO_NAMES: &[&str] = &[
     // differently-scoped Rust-only stress that was previously mislabeled as
     // satisfying this requirement).
     crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
+    // FINAL-P9-ROBUSTNESS-SEMANTICS-01: the genuine shuffled/random-label
+    // placebo -- distinct from, and never a substitute for,
+    // `placebo_temporal_offset` above (a real but differently-scoped
+    // temporal-delay check that does not satisfy a shuffled-placebo
+    // requirement -- delaying a decision still trades its own real score).
+    crate::genuine_shuffled_placebo::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME,
 ];
 
 /// The conservative max-drawdown ceiling every re-run scenario is judged
@@ -161,6 +178,40 @@ fn clears_conservative_bar(initial_cash: i64, curve: &[(i64, i64)]) -> (bool, St
         );
     }
     (true, format!("max_drawdown_fraction={dd:.6}, final_equity_micros={final_equity}"))
+}
+
+/// FINAL-P9-ROBUSTNESS-SEMANTICS-01: edge-collapse check shared by every
+/// re-run scenario below -- robustness cannot mean only "didn't go
+/// bankrupt". When the candidate's BASELINE was genuinely profitable
+/// (`baseline_final_equity_micros > initial_cash`), the re-run must also
+/// remain profitable (net non-negative return); a re-run that turns a real
+/// edge into a net non-positive result fails, even if it clears drawdown/
+/// bankruptcy. A baseline that was never profitable to begin with has no
+/// edge to collapse -- this check is then vacuously satisfied (that
+/// candidate's lack of an edge is already caught by other gates, not this
+/// one). Zero net profitability is sufficient to fail; no invented
+/// relative-performance percentage threshold.
+fn clears_economic_edge(
+    baseline_final_equity_micros: i64,
+    initial_cash: i64,
+    curve: &[(i64, i64)],
+) -> (bool, String) {
+    if baseline_final_equity_micros <= initial_cash {
+        return (true, "baseline was not profitable; edge-collapse check not applicable".to_string());
+    }
+    let final_equity = curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
+    if final_equity <= initial_cash {
+        return (
+            false,
+            format!(
+                "economic edge collapsed: baseline was profitable \
+                 (final_equity_micros={baseline_final_equity_micros} > \
+                 initial_cash_micros={initial_cash}) but this scenario's own \
+                 final_equity_micros={final_equity} is not profitable"
+            ),
+        );
+    }
+    (true, format!("remains profitable: final_equity_micros={final_equity}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -329,22 +380,33 @@ fn run_with_strategy(
 }
 
 fn execution_delay_scenario(
+    baseline: &BacktestReport,
     base_config: &BacktestConfig,
     bars: &[BacktestBar],
     make_strategy: &impl Fn() -> Box<dyn Strategy>,
 ) -> RobustnessScenarioOutcome {
     let name = "execution_delay_stress".to_string();
     let initial_cash = base_config.initial_cash_micros;
+    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
     let delayed = DelayedStrategy::new(make_strategy(), 1);
     match run_with_strategy(base_config.clone(), bars, Box::new(delayed)) {
         Ok(report) => {
-            let (passed, detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
+            let (bar_passed, bar_detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
+            let (edge_passed, edge_detail) =
+                clears_economic_edge(baseline_final, initial_cash, &report.equity_curve);
+            let passed = bar_passed && edge_passed;
             RobustnessScenarioOutcome {
                 name,
                 applicable: true,
                 passed,
-                reason: if passed { None } else { Some(detail.clone()) },
-                detail,
+                reason: if passed {
+                    None
+                } else if !bar_passed {
+                    Some(bar_detail.clone())
+                } else {
+                    Some(edge_detail.clone())
+                },
+                detail: format!("{bar_detail}; {edge_detail}"),
                 research_trial_id: None,
                 evidence: None,
             }
@@ -356,12 +418,13 @@ fn execution_delay_scenario(
             reason: Some(e.clone()),
             detail: e,
             research_trial_id: None,
-                evidence: None,
+            evidence: None,
         },
     }
 }
 
 fn symbol_leave_one_out_scenario(
+    baseline: &BacktestReport,
     base_config: &BacktestConfig,
     bars: &[BacktestBar],
     make_strategy: &impl Fn() -> Box<dyn Strategy>,
@@ -383,6 +446,7 @@ fn symbol_leave_one_out_scenario(
     }
 
     let initial_cash = base_config.initial_cash_micros;
+    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
     let mut worst: Option<(String, f64)> = None;
     for symbol in &symbols {
         let filtered: Vec<BacktestBar> =
@@ -397,7 +461,7 @@ fn symbol_leave_one_out_scenario(
                     reason: Some(format!("excluding {symbol}: {e}")),
                     detail: format!("excluding {symbol}: {e}"),
                     research_trial_id: None,
-                evidence: None,
+                    evidence: None,
                 }
             }
         };
@@ -405,8 +469,8 @@ fn symbol_leave_one_out_scenario(
         if worst.as_ref().map(|(_, d)| dd > *d).unwrap_or(true) {
             worst = Some((symbol.to_string(), dd));
         }
-        let (passed, _) = clears_conservative_bar(initial_cash, &report.equity_curve);
-        if !passed {
+        let (bar_passed, _) = clears_conservative_bar(initial_cash, &report.equity_curve);
+        if !bar_passed {
             return RobustnessScenarioOutcome {
                 name,
                 applicable: true,
@@ -415,6 +479,22 @@ fn symbol_leave_one_out_scenario(
                     "excluding symbol {symbol} breaches the conservative bar (max_drawdown_fraction={dd:.6})"
                 )),
                 detail: format!("worst excluded symbol so far: {symbol} dd={dd:.6}"),
+                research_trial_id: None,
+                evidence: None,
+            };
+        }
+        // FINAL-P9-ROBUSTNESS-SEMANTICS-01: excluding a symbol that removes
+        // the candidate's positive result must fail even if the remaining
+        // result is merely flat (zero net profitability is sufficient).
+        let (edge_passed, edge_detail) =
+            clears_economic_edge(baseline_final, initial_cash, &report.equity_curve);
+        if !edge_passed {
+            return RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed: false,
+                reason: Some(format!("excluding symbol {symbol}: {edge_detail}")),
+                detail: format!("excluding symbol {symbol}: {edge_detail}"),
                 research_trial_id: None,
                 evidence: None,
             };
@@ -436,8 +516,59 @@ fn symbol_leave_one_out_scenario(
     }
 }
 
-fn month_and_regime_concentration_scenario(baseline: &BacktestReport, bars: &[BacktestBar]) -> RobustnessScenarioOutcome {
-    let name = "month_and_regime_concentration".to_string();
+/// The concentration ceiling every bucketed dimension (month/year/regime) is
+/// judged against -- a single bucket contributing more than half of a run's
+/// total positive gain is fragile, regardless of which dimension buckets it.
+const CONCENTRATION_CEILING_FRACTION: f64 = 0.5;
+
+/// One bucketed dimension's concentration result -- `None` when this
+/// dimension has fewer than 2 distinct buckets with data (not a meaningful
+/// signal, never a fabricated pass/fail).
+struct ConcentrationDimension {
+    concentration_fraction: f64,
+    worst_bucket_desc: String,
+}
+
+fn concentration_dimension<K: Ord + Clone + std::fmt::Debug>(
+    gain_by_bucket: &BTreeMap<K, i64>,
+) -> Option<ConcentrationDimension> {
+    if gain_by_bucket.len() < 2 {
+        return None;
+    }
+    let total_positive: i64 = gain_by_bucket.values().filter(|&&v| v > 0).sum();
+    let worst = gain_by_bucket.iter().filter(|(_, &v)| v > 0).max_by_key(|(_, &v)| v);
+    let concentration_fraction = match (total_positive, worst) {
+        (tp, Some((_, &max_gain))) if tp > 0 => max_gain as f64 / tp as f64,
+        _ => 0.0,
+    };
+    let worst_bucket_desc = worst
+        .map(|(k, &g)| format!("{k:?} (gain_micros={g})"))
+        .unwrap_or_else(|| "none".to_string());
+    Some(ConcentrationDimension {
+        concentration_fraction,
+        worst_bucket_desc,
+    })
+}
+
+/// FINAL-P9-ROBUSTNESS-SEMANTICS-01: month + year + regime concentration --
+/// three INDEPENDENT bucketed-concentration checks (never just "whole-run
+/// regime context"). Each dimension is judged against the same
+/// [`CONCENTRATION_CEILING_FRACTION`]; the scenario is `applicable` iff at
+/// least one dimension has 2+ distinct buckets of data, and `passed` iff
+/// EVERY applicable dimension clears the ceiling -- a candidate failing any
+/// one dimension (e.g. genuinely regime-concentrated profit while month/year
+/// happen to look diversified) fails the whole scenario.
+///
+/// REGIME buckets are built by classifying EACH calendar month's own bars
+/// via the existing, accepted [`detect_market_regime`] (reused, never a
+/// second classifier) and accumulating that month's gain under its
+/// classified [`MarketRegimeKind`] -- genuine per-window regime
+/// concentration, not the whole run's own aggregate classification.
+fn month_year_regime_concentration_scenario(
+    baseline: &BacktestReport,
+    bars: &[BacktestBar],
+) -> RobustnessScenarioOutcome {
+    let name = "month_year_regime_concentration".to_string();
 
     let mut monthly_gain: BTreeMap<(i32, u32), i64> = BTreeMap::new();
     let mut prev_equity: Option<i64> = None;
@@ -451,76 +582,93 @@ fn month_and_regime_concentration_scenario(baseline: &BacktestReport, bars: &[Ba
         prev_equity = Some(eq);
     }
 
-    // Concentration is only a meaningful signal across 2+ distinct calendar
-    // months of equity-curve data -- a run confined to a single month is
-    // trivially "100% concentrated" by construction, not evidence of
-    // fragility. Reported honestly as not-applicable rather than a
-    // fabricated pass or fail.
-    if monthly_gain.len() < 2 {
+    let mut yearly_gain: BTreeMap<i32, i64> = BTreeMap::new();
+    for (&(y, _), &g) in &monthly_gain {
+        *yearly_gain.entry(y).or_insert(0) += g;
+    }
+
+    let policy = MarketRegimePolicy::conservative_defaults();
+    let mut regime_gain: BTreeMap<&'static str, i64> = BTreeMap::new();
+    for (&(y, m), &gain) in &monthly_gain {
+        let month_bars: Vec<BacktestBar> = bars
+            .iter()
+            .filter(|b| {
+                chrono::DateTime::from_timestamp(b.end_ts, 0)
+                    .map(|dt| dt.year() == y && dt.month() == m)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        let input = MarketRegimeInput::from_bars(month_bars, None::<String>, None::<String>);
+        let classification = detect_market_regime(&input, &policy);
+        *regime_gain.entry(classification.kind.code()).or_insert(0) += gain;
+    }
+
+    let month_dim = concentration_dimension(&monthly_gain);
+    let year_dim = concentration_dimension(&yearly_gain);
+    let regime_dim = concentration_dimension(&regime_gain);
+
+    if month_dim.is_none() && year_dim.is_none() && regime_dim.is_none() {
         return RobustnessScenarioOutcome {
             name,
             applicable: false,
             passed: false,
             reason: Some(format!(
-                "run spans only {} distinct calendar month(s); concentration analysis requires 2+",
-                monthly_gain.len()
+                "run spans only {} distinct calendar month(s) and {} distinct regime bucket(s); \
+                 concentration analysis requires 2+ distinct buckets in at least one dimension",
+                monthly_gain.len(),
+                regime_gain.len()
             )),
-            detail: format!("distinct_months={}", monthly_gain.len()),
+            detail: format!("distinct_months={}, distinct_regimes={}", monthly_gain.len(), regime_gain.len()),
             research_trial_id: None,
-                evidence: None,
+            evidence: None,
         };
     }
 
-    let total_positive: i64 = monthly_gain.values().filter(|&&v| v > 0).sum();
-    let worst_month = monthly_gain
-        .iter()
-        .filter(|(_, &v)| v > 0)
-        .max_by_key(|(_, &v)| v);
-
-    let concentration_fraction = match (total_positive, worst_month) {
-        (tp, Some((_, &max_gain))) if tp > 0 => max_gain as f64 / tp as f64,
-        _ => 0.0,
-    };
-    let passed = total_positive <= 0 || concentration_fraction <= 0.5;
-
-    let regime_context = {
-        let policy = MarketRegimePolicy::conservative_defaults();
-        let input = MarketRegimeInput::from_bars(bars.to_vec(), None::<String>, None::<String>);
-        let classification = detect_market_regime(&input, &policy);
-        format!("{:?}", classification.kind)
-    };
-
-    let month_desc = worst_month
-        .map(|((y, m), &g)| format!("{y}-{m:02} (gain_micros={g})"))
-        .unwrap_or_else(|| "none".to_string());
+    let mut failures: Vec<String> = Vec::new();
+    for (label, dim) in [("month", &month_dim), ("year", &year_dim), ("regime", &regime_dim)] {
+        if let Some(d) = dim {
+            if d.concentration_fraction > CONCENTRATION_CEILING_FRACTION {
+                failures.push(format!(
+                    "{label}: worst bucket contributed {:.4} of total positive gain \
+                     (> {CONCENTRATION_CEILING_FRACTION} ceiling): {}",
+                    d.concentration_fraction, d.worst_bucket_desc
+                ));
+            }
+        }
+    }
+    let passed = failures.is_empty();
 
     RobustnessScenarioOutcome {
         name,
         applicable: true,
         passed,
-        reason: if passed {
-            None
-        } else {
-            Some(format!(
-                "worst single month contributed {concentration_fraction:.4} of total positive \
-                 gain (> 0.5 ceiling): {month_desc}"
-            ))
-        },
+        reason: if passed { None } else { Some(failures.join("; ")) },
         detail: format!(
-            "months_with_gain_data={}, worst_month={month_desc}, concentration_fraction={concentration_fraction:.4}, whole_run_regime={regime_context}",
-            monthly_gain.len()
+            "distinct_months={}, month_concentration={:.4?}, distinct_years={}, \
+             year_concentration={:.4?}, distinct_regimes={}, regime_concentration={:.4?}",
+            monthly_gain.len(),
+            month_dim.as_ref().map(|d| d.concentration_fraction),
+            yearly_gain.len(),
+            year_dim.as_ref().map(|d| d.concentration_fraction),
+            regime_gain.len(),
+            regime_dim.as_ref().map(|d| d.concentration_fraction),
         ),
         research_trial_id: None,
-                evidence: None,
+        evidence: None,
     }
 }
 
 fn parameter_neighborhood_scenario(
+    baseline: &BacktestReport,
     base_config: &BacktestConfig,
     bars: &[BacktestBar],
     make_strategy: &impl Fn() -> Box<dyn Strategy>,
 ) -> RobustnessScenarioOutcome {
     let name = "parameter_neighborhood_execution".to_string();
+    let initial_cash = base_config.initial_cash_micros;
+    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
+    let baseline_profitable = baseline_final > initial_cash;
     let base_slippage = base_config.stress.slippage_bps;
     let grid = SweepGrid {
         target_qty: vec![base_config.sizing.target_qty.max(1)],
@@ -549,9 +697,16 @@ fn parameter_neighborhood_scenario(
     let worst_row = rows
         .iter()
         .max_by(|a, b| a.max_drawdown_pct.partial_cmp(&b.max_drawdown_pct).unwrap());
-    let passed = rows
-        .iter()
-        .all(|r| r.max_drawdown_pct <= ceiling && !r.halted);
+    let bar_passed = rows.iter().all(|r| r.max_drawdown_pct <= ceiling && !r.halted);
+    // FINAL-P9-ROBUSTNESS-SEMANTICS-01: a neighboring parameter point that
+    // becomes economically non-profitable fails, when the baseline itself
+    // was genuinely profitable -- zero net return is sufficient to fail.
+    let collapsed_row = if baseline_profitable {
+        rows.iter().find(|r| r.total_return_pct <= 0.0)
+    } else {
+        None
+    };
+    let passed = bar_passed && collapsed_row.is_none();
 
     RobustnessScenarioOutcome {
         name,
@@ -559,10 +714,17 @@ fn parameter_neighborhood_scenario(
         passed,
         reason: if passed {
             None
-        } else {
+        } else if !bar_passed {
             Some(format!(
                 "at least one neighboring parameter point breached the conservative drawdown \
                  ceiling ({ceiling:.4}%) or halted"
+            ))
+        } else {
+            Some(format!(
+                "economic edge collapsed at a neighboring parameter point (slippage_bps={:?}): \
+                 total_return_pct={:.4} is not profitable, though baseline was",
+                collapsed_row.map(|r| r.slippage_bps),
+                collapsed_row.map(|r| r.total_return_pct).unwrap_or(0.0)
             ))
         },
         detail: format!(
@@ -571,7 +733,7 @@ fn parameter_neighborhood_scenario(
             worst_row.map(|r| r.max_drawdown_pct).unwrap_or(0.0)
         ),
         research_trial_id: None,
-                evidence: None,
+        evidence: None,
     }
 }
 
@@ -709,10 +871,10 @@ pub fn run_robustness_gauntlet(
     make_strategy: impl Fn() -> Box<dyn Strategy>,
 ) -> RobustnessGauntletOutput {
     let scenarios = vec![
-        execution_delay_scenario(base_config, bars, &make_strategy),
-        symbol_leave_one_out_scenario(base_config, bars, &make_strategy),
-        month_and_regime_concentration_scenario(baseline, bars),
-        parameter_neighborhood_scenario(base_config, bars, &make_strategy),
+        execution_delay_scenario(baseline, base_config, bars, &make_strategy),
+        symbol_leave_one_out_scenario(baseline, base_config, bars, &make_strategy),
+        month_year_regime_concentration_scenario(baseline, bars),
+        parameter_neighborhood_scenario(baseline, base_config, bars, &make_strategy),
         placebo_temporal_offset_scenario(baseline, base_config, bars, &make_strategy),
         conservative_capacity_stress_scenario(base_config, bars, &make_strategy),
     ];
@@ -736,6 +898,16 @@ pub fn run_robustness_gauntlet(
                  separately and merge it in via \
                  RobustnessGauntletOutput::merge_dsr_pbo_sensitivity (name-agnostic) before \
                  treating this artifact as complete (see RobustnessGauntletOutput::is_complete)"
+                .to_string(),
+        },
+        DeferredScenario {
+            name: crate::genuine_shuffled_placebo::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME.to_string(),
+            reason: "requires a completed, registered Research trial plus subprocess/filesystem \
+                 I/O this pure, engine-only function does not accept as input -- call \
+                 crate::genuine_shuffled_placebo::genuine_shuffled_placebo_scenario separately \
+                 and merge it in via RobustnessGauntletOutput::merge_dsr_pbo_sensitivity \
+                 (name-agnostic) before treating this artifact as complete (see \
+                 RobustnessGauntletOutput::is_complete)"
                 .to_string(),
         },
     ];

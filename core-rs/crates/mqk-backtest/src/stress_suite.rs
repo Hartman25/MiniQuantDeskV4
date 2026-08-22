@@ -160,11 +160,19 @@ fn conservative_risk_limits_config(base: &BacktestConfig) -> BacktestConfig {
     cfg
 }
 
+/// FINAL-P9-ROBUSTNESS-SEMANTICS-01: edge-collapse check -- when `Some`,
+/// carries the baseline's OWN final equity so a scenario that was genuinely
+/// profitable at baseline (`baseline_final_equity_micros > initial_cash`)
+/// can be required to remain profitable under stress, never merely clear
+/// bankruptcy/drawdown. `None` for scenarios this mission's edge-collapse
+/// requirement does not scope (e.g. `conservative_risk_limits`, whose
+/// accepted semantics predate and are untouched by this requirement).
 fn evaluate_scenario(
     name: &str,
     config: BacktestConfig,
     bars: &[BacktestBar],
     strategy: Box<dyn Strategy>,
+    edge_collapse_baseline_final_equity_micros: Option<i64>,
 ) -> StressScenarioOutcome {
     let initial_cash = config.initial_cash_micros;
     let mut engine = BacktestEngine::new(config);
@@ -217,6 +225,29 @@ fn evaluate_scenario(
         };
     }
 
+    // FINAL-P9-ROBUSTNESS-SEMANTICS-01: robustness cannot mean only "didn't
+    // go bankrupt" -- a candidate that was genuinely profitable at baseline
+    // but whose economic edge disappears entirely under stress (net
+    // non-positive return) fails, even though it cleared drawdown/
+    // bankruptcy. Zero net profitability is sufficient to fail; no
+    // relative-performance percentage threshold is invented.
+    if let Some(baseline_final) = edge_collapse_baseline_final_equity_micros {
+        if baseline_final > initial_cash && final_equity_micros <= initial_cash {
+            return StressScenarioOutcome {
+                name: name.to_string(),
+                passed: false,
+                reason: Some(format!(
+                    "economic edge collapsed under stress: baseline was profitable \
+                     (final_equity_micros={baseline_final} > initial_cash_micros={initial_cash}) \
+                     but this scenario's final_equity_micros={final_equity_micros} is not \
+                     profitable"
+                )),
+                final_equity_micros,
+                max_drawdown_fraction: dd_fraction,
+            };
+        }
+    }
+
     StressScenarioOutcome {
         name: name.to_string(),
         passed: true,
@@ -241,24 +272,30 @@ pub fn run_backtest_stress_suite(
     bars: &[BacktestBar],
     make_strategy: impl Fn() -> Box<dyn Strategy>,
 ) -> StressSuiteRunOutput {
+    let baseline_final_equity_micros =
+        baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(base_config.initial_cash_micros);
+
     let scenarios = vec![
         evaluate_scenario(
             "cost_stress_2x",
             cost_stress_config(base_config, 2),
             bars,
             make_strategy(),
+            Some(baseline_final_equity_micros),
         ),
         evaluate_scenario(
             "cost_stress_3x",
             cost_stress_config(base_config, 3),
             bars,
             make_strategy(),
+            Some(baseline_final_equity_micros),
         ),
         evaluate_scenario(
             "conservative_risk_limits",
             conservative_risk_limits_config(base_config),
             bars,
             make_strategy(),
+            None,
         ),
     ];
 

@@ -8,10 +8,10 @@ mod commands;
 
 use commands::{
     bkt::{
-        run_backtest_csv, run_backtest_db, run_finalize_p7a_p7b_replay_stress,
-        run_finalize_robustness_sensitivity, run_regime_detect, run_review_scan,
-        run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
-        IntegrityCalendarArg,
+        run_backtest_csv, run_backtest_db, run_finalize_genuine_shuffled_placebo,
+        run_finalize_p7a_p7b_replay_stress, run_finalize_robustness_sensitivity,
+        run_regime_detect, run_review_scan, run_strategy_lab_evaluate, run_strategy_lab_rank,
+        run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
     },
     load_payload,
     md::{
@@ -598,6 +598,53 @@ enum BacktestCmd {
         /// operator/Research-policy owner must supply one.
         #[arg(long)]
         max_drawdown_ceiling: f64,
+    },
+
+    /// FINAL-P9-ROBUSTNESS-SEMANTICS-01: finalize the genuine shuffled
+    /// placebo scenario for an existing candidate's `robustness_gauntlet.json`
+    /// (produced earlier by `mqk backtest csv`/`db` with `--out-dir`).
+    /// Re-evaluates the trial's FROZEN OOS predictions through the SAME
+    /// economic protocol with a deterministically shuffled signal stream --
+    /// see `mqk_research.ml.genuine_shuffled_placebo_cli`'s own module docs.
+    FinalizeGenuineShuffledPlacebo {
+        /// Artifact root directory (the SAME `--out-dir` the candidate's
+        /// real backtest run used) -- the candidate directory is
+        /// `{artifact_root}/{run_id}/`.
+        #[arg(long)]
+        artifact_root: String,
+
+        /// The candidate's backtest run_id (printed by `mqk backtest
+        /// csv`/`db` as `run_id=...`).
+        #[arg(long)]
+        run_id: String,
+
+        /// Path to the Research SQLite registry database.
+        #[arg(long)]
+        registry_db: String,
+
+        /// The Research trial_id this backtest candidate corresponds to.
+        #[arg(long)]
+        trial_id: String,
+
+        /// REQUIRED, no default: the exact P7C-authorized `economic_eval_id`
+        /// this placebo control must bind to.
+        #[arg(long)]
+        economic_eval_id: String,
+
+        /// Path to the research-py project root (the directory containing
+        /// `src/mqk_research`).
+        #[arg(long)]
+        research_py_root: String,
+
+        /// Python executable to invoke.
+        #[arg(long, default_value = "python")]
+        python: String,
+
+        /// Directory to write the placebo re-evaluation's own output
+        /// artifacts into (never the original candidate's evidence
+        /// directory).
+        #[arg(long)]
+        placebo_out_dir: String,
     },
 }
 
@@ -1582,6 +1629,27 @@ async fn run_cli() -> Result<()> {
                     stress_max_target_qty,
                     stress_max_position_notional_usd,
                     max_drawdown_ceiling,
+                )?;
+            }
+            BacktestCmd::FinalizeGenuineShuffledPlacebo {
+                artifact_root,
+                run_id,
+                registry_db,
+                trial_id,
+                economic_eval_id,
+                research_py_root,
+                python,
+                placebo_out_dir,
+            } => {
+                run_finalize_genuine_shuffled_placebo(
+                    artifact_root,
+                    run_id,
+                    registry_db,
+                    trial_id,
+                    economic_eval_id,
+                    research_py_root,
+                    python,
+                    placebo_out_dir,
                 )?;
             }
         },

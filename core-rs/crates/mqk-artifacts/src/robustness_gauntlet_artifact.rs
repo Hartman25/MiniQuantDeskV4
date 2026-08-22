@@ -458,6 +458,7 @@ pub fn finalize_canonical_robustness_gauntlet_with_sensitivity(
     const FINALIZABLE_SCENARIO_NAMES: &[&str] = &[
         mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME,
         mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
+        mqk_backtest::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME,
     ];
     if !FINALIZABLE_SCENARIO_NAMES.contains(&sensitivity.name.as_str()) {
         return Err(RobustnessGauntletFinalizeError::WrongScenarioName(
