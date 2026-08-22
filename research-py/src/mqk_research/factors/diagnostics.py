@@ -96,8 +96,22 @@ def _quantile_buckets(values: np.ndarray, n_quantiles: int) -> np.ndarray:
     return np.clip(buckets, 0, n_quantiles - 1)
 
 
+def _is_effectively_constant(values: np.ndarray) -> bool:
+    """True if `values` has no real variance -- exact zero OR floating-point
+    dust at the scale of the data (e.g. an OLS residual for an exactly
+    collinear fit lands at ~1e-16, never exact 0.0, but its rank order is
+    pure numerical noise, not signal). An absolute-only threshold would
+    misfire on genuinely tiny-scale data, so the tolerance is relative to
+    the data's own magnitude."""
+    if values.size == 0:
+        return True
+    scale = float(np.max(np.abs(values)))
+    tol = max(1e-9, scale * 1e-9)
+    return float(np.std(values)) <= tol
+
+
 def _spearman_rank_ic(factor_values: np.ndarray, label_values: np.ndarray) -> Optional[float]:
-    if np.std(factor_values) <= 0.0 or np.std(label_values) <= 0.0:
+    if _is_effectively_constant(factor_values) or _is_effectively_constant(label_values):
         return None
     rx = pd.Series(factor_values).rank(method="average").to_numpy()
     ry = pd.Series(label_values).rank(method="average").to_numpy()
@@ -190,10 +204,10 @@ def evaluate_factor_ic_ir(
         if n < effective_min_cross_section:
             excluded_periods[period_key] = NOT_EVALUABLE_INSUFFICIENT_CROSS_SECTION
             continue
-        if np.std(factor_values) <= 0.0:
+        if _is_effectively_constant(factor_values):
             excluded_periods[period_key] = NOT_EVALUABLE_ZERO_VARIANCE_FACTOR
             continue
-        if np.std(label_values) <= 0.0:
+        if _is_effectively_constant(label_values):
             excluded_periods[period_key] = NOT_EVALUABLE_UNUSABLE_LABEL_POPULATION
             continue
 
