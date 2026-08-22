@@ -43,7 +43,7 @@ fn py_str_literal(s: &str) -> String {
 /// the trial genuinely registered but NOT part of any judged comparison
 /// scope (mirrors `build_multiple_testing_judge`'s own `never_attempted`
 /// exclusion path -- see that function's `load_exclusions` handling).
-fn register_never_attempted_trial(registry_db: &Path, trial_id: &str) {
+fn register_never_attempted_trial(registry_db: &Path, trial_id: &str, strategy_id: &str) {
     let script = format!(
         "from pathlib import Path\n\
          from mqk_research.exp_distributed.storage import ResearchResultStore\n\
@@ -52,10 +52,11 @@ fn register_never_attempted_trial(registry_db: &Path, trial_id: &str) {
          store.register_hypothesis(hypothesis_id='hyp', experiment_id='exp.rust_it')\n\
          store.register_trial(\n\
          \ttrial_id={trial_id}, experiment_id='exp.rust_it', hypothesis_id='hyp',\n\
-         \tstrategy_id='only', protocol_id=PROTOCOL_ID, identity={{'minimal': True}},\n\
+         \tstrategy_id={strategy_id}, protocol_id=PROTOCOL_ID, identity={{'minimal': True}},\n\
          )\n",
         db = py_str_literal(&registry_db.display().to_string()),
         trial_id = py_str_literal(trial_id),
+        strategy_id = py_str_literal(strategy_id),
     );
 
     let src_dir = research_py_root().join("src");
@@ -86,13 +87,14 @@ fn dpsr01a_never_attempted_trial_is_genuinely_inapplicable() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let registry_db = dir.join("registry.sqlite3");
-    register_never_attempted_trial(&registry_db, "rust_it_never_attempted");
+    register_never_attempted_trial(&registry_db, "rust_it_never_attempted", "only");
 
     let outcome = dsr_pbo_sensitivity_scenario(
         &python_executable(),
         &research_py_root(),
         &registry_db,
         "rust_it_never_attempted",
+        "only",
         &[8, 10],
     );
 
@@ -120,7 +122,7 @@ fn dpsr01b_unknown_trial_id_is_a_real_failure_not_a_silent_pass() {
     std::fs::create_dir_all(&dir).unwrap();
     // Registry file created (empty DB, schema initialized) but no such
     // trial was ever registered.
-    register_never_attempted_trial(&dir.join("registry.sqlite3"), "some_other_trial");
+    register_never_attempted_trial(&dir.join("registry.sqlite3"), "some_other_trial", "only");
     let registry_db = dir.join("registry.sqlite3");
 
     let outcome = dsr_pbo_sensitivity_scenario(
@@ -128,6 +130,7 @@ fn dpsr01b_unknown_trial_id_is_a_real_failure_not_a_silent_pass() {
         &research_py_root(),
         &registry_db,
         "totally_unknown_trial_id",
+        "only",
         &[8, 10],
     );
 
@@ -151,19 +154,57 @@ fn dpsr01c_bad_python_executable_fails_closed_not_a_panic() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let registry_db = dir.join("registry.sqlite3");
-    register_never_attempted_trial(&registry_db, "trial_for_bad_python_test");
+    register_never_attempted_trial(&registry_db, "trial_for_bad_python_test", "only");
 
     let outcome = dsr_pbo_sensitivity_scenario(
         "mqk_definitely_not_a_real_python_executable_xyz",
         &research_py_root(),
         &registry_db,
         "trial_for_bad_python_test",
+        "only",
         &[8, 10],
     );
 
     assert!(outcome.applicable);
     assert!(!outcome.passed, "a spawn failure must fail closed, never silently pass: {outcome:?}");
     assert!(outcome.reason.unwrap_or_default().contains("failed to spawn"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "requires a real python with research-py's runtime deps (pandas/numpy) importable"]
+fn dpsr01d_research_trial_strategy_mismatch_is_rejected() {
+    let dir = std::env::temp_dir().join(format!(
+        "mqk_dpsr01d_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry_db = dir.join("registry.sqlite3");
+    // Trial genuinely registered under strategy_id="registered_strategy" --
+    // the backtest candidate claims to be a DIFFERENT strategy.
+    register_never_attempted_trial(&registry_db, "rust_it_mismatch_trial", "registered_strategy");
+
+    let outcome = dsr_pbo_sensitivity_scenario(
+        &python_executable(),
+        &research_py_root(),
+        &registry_db,
+        "rust_it_mismatch_trial",
+        "a_completely_different_backtest_strategy",
+        &[8, 10],
+    );
+
+    assert_eq!(outcome.name, "dsr_pbo_sensitivity");
+    assert!(outcome.applicable, "a cross-candidate mismatch is a real failure, never inapplicable");
+    assert!(!outcome.passed, "a Research trial registered under a DIFFERENT strategy must never merge: {outcome:?}");
+    let reason = outcome.reason.unwrap_or_default();
+    assert!(reason.contains("Research trial mismatch"), "got: {reason}");
+    assert!(reason.contains("registered_strategy"), "got: {reason}");
+    assert!(reason.contains("a_completely_different_backtest_strategy"), "got: {reason}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -61,11 +61,19 @@ pub const PBO_MAX_SENSITIVITY_RANGE: f64 = 0.25;
 /// every other Research-registry-touching seam in this codebase
 /// (`MQK_RESEARCH_REGISTRY_DB`, `MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT`).
 ///
-/// Fails closed: a spawn failure, unparseable output, or a genuine CLI
-/// error (bad registry, unknown trial) all become `applicable: true,
-/// passed: false` with the real reason -- never silently skipped. A
-/// structurally too-small comparison population (mirroring the frozen
-/// judge's own `insufficient_candidates_for_cscv` /
+/// `expected_strategy_id` is BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01's
+/// cross-candidate authority check: the CLI resolves `trial_id`'s own
+/// registered `strategy_id` from the registry and this function rejects a
+/// mismatch against `expected_strategy_id` (the backtest candidate's own
+/// `report.strategy_name`) BEFORE the result is ever merged into that
+/// candidate's P9 evidence -- an operator supplying the wrong `--trial-id`
+/// at finalization time is caught here, not only later at promotion time.
+///
+/// Fails closed: a spawn failure, unparseable output, a `strategy_id`
+/// mismatch, or a genuine CLI error (bad registry, unknown trial) all
+/// become `applicable: true, passed: false` with the real reason -- never
+/// silently skipped. A structurally too-small comparison population
+/// (mirroring the frozen judge's own `insufficient_candidates_for_cscv` /
 /// `insufficient_trial_population_for_correction` reason codes) is the ONE
 /// case reported as genuinely inapplicable (`applicable: false`) rather
 /// than a failure, matching `symbol_leave_one_out_scenario`'s own
@@ -75,6 +83,7 @@ pub fn dsr_pbo_sensitivity_scenario(
     research_py_root: &Path,
     registry_db: &Path,
     trial_id: &str,
+    expected_strategy_id: &str,
     block_counts: &[u32],
 ) -> RobustnessScenarioOutcome {
     let name = DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string();
@@ -144,6 +153,32 @@ pub fn dsr_pbo_sensitivity_scenario(
             };
         }
     };
+
+    // BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: cross-candidate
+    // authority -- checked BEFORE the status dispatch so a genuine
+    // Research-trial mismatch is never masked by a more permissive
+    // "evaluated"/"not_evaluable" reason. `strategy_id` is present on both
+    // the "evaluated" and "not_evaluable" outcomes (see the CLI's own
+    // module docs); only a genuine operational "error" (e.g. unknown
+    // trial_id, caught by the trial-lookup failure itself) may lack it,
+    // and that path already fails independently below.
+    if let Some(actual_strategy_id) = value.get("strategy_id").and_then(|v| v.as_str()) {
+        if actual_strategy_id != expected_strategy_id {
+            let reason = format!(
+                "Research trial mismatch: trial_id {trial_id:?} is registered under \
+                 strategy_id {actual_strategy_id:?}, but this backtest candidate is \
+                 strategy_id {expected_strategy_id:?} -- refusing to merge sensitivity \
+                 evidence from an unrelated Research trial"
+            );
+            return RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed: false,
+                reason: Some(reason.clone()),
+                detail: reason,
+            };
+        }
+    }
 
     let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
     match status {

@@ -53,6 +53,7 @@ def _run_sensitivity(
     trial = store.get_trial(trial_id)  # raises KeyError if unknown -- caller (main) reports as error
     experiment_id = trial["experiment_id"]
     hypothesis_id = trial["hypothesis_id"]
+    strategy_id = trial["strategy_id"]
 
     per_block: List[Dict[str, Any]] = []
     dsr_values: List[float] = []
@@ -72,6 +73,7 @@ def _run_sensitivity(
         if dsr_entry is None:
             return {
                 "status": "not_evaluable",
+                "strategy_id": strategy_id,
                 "reason": (
                     f"trial_id {trial_id!r} has no dsr_results entry at "
                     f"block_count={block_count} (not part of the judged comparison scope)"
@@ -92,6 +94,7 @@ def _run_sensitivity(
         if not dsr_entry["evaluable"] or entry["deflated_sharpe_ratio"] is None:
             return {
                 "status": "not_evaluable",
+                "strategy_id": strategy_id,
                 "reason": (
                     f"DSR not evaluable for trial_id {trial_id!r} at block_count={block_count} "
                     f"(reason={dsr_entry.get('reason')!r})"
@@ -101,6 +104,7 @@ def _run_sensitivity(
         if pbo_result["status"] != "evaluated" or entry["pbo"] is None:
             return {
                 "status": "not_evaluable",
+                "strategy_id": strategy_id,
                 "reason": f"PBO not evaluated at block_count={block_count} (status={pbo_result['status']!r})",
                 "per_block": per_block,
             }
@@ -110,6 +114,7 @@ def _run_sensitivity(
     return {
         "status": "evaluated",
         "trial_id": trial_id,
+        "strategy_id": strategy_id,
         "experiment_id": experiment_id,
         "hypothesis_id": hypothesis_id,
         "block_counts": block_counts,

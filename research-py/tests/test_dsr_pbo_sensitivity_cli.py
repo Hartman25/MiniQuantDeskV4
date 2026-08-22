@@ -62,6 +62,11 @@ def test_evaluated_for_real_two_trial_comparison_scope(tmp_path):
     assert result["pbo_min"] <= result["pbo_max"]
     assert result["dsr_range"] == result["dsr_max"] - result["dsr_min"]
     assert result["pbo_range"] == result["pbo_max"] - result["pbo_min"]
+    assert result["strategy_id"] == "a", (
+        "strategy_id must identify the ACTUAL registered strategy for this trial -- "
+        "the Rust caller cross-checks this against the backtest candidate's own "
+        "strategy_name to catch a Research-trial mismatch before merging"
+    )
 
 
 def test_deterministic_across_repeated_calls(tmp_path):
@@ -90,6 +95,7 @@ def test_single_trial_population_is_not_evaluable(tmp_path):
     # caller checks to classify a scenario as genuinely inapplicable rather
     # than a failure.
     assert "not part of the judged comparison scope" in result["reason"]
+    assert result["strategy_id"] == "only", "strategy_id must be present even on a not_evaluable outcome"
 
 
 def test_unknown_trial_id_raises_key_error(tmp_path):

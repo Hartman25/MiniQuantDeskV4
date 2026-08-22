@@ -62,6 +62,41 @@ fn build_backtest_economics_from_cli_flags(
 }
 
 // ---------------------------------------------------------------------------
+// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: inline promotion evidence
+// ---------------------------------------------------------------------------
+
+/// Generate and persist the complete Backtest-side promotion evidence set
+/// (stress suite + P9 robustness gauntlet) for a real backtest run, using
+/// the SAME genuine `report`/`config`/`bars`/strategy factory the caller
+/// just used for the actual run -- never reconstructed or replayed from a
+/// derived artifact. Called immediately after `write_backtest_report`
+/// while the real inputs are still in scope, from every CLI backtest entry
+/// point that persists artifacts at all (`--out-dir` supplied).
+///
+/// `make_strategy` must return a FRESH strategy instance each call (the
+/// same contract `run_backtest_stress_suite`/`run_robustness_gauntlet`
+/// already require) -- a `PluginRegistry::instantiate(&self, ...)` closure
+/// satisfies this since `instantiate` only borrows the registry.
+fn write_inline_promotion_evidence(
+    run_dir: &Path,
+    report: &mqk_backtest::BacktestReport,
+    config: &BacktestConfig,
+    bars: &[BacktestBar],
+    make_strategy: impl Fn() -> Box<dyn mqk_strategy::Strategy>,
+) -> Result<()> {
+    let stress_output =
+        mqk_backtest::run_backtest_stress_suite(report, config, bars, &make_strategy);
+    mqk_artifacts::write_canonical_stress_suite(run_dir, &stress_output)
+        .context("write_canonical_stress_suite failed")?;
+
+    let gauntlet_output = mqk_backtest::run_robustness_gauntlet(report, config, bars, &make_strategy);
+    mqk_artifacts::write_canonical_robustness_gauntlet(run_dir, &gauntlet_output)
+        .context("write_canonical_robustness_gauntlet failed")?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // CSV backtest runner
 // ---------------------------------------------------------------------------
 
@@ -132,6 +167,10 @@ pub async fn run_backtest_csv(
         )
     })?;
 
+    // BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: a clone taken before
+    // `cfg` moves into the engine -- the stress/robustness re-runs need the
+    // exact same base config the real run used.
+    let cfg_for_evidence = cfg.clone();
     let mut engine = BacktestEngine::new(cfg);
 
     // BACKTEST-ECONOMICS-CLI-ENTRY-01: opt-in economics wiring, before any
@@ -197,9 +236,24 @@ pub async fn run_backtest_csv(
                 )
             })?;
 
+        // BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: real stress suite
+        // + P9 robustness gauntlet, using the SAME genuine cfg/bars/reg this
+        // run just used -- reg is still owned here (instantiate only
+        // borrows), never reconstructed.
+        write_inline_promotion_evidence(&init_result.run_dir, &report, &cfg_for_evidence, &bars, || {
+            reg.instantiate(&strategy).expect("strategy known valid: already instantiated once above")
+        })
+        .with_context(|| {
+            format!(
+                "write inline promotion evidence failed: {}",
+                init_result.run_dir.display()
+            )
+        })?;
+
         println!("artifacts_written=true");
         println!("artifacts_dir={}", init_result.run_dir.display());
         println!("manifest={}", init_result.manifest_path.display());
+        println!("promotion_evidence_written=true");
     } else {
         println!("artifacts_written=false");
     }
@@ -523,6 +577,10 @@ pub async fn run_backtest_db(
         )
     })?;
 
+    // BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: a clone taken before
+    // `cfg` moves into the engine -- the stress/robustness re-runs need the
+    // exact same base config the real run used.
+    let cfg_for_evidence = cfg.clone();
     let mut engine = BacktestEngine::new(cfg);
     if let Some(economics) = economics {
         engine = engine.with_economics(economics);
@@ -580,9 +638,24 @@ pub async fn run_backtest_db(
                 )
             })?;
 
+        // BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: real stress suite
+        // + P9 robustness gauntlet, using the SAME genuine cfg/bars/reg this
+        // run just used -- reg is still owned here (instantiate only
+        // borrows), never reconstructed.
+        write_inline_promotion_evidence(&init_result.run_dir, &report, &cfg_for_evidence, &bars, || {
+            reg.instantiate(&strategy).expect("strategy known valid: already instantiated once above")
+        })
+        .with_context(|| {
+            format!(
+                "write inline promotion evidence failed: {}",
+                init_result.run_dir.display()
+            )
+        })?;
+
         println!("artifacts_written=true");
         println!("artifacts_dir={}", init_result.run_dir.display());
         println!("manifest={}", init_result.manifest_path.display());
+        println!("promotion_evidence_written=true");
     } else {
         println!("artifacts_written=false");
     }
@@ -1148,6 +1221,98 @@ pub fn run_review_scan(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: DSR/PBO sensitivity
+// finalization
+// ---------------------------------------------------------------------------
+
+/// Merge the real DSR/PBO sensitivity result for a Research trial into an
+/// existing candidate's `robustness_gauntlet.json`, produced earlier by the
+/// SAME candidate's real backtest execution (`mqk backtest csv`/`db`).
+///
+/// This is a genuinely SEPARATE production phase from backtest execution --
+/// Research trial identity is a Python/research-py concept established by
+/// the Research pipeline, never known to the Rust backtest engine at
+/// execution time -- so it cannot run inline with the backtest the way the
+/// stress suite / pure P9 scenarios do. `artifact_root`/`run_id` identify
+/// the candidate's EXISTING evidence directory (the same
+/// `artifact_root/<run_id>/` convention `resolve_backtest_evidence` uses);
+/// this command loads it, cross-checks `--trial-id`'s own registered
+/// `strategy_id` against that candidate's real `strategy_name` (refusing a
+/// Research-trial mismatch), and merges the result via
+/// `mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_finalize_robustness_sensitivity(
+    artifact_root: String,
+    run_id: String,
+    registry_db: String,
+    trial_id: String,
+    research_py_root: String,
+    python: String,
+    block_counts: String,
+) -> Result<()> {
+    let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
+    let run_dir = Path::new(&artifact_root).join(run_id.to_string());
+
+    let existing = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
+        format!(
+            "existing robustness_gauntlet.json must already be real and structurally valid \
+             at {} -- run the real backtest (mqk backtest csv/db with --out-dir) first",
+            run_dir.display()
+        )
+    })?;
+
+    let block_counts: Vec<u32> = parse_u32_list(&block_counts)?;
+    if block_counts.is_empty() {
+        anyhow::bail!("--block-counts must supply at least one value");
+    }
+
+    let sensitivity = mqk_backtest::dsr_pbo_sensitivity_scenario(
+        &python,
+        Path::new(&research_py_root),
+        Path::new(&registry_db),
+        &trial_id,
+        &existing.strategy_name,
+        &block_counts,
+    );
+
+    println!("scenario_name={}", sensitivity.name);
+    println!("applicable={}", sensitivity.applicable);
+    println!("passed={}", sensitivity.passed);
+    if let Some(reason) = &sensitivity.reason {
+        println!("reason={reason}");
+    }
+
+    let path = mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+        &run_dir,
+        &sensitivity,
+    )
+    .with_context(|| {
+        format!(
+            "finalize_canonical_robustness_gauntlet_with_sensitivity failed for {}",
+            run_dir.display()
+        )
+    })?;
+
+    let finalized = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir)
+        .context("re-loading the finalized artifact failed")?;
+
+    println!("finalized_artifact={}", path.display());
+    println!("scenarios_run={}", finalized.scenarios_run());
+    println!("is_complete={}", finalized.is_complete());
+    println!("all_applicable_passed={}", finalized.all_applicable_passed());
+
+    Ok(())
+}
+
+fn parse_u32_list(s: &str) -> Result<Vec<u32>> {
+    s.split(',')
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.parse::<u32>().with_context(|| format!("invalid integer: {v}")))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mqk_artifacts::{load_canonical_robustness_gauntlet, InitRunArtifactsArgs, RobustnessGauntletArtifactError};
+use mqk_artifacts::{
+    finalize_canonical_robustness_gauntlet_with_sensitivity, load_canonical_robustness_gauntlet,
+    InitRunArtifactsArgs, RobustnessGauntletArtifactError, RobustnessGauntletFinalizeError,
+};
 use mqk_backtest::{run_robustness_gauntlet, BacktestBar, BacktestConfig, BacktestEngine};
 use mqk_strategy::{Strategy, StrategyContext, StrategyOutput, StrategySpec, TargetPosition};
 
@@ -267,6 +270,188 @@ fn rga01i_loaded_artifact_complete_after_dsr_pbo_merged() {
     let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load");
     assert!(loaded.is_complete(), "must be complete once dsr_pbo_sensitivity is merged in");
     assert!(loaded.deferred_scenario_names().is_empty());
+
+    cleanup(&run_dir);
+}
+
+// ---------------------------------------------------------------------------
+// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: finalize seam
+// ---------------------------------------------------------------------------
+
+fn fake_sensitivity(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome {
+    mqk_backtest::RobustnessScenarioOutcome {
+        name: mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string(),
+        applicable: true,
+        passed,
+        reason: if passed { None } else { Some("dsr_range exceeded ceiling".to_string()) },
+        detail: "test-fabricated finalize-seam outcome".to_string(),
+    }
+}
+
+/// The real production two-phase flow: `write_canonical_robustness_gauntlet`
+/// (inline, at backtest-execution time) produces a structurally valid but
+/// INCOMPLETE artifact; `finalize_canonical_robustness_gauntlet_with_sensitivity`
+/// (a later, separate phase) merges the real sensitivity result in --
+/// the loaded artifact then reports `is_complete() == true`.
+#[test]
+fn rga01j_finalize_merges_sensitivity_into_incomplete_artifact() {
+    let (report, run_dir, config, bars) = run_and_persist("finalize_basic", "RgaFinalizeBasic");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaFinalizeBasic" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+    assert!(!load_canonical_robustness_gauntlet(&run_dir).unwrap().is_complete());
+
+    let sensitivity = fake_sensitivity(true);
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &sensitivity)
+        .expect("finalize must succeed against a structurally valid existing artifact");
+
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load after finalize");
+    assert!(loaded.is_complete(), "must be complete after merging dsr_pbo_sensitivity");
+    assert!(
+        !loaded.failed_scenario_descriptions().iter().any(|d| d.starts_with("dsr_pbo_sensitivity")),
+        "the merged sensitivity scenario passed and must not appear as failed: {:?}",
+        loaded.failed_scenario_descriptions()
+    );
+    assert_eq!(loaded.scenarios_run(), 7, "6 pure scenarios + 1 finalized sensitivity");
+
+    cleanup(&run_dir);
+}
+
+/// A finalization retry with IDENTICAL sensitivity content is a genuine
+/// no-op -- never a duplicate scenario, never a second audit event.
+#[test]
+fn rga01k_finalize_is_idempotent_on_identical_replay() {
+    let (report, run_dir, config, bars) = run_and_persist("finalize_idem", "RgaFinalizeIdem");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaFinalizeIdem" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let sensitivity = fake_sensitivity(true);
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &sensitivity).unwrap();
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &sensitivity)
+        .expect("identical replay must be idempotent, not an error");
+
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must still load");
+    assert_eq!(loaded.scenarios_run(), 7, "replay must not duplicate the scenario");
+
+    let audit_jsonl = fs::read_to_string(run_dir.join("audit.jsonl")).unwrap();
+    let finalized_count = audit_jsonl
+        .lines()
+        .filter(|l| l.contains("robustness_gauntlet_finalized"))
+        .count();
+    assert_eq!(finalized_count, 1, "replay must not append a second finalized audit event");
+
+    cleanup(&run_dir);
+}
+
+/// A finalization retry with a DIFFERENT sensitivity result for the same
+/// already-finalized artifact is refused -- real evidence is never silently
+/// overwritten by a conflicting later claim.
+#[test]
+fn rga01l_finalize_rejects_conflicting_sensitivity() {
+    let (report, run_dir, config, bars) = run_and_persist("finalize_conflict", "RgaFinalizeConflict");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaFinalizeConflict" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &fake_sensitivity(true)).unwrap();
+
+    let err = finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &fake_sensitivity(false))
+        .unwrap_err();
+    assert_eq!(err, RobustnessGauntletFinalizeError::ConflictingSensitivityResult);
+
+    // The original, genuinely-finalized evidence must remain untouched --
+    // still the PASSED sensitivity result, never the rejected failed one.
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must still load");
+    assert!(
+        !loaded.failed_scenario_descriptions().iter().any(|d| d.starts_with("dsr_pbo_sensitivity")),
+        "the rejected conflicting (failed) result must never have applied: {:?}",
+        loaded.failed_scenario_descriptions()
+    );
+
+    cleanup(&run_dir);
+}
+
+/// A caller bug (wrong scenario name) is refused before touching disk.
+#[test]
+fn rga01m_finalize_rejects_wrong_scenario_name() {
+    let (report, run_dir, config, bars) = run_and_persist("finalize_wrong_name", "RgaFinalizeWrongName");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaFinalizeWrongName" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let mut wrong = fake_sensitivity(true);
+    wrong.name = "not_dsr_pbo_sensitivity".to_string();
+    let err = finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &wrong).unwrap_err();
+    assert_eq!(
+        err,
+        RobustnessGauntletFinalizeError::WrongScenarioName("not_dsr_pbo_sensitivity".to_string())
+    );
+
+    cleanup(&run_dir);
+}
+
+/// Finalization requires a structurally valid EXISTING artifact -- it can
+/// never create one from scratch. A candidate that never had its inline
+/// evidence written at all is refused.
+#[test]
+fn rga01n_finalize_on_missing_artifact_fails() {
+    let (_report, run_dir, _config, _bars) = run_and_persist("finalize_missing", "RgaFinalizeMissing");
+    // Deliberately never call write_canonical_robustness_gauntlet.
+
+    let err = finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &fake_sensitivity(true))
+        .unwrap_err();
+    assert_eq!(
+        err,
+        RobustnessGauntletFinalizeError::ExistingArtifactInvalid(
+            RobustnessGauntletArtifactError::MissingArtifact
+        )
+    );
+
+    cleanup(&run_dir);
+}
+
+/// Interrupted finalization: if the process died after the JSON file was
+/// updated but before the new audit event was appended, the artifact must
+/// NEVER read back as valid (let alone complete) -- proven here by
+/// reproducing exactly that half-written state directly (bypassing the
+/// finalize function's own atomicity) and confirming the loader fails
+/// closed with `ContentHashMismatch`, never silently accepting the
+/// unaudited content.
+#[test]
+fn rga01o_interrupted_finalization_leaves_no_falsely_complete_artifact() {
+    let (report, run_dir, config, bars) = run_and_persist("finalize_interrupt", "RgaFinalizeInterrupt");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaFinalizeInterrupt" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    // Simulate the exact interrupted state: rewrite robustness_gauntlet.json
+    // with genuinely more-complete content (as finalize would), but WITHOUT
+    // appending the corresponding robustness_gauntlet_finalized audit event.
+    tamper(&run_dir, |v| {
+        let arr = v["scenarios"].as_array_mut().unwrap();
+        arr.push(serde_json::json!({
+            "name": "dsr_pbo_sensitivity",
+            "applicable": true,
+            "passed": true,
+            "reason": serde_json::Value::Null,
+            "detail": "interrupted -- audit event never appended"
+        }));
+        let deferred = v["deferred"].as_array_mut().unwrap();
+        deferred.clear();
+    });
+
+    let err = load_canonical_robustness_gauntlet(&run_dir).unwrap_err();
+    assert_eq!(
+        err,
+        RobustnessGauntletArtifactError::ContentHashMismatch,
+        "an artifact updated without its audit event must never read back as valid"
+    );
 
     cleanup(&run_dir);
 }

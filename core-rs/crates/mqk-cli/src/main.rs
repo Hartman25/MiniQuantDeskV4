@@ -8,9 +8,9 @@ mod commands;
 
 use commands::{
     bkt::{
-        run_backtest_csv, run_backtest_db, run_regime_detect, run_review_scan,
-        run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
-        IntegrityCalendarArg,
+        run_backtest_csv, run_backtest_db, run_finalize_robustness_sensitivity,
+        run_regime_detect, run_review_scan, run_strategy_lab_evaluate, run_strategy_lab_rank,
+        run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
     },
     load_payload,
     md::{
@@ -459,6 +459,47 @@ enum BacktestCmd {
         /// Print a deterministic JSON report instead of key=value lines.
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+
+    /// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01: merge the real DSR/PBO
+    /// sensitivity result for a Research trial into an existing candidate's
+    /// robustness_gauntlet.json (produced earlier by `csv`/`db` with
+    /// `--out-dir`). A separate, later production phase from backtest
+    /// execution -- Research trial identity is established by the Research
+    /// pipeline (research-py), never known to the Rust backtest engine at
+    /// execution time.
+    FinalizeRobustnessSensitivity {
+        /// Artifact root directory (the SAME `--out-dir` the candidate's
+        /// real backtest run used) -- the candidate directory is
+        /// `{artifact_root}/{run_id}/`.
+        #[arg(long)]
+        artifact_root: String,
+
+        /// The candidate's backtest run_id (printed by `mqk backtest
+        /// csv`/`db` as `run_id=...`).
+        #[arg(long)]
+        run_id: String,
+
+        /// Path to the Research SQLite registry database.
+        #[arg(long)]
+        registry_db: String,
+
+        /// The Research trial_id this backtest candidate corresponds to.
+        #[arg(long)]
+        trial_id: String,
+
+        /// Path to the research-py project root (the directory containing
+        /// `src/mqk_research`).
+        #[arg(long)]
+        research_py_root: String,
+
+        /// Python executable to invoke.
+        #[arg(long, default_value = "python")]
+        python: String,
+
+        /// Comma-separated CSCV block-count grid (each value even, >= 4).
+        #[arg(long, default_value = "8,10,12")]
+        block_counts: String,
     },
 }
 
@@ -1016,8 +1057,36 @@ enum AuditCmd {
 // Entry point
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// CLI-MAIN-THREAD-STACK-SIZE-01: the initial OS thread's stack size is
+/// fixed at link time and NOT covered by `tokio::runtime::Builder`'s
+/// `thread_stack_size` (that only sizes tokio's own worker threads) --
+/// `Cli::parse()` and every other pre-`.await` synchronous call inside
+/// `run_cli` still execute on the ORIGINAL calling thread. This CLI's
+/// clap-derived argument-parser tree has grown large enough that an
+/// unoptimized (debug) build's default Windows main-thread stack is
+/// sometimes insufficient purely from static frame size (confirmed: an
+/// identical release build never overflows -- this is a debug-build-only
+/// symptom of accumulated CLI surface area, not a logic defect). Run the
+/// real entry point on an explicitly larger stack instead of depending on
+/// the OS/linker default, which every new subcommand narrows further.
+const MAIN_THREAD_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .stack_size(MAIN_THREAD_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime")
+                .block_on(run_cli())
+        })
+        .expect("failed to spawn main thread with expanded stack")
+        .join()
+        .expect("main thread panicked")
+}
+
+async fn run_cli() -> Result<()> {
     let _ = dotenvy::from_filename(".env.local");
 
     let cli = Cli::parse();
@@ -1362,6 +1431,25 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 run_review_scan(artifact_dir, out_dir, top, json)?;
+            }
+            BacktestCmd::FinalizeRobustnessSensitivity {
+                artifact_root,
+                run_id,
+                registry_db,
+                trial_id,
+                research_py_root,
+                python,
+                block_counts,
+            } => {
+                run_finalize_robustness_sensitivity(
+                    artifact_root,
+                    run_id,
+                    registry_db,
+                    trial_id,
+                    research_py_root,
+                    python,
+                    block_counts,
+                )?;
             }
         },
 
