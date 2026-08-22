@@ -63,9 +63,21 @@ pub struct BacktestEvidenceBundle {
     pub report: BacktestReport,
     pub artifact_lock: ArtifactLock,
     pub stress_suite: StressSuiteResult,
+    /// PROMOTION-EVIDENCE-LINEAGE-V3: the EXACT `stress_suite.json` content
+    /// hash [`crate::resolve_backtest_evidence`] verified for this
+    /// candidate (`mqk_artifacts::StressSuiteArtifact::content_sha256`,
+    /// reproducing the existing `stress_suite_sha256` audit hash -- never a
+    /// new parallel hash).
+    pub stress_artifact_sha256: String,
     /// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01 — P9 robustness evidence for
     /// this SAME candidate.
     pub robustness_evidence: RobustnessEvidence,
+    /// PROMOTION-EVIDENCE-LINEAGE-V3: the EXACT `robustness_gauntlet.json`
+    /// content hash [`crate::resolve_backtest_evidence`] verified for this
+    /// candidate (`mqk_artifacts::RobustnessGauntletArtifact::content_sha256`,
+    /// reproducing the existing `robustness_gauntlet_sha256` audit hash --
+    /// never a new parallel hash).
+    pub finalized_robustness_artifact_sha256: String,
     /// The run's starting cash, for [`crate::PromotionInput::initial_equity_micros`].
     /// `BacktestReport` itself carries no such field (it's a config value,
     /// not engine output), so this is read from the SAME hash-chained
@@ -244,11 +256,13 @@ pub fn resolve_backtest_evidence(
     // --- StressSuiteResult authority ---
     let stress_artifact =
         load_canonical_stress_suite(&candidate_canon).map_err(BacktestEvidenceResolveError::StressSuite)?;
+    let stress_artifact_sha256 = stress_artifact.content_sha256();
     let stress_suite = stress_result_from_artifact(&stress_artifact);
 
     // --- RobustnessEvidence authority (P9) ---
     let robustness_artifact = load_canonical_robustness_gauntlet(&candidate_canon)
         .map_err(BacktestEvidenceResolveError::RobustnessGauntlet)?;
+    let finalized_robustness_artifact_sha256 = robustness_artifact.content_sha256();
     let robustness_evidence = robustness_evidence_from_artifact(&robustness_artifact);
 
     Ok(BacktestEvidenceBundle {
@@ -256,7 +270,9 @@ pub fn resolve_backtest_evidence(
         report,
         artifact_lock,
         stress_suite,
+        stress_artifact_sha256,
         robustness_evidence,
+        finalized_robustness_artifact_sha256,
         initial_equity_micros,
     })
 }

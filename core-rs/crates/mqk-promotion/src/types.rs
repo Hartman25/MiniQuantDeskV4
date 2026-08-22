@@ -38,6 +38,43 @@ pub struct PromotionConfig {
     pub max_probability_backtest_overfitting: f64,
 }
 
+impl PromotionConfig {
+    /// PROMOTION-EVIDENCE-LINEAGE-V3: a deterministic SHA-256 fingerprint
+    /// over the exact threshold values a `PromotionDecision` was judged
+    /// against. Unlike every other durable lineage hash this patch reuses
+    /// (stress/robustness artifact content hashes, the Research judge
+    /// artifact hash), there is no PRE-EXISTING artifact or audit event
+    /// hashing `PromotionConfig` -- it is assembled fresh from trusted
+    /// daemon/deployment configuration on every request, never durably
+    /// written anywhere else. This is therefore the one genuinely NEW
+    /// fingerprint this patch computes, following the same
+    /// canonical-byte-buffer-then-SHA-256 pattern already established by
+    /// `mqk-daemon::promotion_evidence_validation::compute_evidence_fingerprint_v2`
+    /// -- each `f64` is hashed via its raw IEEE-754 big-endian bytes
+    /// (`to_bits().to_be_bytes()`), never a lossy decimal string
+    /// representation, so two configs with the same bit pattern always
+    /// fingerprint identically and no rounding ambiguity can hide a
+    /// genuine threshold change.
+    pub fn deterministic_fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut buf = Vec::with_capacity(8 * 7);
+        for v in [
+            self.min_sharpe,
+            self.max_mdd,
+            self.min_cagr,
+            self.min_profit_factor,
+            self.min_profitable_months_pct,
+            self.min_deflated_sharpe_ratio,
+            self.max_probability_backtest_overfitting,
+        ] {
+            buf.extend_from_slice(&v.to_bits().to_be_bytes());
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(&buf);
+        hex::encode(hasher.finalize())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Patch B2 — Stress suite result
 // ---------------------------------------------------------------------------

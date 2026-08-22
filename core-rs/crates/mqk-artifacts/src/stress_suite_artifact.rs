@@ -105,6 +105,21 @@ impl StressSuiteArtifact {
             })
             .collect()
     }
+
+    /// PROMOTION-EVIDENCE-LINEAGE-V3: reproduces, bit-for-bit, the SAME
+    /// `stress_suite_sha256` [`write_canonical_stress_suite`] computed at
+    /// write time and [`load_canonical_stress_suite`] already verified
+    /// against `audit.jsonl` before returning this artifact -- never a new,
+    /// independently-invented hash. Safe to call on any successfully loaded
+    /// (therefore already content-hash-verified) artifact.
+    pub fn content_sha256(&self) -> String {
+        let json = serde_json::to_string_pretty(self)
+            .expect("StressSuiteArtifact serialization cannot fail");
+        let contents = format!("{json}\n");
+        let mut hasher = Sha256::new();
+        hasher.update(contents.as_bytes());
+        hex::encode(hasher.finalize())
+    }
 }
 
 impl From<&StressSuiteRunOutput> for StressSuiteArtifact {

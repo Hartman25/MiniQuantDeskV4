@@ -167,6 +167,13 @@ pub struct VerifiedPromotionOosEvidence {
     /// (never a caller claim) -- see
     /// `crate::research_registry::VerifiedResearchAuthority::strategy_id`.
     strategy_id: String,
+    /// PROMOTION-EVIDENCE-LINEAGE-V3: the EXISTING, already-verified
+    /// `research_judge_artifacts.judge_artifact_sha256` this evidence was
+    /// authorized against (`crate::research_registry::VerifiedResearchAuthority::
+    /// judge_artifact_sha256`) -- reused here rather than a new parallel
+    /// hash, so durable promotion lineage can record exactly which judge
+    /// artifact judged this trial.
+    judge_artifact_sha256: String,
 }
 
 impl VerifiedPromotionOosEvidence {
@@ -193,6 +200,12 @@ impl VerifiedPromotionOosEvidence {
 
     pub fn probability_of_backtest_overfitting(&self) -> f64 {
         self.probability_of_backtest_overfitting
+    }
+
+    /// The judge artifact's own registered `judge_artifact_sha256` (see
+    /// field docs). PROMOTION-EVIDENCE-LINEAGE-V3.
+    pub fn judge_artifact_sha256(&self) -> &str {
+        &self.judge_artifact_sha256
     }
 }
 
@@ -452,8 +465,12 @@ pub fn verify_promotion_oos_evidence(
     // integrity against its own `judge_artifact_sha256`, and compares
     // PARSED JSON VALUES using a single (Rust-side) canonicalization.
     let mut research_strategy_id: Option<String> = None;
+    let mut research_judge_artifact_sha256: Option<String> = None;
     match load_research_authority(registry_db_path, trial_id, &economic_eval_id, &judge) {
-        Ok(authority) => research_strategy_id = Some(authority.strategy_id),
+        Ok(authority) => {
+            research_strategy_id = Some(authority.strategy_id);
+            research_judge_artifact_sha256 = Some(authority.judge_artifact_sha256);
+        }
         Err(authority_errs) => errs.extend(authority_errs),
     }
 
@@ -644,6 +661,8 @@ pub fn verify_promotion_oos_evidence(
         probability_of_backtest_overfitting: probability_of_backtest_overfitting
             .expect("no errs means every field above was successfully extracted"),
         strategy_id: research_strategy_id
+            .expect("no errs means load_research_authority returned Ok above"),
+        judge_artifact_sha256: research_judge_artifact_sha256
             .expect("no errs means load_research_authority returned Ok above"),
     })
 }

@@ -34,10 +34,10 @@
 use chrono::{Duration, Utc};
 use mqk_db::{
     evaluate_promotion_tradability, fetch_current_promotion_state,
-    fetch_promotion_transition_lineage_v2, fetch_promotion_history,
+    fetch_promotion_transition_lineage_v3, fetch_promotion_history,
     insert_strategy_promotion_transition, insert_strategy_promotion_transition_serialized,
     is_legal_transition, resolve_evidence_lineage, transition_requires_evidence,
-    upsert_strategy_registry_entry, InsertStrategyPromotionTransitionArgs, PromotionEvidenceLineageV2,
+    upsert_strategy_registry_entry, InsertStrategyPromotionTransitionArgs, PromotionEvidenceLineageV3,
     PromotionReasonCode, TransitionInsertOutcome, UpsertStrategyRegistryArgs, ENV_DB_URL,
     PROMOTION_STATE_ACTIVE_PAPER, PROMOTION_STATE_DEMOTED, PROMOTION_STATE_PAPER_APPROVED,
     PROMOTION_STATE_REJECTED, PROMOTION_STATE_RETIRED, PROMOTION_STATE_SHADOW_APPROVED,
@@ -1140,19 +1140,25 @@ async fn serialized_insert_duplicate_replay_is_idempotent() -> anyhow::Result<()
 // best-effort follow-up step.
 // ---------------------------------------------------------------------------
 
-fn sample_lineage(trial_id: &str, backtest_run_id: Uuid) -> PromotionEvidenceLineageV2 {
-    PromotionEvidenceLineageV2 {
+fn sample_lineage(trial_id: &str, backtest_run_id: Uuid) -> PromotionEvidenceLineageV3 {
+    PromotionEvidenceLineageV3 {
         research_trial_id: Some(trial_id.to_string()),
         research_economic_eval_id: Some(format!("{trial_id}_eval")),
         research_deflated_sharpe_ratio: Some(0.72),
         research_probability_backtest_overfitting: Some(0.11),
         backtest_run_id: Some(backtest_run_id),
+        research_judge_artifact_sha256: Some(format!("{trial_id}_judge_sha256")),
+        stress_protocol_version: Some("bkt_stress_suite_v1".to_string()),
+        stress_artifact_sha256: Some(format!("{trial_id}_stress_sha256")),
+        robustness_protocol_version: Some("bkt_robustness_gauntlet_v1".to_string()),
+        finalized_robustness_artifact_sha256: Some(format!("{trial_id}_robustness_sha256")),
+        promotion_policy_fingerprint: Some(format!("{trial_id}_policy_fingerprint")),
     }
 }
 
 /// A fresh evidence-bearing transition insert with `Some(lineage)` commits
 /// the lineage in the SAME row, readable immediately via
-/// `fetch_promotion_transition_lineage_v2` -- not a separate, independently
+/// `fetch_promotion_transition_lineage_v3` -- not a separate, independently
 /// failable follow-up write.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
@@ -1179,7 +1185,7 @@ async fn lineage_atomicity_fresh_insert_commits_lineage_with_transition() -> any
         insert_strategy_promotion_transition_serialized(&pool, &args, Some(&lineage)).await?;
     assert!(matches!(outcome, TransitionInsertOutcome::Inserted(_)));
 
-    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+    let recorded = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
         .await?
         .expect("lineage must be readable for the transition_id just inserted");
     assert_eq!(recorded, lineage, "recorded lineage must exactly match what was supplied");
@@ -1213,13 +1219,79 @@ async fn lineage_atomicity_none_leaves_columns_unset() -> anyhow::Result<()> {
     let outcome = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
     assert!(matches!(outcome, TransitionInsertOutcome::Inserted(_)));
 
-    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+    let recorded = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
         .await?
         .expect("row must exist");
     assert!(
         recorded.research_trial_id.is_none() && recorded.backtest_run_id.is_none(),
         "no lineage was supplied -- columns must stay genuinely unset, got {recorded:?}"
     );
+
+    Ok(())
+}
+
+/// PROMOTION-EVIDENCE-LINEAGE-V3 LEGACY DUPLICATE RULE (REQUIRED NEGATIVE
+/// CONTROL): a transition_id that was originally committed with NO lineage
+/// (predates complete lineage, or was never evidence-bearing) must NEVER be
+/// retroactively backfilled by a later "duplicate" request that happens to
+/// supply valid lineage -- that would falsely imply the historical decision
+/// was authorized by evidence it never actually had. The insert must be
+/// refused (`Err`), and the row's lineage columns must remain exactly as
+/// they were: genuinely NULL, not silently populated.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn lineage_atomicity_duplicate_of_null_lineage_row_refuses_backfill() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("promo_lineage_legacy_null_dup");
+    let symbol = "LNLG";
+    let timeframe_secs = 900;
+    let now = Utc::now();
+
+    let args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:lineage_legacy_null")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+
+    // Original commit: the identical request, but with NO lineage supplied
+    // -- simulating a historical evidence-requiring transition that
+    // predates complete lineage tracking.
+    let first = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
+    assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
+    let before = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
+        .await?
+        .expect("row must exist after first insert");
+    assert!(before.research_trial_id.is_none(), "precondition: lineage must start NULL");
+
+    // A later "duplicate" request for the EXACT SAME transition_id, now
+    // supplying genuinely valid lineage -- must be refused, never silently
+    // attached.
+    let lineage = sample_lineage("trial-legacy-backfill-attempt-001", Uuid::new_v4());
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args, Some(&lineage))
+        .await
+        .expect_err(
+            "a duplicate request supplying lineage for a historically NULL-lineage row must be \
+             refused, never silently backfilled",
+        );
+    assert!(
+        format!("{err:#}").contains("duplicate of a historical transition with NO recorded evidence lineage"),
+        "got: {err:#}"
+    );
+
+    // The historical row's lineage must remain exactly as it was: NULL.
+    let after = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
+        .await?
+        .expect("row must still exist");
+    assert!(
+        after.research_trial_id.is_none() && after.backtest_run_id.is_none(),
+        "the refused lineage must never have been backfilled onto the historical row, got {after:?}"
+    );
+    assert_eq!(before, after, "lineage state must be byte-identical before and after the refused attempt");
 
     Ok(())
 }
@@ -1257,7 +1329,7 @@ async fn lineage_atomicity_duplicate_replay_with_matching_lineage_is_idempotent(
         insert_strategy_promotion_transition_serialized(&pool, &args, Some(&lineage)).await?;
     assert!(matches!(second, TransitionInsertOutcome::Duplicate(_)));
 
-    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+    let recorded = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
         .await?
         .expect("lineage must still be present after the idempotent replay");
     assert_eq!(recorded, lineage);
@@ -1305,7 +1377,7 @@ async fn lineage_atomicity_mismatched_replay_lineage_is_rejected() -> anyhow::Re
         "got: {err:#}"
     );
 
-    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+    let recorded = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
         .await?
         .expect("original lineage row must still exist");
     assert_eq!(
@@ -1356,12 +1428,12 @@ async fn lineage_atomicity_cross_transition_lineage_is_independent() -> anyhow::
     // B is inserted with NO lineage of its own.
     insert_strategy_promotion_transition_serialized(&pool, &args_b, None).await?;
 
-    let recorded_a = fetch_promotion_transition_lineage_v2(&pool, args_a.transition_id)
+    let recorded_a = fetch_promotion_transition_lineage_v3(&pool, args_a.transition_id)
         .await?
         .expect("A's row must exist");
     assert_eq!(recorded_a, lineage_a);
 
-    let recorded_b = fetch_promotion_transition_lineage_v2(&pool, args_b.transition_id)
+    let recorded_b = fetch_promotion_transition_lineage_v3(&pool, args_b.transition_id)
         .await?
         .expect("B's row must exist");
     assert!(

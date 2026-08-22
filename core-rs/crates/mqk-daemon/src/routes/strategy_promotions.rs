@@ -490,6 +490,20 @@ struct TransitionResponseArgs {
     blockers: Vec<String>,
 }
 
+/// PROMOTION-EVIDENCE-LINEAGE-V3: everything Gate 4c/4d resolves that the
+/// durable evidence-lineage write (Gate 5b, below) needs — bundled rather
+/// than an unwieldy tuple, mirroring [`TransitionResponseArgs`].
+struct PromotionLineageSource {
+    oos_evidence: Box<mqk_promotion::VerifiedPromotionOosEvidence>,
+    backtest_run_id: Uuid,
+    research_judge_artifact_sha256: String,
+    stress_protocol_version: String,
+    stress_artifact_sha256: String,
+    robustness_protocol_version: String,
+    finalized_robustness_artifact_sha256: String,
+    promotion_policy_fingerprint: String,
+}
+
 fn transition_response(args: TransitionResponseArgs) -> Response {
     (
         args.status,
@@ -1031,7 +1045,27 @@ pub(crate) async fn strategy_promotion_transition(
              accepted verified Research + Backtest evidence for shadow_approved transition",
         );
 
-        Some((oos_evidence, backtest_bundle.run_id))
+        // PROMOTION-EVIDENCE-LINEAGE-V3: capture everything the durable
+        // lineage write below needs -- every hash here reuses one already
+        // verified above (research_evidence_gate's registry-anchored judge
+        // hash, backtest_evidence_gate's content-hash-verified stress/
+        // robustness artifacts) except promotion_policy_fingerprint, the
+        // one genuinely new fingerprint (see PromotionConfig::
+        // deterministic_fingerprint's own docs). Computed before
+        // `oos_evidence` moves into the struct below.
+        let research_judge_artifact_sha256 = oos_evidence.judge_artifact_sha256().to_string();
+        Some(PromotionLineageSource {
+            oos_evidence,
+            backtest_run_id: backtest_bundle.run_id,
+            research_judge_artifact_sha256,
+            stress_protocol_version: backtest_bundle.stress_suite.protocol_version.clone(),
+            stress_artifact_sha256: backtest_bundle.stress_artifact_sha256.clone(),
+            robustness_protocol_version: backtest_bundle.robustness_evidence.protocol_version.clone(),
+            finalized_robustness_artifact_sha256: backtest_bundle
+                .finalized_robustness_artifact_sha256
+                .clone(),
+            promotion_policy_fingerprint: policy.deterministic_fingerprint(),
+        })
     } else {
         None
     };
@@ -1096,16 +1130,22 @@ pub(crate) async fn strategy_promotion_transition(
     // write up front so it can be passed into the SAME atomic transaction
     // as the transition insert -- never a second, independently-failable
     // step after the transition is already committed.
-    let evidence_lineage = promotion_lineage.as_ref().map(|(oos_evidence, backtest_run_id)| {
-        mqk_db::PromotionEvidenceLineageV2 {
-            research_trial_id: Some(oos_evidence.trial_id().to_string()),
-            research_economic_eval_id: Some(oos_evidence.economic_eval_id().to_string()),
-            research_deflated_sharpe_ratio: Some(oos_evidence.deflated_sharpe_ratio()),
-            research_probability_backtest_overfitting: Some(
-                oos_evidence.probability_of_backtest_overfitting(),
-            ),
-            backtest_run_id: Some(*backtest_run_id),
-        }
+    let evidence_lineage = promotion_lineage.as_ref().map(|src| mqk_db::PromotionEvidenceLineageV3 {
+        research_trial_id: Some(src.oos_evidence.trial_id().to_string()),
+        research_economic_eval_id: Some(src.oos_evidence.economic_eval_id().to_string()),
+        research_deflated_sharpe_ratio: Some(src.oos_evidence.deflated_sharpe_ratio()),
+        research_probability_backtest_overfitting: Some(
+            src.oos_evidence.probability_of_backtest_overfitting(),
+        ),
+        backtest_run_id: Some(src.backtest_run_id),
+        research_judge_artifact_sha256: Some(src.research_judge_artifact_sha256.clone()),
+        stress_protocol_version: Some(src.stress_protocol_version.clone()),
+        stress_artifact_sha256: Some(src.stress_artifact_sha256.clone()),
+        robustness_protocol_version: Some(src.robustness_protocol_version.clone()),
+        finalized_robustness_artifact_sha256: Some(
+            src.finalized_robustness_artifact_sha256.clone(),
+        ),
+        promotion_policy_fingerprint: Some(src.promotion_policy_fingerprint.clone()),
     });
 
     // Gate 5: atomic, serialized insert (STRATEGY-PROMOTION-REGISTRY-

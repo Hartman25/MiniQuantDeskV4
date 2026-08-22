@@ -592,18 +592,26 @@ fn identity_lock_key(strategy_id: &str, symbol: &str, timeframe_secs: i64) -> St
 /// on drop and no transition is recorded). This replaced a prior best-effort
 /// `UPDATE` run by the caller AFTER this function returned `Inserted`, which
 /// could leave a successful shadow-approved transition with no durable
-/// Research/Backtest evidence lineage if that follow-up write failed. On an
-/// idempotent replay (`Duplicate`), lineage is written/verified inside the
-/// SAME transaction as the duplicate-detection commit rather than skipped:
-/// if this `transition_id` already carries recorded lineage, the supplied
-/// `evidence_lineage` must match it exactly (never silently replaced by a
-/// divergent value); if it carries none yet, the supplied lineage is
-/// written now. `Conflict` never reaches lineage-writing code at all -- the
-/// transaction is rolled back before any lineage write is attempted.
+/// Research/Backtest evidence lineage if that follow-up write failed.
+///
+/// PROMOTION-EVIDENCE-LINEAGE-V3 LEGACY DUPLICATE RULE: a fresh insert (this
+/// call created the row moments ago in this same transaction) always writes
+/// the supplied lineage (`write_evidence_lineage_for_fresh_insert_in_tx`).
+/// An idempotent replay (`Duplicate` -- the row already existed BEFORE this
+/// call began) only ever VERIFIES lineage, never writes it
+/// (`verify_evidence_lineage_for_duplicate_in_tx`): if that historical row
+/// already carries lineage, the supplied `evidence_lineage` must match it
+/// exactly (never silently replaced by a divergent value); if the
+/// historical row's lineage is NULL (it predates complete lineage, or was
+/// never evidence-bearing), the newly supplied lineage is REFUSED (`Err`)
+/// -- a later duplicate request must never retroactively attach evidence to
+/// a historical decision and claim that evidence authorized it. `Conflict`
+/// never reaches lineage-writing code at all -- the transaction is rolled
+/// back before any lineage write/verify is attempted.
 pub async fn insert_strategy_promotion_transition_serialized(
     pool: &PgPool,
     args: &InsertStrategyPromotionTransitionArgs,
-    evidence_lineage: Option<&PromotionEvidenceLineageV2>,
+    evidence_lineage: Option<&PromotionEvidenceLineageV3>,
 ) -> Result<TransitionInsertOutcome> {
     if args.strategy_id.trim().is_empty() {
         anyhow::bail!(
@@ -674,7 +682,8 @@ pub async fn insert_strategy_promotion_transition_serialized(
             });
         }
         if let Some(lineage) = evidence_lineage {
-            write_evidence_lineage_in_tx(&mut tx, args.transition_id, lineage).await?;
+            verify_evidence_lineage_for_duplicate_in_tx(&mut tx, args.transition_id, lineage)
+                .await?;
         }
         tx.commit().await.context(
             "insert_strategy_promotion_transition_serialized: commit (duplicate) failed",
@@ -749,7 +758,8 @@ pub async fn insert_strategy_promotion_transition_serialized(
     .context("insert_strategy_promotion_transition_serialized: insert failed")?;
 
     if let Some(lineage) = evidence_lineage {
-        write_evidence_lineage_in_tx(&mut tx, args.transition_id, lineage).await?;
+        write_evidence_lineage_for_fresh_insert_in_tx(&mut tx, args.transition_id, lineage)
+            .await?;
     }
 
     tx.commit()
@@ -1055,46 +1065,52 @@ pub async fn resolve_evidence_lineage(
 // Adding required fields there would force an unrelated, mechanical edit to
 // every one of those call sites for a "narrow" migration. Instead,
 // `insert_strategy_promotion_transition_serialized` takes evidence lineage
-// as its own optional parameter and writes it (via
-// `write_evidence_lineage_in_tx`, below) inside the SAME transaction as the
-// transition row -- PROMOTION-LINEAGE-ATOMICITY-01 replaced an earlier
+// as its own optional parameter and writes/verifies it (via
+// `write_evidence_lineage_for_fresh_insert_in_tx`/
+// `verify_evidence_lineage_for_duplicate_in_tx`, below) inside the SAME
+// transaction as the transition row -- PROMOTION-LINEAGE-ATOMICITY-01 replaced an earlier
 // best-effort post-commit `UPDATE` (which could leave a successful
 // shadow-approved transition with no durable evidence lineage if that
 // follow-up write failed) with this atomic write.
 
 /// Durable Research/Backtest evidence lineage for one promotion transition.
-/// `None` in every field for a transition that predates migration 0065, or
-/// one that was not evidence-bearing.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PromotionEvidenceLineageV2 {
+/// `None` in every field for a transition that predates migration 0065/0066,
+/// or one that was not evidence-bearing.
+///
+/// PROMOTION-EVIDENCE-LINEAGE-V3: extends the original five (migration
+/// 0065) identity-pointer/judged-statistic fields with six more, each
+/// reusing an EXISTING accepted audit hash already computed and verified
+/// elsewhere in the evidence chain (see migration 0066's own docs) --
+/// except `promotion_policy_fingerprint`, the one genuinely new fingerprint
+/// (`PromotionConfig` was never durably hashed anywhere before).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PromotionEvidenceLineageV3 {
     pub research_trial_id: Option<String>,
     pub research_economic_eval_id: Option<String>,
     pub research_deflated_sharpe_ratio: Option<f64>,
     pub research_probability_backtest_overfitting: Option<f64>,
     pub backtest_run_id: Option<Uuid>,
+    pub research_judge_artifact_sha256: Option<String>,
+    pub stress_protocol_version: Option<String>,
+    pub stress_artifact_sha256: Option<String>,
+    pub robustness_protocol_version: Option<String>,
+    pub finalized_robustness_artifact_sha256: Option<String>,
+    pub promotion_policy_fingerprint: Option<String>,
 }
 
-/// Write/verify `lineage` for `transition_id` INSIDE `tx` -- the caller
-/// (`insert_strategy_promotion_transition_serialized`) commits or rolls
-/// back `tx` as a whole, so this write is never durable independently of
-/// the transition row it documents (PROMOTION-LINEAGE-ATOMICITY-01).
-///
-/// If `transition_id` already carries recorded lineage (an idempotent
-/// retry of the same evidence-bearing transition), `lineage` must match it
-/// exactly -- a divergent payload for an already-lineage-bound
-/// `transition_id` is refused (`Err`, causing the whole transaction to roll
-/// back), never silently overwritten. If it carries none yet, `lineage` is
-/// written now.
-async fn write_evidence_lineage_in_tx(
+/// Read the durable evidence lineage columns for `transition_id` INSIDE
+/// `tx`. `Ok(None)` iff the row itself does not exist.
+async fn read_evidence_lineage_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     transition_id: Uuid,
-    lineage: &PromotionEvidenceLineageV2,
-) -> Result<()> {
-    let existing_row = sqlx::query(
+) -> Result<Option<PromotionEvidenceLineageV3>> {
+    let row = sqlx::query(
         r#"
         select research_trial_id, research_economic_eval_id,
                research_deflated_sharpe_ratio, research_probability_backtest_overfitting,
-               backtest_run_id
+               backtest_run_id, research_judge_artifact_sha256, stress_protocol_version,
+               stress_artifact_sha256, robustness_protocol_version,
+               finalized_robustness_artifact_sha256, promotion_policy_fingerprint
         from sys_strategy_promotion_transitions
         where transition_id = $1
         "#,
@@ -1102,29 +1118,36 @@ async fn write_evidence_lineage_in_tx(
     .bind(transition_id)
     .fetch_optional(&mut **tx)
     .await
-    .context("write_evidence_lineage_in_tx: existing-lineage read failed")?;
+    .context("read_evidence_lineage_in_tx: read failed")?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some(row_to_lineage(&row)?))
+}
 
-    if let Some(row) = existing_row {
-        let existing = PromotionEvidenceLineageV2 {
-            research_trial_id: row.try_get("research_trial_id")?,
-            research_economic_eval_id: row.try_get("research_economic_eval_id")?,
-            research_deflated_sharpe_ratio: row.try_get("research_deflated_sharpe_ratio")?,
-            research_probability_backtest_overfitting: row
-                .try_get("research_probability_backtest_overfitting")?,
-            backtest_run_id: row.try_get("backtest_run_id")?,
-        };
-        if existing.research_trial_id.is_some() {
-            if existing != *lineage {
-                anyhow::bail!(
-                    "write_evidence_lineage_in_tx: transition_id {transition_id} already has \
-                     recorded evidence lineage that disagrees with the newly-supplied lineage \
-                     -- refusing to overwrite authoritative lineage"
-                );
-            }
-            return Ok(()); // idempotent replay -- already correct, nothing to write
-        }
-    }
+fn row_to_lineage(row: &sqlx::postgres::PgRow) -> Result<PromotionEvidenceLineageV3> {
+    Ok(PromotionEvidenceLineageV3 {
+        research_trial_id: row.try_get("research_trial_id")?,
+        research_economic_eval_id: row.try_get("research_economic_eval_id")?,
+        research_deflated_sharpe_ratio: row.try_get("research_deflated_sharpe_ratio")?,
+        research_probability_backtest_overfitting: row
+            .try_get("research_probability_backtest_overfitting")?,
+        backtest_run_id: row.try_get("backtest_run_id")?,
+        research_judge_artifact_sha256: row.try_get("research_judge_artifact_sha256")?,
+        stress_protocol_version: row.try_get("stress_protocol_version")?,
+        stress_artifact_sha256: row.try_get("stress_artifact_sha256")?,
+        robustness_protocol_version: row.try_get("robustness_protocol_version")?,
+        finalized_robustness_artifact_sha256: row
+            .try_get("finalized_robustness_artifact_sha256")?,
+        promotion_policy_fingerprint: row.try_get("promotion_policy_fingerprint")?,
+    })
+}
 
+async fn write_evidence_lineage_columns_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    transition_id: Uuid,
+    lineage: &PromotionEvidenceLineageV3,
+) -> Result<()> {
     sqlx::query(
         r#"
         update sys_strategy_promotion_transitions
@@ -1132,7 +1155,13 @@ async fn write_evidence_lineage_in_tx(
             research_economic_eval_id = $3,
             research_deflated_sharpe_ratio = $4,
             research_probability_backtest_overfitting = $5,
-            backtest_run_id = $6
+            backtest_run_id = $6,
+            research_judge_artifact_sha256 = $7,
+            stress_protocol_version = $8,
+            stress_artifact_sha256 = $9,
+            robustness_protocol_version = $10,
+            finalized_robustness_artifact_sha256 = $11,
+            promotion_policy_fingerprint = $12
         where transition_id = $1
         "#,
     )
@@ -1142,26 +1171,97 @@ async fn write_evidence_lineage_in_tx(
     .bind(lineage.research_deflated_sharpe_ratio)
     .bind(lineage.research_probability_backtest_overfitting)
     .bind(lineage.backtest_run_id)
+    .bind(lineage.research_judge_artifact_sha256.clone())
+    .bind(lineage.stress_protocol_version.clone())
+    .bind(lineage.stress_artifact_sha256.clone())
+    .bind(lineage.robustness_protocol_version.clone())
+    .bind(lineage.finalized_robustness_artifact_sha256.clone())
+    .bind(lineage.promotion_policy_fingerprint.clone())
     .execute(&mut **tx)
     .await
-    .context("write_evidence_lineage_in_tx: write failed")?;
+    .context("write_evidence_lineage_columns_in_tx: write failed")?;
     Ok(())
+}
+
+/// Write `lineage` for a row THIS SAME call just inserted, INSIDE `tx` --
+/// the caller (`insert_strategy_promotion_transition_serialized`'s
+/// fresh-insert branch) guarantees the row was created moments ago in this
+/// same transaction and therefore has NULL lineage. Defensively re-reads
+/// and asserts that guarantee rather than trusting it blindly: if it does
+/// not hold (a caller-contract violation), this fails closed (`Err`)
+/// instead of silently overwriting existing lineage.
+async fn write_evidence_lineage_for_fresh_insert_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    transition_id: Uuid,
+    lineage: &PromotionEvidenceLineageV3,
+) -> Result<()> {
+    let existing = read_evidence_lineage_in_tx(tx, transition_id).await?.context(
+        "write_evidence_lineage_for_fresh_insert_in_tx: row must already exist (just inserted)",
+    )?;
+    if existing.research_trial_id.is_some() {
+        anyhow::bail!(
+            "write_evidence_lineage_for_fresh_insert_in_tx: transition_id {transition_id} \
+             already has recorded lineage -- this function must only be called immediately \
+             after inserting a brand-new row"
+        );
+    }
+    write_evidence_lineage_columns_in_tx(tx, transition_id, lineage).await
+}
+
+/// Verify (NEVER write) `lineage` for a `transition_id` that was found to
+/// ALREADY EXIST before this call began -- i.e. a genuine duplicate/replay
+/// of a previously-committed transition, INSIDE `tx`.
+///
+/// PROMOTION-EVIDENCE-LINEAGE-V3 LEGACY DUPLICATE RULE: if the historical
+/// row's lineage is NULL (it predates complete lineage, or was never
+/// evidence-bearing), this refuses to retroactively attach the newly
+/// supplied lineage and claim that evidence authorized the historical
+/// decision -- `Err`, never a silent backfill. If the historical row
+/// already carries lineage, `lineage` must match it exactly (the original
+/// idempotent-replay behavior, unchanged).
+async fn verify_evidence_lineage_for_duplicate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    transition_id: Uuid,
+    lineage: &PromotionEvidenceLineageV3,
+) -> Result<()> {
+    let existing = read_evidence_lineage_in_tx(tx, transition_id)
+        .await?
+        .context("verify_evidence_lineage_for_duplicate_in_tx: row must already exist")?;
+    if existing.research_trial_id.is_none() {
+        anyhow::bail!(
+            "verify_evidence_lineage_for_duplicate_in_tx: transition_id {transition_id} is a \
+             duplicate of a historical transition with NO recorded evidence lineage -- refusing \
+             to retroactively attach newly supplied lineage; the historical decision's \
+             missing-lineage truth must be preserved (PROMOTION-EVIDENCE-LINEAGE-V3 legacy \
+             duplicate rule)"
+        );
+    }
+    if existing != *lineage {
+        anyhow::bail!(
+            "verify_evidence_lineage_for_duplicate_in_tx: transition_id {transition_id} already \
+             has recorded evidence lineage that disagrees with the newly-supplied lineage -- \
+             refusing to overwrite authoritative lineage"
+        );
+    }
+    Ok(()) // idempotent replay -- already correct, nothing to write
 }
 
 /// Read back the durable evidence lineage for one transition. `Ok(None)`
 /// means `transition_id` does not exist at all -- distinct from
-/// `Ok(Some(PromotionEvidenceLineageV2 { .. all None .. }))`, which means
-/// the row exists but has no recorded lineage (pre-0065 or non-evidence-
-/// bearing transition).
-pub async fn fetch_promotion_transition_lineage_v2(
+/// `Ok(Some(PromotionEvidenceLineageV3 { .. all None .. }))`, which means
+/// the row exists but has no recorded lineage (pre-0065/0066 or
+/// non-evidence-bearing transition).
+pub async fn fetch_promotion_transition_lineage_v3(
     pool: &PgPool,
     transition_id: Uuid,
-) -> Result<Option<PromotionEvidenceLineageV2>> {
+) -> Result<Option<PromotionEvidenceLineageV3>> {
     let row = sqlx::query(
         r#"
         select research_trial_id, research_economic_eval_id,
                research_deflated_sharpe_ratio, research_probability_backtest_overfitting,
-               backtest_run_id
+               backtest_run_id, research_judge_artifact_sha256, stress_protocol_version,
+               stress_artifact_sha256, robustness_protocol_version,
+               finalized_robustness_artifact_sha256, promotion_policy_fingerprint
         from sys_strategy_promotion_transitions
         where transition_id = $1
         "#,
@@ -1169,18 +1269,11 @@ pub async fn fetch_promotion_transition_lineage_v2(
     .bind(transition_id)
     .fetch_optional(pool)
     .await
-    .context("fetch_promotion_transition_lineage_v2 failed")?;
+    .context("fetch_promotion_transition_lineage_v3 failed")?;
     let Some(row) = row else {
         return Ok(None);
     };
-    Ok(Some(PromotionEvidenceLineageV2 {
-        research_trial_id: row.try_get("research_trial_id")?,
-        research_economic_eval_id: row.try_get("research_economic_eval_id")?,
-        research_deflated_sharpe_ratio: row.try_get("research_deflated_sharpe_ratio")?,
-        research_probability_backtest_overfitting: row
-            .try_get("research_probability_backtest_overfitting")?,
-        backtest_run_id: row.try_get("backtest_run_id")?,
-    }))
+    Ok(Some(row_to_lineage(&row)?))
 }
 
 #[cfg(test)]

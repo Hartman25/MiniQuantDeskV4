@@ -136,6 +136,23 @@ impl RobustnessGauntletArtifact {
             .and_then(|s| s.research_trial_id.as_deref())
     }
 
+    /// PROMOTION-EVIDENCE-LINEAGE-V3: reproduces, bit-for-bit, the SAME
+    /// `robustness_gauntlet_sha256` [`write_canonical_robustness_gauntlet`]/
+    /// [`finalize_canonical_robustness_gauntlet_with_sensitivity`] computed
+    /// at write time and [`load_canonical_robustness_gauntlet`] already
+    /// verified against `audit.jsonl` before returning this artifact --
+    /// never a new, independently-invented hash. Safe to call on any
+    /// successfully loaded (therefore already content-hash-verified)
+    /// artifact.
+    pub fn content_sha256(&self) -> String {
+        let json = serde_json::to_string_pretty(self)
+            .expect("RobustnessGauntletArtifact serialization cannot fail");
+        let contents = format!("{json}\n");
+        let mut hasher = Sha256::new();
+        hasher.update(contents.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     /// Mirrors `mqk_backtest::RobustnessGauntletOutput::is_complete`: true
     /// iff `deferred` is empty and every
     /// `mqk_backtest::REQUIRED_ROBUSTNESS_SCENARIO_NAMES` entry is present
