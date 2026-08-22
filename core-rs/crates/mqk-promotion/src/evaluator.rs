@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::types::{
     Candidate, PromotionConfig, PromotionDecision, PromotionInput, PromotionMetrics,
-    PromotionReport, RunProvenance, REQUIRED_STRESS_PROTOCOL_VERSION,
+    PromotionReport, RunProvenance, REQUIRED_ROBUSTNESS_PROTOCOL_VERSION,
+    REQUIRED_STRESS_PROTOCOL_VERSION,
 };
 
 // ============================================================================
@@ -144,6 +145,40 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
                 ));
             }
         }
+    }
+
+    // CANONICAL-ROBUSTNESS-PROMOTION-GATE-01 — P9 robustness gauntlet gate.
+    // Protocol identity is checked BEFORE completeness/pass-state so an
+    // unknown/stale/fabricated protocol never gets a more permissive
+    // "incomplete" or "failed" reason instead of the real one (mirrors the
+    // stress-suite gate's own ordering, PROMOTION-STRESS-AUTHORITY-REPAIR-01).
+    match &input.robustness_evidence {
+        None => {
+            fail_reasons.push(format!(
+                "Robustness evidence missing: PromotionInput.robustness_evidence is None -- \
+                 P9 robustness-gauntlet evidence (protocol {:?}) is required for promotion",
+                REQUIRED_ROBUSTNESS_PROTOCOL_VERSION
+            ));
+        }
+        Some(re) if re.protocol_version != REQUIRED_ROBUSTNESS_PROTOCOL_VERSION => {
+            fail_reasons.push(format!(
+                "Robustness evidence protocol mismatch: got {:?}, required {:?}",
+                re.protocol_version, REQUIRED_ROBUSTNESS_PROTOCOL_VERSION
+            ));
+        }
+        Some(re) if !re.is_complete => {
+            fail_reasons.push(format!(
+                "Robustness evidence incomplete: deferred scenario(s) remain: [{}]",
+                re.deferred_scenarios.join(", ")
+            ));
+        }
+        Some(re) if !re.all_applicable_passed => {
+            fail_reasons.push(format!(
+                "Robustness evidence failed: [{}]",
+                re.failed_scenarios.join(", ")
+            ));
+        }
+        Some(_) => {} // complete, protocol-matching, every applicable scenario passed -- OK
     }
 
     // PATCH F3 — Fail closed on NaN key metrics.

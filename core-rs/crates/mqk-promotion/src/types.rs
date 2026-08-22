@@ -129,6 +129,50 @@ impl StressSuiteResult {
     }
 }
 
+/// The exact versioned P9 robustness-gauntlet protocol
+/// [`evaluate_promotion`](crate::evaluate_promotion) requires
+/// [`RobustnessEvidence::protocol_version`] to equal. Anchored directly to
+/// [`mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION`] -- never
+/// duplicated as a separate literal -- so promotion authority always
+/// tracks whatever protocol `mqk_backtest::run_robustness_gauntlet` /
+/// `mqk_backtest::dsr_pbo_sensitivity_scenario` actually emit.
+pub const REQUIRED_ROBUSTNESS_PROTOCOL_VERSION: &str =
+    mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION;
+
+/// P9 (`BKT-ROBUSTNESS-GAUNTLET-01`) robustness evidence for one candidate.
+/// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01: bridges
+/// `mqk_artifacts::RobustnessGauntletArtifact` (that crate cannot depend on
+/// `mqk-promotion`, the reverse dependency already exists) into the type
+/// `evaluate_promotion` consumes, exactly mirroring how [`StressSuiteResult`]
+/// bridges `mqk_artifacts::StressSuiteArtifact`.
+///
+/// Deliberately carries only the JUDGMENT already computed by
+/// `mqk_artifacts::RobustnessGauntletArtifact::{is_complete,
+/// all_applicable_passed, failed_scenario_descriptions}` -- never the full
+/// per-scenario detail (that stays in the durable artifact for audit; this
+/// type is promotion-policy input only).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RobustnessEvidence {
+    /// The exact gauntlet protocol this evidence was produced under.
+    /// Checked against [`REQUIRED_ROBUSTNESS_PROTOCOL_VERSION`] by
+    /// `evaluate_promotion`.
+    pub protocol_version: String,
+    /// Every scenario required under `protocol_version`
+    /// (`mqk_backtest::REQUIRED_ROBUSTNESS_SCENARIO_NAMES`) was genuinely
+    /// evaluated -- present in `scenarios` and nothing left in `deferred`.
+    /// Distinct from `all_applicable_passed`: a candidate can be complete
+    /// and still fail.
+    pub is_complete: bool,
+    /// Every APPLICABLE required scenario passed (mirrors
+    /// `RobustnessGauntletArtifact::all_applicable_passed`).
+    pub all_applicable_passed: bool,
+    /// Human-readable descriptions of failed applicable scenarios (empty
+    /// when `all_applicable_passed`).
+    pub failed_scenarios: Vec<String>,
+    /// Names of scenarios still deferred (empty when `is_complete`).
+    pub deferred_scenarios: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
@@ -165,6 +209,16 @@ pub struct PromotionInput {
     /// compatibility default equivalent to "evidence passed", and no
     /// caller-populated struct that can satisfy this field.
     pub oos_evidence: Option<VerifiedPromotionOosEvidence>, // P7C-REPAIR-01/-02/-03
+    /// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01 — P9 (`BKT-ROBUSTNESS-GAUNTLET-01`)
+    /// robustness evidence for this SAME candidate.
+    ///
+    /// **Promotion is blocked if `None`** (gauntlet not run), if
+    /// `protocol_version` does not match [`REQUIRED_ROBUSTNESS_PROTOCOL_VERSION`],
+    /// if `is_complete` is `false` (a required scenario is missing/deferred
+    /// without becoming genuinely inapplicable), or if
+    /// `all_applicable_passed` is `false`. Only a complete, valid,
+    /// protocol-matching, fully-passed P9 proof satisfies this gate.
+    pub robustness_evidence: Option<RobustnessEvidence>,
 }
 
 // ---------------------------------------------------------------------------

@@ -164,3 +164,20 @@ pub fn valid_oos_evidence_for_testing(trial_id: &str) -> VerifiedPromotionOosEvi
     verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &judge_json)
         .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")
 }
+
+/// A complete, protocol-matching, fully-passed P9 robustness evidence
+/// bundle -- the ONLY shape `evaluate_promotion`'s robustness gate accepts
+/// (CANONICAL-ROBUSTNESS-PROMOTION-GATE-01). `RobustnessEvidence` carries
+/// only the already-computed judgment (no verification chain like OOS
+/// evidence), so a direct struct literal is the genuine, non-shortcut
+/// construction path here -- unlike `valid_oos_evidence_for_testing`, there
+/// is no separate "real verifier" this bypasses.
+pub fn valid_robustness_evidence_for_testing() -> mqk_promotion::RobustnessEvidence {
+    mqk_promotion::RobustnessEvidence {
+        protocol_version: mqk_promotion::REQUIRED_ROBUSTNESS_PROTOCOL_VERSION.to_string(),
+        is_complete: true,
+        all_applicable_passed: true,
+        failed_scenarios: Vec::new(),
+        deferred_scenarios: Vec::new(),
+    }
+}

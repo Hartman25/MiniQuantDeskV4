@@ -162,8 +162,22 @@ fn run_and_persist_full(
     mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
         .expect("write_canonical_stress_suite must succeed");
 
+    // CANONICAL-ROBUSTNESS-PROMOTION-GATE-01: merge a test-fabricated
+    // dsr_pbo_sensitivity outcome before writing -- real cross-language
+    // wiring is proven separately (mqk-backtest's own
+    // scenario_dsr_pbo_sensitivity_01.rs + research-py's
+    // test_dsr_pbo_sensitivity_cli.py); this P10 chain test only needs a
+    // genuinely COMPLETE P9 artifact so the promotion-level gate this
+    // patch adds does not itself become the reason the chain fails.
     let gauntlet_output = run_robustness_gauntlet(&report, &config, &bars, || {
         Box::new(BuyHoldSell { name: strategy_name, bar_idx: 0, qty, sell_at_idx })
+    })
+    .merge_dsr_pbo_sensitivity(mqk_backtest::RobustnessScenarioOutcome {
+        name: mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet must succeed");
@@ -294,12 +308,15 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     assert!(bundle.stress_suite.passed, "profitable/non-fragile candidate must pass its own stress suite");
 
     // Robustness gauntlet: proves it is a genuinely resolvable, audit-
-    // consumable part of the chain (P9), even though it is not yet wired
-    // as a hard evaluate_promotion gate (P10 does not redesign that here).
+    // consumable part of the chain (P9) -- CANONICAL-ROBUSTNESS-PROMOTION-
+    // GATE-01 wires it as a hard evaluate_promotion gate below via
+    // bundle.robustness_evidence.
     let candidate_dir = root.join(report.run_id.to_string());
     let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&candidate_dir)
         .expect("robustness gauntlet must be resolvable as part of the evidence chain");
-    assert_eq!(gauntlet.scenarios_run(), 6);
+    assert_eq!(gauntlet.scenarios_run(), 7, "6 pure scenarios + merged dsr_pbo_sensitivity");
+    assert!(bundle.robustness_evidence.is_complete);
+    assert!(bundle.robustness_evidence.all_applicable_passed);
 
     // Research OOS evidence: a real SQLite registry, strategy_id matching
     // this SAME candidate's report.strategy_name -- the cross-candidate
@@ -318,6 +335,7 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
         stress_suite: Some(bundle.stress_suite),
         artifact_lock: Some(bundle.artifact_lock),
         oos_evidence: Some(oos_evidence),
+        robustness_evidence: Some(bundle.robustness_evidence),
     };
     let decision = evaluate_promotion(&lenient_promotion_config(), &input);
     assert!(
@@ -380,6 +398,7 @@ fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
         stress_suite: Some(bundle.stress_suite),
         artifact_lock: Some(bundle.artifact_lock),
         oos_evidence: Some(oos_evidence),
+        robustness_evidence: Some(bundle.robustness_evidence),
     };
     let decision = evaluate_promotion(&lenient_promotion_config(), &input);
     assert!(

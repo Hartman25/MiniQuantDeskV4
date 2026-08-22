@@ -159,6 +159,7 @@ fn select_best_picks_correct_winner() {
                 stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
                 oos_evidence: Some(common::valid_oos_evidence_for_testing("candidate_c1_trial")), // P7C
+                robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
             },
         },
         Candidate {
@@ -170,6 +171,7 @@ fn select_best_picks_correct_winner() {
                 stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // needs lock; fails on metrics
                 oos_evidence: Some(common::valid_oos_evidence_for_testing("candidate_c2_trial")), // P7C: isolate MDD failure
+                robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
             },
         },
         Candidate {
@@ -180,6 +182,7 @@ fn select_best_picks_correct_winner() {
                 stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
                 oos_evidence: Some(common::valid_oos_evidence_for_testing("candidate_c3_trial")), // P7C
+                robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
             },
         },
     ];

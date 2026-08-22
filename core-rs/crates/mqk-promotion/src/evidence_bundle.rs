@@ -39,10 +39,11 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::artifact_gate::{lock_artifact_from_str, ArtifactLock, LockError};
-use crate::types::StressSuiteResult;
+use crate::types::{RobustnessEvidence, StressSuiteResult};
 use mqk_artifacts::{
-    load_canonical_backtest_report, load_canonical_stress_suite, BacktestReportArtifactError,
-    StressSuiteArtifact, StressSuiteArtifactError,
+    load_canonical_backtest_report, load_canonical_robustness_gauntlet,
+    load_canonical_stress_suite, BacktestReportArtifactError, RobustnessGauntletArtifact,
+    RobustnessGauntletArtifactError, StressSuiteArtifact, StressSuiteArtifactError,
 };
 use mqk_backtest::BacktestReport;
 
@@ -62,6 +63,9 @@ pub struct BacktestEvidenceBundle {
     pub report: BacktestReport,
     pub artifact_lock: ArtifactLock,
     pub stress_suite: StressSuiteResult,
+    /// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01 — P9 robustness evidence for
+    /// this SAME candidate.
+    pub robustness_evidence: RobustnessEvidence,
     /// The run's starting cash, for [`crate::PromotionInput::initial_equity_micros`].
     /// `BacktestReport` itself carries no such field (it's a config value,
     /// not engine output), so this is read from the SAME hash-chained
@@ -112,6 +116,11 @@ pub enum BacktestEvidenceResolveError {
     /// candidate-binding / integrity checks -- see
     /// [`mqk_artifacts::StressSuiteArtifactError`].
     StressSuite(StressSuiteArtifactError),
+    /// `robustness_gauntlet.json` is missing, malformed, or fails its own
+    /// candidate-binding / integrity checks -- see
+    /// [`mqk_artifacts::RobustnessGauntletArtifactError`].
+    /// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01.
+    RobustnessGauntlet(RobustnessGauntletArtifactError),
 }
 
 impl std::fmt::Display for BacktestEvidenceResolveError {
@@ -141,6 +150,7 @@ impl std::fmt::Display for BacktestEvidenceResolveError {
             ),
             Self::ArtifactLockFailed(e) => write!(f, "artifact lock failed: {e}"),
             Self::StressSuite(e) => write!(f, "stress suite evidence invalid: {e}"),
+            Self::RobustnessGauntlet(e) => write!(f, "robustness gauntlet evidence invalid: {e}"),
         }
     }
 }
@@ -236,11 +246,17 @@ pub fn resolve_backtest_evidence(
         load_canonical_stress_suite(&candidate_canon).map_err(BacktestEvidenceResolveError::StressSuite)?;
     let stress_suite = stress_result_from_artifact(&stress_artifact);
 
+    // --- RobustnessEvidence authority (P9) ---
+    let robustness_artifact = load_canonical_robustness_gauntlet(&candidate_canon)
+        .map_err(BacktestEvidenceResolveError::RobustnessGauntlet)?;
+    let robustness_evidence = robustness_evidence_from_artifact(&robustness_artifact);
+
     Ok(BacktestEvidenceBundle {
         run_id,
         report,
         artifact_lock,
         stress_suite,
+        robustness_evidence,
         initial_equity_micros,
     })
 }
@@ -266,5 +282,22 @@ fn stress_result_from_artifact(a: &StressSuiteArtifact) -> StressSuiteResult {
             a.failed_scenario_descriptions(),
             a.protocol_version.clone(),
         )
+    }
+}
+
+/// Bridge `mqk_artifacts::RobustnessGauntletArtifact` to
+/// `mqk_promotion::RobustnessEvidence` -- mirrors [`stress_result_from_artifact`].
+/// `a.protocol_version` was already verified by
+/// `load_canonical_robustness_gauntlet` to equal
+/// `mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION`; still carried
+/// through (never dropped/re-derived) so `evaluate_promotion`'s own
+/// protocol check is a real, independent verification.
+fn robustness_evidence_from_artifact(a: &RobustnessGauntletArtifact) -> RobustnessEvidence {
+    RobustnessEvidence {
+        protocol_version: a.protocol_version.clone(),
+        is_complete: a.is_complete(),
+        all_applicable_passed: a.all_applicable_passed(),
+        failed_scenarios: a.failed_scenario_descriptions(),
+        deferred_scenarios: a.deferred_scenario_names(),
     }
 }

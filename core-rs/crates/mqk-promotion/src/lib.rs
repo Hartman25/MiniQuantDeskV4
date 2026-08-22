@@ -16,6 +16,6 @@ pub use evidence_bundle::{
 pub use research_evidence::{verify_promotion_oos_evidence, VerifiedPromotionOosEvidence}; // P7C-REPAIR-01/-02/-03
 pub use types::{
     write_promotion_report_json, Candidate, PromotionConfig, PromotionDecision, PromotionInput,
-    PromotionMetrics, PromotionReport, RunProvenance, StressSuiteResult,
-    REQUIRED_STRESS_PROTOCOL_VERSION,
+    PromotionMetrics, PromotionReport, RobustnessEvidence, RunProvenance, StressSuiteResult,
+    REQUIRED_ROBUSTNESS_PROTOCOL_VERSION, REQUIRED_STRESS_PROTOCOL_VERSION,
 };

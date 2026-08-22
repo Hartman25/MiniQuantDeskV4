@@ -154,6 +154,28 @@ fn run_and_persist_full(
     mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
         .expect("write_canonical_stress_suite must succeed");
 
+    // CANONICAL-ROBUSTNESS-PROMOTION-GATE-01: real robustness-gauntlet
+    // evidence (P9), merged with a test-fabricated dsr_pbo_sensitivity
+    // outcome -- real cross-language wiring is proven separately
+    // (mqk-backtest's scenario_dsr_pbo_sensitivity_01.rs, research-py's
+    // test_dsr_pbo_sensitivity_cli.py); this seam only needs a genuinely
+    // COMPLETE artifact so resolve_backtest_evidence can structurally
+    // resolve it (whether the candidate's scenarios PASS is a separate,
+    // real question -- bes01b below proves a genuinely failed one still
+    // resolves).
+    let gauntlet_output = mqk_backtest::run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(BuyHoldSell::named(strategy_name, qty, sell_at_idx))
+    })
+    .merge_dsr_pbo_sensitivity(mqk_backtest::RobustnessScenarioOutcome {
+        name: mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
+        .expect("write_canonical_robustness_gauntlet must succeed");
+
     (report, root, config, bars)
 }
 

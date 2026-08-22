@@ -987,6 +987,7 @@ pub(crate) async fn strategy_promotion_transition(
             stress_suite: Some(backtest_bundle.stress_suite.clone()),
             artifact_lock: Some(backtest_bundle.artifact_lock.clone()),
             oos_evidence: Some(*oos_evidence.clone()),
+            robustness_evidence: Some(backtest_bundle.robustness_evidence.clone()),
         };
         let decision = mqk_promotion::evaluate_promotion(&policy, &promotion_input);
         if !decision.passed {

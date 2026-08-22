@@ -1344,5 +1344,6 @@ fn otherwise_valid_input(
         stress_suite: Some(StressSuiteResult::pass(3, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
         oos_evidence,
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing()),
     }
 }
