@@ -29,25 +29,17 @@
 //!   cargo test -p mqk-daemon --test scenario_strategy_promotion_closure_proof_01f \
 //!     -- --include-ignored --nocapture
 //!
-//! FINAL-P7A-P7B-REPLAY-AUTHORITY-01 (2026-08-22): fixed this file's
-//! `write_real_backtest_evidence`/`ResearchEvidenceFixture` call site to
-//! compile against `p7a_p7b_economic_replay_stress_scenario`'s new required
-//! `economic_eval_id` parameter and the corrected "MANDATORY MEANS MANDATORY"
-//! `not_evaluable -> applicable: true` mapping. NOT independently
-//! re-verified against a live Postgres/Python environment in this session
-//! (no `MQK_DATABASE_URL` configured here). A REAL, KNOWN CONSEQUENCE,
-//! honestly flagged rather than silently patched: this file's
-//! `write_research_evidence_fixture` is the lightweight fixture (no
-//! `inputs` recorded in its `economic_walk_forward.json`), so
-//! `p7a_p7b_economic_replay_stress` now correctly reports
-//! `applicable: true, passed: false` for it instead of the previous
-//! `applicable: false` -- this may cause `closure_proof_full_lifecycle_
-//! through_real_routes`'s early evidence-requiring transition to fail where
-//! it previously passed. Repairing this requires migrating the fixture to a
-//! genuinely qualifying Research trial (real `run_registered_economic_
-//! walkforward_eval` output with recorded `inputs`) and re-running against a
-//! real disposable Postgres -- not attempted here, since this environment
-//! cannot execute or verify that migration.
+//! FINAL-P10-FIXTURE-REALISM-01 (2026-08-22): the mandatory
+//! `p7a_p7b_economic_replay_stress`/`genuine_shuffled_placebo` scenarios
+//! require genuine, registry-anchored `inputs` to pass, which the lightweight
+//! hand-built `write_research_evidence_fixture` fixture could never provide.
+//! `closure_proof_full_lifecycle_through_real_routes` now builds its Research
+//! evidence via `write_real_research_evidence_via_production_pipeline` (the
+//! real Research production pipeline, duplicated here from
+//! `scenario_strategy_promotion_routes_01.rs` for the same "no cross-crate
+//! test visibility" reason). `smooth_uptrend_bars` was replaced with a
+//! genuinely multi-regime bars fixture (see its own doc comment) so
+//! `month_year_regime_concentration` also genuinely passes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -173,104 +165,6 @@ struct ResearchEvidenceFixture {
     judge_path: PathBuf,
 }
 
-fn write_research_evidence_fixture(root: &std::path::Path, seed: &str) -> ResearchEvidenceFixture {
-    use sha2::{Digest, Sha256};
-
-    let trial_id = format!("trial_{seed}");
-    let experiment_id = format!("exp_{seed}");
-    let economic_eval_id = format!("econ_eval_{seed}");
-
-    let evidence_dir = root.join(format!("research_evidence_{seed}"));
-    std::fs::create_dir_all(&evidence_dir).expect("create research evidence dir");
-
-    let daily_csv = b"date,net_daily_return\n2021-01-01,0.0010\n2021-01-02,0.0021\n".to_vec();
-    let daily_sha = hex::encode(Sha256::digest(&daily_csv));
-    std::fs::write(evidence_dir.join("economic_daily_returns.csv"), &daily_csv)
-        .expect("write daily returns csv");
-
-    let economic_json = format!(
-        r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}},"folds":[{{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}}]}}"#
-    );
-    let economic_sha = hex::encode(Sha256::digest(economic_json.as_bytes()));
-    std::fs::write(evidence_dir.join("economic_walk_forward.json"), &economic_json)
-        .expect("write economic artifact");
-
-    let judge_json = format!(
-        r#"{{"schema_version":"multiple_testing_judge_v1","protocol":{{"protocol_id":"research_multiple_testing_judge_v1"}},"comparison_scope":{{"experiment_id":"{experiment_id}"}},"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":0.85}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
-    );
-    let judge_sha = hex::encode(Sha256::digest(judge_json.as_bytes()));
-    let judge_path = root.join(format!("judge_{seed}.json"));
-    std::fs::write(&judge_path, &judge_json).expect("write judge artifact");
-
-    // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01 / REAL-RESEARCH-TO-
-    // PROMOTION-E2E-01: registered via the REAL `ResearchResultStore`
-    // production methods (research-py, real Python subprocess), never a
-    // hand-rolled `rusqlite` schema -- see the identical fix and rationale
-    // in `scenario_strategy_promotion_routes_01.rs`'s own copy of this
-    // function (a hand-rolled minimal schema silently diverges from the
-    // real registry schema `dsr_pbo_sensitivity_cli.py` reads for P9).
-    let registry_db_path = root.join("research_registry.sqlite3");
-    let hypothesis_id = format!("hyp_{seed}");
-    let judge_id = format!("judge_{seed}");
-    let script = format!(
-        "from pathlib import Path\n\
-         from mqk_research.exp_distributed.storage import ResearchResultStore\n\
-         from mqk_research.ml.economic_walkforward import PROTOCOL_ID as ECON_PROTOCOL_ID\n\
-         store = ResearchResultStore(Path({registry_db}))\n\
-         store.register_hypothesis(hypothesis_id={hypothesis_id}, experiment_id={experiment_id})\n\
-         store.register_trial(\n\
-         \ttrial_id={trial_id}, experiment_id={experiment_id}, hypothesis_id={hypothesis_id},\n\
-         \tstrategy_id={strategy_id}, protocol_id=ECON_PROTOCOL_ID, identity={{'minimal': True}},\n\
-         )\n\
-         attempt_id, _ = store.begin_attempt(trial_id={trial_id}, origin='closure_proof_it_fixture')\n\
-         store.finalize_attempt(\n\
-         \tattempt_id, status='succeeded', result_id={economic_eval_id},\n\
-         \tartifact_paths={{'economic_walk_forward': {economic_path}}},\n\
-         \tresult_summary={{'folds_used': 3}},\n\
-         )\n\
-         judge_json = Path({judge_path}).read_text(encoding='utf-8')\n\
-         store.register_judge_artifact(\n\
-         \tjudge_id={judge_id}, experiment_id={experiment_id}, hypothesis_id=None,\n\
-         \tartifact_path={judge_path}, judge_artifact_sha256={judge_sha},\n\
-         \tcanonical_judge_json=judge_json, schema_version='multiple_testing_judge_v1',\n\
-         \tprotocol_id='research_multiple_testing_judge_v1',\n\
-         )\n",
-        registry_db = py_str_literal(&registry_db_path.display().to_string()),
-        hypothesis_id = py_str_literal(&hypothesis_id),
-        experiment_id = py_str_literal(&experiment_id),
-        trial_id = py_str_literal(&trial_id),
-        strategy_id = py_str_literal(seed),
-        economic_eval_id = py_str_literal(&economic_eval_id),
-        economic_path = py_str_literal(
-            &evidence_dir.join("economic_walk_forward.json").display().to_string()
-        ),
-        judge_path = py_str_literal(&judge_path.display().to_string()),
-        judge_id = py_str_literal(&judge_id),
-        judge_sha = py_str_literal(&judge_sha),
-    );
-    let src_dir = research_py_root().join("src");
-    let output = std::process::Command::new("python")
-        .env("PYTHONPATH", &src_dir)
-        .arg("-c")
-        .arg(&script)
-        .output()
-        .expect("failed to spawn python real-registry fixture-builder");
-    assert!(
-        output.status.success(),
-        "real-registry fixture-builder script failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    ResearchEvidenceFixture {
-        trial_id,
-        economic_eval_id,
-        registry_db_path,
-        evidence_dir,
-        judge_path,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // PRODUCTION-PROMOTION-DB-E2E-01: real Backtest-side promotion evidence, via
 // the SAME production functions mqk-cli's `backtest csv` +
@@ -279,25 +173,150 @@ fn write_research_evidence_fixture(root: &std::path::Path, seed: &str) -> Resear
 // above already is (this file is an independent test binary).
 // ---------------------------------------------------------------------------
 
-/// 182 daily bars, ~0.35%/day compounding growth: manually verified (see
-/// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01's own commit, and
-/// `scenario_strategy_promotion_routes_01.rs`'s identical fixture) to make
-/// `swing_momentum` genuinely trade AND clear every real P9 scenario.
+/// FINAL-P10-FIXTURE-REALISM-01: 240 daily bars (8 calendar months), built
+/// from three deterministic 30-day legs cycled `0,1,2,0,1,2,0,1`: a calm
+/// uptrend leg (tight 0.5% intrabar range, +0.55%/day close growth,
+/// classifies `bull_trend`), a wide-range uptrend leg (9% intrabar range,
+/// +0.17%/day close growth -- `average_range_pct` alone crosses
+/// `detect_market_regime`'s high-volatility threshold, so it classifies
+/// `high_volatility` regardless of its own positive trend), and a decline
+/// leg (-0.40%/day close growth, classifies `bear_trend`; `swing_momentum`
+/// genuinely flips short and profits from the decline). Verified directly
+/// against the real, unmodified `detect_market_regime` classifier and
+/// `run_robustness_gauntlet` (see FINAL-P10-FIXTURE-REALISM-01's own commit,
+/// and `scenario_strategy_promotion_routes_01.rs`'s identical fixture):
+/// produces 3 genuinely distinct regime buckets (`bull_trend`,
+/// `high_volatility`, `bear_trend`), each with real positive strategy P&L,
+/// none exceeding the 0.5 concentration ceiling in any of the month/year/
+/// regime dimensions -- `month_year_regime_concentration` genuinely passes.
+/// `swing_momentum` genuinely trades throughout and every other P9/stress
+/// scenario clears with real, unforced margin.
 fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
     let m: i64 = 1_000_000;
     let start: i64 = 1_704_229_200; // 2024-01-02T21:00:00Z
     let mut price = 500.0_f64;
-    let mut bars = Vec::with_capacity(182);
-    for i in 0..182i64 {
+    let mut bars = Vec::with_capacity(240);
+    for i in 0..240i64 {
         let ts = start + i * 86_400;
-        price *= 1.0035;
+        let leg = (i / 30) % 3; // 0 = calm bull, 1 = wide-range bull, 2 = decline
+        match leg {
+            0 => price *= 1.0055,
+            1 => price *= 1.0017,
+            _ => price *= 0.9960,
+        }
+        let (hi_mult, lo_mult) = if leg == 1 { (1.09, 0.91) } else { (1.005, 0.995) };
         let o = (price * m as f64) as i64;
-        let h = (price * 1.005 * m as f64) as i64;
-        let l = (price * 0.995 * m as f64) as i64;
+        let h = (price * hi_mult * m as f64) as i64;
+        let l = (price * lo_mult * m as f64) as i64;
         let c = (price * m as f64) as i64;
         bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
     }
     bars
+}
+
+/// FINAL-P10-FIXTURE-REALISM-01: runs the REAL Research production pipeline
+/// (`mqk_research.ml.real_research_promotion_e2e_cli`), duplicated here for
+/// the same "no cross-crate test visibility" reason as
+/// `write_research_evidence_fixture` above -- see
+/// `scenario_strategy_promotion_routes_01.rs`'s identical function for the
+/// full rationale. Returns one [`ResearchEvidenceFixture`] per trial, in
+/// `--entry-thresholds` order; a single-trial population is never
+/// DSR-evaluable, so callers needing a genuinely `evaluated` judge must
+/// supply at least two `entry_thresholds`.
+fn write_real_research_evidence_via_production_pipeline(
+    root: &Path,
+    seed: &str,
+    strategy_id: &str,
+    entry_thresholds: &[f64],
+) -> Vec<ResearchEvidenceFixture> {
+    let registry_db_path = root.join("research_registry.sqlite3");
+    let run_root = root.join(format!("real_research_runs_{seed}"));
+    let judge_path = root.join(format!("real_research_judge_{seed}.json"));
+    let experiment_id = format!("exp.{seed}");
+    let hypothesis_id = format!("hyp.{seed}");
+    let thresholds_arg = entry_thresholds
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let src_dir = research_py_root().join("src");
+    let output = std::process::Command::new("python")
+        .env("PYTHONPATH", &src_dir)
+        .args([
+            "-m",
+            "mqk_research.ml.real_research_promotion_e2e_cli",
+            "--registry-db",
+            &registry_db_path.display().to_string(),
+            "--run-root",
+            &run_root.display().to_string(),
+            "--experiment-id",
+            &experiment_id,
+            "--hypothesis-id",
+            &hypothesis_id,
+            "--strategy-id",
+            strategy_id,
+            "--entry-thresholds",
+            &thresholds_arg,
+            "--periods-days",
+            "560",
+            "--steps",
+            "10",
+            "--judge-out",
+            &judge_path.display().to_string(),
+        ])
+        .output()
+        .expect("failed to spawn real_research_promotion_e2e_cli");
+    assert!(
+        output.status.success(),
+        "real_research_promotion_e2e_cli failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "real_research_promotion_e2e_cli produced unparseable stdout: {e}; stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(
+        parsed["status"], "ok",
+        "real_research_promotion_e2e_cli reported non-ok status: {parsed}"
+    );
+    assert_eq!(
+        parsed["judge_status"], "evaluated",
+        "fixture precondition: the real judge must be genuinely 'evaluated' \
+         (not merely 'partially_evaluable') for these tests to exercise the real \
+         gates meaningfully: {parsed}"
+    );
+
+    let trials = parsed["trials"].as_array().expect("trials array");
+    assert_eq!(trials.len(), entry_thresholds.len());
+    trials
+        .iter()
+        .map(|t| {
+            assert_eq!(
+                t["dsr_evaluable"], true,
+                "fixture precondition: every real trial's DSR must be evaluable: {t}"
+            );
+            let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
+            let economic_eval_id = t["economic_eval_id"].as_str().expect("economic_eval_id").to_string();
+            let economic_json_path =
+                PathBuf::from(t["economic_walk_forward_json"].as_str().expect("path"));
+            let evidence_dir = economic_json_path
+                .parent()
+                .expect("economic_walk_forward_json has a parent dir")
+                .to_path_buf();
+            ResearchEvidenceFixture {
+                trial_id,
+                economic_eval_id,
+                registry_db_path: registry_db_path.clone(),
+                evidence_dir,
+                judge_path: judge_path.clone(),
+            }
+        })
+        .collect()
 }
 
 fn research_py_root() -> PathBuf {
@@ -306,10 +325,6 @@ fn research_py_root() -> PathBuf {
         .join("..")
         .join("..")
         .join("research-py")
-}
-
-fn py_str_literal(s: &str) -> String {
-    serde_json::to_string(s).expect("string always serializes")
 }
 
 /// Run a REAL `BacktestEngine`, write the REAL, genuinely complete evidence
@@ -414,7 +429,10 @@ fn write_real_backtest_evidence(
         &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
         20,   // test-fixture-only stress knob; not asserted as accepted policy
         50,   // test-fixture-only stress knob; not asserted as accepted policy
-        None, // test-fixture-only stress knob; not asserted as accepted policy
+        Some(1000), // FINAL-P7A-P7B-REPLAY-AUTHORITY-01: baseline max_target_qty is
+                    // None -- None -> finite is a genuine P7B tightening, required by
+                    // the genuine-adversity validation (matches
+                    // scenario_strategy_promotion_routes_01.rs's identical fix).
         None, // test-fixture-only stress knob; not asserted as accepted policy
         0.30, // test-fixture-only threshold; not asserted as accepted policy
     );
@@ -584,7 +602,16 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     // real Research OOS evidence, and a real Backtest evidence bundle
     // (genuine engine run + genuine, fully-complete P9 gauntlet). -----------
     let review_dir = write_paper_candidate_fixture(&root, &strategy_id, &symbol);
-    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // FINAL-P10-FIXTURE-REALISM-01: real production pipeline required -- the
+    // hand-built fixture no longer clears the mandatory p7a_p7b_economic_
+    // replay_stress/genuine_shuffled_placebo scenarios (see module doc).
+    let research_trials = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let research = &research_trials[0];
     let backtest_run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,

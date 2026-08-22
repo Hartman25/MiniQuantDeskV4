@@ -8,28 +8,22 @@
 //! mutate `MQK_STRATEGY_REVIEW_ARTIFACT_ROOT` process-wide, so this file
 //! must run with `--test-threads=1`.
 //!
-//! FINAL-P7A-P7B-REPLAY-AUTHORITY-01 (2026-08-22): fixed this file's
-//! `write_real_backtest_evidence`/`ResearchEvidenceFixture` call sites to
-//! compile against `p7a_p7b_economic_replay_stress_scenario`'s new required
-//! `economic_eval_id` parameter and the corrected "MANDATORY MEANS MANDATORY"
-//! `not_evaluable -> applicable: true` mapping (see that function's own
-//! module docs in `mqk-backtest`). NOT independently re-verified against a
-//! live Postgres/Python environment in this session (no `MQK_DATABASE_URL`
-//! configured here, consistent with every prior wave's own disclosure in
-//! this file and the master ledger). A REAL, KNOWN CONSEQUENCE of this fix,
-//! honestly flagged rather than silently patched: any test in this file
-//! using the lightweight `write_research_evidence_fixture` (no `inputs`
-//! recorded in its `economic_walk_forward.json`) together with
-//! `RealEvidenceOptions::finalize_sensitivity` at its `true` default will now
-//! genuinely see `p7a_p7b_economic_replay_stress` report
-//! `applicable: true, passed: false` (correctly -- it is a required
-//! scenario that cannot disappear via `applicable: false`), which may flip
-//! that test's overall `all_applicable_passed`/promotion-decision
-//! expectation from pass to fail. Repairing any such test requires migrating
-//! it to `write_real_research_evidence_via_production_pipeline` (which
-//! genuinely qualifies) and re-running against a real disposable Postgres --
-//! not attempted here, since this environment cannot execute or verify that
-//! migration.
+//! FINAL-P10-FIXTURE-REALISM-01 (2026-08-22): every test in this file whose
+//! overall assertion depends on a promotion decision succeeding now builds
+//! its Research evidence via `write_real_research_evidence_via_production_
+//! pipeline` (the real Research production pipeline) instead of the
+//! lightweight hand-built `write_research_evidence_fixture` -- the mandatory
+//! `p7a_p7b_economic_replay_stress`/`genuine_shuffled_placebo` scenarios
+//! require genuine, registry-anchored `inputs` to pass, and can never be
+//! satisfied by the hand-built fixture's minimal artifact. `smooth_uptrend_
+//! bars` was replaced with a genuinely multi-regime bars fixture (see its
+//! own doc comment) so `month_year_regime_concentration` also genuinely
+//! passes rather than being structurally inapplicable. Tests that reject
+//! before Research/P9 evidence is ever evaluated (auth, field validation,
+//! scanner-evidence-invalid, trial-binding mismatch, missing config,
+//! threshold overrides, tamper detection, deliberately-concentrated bars)
+//! keep the hand-built fixture -- their rejection is unaffected by Research-
+//! evidence completeness.
 //!
 //! No-DB / field-validation tests run unconditionally. Every test that
 //! touches the promotion registry itself requires `MQK_DATABASE_URL` and is
@@ -500,24 +494,44 @@ fn set_backtest_evidence_env(root: &Path) {
 // never a hand-built JSON fixture, never a fabricated RobustnessEvidence.
 // ---------------------------------------------------------------------------
 
-/// 182 daily bars, ~0.35%/day compounding growth: manually verified (see
-/// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01's own commit) to make
-/// `swing_momentum` genuinely trade AND clear every real P9 scenario
-/// (execution-delay, month/regime concentration, parameter-neighborhood,
-/// placebo, conservative-capacity) -- not tuned to force a pass on a
-/// scenario that would otherwise fail; a candidate that behaves badly still
-/// fails these for real (see `bars_that_fail_concentration` below).
+/// FINAL-P10-FIXTURE-REALISM-01: 240 daily bars (8 calendar months), built
+/// from three deterministic 30-day legs cycled `0,1,2,0,1,2,0,1`: a calm
+/// uptrend leg (tight 0.5% intrabar range, +0.55%/day close growth,
+/// classifies `bull_trend`), a wide-range uptrend leg (9% intrabar range,
+/// +0.17%/day close growth -- `average_range_pct` alone crosses
+/// `detect_market_regime`'s high-volatility threshold, so it classifies
+/// `high_volatility` regardless of its own positive trend), and a decline
+/// leg (-0.40%/day close growth, classifies `bear_trend`; `swing_momentum`
+/// genuinely flips short and profits from the decline). Verified directly
+/// against the real, unmodified `detect_market_regime` classifier and
+/// `run_robustness_gauntlet` (see FINAL-P10-FIXTURE-REALISM-01's own
+/// commit): produces 3 genuinely distinct regime buckets (`bull_trend`,
+/// `high_volatility`, `bear_trend`), each with real positive strategy P&L,
+/// none exceeding the 0.5 concentration ceiling in any of the month/year/
+/// regime dimensions -- `month_year_regime_concentration` genuinely passes,
+/// not merely avoided. `swing_momentum` genuinely trades throughout and
+/// every other P9/stress scenario (execution-delay, parameter-neighborhood,
+/// placebo, conservative-capacity, cost-stress 2x/3x) clears with real,
+/// unforced margin -- not tuned to force a pass on a scenario that would
+/// otherwise fail; a candidate that behaves badly still fails these for real
+/// (see `bars_that_fail_concentration` below).
 fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
     let m: i64 = 1_000_000;
     let start: i64 = 1_704_229_200; // 2024-01-02T21:00:00Z
     let mut price = 500.0_f64;
-    let mut bars = Vec::with_capacity(182);
-    for i in 0..182i64 {
+    let mut bars = Vec::with_capacity(240);
+    for i in 0..240i64 {
         let ts = start + i * 86_400;
-        price *= 1.0035;
+        let leg = (i / 30) % 3; // 0 = calm bull, 1 = wide-range bull, 2 = decline
+        match leg {
+            0 => price *= 1.0055,
+            1 => price *= 1.0017,
+            _ => price *= 0.9960,
+        }
+        let (hi_mult, lo_mult) = if leg == 1 { (1.09, 0.91) } else { (1.005, 0.995) };
         let o = (price * m as f64) as i64;
-        let h = (price * 1.005 * m as f64) as i64;
-        let l = (price * 0.995 * m as f64) as i64;
+        let h = (price * hi_mult * m as f64) as i64;
+        let l = (price * lo_mult * m as f64) as i64;
         let c = (price * m as f64) as i64;
         bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
     }
@@ -1000,7 +1014,16 @@ async fn valid_paper_candidate_creates_first_transition() {
     let strategy_id = "swing_momentum".to_string();
     let symbol = unique_id("SYM").to_uppercase();
     let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
-    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // FINAL-P10-FIXTURE-REALISM-01: real production pipeline required -- the
+    // hand-built fixture no longer clears the mandatory p7a_p7b_economic_
+    // replay_stress/genuine_shuffled_placebo scenarios (see module doc).
+    let research_trials = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let research = &research_trials[0];
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
@@ -1595,7 +1618,15 @@ async fn valid_transition_visible_on_read_routes() {
     let strategy_id = "swing_momentum".to_string();
     let symbol = unique_id("SYM").to_uppercase();
     let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
-    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // FINAL-P10-FIXTURE-REALISM-01: real production pipeline required (see
+    // module doc).
+    let research_trials = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let research = &research_trials[0];
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
@@ -1665,7 +1696,15 @@ async fn history_remains_visible_after_later_transition() {
     let strategy_id = "swing_momentum".to_string();
     let symbol = unique_id("SYM").to_uppercase();
     let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
-    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // FINAL-P10-FIXTURE-REALISM-01: real production pipeline required (see
+    // module doc).
+    let research_trials = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let research = &research_trials[0];
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
@@ -1763,7 +1802,15 @@ async fn duplicate_transition_request_is_idempotent() {
     let strategy_id = "swing_momentum".to_string();
     let symbol = unique_id("SYM").to_uppercase();
     let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
-    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // FINAL-P10-FIXTURE-REALISM-01: real production pipeline required (see
+    // module doc).
+    let research_trials = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let research = &research_trials[0];
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
@@ -1825,7 +1872,15 @@ async fn tradable_live_always_false() {
     let strategy_id = "swing_momentum".to_string();
     let symbol = unique_id("SYM").to_uppercase();
     let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
-    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // FINAL-P10-FIXTURE-REALISM-01: real production pipeline required (see
+    // module doc).
+    let research_trials = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let research = &research_trials[0];
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
@@ -2393,7 +2448,15 @@ async fn duplicate_retry_with_mismatched_backtest_run_id_is_rejected() {
     let strategy_id = "swing_momentum".to_string();
     let symbol = unique_id("SYM").to_uppercase();
     let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
-    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // FINAL-P10-FIXTURE-REALISM-01: real production pipeline required -- the
+    // first transition below must genuinely succeed (see module doc).
+    let research_trials = write_real_research_evidence_via_production_pipeline(
+        &root,
+        "real_e2e_positive",
+        &strategy_id,
+        &[0.45, 0.55],
+    );
+    let research = &research_trials[0];
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
