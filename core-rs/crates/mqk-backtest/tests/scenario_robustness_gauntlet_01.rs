@@ -184,15 +184,17 @@ fn rg01a_healthy_single_symbol_candidate_reports_leave_one_out_not_applicable() 
 
     assert_eq!(
         output.deferred.len(),
-        1,
-        "DSR/PBO sensitivity is honestly deferred by this pure, engine-only function -- it \
-         requires separate subprocess/filesystem composition, see \
-         dsr_pbo_sensitivity_scenario/merge_dsr_pbo_sensitivity"
+        2,
+        "DSR/PBO sensitivity and the P7A/P7B economic replay stress are honestly deferred by \
+         this pure, engine-only function -- both require separate subprocess/filesystem \
+         composition, see dsr_pbo_sensitivity_scenario/p7a_p7b_economic_replay_stress_scenario \
+         and merge_dsr_pbo_sensitivity"
     );
     assert!(output.deferred.iter().any(|d| d.name == "dsr_pbo_sensitivity"));
+    assert!(output.deferred.iter().any(|d| d.name == "p7a_p7b_economic_replay_stress"));
     assert!(
         !output.is_complete(),
-        "must not be complete until dsr_pbo_sensitivity is merged in"
+        "must not be complete until both deferred scenarios are merged in"
     );
 }
 
@@ -335,7 +337,7 @@ fn rg01g_conservative_capacity_stress_present_and_passes_for_healthy_candidate()
 }
 
 #[test]
-fn rg01h_is_complete_only_after_dsr_pbo_sensitivity_is_merged() {
+fn rg01h_is_complete_only_after_both_deferred_scenarios_are_merged() {
     use mqk_backtest::RobustnessScenarioOutcome;
 
     let bars = healthy_single_symbol_bars();
@@ -347,9 +349,9 @@ fn rg01h_is_complete_only_after_dsr_pbo_sensitivity_is_merged() {
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
         Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
     });
-    assert!(!output.is_complete(), "must be incomplete before DSR/PBO sensitivity is merged");
+    assert!(!output.is_complete(), "must be incomplete before either deferred scenario is merged");
 
-    let merged = output.merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
+    let after_dsr_pbo = output.merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
         name: "dsr_pbo_sensitivity".to_string(),
         applicable: true,
         passed: true,
@@ -357,6 +359,21 @@ fn rg01h_is_complete_only_after_dsr_pbo_sensitivity_is_merged() {
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("rg01h_test_trial".to_string()),
     });
-    assert!(merged.deferred.is_empty(), "merging must clear the deferred entry");
+    assert_eq!(
+        after_dsr_pbo.deferred.len(),
+        1,
+        "merging dsr_pbo_sensitivity must clear only its own deferred entry"
+    );
+    assert!(!after_dsr_pbo.is_complete(), "must still be incomplete: one scenario remains deferred");
+
+    let merged = after_dsr_pbo.merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
+        name: "p7a_p7b_economic_replay_stress".to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some("rg01h_test_trial".to_string()),
+    });
+    assert!(merged.deferred.is_empty(), "merging both must clear every deferred entry");
     assert!(merged.is_complete(), "must be complete once every required scenario is present");
 }

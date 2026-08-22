@@ -1311,6 +1311,85 @@ pub fn run_finalize_robustness_sensitivity(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// P7A-P7B-ECONOMIC-REPLAY-STRESS-01: genuine P7A/P7B stress finalization
+// ---------------------------------------------------------------------------
+
+/// Merge the real, genuine P7A/P7B economic replay stress result for a
+/// Research trial into an existing candidate's `robustness_gauntlet.json`,
+/// produced earlier by the SAME candidate's real backtest execution (`mqk
+/// backtest csv`/`db`). Mirrors [`run_finalize_robustness_sensitivity`]
+/// exactly -- a genuinely separate production phase, same cross-candidate
+/// authority check, same merge seam
+/// (`mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity`,
+/// generalized to accept either deferred scenario).
+#[allow(clippy::too_many_arguments)]
+pub fn run_finalize_p7a_p7b_replay_stress(
+    artifact_root: String,
+    run_id: String,
+    registry_db: String,
+    trial_id: String,
+    research_py_root: String,
+    python: String,
+    stress_out_dir: String,
+    stress_execution_slippage_bps: u32,
+    stress_execution_volatility_mult_bps: u32,
+    stress_max_target_qty: Option<u32>,
+    stress_max_position_notional_usd: Option<f64>,
+    max_drawdown_ceiling: f64,
+) -> Result<()> {
+    let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
+    let run_dir = Path::new(&artifact_root).join(run_id.to_string());
+
+    let existing = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
+        format!(
+            "existing robustness_gauntlet.json must already be real and structurally valid \
+             at {} -- run the real backtest (mqk backtest csv/db with --out-dir) first",
+            run_dir.display()
+        )
+    })?;
+
+    let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
+        &python,
+        Path::new(&research_py_root),
+        Path::new(&registry_db),
+        &trial_id,
+        &existing.strategy_name,
+        Path::new(&stress_out_dir),
+        stress_execution_slippage_bps,
+        stress_execution_volatility_mult_bps,
+        stress_max_target_qty,
+        stress_max_position_notional_usd,
+        max_drawdown_ceiling,
+    );
+
+    println!("scenario_name={}", stress.name);
+    println!("applicable={}", stress.applicable);
+    println!("passed={}", stress.passed);
+    if let Some(reason) = &stress.reason {
+        println!("reason={reason}");
+    }
+
+    let path =
+        mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &stress)
+            .with_context(|| {
+                format!(
+                    "finalize_canonical_robustness_gauntlet_with_sensitivity failed for {}",
+                    run_dir.display()
+                )
+            })?;
+
+    let finalized = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir)
+        .context("re-loading the finalized artifact failed")?;
+
+    println!("finalized_artifact={}", path.display());
+    println!("scenarios_run={}", finalized.scenarios_run());
+    println!("is_complete={}", finalized.is_complete());
+    println!("all_applicable_passed={}", finalized.all_applicable_passed());
+
+    Ok(())
+}
+
 fn parse_u32_list(s: &str) -> Result<Vec<u32>> {
     s.split(',')
         .map(|v| v.trim())

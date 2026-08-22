@@ -217,6 +217,17 @@ pub struct RobustnessEvidence {
     /// treats that identically to a genuine mismatch against
     /// `oos_evidence.trial_id()`: fail closed, never assume agreement.
     pub dsr_pbo_sensitivity_research_trial_id: Option<String>,
+    /// P7A-P7B-ECONOMIC-REPLAY-STRESS-01: the exact Research `trial_id` the
+    /// `p7a_p7b_economic_replay_stress` scenario's evidence was computed
+    /// against (mirrors `mqk_artifacts::RobustnessGauntletArtifact::
+    /// p7a_p7b_economic_replay_stress_research_trial_id`). Recorded
+    /// unconditionally whenever the scenario is present -- whether it was
+    /// genuinely evaluated, found inapplicable to this candidate, or
+    /// errored -- so `None` here means only "scenario not yet finalized",
+    /// never "no trial to bind". Same fail-closed contract as
+    /// `dsr_pbo_sensitivity_research_trial_id`: `evaluate_promotion` treats
+    /// `None`, and a mismatch against `oos_evidence.trial_id()`, identically.
+    pub p7a_p7b_economic_replay_stress_research_trial_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

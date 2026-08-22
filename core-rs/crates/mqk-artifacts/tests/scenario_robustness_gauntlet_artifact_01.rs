@@ -110,9 +110,9 @@ fn rga01a_real_round_trip() {
     assert_eq!(loaded.scenarios_run(), output.scenarios.len());
     assert_eq!(
         loaded.deferred_scenario_names().len(),
-        1,
-        "only dsr_pbo_sensitivity is deferred by this pure, engine-only run -- \
-         conservative_capacity_stress is now a real scenario"
+        2,
+        "dsr_pbo_sensitivity and p7a_p7b_economic_replay_stress are deferred by this pure, \
+         engine-only run -- conservative_capacity_stress is now a real scenario"
     );
 
     cleanup(&run_dir);
@@ -265,11 +265,19 @@ fn rga01i_loaded_artifact_complete_after_dsr_pbo_merged() {
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("rga01i_test_trial".to_string()),
+    })
+    .merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
+        name: "p7a_p7b_economic_replay_stress".to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some("rga01i_test_trial".to_string()),
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
 
     let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load");
-    assert!(loaded.is_complete(), "must be complete once dsr_pbo_sensitivity is merged in");
+    assert!(loaded.is_complete(), "must be complete once both deferred scenarios are merged in");
     assert!(loaded.deferred_scenario_names().is_empty());
 
     cleanup(&run_dir);
@@ -285,6 +293,17 @@ fn fake_sensitivity(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome {
         applicable: true,
         passed,
         reason: if passed { None } else { Some("dsr_range exceeded ceiling".to_string()) },
+        detail: "test-fabricated finalize-seam outcome".to_string(),
+        research_trial_id: Some("fake_sensitivity_trial".to_string()),
+    }
+}
+
+fn fake_p7a_p7b_stress(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome {
+    mqk_backtest::RobustnessScenarioOutcome {
+        name: mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string(),
+        applicable: true,
+        passed,
+        reason: if passed { None } else { Some("stressed max_drawdown exceeded ceiling".to_string()) },
         detail: "test-fabricated finalize-seam outcome".to_string(),
         research_trial_id: Some("fake_sensitivity_trial".to_string()),
     }
@@ -307,15 +326,22 @@ fn rga01j_finalize_merges_sensitivity_into_incomplete_artifact() {
     let sensitivity = fake_sensitivity(true);
     finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &sensitivity)
         .expect("finalize must succeed against a structurally valid existing artifact");
+    let stress = fake_p7a_p7b_stress(true);
+    finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &stress)
+        .expect("finalize must succeed against a structurally valid existing artifact");
 
     let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load after finalize");
-    assert!(loaded.is_complete(), "must be complete after merging dsr_pbo_sensitivity");
+    assert!(loaded.is_complete(), "must be complete after merging both deferred scenarios");
     assert!(
         !loaded.failed_scenario_descriptions().iter().any(|d| d.starts_with("dsr_pbo_sensitivity")),
         "the merged sensitivity scenario passed and must not appear as failed: {:?}",
         loaded.failed_scenario_descriptions()
     );
-    assert_eq!(loaded.scenarios_run(), 7, "6 pure scenarios + 1 finalized sensitivity");
+    assert_eq!(
+        loaded.scenarios_run(),
+        8,
+        "6 pure scenarios + 2 finalized deferred scenarios"
+    );
 
     cleanup(&run_dir);
 }

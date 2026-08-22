@@ -104,6 +104,12 @@ pub const REQUIRED_ROBUSTNESS_SCENARIO_NAMES: &[&str] = &[
     "placebo_temporal_offset",
     "conservative_capacity_stress",
     crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME,
+    // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: the genuine "conservative P7A/P7B
+    // execution/capacity stress" ledger item -- distinct from, and never a
+    // substitute for, `conservative_capacity_stress` above (a real but
+    // differently-scoped Rust-only stress that was previously mislabeled as
+    // satisfying this requirement).
+    crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
 ];
 
 /// The conservative max-drawdown ceiling every re-run scenario is judged
@@ -277,13 +283,16 @@ impl RobustnessGauntletOutput {
 
     /// Merge a separately-computed
     /// [`crate::dsr_pbo_sensitivity::dsr_pbo_sensitivity_scenario`] result
-    /// into this output: appends it to `scenarios` and removes the matching
-    /// entry from `deferred` (a no-op if none exists), so
+    /// (or, P7A-P7B-ECONOMIC-REPLAY-STRESS-01, a
+    /// [`crate::p7a_p7b_economic_replay_stress::p7a_p7b_economic_replay_stress_scenario`]
+    /// result) into this output: appends it to `scenarios` and removes the
+    /// matching entry from `deferred` (a no-op if none exists), so
     /// [`Self::is_complete`] can become `true` once every required scenario
-    /// has genuinely been evaluated. Never call this with a scenario whose
-    /// `name` is not [`crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME`]
-    /// -- kept name-agnostic only to avoid a redundant assertion the type
-    /// system doesn't otherwise need.
+    /// has genuinely been evaluated. Genuinely name-agnostic -- matches
+    /// purely on `outcome.name` against whatever `deferred` entry shares it;
+    /// only ever call this with an `outcome` whose `name` is one of the
+    /// scenario-name constants this module or `dsr_pbo_sensitivity` /
+    /// `p7a_p7b_economic_replay_stress` export.
     pub fn merge_dsr_pbo_sensitivity(mut self, outcome: RobustnessScenarioOutcome) -> Self {
         self.deferred.retain(|d| d.name != outcome.name);
         self.scenarios.push(outcome);
@@ -682,15 +691,28 @@ pub fn run_robustness_gauntlet(
         conservative_capacity_stress_scenario(base_config, bars, &make_strategy),
     ];
 
-    let deferred = vec![DeferredScenario {
-        name: crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string(),
-        reason: "requires subprocess/filesystem I/O (Python executable, research-py root, \
+    let deferred = vec![
+        DeferredScenario {
+            name: crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string(),
+            reason: "requires subprocess/filesystem I/O (Python executable, research-py root, \
                  registry path) this pure, engine-only function does not accept as input -- \
                  call crate::dsr_pbo_sensitivity::dsr_pbo_sensitivity_scenario separately and \
                  merge it in via RobustnessGauntletOutput::merge_dsr_pbo_sensitivity before \
                  treating this artifact as complete (see RobustnessGauntletOutput::is_complete)"
-            .to_string(),
-    }];
+                .to_string(),
+        },
+        DeferredScenario {
+            name: crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME
+                .to_string(),
+            reason: "requires a completed, registered Research trial plus subprocess/filesystem \
+                 I/O this pure, engine-only function does not accept as input -- call \
+                 crate::p7a_p7b_economic_replay_stress::p7a_p7b_economic_replay_stress_scenario \
+                 separately and merge it in via \
+                 RobustnessGauntletOutput::merge_dsr_pbo_sensitivity (name-agnostic) before \
+                 treating this artifact as complete (see RobustnessGauntletOutput::is_complete)"
+                .to_string(),
+        },
+    ];
 
     RobustnessGauntletOutput {
         protocol_version: ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION.to_string(),

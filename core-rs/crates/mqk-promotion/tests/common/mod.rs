@@ -226,5 +226,6 @@ pub fn valid_robustness_evidence_for_testing(research_trial_id: &str) -> mqk_pro
         failed_scenarios: Vec::new(),
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some(research_trial_id.to_string()),
+        p7a_p7b_economic_replay_stress_research_trial_id: Some(research_trial_id.to_string()),
     }
 }

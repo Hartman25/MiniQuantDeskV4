@@ -8,9 +8,10 @@ mod commands;
 
 use commands::{
     bkt::{
-        run_backtest_csv, run_backtest_db, run_finalize_robustness_sensitivity,
-        run_regime_detect, run_review_scan, run_strategy_lab_evaluate, run_strategy_lab_rank,
-        run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
+        run_backtest_csv, run_backtest_db, run_finalize_p7a_p7b_replay_stress,
+        run_finalize_robustness_sensitivity, run_regime_detect, run_review_scan,
+        run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
+        IntegrityCalendarArg,
     },
     load_payload,
     md::{
@@ -516,6 +517,79 @@ enum BacktestCmd {
         /// Overfitting (must be in `[0, 1]`).
         #[arg(long)]
         pbo_max_sensitivity_range: f64,
+    },
+
+    /// P7A-P7B-ECONOMIC-REPLAY-STRESS-01: merge the real, genuine P7A/P7B
+    /// economic replay stress result for a Research trial into an existing
+    /// candidate's robustness_gauntlet.json (produced earlier by `csv`/`db`
+    /// with `--out-dir`). Re-evaluates the trial's FROZEN OOS prediction
+    /// stream (never re-trained) through the real `run_economic_walkforward`
+    /// machinery under an explicit stress configuration -- see
+    /// `mqk_research.ml.p7a_p7b_economic_replay_stress_cli`'s own module
+    /// docs for the full replay-authority contract.
+    FinalizeP7aP7bReplayStress {
+        /// Artifact root directory (the SAME `--out-dir` the candidate's
+        /// real backtest run used) -- the candidate directory is
+        /// `{artifact_root}/{run_id}/`.
+        #[arg(long)]
+        artifact_root: String,
+
+        /// The candidate's backtest run_id (printed by `mqk backtest
+        /// csv`/`db` as `run_id=...`).
+        #[arg(long)]
+        run_id: String,
+
+        /// Path to the Research SQLite registry database.
+        #[arg(long)]
+        registry_db: String,
+
+        /// The Research trial_id this backtest candidate corresponds to --
+        /// must be the SAME trial_id already bound to this candidate's P7C
+        /// evidence and its dsr_pbo_sensitivity finalization.
+        #[arg(long)]
+        trial_id: String,
+
+        /// Path to the research-py project root (the directory containing
+        /// `src/mqk_research`).
+        #[arg(long)]
+        research_py_root: String,
+
+        /// Python executable to invoke.
+        #[arg(long, default_value = "python")]
+        python: String,
+
+        /// Directory to write the stressed economic re-evaluation's own
+        /// output artifacts into (never the original candidate's evidence
+        /// directory -- the original is never touched).
+        #[arg(long)]
+        stress_out_dir: String,
+
+        /// P7A stress knob: slippage_bps for the stressed
+        /// ExecutionPricingSpec. Required, no default.
+        #[arg(long)]
+        stress_execution_slippage_bps: u32,
+
+        /// P7A stress knob: volatility_mult_bps for the stressed
+        /// ExecutionPricingSpec. Required, no default.
+        #[arg(long)]
+        stress_execution_volatility_mult_bps: u32,
+
+        /// P7B stress knob: max_target_qty for the stressed
+        /// WeightToShareSpec. Optional -- omit for uncapped.
+        #[arg(long)]
+        stress_max_target_qty: Option<u32>,
+
+        /// P7B stress knob: max_position_notional_usd for the stressed
+        /// WeightToShareSpec. Optional -- omit for uncapped.
+        #[arg(long)]
+        stress_max_position_notional_usd: Option<f64>,
+
+        /// Maximum allowed max-drawdown fraction (e.g. 0.30) the stressed
+        /// replay must not breach to pass. Required, no default -- there is
+        /// no accepted source establishing a specific ceiling; the
+        /// operator/Research-policy owner must supply one.
+        #[arg(long)]
+        max_drawdown_ceiling: f64,
     },
 }
 
@@ -1469,6 +1543,35 @@ async fn run_cli() -> Result<()> {
                     block_counts,
                     dsr_max_sensitivity_range,
                     pbo_max_sensitivity_range,
+                )?;
+            }
+            BacktestCmd::FinalizeP7aP7bReplayStress {
+                artifact_root,
+                run_id,
+                registry_db,
+                trial_id,
+                research_py_root,
+                python,
+                stress_out_dir,
+                stress_execution_slippage_bps,
+                stress_execution_volatility_mult_bps,
+                stress_max_target_qty,
+                stress_max_position_notional_usd,
+                max_drawdown_ceiling,
+            } => {
+                run_finalize_p7a_p7b_replay_stress(
+                    artifact_root,
+                    run_id,
+                    registry_db,
+                    trial_id,
+                    research_py_root,
+                    python,
+                    stress_out_dir,
+                    stress_execution_slippage_bps,
+                    stress_execution_volatility_mult_bps,
+                    stress_max_target_qty,
+                    stress_max_position_notional_usd,
+                    max_drawdown_ceiling,
                 )?;
             }
         },

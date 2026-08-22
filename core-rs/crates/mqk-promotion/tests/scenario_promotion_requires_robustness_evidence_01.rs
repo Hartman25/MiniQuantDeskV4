@@ -95,6 +95,7 @@ fn robustness_evidence_wrong_protocol_blocks_promotion() {
         failed_scenarios: Vec::new(),
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -116,6 +117,7 @@ fn robustness_evidence_incomplete_blocks_promotion() {
         failed_scenarios: Vec::new(),
         deferred_scenarios: vec!["dsr_pbo_sensitivity".to_string()],
         dsr_pbo_sensitivity_research_trial_id: None, // scenario itself is still deferred
+        p7a_p7b_economic_replay_stress_research_trial_id: None, // scenario itself is still deferred
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -137,6 +139,7 @@ fn robustness_evidence_failed_scenario_blocks_promotion() {
         failed_scenarios: vec!["symbol_leave_one_out: excluding ES breaches conservative bar".to_string()],
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -155,6 +158,7 @@ fn robustness_evidence_complete_and_passed_allows_promotion() {
         failed_scenarios: Vec::new(),
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -165,4 +169,62 @@ fn robustness_evidence_complete_and_passed_allows_promotion() {
         decision.fail_reasons
     );
     assert!(decision.fail_reasons.is_empty());
+}
+
+/// P7A-P7B-ECONOMIC-REPLAY-STRESS-01 negative controls #6/#9: the
+/// `p7a_p7b_economic_replay_stress` trial-binding gate must be enforced
+/// INDEPENDENTLY of the `dsr_pbo_sensitivity` one -- `dsr_pbo_sensitivity_
+/// research_trial_id` here correctly matches the P7C/OOS trial
+/// (`robustness_gate_trial`), isolating this failure to the NEW gate alone
+/// (a genuinely distinct trial's stress evidence, e.g. trial B's replay
+/// result, supplied for trial A's promotion).
+#[test]
+fn p7a_p7b_replay_stress_trial_mismatch_blocks_promotion_even_when_dsr_pbo_matches() {
+    let input = base_input(Some(RobustnessEvidence {
+        protocol_version: REQUIRED_ROBUSTNESS_PROTOCOL_VERSION.to_string(),
+        is_complete: true,
+        all_applicable_passed: true,
+        failed_scenarios: Vec::new(),
+        deferred_scenarios: Vec::new(),
+        dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_research_trial_id: Some("a_different_trial_b".to_string()),
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(
+        !decision.passed,
+        "a p7a_p7b_economic_replay_stress result bound to a DIFFERENT research trial must block \
+         promotion even though dsr_pbo_sensitivity is correctly bound"
+    );
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(reasons.contains("p7a_p7b_economic_replay_stress"), "got: {reasons}");
+    assert!(reasons.contains("a_different_trial_b"), "got: {reasons}");
+    assert!(reasons.contains("robustness_gate_trial"), "got: {reasons}");
+}
+
+/// Same invariant, missing-binding form: `p7a_p7b_economic_replay_stress`
+/// evidence present but carrying no `research_trial_id` at all must block
+/// promotion just as an explicit mismatch does -- `None` is never treated
+/// as an assumed match.
+#[test]
+fn p7a_p7b_replay_stress_missing_trial_binding_blocks_promotion_even_when_dsr_pbo_matches() {
+    let input = base_input(Some(RobustnessEvidence {
+        protocol_version: REQUIRED_ROBUSTNESS_PROTOCOL_VERSION.to_string(),
+        is_complete: true,
+        all_applicable_passed: true,
+        failed_scenarios: Vec::new(),
+        deferred_scenarios: Vec::new(),
+        dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_research_trial_id: None,
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(
+        !decision.passed,
+        "p7a_p7b_economic_replay_stress evidence with no bound research_trial_id must block \
+         promotion even though dsr_pbo_sensitivity is correctly bound"
+    );
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(reasons.contains("p7a_p7b_economic_replay_stress"), "got: {reasons}");
+    assert!(reasons.contains("Research trial binding missing"), "got: {reasons}");
 }

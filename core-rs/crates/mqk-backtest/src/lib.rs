@@ -20,6 +20,7 @@ mod economics; // BACKTEST-MULTIPLIER-MARGIN-01
 mod engine;
 pub mod loader;
 pub mod market_frame; // BKT-MULTISYMBOL-MARKET-FRAME-01
+pub mod p7a_p7b_economic_replay_stress; // P9 BKT-ROBUSTNESS-GAUNTLET-01 / P7A-P7B-ECONOMIC-REPLAY-STRESS-01
 pub mod regime;
 pub mod robustness_gauntlet; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub mod strategy_lab;
@@ -64,6 +65,9 @@ pub use strategy_scanner::{
     DEFAULT_MIN_BARS,
 };
 pub use dsr_pbo_sensitivity::{dsr_pbo_sensitivity_scenario, DSR_PBO_SENSITIVITY_SCENARIO_NAME};
+pub use p7a_p7b_economic_replay_stress::{
+    p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
+};
 pub use robustness_gauntlet::{
     run_robustness_gauntlet, DeferredScenario, RobustnessGauntletOutput,
     RobustnessScenarioOutcome, REQUIRED_ROBUSTNESS_SCENARIO_NAMES,

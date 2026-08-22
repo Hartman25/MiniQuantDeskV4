@@ -665,6 +665,34 @@ fn write_real_backtest_evidence(
                 &sensitivity,
             )
             .expect("finalize_canonical_robustness_gauntlet_with_sensitivity");
+
+            // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: SAME trial/registry as
+            // dsr_pbo_sensitivity above. Candidates whose Research evidence
+            // came from the lightweight hand-registered fixture (no
+            // `inputs` recorded in economic_walk_forward.json) genuinely
+            // report `applicable: false` here -- fast (a registry lookup,
+            // no real walkforward re-run), and does not block
+            // `is_complete()`. Candidates from the REAL production pipeline
+            // (`write_real_research_evidence_via_production_pipeline`)
+            // genuinely replay and are judged for real.
+            let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
+                "python",
+                &research_py_root(),
+                research_registry_db,
+                research_trial_id,
+                &report.strategy_name,
+                &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
+                20,   // test-fixture-only stress knob; not asserted as accepted policy
+                50,   // test-fixture-only stress knob; not asserted as accepted policy
+                None, // test-fixture-only stress knob; not asserted as accepted policy
+                None, // test-fixture-only stress knob; not asserted as accepted policy
+                0.30, // test-fixture-only threshold; not asserted as accepted policy
+            );
+            mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+                &init_result.run_dir,
+                &stress,
+            )
+            .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)");
         }
     }
 
@@ -1054,6 +1082,41 @@ async fn real_research_production_trial_used_for_both_p7c_and_p9_passes() {
             bars: smooth_uptrend_bars(&symbol),
             ..Default::default()
         },
+    );
+
+    // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: this candidate's Research evidence
+    // came from the REAL production pipeline (real `inputs` recorded in
+    // economic_walk_forward.json), so the P7A/P7B replay stress
+    // `write_real_backtest_evidence` finalized above must have GENUINELY
+    // evaluated (`applicable: true, passed: true`) -- proves the full
+    // chain actually ran the replay, not merely that an inapplicable
+    // scenario didn't block promotion. `RobustnessGauntletArtifact` has no
+    // per-scenario accessor beyond aggregate helpers, so this reads the raw
+    // artifact JSON directly (test-only introspection).
+    let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&root.join(run_id.to_string()))
+        .expect("robustness gauntlet must load");
+    assert!(gauntlet.is_complete(), "P9 must be complete");
+    assert!(gauntlet.all_applicable_passed(), "every applicable P9 scenario must pass");
+    let raw = std::fs::read_to_string(
+        root.join(run_id.to_string()).join("robustness_gauntlet.json"),
+    )
+    .expect("read robustness_gauntlet.json");
+    let raw_json: serde_json::Value = serde_json::from_str(&raw).expect("parse robustness_gauntlet.json");
+    let p7a_p7b_entry = raw_json["scenarios"]
+        .as_array()
+        .expect("scenarios array")
+        .iter()
+        .find(|s| s["name"] == "p7a_p7b_economic_replay_stress")
+        .expect("p7a_p7b_economic_replay_stress scenario must be present");
+    assert_eq!(
+        p7a_p7b_entry["applicable"], true,
+        "the real P7A/P7B replay stress must have genuinely APPLIED (not fast-pathed as \
+         inapplicable) for a candidate whose Research evidence came from the real production \
+         pipeline: {p7a_p7b_entry}"
+    );
+    assert_eq!(
+        p7a_p7b_entry["passed"], true,
+        "the real P7A/P7B replay stress must have PASSED: {p7a_p7b_entry}"
     );
 
     let pool = make_db_pool().await;

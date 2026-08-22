@@ -123,17 +123,30 @@ impl RobustnessGauntletArtifact {
         self.deferred.iter().map(|d| d.name.clone()).collect()
     }
 
-    /// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: the exact Research
-    /// `trial_id` the `dsr_pbo_sensitivity` scenario's evidence was computed
-    /// against, if that scenario is present and carries one. `None` when the
-    /// scenario is absent/deferred, or when it was recorded before this
-    /// field existed -- either way, "no binding proof", never a bare claim
-    /// promotion can rely on.
-    pub fn dsr_pbo_sensitivity_research_trial_id(&self) -> Option<&str> {
+    /// The exact Research `trial_id` the named scenario's evidence was
+    /// computed against, if that scenario is present and carries one.
+    /// `None` when the scenario is absent/deferred, or when it was recorded
+    /// before this field existed -- either way, "no binding proof", never a
+    /// bare claim promotion can rely on.
+    fn scenario_research_trial_id(&self, scenario_name: &str) -> Option<&str> {
         self.scenarios
             .iter()
-            .find(|s| s.name == mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME)
+            .find(|s| s.name == scenario_name)
             .and_then(|s| s.research_trial_id.as_deref())
+    }
+
+    /// PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: see
+    /// [`Self::scenario_research_trial_id`] for `dsr_pbo_sensitivity`.
+    pub fn dsr_pbo_sensitivity_research_trial_id(&self) -> Option<&str> {
+        self.scenario_research_trial_id(mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME)
+    }
+
+    /// P7A-P7B-ECONOMIC-REPLAY-STRESS-01: see
+    /// [`Self::scenario_research_trial_id`] for `p7a_p7b_economic_replay_stress`.
+    pub fn p7a_p7b_economic_replay_stress_research_trial_id(&self) -> Option<&str> {
+        self.scenario_research_trial_id(
+            mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
+        )
     }
 
     /// PROMOTION-EVIDENCE-LINEAGE-V3: reproduces, bit-for-bit, the SAME
@@ -343,10 +356,11 @@ pub enum RobustnessGauntletFinalizeError {
     /// hash, candidate binding) before it can be finalized -- finalization
     /// only ADDS evidence to an already-real artifact.
     ExistingArtifactInvalid(RobustnessGauntletArtifactError),
-    /// `sensitivity.name` was not
-    /// [`mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME`] -- this seam
-    /// only ever merges that one scenario; any other name is a caller bug,
-    /// never silently accepted.
+    /// `sensitivity.name` was neither
+    /// [`mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME`] nor
+    /// [`mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME`] --
+    /// this seam only ever merges one of those two deferred scenarios; any
+    /// other name is a caller bug, never silently accepted.
     WrongScenarioName(String),
     /// A `dsr_pbo_sensitivity` scenario is ALREADY present on this artifact
     /// with DIFFERENT content -- refusing to silently overwrite real,
@@ -369,12 +383,12 @@ impl std::fmt::Display for RobustnessGauntletFinalizeError {
             Self::WrongScenarioName(name) => write!(
                 f,
                 "finalize_canonical_robustness_gauntlet_with_sensitivity only merges \
-                 dsr_pbo_sensitivity, got scenario name {name:?}"
+                 dsr_pbo_sensitivity or p7a_p7b_economic_replay_stress, got scenario name {name:?}"
             ),
             Self::ConflictingSensitivityResult => write!(
                 f,
-                "a dsr_pbo_sensitivity scenario is already finalized on this artifact with \
-                 different content -- refusing to overwrite"
+                "a scenario of this name is already finalized on this artifact with different \
+                 content -- refusing to overwrite"
             ),
             Self::Io(e) => write!(f, "finalize I/O failed: {e}"),
         }
@@ -384,15 +398,18 @@ impl std::fmt::Display for RobustnessGauntletFinalizeError {
 impl std::error::Error for RobustnessGauntletFinalizeError {}
 
 /// Merge a separately-computed `dsr_pbo_sensitivity` scenario
-/// (`mqk_backtest::dsr_pbo_sensitivity_scenario`) into an EXISTING, already-
-/// real `robustness_gauntlet.json` (written by
+/// (`mqk_backtest::dsr_pbo_sensitivity_scenario`) OR
+/// `p7a_p7b_economic_replay_stress` scenario
+/// (`mqk_backtest::p7a_p7b_economic_replay_stress_scenario`) into an
+/// EXISTING, already-real `robustness_gauntlet.json` (written by
 /// [`write_canonical_robustness_gauntlet`] immediately after the real
 /// backtest run), and durably re-record the merged artifact's new content
 /// hash via a SECOND, distinct, hash-chained audit event
 /// ([`ROBUSTNESS_GAUNTLET_FINALIZED_AUDIT_EVENT_TYPE`]) -- the original
 /// `robustness_gauntlet_completed` event is never modified or removed, so
 /// the artifact's full history (pre- and post-finalization) stays
-/// auditable.
+/// auditable. Call once per deferred scenario -- each finalization only
+/// ever touches its own scenario's entry in `deferred`/`scenarios`.
 ///
 /// # Interrupted finalization
 ///
@@ -405,15 +422,19 @@ impl std::error::Error for RobustnessGauntletFinalizeError {}
 ///
 /// # Idempotency
 ///
-/// If a `dsr_pbo_sensitivity` scenario with IDENTICAL content is already
+/// If a scenario of the SAME name with IDENTICAL content is already
 /// present, this is a no-op (`Ok`, no new write, no new audit event). A
-/// DIFFERENT `dsr_pbo_sensitivity` scenario for an already-finalized
-/// artifact is refused (`ConflictingSensitivityResult`).
+/// DIFFERENT result for an already-finalized scenario of that name is
+/// refused (`ConflictingSensitivityResult`).
 pub fn finalize_canonical_robustness_gauntlet_with_sensitivity(
     run_dir: &Path,
     sensitivity: &mqk_backtest::RobustnessScenarioOutcome,
 ) -> Result<PathBuf, RobustnessGauntletFinalizeError> {
-    if sensitivity.name != mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME {
+    const FINALIZABLE_SCENARIO_NAMES: &[&str] = &[
+        mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME,
+        mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
+    ];
+    if !FINALIZABLE_SCENARIO_NAMES.contains(&sensitivity.name.as_str()) {
         return Err(RobustnessGauntletFinalizeError::WrongScenarioName(
             sensitivity.name.clone(),
         ));
@@ -423,11 +444,7 @@ pub fn finalize_canonical_robustness_gauntlet_with_sensitivity(
         .map_err(RobustnessGauntletFinalizeError::ExistingArtifactInvalid)?;
     let path = run_dir.join("robustness_gauntlet.json");
 
-    if let Some(prev) = existing
-        .scenarios
-        .iter()
-        .find(|s| s.name == mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME)
-    {
+    if let Some(prev) = existing.scenarios.iter().find(|s| s.name == sensitivity.name) {
         let prev_matches = prev.applicable == sensitivity.applicable
             && prev.passed == sensitivity.passed
             && prev.reason == sensitivity.reason

@@ -214,6 +214,34 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         }
     }
 
+    // P7A-P7B-ECONOMIC-REPLAY-STRESS-01 — same invariant as the DSR/PBO
+    // binding gate above, for the P7A/P7B economic replay stress scenario:
+    // it must be bound to the EXACT SAME Research trial as the P7C/OOS
+    // evidence, never merely a scenario that happens to be present.
+    if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
+        match re.p7a_p7b_economic_replay_stress_research_trial_id.as_deref() {
+            Some(bound_trial_id) if bound_trial_id == ev.trial_id() => {} // same trial -- OK
+            Some(bound_trial_id) => {
+                fail_reasons.push(format!(
+                    "Research trial binding mismatch: P9 p7a_p7b_economic_replay_stress \
+                     evidence was computed for research_trial_id {bound_trial_id:?}, but P7C/OOS \
+                     evidence was verified for research_trial_id {:?} -- both must be the SAME \
+                     Research trial, never merely the same strategy_id",
+                    ev.trial_id()
+                ));
+            }
+            None => {
+                fail_reasons.push(format!(
+                    "Research trial binding missing: P9 robustness evidence carries no \
+                     p7a_p7b_economic_replay_stress_research_trial_id -- cannot prove it was \
+                     computed for the same Research trial ({:?}) as the P7C/OOS evidence; \
+                     promotion requires that proof, never an assumed match",
+                    ev.trial_id()
+                ));
+            }
+        }
+    }
+
     // PATCH F3 — Fail closed on NaN key metrics.
     //
     // Float comparisons involving NaN always return `false` in Rust, so a NaN

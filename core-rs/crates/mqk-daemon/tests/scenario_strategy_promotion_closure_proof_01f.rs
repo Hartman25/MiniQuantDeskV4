@@ -370,6 +370,31 @@ fn write_real_backtest_evidence(
     )
     .expect("finalize_canonical_robustness_gauntlet_with_sensitivity");
 
+    // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: SAME trial/registry as
+    // dsr_pbo_sensitivity above -- see the identical rationale in
+    // `scenario_strategy_promotion_routes_01.rs`'s own copy of this
+    // function (this fixture's hand-registered economic_walk_forward.json
+    // has no recorded `inputs`, so this genuinely reports
+    // `applicable: false`, fast, and does not block `is_complete()`).
+    let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
+        "python",
+        &research_py_root(),
+        research_registry_db,
+        research_trial_id,
+        &report.strategy_name,
+        &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
+        20,   // test-fixture-only stress knob; not asserted as accepted policy
+        50,   // test-fixture-only stress knob; not asserted as accepted policy
+        None, // test-fixture-only stress knob; not asserted as accepted policy
+        None, // test-fixture-only stress knob; not asserted as accepted policy
+        0.30, // test-fixture-only threshold; not asserted as accepted policy
+    );
+    mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+        &init_result.run_dir,
+        &stress,
+    )
+    .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)");
+
     report.run_id
 }
 

@@ -207,6 +207,20 @@ fn run_and_persist_full(
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some(research_trial_id.to_string()),
+    })
+    // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: the real cross-language wiring is
+    // proven separately (mqk-backtest's own
+    // p7a_p7b_economic_replay_stress.rs unit tests + research-py's
+    // p7a_p7b_economic_replay_stress_cli); this P10 chain test only needs a
+    // genuinely COMPLETE P9 artifact, same rationale as dsr_pbo_sensitivity
+    // above.
+    .merge_dsr_pbo_sensitivity(mqk_backtest::RobustnessScenarioOutcome {
+        name: mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string(),
+        applicable: true,
+        passed: true,
+        reason: None,
+        detail: "test-fabricated evaluated outcome".to_string(),
+        research_trial_id: Some(research_trial_id.to_string()),
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet must succeed");
@@ -343,7 +357,11 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     let candidate_dir = root.join(report.run_id.to_string());
     let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&candidate_dir)
         .expect("robustness gauntlet must be resolvable as part of the evidence chain");
-    assert_eq!(gauntlet.scenarios_run(), 7, "6 pure scenarios + merged dsr_pbo_sensitivity");
+    assert_eq!(
+        gauntlet.scenarios_run(),
+        8,
+        "6 pure scenarios + merged dsr_pbo_sensitivity + merged p7a_p7b_economic_replay_stress"
+    );
     assert!(bundle.robustness_evidence.is_complete);
     assert!(bundle.robustness_evidence.all_applicable_passed);
 
