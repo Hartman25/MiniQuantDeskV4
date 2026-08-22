@@ -28,7 +28,12 @@ import pandas as pd
 
 from mqk_research.exp_distributed.hashing import short_hash
 
-from .contracts import DIRECTION_HIGHER_IS_BETTER, EVAL_STATUS_NOT_EVALUABLE, EVAL_STATUS_SUCCEEDED
+from .contracts import (
+    DIRECTION_HIGHER_IS_BETTER,
+    EVAL_STATUS_NOT_EVALUABLE,
+    EVAL_STATUS_SUCCEEDED,
+    FactorEvaluationSpec,
+)
 from .diagnostics import (
     FACTOR_VALUE_COL,
     PERIOD_COL,
@@ -89,6 +94,46 @@ class ExposureSchema:
 
 
 @dataclass(frozen=True)
+class FactorExposureEvaluationSpec:
+    """Identity-bearing binding of a base `FactorEvaluationSpec` to an
+    exposure schema and attribution protocol (RESEARCH-FACTOR-EXPOSURE-
+    POINT-IN-TIME-CATEGORY-01). Mirrors `null_controls.FactorNullControlSpec`
+    -- wraps `base_evaluation` rather than duplicating its fields, so this
+    spec can never drift from that contract.
+
+    Changing the exposure schema (or attribution protocol) changes
+    `compute_exposure_evaluation_id()` -- which exposure-evaluation artifact
+    this analysis is filed under -- but NEVER `base_evaluation`'s own
+    `compute_evaluation_id()`, and never the underlying `factor_id`."""
+
+    base_evaluation: FactorEvaluationSpec
+    exposure_schema_id: str
+    exposure_attribution_protocol_version: str = EXPOSURE_ATTRIBUTION_PROTOCOL_VERSION
+
+    @property
+    def factor_id(self) -> str:
+        return self.base_evaluation.factor_id
+
+    def validate(self) -> None:
+        self.base_evaluation.validate()
+        if not self.exposure_schema_id.strip():
+            raise ValueError("FactorExposureEvaluationSpec.exposure_schema_id is required")
+        if not self.exposure_attribution_protocol_version.strip():
+            raise ValueError("FactorExposureEvaluationSpec.exposure_attribution_protocol_version is required")
+
+    def identity_payload(self) -> Dict[str, Any]:
+        return {
+            "exposure_attribution_protocol_version": self.exposure_attribution_protocol_version,
+            "base_evaluation_identity": copy.deepcopy(self.base_evaluation.identity_payload()),
+            "exposure_schema_id": self.exposure_schema_id,
+        }
+
+    def compute_exposure_evaluation_id(self) -> str:
+        self.validate()
+        return short_hash(self.identity_payload(), length=32)
+
+
+@dataclass(frozen=True)
 class FactorExposureReport:
     status: str
     reason: Optional[str] = None
@@ -126,11 +171,19 @@ def neutralize_factor(
 ) -> Dict[str, Any]:
     """Deterministic per-period cross-sectional OLS residualization of
     `factor_value` against the supplied exposures. Fits each period using
-    ONLY that period's own rows. Returns a dict with:
+    ONLY that period's own rows -- including the CATEGORICAL VOCABULARY
+    itself (RESEARCH-FACTOR-EXPOSURE-POINT-IN-TIME-CATEGORY-01): a category
+    level that first appears in a later period is never used to define an
+    earlier period's design matrix, so its future existence can never change
+    an earlier period's residual or evaluability decision. Returns a dict
+    with:
       - 'neutralized_observations': a copy of `observations` (restricted to
         well-posed periods) with `factor_value` replaced by the OLS residual.
       - 'excluded_periods': period_key -> typed reason (never a fabricated
         residual for a singular/underdetermined period).
+      - 'period_design_column_counts' / 'period_categorical_vocab': per-
+        period design/schema evidence, so the point-in-time protocol is
+        auditable rather than only asserted.
     """
     schema.validate()
     exposure_cols = schema.numeric_exposure_columns + schema.categorical_exposure_columns
@@ -139,13 +192,17 @@ def neutralize_factor(
         raise ValueError(f"observations is missing exposure columns: {missing_cols}")
 
     usable = observations.dropna(subset=[FACTOR_VALUE_COL] + exposure_cols)
-    vocab = _categorical_vocab(usable, schema)
-    n_design_cols = _design_column_count(schema, vocab)
 
     parts = []
     excluded: Dict[str, str] = {}
+    period_design_column_counts: Dict[str, int] = {}
+    period_categorical_vocab: Dict[str, Dict[str, List[str]]] = {}
     for period, group in usable.groupby(PERIOD_COL, sort=True):
         period_key = str(period)
+        # Point-in-time-safe: vocabulary derived from THIS period's rows
+        # only, never from the full (past+future) dataset.
+        vocab = _categorical_vocab(group, schema)
+        n_design_cols = _design_column_count(schema, vocab)
         if len(group) < n_design_cols + min_cross_section_margin:
             excluded[period_key] = "insufficient_cross_section_for_regression"
             continue
@@ -168,12 +225,15 @@ def neutralize_factor(
         neutralized_group = group.copy()
         neutralized_group[FACTOR_VALUE_COL] = residual
         parts.append(neutralized_group)
+        period_design_column_counts[period_key] = n_design_cols
+        period_categorical_vocab[period_key] = vocab
 
     neutralized_observations = pd.concat(parts, ignore_index=True) if parts else observations.iloc[0:0].copy()
     return {
         "neutralized_observations": neutralized_observations,
         "excluded_periods": excluded,
-        "design_column_count": n_design_cols,
+        "period_design_column_counts": period_design_column_counts,
+        "period_categorical_vocab": period_categorical_vocab,
     }
 
 

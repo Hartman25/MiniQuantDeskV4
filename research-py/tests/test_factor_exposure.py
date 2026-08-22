@@ -14,11 +14,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mqk_research.factors.contracts import EVAL_STATUS_NOT_EVALUABLE, EVAL_STATUS_SUCCEEDED, FactorSpec, DIRECTION_HIGHER_IS_BETTER, NORMALIZATION_CROSS_SECTIONAL_RANK, TIMING_NEXT_BAR_TRADABLE
+from mqk_research.factors.contracts import (
+    EVAL_STATUS_NOT_EVALUABLE,
+    EVAL_STATUS_SUCCEEDED,
+    FactorEvaluationSpec,
+    FactorSpec,
+    DIRECTION_HIGHER_IS_BETTER,
+    NORMALIZATION_CROSS_SECTIONAL_RANK,
+    TIMING_NEXT_BAR_TRADABLE,
+)
 from mqk_research.factors.exposure import (
     NOT_EVALUABLE_INSUFFICIENT_PERIODS_FOR_NEUTRALIZATION,
     NOT_EVALUABLE_SINGULAR_EXPOSURE_MATRIX,
     ExposureSchema,
+    FactorExposureEvaluationSpec,
     compute_exposure_association,
     evaluate_factor_exposure_diagnostics,
     neutralize_factor,
@@ -126,6 +135,56 @@ def test_future_exposure_mutation_does_not_change_earlier_residuals():
     pd.testing.assert_series_equal(a_early["factor_value"], b_early["factor_value"])
 
 
+# -- a future-only categorical LEVEL cannot leak backward either -----------
+# RESEARCH-FACTOR-EXPOSURE-POINT-IN-TIME-CATEGORY-01
+
+def _independent_factor_dataset_with_sector(n_symbols=6, n_periods=8, seed=3) -> pd.DataFrame:
+    df = _independent_factor_dataset(n_symbols=n_symbols, n_periods=n_periods, seed=seed)
+    sectors = ["TECH", "FIN", "HEALTH"]
+    df = df.copy()
+    df["sector"] = [sectors[i % len(sectors)] for i in range(len(df))]
+    return df
+
+
+def test_future_categorical_level_does_not_leak_into_earlier_periods():
+    df = _independent_factor_dataset_with_sector()
+    schema = ExposureSchema(categorical_exposure_columns=["sector"])
+    result_a = neutralize_factor(df, schema)
+
+    mutated = df.copy()
+    last_period = sorted(mutated["period_ts_utc"].unique())[-1]
+    last_period_first_idx = mutated[mutated["period_ts_utc"] == last_period].index[0]
+    # A brand-new category, never seen in any earlier period, appearing
+    # ONLY in the final/future period.
+    mutated.loc[last_period_first_idx, "sector"] = "ENERGY"
+    result_b = neutralize_factor(mutated, schema)
+
+    early_periods = sorted(df["period_ts_utc"].unique())[:-1]
+    a_early = result_a["neutralized_observations"]
+    a_early = a_early[a_early["period_ts_utc"].isin(early_periods)].sort_values(["period_ts_utc", "symbol"]).reset_index(drop=True)
+    b_early = result_b["neutralized_observations"]
+    b_early = b_early[b_early["period_ts_utc"].isin(early_periods)].sort_values(["period_ts_utc", "symbol"]).reset_index(drop=True)
+
+    # Residuals for every earlier period are byte/numerically identical.
+    pd.testing.assert_series_equal(a_early["factor_value"], b_early["factor_value"])
+
+    # Evaluability decisions for earlier periods (excluded reason AND design
+    # column count) are also unaffected -- the historical bug added an
+    # all-zero "ENERGY" dummy column to every EARLIER period's design too,
+    # which could rank-deficiency-exclude periods that were previously
+    # well-posed.
+    for period in early_periods:
+        period_key = str(period)
+        assert result_a["excluded_periods"].get(period_key) == result_b["excluded_periods"].get(period_key)
+        assert (
+            result_a["period_design_column_counts"].get(period_key)
+            == result_b["period_design_column_counts"].get(period_key)
+        )
+        assert period_key not in result_a["period_design_column_counts"] or "ENERGY" not in result_a[
+            "period_categorical_vocab"
+        ][period_key].get("sector", [])
+
+
 # -- singular exposure matrix -> typed not_evaluable -----------------------
 
 def test_singular_exposure_matrix_not_evaluable():
@@ -162,6 +221,45 @@ def test_schema_rejects_overlap_and_empty():
         ExposureSchema().validate()
     with pytest.raises(ValueError, match="cannot be both"):
         ExposureSchema(numeric_exposure_columns=["size"], categorical_exposure_columns=["size"]).validate()
+
+
+# -- exposure-evaluation identity is bound to the exposure schema, but
+# never changes the base evaluation_id or the factor_id -------------------
+# RESEARCH-FACTOR-EXPOSURE-POINT-IN-TIME-CATEGORY-01
+
+def _base_eval_spec() -> FactorEvaluationSpec:
+    return FactorEvaluationSpec(
+        factor_id="f" * 32,
+        universe_identity={"universe_id": "sp500_pit_v1"},
+        evaluation_window_start_utc="2024-01-01T00:00:00+00:00",
+        evaluation_window_end_utc="2024-06-01T00:00:00+00:00",
+        label_protocol_version="fwd_ret_label_v1",
+        evaluation_protocol_version="factor_ic_ir_quantile_v1",
+    )
+
+
+def test_exposure_schema_change_changes_exposure_evaluation_id_only():
+    base_eval_spec = _base_eval_spec()
+    schema_a = ExposureSchema(numeric_exposure_columns=["size"])
+    schema_b = ExposureSchema(numeric_exposure_columns=["size", "beta"])
+
+    spec_a = FactorExposureEvaluationSpec(base_evaluation=base_eval_spec, exposure_schema_id=schema_a.compute_schema_id())
+    spec_b = FactorExposureEvaluationSpec(base_evaluation=base_eval_spec, exposure_schema_id=schema_b.compute_schema_id())
+
+    assert spec_a.compute_exposure_evaluation_id() != spec_b.compute_exposure_evaluation_id()
+    # The exposure schema is bound into the exposure-evaluation identity,
+    # but never mutates the underlying FactorEvaluationSpec's own identity
+    # or the factor_id.
+    assert spec_a.base_evaluation.compute_evaluation_id() == spec_b.base_evaluation.compute_evaluation_id()
+    assert spec_a.factor_id == spec_b.factor_id == "f" * 32
+
+
+def test_exposure_evaluation_id_stable_for_same_schema():
+    base_eval_spec = _base_eval_spec()
+    schema = ExposureSchema(numeric_exposure_columns=["size"])
+    spec_a = FactorExposureEvaluationSpec(base_evaluation=base_eval_spec, exposure_schema_id=schema.compute_schema_id())
+    spec_b = FactorExposureEvaluationSpec(base_evaluation=base_eval_spec, exposure_schema_id=schema.compute_schema_id())
+    assert spec_a.compute_exposure_evaluation_id() == spec_b.compute_exposure_evaluation_id()
 
 
 # -- numeric result change -> factor identity unchanged --------------------
