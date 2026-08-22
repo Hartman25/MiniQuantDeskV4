@@ -1173,13 +1173,26 @@ class ResearchResultStore:
         attempt_id: str,
         *,
         status: str,
+        expected_factor_id: str,
+        expected_evaluation_id: str,
         result_summary: Optional[Dict[str, Any]] = None,
         artifact_paths: Optional[Dict[str, Any]] = None,
         failure_reason: Optional[str] = None,
     ) -> None:
         """Transition a 'started' factor evaluation attempt to a terminal
         status. Fails closed if the attempt is unknown or already terminal --
-        terminal attempts are never reopened or overwritten."""
+        terminal attempts are never reopened or overwritten.
+
+        RESEARCH-FACTOR-REGISTRY-RESULT-BINDING-01: also fails closed unless
+        the supplied `expected_factor_id`/`expected_evaluation_id` (the
+        caller's FactorEvaluationResult identity) exactly match the durable
+        attempt row's own `factor_id`/`evaluation_id` -- selecting the row by
+        `attempt_id` alone does not prove the caller's result object was
+        actually produced for THIS attempt (e.g. a result for factor B could
+        otherwise be used to finalize an attempt opened for factor A). A
+        durable attempt with no recorded `evaluation_id` can never be proven
+        bound to anything, so it also fails closed rather than being treated
+        as a wildcard match."""
         if status not in _FACTOR_EVAL_TERMINAL_STATUSES:
             raise ValueError(f"invalid terminal factor evaluation status: {status!r}")
         with closing(self._connect()) as connection:
@@ -1187,15 +1200,27 @@ class ResearchResultStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "select status from research_factor_evaluation_attempts where attempt_id=?",
+                    "select status, factor_id, evaluation_id "
+                    "from research_factor_evaluation_attempts where attempt_id=?",
                     (attempt_id,),
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"unknown attempt_id: {attempt_id}")
-                if row[0] != "started":
+                durable_status, durable_factor_id, durable_evaluation_id = row
+                if durable_status != "started":
                     raise RuntimeError(
-                        f"factor evaluation attempt {attempt_id!r} is already terminal (status={row[0]!r}); "
+                        f"factor evaluation attempt {attempt_id!r} is already terminal (status={durable_status!r}); "
                         "terminal attempts cannot be reopened or refinalized"
+                    )
+                if durable_factor_id != expected_factor_id:
+                    raise ValueError(
+                        f"factor evaluation result is bound to factor_id {expected_factor_id!r} but "
+                        f"attempt {attempt_id!r} was opened for factor_id {durable_factor_id!r}"
+                    )
+                if durable_evaluation_id is None or durable_evaluation_id != expected_evaluation_id:
+                    raise ValueError(
+                        f"factor evaluation result is bound to evaluation_id {expected_evaluation_id!r} but "
+                        f"attempt {attempt_id!r} was opened for evaluation_id {durable_evaluation_id!r}"
                     )
                 connection.execute(
                     """

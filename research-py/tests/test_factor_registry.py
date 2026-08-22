@@ -247,6 +247,88 @@ def test_not_evaluable_evaluation_is_durably_recorded(tmp_path):
     assert attempts[0]["failure_reason"] == "zero_variance_factor"
 
 
+# -- a result is bound to the exact durable attempt it terminates ----------
+# RESEARCH-FACTOR-REGISTRY-RESULT-BINDING-01
+
+def test_finalize_rejects_result_from_a_different_factor(tmp_path):
+    registry_db = tmp_path / "registry.sqlite3"
+    factor_a = register_factor(registry_db, _spec(name="factor_a"))
+    factor_b = register_factor(registry_db, _spec(name="factor_b"))
+    attempt_id, evaluation_id, _ = begin_factor_evaluation(registry_db, _eval_spec(factor_a))
+
+    with pytest.raises(ValueError, match="factor_id"):
+        finalize_factor_evaluation(
+            registry_db,
+            attempt_id,
+            FactorEvaluationResult(
+                eval_id=evaluation_id, factor_id=factor_b, status=EVAL_STATUS_SUCCEEDED, metrics={}
+            ),
+        )
+    # The attempt must stay 'started' -- the rejected result never terminated it.
+    attempts = list_factor_evaluation_attempts(registry_db, factor_a)
+    assert attempts[0]["status"] == "started"
+
+
+def test_finalize_rejects_result_from_a_different_evaluation(tmp_path):
+    registry_db = tmp_path / "registry.sqlite3"
+    factor_id = register_factor(registry_db, _spec())
+    eval_spec_a = _eval_spec(factor_id, universe_identity={"universe_id": "sp500_pit_v1"})
+    eval_spec_b = _eval_spec(factor_id, universe_identity={"universe_id": "russell1000_pit_v1"})
+    attempt_id, evaluation_id_a, _ = begin_factor_evaluation(registry_db, eval_spec_a)
+    evaluation_id_b = eval_spec_b.compute_evaluation_id()
+    assert evaluation_id_a != evaluation_id_b
+
+    with pytest.raises(ValueError, match="evaluation_id"):
+        finalize_factor_evaluation(
+            registry_db,
+            attempt_id,
+            FactorEvaluationResult(
+                eval_id=evaluation_id_b, factor_id=factor_id, status=EVAL_STATUS_SUCCEEDED, metrics={}
+            ),
+        )
+    attempts = list_factor_evaluation_attempts(registry_db, factor_id)
+    assert attempts[0]["status"] == "started"
+
+
+def test_finalize_accepts_matching_factor_and_evaluation(tmp_path):
+    registry_db = tmp_path / "registry.sqlite3"
+    factor_id = register_factor(registry_db, _spec())
+    attempt_id, evaluation_id, _ = begin_factor_evaluation(registry_db, _eval_spec(factor_id))
+    finalize_factor_evaluation(
+        registry_db,
+        attempt_id,
+        FactorEvaluationResult(
+            eval_id=evaluation_id, factor_id=factor_id, status=EVAL_STATUS_SUCCEEDED, metrics={}
+        ),
+    )
+    attempts = list_factor_evaluation_attempts(registry_db, factor_id)
+    assert attempts[0]["status"] == "succeeded"
+
+
+def test_finalize_mismatch_cannot_be_used_to_bypass_terminal_retry_rejection(tmp_path):
+    registry_db = tmp_path / "registry.sqlite3"
+    factor_a = register_factor(registry_db, _spec(name="factor_a2"))
+    factor_b = register_factor(registry_db, _spec(name="factor_b2"))
+    attempt_id, evaluation_id, _ = begin_factor_evaluation(registry_db, _eval_spec(factor_a))
+    finalize_factor_evaluation(
+        registry_db,
+        attempt_id,
+        FactorEvaluationResult(
+            eval_id=evaluation_id, factor_id=factor_a, status=EVAL_STATUS_SUCCEEDED, metrics={}
+        ),
+    )
+    # Now terminal. A mismatched-factor retry must still be rejected (as
+    # terminal, not silently accepted because the identity also mismatches).
+    with pytest.raises(RuntimeError, match="already terminal"):
+        finalize_factor_evaluation(
+            registry_db,
+            attempt_id,
+            FactorEvaluationResult(
+                eval_id=evaluation_id, factor_id=factor_b, status=EVAL_STATUS_FAILED, reason="x"
+            ),
+        )
+
+
 # -- universe identity change on an evaluation spec changes evaluation_id
 # but never the underlying factor_id -------------------------------------
 

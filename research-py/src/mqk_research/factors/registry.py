@@ -90,12 +90,17 @@ def finalize_factor_evaluation(
     result: FactorEvaluationResult,
 ) -> None:
     """Transition a 'started' factor evaluation attempt to its terminal
-    status. Fails closed if the attempt is unknown or already terminal."""
+    status. Fails closed if the attempt is unknown or already terminal, or if
+    `result.factor_id`/`result.eval_id` do not match the durable attempt's
+    own factor_id/evaluation_id (RESEARCH-FACTOR-REGISTRY-RESULT-BINDING-01)
+    -- the storage layer proves this binding, not this wrapper."""
     result.validate()
     store = ResearchResultStore(Path(registry_db))
     store.finalize_factor_evaluation_attempt(
         attempt_id,
         status=result.status,
+        expected_factor_id=result.factor_id,
+        expected_evaluation_id=result.eval_id,
         result_summary={"metrics": result.metrics} if result.metrics else {},
         artifact_paths=result.artifact_paths,
         failure_reason=result.reason,
