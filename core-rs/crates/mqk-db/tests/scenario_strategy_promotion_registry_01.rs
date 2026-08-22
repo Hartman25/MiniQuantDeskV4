@@ -33,13 +33,14 @@
 
 use chrono::{Duration, Utc};
 use mqk_db::{
-    evaluate_promotion_tradability, fetch_current_promotion_state, fetch_promotion_history,
+    evaluate_promotion_tradability, fetch_current_promotion_state,
+    fetch_promotion_transition_lineage_v2, fetch_promotion_history,
     insert_strategy_promotion_transition, insert_strategy_promotion_transition_serialized,
     is_legal_transition, resolve_evidence_lineage, transition_requires_evidence,
-    upsert_strategy_registry_entry, InsertStrategyPromotionTransitionArgs, PromotionReasonCode,
-    TransitionInsertOutcome, UpsertStrategyRegistryArgs, ENV_DB_URL, PROMOTION_STATE_ACTIVE_PAPER,
-    PROMOTION_STATE_DEMOTED, PROMOTION_STATE_PAPER_APPROVED, PROMOTION_STATE_REJECTED,
-    PROMOTION_STATE_RETIRED, PROMOTION_STATE_SHADOW_APPROVED,
+    upsert_strategy_registry_entry, InsertStrategyPromotionTransitionArgs, PromotionEvidenceLineageV2,
+    PromotionReasonCode, TransitionInsertOutcome, UpsertStrategyRegistryArgs, ENV_DB_URL,
+    PROMOTION_STATE_ACTIVE_PAPER, PROMOTION_STATE_DEMOTED, PROMOTION_STATE_PAPER_APPROVED,
+    PROMOTION_STATE_REJECTED, PROMOTION_STATE_RETIRED, PROMOTION_STATE_SHADOW_APPROVED,
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -972,10 +973,10 @@ async fn concurrent_transitions_from_same_parent_only_one_accepted() -> anyhow::
     let pool_b = pool.clone();
     let (result_a, result_b) = tokio::join!(
         tokio::spawn(async move {
-            insert_strategy_promotion_transition_serialized(&pool_a, &args_a).await
+            insert_strategy_promotion_transition_serialized(&pool_a, &args_a, None).await
         }),
         tokio::spawn(async move {
-            insert_strategy_promotion_transition_serialized(&pool_b, &args_b).await
+            insert_strategy_promotion_transition_serialized(&pool_b, &args_b, None).await
         }),
     );
     let outcome_a = result_a.expect("task a panicked")?;
@@ -1038,7 +1039,7 @@ async fn stale_parent_rejected_as_conflict() -> anyhow::Result<()> {
         now,
         now,
     );
-    insert_strategy_promotion_transition_serialized(&pool, &root_args).await?;
+    insert_strategy_promotion_transition_serialized(&pool, &root_args, None).await?;
 
     // Advance the identity for real: shadow_approved -> paper_approved.
     let mut advance_args = make_args(
@@ -1052,7 +1053,7 @@ async fn stale_parent_rejected_as_conflict() -> anyhow::Result<()> {
         now + Duration::milliseconds(1),
     );
     advance_args.parent_transition_id = Some(root_id);
-    let outcome = insert_strategy_promotion_transition_serialized(&pool, &advance_args).await?;
+    let outcome = insert_strategy_promotion_transition_serialized(&pool, &advance_args, None).await?;
     assert!(matches!(outcome, TransitionInsertOutcome::Inserted(_)));
 
     // A caller that still believes `root_id` is current (stale read) tries
@@ -1069,7 +1070,7 @@ async fn stale_parent_rejected_as_conflict() -> anyhow::Result<()> {
         now + Duration::milliseconds(2),
     );
     stale_args.parent_transition_id = Some(root_id);
-    let stale_outcome = insert_strategy_promotion_transition_serialized(&pool, &stale_args).await?;
+    let stale_outcome = insert_strategy_promotion_transition_serialized(&pool, &stale_args, None).await?;
     match stale_outcome {
         TransitionInsertOutcome::Conflict { current } => {
             let current = current.expect("conflict must carry the actual current record");
@@ -1112,10 +1113,10 @@ async fn serialized_insert_duplicate_replay_is_idempotent() -> anyhow::Result<()
         now,
     );
 
-    let first = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
+    let first = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
     assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
 
-    let second = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
+    let second = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
     match second {
         TransitionInsertOutcome::Duplicate(record) => {
             assert_eq!(record.transition_id, args.transition_id);
@@ -1128,6 +1129,244 @@ async fn serialized_insert_duplicate_replay_is_idempotent() -> anyhow::Result<()
         history.len(),
         1,
         "a replayed duplicate must not create a second row"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PROMOTION-LINEAGE-ATOMICITY-01: Research/Backtest evidence lineage is
+// written durably atomically with the transition row itself, never as a
+// best-effort follow-up step.
+// ---------------------------------------------------------------------------
+
+fn sample_lineage(trial_id: &str, backtest_run_id: Uuid) -> PromotionEvidenceLineageV2 {
+    PromotionEvidenceLineageV2 {
+        research_trial_id: Some(trial_id.to_string()),
+        research_economic_eval_id: Some(format!("{trial_id}_eval")),
+        research_deflated_sharpe_ratio: Some(0.72),
+        research_probability_backtest_overfitting: Some(0.11),
+        backtest_run_id: Some(backtest_run_id),
+    }
+}
+
+/// A fresh evidence-bearing transition insert with `Some(lineage)` commits
+/// the lineage in the SAME row, readable immediately via
+/// `fetch_promotion_transition_lineage_v2` -- not a separate, independently
+/// failable follow-up write.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn lineage_atomicity_fresh_insert_commits_lineage_with_transition() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("promo_lineage_atomic_fresh");
+    let symbol = "LNAT";
+    let timeframe_secs = 900;
+    let now = Utc::now();
+
+    let args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:lineage_fresh")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    let lineage = sample_lineage("trial-fresh-001", Uuid::new_v4());
+
+    let outcome =
+        insert_strategy_promotion_transition_serialized(&pool, &args, Some(&lineage)).await?;
+    assert!(matches!(outcome, TransitionInsertOutcome::Inserted(_)));
+
+    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+        .await?
+        .expect("lineage must be readable for the transition_id just inserted");
+    assert_eq!(recorded, lineage, "recorded lineage must exactly match what was supplied");
+
+    Ok(())
+}
+
+/// A non-evidence-bearing transition inserted with `None` lineage (the
+/// common case -- every non-`shadow_approved` transition) leaves the
+/// lineage columns genuinely unset, never a fabricated/defaulted value.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn lineage_atomicity_none_leaves_columns_unset() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("promo_lineage_atomic_none");
+    let symbol = "LNNO";
+    let timeframe_secs = 900;
+    let now = Utc::now();
+
+    let args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:lineage_none")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+
+    let outcome = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
+    assert!(matches!(outcome, TransitionInsertOutcome::Inserted(_)));
+
+    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+        .await?
+        .expect("row must exist");
+    assert!(
+        recorded.research_trial_id.is_none() && recorded.backtest_run_id.is_none(),
+        "no lineage was supplied -- columns must stay genuinely unset, got {recorded:?}"
+    );
+
+    Ok(())
+}
+
+/// Retry/idempotency: replaying the exact same evidence-bearing transition
+/// with the exact same lineage a second time is accepted (`Duplicate`) and
+/// the recorded lineage is unchanged.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn lineage_atomicity_duplicate_replay_with_matching_lineage_is_idempotent(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("promo_lineage_atomic_replay_match");
+    let symbol = "LNRM";
+    let timeframe_secs = 900;
+    let now = Utc::now();
+
+    let args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:lineage_replay_match")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    let lineage = sample_lineage("trial-replay-match-001", Uuid::new_v4());
+
+    let first =
+        insert_strategy_promotion_transition_serialized(&pool, &args, Some(&lineage)).await?;
+    assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
+
+    let second =
+        insert_strategy_promotion_transition_serialized(&pool, &args, Some(&lineage)).await?;
+    assert!(matches!(second, TransitionInsertOutcome::Duplicate(_)));
+
+    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+        .await?
+        .expect("lineage must still be present after the idempotent replay");
+    assert_eq!(recorded, lineage);
+
+    Ok(())
+}
+
+/// Mismatched lineage cannot replace existing authoritative lineage: a
+/// same-`transition_id` replay of an otherwise-identical payload but with a
+/// DIFFERENT lineage is refused (`Err`), and the originally-recorded
+/// lineage remains untouched -- proving both that no forged lineage can
+/// silently overwrite the real one, and that a lineage-write failure never
+/// leaves a transition (or its lineage) in an inconsistent state.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn lineage_atomicity_mismatched_replay_lineage_is_rejected() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("promo_lineage_atomic_replay_mismatch");
+    let symbol = "LNRX";
+    let timeframe_secs = 900;
+    let now = Utc::now();
+
+    let args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:lineage_replay_mismatch")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    let original_lineage = sample_lineage("trial-original-001", Uuid::new_v4());
+    let forged_lineage = sample_lineage("trial-FORGED-999", Uuid::new_v4());
+
+    let first = insert_strategy_promotion_transition_serialized(&pool, &args, Some(&original_lineage))
+        .await?;
+    assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
+
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args, Some(&forged_lineage))
+        .await
+        .expect_err("a divergent lineage for an already-lineage-bound transition_id must be refused");
+    assert!(
+        format!("{err:#}").contains("refusing to overwrite authoritative lineage"),
+        "got: {err:#}"
+    );
+
+    let recorded = fetch_promotion_transition_lineage_v2(&pool, args.transition_id)
+        .await?
+        .expect("original lineage row must still exist");
+    assert_eq!(
+        recorded, original_lineage,
+        "the rejected forged lineage must never have replaced the original"
+    );
+
+    Ok(())
+}
+
+/// Cross-candidate lineage independence: lineage recorded for one
+/// transition_id is never readable/attributable to a different, unrelated
+/// transition_id -- each row's lineage is exactly what was supplied for
+/// that row, never inherited, defaulted, or contaminated across rows.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn lineage_atomicity_cross_transition_lineage_is_independent() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id_a = unique_id("promo_lineage_cross_a");
+    let strategy_id_b = unique_id("promo_lineage_cross_b");
+    let symbol = "LNCX";
+    let timeframe_secs = 900;
+    let now = Utc::now();
+
+    let args_a = make_args(
+        transition_id_for(&format!("{strategy_id_a}:{symbol}:lineage_cross_a")),
+        &strategy_id_a,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    let lineage_a = sample_lineage("trial-cross-a-001", Uuid::new_v4());
+    insert_strategy_promotion_transition_serialized(&pool, &args_a, Some(&lineage_a)).await?;
+
+    let args_b = make_args(
+        transition_id_for(&format!("{strategy_id_b}:{symbol}:lineage_cross_b")),
+        &strategy_id_b,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now + Duration::milliseconds(1),
+        now + Duration::milliseconds(1),
+    );
+    // B is inserted with NO lineage of its own.
+    insert_strategy_promotion_transition_serialized(&pool, &args_b, None).await?;
+
+    let recorded_a = fetch_promotion_transition_lineage_v2(&pool, args_a.transition_id)
+        .await?
+        .expect("A's row must exist");
+    assert_eq!(recorded_a, lineage_a);
+
+    let recorded_b = fetch_promotion_transition_lineage_v2(&pool, args_b.transition_id)
+        .await?
+        .expect("B's row must exist");
+    assert!(
+        recorded_b.research_trial_id.is_none(),
+        "B must not inherit A's lineage: got {recorded_b:?}"
     );
 
     Ok(())
@@ -1170,7 +1409,7 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     root_args.evidence_artifact_path = Some("exports/strategy_reviews/evid".to_string());
     root_args.evidence_fingerprint =
         Some("67684119ecbfa8391eee4cc571d59adab9c6dad3d41f7788a984b36da1028dc5".to_string());
-    let root_outcome = insert_strategy_promotion_transition_serialized(&pool, &root_args).await?;
+    let root_outcome = insert_strategy_promotion_transition_serialized(&pool, &root_args, None).await?;
     assert!(matches!(root_outcome, TransitionInsertOutcome::Inserted(_)));
 
     // shadow_approved -> paper_approved: no fresh evidence required; must
@@ -1197,7 +1436,7 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     paper_args.evidence_artifact_path = None;
     paper_args.evidence_fingerprint = None;
     paper_args.evidence_fingerprint_v2 = None;
-    let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args).await?;
+    let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args, None).await?;
     let TransitionInsertOutcome::Inserted(paper_record) = paper_outcome else {
         panic!("expected Inserted");
     };
@@ -1226,7 +1465,7 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     active_args.evidence_fingerprint = None;
     active_args.evidence_fingerprint_v2 = None;
     let active_outcome =
-        insert_strategy_promotion_transition_serialized(&pool, &active_args).await?;
+        insert_strategy_promotion_transition_serialized(&pool, &active_args, None).await?;
     let TransitionInsertOutcome::Inserted(active_record) = active_outcome else {
         panic!("expected Inserted");
     };
@@ -1280,7 +1519,7 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
     );
     root_args.evidence_transition_id = Some(root_id);
     root_args.evidence_review_id = Some("review-original".to_string());
-    insert_strategy_promotion_transition_serialized(&pool, &root_args).await?;
+    insert_strategy_promotion_transition_serialized(&pool, &root_args, None).await?;
 
     // shadow_approved -> paper_approved -> demoted (all inherit root evidence).
     let mut paper_args = make_args(
@@ -1303,7 +1542,7 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
     paper_args.evidence_artifact_path = None;
     paper_args.evidence_fingerprint = None;
     paper_args.evidence_fingerprint_v2 = None;
-    let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args).await?;
+    let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args, None).await?;
     let TransitionInsertOutcome::Inserted(paper_record) = paper_outcome else {
         panic!("expected Inserted");
     };
@@ -1329,7 +1568,7 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
     demoted_args.evidence_fingerprint = None;
     demoted_args.evidence_fingerprint_v2 = None;
     let demoted_outcome =
-        insert_strategy_promotion_transition_serialized(&pool, &demoted_args).await?;
+        insert_strategy_promotion_transition_serialized(&pool, &demoted_args, None).await?;
     let TransitionInsertOutcome::Inserted(demoted_record) = demoted_outcome else {
         panic!("expected Inserted");
     };
@@ -1354,7 +1593,7 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
     reapproval_args.evidence_transition_id = Some(reapproval_id); // fresh: self, not inherited.
     reapproval_args.evidence_review_id = Some("review-reapproved".to_string());
     let reapproval_outcome =
-        insert_strategy_promotion_transition_serialized(&pool, &reapproval_args).await?;
+        insert_strategy_promotion_transition_serialized(&pool, &reapproval_args, None).await?;
     let TransitionInsertOutcome::Inserted(reapproval_record) = reapproval_outcome else {
         panic!("expected Inserted");
     };
@@ -1411,7 +1650,7 @@ async fn malformed_v2_fingerprint_is_refused_on_insert() -> anyhow::Result<()> {
     );
     args.evidence_fingerprint_v2 = Some("not-a-valid-hex-fingerprint".to_string());
 
-    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args, None)
         .await
         .expect_err("a malformed v2 fingerprint must be refused before it reaches storage");
     assert!(
@@ -1485,7 +1724,7 @@ async fn valid_v2_fingerprint_inserts_and_replays_idempotently() -> anyhow::Resu
     );
     args.evidence_fingerprint_v2 = Some(valid_v2.clone());
 
-    let outcome = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
+    let outcome = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
     let TransitionInsertOutcome::Inserted(record) = outcome else {
         panic!("expected Inserted");
     };
@@ -1496,7 +1735,7 @@ async fn valid_v2_fingerprint_inserts_and_replays_idempotently() -> anyhow::Resu
 
     // Exact replay (same transition_id, same content) is idempotent -- no
     // second row, no error, and the v2 fingerprint round-trips unchanged.
-    let replay_outcome = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
+    let replay_outcome = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
     match replay_outcome {
         TransitionInsertOutcome::Duplicate(dup) => {
             assert_eq!(
@@ -1540,7 +1779,7 @@ async fn v2_fingerprint_without_legacy_is_refused_on_insert() -> anyhow::Result<
     );
     args.evidence_fingerprint = None;
 
-    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args, None)
         .await
         .expect_err("a fresh evidence-bearing insert with no legacy fingerprint must be refused");
     assert!(
@@ -1579,7 +1818,7 @@ async fn partial_evidence_bundle_is_refused_on_insert() -> anyhow::Result<()> {
     args.evidence_fingerprint_v2 = None;
     assert!(args.evidence_review_id.is_some(), "only review_id present");
 
-    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args, None)
         .await
         .expect_err("a partial evidence bundle must be refused");
     assert!(
@@ -1613,12 +1852,12 @@ async fn same_transition_id_different_v2_is_a_collision_not_duplicate() -> anyho
         now,
         now,
     );
-    let first = insert_strategy_promotion_transition_serialized(&pool, &first_args).await?;
+    let first = insert_strategy_promotion_transition_serialized(&pool, &first_args, None).await?;
     assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
 
     let mut second_args = first_args.clone();
     second_args.evidence_fingerprint_v2 = Some("c".repeat(64));
-    let second = insert_strategy_promotion_transition_serialized(&pool, &second_args).await?;
+    let second = insert_strategy_promotion_transition_serialized(&pool, &second_args, None).await?;
     match second {
         TransitionInsertOutcome::Conflict { current } => {
             let current = current.expect("existing row must be returned on collision");
@@ -1668,12 +1907,12 @@ async fn same_transition_id_different_evidence_field_is_a_collision() -> anyhow:
         now,
         now,
     );
-    let first = insert_strategy_promotion_transition_serialized(&pool, &first_args).await?;
+    let first = insert_strategy_promotion_transition_serialized(&pool, &first_args, None).await?;
     assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
 
     let mut second_args = first_args.clone();
     second_args.evidence_git_hash = Some("divergent-git-hash".to_string());
-    let second = insert_strategy_promotion_transition_serialized(&pool, &second_args).await?;
+    let second = insert_strategy_promotion_transition_serialized(&pool, &second_args, None).await?;
     match second {
         TransitionInsertOutcome::Conflict { current } => {
             let current = current.expect("existing row must be returned on collision");
@@ -1720,7 +1959,7 @@ async fn absent_v2_fingerprint_on_a_new_row_is_refused_on_insert() -> anyhow::Re
         "evidence-bearing fixture"
     );
 
-    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args, None)
         .await
         .expect_err("a fresh evidence-bearing insert with no v2 fingerprint must be refused");
     assert!(

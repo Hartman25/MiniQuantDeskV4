@@ -1078,33 +1078,32 @@ pub(crate) async fn strategy_promotion_transition(
         created_at_utc: Utc::now(), // allow: ops-metadata write timestamp, not lifecycle truth
     };
 
+    // PROMOTION-LINEAGE-ATOMICITY-01: derive the durable evidence-lineage
+    // write up front so it can be passed into the SAME atomic transaction
+    // as the transition insert -- never a second, independently-failable
+    // step after the transition is already committed.
+    let evidence_lineage = promotion_lineage.as_ref().map(|(oos_evidence, backtest_run_id)| {
+        mqk_db::PromotionEvidenceLineageV2 {
+            research_trial_id: Some(oos_evidence.trial_id().to_string()),
+            research_economic_eval_id: Some(oos_evidence.economic_eval_id().to_string()),
+            research_deflated_sharpe_ratio: Some(oos_evidence.deflated_sharpe_ratio()),
+            research_probability_backtest_overfitting: Some(
+                oos_evidence.probability_of_backtest_overfitting(),
+            ),
+            backtest_run_id: Some(*backtest_run_id),
+        }
+    });
+
     // Gate 5: atomic, serialized insert (STRATEGY-PROMOTION-REGISTRY-
     // CLOSURE-REPAIR-01 Phase B) -- the only insert path this route uses.
-    match insert_strategy_promotion_transition_serialized(db, &args).await {
+    // `evidence_lineage` (Gate 5b) is written durably atomically with the
+    // transition row itself inside this same call -- see
+    // `insert_strategy_promotion_transition_serialized`'s own docs
+    // (PROMOTION-LINEAGE-ATOMICITY-01).
+    match insert_strategy_promotion_transition_serialized(db, &args, evidence_lineage.as_ref())
+        .await
+    {
         Ok(TransitionInsertOutcome::Inserted(_)) => {
-            // Gate 5b: durable evidence lineage (PROMOTION-WALKFORWARD-
-            // GATE-WIRING-01-REPAIR-CLOSURE, migration 0065). Best-effort:
-            // these columns are audit/lineage metadata only, never read
-            // back to gate legality or state, so a failure here is logged
-            // and does not fail the already-successful transition.
-            if let Some((oos_evidence, backtest_run_id)) = promotion_lineage.as_ref() {
-                if let Err(err) = mqk_db::record_promotion_transition_lineage_v2(
-                    db,
-                    transition_id,
-                    oos_evidence.trial_id(),
-                    oos_evidence.economic_eval_id(),
-                    oos_evidence.deflated_sharpe_ratio(),
-                    oos_evidence.probability_of_backtest_overfitting(),
-                    *backtest_run_id,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        "record_promotion_transition_lineage_v2 failed for transition_id={}: {err}",
-                        transition_id
-                    );
-                }
-            }
             transition_response(TransitionResponseArgs {
                 status: StatusCode::OK,
                 accepted: true,
