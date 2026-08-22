@@ -250,13 +250,21 @@ pub fn resolve_backtest_evidence(
 /// to `mqk_promotion::StressSuiteResult` (the type `evaluate_promotion`
 /// consumes).
 fn stress_result_from_artifact(a: &StressSuiteArtifact) -> StressSuiteResult {
+    // `a.protocol_version` was already verified by `load_canonical_stress_suite`
+    // to equal `mqk_backtest::STRESS_SUITE_PROTOCOL_VERSION` (== `mqk_promotion`'s
+    // `REQUIRED_STRESS_PROTOCOL_VERSION` -- the two are the same constant by
+    // construction) before this resolver ever runs. It is still carried
+    // through here (never dropped/re-derived) so `evaluate_promotion`'s own
+    // protocol check is a real, independent verification rather than a
+    // rubber stamp -- PROMOTION-STRESS-AUTHORITY-REPAIR-01.
     if a.all_passed() {
-        StressSuiteResult::pass(a.scenarios_run() as u32)
+        StressSuiteResult::pass(a.scenarios_run() as u32, a.protocol_version.clone())
     } else {
         StressSuiteResult::fail(
             a.scenarios_run() as u32,
             a.scenarios_passed() as u32,
             a.failed_scenario_descriptions(),
+            a.protocol_version.clone(),
         )
     }
 }

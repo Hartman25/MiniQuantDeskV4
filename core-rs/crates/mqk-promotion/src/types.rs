@@ -42,14 +42,48 @@ pub struct PromotionConfig {
 // Patch B2 — Stress suite result
 // ---------------------------------------------------------------------------
 
-/// Results of the adversarial partial-fill + cancel/replace stress suite.
+/// The exact versioned production stress protocol
+/// [`evaluate_promotion`](crate::evaluate_promotion) requires
+/// [`StressSuiteResult::protocol_version`] to equal. Anchored directly to
+/// [`mqk_backtest::STRESS_SUITE_PROTOCOL_VERSION`] -- never duplicated as a
+/// separate literal -- so promotion authority always tracks whatever
+/// protocol the real stress suite implementation
+/// (`mqk_backtest::run_backtest_stress_suite`) actually emits.
+///
+/// PROMOTION-STRESS-AUTHORITY-REPAIR-01: the original Patch B2 doc comment
+/// on this type named "adversarial partial-fill + cancel/replace" stress as
+/// the required evidence. Investigation (see
+/// `mqk_backtest::stress_suite` module docs) found that wording was
+/// unimplemented scaffold -- the causal execution engine has no partial-fill
+/// or cancel/replace order lifecycle, and building one would rewrite the
+/// accepted `BKT-FUTURE-EXECUTION-01` causal-execution invariant. The real,
+/// accepted production protocol is `cost_stress_2x` / `cost_stress_3x` /
+/// `conservative_risk_limits` (`bkt_stress_suite_v1`); this constant --
+/// checked by both the durable artifact loader
+/// (`mqk_artifacts::load_canonical_stress_suite`) and `evaluate_promotion`
+/// itself -- is what makes that the ONE exact supported protocol rather than
+/// an unenforced convention.
+pub const REQUIRED_STRESS_PROTOCOL_VERSION: &str = mqk_backtest::STRESS_SUITE_PROTOCOL_VERSION;
+
+/// Results of the real, versioned production Backtest stress suite
+/// (`mqk_backtest::run_backtest_stress_suite`, protocol
+/// [`REQUIRED_STRESS_PROTOCOL_VERSION`]).
 ///
 /// Promotion is **blocked** when:
 /// - `PromotionInput.stress_suite` is `None` (suite not run).
+/// - `protocol_version` does not equal [`REQUIRED_STRESS_PROTOCOL_VERSION`]
+///   exactly (unknown, blank, stale, or fabricated protocol).
 /// - The suite ran but `passed == false`.
 /// - The suite ran with zero scenarios (`scenarios_run == 0`), which is invalid.
 ///
 /// Build with [`StressSuiteResult::pass`] or [`StressSuiteResult::fail`].
+/// Constructing a value here (even via these helpers) does not by itself
+/// grant promotion authority -- only a `protocol_version` that matches
+/// [`REQUIRED_STRESS_PROTOCOL_VERSION`] can pass `evaluate_promotion`'s
+/// stress gate; production code only ever obtains a matching value from
+/// [`mqk_artifacts::load_canonical_stress_suite`] via
+/// `crate::evidence_bundle::resolve_backtest_evidence`, which itself
+/// verifies protocol identity before this type is ever constructed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StressSuiteResult {
     /// True if all scenarios passed.
@@ -60,26 +94,37 @@ pub struct StressSuiteResult {
     pub scenarios_passed: u32,
     /// Human-readable descriptions of failed scenarios (empty when passed).
     pub failed_scenarios: Vec<String>,
+    /// The exact stress protocol this result was produced under. Checked
+    /// against [`REQUIRED_STRESS_PROTOCOL_VERSION`] by `evaluate_promotion`
+    /// -- see that constant's docs. PROMOTION-STRESS-AUTHORITY-REPAIR-01.
+    pub protocol_version: String,
 }
 
 impl StressSuiteResult {
-    /// All `scenarios_run` scenarios passed.
-    pub fn pass(scenarios_run: u32) -> Self {
+    /// All `scenarios_run` scenarios passed, under `protocol_version`.
+    pub fn pass(scenarios_run: u32, protocol_version: impl Into<String>) -> Self {
         Self {
             passed: true,
             scenarios_run,
             scenarios_passed: scenarios_run,
             failed_scenarios: Vec::new(),
+            protocol_version: protocol_version.into(),
         }
     }
 
-    /// Some scenarios failed.
-    pub fn fail(scenarios_run: u32, scenarios_passed: u32, failed_scenarios: Vec<String>) -> Self {
+    /// Some scenarios failed, under `protocol_version`.
+    pub fn fail(
+        scenarios_run: u32,
+        scenarios_passed: u32,
+        failed_scenarios: Vec<String>,
+        protocol_version: impl Into<String>,
+    ) -> Self {
         Self {
             passed: false,
             scenarios_run,
             scenarios_passed,
             failed_scenarios,
+            protocol_version: protocol_version.into(),
         }
     }
 }

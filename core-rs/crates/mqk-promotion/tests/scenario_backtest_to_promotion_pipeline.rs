@@ -26,7 +26,10 @@ fn bf(inner: Fill) -> BacktestFill {
         inner,
     }
 }
-use mqk_promotion::{evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult};
+use mqk_promotion::{
+    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
+    REQUIRED_STRESS_PROTOCOL_VERSION,
+};
 
 /// Build a BacktestReport with deterministic real provenance but a synthetic equity curve.
 ///
@@ -135,7 +138,7 @@ fn profitable_backtest_passes_promotion() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
-        stress_suite: Some(StressSuiteResult::pass(1)),
+        stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
         oos_evidence: Some(common::valid_oos_evidence_for_testing("profitable_backtest_trial")), // P7C
     };
@@ -260,7 +263,7 @@ fn halted_backtest_metrics_computed_from_partial_curve() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
-        stress_suite: Some(StressSuiteResult::pass(1)),
+        stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: None, // B6: not needed; test only checks metrics, not decision.passed
         oos_evidence: None, // P7C: not needed; test only checks metrics, not decision.passed
     };

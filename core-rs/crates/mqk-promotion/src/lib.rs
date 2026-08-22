@@ -17,4 +17,5 @@ pub use research_evidence::{verify_promotion_oos_evidence, VerifiedPromotionOosE
 pub use types::{
     write_promotion_report_json, Candidate, PromotionConfig, PromotionDecision, PromotionInput,
     PromotionMetrics, PromotionReport, RunProvenance, StressSuiteResult,
+    REQUIRED_STRESS_PROTOCOL_VERSION,
 };

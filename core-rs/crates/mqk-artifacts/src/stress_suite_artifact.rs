@@ -132,6 +132,18 @@ pub enum StressSuiteArtifactError {
     MissingArtifact,
     MalformedJson(String),
     UnsupportedSchemaVersion(u32),
+    /// `protocol_version` does not equal
+    /// [`mqk_backtest::STRESS_SUITE_PROTOCOL_VERSION`] -- an artifact
+    /// produced under a different (older, newer, or fabricated) stress
+    /// protocol can never satisfy the current protocol's evidence
+    /// requirement. PROMOTION-STRESS-AUTHORITY-REPAIR-01.
+    UnsupportedProtocolVersion(String),
+    /// The artifact's `protocol_version` matched, but at least one scenario
+    /// name required by [`mqk_backtest::REQUIRED_SCENARIO_NAMES`] is absent
+    /// -- an incomplete scenario set can never satisfy that protocol's
+    /// evidence requirement, regardless of how many other scenarios ran.
+    /// PROMOTION-STRESS-AUTHORITY-REPAIR-01.
+    MissingRequiredScenario(String),
     /// The artifact recorded zero scenarios -- never valid evidence.
     ZeroScenarios,
     RunIdMismatch { manifest: Uuid, artifact: Uuid },
@@ -158,6 +170,14 @@ impl std::fmt::Display for StressSuiteArtifactError {
             Self::UnsupportedSchemaVersion(v) => {
                 write!(f, "stress_suite.json schema_version {v} unsupported")
             }
+            Self::UnsupportedProtocolVersion(v) => write!(
+                f,
+                "stress_suite.json protocol_version {v:?} is not the required production stress protocol"
+            ),
+            Self::MissingRequiredScenario(name) => write!(
+                f,
+                "stress_suite.json is missing required scenario {name:?}"
+            ),
             Self::ZeroScenarios => write!(f, "stress_suite.json recorded zero scenarios"),
             Self::RunIdMismatch { manifest, artifact } => write!(
                 f,
@@ -305,6 +325,20 @@ pub fn load_canonical_stress_suite(
     }
     if artifact.scenarios.is_empty() {
         return Err(StressSuiteArtifactError::ZeroScenarios);
+    }
+    if artifact.protocol_version != mqk_backtest::STRESS_SUITE_PROTOCOL_VERSION {
+        return Err(StressSuiteArtifactError::UnsupportedProtocolVersion(
+            artifact.protocol_version.clone(),
+        ));
+    }
+    let present_names: std::collections::BTreeSet<&str> =
+        artifact.scenarios.iter().map(|s| s.name.as_str()).collect();
+    for required in mqk_backtest::REQUIRED_SCENARIO_NAMES {
+        if !present_names.contains(required) {
+            return Err(StressSuiteArtifactError::MissingRequiredScenario(
+                required.to_string(),
+            ));
+        }
     }
     if artifact.run_id != manifest.run_id {
         return Err(StressSuiteArtifactError::RunIdMismatch {

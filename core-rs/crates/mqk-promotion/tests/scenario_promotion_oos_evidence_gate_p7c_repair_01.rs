@@ -26,6 +26,7 @@ use common::{
 use mqk_promotion::{
     evaluate_promotion, pick_winner, select_best, verify_promotion_oos_evidence, ArtifactLock,
     Candidate, PromotionConfig, PromotionInput, StressSuiteResult, VerifiedPromotionOosEvidence,
+    REQUIRED_STRESS_PROTOCOL_VERSION,
 };
 use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 
@@ -1340,7 +1341,7 @@ fn otherwise_valid_input(
     PromotionInput {
         initial_equity_micros: 1_000_000_000,
         report: good_report(strategy_name),
-        stress_suite: Some(StressSuiteResult::pass(3)),
+        stress_suite: Some(StressSuiteResult::pass(3, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
         oos_evidence,
     }

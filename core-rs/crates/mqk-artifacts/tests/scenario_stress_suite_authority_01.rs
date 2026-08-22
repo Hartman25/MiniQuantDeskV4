@@ -364,6 +364,86 @@ fn bsaa01i_content_tampered_after_write_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b-3e. PROMOTION-STRESS-AUTHORITY-REPAIR-01: protocol identity controls
+// ---------------------------------------------------------------------------
+
+/// Simulates a legitimately-written, internally-consistent artifact produced
+/// under an unsupported protocol (e.g. an old/never-accepted version) --
+/// mutating `StressSuiteRunOutput.protocol_version` BEFORE writing (rather
+/// than tampering the JSON after) means the resulting `stress_suite.json`
+/// and its `stress_suite_completed` audit hash agree perfectly with each
+/// other; only the structural protocol-identity check in
+/// `load_canonical_stress_suite` -- not audit/content-hash tamper detection
+/// -- can reject it.
+#[test]
+fn bsaa01l_wrong_protocol_version_rejected() {
+    let (report, config, bars, run_dir) =
+        run_and_persist("wrong_protocol", "BsaaWrongProtocol", healthy_bars(), 1, 3);
+    let mut output =
+        run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
+    output.protocol_version = "bkt_stress_suite_v0_fabricated".to_string();
+    mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
+
+    let err = load_canonical_stress_suite(&run_dir).unwrap_err();
+    assert_eq!(
+        err,
+        StressSuiteArtifactError::UnsupportedProtocolVersion(
+            "bkt_stress_suite_v0_fabricated".to_string()
+        )
+    );
+    cleanup(&run_dir);
+}
+
+/// Same construction as [`bsaa01l_wrong_protocol_version_rejected`] but with
+/// a blank protocol -- no implicit "unset means legacy/trusted" fallback.
+#[test]
+fn bsaa01m_blank_protocol_version_rejected() {
+    let (report, config, bars, run_dir) =
+        run_and_persist("blank_protocol", "BsaaBlankProtocol", healthy_bars(), 1, 3);
+    let mut output =
+        run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
+    output.protocol_version = String::new();
+    mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
+
+    let err = load_canonical_stress_suite(&run_dir).unwrap_err();
+    assert_eq!(
+        err,
+        StressSuiteArtifactError::UnsupportedProtocolVersion(String::new())
+    );
+    cleanup(&run_dir);
+}
+
+/// Same "consistent, not tampered" construction as
+/// [`bsaa01l_wrong_protocol_version_rejected`]: the `conservative_risk_limits`
+/// scenario is removed from `StressSuiteRunOutput` BEFORE writing, so the
+/// resulting `stress_suite.json` and its audit hash agree perfectly -- only
+/// the required-scenario-set completeness check can reject it.
+#[test]
+fn bsaa01n_missing_required_scenario_rejected() {
+    let (report, config, bars, run_dir) =
+        run_and_persist("missing_scenario", "BsaaMissingScenario", healthy_bars(), 1, 3);
+    let mut output =
+        run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
+    output.scenarios.retain(|s| s.name != "conservative_risk_limits");
+    mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
+
+    let err = load_canonical_stress_suite(&run_dir).unwrap_err();
+    assert_eq!(
+        err,
+        StressSuiteArtifactError::MissingRequiredScenario("conservative_risk_limits".to_string())
+    );
+    cleanup(&run_dir);
+}
+
+// Note: a `protocol_version` tampered post-write (matching or not) is caught
+// by `UnsupportedProtocolVersion` (bsaa01l) BEFORE the audit/content-hash
+// check ever runs -- structural protocol-identity rejection is strictly
+// earlier and strictly fail-closed relative to hash-chain tamper detection,
+// so there is no separate "protocol changed but hash still matches" case to
+// prove: any post-write edit to this field either fails structurally (wrong
+// value) or leaves the artifact byte-identical (no edit at all).
+
+// ---------------------------------------------------------------------------
 // 9. Idempotent write
 // ---------------------------------------------------------------------------
 

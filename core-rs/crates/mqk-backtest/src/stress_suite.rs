@@ -50,6 +50,15 @@ use mqk_strategy::Strategy;
 /// incomparable to a newer one.
 pub const STRESS_SUITE_PROTOCOL_VERSION: &str = "bkt_stress_suite_v1";
 
+/// The exact scenario names required under [`STRESS_SUITE_PROTOCOL_VERSION`].
+/// PROMOTION-STRESS-AUTHORITY-REPAIR-01: bound 1:1 to the protocol version --
+/// a durable stress artifact must carry every one of these names to be
+/// accepted as evidence for that protocol. If the scenario set ever changes,
+/// bump `STRESS_SUITE_PROTOCOL_VERSION` and update this list in the same
+/// patch so old artifacts are never silently reinterpreted under a new set.
+pub const REQUIRED_SCENARIO_NAMES: &[&str] =
+    &["cost_stress_2x", "cost_stress_3x", "conservative_risk_limits"];
+
 /// Outcome of one adversarial re-run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StressScenarioOutcome {

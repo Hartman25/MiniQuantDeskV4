@@ -1,10 +1,13 @@
-//! Patch B2 — Stress suite gate tests for promotion evaluation.
+//! Patch B2 / PROMOTION-STRESS-AUTHORITY-REPAIR-01 — Stress suite gate tests
+//! for promotion evaluation.
 //!
 //! Validates:
 //! - Promotion is blocked when `stress_suite` is `None` (suite not run).
 //! - Promotion is blocked when the suite ran with 0 scenarios (invalid).
 //! - Promotion is blocked when the suite failed (some scenarios failed).
 //! - Promotion passes when the suite passed and metrics meet thresholds.
+//! - A passed suite under a wrong/fabricated or blank protocol still blocks
+//!   promotion -- `passed: true` alone is never sufficient authority.
 //! - Profit factor is computed correctly from partial fills.
 //! - No phantom PnL is generated for the uncancelled portion of a partial-fill.
 
@@ -29,6 +32,7 @@ fn bf(inner: Fill) -> BacktestFill {
 }
 use mqk_promotion::{
     evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
+    REQUIRED_STRESS_PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -126,7 +130,7 @@ fn zero_scenarios_run_is_invalid_stress_suite() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000_000,
         report: good_report(),
-        stress_suite: Some(StressSuiteResult::pass(0)), // 0 scenarios — invalid
+        stress_suite: Some(StressSuiteResult::pass(0, REQUIRED_STRESS_PROTOCOL_VERSION)), // 0 scenarios — invalid
         artifact_lock: None,                            // B6: not locked; test expects failure
         oos_evidence: Some(common::valid_oos_evidence_for_testing("zero_scenarios_trial")), // P7C: isolate stress gate
     };
@@ -155,9 +159,10 @@ fn stress_suite_failed_scenarios_block_promotion() {
         5,
         3,
         vec![
-            "partial-fill partial-cancel disagreement".to_string(),
-            "cancel-replace sequence mis-routed".to_string(),
+            "cost_stress_2x: max_drawdown_fraction exceeds conservative ceiling".to_string(),
+            "conservative_risk_limits: bankruptcy".to_string(),
         ],
+        REQUIRED_STRESS_PROTOCOL_VERSION,
     );
 
     let input = PromotionInput {
@@ -185,7 +190,7 @@ fn stress_suite_failed_scenarios_block_promotion() {
         "fail reason should show 3/5 pass ratio, got: {reasons}"
     );
     assert!(
-        reasons.contains("partial-fill partial-cancel disagreement"),
+        reasons.contains("cost_stress_2x: max_drawdown_fraction exceeds conservative ceiling"),
         "fail reason should include first failed scenario description, got: {reasons}"
     );
 }
@@ -201,7 +206,7 @@ fn stress_suite_passed_with_good_metrics_allows_promotion() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000_000,
         report: good_report(),
-        stress_suite: Some(StressSuiteResult::pass(3)),
+        stress_suite: Some(StressSuiteResult::pass(3, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
         oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_passed_trial")), // P7C
     };
@@ -218,6 +223,65 @@ fn stress_suite_passed_with_good_metrics_allows_promotion() {
         decision.fail_reasons.is_empty(),
         "no fail reasons expected, got: {:?}",
         decision.fail_reasons
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gate: wrong/fabricated protocol cannot constitute production authority
+// ---------------------------------------------------------------------------
+
+/// PROMOTION-STRESS-AUTHORITY-REPAIR-01: an all-scenarios-passed
+/// `StressSuiteResult` under a protocol OTHER than
+/// `REQUIRED_STRESS_PROTOCOL_VERSION` must still block promotion --
+/// `StressSuiteResult::pass()` returning `passed: true` is never itself
+/// sufficient; the protocol identity is checked independently.
+#[test]
+fn stress_suite_wrong_protocol_blocks_promotion_even_when_passed() {
+    let input = PromotionInput {
+        initial_equity_micros: 1_000_000_000,
+        report: good_report(),
+        stress_suite: Some(StressSuiteResult::pass(3, "bkt_stress_suite_v0_fabricated")),
+        artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_wrong_protocol_trial")),
+    };
+
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(
+        !decision.passed,
+        "a passed stress suite under an unsupported protocol must still block promotion"
+    );
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(
+        reasons.contains("Stress suite protocol mismatch"),
+        "fail reason must mention protocol mismatch, got: {reasons}"
+    );
+    assert!(
+        reasons.contains(REQUIRED_STRESS_PROTOCOL_VERSION),
+        "fail reason must name the required protocol, got: {reasons}"
+    );
+}
+
+/// A blank `protocol_version` (e.g. a zero-valued/default-constructed
+/// result) must be rejected exactly like any other non-matching protocol --
+/// no implicit "unset means legacy/trusted" fallback.
+#[test]
+fn stress_suite_blank_protocol_blocks_promotion() {
+    let input = PromotionInput {
+        initial_equity_micros: 1_000_000_000,
+        report: good_report(),
+        stress_suite: Some(StressSuiteResult::pass(3, "")),
+        artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_blank_protocol_trial")),
+    };
+
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(!decision.passed, "a blank stress protocol must block promotion");
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(
+        reasons.contains("Stress suite protocol mismatch"),
+        "fail reason must mention protocol mismatch, got: {reasons}"
     );
 }
 
@@ -269,7 +333,7 @@ fn partial_fills_profit_factor_computed_correctly() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000_000,
         report,
-        stress_suite: Some(StressSuiteResult::pass(1)),
+        stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: None, // B6: only checking metrics; decision.passed not tested
         oos_evidence: None, // P7C: only checking metrics; decision.passed not tested
     };
@@ -341,7 +405,7 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000_000,
         report,
-        stress_suite: Some(StressSuiteResult::pass(1)),
+        stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: None, // B6: only checking metrics; decision.passed not tested
         oos_evidence: None, // P7C: only checking metrics; decision.passed not tested
     };

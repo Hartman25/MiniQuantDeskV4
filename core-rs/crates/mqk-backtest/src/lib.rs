@@ -68,7 +68,7 @@ pub use robustness_gauntlet::{
 }; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub use stress_suite::{
     run_backtest_stress_suite, StressScenarioOutcome, StressSuiteRunOutput,
-    STRESS_SUITE_PROTOCOL_VERSION,
+    REQUIRED_SCENARIO_NAMES, STRESS_SUITE_PROTOCOL_VERSION,
 }; // PROMOTION-STRESS-SUITE-AUTHORITY-01
 pub use sweep::{
     rank_sweep_results, run_sweep, sweep_row_from_report, SweepError, SweepGrid, SweepPoint,

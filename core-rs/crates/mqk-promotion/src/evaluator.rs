@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::types::{
     Candidate, PromotionConfig, PromotionDecision, PromotionInput, PromotionMetrics,
-    PromotionReport, RunProvenance,
+    PromotionReport, RunProvenance, REQUIRED_STRESS_PROTOCOL_VERSION,
 };
 
 // ============================================================================
@@ -52,12 +52,24 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         );
     }
 
-    // Patch B2 — Stress suite gate: must be run and must have passed.
+    // Patch B2 / PROMOTION-STRESS-AUTHORITY-REPAIR-01 — Stress suite gate:
+    // must be run under the exact required production stress protocol and
+    // must have passed. Protocol identity is checked BEFORE scenario
+    // count/pass-state so an unknown/stale/fabricated protocol never gets a
+    // more permissive "0 scenarios" or "failed" reason instead of the real
+    // one.
     match &input.stress_suite {
         None => {
-            fail_reasons.push(
-                "Stress suite not run (partial-fill + cancel/replace suite is required for promotion)".to_string(),
-            );
+            fail_reasons.push(format!(
+                "Stress suite not run (exact versioned production stress protocol {:?} is required for promotion)",
+                REQUIRED_STRESS_PROTOCOL_VERSION
+            ));
+        }
+        Some(ss) if ss.protocol_version != REQUIRED_STRESS_PROTOCOL_VERSION => {
+            fail_reasons.push(format!(
+                "Stress suite protocol mismatch: got {:?}, required {:?}",
+                ss.protocol_version, REQUIRED_STRESS_PROTOCOL_VERSION
+            ));
         }
         Some(ss) if ss.scenarios_run == 0 => {
             fail_reasons.push(
