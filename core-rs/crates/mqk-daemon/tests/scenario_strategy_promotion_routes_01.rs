@@ -302,9 +302,254 @@ fn write_research_evidence_fixture(root: &Path, seed: &str) -> ResearchEvidenceF
     }
 }
 
+/// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01: trusted daemon config for the
+/// backtest-evidence gate (`backtest_evidence_gate::evaluate_backtest_evidence_gate`),
+/// alongside the Research env vars above. `root` doubles as the artifact
+/// root `write_real_backtest_evidence` below writes real candidates into --
+/// the SAME convention `mqk_artifacts::init_run_artifacts` always uses.
+fn set_backtest_evidence_env(root: &Path) {
+    std::env::set_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT", root);
+    std::env::set_var("MQK_PROMOTION_MIN_SHARPE", "0.0");
+    std::env::set_var("MQK_PROMOTION_MAX_MDD", "1.0");
+    std::env::set_var("MQK_PROMOTION_MIN_CAGR", "0.0");
+    std::env::set_var("MQK_PROMOTION_MIN_PROFIT_FACTOR", "0.0");
+    std::env::set_var("MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT", "0.0");
+}
+
+// ---------------------------------------------------------------------------
+// CANONICAL-ROBUSTNESS-PROMOTION-GATE-01 / PRODUCTION-PROMOTION-DB-E2E-01:
+// real Backtest-side promotion evidence, via the SAME production functions
+// mqk-cli's `backtest csv` + `finalize-robustness-sensitivity` call --
+// never a hand-built JSON fixture, never a fabricated RobustnessEvidence.
+// ---------------------------------------------------------------------------
+
+/// 182 daily bars, ~0.35%/day compounding growth: manually verified (see
+/// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01's own commit) to make
+/// `swing_momentum` genuinely trade AND clear every real P9 scenario
+/// (execution-delay, month/regime concentration, parameter-neighborhood,
+/// placebo, conservative-capacity) -- not tuned to force a pass on a
+/// scenario that would otherwise fail; a candidate that behaves badly still
+/// fails these for real (see `bars_that_fail_concentration` below).
+fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
+    let m: i64 = 1_000_000;
+    let start: i64 = 1_704_229_200; // 2024-01-02T21:00:00Z
+    let mut price = 500.0_f64;
+    let mut bars = Vec::with_capacity(182);
+    for i in 0..182i64 {
+        let ts = start + i * 86_400;
+        price *= 1.0035;
+        let o = (price * m as f64) as i64;
+        let h = (price * 1.005 * m as f64) as i64;
+        let l = (price * 0.995 * m as f64) as i64;
+        let c = (price * m as f64) as i64;
+        bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+    }
+    bars
+}
+
+/// 90 daily bars, front-loaded then flat-then-jump growth: the SAME shape
+/// proven (BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01's own manual
+/// smoke test) to make `month_and_regime_concentration` genuinely FAIL
+/// (>50% of total gain concentrated in one calendar month) -- real evidence
+/// of a real defect, not a fabricated failure.
+fn bars_that_fail_concentration(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
+    let m: i64 = 1_000_000;
+    let start: i64 = 1_704_229_200; // 2024-01-02T21:00:00Z
+    let mut price = 500.0_f64;
+    let mut bars = Vec::with_capacity(90);
+    for i in 0..90i64 {
+        let ts = start + i * 86_400;
+        price *= 1.002;
+        let o = (price * m as f64) as i64;
+        let h = (price * 1.01 * m as f64) as i64;
+        let l = (price * 0.99 * m as f64) as i64;
+        let c = (price * m as f64) as i64;
+        bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+    }
+    bars
+}
+
+fn research_py_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("research-py")
+}
+
+fn py_str_literal(s: &str) -> String {
+    serde_json::to_string(s).expect("string always serializes")
+}
+
+/// Real Python subprocess, `ResearchResultStore` directly -- mirrors
+/// `mqk-backtest`'s own `scenario_dsr_pbo_sensitivity_01.rs` fixture
+/// builder. Registers ONE trial with zero attempts under `strategy_id`.
+fn register_dsr_trial(registry_db: &Path, trial_id: &str, strategy_id: &str) {
+    let script = format!(
+        "from pathlib import Path\n\
+         from mqk_research.exp_distributed.storage import ResearchResultStore\n\
+         from mqk_research.ml.economic_walkforward import PROTOCOL_ID\n\
+         store = ResearchResultStore(Path({db}))\n\
+         store.register_hypothesis(hypothesis_id='hyp', experiment_id='exp.daemon_route_it')\n\
+         store.register_trial(\n\
+         \ttrial_id={trial_id}, experiment_id='exp.daemon_route_it', hypothesis_id='hyp',\n\
+         \tstrategy_id={strategy_id}, protocol_id=PROTOCOL_ID, identity={{'minimal': True}},\n\
+         )\n",
+        db = py_str_literal(&registry_db.display().to_string()),
+        trial_id = py_str_literal(trial_id),
+        strategy_id = py_str_literal(strategy_id),
+    );
+    let src_dir = research_py_root().join("src");
+    let output = std::process::Command::new("python")
+        .env("PYTHONPATH", &src_dir)
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("failed to spawn python fixture-builder");
+    assert!(
+        output.status.success(),
+        "fixture-builder script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Options for [`write_real_backtest_evidence`] -- every knob a caller
+/// might deliberately vary to construct a genuine negative control (never
+/// by hand-editing the resulting JSON).
+struct RealEvidenceOptions {
+    bars: Vec<mqk_backtest::BacktestBar>,
+    /// If `false`, never call `write_canonical_stress_suite` at all
+    /// (missing stress evidence).
+    write_stress: bool,
+    /// If `false`, never call `write_canonical_robustness_gauntlet` at all
+    /// (missing P9 evidence).
+    write_p9: bool,
+    /// If `false`, skip the real DSR/PBO sensitivity finalize step (P9
+    /// stays incomplete: `dsr_pbo_sensitivity` remains deferred).
+    finalize_sensitivity: bool,
+}
+
+impl Default for RealEvidenceOptions {
+    fn default() -> Self {
+        Self {
+            bars: Vec::new(), // caller always overrides
+            write_stress: true,
+            write_p9: true,
+            finalize_sensitivity: true,
+        }
+    }
+}
+
+/// Run a REAL `BacktestEngine`, write the REAL full evidence set (manifest,
+/// audit, `backtest_report.json`, `stress_suite.json`,
+/// `robustness_gauntlet.json` -- finalized with a REAL DSR/PBO sensitivity
+/// result via a real Python subprocess against a real disposable SQLite
+/// registry) via the exact same production functions
+/// `mqk-cli`'s `backtest csv` + `finalize-robustness-sensitivity` call.
+/// Returns the candidate's `run_id`. `artifact_root` must be the SAME root
+/// `set_backtest_evidence_env` configured.
+fn write_real_backtest_evidence(
+    artifact_root: &Path,
+    dsr_registry_db: &Path,
+    strategy_id: &str,
+    symbol: &str,
+    opts: RealEvidenceOptions,
+) -> Uuid {
+    use mqk_strategy::engines::register_builtin_strategies_with_sizing;
+    use mqk_strategy::PluginRegistry;
+
+    // Mirrors `mqk-cli`'s own `backtest csv` config construction exactly
+    // (`conservative_defaults()` + timeframe + integrity threshold) -- the
+    // SAME config shape manually validated (BKT-PROMOTION-EVIDENCE-
+    // PRODUCTION-FINALIZER-01) to make `swing_momentum` genuinely trade and
+    // clear every real P9 scenario on daily bars.
+    let mut cfg = mqk_backtest::BacktestConfig::conservative_defaults();
+    cfg.timeframe_secs = 86_400;
+    cfg.integrity_stale_threshold_ticks = 200_000;
+    let initial_cash = cfg.initial_cash_micros;
+
+    let mut reg = PluginRegistry::new();
+    register_builtin_strategies_with_sizing(&mut reg, symbol, 1, None, None)
+        .expect("register_builtin_strategies_with_sizing");
+    // The engine always runs the real `swing_momentum` strategy; its own
+    // `report.strategy_name` (== "swing_momentum") is what
+    // `evaluate_backtest_evidence_gate`'s cross-candidate check below
+    // compares the daemon route's `strategy_id` against, and what
+    // `dsr_pbo_sensitivity_scenario`'s own cross-candidate check compares
+    // the Research trial's `strategy_id` against. `strategy_id` (the
+    // parameter here) is used ONLY to namespace this test's DSR trial_id so
+    // parallel test fixtures never collide in the shared SQLite registry.
+
+    let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
+    engine
+        .add_strategy(reg.instantiate("swing_momentum").expect("swing_momentum registered"))
+        .expect("add_strategy");
+    let report = engine.run(&opts.bars).expect("engine.run");
+
+    let config_hash = report.config_id.to_string();
+    let init_result = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+        exports_root: artifact_root,
+        schema_version: 1,
+        run_id: report.run_id,
+        strategy_name: &report.strategy_name,
+        engine_id: "mqk-backtest",
+        mode: "backtest",
+        timeframe: None,
+        timeframe_secs: Some(86_400),
+        git_hash: "daemon_route_it_git_hash",
+        config_hash: &config_hash,
+        host_fingerprint: "daemon_route_it_host",
+        now_utc: Utc::now(),
+    })
+    .expect("init_run_artifacts");
+
+    mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, initial_cash)
+        .expect("write_backtest_report");
+
+    if opts.write_stress {
+        let stress_output =
+            mqk_backtest::run_backtest_stress_suite(&report, &cfg, &opts.bars, || {
+                reg.instantiate("swing_momentum").expect("swing_momentum registered")
+            });
+        mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
+            .expect("write_canonical_stress_suite");
+    }
+
+    if opts.write_p9 {
+        let gauntlet_output =
+            mqk_backtest::run_robustness_gauntlet(&report, &cfg, &opts.bars, || {
+                reg.instantiate("swing_momentum").expect("swing_momentum registered")
+            });
+        mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
+            .expect("write_canonical_robustness_gauntlet");
+
+        if opts.finalize_sensitivity {
+            let trial_id = format!("trial_for_{strategy_id}");
+            register_dsr_trial(dsr_registry_db, &trial_id, &report.strategy_name);
+            let sensitivity = mqk_backtest::dsr_pbo_sensitivity_scenario(
+                "python",
+                &research_py_root(),
+                dsr_registry_db,
+                &trial_id,
+                &report.strategy_name,
+                &[8, 10],
+            );
+            mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+                &init_result.run_dir,
+                &sensitivity,
+            )
+            .expect("finalize_canonical_robustness_gauntlet_with_sensitivity");
+        }
+    }
+
+    report.run_id
+}
+
 fn make_state_no_db(root: &Path, auth: state::OperatorAuthMode) -> Arc<state::AppState> {
     std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", root);
     set_research_evidence_env(root);
+    set_backtest_evidence_env(root);
     Arc::new(state::AppState::new_with_operator_auth(auth))
 }
 
@@ -333,6 +578,7 @@ fn make_state_with_db(
 ) -> Arc<state::AppState> {
     std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", root);
     set_research_evidence_env(root);
+    set_backtest_evidence_env(root);
     Arc::new(state::AppState::new_with_db_and_operator_auth(pool, auth))
 }
 
@@ -345,6 +591,10 @@ async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCo
 
 fn parse_json(body: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&body).expect("response body must be valid JSON")
+}
+
+fn router_with(st: &Arc<state::AppState>) -> axum::Router {
+    routes::build_router(Arc::clone(st))
 }
 
 fn get_req(uri: &str) -> Request<axum::body::Body> {
@@ -404,11 +654,13 @@ fn transition_body(
     })
 }
 
-/// PROMOTION-WALKFORWARD-GATE-WIRING-01: like `transition_body`, but also
-/// carries the three P7C research-evidence fields required for any
-/// evidence-requiring transition to actually succeed (Gate 4c). Tests that
-/// only exercise Gate 4 (scanner evidence) rejection paths never reach Gate
-/// 4c and keep using plain `transition_body`.
+/// PROMOTION-WALKFORWARD-GATE-WIRING-01 / CANONICAL-ROBUSTNESS-PROMOTION-
+/// GATE-01: like `transition_body`, but also carries the three P7C
+/// research-evidence fields AND `backtest_run_id` required for any
+/// evidence-requiring transition to actually succeed (Gate 4c/4d). Tests
+/// that only exercise Gate 4 (scanner evidence) rejection paths never reach
+/// Gate 4c and keep using plain `transition_body`; for those, an empty/
+/// irrelevant `backtest_run_id` is harmless since Gate 4 rejects first.
 #[allow(clippy::too_many_arguments)]
 fn transition_body_with_research(
     strategy_id: &str,
@@ -419,6 +671,7 @@ fn transition_body_with_research(
     research_trial_id: &str,
     research_evidence_dir: &str,
     research_judge_artifact_path: &str,
+    backtest_run_id: &str,
 ) -> serde_json::Value {
     serde_json::json!({
         "strategy_id": strategy_id,
@@ -429,6 +682,7 @@ fn transition_body_with_research(
         "research_trial_id": research_trial_id,
         "research_evidence_dir": research_evidence_dir,
         "research_judge_artifact_path": research_judge_artifact_path,
+        "backtest_run_id": backtest_run_id,
         "effective_at_utc": Utc::now().to_rfc3339(),
         "expires_at_utc": null,
         "initiated_by": "test-operator",
@@ -524,23 +778,41 @@ async fn mutation_field_validation_before_db() {
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn valid_paper_candidate_creates_first_transition() {
+    // Gate 4c/4d's backtest-evidence gate binds candidate identity via the
+    // REAL engine's own `strategy_name` (always "swing_momentum" for the
+    // real `swing_momentum` plugin -- see `write_real_backtest_evidence`),
+    // so `strategy_id` here must be the real name, not a synthetic unique
+    // id. The symbol is varied instead to keep this test's DB identity
+    // (strategy_id, symbol, timeframe_secs) disjoint from other tests.
     let root = temp_dir("valid_paper_candidate");
-    let strategy_id = unique_id("promo_route_valid");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
     let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
     let pool = make_db_pool().await;
     let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
     let router = routes::build_router(st);
 
     let body = transition_body_with_research(
         &strategy_id,
-        "AAPL",
+        &symbol,
         86400,
         "shadow_approved",
         Some(review_dir.to_str().unwrap()),
         &research.trial_id,
         research.evidence_dir.to_str().unwrap(),
         research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
     );
     let (status, resp_body) = call(router, post_json_req(TRANSITION_ROUTE, None, body)).await;
     assert_eq!(status, StatusCode::OK);
@@ -611,6 +883,11 @@ async fn valid_research_evidence_without_scanner_evidence_is_rejected() {
         &research.trial_id,
         research.evidence_dir.to_str().unwrap(),
         research.judge_path.to_str().unwrap(),
+        // Gate 4 (scanner/review evidence) rejects this request before Gate
+        // 4c/4d is ever reached (review_state=rejected, not
+        // paper_candidate) -- no real backtest evidence is needed for this
+        // negative control.
+        "",
     );
     let (status, resp_body) = call(router, post_json_req(TRANSITION_ROUTE, None, body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -861,21 +1138,33 @@ async fn no_db_produces_unavailable() {
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn valid_transition_visible_on_read_routes() {
     let root = temp_dir("visible_on_read");
-    let strategy_id = unique_id("promo_route_readback");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
     let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
     let pool = make_db_pool().await;
     let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
 
     let body = transition_body_with_research(
         &strategy_id,
-        "AAPL",
+        &symbol,
         86400,
         "shadow_approved",
         Some(review_dir.to_str().unwrap()),
         &research.trial_id,
         research.evidence_dir.to_str().unwrap(),
         research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
     );
     let (status, _) = call(
         routes::build_router(Arc::clone(&st)),
@@ -886,8 +1175,9 @@ async fn valid_transition_visible_on_read_routes() {
 
     // GET .../promotions/check reflects it.
     let uri = format!(
-        "/api/v1/strategy/promotions/check?strategy_id={}&symbol=AAPL&timeframe_secs=86400",
-        urlencoding_encode(&strategy_id)
+        "/api/v1/strategy/promotions/check?strategy_id={}&symbol={}&timeframe_secs=86400",
+        urlencoding_encode(&strategy_id),
+        urlencoding_encode(&symbol)
     );
     let (status, resp_body) = call(routes::build_router(Arc::clone(&st)), get_req(&uri)).await;
     assert_eq!(status, StatusCode::OK);
@@ -917,22 +1207,34 @@ async fn valid_transition_visible_on_read_routes() {
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn history_remains_visible_after_later_transition() {
     let root = temp_dir("history_visible");
-    let strategy_id = unique_id("promo_route_history");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
     let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
     let pool = make_db_pool().await;
     let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
 
     // shadow_approved (requires evidence).
     let body = transition_body_with_research(
         &strategy_id,
-        "AAPL",
+        &symbol,
         86400,
         "shadow_approved",
         Some(review_dir.to_str().unwrap()),
         &research.trial_id,
         research.evidence_dir.to_str().unwrap(),
         research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
     );
     let (status, _) = call(
         routes::build_router(Arc::clone(&st)),
@@ -942,7 +1244,7 @@ async fn history_remains_visible_after_later_transition() {
     assert_eq!(status, StatusCode::OK);
 
     // paper_approved (no new evidence required for this edge).
-    let body = transition_body(&strategy_id, "AAPL", 86400, "paper_approved", None);
+    let body = transition_body(&strategy_id, &symbol, 86400, "paper_approved", None);
     let (status, _) = call(
         routes::build_router(Arc::clone(&st)),
         post_json_req(TRANSITION_ROUTE, None, body),
@@ -951,8 +1253,9 @@ async fn history_remains_visible_after_later_transition() {
     assert_eq!(status, StatusCode::OK);
 
     let uri = format!(
-        "/api/v1/strategy/promotions/history?strategy_id={}&symbol=AAPL&timeframe_secs=86400",
-        urlencoding_encode(&strategy_id)
+        "/api/v1/strategy/promotions/history?strategy_id={}&symbol={}&timeframe_secs=86400",
+        urlencoding_encode(&strategy_id),
+        urlencoding_encode(&symbol)
     );
     let (status, resp_body) = call(routes::build_router(st), get_req(&uri)).await;
     assert_eq!(status, StatusCode::OK);
@@ -1001,9 +1304,20 @@ async fn illegal_transition_creates_no_row() {
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn duplicate_transition_request_is_idempotent() {
     let root = temp_dir("duplicate_request");
-    let strategy_id = unique_id("promo_route_replay");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
     let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
     let pool = make_db_pool().await;
     let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
 
@@ -1012,13 +1326,14 @@ async fn duplicate_transition_request_is_idempotent() {
     let effective_at = Utc::now().to_rfc3339();
     let body = serde_json::json!({
         "strategy_id": strategy_id,
-        "symbol": "AAPL",
+        "symbol": symbol,
         "timeframe_secs": 86400,
         "target_state": "shadow_approved",
         "review_dir": review_dir.to_str().unwrap(),
         "research_trial_id": research.trial_id,
         "research_evidence_dir": research.evidence_dir.to_str().unwrap(),
         "research_judge_artifact_path": research.judge_path.to_str().unwrap(),
+        "backtest_run_id": run_id.to_string(),
         "effective_at_utc": effective_at,
         "expires_at_utc": null,
         "initiated_by": "test-operator",
@@ -1050,31 +1365,45 @@ async fn duplicate_transition_request_is_idempotent() {
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn tradable_live_always_false() {
     let root = temp_dir("live_always_false");
-    let strategy_id = unique_id("promo_route_live_check");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
     let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
     let pool = make_db_pool().await;
     let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
 
     let body = transition_body_with_research(
         &strategy_id,
-        "AAPL",
+        &symbol,
         86400,
         "shadow_approved",
         Some(review_dir.to_str().unwrap()),
         &research.trial_id,
         research.evidence_dir.to_str().unwrap(),
         research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
     );
-    call(
+    let (status, _) = call(
         routes::build_router(Arc::clone(&st)),
         post_json_req(TRANSITION_ROUTE, None, body),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "real evidence must produce a genuine transition");
 
     let uri = format!(
-        "/api/v1/strategy/promotions/check?strategy_id={}&symbol=AAPL&timeframe_secs=86400",
-        urlencoding_encode(&strategy_id)
+        "/api/v1/strategy/promotions/check?strategy_id={}&symbol={}&timeframe_secs=86400",
+        urlencoding_encode(&strategy_id),
+        urlencoding_encode(&symbol)
     );
     let (_, resp_body) = call(routes::build_router(Arc::clone(&st)), get_req(&uri)).await;
     assert_eq!(parse_json(resp_body)["tradable_live"], false);
@@ -1091,4 +1420,598 @@ async fn tradable_live_always_false() {
             "tradable_live must always be false"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// PRODUCTION-PROMOTION-DB-E2E-01: negative controls over the REAL Gate
+// 4c/4d backtest-evidence path, exercised through the real Axum route with
+// a real Postgres pool -- each fixture is genuine production evidence with
+// exactly one deliberate defect, never a hand-edited JSON file.
+// ---------------------------------------------------------------------------
+
+/// Asserts a transition request was rejected before any row could be
+/// committed: BAD_REQUEST/evidence_invalid, and the identity's current
+/// state (via the real `/promotions/check` route) is still null.
+async fn assert_evidence_rejected_no_row(
+    st: Arc<state::AppState>,
+    body: serde_json::Value,
+    strategy_id: &str,
+    symbol: &str,
+) {
+    let (status, resp_body) = call(
+        routes::build_router(Arc::clone(&st)),
+        post_json_req(TRANSITION_ROUTE, None, body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json = parse_json(resp_body);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "evidence_invalid");
+
+    let uri = format!(
+        "/api/v1/strategy/promotions/check?strategy_id={}&symbol={}&timeframe_secs=86400",
+        urlencoding_encode(strategy_id),
+        urlencoding_encode(symbol)
+    );
+    let (_, resp_body) = call(routes::build_router(st), get_req(&uri)).await;
+    assert_eq!(
+        parse_json(resp_body)["current_state"],
+        serde_json::Value::Null,
+        "rejected evidence must leave no promotion row"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn cross_candidate_backtest_evidence_strategy_mismatch_is_rejected() {
+    // Real evidence is genuinely produced (engine always runs the real
+    // `swing_momentum` plugin, so `report.strategy_name == "swing_momentum"`
+    // no matter what `strategy_id` is passed in here) -- but every OTHER
+    // fixture (scanner review, research OOS) plus the promotion request
+    // itself claims a DIFFERENT strategy_id. The backtest-evidence gate's
+    // own cross-candidate check (`backtest_evidence_gate.rs`) must catch
+    // this: a real, structurally valid Backtest candidate must never be
+    // accepted for a promotion identity it was not produced for.
+    let root = temp_dir("cross_candidate_mismatch");
+    let strategy_id = unique_id("promo_route_cross_candidate").to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    // Real evidence, but produced by the real engine under its own real
+    // name ("swing_momentum"), never under `strategy_id` above.
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    let (status, resp_body) = call(
+        routes::build_router(Arc::clone(&st)),
+        post_json_req(TRANSITION_ROUTE, None, body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json = parse_json(resp_body);
+    assert_eq!(json["disposition"], "evidence_invalid");
+    assert!(json["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b.as_str().unwrap().contains("cross-candidate")));
+
+    let uri = format!(
+        "/api/v1/strategy/promotions/check?strategy_id={}&symbol={}&timeframe_secs=86400",
+        urlencoding_encode(&strategy_id),
+        urlencoding_encode(&symbol)
+    );
+    let (_, resp_body) = call(routes::build_router(st), get_req(&uri)).await;
+    assert_eq!(
+        parse_json(resp_body)["current_state"],
+        serde_json::Value::Null,
+        "rejected cross-candidate evidence must leave no promotion row"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn missing_backtest_run_id_is_rejected() {
+    let root = temp_dir("missing_backtest_run_id");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        "", // no real evidence was ever written for this candidate
+    );
+    let (status, resp_body) = call(router_with(&st), post_json_req(TRANSITION_ROUTE, None, body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json = parse_json(resp_body);
+    assert_eq!(json["disposition"], "evidence_invalid");
+    assert!(json["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b.as_str().unwrap().contains("backtest_run_id")));
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn missing_backtest_evidence_artifact_root_is_rejected() {
+    // Same fully-valid fixtures as the positive-path tests, but the daemon
+    // itself has no `MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT` configured --
+    // trusted daemon config, never request content, is the only source of
+    // authority for the artifact root (`backtest_evidence_gate.rs`).
+    let root = temp_dir("missing_artifact_root_config");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
+    set_research_evidence_env(&root);
+    std::env::remove_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT");
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    // Restore for subsequent tests sharing this process (--test-threads=1).
+    set_backtest_evidence_env(&root);
+
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    let (status, resp_body) = call(router_with(&st), post_json_req(TRANSITION_ROUTE, None, body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json = parse_json(resp_body);
+    assert_eq!(json["disposition"], "evidence_invalid");
+    assert!(json["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b.as_str().unwrap().contains("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT")));
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn missing_stress_evidence_is_rejected() {
+    let root = temp_dir("missing_stress_evidence");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            write_stress: false,
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    assert_evidence_rejected_no_row(st, body, &strategy_id, &symbol).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn missing_p9_robustness_evidence_is_rejected() {
+    let root = temp_dir("missing_p9");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            write_p9: false,
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    assert_evidence_rejected_no_row(st, body, &strategy_id, &symbol).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn incomplete_p9_missing_dsr_pbo_sensitivity_is_rejected() {
+    // P9 (robustness_gauntlet.json) is written, but the DSR/PBO sensitivity
+    // finalize step never runs -- `dsr_pbo_sensitivity` stays a deferred
+    // scenario, so P9 is structurally present but NOT complete
+    // (`is_complete=false`). `evaluate_promotion` must require full P9
+    // completeness, not merely its presence.
+    let root = temp_dir("incomplete_p9");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            finalize_sensitivity: false,
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    assert_evidence_rejected_no_row(st, body, &strategy_id, &symbol).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn failed_p9_scenario_is_rejected() {
+    // A genuinely bad candidate: `month_and_regime_concentration` really
+    // fails (>50% of total gain concentrated in one calendar month) on
+    // `bars_that_fail_concentration`. `is_complete=true` (every scenario
+    // ran, including a real DSR/PBO sensitivity finalize) but
+    // `all_applicable_passed=false` -- `evaluate_promotion` must require
+    // both.
+    let root = temp_dir("failed_p9_scenario");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: bars_that_fail_concentration(&symbol),
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    assert_evidence_rejected_no_row(st, body, &strategy_id, &symbol).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn artifact_tamper_is_rejected() {
+    // Real, genuinely complete evidence -- then one byte of
+    // `stress_suite.json` is corrupted after the fact, breaking its
+    // recorded hash. `resolve_backtest_evidence`'s hash-chain verification
+    // must catch this; a route that only checked file *presence* would not.
+    let root = temp_dir("artifact_tamper");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+    let stress_path = root.join(run_id.to_string()).join("stress_suite.json");
+    let original = std::fs::read_to_string(&stress_path).expect("read stress_suite.json");
+    std::fs::write(&stress_path, format!("{original} ")).expect("tamper stress_suite.json");
+
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    assert_evidence_rejected_no_row(st, body, &strategy_id, &symbol).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn dsr_below_threshold_is_rejected() {
+    // Genuine end-to-end fixtures, but with the Research judge's own
+    // dsr=0.85 fixture value now failing an unusually strict daemon policy
+    // threshold override -- proves the ROUTE actually reads and enforces
+    // `MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO`, not merely that the judge
+    // artifact contains a dsr value.
+    let root = temp_dir("dsr_below_threshold");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    // `AppState` captures this threshold ONCE at construction time, and
+    // `make_state_with_db` itself unconditionally resets it to the
+    // permissive default via `set_research_evidence_env` -- so the override
+    // must be applied AFTER that call but BEFORE `AppState` is constructed,
+    // not by calling `make_state_with_db` at all. Fixture dsr=0.85 must now
+    // fail a 0.99 floor.
+    std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
+    set_research_evidence_env(&root);
+    std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.99");
+    set_backtest_evidence_env(&root);
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.0");
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    assert_evidence_rejected_no_row(st, body, &strategy_id, &symbol).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn pbo_above_threshold_is_rejected() {
+    // Same rationale as `dsr_below_threshold_is_rejected`, for
+    // `MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING` against the
+    // fixture's pbo=0.15.
+    let root = temp_dir("pbo_above_threshold");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    // Same rationale as `dsr_below_threshold_is_rejected`: bypass
+    // `make_state_with_db` (which unconditionally resets this var to its
+    // permissive default) and apply the override directly before
+    // constructing `AppState`.
+    std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
+    set_research_evidence_env(&root);
+    std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "0.01");
+    set_backtest_evidence_env(&root);
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "1.0");
+    let body = transition_body_with_research(
+        &strategy_id,
+        &symbol,
+        86400,
+        "shadow_approved",
+        Some(review_dir.to_str().unwrap()),
+        &research.trial_id,
+        research.evidence_dir.to_str().unwrap(),
+        research.judge_path.to_str().unwrap(),
+        &run_id.to_string(),
+    );
+    assert_evidence_rejected_no_row(st, body, &strategy_id, &symbol).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn duplicate_retry_with_mismatched_backtest_run_id_is_rejected() {
+    // PRODUCTION-PROMOTION-DB-E2E-01: a retry that is byte-identical to an
+    // already-accepted request except for a DIFFERENT (never-validated)
+    // `backtest_run_id` must never be short-circuited as
+    // `disposition: "duplicate"` -- that would silently skip Gate 4c/4d
+    // re-validation of the second request's own claimed evidence. Proves
+    // the `backtest_run_id` fix to the deterministic `transition_id` seed
+    // in `routes/strategy_promotions.rs`.
+    let root = temp_dir("duplicate_mismatched_run_id");
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
+    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, &symbol, "1D")]);
+    let research = write_research_evidence_fixture(&root, &strategy_id);
+    let run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+        RealEvidenceOptions {
+            bars: smooth_uptrend_bars(&symbol),
+            ..Default::default()
+        },
+    );
+    let pool = make_db_pool().await;
+    let st = make_state_with_db(&root, pool, state::OperatorAuthMode::ExplicitDevNoToken);
+
+    let effective_at = Utc::now().to_rfc3339();
+    let mut body = serde_json::json!({
+        "strategy_id": strategy_id,
+        "symbol": symbol,
+        "timeframe_secs": 86400,
+        "target_state": "shadow_approved",
+        "review_dir": review_dir.to_str().unwrap(),
+        "research_trial_id": research.trial_id,
+        "research_evidence_dir": research.evidence_dir.to_str().unwrap(),
+        "research_judge_artifact_path": research.judge_path.to_str().unwrap(),
+        "backtest_run_id": run_id.to_string(),
+        "effective_at_utc": effective_at,
+        "expires_at_utc": null,
+        "initiated_by": "test-operator",
+        "reason": "scenario test",
+    });
+
+    let (status1, body1) = call(
+        routes::build_router(Arc::clone(&st)),
+        post_json_req(TRANSITION_ROUTE, None, body.clone()),
+    )
+    .await;
+    assert_eq!(status1, StatusCode::OK);
+    let json1 = parse_json(body1);
+    assert_eq!(json1["disposition"], "transitioned");
+    let tid1 = json1["transition_id"].as_str().unwrap().to_string();
+
+    // Same request, but a syntactically well-formed, never-registered
+    // `backtest_run_id` -- everything else (including `effective_at_utc`)
+    // byte-identical. Because `backtest_run_id` is now part of the
+    // deterministic `transition_id` seed, this computes a DIFFERENT
+    // `transition_id` than the first call, so Gate 1b's idempotency
+    // short-circuit does not fire; the request is independently re-decided
+    // from Gate 2 onward against the identity's now-current state
+    // (shadow_approved), which correctly rejects a second
+    // shadow_approved->shadow_approved request as `illegal_transition`
+    // regardless of evidence -- the exact outcome this test exists to
+    // prove is absent: it must NEVER be silently accepted as
+    // `disposition: "duplicate"` carrying the first call's already-verified
+    // lineage.
+    body["backtest_run_id"] = serde_json::Value::String(Uuid::new_v4().to_string());
+    let (status2, body2) = call(
+        routes::build_router(Arc::clone(&st)),
+        post_json_req(TRANSITION_ROUTE, None, body),
+    )
+    .await;
+    assert_ne!(status2, StatusCode::OK, "a mismatched-lineage retry must never succeed");
+    let json2 = parse_json(body2);
+    assert_ne!(
+        json2["disposition"], "duplicate",
+        "a mismatched-lineage retry must never be reported as a duplicate of the original request"
+    );
+    assert_ne!(
+        json2["transition_id"].as_str(),
+        Some(tid1.as_str()),
+        "a rejected mismatched-lineage retry must never claim the original transition_id"
+    );
+
+    // No contradictory second row: history for this identity still shows
+    // exactly the one, originally-verified transition.
+    let uri = format!(
+        "/api/v1/strategy/promotions/history?strategy_id={}&symbol={}&timeframe_secs=86400",
+        urlencoding_encode(&strategy_id),
+        urlencoding_encode(&symbol)
+    );
+    let (_, resp_body) = call(routes::build_router(st), get_req(&uri)).await;
+    let history = parse_json(resp_body);
+    let rows = history["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "a rejected mismatched-lineage retry must never create a second row"
+    );
+    assert_eq!(rows[0]["transition_id"].as_str().unwrap(), tid1);
 }

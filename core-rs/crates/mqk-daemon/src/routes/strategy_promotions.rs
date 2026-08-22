@@ -619,12 +619,18 @@ pub(crate) async fn strategy_promotion_transition(
     // anyway), which would silently break idempotency by minting a
     // different id for what the client considers "the same request".
     let review_dir_raw = body.review_dir.as_deref().unwrap_or("").trim().to_string();
-    // PROMOTION-WALKFORWARD-GATE-WIRING-01: the three P7C fields are
+    // PROMOTION-WALKFORWARD-GATE-WIRING-01: the three P7C fields, and
+    // (PRODUCTION-PROMOTION-DB-E2E-01) `backtest_run_id`, are all
     // client-supplied request content that materially changes the
     // transition's evidentiary basis, exactly like `review_dir` above --
     // included in the deterministic seed so two requests differing only in
-    // which Research trial/evidence they claim can never collide on the
-    // same `transition_id`.
+    // which Research trial/evidence or which Backtest run they claim can
+    // never collide on the same `transition_id`. Without `backtest_run_id`
+    // in this seed, a retry that is byte-identical except for a DIFFERENT
+    // (unvalidated) `backtest_run_id` would be misdiagnosed as an exact
+    // replay by Gate 1b above and short-circuited to `disposition:
+    // "duplicate"` -- silently skipping Gate 4c/4d re-validation of the
+    // second request's own claimed evidence entirely.
     let research_trial_id_raw = body
         .research_trial_id
         .as_deref()
@@ -643,11 +649,18 @@ pub(crate) async fn strategy_promotion_transition(
         .unwrap_or("")
         .trim()
         .to_string();
+    let backtest_run_id_raw = body
+        .backtest_run_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let seed = format!(
         "mqk-strategy-promotion-transition.v1|strategy_id={strategy_id}|symbol={symbol}|\
          timeframe_secs={timeframe_secs}|target_state={target_state}|review_dir={review_dir_raw}|\
          research_trial_id={research_trial_id_raw}|research_evidence_dir={research_evidence_dir_raw}|\
          research_judge_artifact_path={research_judge_artifact_path_raw}|\
+         backtest_run_id={backtest_run_id_raw}|\
          effective_at_utc={}|expires_at_utc={:?}|initiated_by={initiated_by}|reason={}",
         effective_at_utc.to_rfc3339(),
         expires_at_utc.map(|t| t.to_rfc3339()),

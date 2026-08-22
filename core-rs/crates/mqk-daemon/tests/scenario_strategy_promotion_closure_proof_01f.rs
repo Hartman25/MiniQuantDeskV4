@@ -29,7 +29,7 @@
 //!   cargo test -p mqk-daemon --test scenario_strategy_promotion_closure_proof_01f \
 //!     -- --include-ignored --nocapture
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
@@ -46,7 +46,6 @@ use mqk_daemon::{
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const SYMBOL: &str = "AAPL";
 const TIMEFRAME_SECS: i64 = 86400;
 const TRANSITION_ROUTE: &str = "/api/v1/strategy/promotions/transition";
 
@@ -77,9 +76,13 @@ async fn make_db_pool() -> sqlx::PgPool {
 /// the exact same `write_review_artifacts` function the CLI's
 /// `mqk backtest review-scan` command calls — this is a real artifact
 /// directory, not a hand-rolled JSON blob.
-fn write_paper_candidate_fixture(out_dir: &std::path::Path, strategy_id: &str) -> PathBuf {
+fn write_paper_candidate_fixture(
+    out_dir: &std::path::Path,
+    strategy_id: &str,
+    symbol: &str,
+) -> PathBuf {
     let decision = StrategyScanReviewDecision {
-        symbol: SYMBOL.to_string(),
+        symbol: symbol.to_string(),
         timeframe: "1D".to_string(),
         strategy_id: strategy_id.to_string(),
         scanner_rank: Some(1),
@@ -235,6 +238,165 @@ fn write_research_evidence_fixture(root: &std::path::Path, seed: &str) -> Resear
     }
 }
 
+// ---------------------------------------------------------------------------
+// PRODUCTION-PROMOTION-DB-E2E-01: real Backtest-side promotion evidence, via
+// the SAME production functions mqk-cli's `backtest csv` +
+// `finalize-robustness-sensitivity` call -- duplicated here for the same
+// "no cross-crate test visibility" reason `write_research_evidence_fixture`
+// above already is (this file is an independent test binary).
+// ---------------------------------------------------------------------------
+
+/// 182 daily bars, ~0.35%/day compounding growth: manually verified (see
+/// BKT-PROMOTION-EVIDENCE-PRODUCTION-FINALIZER-01's own commit, and
+/// `scenario_strategy_promotion_routes_01.rs`'s identical fixture) to make
+/// `swing_momentum` genuinely trade AND clear every real P9 scenario.
+fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
+    let m: i64 = 1_000_000;
+    let start: i64 = 1_704_229_200; // 2024-01-02T21:00:00Z
+    let mut price = 500.0_f64;
+    let mut bars = Vec::with_capacity(182);
+    for i in 0..182i64 {
+        let ts = start + i * 86_400;
+        price *= 1.0035;
+        let o = (price * m as f64) as i64;
+        let h = (price * 1.005 * m as f64) as i64;
+        let l = (price * 0.995 * m as f64) as i64;
+        let c = (price * m as f64) as i64;
+        bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+    }
+    bars
+}
+
+fn research_py_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("research-py")
+}
+
+fn py_str_literal(s: &str) -> String {
+    serde_json::to_string(s).expect("string always serializes")
+}
+
+/// Real Python subprocess, `ResearchResultStore` directly -- mirrors
+/// `mqk-backtest`'s own `scenario_dsr_pbo_sensitivity_01.rs` fixture
+/// builder. Registers ONE trial with zero attempts under `strategy_id`.
+fn register_dsr_trial(registry_db: &std::path::Path, trial_id: &str, strategy_id: &str) {
+    let script = format!(
+        "from pathlib import Path\n\
+         from mqk_research.exp_distributed.storage import ResearchResultStore\n\
+         from mqk_research.ml.economic_walkforward import PROTOCOL_ID\n\
+         store = ResearchResultStore(Path({db}))\n\
+         store.register_hypothesis(hypothesis_id='hyp', experiment_id='exp.closure_proof_it')\n\
+         store.register_trial(\n\
+         \ttrial_id={trial_id}, experiment_id='exp.closure_proof_it', hypothesis_id='hyp',\n\
+         \tstrategy_id={strategy_id}, protocol_id=PROTOCOL_ID, identity={{'minimal': True}},\n\
+         )\n",
+        db = py_str_literal(&registry_db.display().to_string()),
+        trial_id = py_str_literal(trial_id),
+        strategy_id = py_str_literal(strategy_id),
+    );
+    let src_dir = research_py_root().join("src");
+    let output = std::process::Command::new("python")
+        .env("PYTHONPATH", &src_dir)
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("failed to spawn python fixture-builder");
+    assert!(
+        output.status.success(),
+        "fixture-builder script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run a REAL `BacktestEngine`, write the REAL, genuinely complete evidence
+/// set (manifest, audit, `backtest_report.json`, `stress_suite.json`,
+/// `robustness_gauntlet.json` -- finalized with a REAL DSR/PBO sensitivity
+/// result via a real Python subprocess against a real disposable SQLite
+/// registry). Returns the candidate's `run_id`. The engine always runs the
+/// real `swing_momentum` plugin, so `report.strategy_name ==
+/// "swing_momentum"` regardless of `dsr_trial_seed` -- callers that need
+/// Gate 4c/4d to pass must use `strategy_id = "swing_momentum"` for the
+/// promotion identity itself (see the test below).
+fn write_real_backtest_evidence(
+    artifact_root: &std::path::Path,
+    dsr_registry_db: &std::path::Path,
+    dsr_trial_seed: &str,
+    symbol: &str,
+) -> Uuid {
+    use mqk_strategy::engines::register_builtin_strategies_with_sizing;
+    use mqk_strategy::PluginRegistry;
+
+    let mut cfg = mqk_backtest::BacktestConfig::conservative_defaults();
+    cfg.timeframe_secs = 86_400;
+    cfg.integrity_stale_threshold_ticks = 200_000;
+    let initial_cash = cfg.initial_cash_micros;
+
+    let mut reg = PluginRegistry::new();
+    register_builtin_strategies_with_sizing(&mut reg, symbol, 1, None, None)
+        .expect("register_builtin_strategies_with_sizing");
+
+    let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
+    engine
+        .add_strategy(reg.instantiate("swing_momentum").expect("swing_momentum registered"))
+        .expect("add_strategy");
+    let bars = smooth_uptrend_bars(symbol);
+    let report = engine.run(&bars).expect("engine.run");
+
+    let config_hash = report.config_id.to_string();
+    let init_result = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+        exports_root: artifact_root,
+        schema_version: 1,
+        run_id: report.run_id,
+        strategy_name: &report.strategy_name,
+        engine_id: "mqk-backtest",
+        mode: "backtest",
+        timeframe: None,
+        timeframe_secs: Some(86_400),
+        git_hash: "closure_proof_it_git_hash",
+        config_hash: &config_hash,
+        host_fingerprint: "closure_proof_it_host",
+        now_utc: Utc::now(),
+    })
+    .expect("init_run_artifacts");
+
+    mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, initial_cash)
+        .expect("write_backtest_report");
+
+    let stress_output = mqk_backtest::run_backtest_stress_suite(&report, &cfg, &bars, || {
+        reg.instantiate("swing_momentum").expect("swing_momentum registered")
+    });
+    mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
+        .expect("write_canonical_stress_suite");
+
+    let gauntlet_output = mqk_backtest::run_robustness_gauntlet(&report, &cfg, &bars, || {
+        reg.instantiate("swing_momentum").expect("swing_momentum registered")
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
+        .expect("write_canonical_robustness_gauntlet");
+
+    let trial_id = format!("trial_for_{dsr_trial_seed}");
+    register_dsr_trial(dsr_registry_db, &trial_id, &report.strategy_name);
+    let sensitivity = mqk_backtest::dsr_pbo_sensitivity_scenario(
+        "python",
+        &research_py_root(),
+        dsr_registry_db,
+        &trial_id,
+        &report.strategy_name,
+        &[8, 10],
+    );
+    mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+        &init_result.run_dir,
+        &sensitivity,
+    )
+    .expect("finalize_canonical_robustness_gauntlet_with_sensitivity");
+
+    report.run_id
+}
+
 async fn seed_registry(pool: &sqlx::PgPool, strategy_id: &str) {
     let ts = Utc::now();
     mqk_db::upsert_strategy_registry_entry(
@@ -308,11 +470,11 @@ fn get_req(uri: &str) -> Request<axum::body::Body> {
         .unwrap()
 }
 
-fn make_decision(decision_id: &str, strategy_id: &str) -> InternalStrategyDecision {
+fn make_decision(decision_id: &str, strategy_id: &str, symbol: &str) -> InternalStrategyDecision {
     InternalStrategyDecision {
         decision_id: decision_id.to_string(),
         strategy_id: strategy_id.to_string(),
-        symbol: SYMBOL.to_string(),
+        symbol: symbol.to_string(),
         timeframe_secs: TIMEFRAME_SECS,
         side: "buy".to_string(),
         qty: 10,
@@ -335,7 +497,15 @@ async fn outbox_row_count(pool: &sqlx::PgPool, decision_id: &str) -> i64 {
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn closure_proof_full_lifecycle_through_real_routes() {
     let pool = make_db_pool().await;
-    let strategy_id = unique_id("closureproof");
+    // Gate 4c/4d's backtest-evidence gate binds candidate identity via the
+    // REAL engine's own `strategy_name` (always "swing_momentum" for the
+    // real `swing_momentum` plugin -- see `write_real_backtest_evidence`),
+    // so `strategy_id` here must be the real name, not a synthetic unique
+    // id. The symbol is varied instead to keep this test's DB identity
+    // (strategy_id, symbol, timeframe_secs) -- and therefore this test's own
+    // repeated-run idempotency -- disjoint across runs.
+    let strategy_id = "swing_momentum".to_string();
+    let symbol = unique_id("SYM").to_uppercase();
     let root = std::env::temp_dir().join(format!("mqk_closure_proof_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("create fixture root");
     std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
@@ -350,13 +520,30 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     std::env::set_var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT", &root);
     std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.0");
     std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "1.0");
+    // PRODUCTION-PROMOTION-DB-E2E-01: trusted config for the Backtest-
+    // evidence gate (Gate 4d) + the canonical `evaluate_promotion` metrics
+    // policy, required in addition to the above for the same transition.
+    std::env::set_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT", &root);
+    std::env::set_var("MQK_PROMOTION_MIN_SHARPE", "0.0");
+    std::env::set_var("MQK_PROMOTION_MAX_MDD", "1.0");
+    std::env::set_var("MQK_PROMOTION_MIN_CAGR", "0.0");
+    std::env::set_var("MQK_PROMOTION_MIN_PROFIT_FACTOR", "0.0");
+    std::env::set_var("MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT", "0.0");
 
     // --- Step 1: register the strategy. -----------------------------------
     seed_registry(&pool, &strategy_id).await;
 
-    // --- Step 2: write a real paper_candidate review artifact fixture. ----
-    let review_dir = write_paper_candidate_fixture(&root, &strategy_id);
+    // --- Step 2: write a real paper_candidate review artifact fixture,
+    // real Research OOS evidence, and a real Backtest evidence bundle
+    // (genuine engine run + genuine, fully-complete P9 gauntlet). -----------
+    let review_dir = write_paper_candidate_fixture(&root, &strategy_id, &symbol);
     let research = write_research_evidence_fixture(&root, &strategy_id);
+    let backtest_run_id = write_real_backtest_evidence(
+        &root,
+        &root.join("dsr_registry.sqlite3"),
+        &strategy_id,
+        &symbol,
+    );
 
     let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
         pool.clone(),
@@ -368,13 +555,14 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         routes::build_router(Arc::clone(&st)),
         transition_req(serde_json::json!({
             "strategy_id": strategy_id,
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "timeframe_secs": TIMEFRAME_SECS,
             "target_state": "shadow_approved",
             "review_dir": review_dir.to_str().unwrap(),
             "research_trial_id": research.trial_id,
             "research_evidence_dir": research.evidence_dir.to_str().unwrap(),
             "research_judge_artifact_path": research.judge_path.to_str().unwrap(),
+            "backtest_run_id": backtest_run_id.to_string(),
             "effective_at_utc": Utc::now().to_rfc3339(),
             "expires_at_utc": null,
             "initiated_by": "closure-proof-operator",
@@ -392,7 +580,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
 
     // Readback: current state + history after step 1.
     let check_uri = format!(
-        "/api/v1/strategy/promotions/check?strategy_id={strategy_id}&symbol={SYMBOL}&timeframe_secs={TIMEFRAME_SECS}"
+        "/api/v1/strategy/promotions/check?strategy_id={strategy_id}&symbol={symbol}&timeframe_secs={TIMEFRAME_SECS}"
     );
     let (_, check1) = call(routes::build_router(Arc::clone(&st)), get_req(&check_uri)).await;
     assert_eq!(check1["current_state"], "shadow_approved");
@@ -405,7 +593,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         routes::build_router(Arc::clone(&st)),
         transition_req(serde_json::json!({
             "strategy_id": strategy_id,
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "timeframe_secs": TIMEFRAME_SECS,
             "target_state": "paper_approved",
             "review_dir": null,
@@ -432,7 +620,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     let pre_active_decision_id = unique_id("dec_pre_active");
     let pre_active_outcome = submit_internal_strategy_decision(
         &st,
-        make_decision(&pre_active_decision_id, &strategy_id),
+        make_decision(&pre_active_decision_id, &strategy_id, &symbol),
     )
     .await;
     assert!(
@@ -448,7 +636,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         routes::build_router(Arc::clone(&st)),
         transition_req(serde_json::json!({
             "strategy_id": strategy_id,
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "timeframe_secs": TIMEFRAME_SECS,
             "target_state": "active_paper",
             "review_dir": null,
@@ -473,7 +661,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     println!("[closure-proof] readback after step 4: {check2}");
 
     let history_uri = format!(
-        "/api/v1/strategy/promotions/history?strategy_id={strategy_id}&symbol={SYMBOL}&timeframe_secs={TIMEFRAME_SECS}"
+        "/api/v1/strategy/promotions/history?strategy_id={strategy_id}&symbol={symbol}&timeframe_secs={TIMEFRAME_SECS}"
     );
     let (_, history1) = call(routes::build_router(Arc::clone(&st)), get_req(&history_uri)).await;
     let history_rows = history1["rows"].as_array().expect("history rows array");
@@ -490,8 +678,11 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     // --- Step 5: exactly one synthetic outbox row after active_paper. -----
     let active_decision_id = unique_id("dec_active");
     let active_outcome =
-        submit_internal_strategy_decision(&st, make_decision(&active_decision_id, &strategy_id))
-            .await;
+        submit_internal_strategy_decision(
+            &st,
+            make_decision(&active_decision_id, &strategy_id, &symbol),
+        )
+        .await;
     assert!(
         active_outcome.accepted,
         "active_paper + every other gate satisfied must create an outbox row; disposition={:?} blockers={:?}",
@@ -505,7 +696,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         routes::build_router(Arc::clone(&st)),
         transition_req(serde_json::json!({
             "strategy_id": strategy_id,
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "timeframe_secs": TIMEFRAME_SECS,
             "target_state": "demoted",
             "review_dir": null,
@@ -527,7 +718,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     let post_demote_decision_id = unique_id("dec_post_demote");
     let post_demote_outcome = submit_internal_strategy_decision(
         &st,
-        make_decision(&post_demote_decision_id, &strategy_id),
+        make_decision(&post_demote_decision_id, &strategy_id, &symbol),
     )
     .await;
     assert!(
