@@ -321,5 +321,8 @@ fn robustness_evidence_from_artifact(a: &RobustnessGauntletArtifact) -> Robustne
         p7a_p7b_economic_replay_stress_research_trial_id: a
             .p7a_p7b_economic_replay_stress_research_trial_id()
             .map(|s| s.to_string()),
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: a
+            .p7a_p7b_economic_replay_stress_baseline_economic_eval_id()
+            .map(|s| s.to_string()),
     }
 }

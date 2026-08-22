@@ -228,6 +228,16 @@ pub struct RobustnessEvidence {
     /// `dsr_pbo_sensitivity_research_trial_id`: `evaluate_promotion` treats
     /// `None`, and a mismatch against `oos_evidence.trial_id()`, identically.
     pub p7a_p7b_economic_replay_stress_research_trial_id: Option<String>,
+    /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B: the exact
+    /// `economic_eval_id` the `p7a_p7b_economic_replay_stress` scenario's
+    /// evidence was bound to (mirrors `mqk_artifacts::RobustnessGauntletArtifact::
+    /// p7a_p7b_economic_replay_stress_baseline_economic_eval_id`). Must equal
+    /// the P7C/OOS evidence's own verified `economic_eval_id` -- same trial
+    /// but a DIFFERENT economic result is a mismatch, never assumed to
+    /// agree. `None` means no binding proof exists (scenario absent, or
+    /// recorded before this field existed) -- `evaluate_promotion` treats
+    /// that identically to a genuine mismatch.
+    pub p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

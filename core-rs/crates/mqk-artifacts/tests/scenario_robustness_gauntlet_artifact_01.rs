@@ -265,6 +265,7 @@ fn rga01i_loaded_artifact_complete_after_dsr_pbo_merged() {
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("rga01i_test_trial".to_string()),
+        evidence: None,
     })
     .merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
         name: "p7a_p7b_economic_replay_stress".to_string(),
@@ -273,6 +274,7 @@ fn rga01i_loaded_artifact_complete_after_dsr_pbo_merged() {
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("rga01i_test_trial".to_string()),
+        evidence: None,
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
 
@@ -295,6 +297,7 @@ fn fake_sensitivity(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome {
         reason: if passed { None } else { Some("dsr_range exceeded ceiling".to_string()) },
         detail: "test-fabricated finalize-seam outcome".to_string(),
         research_trial_id: Some("fake_sensitivity_trial".to_string()),
+        evidence: None,
     }
 }
 
@@ -306,6 +309,7 @@ fn fake_p7a_p7b_stress(passed: bool) -> mqk_backtest::RobustnessScenarioOutcome 
         reason: if passed { None } else { Some("stressed max_drawdown exceeded ceiling".to_string()) },
         detail: "test-fabricated finalize-seam outcome".to_string(),
         research_trial_id: Some("fake_sensitivity_trial".to_string()),
+        evidence: None,
     }
 }
 

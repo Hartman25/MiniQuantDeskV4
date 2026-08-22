@@ -150,6 +150,7 @@ fn run_and_persist_full(
     qty: i64,
     sell_at_idx: u64,
     research_trial_id: &str,
+    research_economic_eval_id: &str,
 ) -> (BacktestReport, PathBuf) {
     let config = cfg_with_wide_cap();
     let initial_cash = config.initial_cash_micros;
@@ -207,13 +208,16 @@ fn run_and_persist_full(
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some(research_trial_id.to_string()),
+        evidence: None,
     })
     // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: the real cross-language wiring is
     // proven separately (mqk-backtest's own
     // p7a_p7b_economic_replay_stress.rs unit tests + research-py's
     // p7a_p7b_economic_replay_stress_cli); this P10 chain test only needs a
     // genuinely COMPLETE P9 artifact, same rationale as dsr_pbo_sensitivity
-    // above.
+    // above. FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B: `evidence` carries
+    // the `baseline_economic_eval_id` the new evaluator.rs gate requires to
+    // match the P7C/OOS evidence's own `economic_eval_id`.
     .merge_dsr_pbo_sensitivity(mqk_backtest::RobustnessScenarioOutcome {
         name: mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string(),
         applicable: true,
@@ -221,6 +225,9 @@ fn run_and_persist_full(
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some(research_trial_id.to_string()),
+        evidence: Some(serde_json::json!({
+            "baseline_economic_eval_id": research_economic_eval_id,
+        })),
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet must succeed");
@@ -343,7 +350,15 @@ fn lenient_promotion_config() -> PromotionConfig {
 #[test]
 fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     let (report, root) =
-        run_and_persist_full("full_chain", "P10FullChain", profitable_bars(), 5, 25, "trial_full_chain");
+        run_and_persist_full(
+            "full_chain",
+            "P10FullChain",
+            profitable_bars(),
+            5,
+            25,
+            "trial_full_chain",
+            "econ_eval_full_chain",
+        );
 
     // Backtest evidence (report + artifact_lock + stress_suite), resolved
     // by the exact candidate-bound seam the production route uses.
@@ -411,6 +426,7 @@ fn p10b_cross_candidate_identity_is_distinguishable() {
         5,
         25,
         "trial_cross_candidate",
+        "econ_eval_cross_candidate",
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
 
@@ -442,6 +458,7 @@ fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
         100,
         3,
         "trial_fragile_with_research",
+        "econ_eval_fragile_with_research",
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
     assert!(!bundle.stress_suite.passed, "fixture precondition: this candidate's real stress suite must fail");
@@ -493,6 +510,7 @@ fn p10d_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
         5,
         25,
         "trial_trial_binding_b",
+        "econ_eval_trial_binding_b",
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
     assert!(bundle.robustness_evidence.is_complete);
@@ -560,6 +578,7 @@ fn p10e_same_trial_for_p9_and_p7c_is_accepted() {
         5,
         25,
         "trial_trial_binding_same",
+        "econ_eval_trial_binding_same",
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
 

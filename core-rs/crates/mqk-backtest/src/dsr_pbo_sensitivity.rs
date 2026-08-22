@@ -113,6 +113,7 @@ pub fn dsr_pbo_sensitivity_scenario(
             reason: Some(reason.clone()),
             detail: reason,
             research_trial_id: Some(trial_id.to_string()),
+            evidence: None,
         };
     }
     if !pbo_max_sensitivity_range.is_finite() || !(0.0..=1.0).contains(&pbo_max_sensitivity_range) {
@@ -127,6 +128,7 @@ pub fn dsr_pbo_sensitivity_scenario(
             reason: Some(reason.clone()),
             detail: reason,
             research_trial_id: Some(trial_id.to_string()),
+            evidence: None,
         };
     }
     // PROMOTION-RESEARCH-BACKTEST-TRIAL-BINDING-01: this scenario's evidence
@@ -144,6 +146,7 @@ pub fn dsr_pbo_sensitivity_scenario(
             reason: Some("block_counts must be non-empty".to_string()),
             detail: "block_counts must be non-empty".to_string(),
             research_trial_id,
+            evidence: None,
         };
     }
     let block_counts_arg = block_counts
@@ -180,6 +183,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
+                evidence: None,
             };
         }
     };
@@ -201,6 +205,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
+                evidence: None,
             };
         }
     };
@@ -228,6 +233,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
+                evidence: None,
             };
         }
     }
@@ -261,6 +267,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                              (ceiling {pbo_max_sensitivity_range})"
                         ),
                         research_trial_id,
+                        evidence: None,
                     }
                 }
                 _ => {
@@ -272,6 +279,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                         reason: Some(reason.clone()),
                         detail: reason,
                         research_trial_id,
+                        evidence: None,
                     }
                 }
             }
@@ -292,6 +300,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
+                evidence: None,
             }
         }
         _ => {
@@ -308,6 +317,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 reason: Some(full.clone()),
                 detail: full,
                 research_trial_id,
+                evidence: None,
             }
         }
     }

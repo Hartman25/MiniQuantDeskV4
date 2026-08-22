@@ -358,6 +358,7 @@ fn rg01h_is_complete_only_after_both_deferred_scenarios_are_merged() {
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("rg01h_test_trial".to_string()),
+        evidence: None,
     });
     assert_eq!(
         after_dsr_pbo.deferred.len(),
@@ -373,6 +374,7 @@ fn rg01h_is_complete_only_after_both_deferred_scenarios_are_merged() {
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("rg01h_test_trial".to_string()),
+        evidence: None,
     });
     assert!(merged.deferred.is_empty(), "merging both must clear every deferred entry");
     assert!(merged.is_complete(), "must be complete once every required scenario is present");

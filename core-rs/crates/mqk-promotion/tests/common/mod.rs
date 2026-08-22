@@ -227,5 +227,13 @@ pub fn valid_robustness_evidence_for_testing(research_trial_id: &str) -> mqk_pro
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some(research_trial_id.to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: Some(research_trial_id.to_string()),
+        // FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B: derived the SAME
+        // deterministic way `valid_oos_evidence_for_testing_with_strategy`
+        // derives its own `economic_eval_id` (`format!("econ_eval_{trial_id}")`)
+        // -- callers passing the SAME trial_id to both helpers automatically
+        // get matching economic_eval_id binding too, no new parameter needed.
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(format!(
+            "econ_eval_{research_trial_id}"
+        )),
     }
 }

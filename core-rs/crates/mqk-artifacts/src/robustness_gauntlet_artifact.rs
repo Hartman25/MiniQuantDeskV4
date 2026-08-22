@@ -50,6 +50,14 @@ struct RobustnessScenarioOutcomeDto {
     /// genuine mismatch.
     #[serde(default)]
     research_trial_id: Option<String>,
+    /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section G: durable, structured
+    /// replay evidence (currently only populated by
+    /// `p7a_p7b_economic_replay_stress`) -- see
+    /// [`mqk_backtest::RobustnessScenarioOutcome::evidence`]. `#[serde(default)]`
+    /// so an artifact written before this field existed still loads as
+    /// `None`.
+    #[serde(default)]
+    evidence: Option<serde_json::Value>,
 }
 
 impl From<&mqk_backtest::RobustnessScenarioOutcome> for RobustnessScenarioOutcomeDto {
@@ -61,6 +69,7 @@ impl From<&mqk_backtest::RobustnessScenarioOutcome> for RobustnessScenarioOutcom
             reason: s.reason.clone(),
             detail: s.detail.clone(),
             research_trial_id: s.research_trial_id.clone(),
+            evidence: s.evidence.clone(),
         }
     }
 }
@@ -147,6 +156,22 @@ impl RobustnessGauntletArtifact {
         self.scenario_research_trial_id(
             mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
         )
+    }
+
+    /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B: the exact P7C-authorized
+    /// `economic_eval_id` the `p7a_p7b_economic_replay_stress` scenario's
+    /// evidence was bound to (read from its durable structured `evidence`
+    /// blob's `baseline_economic_eval_id` field). `None` when the scenario
+    /// is absent/deferred, was recorded before this field existed, or never
+    /// reached a status carrying it (e.g. a spawn failure) -- "no binding
+    /// proof", never a bare claim promotion can rely on.
+    pub fn p7a_p7b_economic_replay_stress_baseline_economic_eval_id(&self) -> Option<&str> {
+        self.scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME)
+            .and_then(|s| s.evidence.as_ref())
+            .and_then(|e| e.get("baseline_economic_eval_id"))
+            .and_then(|v| v.as_str())
     }
 
     /// PROMOTION-EVIDENCE-LINEAGE-V3: reproduces, bit-for-bit, the SAME

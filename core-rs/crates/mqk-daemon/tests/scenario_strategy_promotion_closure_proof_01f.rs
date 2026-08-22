@@ -28,6 +28,26 @@
 //!   MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
 //!   cargo test -p mqk-daemon --test scenario_strategy_promotion_closure_proof_01f \
 //!     -- --include-ignored --nocapture
+//!
+//! FINAL-P7A-P7B-REPLAY-AUTHORITY-01 (2026-08-22): fixed this file's
+//! `write_real_backtest_evidence`/`ResearchEvidenceFixture` call site to
+//! compile against `p7a_p7b_economic_replay_stress_scenario`'s new required
+//! `economic_eval_id` parameter and the corrected "MANDATORY MEANS MANDATORY"
+//! `not_evaluable -> applicable: true` mapping. NOT independently
+//! re-verified against a live Postgres/Python environment in this session
+//! (no `MQK_DATABASE_URL` configured here). A REAL, KNOWN CONSEQUENCE,
+//! honestly flagged rather than silently patched: this file's
+//! `write_research_evidence_fixture` is the lightweight fixture (no
+//! `inputs` recorded in its `economic_walk_forward.json`), so
+//! `p7a_p7b_economic_replay_stress` now correctly reports
+//! `applicable: true, passed: false` for it instead of the previous
+//! `applicable: false` -- this may cause `closure_proof_full_lifecycle_
+//! through_real_routes`'s early evidence-requiring transition to fail where
+//! it previously passed. Repairing this requires migrating the fixture to a
+//! genuinely qualifying Research trial (real `run_registered_economic_
+//! walkforward_eval` output with recorded `inputs`) and re-running against a
+//! real disposable Postgres -- not attempted here, since this environment
+//! cannot execute or verify that migration.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -145,6 +165,9 @@ fn write_paper_candidate_fixture(
 /// in `scenario_strategy_promotion_routes_01.rs`).
 struct ResearchEvidenceFixture {
     trial_id: String,
+    /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01: the exact `economic_eval_id` this
+    /// fixture registered as the trial's succeeded attempt `result_id`.
+    economic_eval_id: String,
     registry_db_path: PathBuf,
     evidence_dir: PathBuf,
     judge_path: PathBuf,
@@ -241,6 +264,7 @@ fn write_research_evidence_fixture(root: &std::path::Path, seed: &str) -> Resear
 
     ResearchEvidenceFixture {
         trial_id,
+        economic_eval_id,
         registry_db_path,
         evidence_dir,
         judge_path,
@@ -300,6 +324,7 @@ fn py_str_literal(s: &str) -> String {
 fn write_real_backtest_evidence(
     artifact_root: &std::path::Path,
     research_trial_id: &str,
+    research_economic_eval_id: &str,
     research_registry_db: &std::path::Path,
     symbol: &str,
 ) -> Uuid {
@@ -371,16 +396,20 @@ fn write_real_backtest_evidence(
     .expect("finalize_canonical_robustness_gauntlet_with_sensitivity");
 
     // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: SAME trial/registry as
-    // dsr_pbo_sensitivity above -- see the identical rationale in
-    // `scenario_strategy_promotion_routes_01.rs`'s own copy of this
-    // function (this fixture's hand-registered economic_walk_forward.json
-    // has no recorded `inputs`, so this genuinely reports
-    // `applicable: false`, fast, and does not block `is_complete()`).
+    // dsr_pbo_sensitivity above. FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section A
+    // ("MANDATORY MEANS MANDATORY"): this fixture's hand-registered
+    // economic_walk_forward.json has no recorded `inputs`, so this now
+    // genuinely reports `applicable: true, passed: false` (it can never
+    // disappear via `applicable: false`) -- see the module-level note at the
+    // top of this file for the known, honestly-flagged consequence for this
+    // test's overall pass/fail expectation, not independently re-verified in
+    // this session (no live Postgres/Python DB harness available here).
     let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
         "python",
         &research_py_root(),
         research_registry_db,
         research_trial_id,
+        research_economic_eval_id,
         &report.strategy_name,
         &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
         20,   // test-fixture-only stress knob; not asserted as accepted policy
@@ -542,6 +571,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     let backtest_run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
     );

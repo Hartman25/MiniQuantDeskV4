@@ -153,6 +153,10 @@ def _synthetic_bars_provenance(bars_path: Path) -> Dict[str, Any]:
 
 
 def _registered_run(tmp_path: Path, name: str, *, registry_db: Path, economic_spec: EconomicWalkForwardSpec, seed: int = 0):
+    """Returns `(trial_id, economic_eval_id, out_path)` -- `economic_eval_id`
+    is the durable registry `result_id` FINAL-P7A-P7B-REPLAY-AUTHORITY-01
+    requires callers to bind to explicitly (never "the latest successful
+    attempt")."""
     run_dir = tmp_path / name
     df = _build_full_dataset(periods_days=560, seed=seed)
     _write_full_run_dir(run_dir, df)
@@ -171,33 +175,41 @@ def _registered_run(tmp_path: Path, name: str, *, registry_db: Path, economic_sp
         steps=10,
     )
     out = json.loads(out_path.read_text(encoding="utf-8"))
-    return out["registry"]["trial_id"], out_path
+    return out["registry"]["trial_id"], out["ids"]["economic_eval_id"], out_path
 
 
-def _default_stress_kwargs(registry_db: Path, trial_id: str, stress_out_dir: Path) -> Dict[str, Any]:
+def _default_stress_kwargs(
+    registry_db: Path, trial_id: str, economic_eval_id: str, stress_out_dir: Path
+) -> Dict[str, Any]:
     return dict(
         registry_db=registry_db,
         trial_id=trial_id,
+        economic_eval_id=economic_eval_id,
         stress_out_dir=stress_out_dir,
         stress_execution_slippage_bps=20,
         stress_execution_volatility_mult_bps=50,
-        stress_max_target_qty=None,
+        # Genuine P7B tightening (Section F): OFFICIAL_SPEC's baseline
+        # WeightToShareSpec leaves max_target_qty=None -- None -> finite is
+        # a genuine tightening, satisfying the new adversity-validation
+        # requirement by default so existing positive-path tests need no
+        # further changes.
+        stress_max_target_qty=1000,
         stress_max_position_notional_usd=None,
         max_drawdown_ceiling=0.99,
     )
 
 
 # ---------------------------------------------------------------------------
-# Positive path (control #10) + no-new-trial (#11) + holdout reserved (#12)
+# Positive path (control #13) + no-new-trial (#14) + holdout reserved (#15)
 # ---------------------------------------------------------------------------
 
 def test_genuine_replay_through_real_p7a_p7b_evaluates_and_passes(tmp_path):
-    """Control #10: the same OOS predictions genuinely replay through the
-    real P7A/P7B machinery and produce a real pass/fail judgment."""
+    """Control #13: real P7A + real tighter P7B stress genuinely replay and
+    pass."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
 
-    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
 
     assert result["status"] == "evaluated"
     assert result["trial_id"] == trial_id
@@ -207,15 +219,15 @@ def test_genuine_replay_through_real_p7a_p7b_evaluates_and_passes(tmp_path):
 
 
 def test_replay_never_registers_a_new_trial(tmp_path):
-    """Control #11: a replay stress evaluation is an evaluation slice of the
+    """Control #14: a replay stress evaluation is an evaluation slice of the
     existing trial, never a new trial registration."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
 
     store = ResearchResultStore(registry_db)
     trials_before = store.list_trials()
 
-    _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+    _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
 
     trials_after = store.list_trials()
     assert [t["trial_id"] for t in trials_after] == [t["trial_id"] for t in trials_before]
@@ -223,26 +235,26 @@ def test_replay_never_registers_a_new_trial(tmp_path):
 
 
 def test_replay_leaves_holdout_reserved(tmp_path):
-    """Control #12: the stressed replay's own artifact still reports the
+    """Control #15: the stressed replay's own artifact still reports the
     final holdout as reserved, never evaluated -- replay stress never
     touches holdout data."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
 
-    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
 
     stressed = json.loads(Path(result["stressed_artifact_path"]).read_text(encoding="utf-8"))
     assert stressed["holdout"] == {"status": "reserved_not_evaluated"}
 
 
 # ---------------------------------------------------------------------------
-# Tamper / missing-input controls (#1-#4)
+# Tamper / missing-input controls
 # ---------------------------------------------------------------------------
 
 def test_bars_file_changed_after_original_run_fails_closed(tmp_path):
-    """Control #1."""
+    """Required test: bars_csv tamper (byte-count mismatch) fails closed."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
     econ = json.loads(econ_path.read_text(encoding="utf-8"))
     bars_path = Path(econ["inputs"]["bars_csv"]["path"])
 
@@ -250,20 +262,20 @@ def test_bars_file_changed_after_original_run_fails_closed(tmp_path):
     try:
         bars_path.write_bytes(original + b"\n999,MUTATED,999.0,999.0,999.0\n")
         with pytest.raises(ReplayAuthorityError, match="bars_csv"):
-            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
     finally:
         bars_path.write_bytes(original)
 
     # restored -- a clean replay now succeeds again (proves the tamper, not
     # something else, caused the failure)
-    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress_clean"))
+    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress_clean"))
     assert result["status"] == "evaluated"
 
 
 def test_oos_predictions_changed_after_original_run_fails_closed(tmp_path):
-    """Control #2."""
+    """Required test: oos_predictions_csv tamper fails closed."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
     econ = json.loads(econ_path.read_text(encoding="utf-8"))
     oos_path = Path(econ["inputs"]["oos_predictions_csv"]["path"])
 
@@ -271,15 +283,15 @@ def test_oos_predictions_changed_after_original_run_fails_closed(tmp_path):
     try:
         oos_path.write_bytes(original + b"\n")
         with pytest.raises(ReplayAuthorityError, match="oos_predictions_csv"):
-            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
     finally:
         oos_path.write_bytes(original)
 
 
 def test_walk_forward_eval_changed_after_original_run_fails_closed(tmp_path):
-    """Control #3."""
+    """Required test: walk_forward_eval tamper fails closed."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
     econ = json.loads(econ_path.read_text(encoding="utf-8"))
     wf_path = Path(econ["inputs"]["walk_forward_eval"]["path"])
 
@@ -287,16 +299,16 @@ def test_walk_forward_eval_changed_after_original_run_fails_closed(tmp_path):
     try:
         wf_path.write_bytes(original + b" ")
         with pytest.raises(ReplayAuthorityError, match="walk_forward_eval"):
-            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
     finally:
         wf_path.write_bytes(original)
 
 
 def test_recorded_input_missing_fails_closed(tmp_path):
-    """Control #4: a recorded input file has been deleted, not merely
+    """Required test: a recorded input file has been deleted, not merely
     mutated -- distinct code path from the byte/hash mismatch checks."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
     econ = json.loads(econ_path.read_text(encoding="utf-8"))
     bars_path = Path(econ["inputs"]["bars_csv"]["path"])
 
@@ -304,20 +316,23 @@ def test_recorded_input_missing_fails_closed(tmp_path):
     bars_path.unlink()
     try:
         with pytest.raises(ReplayAuthorityError, match="no longer exists"):
-            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
     finally:
         bars_path.write_bytes(saved)
 
 
 def test_bars_provenance_mismatch_fails_closed(tmp_path):
-    """Control #5: the bars.csv FILE itself is untouched (its own sha256
-    still verifies), but the recorded `bars_provenance` block inside
+    """The bars.csv FILE itself is untouched (its own sha256 still
+    verifies), but the recorded `bars_provenance` block inside
     economic_walk_forward.json has been tampered with -- the downstream
     `run_economic_walkforward` -> `require_bars_match_manifest` content
     check must still fail closed, proving provenance identity is verified
-    independently of the raw file hash."""
+    independently of the raw file hash. Also exercises Section C's own
+    content-hash authentication (this mutation changes the recomputed
+    economic_eval_id too), since both checks now run for any content
+    tamper."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
     econ = json.loads(econ_path.read_text(encoding="utf-8"))
 
     original_text = econ_path.read_text(encoding="utf-8")
@@ -327,68 +342,152 @@ def test_bars_provenance_mismatch_fails_closed(tmp_path):
     try:
         econ_path.write_text(json.dumps(tampered), encoding="utf-8")
         with pytest.raises(Exception):
-            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
     finally:
         econ_path.write_text(original_text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
-# Non-official baseline controls (#7, #8)
+# Section C: durable-authority content-hash tamper (mission test #8) --
+# mutating ONLY the artifact's own reported values (never touching bars/OOS/
+# WF files) must still fail closed, because the recomputed content hash no
+# longer matches the durable registry `result_id`.
+# ---------------------------------------------------------------------------
+
+def test_baseline_economic_json_tampered_after_finalization_fails_closed(tmp_path):
+    """Mission test #8: an attacker mutates ONLY economic_walk_forward.json's
+    own reported `aggregate` value (e.g. to hide a bad Sharpe) -- bars/OOS/WF
+    files are completely untouched. The recomputed content hash no longer
+    equals the durable registry `result_id`, so this must fail closed
+    regardless of the file's own self-declared `ids.economic_eval_id`."""
+    registry_db = tmp_path / "registry.sqlite3"
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    econ = json.loads(econ_path.read_text(encoding="utf-8"))
+
+    original_text = econ_path.read_text(encoding="utf-8")
+    tampered = dict(econ)
+    tampered["aggregate"] = dict(econ["aggregate"])
+    tampered["aggregate"]["folds_used"] = 999999  # attacker did NOT recompute ids.economic_eval_id
+    try:
+        econ_path.write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(ReplayAuthorityError, match="content hash disagrees"):
+            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
+    finally:
+        econ_path.write_text(original_text, encoding="utf-8")
+
+
+def test_baseline_economic_json_tampered_with_self_consistent_id_still_fails_closed(tmp_path):
+    """Sophisticated variant of mission test #8: the attacker ALSO
+    recomputes `ids.economic_eval_id` to match their mutated content (making
+    the file internally self-consistent) -- this must STILL fail closed,
+    because authority comes from the DURABLE registry `result_id`, never the
+    file's own self-declared id. Proves Section C's requirement that a
+    mutated artifact cannot become replay authority merely by being
+    internally hash-consistent."""
+    from mqk_research.ml.util_hash import sha256_json
+
+    registry_db = tmp_path / "registry.sqlite3"
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    econ = json.loads(econ_path.read_text(encoding="utf-8"))
+
+    original_text = econ_path.read_text(encoding="utf-8")
+    tampered = dict(econ)
+    tampered["aggregate"] = dict(econ["aggregate"])
+    tampered["aggregate"]["folds_used"] = 999999
+    basis = {k: v for k, v in tampered.items() if k not in ("ids", "registry")}
+    tampered["ids"] = {"economic_eval_id": sha256_json(basis)}
+    try:
+        econ_path.write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(ReplayAuthorityError, match="content hash disagrees"):
+            _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
+    finally:
+        econ_path.write_text(original_text, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Section B: exact economic_eval_id binding (mission test #9)
+# ---------------------------------------------------------------------------
+
+def test_same_trial_different_economic_eval_id_fails_closed(tmp_path):
+    """Mission test #9: same trial_id, but a caller-supplied economic_eval_id
+    that does not match any of this trial's succeeded attempts fails closed
+    -- never falls back to "the latest successful attempt"."""
+    registry_db = tmp_path / "registry.sqlite3"
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    assert eval_id != "some_other_economic_eval_id_never_registered"
+
+    kwargs = _default_stress_kwargs(
+        registry_db, trial_id, "some_other_economic_eval_id_never_registered", tmp_path / "stress"
+    )
+    with pytest.raises(ReplayAuthorityError, match="no succeeded attempt"):
+        _run_replay_stress(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Non-official baseline controls
 # ---------------------------------------------------------------------------
 
 def test_baseline_not_using_official_p7a_is_not_evaluable(tmp_path):
-    """Control #7."""
+    """Unknown/non-official P7A execution-pricing protocol -> not_evaluable
+    at the Python layer (FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section A maps
+    this to a hard `applicable: true, passed: false` fail at the Rust
+    wrapper -- see `p7a_p7b_economic_replay_stress.rs`)."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=NON_OFFICIAL_PRICING_SPEC)
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=NON_OFFICIAL_PRICING_SPEC)
 
-    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
 
     assert result["status"] == "not_evaluable"
     assert "execution_pricing" in result["reason"]
 
 
 def test_baseline_not_using_official_p7b_is_not_evaluable(tmp_path):
-    """Control #8."""
+    """Unknown/missing P7B weight-to-share protocol -> not_evaluable."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_PRICING_NO_WTS_SPEC)
+    trial_id, eval_id, _ = _registered_run(
+        tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_PRICING_NO_WTS_SPEC
+    )
 
-    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
 
     assert result["status"] == "not_evaluable"
     assert "weight_to_share" in result["reason"]
 
 
 # ---------------------------------------------------------------------------
-# research_trial_id controls (#6, #9)
+# research_trial_id controls
 # ---------------------------------------------------------------------------
 
 def test_unknown_trial_id_fails_closed(tmp_path):
-    """Control #6 (CLI layer): a research_trial_id that was never
-    registered fails closed rather than silently substituting anything."""
+    """Mission test #10: an unknown trial_id fails closed rather than
+    silently substituting anything."""
     registry_db = tmp_path / "registry.sqlite3"
     _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
 
     with pytest.raises(KeyError, match="unknown trial_id"):
-        _run_replay_stress(**_default_stress_kwargs(registry_db, "trial_that_was_never_registered", tmp_path / "stress"))
+        _run_replay_stress(
+            **_default_stress_kwargs(
+                registry_db, "trial_that_was_never_registered", "some_eval_id", tmp_path / "stress"
+            )
+        )
 
 
 def test_stress_result_is_bound_to_the_trial_it_was_computed_from_not_a_different_one(tmp_path):
-    """Control #9: two genuinely distinct, independently registered trials
-    (A and B) each produce their OWN replay stress result -- trial A's
-    result must never be usable as if it were trial B's. Proven here by
-    replaying both and confirming the returned `trial_id` and
-    `baseline_economic_eval_id` are trial-specific, never interchangeable;
-    the Rust-level promotion gate (`evaluate_promotion` in
-    mqk-promotion/src/evaluator.rs) is what actually refuses a mismatched
-    binding at promotion time -- see
+    """Two genuinely distinct, independently registered trials (A and B)
+    each produce their OWN replay stress result -- trial A's result must
+    never be usable as if it were trial B's. Proven here by replaying both
+    and confirming the returned `trial_id` and `baseline_economic_eval_id`
+    are trial-specific, never interchangeable; the Rust-level promotion gate
+    (`evaluate_promotion` in mqk-promotion/src/evaluator.rs) is what actually
+    refuses a mismatched binding at promotion time -- see
     `mqk-promotion/tests/scenario_promotion_requires_robustness_evidence_01.rs`."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_a, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC, seed=0)
-    trial_b, _ = _registered_run(tmp_path, "b", registry_db=registry_db, economic_spec=OFFICIAL_SPEC, seed=1)
+    trial_a, eval_a, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC, seed=0)
+    trial_b, eval_b, _ = _registered_run(tmp_path, "b", registry_db=registry_db, economic_spec=OFFICIAL_SPEC, seed=1)
     assert trial_a != trial_b
 
-    result_a = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_a, tmp_path / "stress_a"))
-    result_b = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_b, tmp_path / "stress_b"))
+    result_a = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_a, eval_a, tmp_path / "stress_a"))
+    result_b = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_b, eval_b, tmp_path / "stress_b"))
 
     assert result_a["trial_id"] == trial_a
     assert result_b["trial_id"] == trial_b
@@ -401,22 +500,171 @@ def test_stress_result_is_bound_to_the_trial_it_was_computed_from_not_a_differen
 
 
 # ---------------------------------------------------------------------------
-# Durable evidence content proof
+# Section F: genuine P7A/P7B adversity validation
+# ---------------------------------------------------------------------------
+
+def test_p7a_looser_slippage_fails(tmp_path):
+    """Mission negative control: stressed slippage LOWER than baseline is
+    forbidden -- a stress replay can never be less adverse than baseline."""
+    registry_db = tmp_path / "registry.sqlite3"
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    kwargs = _default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress")
+    kwargs["stress_execution_slippage_bps"] = 0  # baseline is 5 -- strictly looser
+
+    result = _run_replay_stress(**kwargs)
+    assert result["status"] == "error"
+    assert "not adverse" in result["reason"]
+
+
+def test_p7a_no_genuine_adversity_fails(tmp_path):
+    """Mission negative control: stress execution_pricing exactly equal to
+    baseline in both dimensions is not genuine adversity."""
+    registry_db = tmp_path / "registry.sqlite3"
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    kwargs = _default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress")
+    kwargs["stress_execution_slippage_bps"] = 5  # baseline's own value
+    kwargs["stress_execution_volatility_mult_bps"] = 0  # baseline's own value
+
+    result = _run_replay_stress(**kwargs)
+    assert result["status"] == "error"
+    assert "not genuinely adverse" in result["reason"]
+
+
+def test_p7b_no_tightening_fails(tmp_path):
+    """Mission negative control: both P7B stress caps left at baseline
+    (None -> None) is NOT valid P7B stress."""
+    registry_db = tmp_path / "registry.sqlite3"
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    kwargs = _default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress")
+    kwargs["stress_max_target_qty"] = None  # override the helper's default tightening
+
+    result = _run_replay_stress(**kwargs)
+    assert result["status"] == "error"
+    assert "no genuine tightening" in result["reason"]
+
+
+def test_p7b_cap_removed_fails(tmp_path):
+    """Mission negative control: an existing finite baseline cap loosened to
+    None (uncapped) is forbidden."""
+    registry_db = tmp_path / "registry.sqlite3"
+    capped_spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5),
+        cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
+        execution_pricing=ExecutionPricingSpec(
+            pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1, slippage_bps=5, volatility_mult_bps=0
+        ),
+        weight_to_share=WeightToShareSpec(equity_usd=100_000.0, max_target_qty=500),
+        annualization=AnnualizationSpec(),
+    )
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=capped_spec)
+    kwargs = _default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress")
+    kwargs["stress_max_target_qty"] = None  # baseline had 500 -- removing it is forbidden
+
+    result = _run_replay_stress(**kwargs)
+    assert result["status"] == "error"
+    assert "looser than baseline" in result["reason"]
+
+
+def test_p7b_cap_loosened_fails(tmp_path):
+    """Mission negative control: a finite baseline cap made LARGER (looser)
+    is forbidden."""
+    registry_db = tmp_path / "registry.sqlite3"
+    capped_spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5),
+        cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
+        execution_pricing=ExecutionPricingSpec(
+            pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1, slippage_bps=5, volatility_mult_bps=0
+        ),
+        weight_to_share=WeightToShareSpec(equity_usd=100_000.0, max_target_qty=500),
+        annualization=AnnualizationSpec(),
+    )
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=capped_spec)
+    kwargs = _default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress")
+    kwargs["stress_max_target_qty"] = 5000  # baseline had 500 -- larger is looser, forbidden
+
+    result = _run_replay_stress(**kwargs)
+    assert result["status"] == "error"
+    assert "looser than baseline" in result["reason"]
+
+
+def test_p7b_tighter_finite_cap_passes(tmp_path):
+    """Positive companion: a finite baseline cap made strictly SMALLER
+    (tighter) is genuine P7B stress and evaluates normally."""
+    registry_db = tmp_path / "registry.sqlite3"
+    capped_spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(entry_threshold=0.5),
+        cost_model=CostModelSpec(commission_bps_per_side=10.0, slippage_bps_per_side=0.0),
+        execution_pricing=ExecutionPricingSpec(
+            pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1, slippage_bps=5, volatility_mult_bps=0
+        ),
+        weight_to_share=WeightToShareSpec(equity_usd=100_000.0, max_target_qty=500),
+        annualization=AnnualizationSpec(),
+    )
+    trial_id, eval_id, _ = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=capped_spec)
+    kwargs = _default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress")
+    kwargs["stress_max_target_qty"] = 100  # baseline had 500 -- strictly tighter
+
+    result = _run_replay_stress(**kwargs)
+    assert result["status"] == "evaluated"
+
+
+# ---------------------------------------------------------------------------
+# Section E: exact spec reconstruction round-trip (mission test #7's premise)
+# ---------------------------------------------------------------------------
+
+def test_reconstructed_baseline_protocol_identity_round_trips(tmp_path):
+    """Positive proof that `_reconstruct_baseline_spec` +
+    `economic_protocol_identity` genuinely round-trip against what was
+    recorded for a real registered attempt -- the check
+    `_run_replay_stress` performs before ever building a stressed spec.
+    A genuine divergence (mission test #7, "reconstructed protocol identity
+    mismatch") cannot be produced by tampering the on-disk artifact alone:
+    any such tamper is caught first by Section C's content-hash
+    authentication (see the tamper tests above), which is strictly stronger
+    -- this test instead proves the round-trip check's own premise holds for
+    real data, and would fail loudly if a future protocol-identity field
+    were added to `economic_protocol_identity` without updating
+    `_reconstruct_baseline_spec` to recover it."""
+    from mqk_research.ml.p7a_p7b_economic_replay_stress_cli import _reconstruct_baseline_spec
+    from mqk_research.ml.economic_walkforward import economic_protocol_identity
+
+    registry_db = tmp_path / "registry.sqlite3"
+    _, _, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    econ = json.loads(econ_path.read_text(encoding="utf-8"))
+
+    reconstructed = _reconstruct_baseline_spec(econ)
+    identity = economic_protocol_identity(reconstructed)
+    assert identity == {
+        "protocol_id": econ["protocol"]["protocol_id"],
+        "signal_policy": econ["signal_policy"],
+        "cost_model": econ["cost_model"],
+        "execution_pricing": econ["execution_pricing"],
+        "weight_to_share": econ["weight_to_share"],
+        "annualization": econ["annualization"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Durable evidence content proof (mission test #12)
 # ---------------------------------------------------------------------------
 
 def test_evaluated_result_carries_required_durable_evidence_fields(tmp_path):
-    """The mission's DURABLE EVIDENCE list: trial_id, baseline economic
-    protocol identity (via baseline_economic_eval_id), bars/OOS/walk-forward
-    SHA-256, bars provenance hash, stress-spec identity, and the stressed
-    result's own artifact SHA-256 must all be present and self-consistent."""
+    """Mission test #12: trial_id, baseline economic protocol identity (via
+    baseline_economic_eval_id), baseline artifact SHA-256, bars/OOS/
+    walk-forward SHA-256, bars provenance hash, stress-spec identity, and the
+    stressed result's own artifact SHA-256 must all be present and
+    self-consistent."""
     registry_db = tmp_path / "registry.sqlite3"
-    trial_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
+    trial_id, eval_id, econ_path = _registered_run(tmp_path, "a", registry_db=registry_db, economic_spec=OFFICIAL_SPEC)
     econ = json.loads(econ_path.read_text(encoding="utf-8"))
 
-    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, tmp_path / "stress"))
+    result = _run_replay_stress(**_default_stress_kwargs(registry_db, trial_id, eval_id, tmp_path / "stress"))
 
     assert result["trial_id"] == trial_id
+    assert result["research_trial_id"] == trial_id
     assert result["baseline_economic_eval_id"] == econ["ids"]["economic_eval_id"]
+    assert result["baseline_economic_artifact_sha256"] == sha256_file(econ_path)
+    assert result["baseline_protocol_identity"]["protocol_id"] == econ["protocol"]["protocol_id"]
     assert result["bars_csv_sha256"] == econ["inputs"]["bars_csv"]["sha256"]
     assert result["oos_predictions_csv_sha256"] == econ["inputs"]["oos_predictions_csv"]["sha256"]
     assert result["walk_forward_eval_sha256"] == econ["inputs"]["walk_forward_eval"]["sha256"]
@@ -424,7 +672,7 @@ def test_evaluated_result_carries_required_durable_evidence_fields(tmp_path):
     assert result["stress_spec"] == {
         "execution_pricing_slippage_bps": 20,
         "execution_pricing_volatility_mult_bps": 50,
-        "max_target_qty": None,
+        "max_target_qty": 1000,
         "max_position_notional_usd": None,
     }
     assert result["stressed_artifact_sha256"] == sha256_file(Path(result["stressed_artifact_path"]))

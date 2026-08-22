@@ -96,6 +96,9 @@ fn robustness_evidence_wrong_protocol_blocks_promotion() {
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -118,6 +121,7 @@ fn robustness_evidence_incomplete_blocks_promotion() {
         deferred_scenarios: vec!["dsr_pbo_sensitivity".to_string()],
         dsr_pbo_sensitivity_research_trial_id: None, // scenario itself is still deferred
         p7a_p7b_economic_replay_stress_research_trial_id: None, // scenario itself is still deferred
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: None, // scenario itself is still deferred
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -140,6 +144,9 @@ fn robustness_evidence_failed_scenario_blocks_promotion() {
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -159,6 +166,9 @@ fn robustness_evidence_complete_and_passed_allows_promotion() {
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -188,6 +198,9 @@ fn p7a_p7b_replay_stress_trial_mismatch_blocks_promotion_even_when_dsr_pbo_match
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: Some("a_different_trial_b".to_string()),
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
+            "econ_eval_a_different_trial_b".to_string(),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -216,6 +229,7 @@ fn p7a_p7b_replay_stress_missing_trial_binding_blocks_promotion_even_when_dsr_pb
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: None,
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: None,
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 

@@ -19,12 +19,23 @@
 //! `bars_provenance` manifest that originally produced it. The Python CLI
 //! re-verifies every one of those against the live filesystem (path exists,
 //! byte count matches, sha256 matches) before replaying -- fails closed on
-//! any missing/mutated input rather than refetching and assuming identity. A
-//! trial whose economic evidence predates this durable-input recording, or
-//! never engaged the OFFICIAL P7A/P7B protocols, is reported as genuinely
-//! `applicable: false` here (mirrors `symbol_leave_one_out_scenario`'s own
-//! "does not apply to this candidate" precedent) -- never fabricated as a
-//! pass.
+//! any missing/mutated input rather than refetching and assuming identity.
+//!
+//! FINAL-P7A-P7B-REPLAY-AUTHORITY-01: the caller must supply the EXACT
+//! P7C-authorized `economic_eval_id` (`E`) this replay must bind to -- the
+//! CLI resolves the succeeded attempt whose durable registry `result_id`
+//! equals `E` (never "the latest successful attempt"), re-authenticates
+//! that attempt's `economic_walk_forward.json` by recomputing its content
+//! hash against that SAME durable authority (never trusting the file's own
+//! self-declared id), and validates the caller-supplied stress knobs are
+//! GENUINELY adverse relative to the verified baseline before replaying. A
+//! trial whose economic evidence predates this durable-input recording,
+//! never engaged the OFFICIAL P7A/P7B protocols, or does not bind to the
+//! required `economic_eval_id` is reported `applicable: true, passed: false`
+//! -- "MANDATORY MEANS MANDATORY": this required scenario can never
+//! disappear from a promotion-grade P9 artifact via `applicable: false`,
+//! unlike genuinely optional scenarios such as
+//! `symbol_leave_one_out_scenario`'s "does not apply to this candidate".
 //!
 //! Deliberately kept OUT of
 //! `crate::robustness_gauntlet::run_robustness_gauntlet` itself (a pure,
@@ -53,6 +64,11 @@ pub const P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME: &str = "p7a_p7b_economic
 /// `python_executable`/`research_py_root` are supplied by the caller, same
 /// contract as [`crate::dsr_pbo_sensitivity::dsr_pbo_sensitivity_scenario`].
 ///
+/// `economic_eval_id` is the EXACT, REQUIRED P7C-authorized economic result
+/// (`E`) this replay must bind to -- never resolved by "latest successful
+/// attempt". A mismatch between what the CLI resolves and this value fails
+/// closed.
+///
 /// `expected_strategy_id` is the same cross-candidate authority check
 /// `dsr_pbo_sensitivity_scenario` performs: the CLI resolves `trial_id`'s
 /// own registered `strategy_id` and this function rejects a mismatch BEFORE
@@ -74,20 +90,20 @@ pub const P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME: &str = "p7a_p7b_economic
 /// `dsr_pbo_sensitivity_scenario`'s own threshold-validation discipline.
 ///
 /// Fails closed: an invalid ceiling, a spawn failure, unparseable output, a
-/// `strategy_id` mismatch, or a genuine CLI error (bad registry, unknown
-/// trial, missing/mutated replay input) all become
-/// `applicable: true, passed: false` with the real reason. A baseline that
-/// never engaged the official P7A/P7B protocols, has no durably-recorded
-/// replay inputs, or lacks the discrete-economics fold marker is reported as
-/// genuinely inapplicable (`applicable: false`) -- these are structural
-/// preconditions this candidate's OWN evidence does not meet, never a
-/// failure of the stress itself.
+/// `strategy_id`/`economic_eval_id` mismatch, a baseline that never engaged
+/// the official P7A/P7B protocols, missing/mutated replay inputs, a
+/// non-genuine (not strictly adverse) stress configuration, or a genuine CLI
+/// error (bad registry, unknown trial) all become
+/// `applicable: true, passed: false` with the real reason -- MANDATORY MEANS
+/// MANDATORY (see module docs): this scenario never reports
+/// `applicable: false`.
 #[allow(clippy::too_many_arguments)]
 pub fn p7a_p7b_economic_replay_stress_scenario(
     python_executable: &str,
     research_py_root: &Path,
     registry_db: &Path,
     trial_id: &str,
+    economic_eval_id: &str,
     expected_strategy_id: &str,
     stress_out_dir: &Path,
     stress_execution_slippage_bps: u32,
@@ -114,6 +130,7 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
             reason: Some(reason.clone()),
             detail: reason,
             research_trial_id,
+            evidence: None,
         };
     }
 
@@ -126,6 +143,8 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
         &registry_db.display().to_string(),
         "--trial-id",
         trial_id,
+        "--economic-eval-id",
+        economic_eval_id,
         "--stress-out-dir",
         &stress_out_dir.display().to_string(),
         "--stress-execution-slippage-bps",
@@ -156,6 +175,7 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
+                evidence: None,
             };
         }
     };
@@ -177,9 +197,41 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
+                evidence: None,
             };
         }
     };
+
+    dispatch_cli_value(
+        value,
+        trial_id,
+        economic_eval_id,
+        expected_strategy_id,
+        max_drawdown_ceiling,
+        research_trial_id,
+    )
+    .unwrap_or_else(|e| e)
+}
+
+/// Pure dispatch of the parsed `mqk_research.ml.p7a_p7b_economic_replay_stress_cli`
+/// JSON response into a [`RobustnessScenarioOutcome`] -- extracted from
+/// [`p7a_p7b_economic_replay_stress_scenario`] so the mapping itself (in
+/// particular, FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section A's "MANDATORY
+/// MEANS MANDATORY": `not_evaluable` must map to `applicable: true`, never
+/// `applicable: false`) is directly unit-testable against a hand-built
+/// `serde_json::Value`, with no subprocess required. Infallible (always
+/// returns a `RobustnessScenarioOutcome`) -- the `Result`/`unwrap_or_else`
+/// wrapper at the call site exists only so this function's every branch can
+/// use ordinary `return`-free tail expressions.
+fn dispatch_cli_value(
+    value: serde_json::Value,
+    trial_id: &str,
+    economic_eval_id: &str,
+    expected_strategy_id: &str,
+    max_drawdown_ceiling: f64,
+    research_trial_id: Option<String>,
+) -> Result<RobustnessScenarioOutcome, RobustnessScenarioOutcome> {
+    let name = P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string();
 
     // Cross-candidate authority -- checked BEFORE the status dispatch, same
     // discipline as `dsr_pbo_sensitivity_scenario`.
@@ -191,19 +243,45 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
                  strategy_id {expected_strategy_id:?} -- refusing to merge P7A/P7B replay \
                  stress evidence from an unrelated Research trial"
             );
-            return RobustnessScenarioOutcome {
+            return Err(RobustnessScenarioOutcome {
                 name,
                 applicable: true,
                 passed: false,
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
-            };
+                evidence: None,
+            });
+        }
+    }
+
+    // FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B: the CLI's own resolved
+    // `baseline_economic_eval_id` (when present -- only on "evaluated") must
+    // agree with the caller-supplied `economic_eval_id` E. The Python CLI
+    // already enforces this as its OWN binding authority; this is a cheap,
+    // independent cross-check against caller/CLI drift, same discipline as
+    // the `strategy_id` cross-check above.
+    if let Some(actual_eval_id) = value.get("baseline_economic_eval_id").and_then(|v| v.as_str()) {
+        if actual_eval_id != economic_eval_id {
+            let reason = format!(
+                "economic_eval_id mismatch: CLI resolved baseline_economic_eval_id \
+                 {actual_eval_id:?}, but caller required {economic_eval_id:?} -- refusing to \
+                 merge P7A/P7B replay stress evidence bound to a different economic result"
+            );
+            return Err(RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed: false,
+                reason: Some(reason.clone()),
+                detail: reason,
+                research_trial_id,
+                evidence: Some(value),
+            });
         }
     }
 
     let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    match status {
+    Ok(match status {
         "evaluated" => {
             let passed = value.get("passed").and_then(|v| v.as_bool());
             let stressed_max_drawdown = value.get("stressed_max_drawdown").and_then(|v| v.as_f64());
@@ -227,6 +305,7 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
                         value.get("stress_spec")
                     ),
                     research_trial_id,
+                    evidence: Some(value),
                 },
                 _ => {
                     let reason = format!("evaluated result missing passed/stressed_max_drawdown: {value}");
@@ -237,6 +316,7 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
                         reason: Some(reason.clone()),
                         detail: reason,
                         research_trial_id,
+                        evidence: Some(value),
                     }
                 }
             }
@@ -247,20 +327,23 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            // Structural preconditions this candidate's OWN evidence does
-            // not meet (predates durable replay-input recording, never
-            // engaged the official P7A/P7B protocols, or lacks the
-            // discrete-economics fold marker) -- a genuine "does not apply
-            // to this candidate", never a failure of the stress itself.
-            // Distinct from a tamper/mismatch, which the CLI always reports
-            // as `"status": "error"` (handled below), never "not_evaluable".
+            // FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section A ("MANDATORY MEANS
+            // MANDATORY"): a structural precondition this candidate's OWN
+            // evidence does not meet (predates durable replay-input
+            // recording, never engaged the official P7A/P7B protocols, lacks
+            // the discrete-economics fold marker, or does not bind to the
+            // required economic_eval_id) is a genuine FAIL for
+            // promotion-grade P9 completeness -- it must NEVER disappear via
+            // `applicable: false`. Distinct from a tamper/mismatch, which
+            // the CLI always reports as `"status": "error"` (handled below).
             RobustnessScenarioOutcome {
                 name,
-                applicable: false,
+                applicable: true,
                 passed: false,
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
+                evidence: Some(value),
             }
         }
         _ => {
@@ -277,9 +360,10 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
                 reason: Some(full.clone()),
                 detail: full,
                 research_trial_id,
+                evidence: Some(value),
             }
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -295,6 +379,7 @@ mod tests {
             Path::new("/nonexistent/research-py"),
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
+            "some_eval_id",
             "some_strategy",
             Path::new("/nonexistent/stress_out"),
             20,
@@ -318,6 +403,7 @@ mod tests {
             Path::new("/nonexistent/research-py"),
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
+            "some_eval_id",
             "some_strategy",
             Path::new("/nonexistent/stress_out"),
             20,
@@ -337,6 +423,7 @@ mod tests {
             Path::new("/nonexistent/research-py"),
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
+            "some_eval_id",
             "some_strategy",
             Path::new("/nonexistent/stress_out"),
             20,
@@ -359,6 +446,7 @@ mod tests {
             Path::new("/nonexistent/research-py"),
             Path::new("/nonexistent/registry.sqlite3"),
             "trial_xyz",
+            "some_eval_id",
             "some_strategy",
             Path::new("/nonexistent/stress_out"),
             20,
@@ -368,5 +456,141 @@ mod tests {
             -1.0,
         );
         assert_eq!(outcome.research_trial_id.as_deref(), Some("trial_xyz"));
+    }
+
+    // -----------------------------------------------------------------
+    // dispatch_cli_value: pure mapping tests (no subprocess required)
+    // -----------------------------------------------------------------
+
+    /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section A ("MANDATORY MEANS
+    /// MANDATORY"): a `not_evaluable` CLI response must map to
+    /// `applicable: true, passed: false` -- it must NEVER disappear from a
+    /// promotion-grade P9 artifact via `applicable: false`, unlike a
+    /// genuinely optional scenario.
+    #[test]
+    fn not_evaluable_maps_to_applicable_true_passed_false_never_inapplicable() {
+        let value = serde_json::json!({
+            "status": "not_evaluable",
+            "strategy_id": "some_strategy",
+            "reason": "baseline execution_pricing.pricing_model_id is not the official model",
+        });
+        let outcome = dispatch_cli_value(
+            value,
+            "some_trial",
+            "some_eval_id",
+            "some_strategy",
+            0.5,
+            Some("some_trial".to_string()),
+        )
+        .unwrap_or_else(|e| e);
+        assert!(outcome.applicable, "not_evaluable must never become applicable: false");
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap().contains("official model"));
+    }
+
+    /// Section B: the CLI's own resolved `baseline_economic_eval_id`
+    /// disagreeing with the caller-required `economic_eval_id` fails closed
+    /// -- same trial, different economic result is a mismatch.
+    #[test]
+    fn economic_eval_id_mismatch_fails_closed() {
+        let value = serde_json::json!({
+            "status": "evaluated",
+            "strategy_id": "some_strategy",
+            "baseline_economic_eval_id": "eval_id_actually_used",
+            "passed": true,
+            "stressed_max_drawdown": -0.01,
+        });
+        let outcome = dispatch_cli_value(
+            value,
+            "some_trial",
+            "eval_id_caller_required",
+            "some_strategy",
+            0.5,
+            Some("some_trial".to_string()),
+        )
+        .unwrap_or_else(|e| e);
+        assert!(outcome.applicable);
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap().contains("economic_eval_id mismatch"));
+    }
+
+    /// A genuine `strategy_id` mismatch still fails closed exactly as before
+    /// this refactor (regression proof that extracting `dispatch_cli_value`
+    /// preserved this existing invariant).
+    #[test]
+    fn strategy_id_mismatch_still_fails_closed() {
+        let value = serde_json::json!({
+            "status": "evaluated",
+            "strategy_id": "other_strategy",
+            "baseline_economic_eval_id": "e",
+            "passed": true,
+            "stressed_max_drawdown": -0.01,
+        });
+        let outcome = dispatch_cli_value(value, "some_trial", "e", "expected_strategy", 0.5, None)
+            .unwrap_or_else(|e| e);
+        assert!(outcome.applicable);
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap().contains("Research trial mismatch"));
+    }
+
+    /// A genuine "evaluated, passed" response carries the full structured
+    /// evidence blob durably (Section G) -- never reduced to a detail
+    /// string only.
+    #[test]
+    fn evaluated_pass_carries_structured_evidence() {
+        let value = serde_json::json!({
+            "status": "evaluated",
+            "strategy_id": "some_strategy",
+            "baseline_economic_eval_id": "e",
+            "stressed_economic_eval_id": "e2",
+            "passed": true,
+            "stressed_max_drawdown": -0.01,
+            "bars_csv_sha256": "abc",
+        });
+        let outcome = dispatch_cli_value(
+            value,
+            "some_trial",
+            "e",
+            "some_strategy",
+            0.5,
+            Some("some_trial".to_string()),
+        )
+        .unwrap_or_else(|e| e);
+        assert!(outcome.applicable);
+        assert!(outcome.passed);
+        let evidence = outcome.evidence.expect("evaluated outcome must carry structured evidence");
+        assert_eq!(evidence.get("bars_csv_sha256").and_then(|v| v.as_str()), Some("abc"));
+        assert_eq!(evidence.get("stressed_economic_eval_id").and_then(|v| v.as_str()), Some("e2"));
+    }
+
+    /// A drawdown-ceiling breach ("evaluated, not passed") is a genuine
+    /// found failure, not tuned away -- and still carries evidence.
+    #[test]
+    fn evaluated_fail_reports_ceiling_breach_reason() {
+        let value = serde_json::json!({
+            "status": "evaluated",
+            "strategy_id": "some_strategy",
+            "baseline_economic_eval_id": "e",
+            "passed": false,
+            "stressed_max_drawdown": -0.9,
+        });
+        let outcome = dispatch_cli_value(value, "some_trial", "e", "some_strategy", 0.3, None)
+            .unwrap_or_else(|e| e);
+        assert!(outcome.applicable);
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap().contains("breached the conservative max-drawdown"));
+        assert!(outcome.evidence.is_some());
+    }
+
+    /// A genuine operational CLI error (`status: "error"`) fails closed,
+    /// distinct from `not_evaluable`.
+    #[test]
+    fn error_status_fails_closed() {
+        let value = serde_json::json!({"status": "error", "reason": "unknown trial_id"});
+        let outcome = dispatch_cli_value(value, "some_trial", "e", "some_strategy", 0.3, None)
+            .unwrap_or_else(|e| e);
+        assert!(outcome.applicable);
+        assert!(!outcome.passed);
+        assert!(outcome.reason.unwrap().contains("unknown trial_id"));
     }
 }

@@ -8,6 +8,29 @@
 //! mutate `MQK_STRATEGY_REVIEW_ARTIFACT_ROOT` process-wide, so this file
 //! must run with `--test-threads=1`.
 //!
+//! FINAL-P7A-P7B-REPLAY-AUTHORITY-01 (2026-08-22): fixed this file's
+//! `write_real_backtest_evidence`/`ResearchEvidenceFixture` call sites to
+//! compile against `p7a_p7b_economic_replay_stress_scenario`'s new required
+//! `economic_eval_id` parameter and the corrected "MANDATORY MEANS MANDATORY"
+//! `not_evaluable -> applicable: true` mapping (see that function's own
+//! module docs in `mqk-backtest`). NOT independently re-verified against a
+//! live Postgres/Python environment in this session (no `MQK_DATABASE_URL`
+//! configured here, consistent with every prior wave's own disclosure in
+//! this file and the master ledger). A REAL, KNOWN CONSEQUENCE of this fix,
+//! honestly flagged rather than silently patched: any test in this file
+//! using the lightweight `write_research_evidence_fixture` (no `inputs`
+//! recorded in its `economic_walk_forward.json`) together with
+//! `RealEvidenceOptions::finalize_sensitivity` at its `true` default will now
+//! genuinely see `p7a_p7b_economic_replay_stress` report
+//! `applicable: true, passed: false` (correctly -- it is a required
+//! scenario that cannot disappear via `applicable: false`), which may flip
+//! that test's overall `all_applicable_passed`/promotion-decision
+//! expectation from pass to fail. Repairing any such test requires migrating
+//! it to `write_real_research_evidence_via_production_pipeline` (which
+//! genuinely qualifies) and re-running against a real disposable Postgres --
+//! not attempted here, since this environment cannot execute or verify that
+//! migration.
+//!
 //! No-DB / field-validation tests run unconditionally. Every test that
 //! touches the promotion registry itself requires `MQK_DATABASE_URL` and is
 //! marked `#[ignore]`. Run with:
@@ -209,6 +232,11 @@ struct ResearchEvidenceFixture {
     evidence_dir: PathBuf,
     judge_path: PathBuf,
     trial_id: String,
+    /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01: the exact `economic_eval_id` this
+    /// fixture registered as the trial's succeeded attempt `result_id` --
+    /// required by `p7a_p7b_economic_replay_stress_scenario`'s new
+    /// exact-binding contract (never "the latest successful attempt").
+    economic_eval_id: String,
 }
 
 fn write_research_evidence_fixture(root: &Path, seed: &str) -> ResearchEvidenceFixture {
@@ -327,6 +355,7 @@ fn write_research_evidence_fixture_with_strategy(
         evidence_dir,
         judge_path,
         trial_id,
+        economic_eval_id,
     }
 }
 
@@ -432,6 +461,7 @@ fn write_real_research_evidence_via_production_pipeline(
                 "fixture precondition: every real trial's DSR must be evaluable: {t}"
             );
             let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
+            let economic_eval_id = t["economic_eval_id"].as_str().expect("economic_eval_id").to_string();
             let economic_json_path =
                 PathBuf::from(t["economic_walk_forward_json"].as_str().expect("path"));
             let evidence_dir = economic_json_path
@@ -443,6 +473,7 @@ fn write_real_research_evidence_via_production_pipeline(
                 evidence_dir,
                 judge_path: judge_path.clone(),
                 trial_id,
+                economic_eval_id,
             }
         })
         .collect()
@@ -579,6 +610,7 @@ impl Default for RealEvidenceOptions {
 fn write_real_backtest_evidence(
     artifact_root: &Path,
     research_trial_id: &str,
+    research_economic_eval_id: &str,
     research_registry_db: &Path,
     symbol: &str,
     opts: RealEvidenceOptions,
@@ -667,26 +699,32 @@ fn write_real_backtest_evidence(
             .expect("finalize_canonical_robustness_gauntlet_with_sensitivity");
 
             // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: SAME trial/registry as
-            // dsr_pbo_sensitivity above. Candidates whose Research evidence
-            // came from the lightweight hand-registered fixture (no
-            // `inputs` recorded in economic_walk_forward.json) genuinely
-            // report `applicable: false` here -- fast (a registry lookup,
-            // no real walkforward re-run), and does not block
-            // `is_complete()`. Candidates from the REAL production pipeline
-            // (`write_real_research_evidence_via_production_pipeline`)
-            // genuinely replay and are judged for real.
+            // dsr_pbo_sensitivity above. FINAL-P7A-P7B-REPLAY-AUTHORITY-01
+            // Section A ("MANDATORY MEANS MANDATORY"): candidates whose
+            // Research evidence came from the lightweight hand-registered
+            // fixture (no `inputs` recorded in economic_walk_forward.json)
+            // now genuinely report `applicable: true, passed: false` here --
+            // this scenario can never disappear via `applicable: false`, so
+            // a test relying on this scenario's contribution to
+            // `all_applicable_passed` must use the REAL production pipeline
+            // (`write_real_research_evidence_via_production_pipeline`),
+            // which genuinely replays and is judged for real.
             let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
                 "python",
                 &research_py_root(),
                 research_registry_db,
                 research_trial_id,
+                research_economic_eval_id,
                 &report.strategy_name,
                 &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
-                20,   // test-fixture-only stress knob; not asserted as accepted policy
-                50,   // test-fixture-only stress knob; not asserted as accepted policy
-                None, // test-fixture-only stress knob; not asserted as accepted policy
-                None, // test-fixture-only stress knob; not asserted as accepted policy
-                0.30, // test-fixture-only threshold; not asserted as accepted policy
+                20,        // test-fixture-only stress knob; not asserted as accepted policy
+                50,        // test-fixture-only stress knob; not asserted as accepted policy
+                Some(1000), // FINAL-P7A-P7B-REPLAY-AUTHORITY-01: baseline max_target_qty is
+                            // None (real_research_promotion_e2e_cli's WeightToShareSpec never
+                            // sets it) -- None -> finite is a genuine P7B tightening, required
+                            // by the new genuine-adversity validation.
+                None,      // test-fixture-only stress knob; not asserted as accepted policy
+                0.30,      // test-fixture-only threshold; not asserted as accepted policy
             );
             mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
                 &init_result.run_dir,
@@ -945,6 +983,7 @@ async fn valid_paper_candidate_creates_first_transition() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1008,6 +1047,7 @@ async fn same_strategy_different_research_trial_for_p9_vs_p7c_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research_b.trial_id,
+        &research_b.economic_eval_id,
         &research_b.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1076,6 +1116,7 @@ async fn real_research_production_trial_used_for_both_p7c_and_p9_passes() {
     let run_id = write_real_backtest_evidence(
         &root,
         &trial.trial_id,
+        &trial.economic_eval_id,
         &trial.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1173,6 +1214,7 @@ async fn real_research_production_same_strategy_different_trial_for_p9_vs_p7c_is
     let run_id = write_real_backtest_evidence(
         &root,
         &trial_b.trial_id,
+        &trial_b.economic_eval_id,
         &trial_b.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1532,6 +1574,7 @@ async fn valid_transition_visible_on_read_routes() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1601,6 +1644,7 @@ async fn history_remains_visible_after_later_transition() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1698,6 +1742,7 @@ async fn duplicate_transition_request_is_idempotent() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1759,6 +1804,7 @@ async fn tradable_live_always_false() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1869,6 +1915,7 @@ async fn cross_candidate_backtest_evidence_strategy_mismatch_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -1965,6 +2012,7 @@ async fn missing_backtest_evidence_artifact_root_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2016,6 +2064,7 @@ async fn missing_stress_evidence_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2051,6 +2100,7 @@ async fn missing_p9_robustness_evidence_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2091,6 +2141,7 @@ async fn incomplete_p9_missing_dsr_pbo_sensitivity_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2132,6 +2183,7 @@ async fn failed_p9_scenario_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2170,6 +2222,7 @@ async fn artifact_tamper_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2213,6 +2266,7 @@ async fn dsr_below_threshold_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2264,6 +2318,7 @@ async fn pbo_above_threshold_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {
@@ -2317,6 +2372,7 @@ async fn duplicate_retry_with_mismatched_backtest_run_id_is_rejected() {
     let run_id = write_real_backtest_evidence(
         &root,
         &research.trial_id,
+        &research.economic_eval_id,
         &research.registry_db_path,
         &symbol,
         RealEvidenceOptions {

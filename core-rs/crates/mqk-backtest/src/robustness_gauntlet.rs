@@ -230,6 +230,18 @@ pub struct RobustnessScenarioOutcome {
     /// decision can prove the SAME trial produced both this P9 evidence and
     /// the P7C/OOS evidence, never merely that both share a `strategy_id`.
     pub research_trial_id: Option<String>,
+    /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section G: structured, TYPED replay
+    /// evidence for a Research-registry-anchored scenario (currently only
+    /// `p7a_p7b_economic_replay_stress`) -- the exact JSON object the
+    /// underlying Python CLI reported, carrying every durable identity/hash
+    /// field (baseline/stressed `economic_eval_id`, artifact SHA-256s,
+    /// input SHA-256s, bars-provenance hash, stress-spec identity, actual
+    /// pass/fail metrics). Deliberately NOT reduced to a human-readable
+    /// `detail` string -- promotion-grade replay proof must be machine-
+    /// verifiable. `None` for every pure-engine scenario and for outcomes
+    /// where no structured evidence was ever produced (e.g. a spawn
+    /// failure).
+    pub evidence: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,6 +346,7 @@ fn execution_delay_scenario(
                 reason: if passed { None } else { Some(detail.clone()) },
                 detail,
                 research_trial_id: None,
+                evidence: None,
             }
         }
         Err(e) => RobustnessScenarioOutcome {
@@ -343,6 +356,7 @@ fn execution_delay_scenario(
             reason: Some(e.clone()),
             detail: e,
             research_trial_id: None,
+                evidence: None,
         },
     }
 }
@@ -364,6 +378,7 @@ fn symbol_leave_one_out_scenario(
             ),
             detail: format!("distinct_symbols={}", symbols.len()),
             research_trial_id: None,
+                evidence: None,
         };
     }
 
@@ -382,6 +397,7 @@ fn symbol_leave_one_out_scenario(
                     reason: Some(format!("excluding {symbol}: {e}")),
                     detail: format!("excluding {symbol}: {e}"),
                     research_trial_id: None,
+                evidence: None,
                 }
             }
         };
@@ -400,6 +416,7 @@ fn symbol_leave_one_out_scenario(
                 )),
                 detail: format!("worst excluded symbol so far: {symbol} dd={dd:.6}"),
                 research_trial_id: None,
+                evidence: None,
             };
         }
     }
@@ -415,6 +432,7 @@ fn symbol_leave_one_out_scenario(
             symbols.len()
         ),
         research_trial_id: None,
+                evidence: None,
     }
 }
 
@@ -449,6 +467,7 @@ fn month_and_regime_concentration_scenario(baseline: &BacktestReport, bars: &[Ba
             )),
             detail: format!("distinct_months={}", monthly_gain.len()),
             research_trial_id: None,
+                evidence: None,
         };
     }
 
@@ -492,6 +511,7 @@ fn month_and_regime_concentration_scenario(baseline: &BacktestReport, bars: &[Ba
             monthly_gain.len()
         ),
         research_trial_id: None,
+                evidence: None,
     }
 }
 
@@ -520,6 +540,7 @@ fn parameter_neighborhood_scenario(
                 reason: Some(e.to_string()),
                 detail: e.to_string(),
                 research_trial_id: None,
+                evidence: None,
             }
         }
     };
@@ -550,6 +571,7 @@ fn parameter_neighborhood_scenario(
             worst_row.map(|r| r.max_drawdown_pct).unwrap_or(0.0)
         ),
         research_trial_id: None,
+                evidence: None,
     }
 }
 
@@ -600,6 +622,7 @@ fn placebo_temporal_offset_scenario(
                      placebo_final_equity_micros={placebo_final}"
                 ),
                 research_trial_id: None,
+                evidence: None,
             }
         }
         Err(e) => RobustnessScenarioOutcome {
@@ -609,6 +632,7 @@ fn placebo_temporal_offset_scenario(
             reason: Some(e.clone()),
             detail: e,
             research_trial_id: None,
+                evidence: None,
         },
     }
 }
@@ -656,6 +680,7 @@ fn conservative_capacity_stress_scenario(
                 reason: if passed { None } else { Some(detail.clone()) },
                 detail,
                 research_trial_id: None,
+                evidence: None,
             }
         }
         Err(e) => RobustnessScenarioOutcome {
@@ -665,6 +690,7 @@ fn conservative_capacity_stress_scenario(
             reason: Some(e.clone()),
             detail: e,
             research_trial_id: None,
+                evidence: None,
         },
     }
 }

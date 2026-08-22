@@ -242,6 +242,36 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         }
     }
 
+    // FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B — the P7A/P7B replay
+    // stress evidence must be bound to the SAME authoritative
+    // `economic_eval_id` the P7C/OOS evidence was verified for, never merely
+    // the same trial_id (a trial with multiple succeeded attempts could
+    // otherwise supply P7C evidence from one economic result and replay
+    // stress evidence from a different one under the SAME trial_id).
+    if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
+        match re.p7a_p7b_economic_replay_stress_baseline_economic_eval_id.as_deref() {
+            Some(bound_eval_id) if bound_eval_id == ev.economic_eval_id() => {} // same result -- OK
+            Some(bound_eval_id) => {
+                fail_reasons.push(format!(
+                    "Economic result binding mismatch: P9 p7a_p7b_economic_replay_stress \
+                     evidence was computed for economic_eval_id {bound_eval_id:?}, but P7C/OOS \
+                     evidence was verified for economic_eval_id {:?} -- both must be the SAME \
+                     authoritative economic result, never merely the same Research trial",
+                    ev.economic_eval_id()
+                ));
+            }
+            None => {
+                fail_reasons.push(format!(
+                    "Economic result binding missing: P9 robustness evidence carries no \
+                     p7a_p7b_economic_replay_stress_baseline_economic_eval_id -- cannot prove \
+                     it was computed for the same economic result ({:?}) as the P7C/OOS \
+                     evidence; promotion requires that proof, never an assumed match",
+                    ev.economic_eval_id()
+                ));
+            }
+        }
+    }
+
     // PATCH F3 — Fail closed on NaN key metrics.
     //
     // Float comparisons involving NaN always return `false` in Rust, so a NaN

@@ -173,6 +173,7 @@ fn run_and_persist_full(
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some("bes01_test_trial".to_string()),
+        evidence: None,
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet must succeed");

@@ -549,6 +549,14 @@ enum BacktestCmd {
         #[arg(long)]
         trial_id: String,
 
+        /// REQUIRED, no default: the exact P7C-authorized `economic_eval_id`
+        /// this replay must bind to -- resolved against `trial_id`'s
+        /// durable registry `result_id` (never "the latest successful
+        /// attempt"). Must be the SAME economic_eval_id this candidate's
+        /// P7C/OOS evidence was verified for.
+        #[arg(long)]
+        economic_eval_id: String,
+
         /// Path to the research-py project root (the directory containing
         /// `src/mqk_research`).
         #[arg(long)]
@@ -1550,6 +1558,7 @@ async fn run_cli() -> Result<()> {
                 run_id,
                 registry_db,
                 trial_id,
+                economic_eval_id,
                 research_py_root,
                 python,
                 stress_out_dir,
@@ -1564,6 +1573,7 @@ async fn run_cli() -> Result<()> {
                     run_id,
                     registry_db,
                     trial_id,
+                    economic_eval_id,
                     research_py_root,
                     python,
                     stress_out_dir,
