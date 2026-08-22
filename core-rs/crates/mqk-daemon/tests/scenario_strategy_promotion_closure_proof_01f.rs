@@ -424,6 +424,23 @@ fn write_real_backtest_evidence(
     )
     .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)");
 
+    // FINAL-P9-ROBUSTNESS-SEMANTICS-01: SAME trial/registry as the two
+    // scenarios above.
+    let placebo = mqk_backtest::genuine_shuffled_placebo_scenario(
+        "python",
+        &research_py_root(),
+        research_registry_db,
+        research_trial_id,
+        research_economic_eval_id,
+        &report.strategy_name,
+        &artifact_root.join(format!("genuine_shuffled_placebo_{}", report.run_id)),
+    );
+    mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+        &init_result.run_dir,
+        &placebo,
+    )
+    .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (genuine_shuffled_placebo)");
+
     report.run_id
 }
 

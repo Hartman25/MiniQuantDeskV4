@@ -731,6 +731,27 @@ fn write_real_backtest_evidence(
                 &stress,
             )
             .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)");
+
+            // FINAL-P9-ROBUSTNESS-SEMANTICS-01: SAME trial/registry as the
+            // two scenarios above. Same "MANDATORY MEANS MANDATORY"
+            // discipline: candidates whose Research evidence came from the
+            // lightweight hand-registered fixture genuinely report
+            // `applicable: true, passed: false` here too (no recorded
+            // `inputs`).
+            let placebo = mqk_backtest::genuine_shuffled_placebo_scenario(
+                "python",
+                &research_py_root(),
+                research_registry_db,
+                research_trial_id,
+                research_economic_eval_id,
+                &report.strategy_name,
+                &artifact_root.join(format!("genuine_shuffled_placebo_{}", report.run_id)),
+            );
+            mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+                &init_result.run_dir,
+                &placebo,
+            )
+            .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (genuine_shuffled_placebo)");
         }
     }
 
@@ -1137,7 +1158,11 @@ async fn real_research_production_trial_used_for_both_p7c_and_p9_passes() {
     let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&root.join(run_id.to_string()))
         .expect("robustness gauntlet must load");
     assert!(gauntlet.is_complete(), "P9 must be complete");
-    assert!(gauntlet.all_applicable_passed(), "every applicable P9 scenario must pass");
+    assert!(
+        gauntlet.all_applicable_passed(),
+        "every applicable P9 scenario must pass: {:?}",
+        gauntlet.failed_scenario_descriptions()
+    );
     let raw = std::fs::read_to_string(
         root.join(run_id.to_string()).join("robustness_gauntlet.json"),
     )
