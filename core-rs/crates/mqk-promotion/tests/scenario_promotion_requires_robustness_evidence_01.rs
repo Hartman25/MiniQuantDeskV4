@@ -99,6 +99,17 @@ fn robustness_evidence_wrong_protocol_blocks_promotion() {
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
             "econ_eval_robustness_gate_trial".to_string(),
         ),
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: Vec::new(),
+        genuine_shuffled_placebo_research_trial_id: Some("robustness_gate_trial".to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        genuine_shuffled_placebo_protocol_id: Some(
+            mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID.to_string(),
+        ),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(
+            common::deterministic_judge_artifact_sha256_for_testing("robustness_gate_trial"),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -122,6 +133,13 @@ fn robustness_evidence_incomplete_blocks_promotion() {
         dsr_pbo_sensitivity_research_trial_id: None, // scenario itself is still deferred
         p7a_p7b_economic_replay_stress_research_trial_id: None, // scenario itself is still deferred
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: None, // scenario itself is still deferred
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: vec![
+            "<scenario evidence entirely absent>".to_string(),
+        ],
+        genuine_shuffled_placebo_research_trial_id: None, // scenario itself is still deferred
+        genuine_shuffled_placebo_baseline_economic_eval_id: None, // scenario itself is still deferred
+        genuine_shuffled_placebo_protocol_id: None, // scenario itself is still deferred
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: None, // scenario itself is still deferred
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -147,6 +165,17 @@ fn robustness_evidence_failed_scenario_blocks_promotion() {
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
             "econ_eval_robustness_gate_trial".to_string(),
         ),
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: Vec::new(),
+        genuine_shuffled_placebo_research_trial_id: Some("robustness_gate_trial".to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        genuine_shuffled_placebo_protocol_id: Some(
+            mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID.to_string(),
+        ),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(
+            common::deterministic_judge_artifact_sha256_for_testing("robustness_gate_trial"),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -168,6 +197,17 @@ fn robustness_evidence_complete_and_passed_allows_promotion() {
         p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
             "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: Vec::new(),
+        genuine_shuffled_placebo_research_trial_id: Some("robustness_gate_trial".to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        genuine_shuffled_placebo_protocol_id: Some(
+            mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID.to_string(),
+        ),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(
+            common::deterministic_judge_artifact_sha256_for_testing("robustness_gate_trial"),
         ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -201,6 +241,17 @@ fn p7a_p7b_replay_stress_trial_mismatch_blocks_promotion_even_when_dsr_pbo_match
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
             "econ_eval_a_different_trial_b".to_string(),
         ),
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: Vec::new(),
+        genuine_shuffled_placebo_research_trial_id: Some("robustness_gate_trial".to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        genuine_shuffled_placebo_protocol_id: Some(
+            mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID.to_string(),
+        ),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(
+            common::deterministic_judge_artifact_sha256_for_testing("robustness_gate_trial"),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -230,6 +281,19 @@ fn p7a_p7b_replay_stress_missing_trial_binding_blocks_promotion_even_when_dsr_pb
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: None,
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: None,
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: vec![
+            "<scenario evidence entirely absent>".to_string(),
+        ],
+        genuine_shuffled_placebo_research_trial_id: Some("robustness_gate_trial".to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        genuine_shuffled_placebo_protocol_id: Some(
+            mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID.to_string(),
+        ),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(
+            common::deterministic_judge_artifact_sha256_for_testing("robustness_gate_trial"),
+        ),
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
@@ -241,4 +305,159 @@ fn p7a_p7b_replay_stress_missing_trial_binding_blocks_promotion_even_when_dsr_pb
     let reasons = decision.fail_reasons.join("; ");
     assert!(reasons.contains("p7a_p7b_economic_replay_stress"), "got: {reasons}");
     assert!(reasons.contains("Research trial binding missing"), "got: {reasons}");
+}
+
+// ---------------------------------------------------------------------------
+// FINAL-P9-AUTHORITY-BINDING-REPAIR-01: Sections 1, 3, 4 negative controls
+// ---------------------------------------------------------------------------
+
+/// A fully valid, complete, protocol-matching, fully-bound P9 robustness
+/// evidence bundle for `research_trial_id = "robustness_gate_trial"` (the
+/// SAME trial `base_input` uses) -- the baseline every negative control
+/// below mutates exactly ONE field of via struct-update syntax, isolating
+/// each new gate's failure to that ONE field.
+fn full_valid_robustness_evidence() -> RobustnessEvidence {
+    RobustnessEvidence {
+        protocol_version: REQUIRED_ROBUSTNESS_PROTOCOL_VERSION.to_string(),
+        is_complete: true,
+        all_applicable_passed: true,
+        failed_scenarios: Vec::new(),
+        deferred_scenarios: Vec::new(),
+        dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: Vec::new(),
+        genuine_shuffled_placebo_research_trial_id: Some("robustness_gate_trial".to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(
+            "econ_eval_robustness_gate_trial".to_string(),
+        ),
+        genuine_shuffled_placebo_protocol_id: Some(
+            mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID.to_string(),
+        ),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(
+            common::deterministic_judge_artifact_sha256_for_testing("robustness_gate_trial"),
+        ),
+    }
+}
+
+/// Section 1 positive control is `robustness_evidence_complete_and_passed_allows_promotion`
+/// above. Negative control: a `dsr_pbo_sensitivity` judge-scope binding that
+/// disagrees with the P7C/OOS evidence's own verified judge scope must block
+/// promotion, even though every OTHER binding (trial, economic result,
+/// placebo) is correct.
+#[test]
+fn dsr_pbo_sensitivity_judge_scope_mismatch_blocks_promotion() {
+    let input = base_input(Some(RobustnessEvidence {
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(
+            "a_completely_different_judge_sha256".to_string(),
+        ),
+        ..full_valid_robustness_evidence()
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(
+        !decision.passed,
+        "a dsr_pbo_sensitivity judge scope bound to a DIFFERENT judge_artifact_sha256 than the \
+         P7C/OOS evidence must block promotion"
+    );
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(reasons.contains("Judge scope binding mismatch"), "got: {reasons}");
+}
+
+/// Missing-binding form: no `dsr_pbo_sensitivity_authoritative_judge_artifact_sha256`
+/// at all must block promotion just as an explicit mismatch does.
+#[test]
+fn dsr_pbo_sensitivity_missing_judge_scope_binding_blocks_promotion() {
+    let input = base_input(Some(RobustnessEvidence {
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: None,
+        ..full_valid_robustness_evidence()
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(!decision.passed);
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(reasons.contains("Judge scope binding missing"), "got: {reasons}");
+}
+
+/// Section 3: `genuine_shuffled_placebo` bound to a DIFFERENT research trial
+/// than the P7C/OOS evidence must block promotion.
+#[test]
+fn genuine_shuffled_placebo_trial_mismatch_blocks_promotion() {
+    let input = base_input(Some(RobustnessEvidence {
+        genuine_shuffled_placebo_research_trial_id: Some("a_different_trial_c".to_string()),
+        ..full_valid_robustness_evidence()
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(!decision.passed);
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(reasons.contains("genuine_shuffled_placebo"), "got: {reasons}");
+    assert!(reasons.contains("Research trial binding mismatch"), "got: {reasons}");
+    assert!(reasons.contains("a_different_trial_c"), "got: {reasons}");
+}
+
+/// Section 3: `genuine_shuffled_placebo` bound to a DIFFERENT economic
+/// result than the P7C/OOS evidence, under the SAME trial, must block
+/// promotion (two valid trials/evals under the same strategy scenario).
+#[test]
+fn genuine_shuffled_placebo_economic_eval_mismatch_blocks_promotion() {
+    let input = base_input(Some(RobustnessEvidence {
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(
+            "econ_eval_a_different_trial_b".to_string(),
+        ),
+        ..full_valid_robustness_evidence()
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(!decision.passed);
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(reasons.contains("genuine_shuffled_placebo"), "got: {reasons}");
+    assert!(reasons.contains("Economic result binding mismatch"), "got: {reasons}");
+}
+
+/// Section 3: `genuine_shuffled_placebo` declaring the WRONG protocol_id
+/// must block promotion -- only the exact accepted placebo protocol counts.
+#[test]
+fn genuine_shuffled_placebo_wrong_protocol_blocks_promotion() {
+    let input = base_input(Some(RobustnessEvidence {
+        genuine_shuffled_placebo_protocol_id: Some("temporal_offset_placebo_v0_fabricated".to_string()),
+        ..full_valid_robustness_evidence()
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(!decision.passed);
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(reasons.contains("genuine_shuffled_placebo protocol mismatch"), "got: {reasons}");
+}
+
+/// Section 4: a `p7a_p7b_economic_replay_stress` scenario missing REQUIRED
+/// structured evidence fields (mirroring a fabricated scenario carrying only
+/// `baseline_economic_eval_id`, the ONLY field the prior canonical check
+/// required) must block promotion even though every trial/economic-result
+/// binding is otherwise correct.
+#[test]
+fn p7a_p7b_replay_stress_missing_required_evidence_fields_blocks_promotion() {
+    let input = base_input(Some(RobustnessEvidence {
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: vec![
+            "protocol_id".to_string(),
+            "stressed_max_drawdown".to_string(),
+        ],
+        ..full_valid_robustness_evidence()
+    }));
+    let decision = evaluate_promotion(&lenient_config(), &input);
+
+    assert!(
+        !decision.passed,
+        "incomplete p7a_p7b_economic_replay_stress evidence must block promotion even with \
+         correct trial/economic-result binding"
+    );
+    let reasons = decision.fail_reasons.join("; ");
+    assert!(
+        reasons.contains("p7a_p7b_economic_replay_stress evidence incomplete"),
+        "got: {reasons}"
+    );
+    assert!(reasons.contains("protocol_id"), "got: {reasons}");
+    assert!(reasons.contains("stressed_max_drawdown"), "got: {reasons}");
 }

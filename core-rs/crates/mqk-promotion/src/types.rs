@@ -238,6 +238,54 @@ pub struct RobustnessEvidence {
     /// recorded before this field existed) -- `evaluate_promotion` treats
     /// that identically to a genuine mismatch.
     pub p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Option<String>,
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 4: names of every
+    /// REQUIRED `p7a_p7b_economic_replay_stress` evidence field missing or
+    /// structurally invalid on this candidate's evidence (mirrors
+    /// `mqk_artifacts::RobustnessGauntletArtifact::
+    /// p7a_p7b_economic_replay_stress_missing_required_evidence_fields`).
+    /// Empty iff every required field (exact `protocol_id`, `research_trial_id`,
+    /// `baseline_economic_eval_id`, `baseline_economic_artifact_sha256`,
+    /// `stressed_economic_eval_id`, `stressed_artifact_sha256`,
+    /// `bars_csv_sha256`, `oos_predictions_csv_sha256`,
+    /// `walk_forward_eval_sha256`, bars-provenance/pricing identity,
+    /// stress-spec identity, and the actual stressed pass/fail metric) is
+    /// present -- `evaluate_promotion` fails closed on any non-empty list, so
+    /// a fabricated scenario carrying only `baseline_economic_eval_id` can
+    /// never satisfy canonical promotion.
+    pub p7a_p7b_economic_replay_stress_missing_required_evidence_fields: Vec<String>,
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: the exact Research
+    /// `trial_id` the `genuine_shuffled_placebo` scenario's evidence was
+    /// computed against (mirrors
+    /// `mqk_artifacts::RobustnessGauntletArtifact::
+    /// genuine_shuffled_placebo_research_trial_id`). Same fail-closed
+    /// contract as `dsr_pbo_sensitivity_research_trial_id`: `None` (absent,
+    /// or a mismatch against `oos_evidence.trial_id()`) is never assumed to
+    /// agree.
+    pub genuine_shuffled_placebo_research_trial_id: Option<String>,
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: the exact P7C-
+    /// authorized `economic_eval_id` the `genuine_shuffled_placebo`
+    /// scenario's evidence was bound to (mirrors
+    /// `mqk_artifacts::RobustnessGauntletArtifact::
+    /// genuine_shuffled_placebo_baseline_economic_eval_id`). Must equal the
+    /// P7C/OOS evidence's own verified `economic_eval_id` -- same trial but
+    /// a DIFFERENT economic result is a mismatch, never assumed to agree.
+    pub genuine_shuffled_placebo_baseline_economic_eval_id: Option<String>,
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: the `protocol_id` the
+    /// `genuine_shuffled_placebo` scenario's evidence declares (mirrors
+    /// `mqk_artifacts::RobustnessGauntletArtifact::
+    /// genuine_shuffled_placebo_protocol_id`). Must equal
+    /// `mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID` exactly -- the
+    /// one accepted placebo protocol.
+    pub genuine_shuffled_placebo_protocol_id: Option<String>,
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the exact registered
+    /// `research_judge_artifacts.judge_artifact_sha256` scope the
+    /// `dsr_pbo_sensitivity` scenario's rerun grid reused (mirrors
+    /// `mqk_artifacts::RobustnessGauntletArtifact::
+    /// dsr_pbo_sensitivity_authoritative_judge_artifact_sha256`). Must equal
+    /// the P7C/OOS evidence's own verified
+    /// `VerifiedPromotionOosEvidence::judge_artifact_sha256` -- reusing the
+    /// existing registered judge authority, never assumed to agree.
+    pub dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -56,6 +56,15 @@ use crate::robustness_gauntlet::RobustnessScenarioOutcome;
 /// `robustness_gauntlet::REQUIRED_ROBUSTNESS_SCENARIO_NAMES`.
 pub const P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME: &str = "p7a_p7b_economic_replay_stress";
 
+/// The exact accepted replay-stress protocol identity, mirroring
+/// `mqk_research.ml.p7a_p7b_economic_replay_stress_cli.STRESS_PROTOCOL_ID`
+/// byte-for-byte -- see that module's own `_run_replay_stress`, which emits
+/// this under the evidence blob's `protocol_id` key on every "evaluated"
+/// result. FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 4: checked by
+/// `mqk_artifacts::RobustnessGauntletArtifact::
+/// p7a_p7b_economic_replay_stress_missing_required_evidence_fields`.
+pub const P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID: &str = "p7a_p7b_economic_replay_stress_v1";
+
 /// Run the genuine P7A/P7B economic replay stress for `trial_id` against
 /// `registry_db`, re-evaluating that trial's FROZEN OOS prediction stream
 /// (never re-trained) through the real `run_economic_walkforward` machinery

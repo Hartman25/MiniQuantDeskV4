@@ -324,5 +324,22 @@ fn robustness_evidence_from_artifact(a: &RobustnessGauntletArtifact) -> Robustne
         p7a_p7b_economic_replay_stress_baseline_economic_eval_id: a
             .p7a_p7b_economic_replay_stress_baseline_economic_eval_id()
             .map(|s| s.to_string()),
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: a
+            .p7a_p7b_economic_replay_stress_missing_required_evidence_fields()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+        genuine_shuffled_placebo_research_trial_id: a
+            .genuine_shuffled_placebo_research_trial_id()
+            .map(|s| s.to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: a
+            .genuine_shuffled_placebo_baseline_economic_eval_id()
+            .map(|s| s.to_string()),
+        genuine_shuffled_placebo_protocol_id: a
+            .genuine_shuffled_placebo_protocol_id()
+            .map(|s| s.to_string()),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: a
+            .dsr_pbo_sensitivity_authoritative_judge_artifact_sha256()
+            .map(|s| s.to_string()),
     }
 }

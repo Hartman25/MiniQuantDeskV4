@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use mqk_audit::{verify_hash_chain_str, AuditEvent, AuditWriter, VerifyResult};
 use mqk_backtest::RobustnessGauntletOutput;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -171,6 +172,135 @@ impl RobustnessGauntletArtifact {
             .find(|s| s.name == mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME)
             .and_then(|s| s.evidence.as_ref())
             .and_then(|e| e.get("baseline_economic_eval_id"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 4: names of every
+    /// REQUIRED `p7a_p7b_economic_replay_stress` evidence field that is
+    /// missing/structurally invalid on this artifact's scenario evidence --
+    /// empty iff EVERY required field is present, matching the CLI's own
+    /// (`mqk_research.ml.p7a_p7b_economic_replay_stress_cli`) real "evaluated"
+    /// output shape. Checked independent of `applicable`/`passed`: a
+    /// fabricated "evaluated, passed" scenario containing only
+    /// `baseline_economic_eval_id` (the ONLY field the prior canonical check
+    /// required) must never satisfy canonical promotion. A completely absent
+    /// evidence blob (scenario missing, deferred, or recorded before
+    /// `evidence` existed) reports a single sentinel entry rather than every
+    /// individual field name, since none of them can be checked at all.
+    pub fn p7a_p7b_economic_replay_stress_missing_required_evidence_fields(&self) -> Vec<&'static str> {
+        const REQUIRED_STRING_FIELDS: &[&str] = &[
+            "research_trial_id",
+            "baseline_economic_eval_id",
+            "baseline_economic_artifact_sha256",
+            "stressed_economic_eval_id",
+            "stressed_artifact_sha256",
+            "bars_csv_sha256",
+            "oos_predictions_csv_sha256",
+            "walk_forward_eval_sha256",
+            "bars_provenance_hash",
+        ];
+        let evidence = self
+            .scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME)
+            .and_then(|s| s.evidence.as_ref());
+        let evidence = match evidence {
+            Some(e) => e,
+            None => return vec!["<scenario evidence entirely absent>"],
+        };
+        let mut missing = Vec::new();
+        if evidence.get("protocol_id").and_then(|v| v.as_str())
+            != Some(mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID)
+        {
+            missing.push("protocol_id");
+        }
+        for field in REQUIRED_STRING_FIELDS {
+            let present = evidence
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if !present {
+                missing.push(field);
+            }
+        }
+        // "bars provenance/pricing identity": the reconstructed baseline
+        // protocol identity (which itself carries the P7A execution_pricing
+        // identity that was replayed) must be a structurally present object.
+        if !evidence.get("baseline_protocol_identity").map(Value::is_object).unwrap_or(false) {
+            missing.push("baseline_protocol_identity");
+        }
+        // "stress-spec identity": the EXACT P7A/P7B stress knobs replayed.
+        if !evidence.get("stress_spec").map(Value::is_object).unwrap_or(false) {
+            missing.push("stress_spec");
+        }
+        // "actual stressed result/pass-fail metric".
+        let drawdown_present = evidence
+            .get("stressed_max_drawdown")
+            .and_then(Value::as_f64)
+            .map(f64::is_finite)
+            .unwrap_or(false);
+        if !drawdown_present {
+            missing.push("stressed_max_drawdown");
+        }
+        if evidence.get("passed").and_then(Value::as_bool).is_none() {
+            missing.push("passed");
+        }
+        missing
+    }
+
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: see
+    /// [`Self::scenario_research_trial_id`] for `genuine_shuffled_placebo`.
+    pub fn genuine_shuffled_placebo_research_trial_id(&self) -> Option<&str> {
+        self.scenario_research_trial_id(mqk_backtest::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME)
+    }
+
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: the exact P7C-
+    /// authorized `economic_eval_id` the `genuine_shuffled_placebo` scenario's
+    /// evidence was bound to (read from its durable structured `evidence`
+    /// blob's `baseline_economic_eval_id` field) -- mirrors
+    /// [`Self::p7a_p7b_economic_replay_stress_baseline_economic_eval_id`].
+    /// `None` means no binding proof exists (scenario absent/deferred, or
+    /// recorded before this field existed).
+    pub fn genuine_shuffled_placebo_baseline_economic_eval_id(&self) -> Option<&str> {
+        self.scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME)
+            .and_then(|s| s.evidence.as_ref())
+            .and_then(|e| e.get("baseline_economic_eval_id"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: the `protocol_id` the
+    /// `genuine_shuffled_placebo` scenario's evidence declares (read from its
+    /// durable structured `evidence` blob's `protocol_id` field) -- checked
+    /// by `evaluate_promotion` against
+    /// [`mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID`], the exact
+    /// accepted placebo protocol. `None` means no protocol identity was ever
+    /// recorded (scenario absent/deferred, or a status lacking it).
+    pub fn genuine_shuffled_placebo_protocol_id(&self) -> Option<&str> {
+        self.scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME)
+            .and_then(|s| s.evidence.as_ref())
+            .and_then(|e| e.get("protocol_id"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the exact registered
+    /// `research_judge_artifacts.judge_artifact_sha256` scope the
+    /// `dsr_pbo_sensitivity` scenario's rerun grid reused (read from its
+    /// durable structured `evidence` blob's
+    /// `authoritative_judge_artifact_sha256` field, persisted by
+    /// `mqk_research.ml.dsr_pbo_sensitivity_cli`). `None` means no binding
+    /// proof exists (scenario absent/deferred, recorded before this field
+    /// existed, or a status lacking it, e.g. a spawn failure).
+    pub fn dsr_pbo_sensitivity_authoritative_judge_artifact_sha256(&self) -> Option<&str> {
+        self.scenarios
+            .iter()
+            .find(|s| s.name == mqk_backtest::DSR_PBO_SENSITIVITY_SCENARIO_NAME)
+            .and_then(|s| s.evidence.as_ref())
+            .and_then(|e| e.get("authoritative_judge_artifact_sha256"))
             .and_then(|v| v.as_str())
     }
 

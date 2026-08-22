@@ -489,6 +489,15 @@ enum BacktestCmd {
         #[arg(long)]
         trial_id: String,
 
+        /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the EXACT,
+        /// already-registered P7C-authorized
+        /// `research_judge_artifacts.judge_artifact_sha256` whose registered
+        /// `(experiment_id, hypothesis_id)` scope this sensitivity sweep must
+        /// reuse -- required, no default; never derived from `--trial-id`'s
+        /// own registered `hypothesis_id`.
+        #[arg(long)]
+        judge_artifact_sha256: String,
+
         /// Path to the research-py project root (the directory containing
         /// `src/mqk_research`).
         #[arg(long)]
@@ -1582,6 +1591,7 @@ async fn run_cli() -> Result<()> {
                 run_id,
                 registry_db,
                 trial_id,
+                judge_artifact_sha256,
                 research_py_root,
                 python,
                 block_counts,
@@ -1593,6 +1603,7 @@ async fn run_cli() -> Result<()> {
                     run_id,
                     registry_db,
                     trial_id,
+                    judge_artifact_sha256,
                     research_py_root,
                     python,
                     block_counts,

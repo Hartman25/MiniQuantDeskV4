@@ -163,6 +163,11 @@ struct ResearchEvidenceFixture {
     registry_db_path: PathBuf,
     evidence_dir: PathBuf,
     judge_path: PathBuf,
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the exact
+    /// `research_judge_artifacts.judge_artifact_sha256` this fixture
+    /// registered -- required by `dsr_pbo_sensitivity_scenario`'s new
+    /// `authoritative_judge_artifact_sha256` contract.
+    judge_artifact_sha256: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +296,11 @@ fn write_real_research_evidence_via_production_pipeline(
          gates meaningfully: {parsed}"
     );
 
+    let judge_artifact_sha256 = parsed["judge_artifact_sha256"]
+        .as_str()
+        .expect("judge_artifact_sha256")
+        .to_string();
+
     let trials = parsed["trials"].as_array().expect("trials array");
     assert_eq!(trials.len(), entry_thresholds.len());
     trials
@@ -314,6 +324,7 @@ fn write_real_research_evidence_via_production_pipeline(
                 registry_db_path: registry_db_path.clone(),
                 evidence_dir,
                 judge_path: judge_path.clone(),
+                judge_artifact_sha256: judge_artifact_sha256.clone(),
             }
         })
         .collect()
@@ -341,6 +352,7 @@ fn write_real_backtest_evidence(
     research_trial_id: &str,
     research_economic_eval_id: &str,
     research_registry_db: &std::path::Path,
+    research_judge_artifact_sha256: &str,
     symbol: &str,
 ) -> Uuid {
     use mqk_strategy::engines::register_builtin_strategies_with_sizing;
@@ -400,6 +412,7 @@ fn write_real_backtest_evidence(
         research_registry_db,
         research_trial_id,
         &report.strategy_name,
+        research_judge_artifact_sha256,
         &[8, 10],
         0.25, // test-fixture-only threshold; not asserted as accepted policy
         0.25,
@@ -617,6 +630,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
     );
 

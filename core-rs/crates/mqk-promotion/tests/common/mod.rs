@@ -204,6 +204,30 @@ pub fn valid_oos_evidence_for_testing_with_strategy(
         .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")
 }
 
+/// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the EXACT SAME
+/// deterministic `judge_artifact_sha256`
+/// `valid_oos_evidence_for_testing_with_strategy` registers/verifies for
+/// `trial_id` -- the underlying judge_json formula is strategy_id-
+/// independent (see that function's own judge_json construction), so a
+/// caller pairing `valid_oos_evidence_for_testing(trial_id)` with a
+/// `RobustnessEvidence` built from THIS value under the SAME `trial_id`
+/// automatically gets a matching
+/// `dsr_pbo_sensitivity_authoritative_judge_artifact_sha256` binding.
+pub fn deterministic_judge_artifact_sha256_for_testing(trial_id: &str) -> String {
+    let daily_csv = b"date,net_daily_return\n2021-01-01,0.0010\n2021-01-02,0.0021\n".to_vec();
+    let daily_sha = sha256_hex(&daily_csv);
+    let economic_eval_id = format!("econ_eval_{trial_id}");
+    let experiment_id = format!("exp_{trial_id}");
+    let economic_json = format!(
+        r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}},"folds":[{{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}}]}}"#
+    );
+    let economic_sha = sha256_hex(economic_json.as_bytes());
+    let judge_json = format!(
+        r#"{{"schema_version":"multiple_testing_judge_v1","protocol":{{"protocol_id":"research_multiple_testing_judge_v1"}},"comparison_scope":{{"experiment_id":"{experiment_id}"}},"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":0.85}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
+    );
+    canonical_json_sha256(&judge_json)
+}
+
 /// A complete, protocol-matching, fully-passed P9 robustness evidence
 /// bundle -- the ONLY shape `evaluate_promotion`'s robustness gate accepts
 /// (CANONICAL-ROBUSTNESS-PROMOTION-GATE-01). `RobustnessEvidence` carries
@@ -219,6 +243,9 @@ pub fn valid_oos_evidence_for_testing_with_strategy(
 /// same `PromotionInput` so `evaluate_promotion`'s trial-binding gate
 /// accepts the pair.
 pub fn valid_robustness_evidence_for_testing(research_trial_id: &str) -> mqk_promotion::RobustnessEvidence {
+    let economic_eval_id = format!("econ_eval_{research_trial_id}");
+    let judge_sha = deterministic_judge_artifact_sha256_for_testing(research_trial_id);
+
     mqk_promotion::RobustnessEvidence {
         protocol_version: mqk_promotion::REQUIRED_ROBUSTNESS_PROTOCOL_VERSION.to_string(),
         is_complete: true,
@@ -232,8 +259,17 @@ pub fn valid_robustness_evidence_for_testing(research_trial_id: &str) -> mqk_pro
         // derives its own `economic_eval_id` (`format!("econ_eval_{trial_id}")`)
         // -- callers passing the SAME trial_id to both helpers automatically
         // get matching economic_eval_id binding too, no new parameter needed.
-        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(format!(
-            "econ_eval_{research_trial_id}"
-        )),
+        p7a_p7b_economic_replay_stress_baseline_economic_eval_id: Some(economic_eval_id.clone()),
+        // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 4: this synthetic
+        // helper represents a complete evidence bundle for gates OTHER than
+        // the field-completeness one -- empty means "no missing required
+        // fields" (that specific check has its own dedicated tests).
+        p7a_p7b_economic_replay_stress_missing_required_evidence_fields: Vec::new(),
+        genuine_shuffled_placebo_research_trial_id: Some(research_trial_id.to_string()),
+        genuine_shuffled_placebo_baseline_economic_eval_id: Some(economic_eval_id),
+        genuine_shuffled_placebo_protocol_id: Some(
+            mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID.to_string(),
+        ),
+        dsr_pbo_sensitivity_authoritative_judge_artifact_sha256: Some(judge_sha),
     }
 }

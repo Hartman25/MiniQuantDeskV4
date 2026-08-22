@@ -9,6 +9,24 @@ out of scope here). Re-runs the judge for the SAME trial/experiment/
 hypothesis population multiple times, varying ONLY `cscv_target_block_count`
 -- an already-existing, caller-supplied `JudgeSpec` field.
 
+FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1 ("DSR/PBO SENSITIVITY MUST
+PRESERVE EXACT JUDGE SCOPE"): the caller-supplied `--judge-artifact-sha256`
+is the EXACT, already-registered P7C-authorized `research_judge_artifacts`
+row this sensitivity sweep must reuse the SCOPE of -- `experiment_id` and
+`hypothesis_id`, INCLUDING `hypothesis_id = None` for a whole-experiment
+scope. `build_multiple_testing_judge` legitimately accepts a `None`
+`hypothesis_id` (whole-experiment comparison population); deriving scope
+from `trial_id`'s own registered `hypothesis_id` instead (the prior
+behavior) could silently narrow an authoritative whole-experiment comparison
+population down to a single-hypothesis one while claiming to vary "only"
+`cscv_target_block_count`. Every re-run in the grid therefore reuses the
+EXACT `(experiment_id, hypothesis_id)` resolved from the registered judge
+row -- never `trial_id`'s own hypothesis_id -- and every returned result
+(evaluated, not_evaluable, or a resolved scope with no matching entry)
+carries `authoritative_judge_artifact_sha256`/`authoritative_experiment_id`/
+`authoritative_hypothesis_id` so the Rust caller can durably record exactly
+which registered judge scope this sweep reused.
+
 This is a safe, explicitly-anticipated use of the existing durable registry
 write path: `ResearchResultStore.register_judge_artifact`'s own docstring
 states "a re-run with an unchanged registry/population/protocol but a
@@ -47,13 +65,43 @@ from mqk_research.ml.multiple_testing_judge import JudgeSpec, build_multiple_tes
 
 
 def _run_sensitivity(
-    *, registry_db: Path, trial_id: str, block_counts: List[int]
+    *, registry_db: Path, trial_id: str, judge_artifact_sha256: str, block_counts: List[int]
 ) -> Dict[str, Any]:
     store = ResearchResultStore(registry_db)
     trial = store.get_trial(trial_id)  # raises KeyError if unknown -- caller (main) reports as error
-    experiment_id = trial["experiment_id"]
-    hypothesis_id = trial["hypothesis_id"]
     strategy_id = trial["strategy_id"]
+
+    # FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: resolve the EXACT
+    # registered judge scope from the caller-supplied, already-P7C-authorized
+    # judge_artifact_sha256 -- raises KeyError (reported as a genuine error by
+    # main()) if unknown, never silently falls back to trial_id's own scope.
+    judge_row = store.get_judge_artifact(judge_artifact_sha256)
+    experiment_id = judge_row["experiment_id"]
+    hypothesis_id = judge_row["hypothesis_id"]
+
+    if experiment_id != trial["experiment_id"]:
+        raise ValueError(
+            f"judge_artifact_sha256 {judge_artifact_sha256!r} is registered under "
+            f"experiment_id {experiment_id!r}, but trial_id {trial_id!r} belongs to "
+            f"experiment_id {trial['experiment_id']!r} -- refusing to rerun a judge scope "
+            "that does not cover this trial's own experiment"
+        )
+    # hypothesis_id = None on the registered judge row means a whole-experiment
+    # scope, which covers every hypothesis in this experiment including
+    # trial_id's own -- only a NON-null judge hypothesis_id must match exactly.
+    if hypothesis_id is not None and hypothesis_id != trial["hypothesis_id"]:
+        raise ValueError(
+            f"judge_artifact_sha256 {judge_artifact_sha256!r} is scoped to hypothesis_id "
+            f"{hypothesis_id!r}, but trial_id {trial_id!r} belongs to hypothesis_id "
+            f"{trial['hypothesis_id']!r} -- refusing to rerun a single-hypothesis judge scope "
+            "that does not cover this trial"
+        )
+
+    authoritative_fields = {
+        "authoritative_judge_artifact_sha256": judge_artifact_sha256,
+        "authoritative_experiment_id": experiment_id,
+        "authoritative_hypothesis_id": hypothesis_id,
+    }
 
     per_block: List[Dict[str, Any]] = []
     dsr_values: List[float] = []
@@ -79,6 +127,7 @@ def _run_sensitivity(
                     f"block_count={block_count} (not part of the judged comparison scope)"
                 ),
                 "per_block": per_block,
+                **authoritative_fields,
             }
         pbo_result = artifact["pbo_result"]
         entry = {
@@ -100,6 +149,7 @@ def _run_sensitivity(
                     f"(reason={dsr_entry.get('reason')!r})"
                 ),
                 "per_block": per_block,
+                **authoritative_fields,
             }
         if pbo_result["status"] != "evaluated" or entry["pbo"] is None:
             return {
@@ -107,6 +157,7 @@ def _run_sensitivity(
                 "strategy_id": strategy_id,
                 "reason": f"PBO not evaluated at block_count={block_count} (status={pbo_result['status']!r})",
                 "per_block": per_block,
+                **authoritative_fields,
             }
         dsr_values.append(float(entry["deflated_sharpe_ratio"]))
         pbo_values.append(float(entry["pbo"]))
@@ -125,6 +176,7 @@ def _run_sensitivity(
         "pbo_min": min(pbo_values),
         "pbo_max": max(pbo_values),
         "pbo_range": max(pbo_values) - min(pbo_values),
+        **authoritative_fields,
     }
 
 
@@ -132,6 +184,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry-db", required=True, type=Path)
     parser.add_argument("--trial-id", required=True)
+    parser.add_argument(
+        "--judge-artifact-sha256",
+        required=True,
+        help=(
+            "REQUIRED, no default: the P7C-authorized research_judge_artifacts."
+            "judge_artifact_sha256 whose registered (experiment_id, hypothesis_id) scope this "
+            "sensitivity sweep must reuse exactly -- never derived from trial_id's own "
+            "hypothesis_id."
+        ),
+    )
     parser.add_argument(
         "--block-counts",
         required=True,
@@ -146,6 +208,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = _run_sensitivity(
             registry_db=args.registry_db,
             trial_id=args.trial_id,
+            judge_artifact_sha256=args.judge_artifact_sha256,
             block_counts=block_counts,
         )
     except Exception as exc:  # noqa: BLE001 -- deliberate catch-all: fail closed with structured JSON,

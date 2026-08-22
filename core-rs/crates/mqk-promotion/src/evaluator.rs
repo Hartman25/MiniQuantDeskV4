@@ -272,6 +272,127 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         }
     }
 
+    // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 4 — the P7A/P7B replay
+    // stress evidence must carry every REQUIRED structured field (exact
+    // subprotocol, both economic-result identities and their content
+    // hashes, the three input-file hashes, bars-provenance/pricing
+    // identity, the exact stress-spec identity, and the actual stressed
+    // pass/fail metric) -- never merely `baseline_economic_eval_id` alone.
+    // A fabricated "evaluated, passed" scenario carrying only that one field
+    // used to satisfy every prior canonical check; it must not anymore.
+    if let Some(re) = &input.robustness_evidence {
+        if !re.p7a_p7b_economic_replay_stress_missing_required_evidence_fields.is_empty() {
+            fail_reasons.push(format!(
+                "P9 p7a_p7b_economic_replay_stress evidence incomplete: missing/invalid \
+                 required field(s) [{}] -- an evidence-only scenario carrying only \
+                 baseline_economic_eval_id (or any other partial evidence) can never satisfy \
+                 canonical promotion",
+                re.p7a_p7b_economic_replay_stress_missing_required_evidence_fields.join(", ")
+            ));
+        }
+    }
+
+    // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3 — the genuine shuffled
+    // placebo evidence must be bound to the EXACT SAME Research trial AND
+    // the EXACT SAME P7C-authorized economic result as the P7C/OOS evidence,
+    // and must declare the one accepted placebo protocol -- same discipline
+    // as the p7a_p7b_economic_replay_stress binding gates above.
+    if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
+        match re.genuine_shuffled_placebo_research_trial_id.as_deref() {
+            Some(bound_trial_id) if bound_trial_id == ev.trial_id() => {} // same trial -- OK
+            Some(bound_trial_id) => {
+                fail_reasons.push(format!(
+                    "Research trial binding mismatch: P9 genuine_shuffled_placebo evidence was \
+                     computed for research_trial_id {bound_trial_id:?}, but P7C/OOS evidence \
+                     was verified for research_trial_id {:?} -- both must be the SAME Research \
+                     trial, never merely the same strategy_id",
+                    ev.trial_id()
+                ));
+            }
+            None => {
+                fail_reasons.push(format!(
+                    "Research trial binding missing: P9 robustness evidence carries no \
+                     genuine_shuffled_placebo_research_trial_id -- cannot prove it was computed \
+                     for the same Research trial ({:?}) as the P7C/OOS evidence; promotion \
+                     requires that proof, never an assumed match",
+                    ev.trial_id()
+                ));
+            }
+        }
+        match re.genuine_shuffled_placebo_baseline_economic_eval_id.as_deref() {
+            Some(bound_eval_id) if bound_eval_id == ev.economic_eval_id() => {} // same result -- OK
+            Some(bound_eval_id) => {
+                fail_reasons.push(format!(
+                    "Economic result binding mismatch: P9 genuine_shuffled_placebo evidence was \
+                     computed for economic_eval_id {bound_eval_id:?}, but P7C/OOS evidence was \
+                     verified for economic_eval_id {:?} -- both must be the SAME authoritative \
+                     economic result, never merely the same Research trial",
+                    ev.economic_eval_id()
+                ));
+            }
+            None => {
+                fail_reasons.push(format!(
+                    "Economic result binding missing: P9 robustness evidence carries no \
+                     genuine_shuffled_placebo_baseline_economic_eval_id -- cannot prove it was \
+                     computed for the same economic result ({:?}) as the P7C/OOS evidence; \
+                     promotion requires that proof, never an assumed match",
+                    ev.economic_eval_id()
+                ));
+            }
+        }
+    }
+    if let Some(re) = &input.robustness_evidence {
+        match re.genuine_shuffled_placebo_protocol_id.as_deref() {
+            Some(protocol_id) if protocol_id == mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID => {} // OK
+            Some(protocol_id) => {
+                fail_reasons.push(format!(
+                    "genuine_shuffled_placebo protocol mismatch: got {protocol_id:?}, required \
+                     {:?} -- the exact accepted placebo protocol",
+                    mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID
+                ));
+            }
+            None => {
+                fail_reasons.push(
+                    "genuine_shuffled_placebo protocol_id missing -- cannot prove the exact \
+                     accepted placebo protocol was used"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1 — the DSR/PBO
+    // sensitivity sweep must have reused the EXACT SAME registered judge
+    // scope (experiment_id/hypothesis_id) the P7C/OOS evidence was verified
+    // against -- reusing the existing registered judge authority, never a
+    // trial-derived scope that could silently narrow (or widen) the
+    // authoritative comparison population.
+    if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
+        match re.dsr_pbo_sensitivity_authoritative_judge_artifact_sha256.as_deref() {
+            Some(bound_judge_sha256) if bound_judge_sha256 == ev.judge_artifact_sha256() => {} // OK
+            Some(bound_judge_sha256) => {
+                fail_reasons.push(format!(
+                    "Judge scope binding mismatch: P9 dsr_pbo_sensitivity evidence reused judge \
+                     scope judge_artifact_sha256 {bound_judge_sha256:?}, but P7C/OOS evidence \
+                     was verified against judge_artifact_sha256 {:?} -- both must reuse the \
+                     SAME registered judge scope (experiment_id/hypothesis_id), never assumed \
+                     to agree",
+                    ev.judge_artifact_sha256()
+                ));
+            }
+            None => {
+                fail_reasons.push(format!(
+                    "Judge scope binding missing: P9 robustness evidence carries no \
+                     dsr_pbo_sensitivity_authoritative_judge_artifact_sha256 -- cannot prove the \
+                     sensitivity sweep reused the SAME registered judge scope \
+                     (judge_artifact_sha256 {:?}) as the P7C/OOS evidence; promotion requires \
+                     that proof, never an assumed match",
+                    ev.judge_artifact_sha256()
+                ));
+            }
+        }
+    }
+
     // PATCH F3 — Fail closed on NaN key metrics.
     //
     // Float comparisons involving NaN always return `false` in Rust, so a NaN

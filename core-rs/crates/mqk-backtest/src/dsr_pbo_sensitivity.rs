@@ -68,6 +68,16 @@ pub const DSR_PBO_SENSITIVITY_SCENARIO_NAME: &str = "dsr_pbo_sensitivity";
 /// candidate's P9 evidence -- an operator supplying the wrong `--trial-id`
 /// at finalization time is caught here, not only later at promotion time.
 ///
+/// `authoritative_judge_artifact_sha256` (FINAL-P9-AUTHORITY-BINDING-REPAIR-01
+/// Section 1) is the EXACT, already-registered P7C-authorized
+/// `research_judge_artifacts.judge_artifact_sha256` whose registered
+/// `(experiment_id, hypothesis_id)` scope this sensitivity sweep must reuse
+/// -- passed straight through to the Python CLI, which resolves that exact
+/// scope (never `trial_id`'s own registered `hypothesis_id`) and reuses it
+/// for EVERY entry in `block_counts`. Required, no default: an empty value
+/// is a genuine misconfiguration, reported `applicable: true, passed: false`
+/// before any subprocess is spawned.
+///
 /// `dsr_max_sensitivity_range`/`pbo_max_sensitivity_range` are the
 /// EXPLICIT, caller-supplied acceptance ceilings for the DSR/PBO spread
 /// across `block_counts` (P9-P7A-P7B-REAL-STRESS-01: no hidden in-crate
@@ -77,15 +87,18 @@ pub const DSR_PBO_SENSITIVITY_SCENARIO_NAME: &str = "dsr_pbo_sensitivity";
 /// `applicable: true, passed: false` misconfiguration -- never silently
 /// clamped or defaulted -- before any subprocess is spawned.
 ///
-/// Fails closed: an invalid threshold, a spawn failure, unparseable output,
-/// a `strategy_id` mismatch, or a genuine CLI error (bad registry, unknown
-/// trial) all become `applicable: true, passed: false` with the real reason
-/// -- never silently skipped. A structurally too-small comparison population
-/// (mirroring the frozen judge's own `insufficient_candidates_for_cscv` /
-/// `insufficient_trial_population_for_correction` reason codes) is the ONE
-/// case reported as genuinely inapplicable (`applicable: false`) rather
-/// than a failure, matching `symbol_leave_one_out_scenario`'s own
-/// precedent for an honest "does not apply to this candidate."
+/// Fails closed: an invalid threshold/judge identity, a spawn failure,
+/// unparseable output, a `strategy_id`/judge-scope mismatch, or a genuine
+/// CLI error (bad registry, unknown trial, unknown judge, judge scope not
+/// covering this trial) all become `applicable: true, passed: false` with
+/// the real reason -- never silently skipped. FINAL-P9-AUTHORITY-BINDING-
+/// REPAIR-01 Section 2 ("REQUIRED DSR/PBO MAY NEVER VANISH via
+/// `applicable=false`"): this scenario is a REQUIRED promotion-grade P9
+/// slice and NEVER reports `applicable: false` -- a structurally too-small
+/// comparison population is a genuine FAIL (`applicable: true, passed:
+/// false`), not an inapplicable exemption, matching
+/// `p7a_p7b_economic_replay_stress_scenario`'s / `genuine_shuffled_placebo_
+/// scenario`'s own "MANDATORY MEANS MANDATORY" discipline.
 #[allow(clippy::too_many_arguments)]
 pub fn dsr_pbo_sensitivity_scenario(
     python_executable: &str,
@@ -93,6 +106,7 @@ pub fn dsr_pbo_sensitivity_scenario(
     registry_db: &Path,
     trial_id: &str,
     expected_strategy_id: &str,
+    authoritative_judge_artifact_sha256: &str,
     block_counts: &[u32],
     dsr_max_sensitivity_range: f64,
     pbo_max_sensitivity_range: f64,
@@ -137,6 +151,24 @@ pub fn dsr_pbo_sensitivity_scenario(
     // outcome so a later promotion decision can prove which Research trial
     // this P9 evidence came from, not merely which strategy_id.
     let research_trial_id = Some(trial_id.to_string());
+
+    // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: an empty judge
+    // identity is a genuine misconfiguration -- fail closed before any
+    // subprocess is spawned, mirroring the threshold checks above.
+    if authoritative_judge_artifact_sha256.trim().is_empty() {
+        let reason = "authoritative_judge_artifact_sha256 must not be empty -- the EXACT \
+                       P7C-authorized judge scope this sensitivity sweep must reuse is required"
+            .to_string();
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(reason.clone()),
+            detail: reason,
+            research_trial_id,
+            evidence: None,
+        };
+    }
 
     if block_counts.is_empty() {
         return RobustnessScenarioOutcome {
@@ -190,6 +222,8 @@ pub fn dsr_pbo_sensitivity_scenario(
             &registry_db.display().to_string(),
             "--trial-id",
             trial_id,
+            "--judge-artifact-sha256",
+            authoritative_judge_artifact_sha256,
             "--block-counts",
             &block_counts_arg,
         ])
@@ -258,7 +292,36 @@ pub fn dsr_pbo_sensitivity_scenario(
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
-                evidence: None,
+                evidence: Some(value),
+            };
+        }
+    }
+
+    // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: cheap, independent
+    // cross-check that the CLI's own resolved
+    // `authoritative_judge_artifact_sha256` (present whenever the CLI
+    // reached a real scope resolution -- "evaluated" or "not_evaluable")
+    // agrees with what THIS caller supplied -- same discipline as the
+    // `strategy_id`/`baseline_economic_eval_id` cross-checks elsewhere in
+    // this P9 module family, guarding against caller/CLI drift.
+    if let Some(actual_judge_sha256) =
+        value.get("authoritative_judge_artifact_sha256").and_then(|v| v.as_str())
+    {
+        if actual_judge_sha256 != authoritative_judge_artifact_sha256 {
+            let reason = format!(
+                "judge scope identity mismatch: CLI resolved \
+                 authoritative_judge_artifact_sha256 {actual_judge_sha256:?}, but caller \
+                 required {authoritative_judge_artifact_sha256:?} -- refusing to merge \
+                 sensitivity evidence computed against a different judge scope"
+            );
+            return RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed: false,
+                reason: Some(reason.clone()),
+                detail: reason,
+                research_trial_id,
+                evidence: Some(value),
             };
         }
     }
@@ -292,7 +355,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                              (ceiling {pbo_max_sensitivity_range})"
                         ),
                         research_trial_id,
-                        evidence: None,
+                        evidence: Some(value),
                     }
                 }
                 _ => {
@@ -304,7 +367,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                         reason: Some(reason.clone()),
                         detail: reason,
                         research_trial_id,
-                        evidence: None,
+                        evidence: Some(value),
                     }
                 }
             }
@@ -315,17 +378,24 @@ pub fn dsr_pbo_sensitivity_scenario(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let genuinely_inapplicable = reason.contains("insufficient_candidates_for_cscv")
-                || reason.contains("insufficient_trial_population_for_correction")
-                || reason.contains("not part of the judged comparison scope");
+            // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 2 ("REQUIRED
+            // DSR/PBO MAY NEVER VANISH via applicable=false"):
+            // dsr_pbo_sensitivity is a REQUIRED promotion-grade P9 slice --
+            // ANY not_evaluable outcome (insufficient candidate/trial
+            // population, trial absent from comparison scope, or any other
+            // inability to perform the requested perturbation) is a genuine
+            // FAIL, never a "does not apply to this candidate" exemption --
+            // it must NEVER disappear via `applicable: false`. Mirrors
+            // p7a_p7b_economic_replay_stress_scenario's / genuine_shuffled_
+            // placebo_scenario's own "MANDATORY MEANS MANDATORY" discipline.
             RobustnessScenarioOutcome {
                 name,
-                applicable: !genuinely_inapplicable,
+                applicable: true,
                 passed: false,
                 reason: Some(reason.clone()),
                 detail: reason,
                 research_trial_id,
-                evidence: None,
+                evidence: Some(value),
             }
         }
         _ => {
@@ -342,7 +412,7 @@ pub fn dsr_pbo_sensitivity_scenario(
                 reason: Some(full.clone()),
                 detail: full,
                 research_trial_id,
-                evidence: None,
+                evidence: Some(value),
             }
         }
     }
@@ -362,6 +432,7 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
             "some_strategy",
+            "some_judge_sha256",
             &[8],
             0.25,
             0.25,
@@ -381,6 +452,7 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
             "some_strategy",
+            "some_judge_sha256",
             &[8, 8],
             0.25,
             0.25,
@@ -400,6 +472,7 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
             "some_strategy",
+            "some_judge_sha256",
             &[8, 10],
             0.25,
             0.25,
@@ -423,6 +496,7 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
             "some_strategy",
+            "some_judge_sha256",
             &[8, 10],
             -0.01,
             0.25,
@@ -443,6 +517,7 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
             "some_strategy",
+            "some_judge_sha256",
             &[8, 10],
             f64::NAN,
             0.25,
@@ -459,6 +534,7 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
             "some_strategy",
+            "some_judge_sha256",
             &[8, 10],
             0.25,
             1.5, // PBO is a probability -- must be within [0, 1]
@@ -475,6 +551,7 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "some_trial",
             "some_strategy",
+            "some_judge_sha256",
             &[8, 10],
             0.25,
             -0.01,
@@ -495,10 +572,38 @@ mod tests {
             Path::new("/nonexistent/registry.sqlite3"),
             "trial_xyz",
             "some_strategy",
+            "some_judge_sha256",
             &[8, 10],
             -1.0,
             0.25,
         );
         assert_eq!(outcome.research_trial_id.as_deref(), Some("trial_xyz"));
+    }
+
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: an empty
+    /// `authoritative_judge_artifact_sha256` fails closed BEFORE any
+    /// subprocess is spawned -- the exact P7C-authorized judge scope is
+    /// required, never optional.
+    #[test]
+    fn empty_authoritative_judge_artifact_sha256_fails_closed_before_any_spawn() {
+        let outcome = dsr_pbo_sensitivity_scenario(
+            "mqk_this_executable_must_never_be_invoked",
+            Path::new("/nonexistent/research-py"),
+            Path::new("/nonexistent/registry.sqlite3"),
+            "some_trial",
+            "some_strategy",
+            "",
+            &[8, 10],
+            0.25,
+            0.25,
+        );
+        assert!(outcome.applicable);
+        assert!(!outcome.passed);
+        assert!(
+            outcome
+                .reason
+                .unwrap_or_default()
+                .contains("authoritative_judge_artifact_sha256 must not be empty")
+        );
     }
 }

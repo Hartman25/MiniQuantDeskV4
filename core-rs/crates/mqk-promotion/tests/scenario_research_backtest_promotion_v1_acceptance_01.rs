@@ -143,6 +143,7 @@ fn fragile_bars() -> Vec<BacktestBar> {
 /// Run a real engine, persist the FULL canonical evidence set (manifest,
 /// audit, backtest_report.json, stress_suite.json, robustness_gauntlet.json)
 /// into a fresh `<root>/<run_id>/` directory.
+#[allow(clippy::too_many_arguments)]
 fn run_and_persist_full(
     label: &str,
     strategy_name: &'static str,
@@ -151,6 +152,7 @@ fn run_and_persist_full(
     sell_at_idx: u64,
     research_trial_id: &str,
     research_economic_eval_id: &str,
+    research_judge_artifact_sha256: &str,
 ) -> (BacktestReport, PathBuf) {
     let config = cfg_with_wide_cap();
     let initial_cash = config.initial_cash_micros;
@@ -198,6 +200,10 @@ fn run_and_persist_full(
     // test_dsr_pbo_sensitivity_cli.py); this P10 chain test only needs a
     // genuinely COMPLETE P9 artifact so the promotion-level gate this
     // patch adds does not itself become the reason the chain fails.
+    // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: `evidence` carries the
+    // `authoritative_judge_artifact_sha256` the new evaluator.rs gate
+    // requires to match the P7C/OOS evidence's own verified
+    // `judge_artifact_sha256`.
     let gauntlet_output = run_robustness_gauntlet(&report, &config, &bars, || {
         Box::new(BuyHoldSell { name: strategy_name, bar_idx: 0, qty, sell_at_idx })
     })
@@ -208,16 +214,19 @@ fn run_and_persist_full(
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some(research_trial_id.to_string()),
-        evidence: None,
+        evidence: Some(serde_json::json!({
+            "authoritative_judge_artifact_sha256": research_judge_artifact_sha256,
+        })),
     })
     // P7A-P7B-ECONOMIC-REPLAY-STRESS-01: the real cross-language wiring is
     // proven separately (mqk-backtest's own
     // p7a_p7b_economic_replay_stress.rs unit tests + research-py's
     // p7a_p7b_economic_replay_stress_cli); this P10 chain test only needs a
     // genuinely COMPLETE P9 artifact, same rationale as dsr_pbo_sensitivity
-    // above. FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B: `evidence` carries
-    // the `baseline_economic_eval_id` the new evaluator.rs gate requires to
-    // match the P7C/OOS evidence's own `economic_eval_id`.
+    // above. FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B / FINAL-P9-
+    // AUTHORITY-BINDING-REPAIR-01 Section 4: `evidence` now carries EVERY
+    // field the canonical evidence-completeness check requires, not merely
+    // `baseline_economic_eval_id`.
     .merge_dsr_pbo_sensitivity(mqk_backtest::RobustnessScenarioOutcome {
         name: mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string(),
         applicable: true,
@@ -226,7 +235,25 @@ fn run_and_persist_full(
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some(research_trial_id.to_string()),
         evidence: Some(serde_json::json!({
+            "protocol_id": mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
+            "research_trial_id": research_trial_id,
             "baseline_economic_eval_id": research_economic_eval_id,
+            "baseline_economic_artifact_sha256": sha256_hex(b"test-fabricated-baseline-artifact"),
+            "stressed_economic_eval_id": format!("{research_economic_eval_id}_stressed"),
+            "stressed_artifact_sha256": sha256_hex(b"test-fabricated-stressed-artifact"),
+            "bars_csv_sha256": sha256_hex(b"test-fabricated-bars-csv"),
+            "oos_predictions_csv_sha256": sha256_hex(b"test-fabricated-oos-predictions-csv"),
+            "walk_forward_eval_sha256": sha256_hex(b"test-fabricated-walk-forward-eval"),
+            "bars_provenance_hash": sha256_hex(b"test-fabricated-bars-provenance"),
+            "baseline_protocol_identity": {"execution_pricing": {"pricing_model_id": "rust_conservative_bar_range_v1"}},
+            "stress_spec": {
+                "execution_pricing_slippage_bps": 20,
+                "execution_pricing_volatility_mult_bps": 50,
+                "max_target_qty": null,
+                "max_position_notional_usd": null,
+            },
+            "passed": true,
+            "stressed_max_drawdown": -0.05,
         })),
     })
     // FINAL-P9-ROBUSTNESS-SEMANTICS-01: the genuine shuffled placebo -- real
@@ -234,7 +261,9 @@ fn run_and_persist_full(
     // genuine_shuffled_placebo.rs + research-py's
     // test_genuine_shuffled_placebo.py); this P10 chain test only needs a
     // genuinely COMPLETE P9 artifact, same rationale as the two scenarios
-    // above.
+    // above. FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3: `evidence`
+    // carries `baseline_economic_eval_id`/`protocol_id` the new evaluator.rs
+    // gates require.
     .merge_dsr_pbo_sensitivity(mqk_backtest::RobustnessScenarioOutcome {
         name: mqk_backtest::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME.to_string(),
         applicable: true,
@@ -242,7 +271,10 @@ fn run_and_persist_full(
         reason: None,
         detail: "test-fabricated evaluated outcome".to_string(),
         research_trial_id: Some(research_trial_id.to_string()),
-        evidence: None,
+        evidence: Some(serde_json::json!({
+            "baseline_economic_eval_id": research_economic_eval_id,
+            "protocol_id": mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID,
+        })),
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet must succeed");
@@ -264,13 +296,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// `research-py`'s actual `research_trials`/`research_attempts`/
 /// `research_judge_artifacts` tables and `mqk-daemon::research_evidence_gate`'s
 /// own test fixtures) for `strategy_id`, and return
-/// `(registry_path, economic_walk_forward_json, economic_daily_returns_csv, judge_json, trial_id)`
-/// ready for `verify_promotion_oos_evidence`.
+/// `(registry_path, economic_walk_forward_json, economic_daily_returns_csv, judge_json, trial_id, judge_artifact_sha256)`
+/// ready for `verify_promotion_oos_evidence`. FINAL-P9-AUTHORITY-BINDING-
+/// REPAIR-01 Section 1: the returned `judge_artifact_sha256` is the SAME
+/// identity `verify_promotion_oos_evidence` will resolve as this trial's
+/// `VerifiedPromotionOosEvidence::judge_artifact_sha256` -- callers embed it
+/// into the fabricated `dsr_pbo_sensitivity` scenario evidence so the new
+/// judge-scope binding gate accepts the pair.
 #[allow(clippy::type_complexity)]
 fn build_real_research_evidence(
     seed: &str,
     strategy_id: &str,
-) -> (PathBuf, String, Vec<u8>, String, String) {
+) -> (PathBuf, String, Vec<u8>, String, String, String) {
     let dir = std::env::temp_dir().join(format!(
         "mqk_p10_research_{}_{}",
         seed,
@@ -343,7 +380,7 @@ fn build_real_research_evidence(
     .unwrap();
     drop(conn);
 
-    (registry_path, economic_json, daily_csv, judge_json, trial_id)
+    (registry_path, economic_json, daily_csv, judge_json, trial_id, judge_sha)
 }
 
 fn lenient_promotion_config() -> PromotionConfig {
@@ -364,6 +401,14 @@ fn lenient_promotion_config() -> PromotionConfig {
 
 #[test]
 fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
+    // Research OOS evidence is built FIRST -- `strategy_id` ("P10FullChain")
+    // is already known as a literal, so the judge_artifact_sha256 this trial
+    // will resolve can be embedded into the fabricated P9 scenario evidence
+    // below, before the backtest even runs (FINAL-P9-AUTHORITY-BINDING-
+    // REPAIR-01 Section 1).
+    let (registry_path, econ_json, daily_csv, judge_json, trial_id, judge_sha256) =
+        build_real_research_evidence("full_chain", "P10FullChain");
+
     let (report, root) =
         run_and_persist_full(
             "full_chain",
@@ -373,6 +418,7 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
             25,
             "trial_full_chain",
             "econ_eval_full_chain",
+            &judge_sha256,
         );
 
     // Backtest evidence (report + artifact_lock + stress_suite), resolved
@@ -396,11 +442,6 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     assert!(bundle.robustness_evidence.is_complete);
     assert!(bundle.robustness_evidence.all_applicable_passed);
 
-    // Research OOS evidence: a real SQLite registry, strategy_id matching
-    // this SAME candidate's report.strategy_name -- the cross-candidate
-    // binding mqk-daemon's production gates independently enforce.
-    let (registry_path, econ_json, daily_csv, judge_json, trial_id) =
-        build_real_research_evidence("full_chain", &report.strategy_name);
     let oos_evidence = verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
         .expect("real, registry-anchored Research evidence must verify");
     assert_eq!(oos_evidence.strategy_id(), report.strategy_name);
@@ -443,11 +484,14 @@ fn p10b_cross_candidate_identity_is_distinguishable() {
         25,
         "trial_cross_candidate",
         "econ_eval_cross_candidate",
+        // This test never calls evaluate_promotion -- the judge scope
+        // identity is irrelevant here, only the strategy_id mismatch below.
+        "unused_cross_candidate_judge_sha256",
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
 
     // Research evidence registered under a DIFFERENT strategy_id.
-    let (registry_path, econ_json, daily_csv, judge_json, trial_id) =
+    let (registry_path, econ_json, daily_csv, judge_json, trial_id, _judge_sha256) =
         build_real_research_evidence("cross_candidate", "SomeUnrelatedStrategy");
     let oos_evidence = verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
         .expect("evidence is internally valid on its own");
@@ -467,6 +511,9 @@ fn p10b_cross_candidate_identity_is_distinguishable() {
 
 #[test]
 fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
+    let (registry_path, econ_json, daily_csv, judge_json, trial_id, judge_sha256) =
+        build_real_research_evidence("fragile_with_research", "P10FragileWithResearch");
+
     let (report, root) = run_and_persist_full(
         "fragile_with_research",
         "P10FragileWithResearch",
@@ -475,12 +522,10 @@ fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
         3,
         "trial_fragile_with_research",
         "econ_eval_fragile_with_research",
+        &judge_sha256,
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
     assert!(!bundle.stress_suite.passed, "fixture precondition: this candidate's real stress suite must fail");
-
-    let (registry_path, econ_json, daily_csv, judge_json, trial_id) =
-        build_real_research_evidence("fragile_with_research", &report.strategy_name);
     let oos_evidence = verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
         .expect("Research evidence itself is genuinely valid");
 
@@ -518,6 +563,16 @@ fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
 fn p10d_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
     let strategy_id = "P10TrialBindingSharedStrategy";
 
+    // Trial B is a real, independently registered trial under the SAME
+    // strategy_id -- built FIRST so its judge_artifact_sha256 can be
+    // embedded into the fabricated P9 evidence below (bound to Trial B).
+    let (registry_path_b, econ_b, daily_b, judge_b, trial_b_id, judge_sha256_b) =
+        build_real_research_evidence("trial_binding_b", strategy_id);
+    let trial_b_evidence =
+        verify_promotion_oos_evidence(&registry_path_b, &trial_b_id, &econ_b, &daily_b, &judge_b)
+            .expect("Trial B's evidence is also genuinely, independently valid");
+    assert_eq!(trial_b_evidence.strategy_id(), strategy_id);
+
     // P9 dsr_pbo_sensitivity evidence bound to Trial B.
     let (report, root) = run_and_persist_full(
         "trial_binding",
@@ -527,6 +582,7 @@ fn p10d_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
         25,
         "trial_trial_binding_b",
         "econ_eval_trial_binding_b",
+        &judge_sha256_b,
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
     assert!(bundle.robustness_evidence.is_complete);
@@ -538,22 +594,12 @@ fn p10d_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
 
     // Trial A supplies the P7C/OOS evidence -- a real, independently valid,
     // registry-anchored Research trial under the SAME strategy_id as Trial B.
-    let (registry_path_a, econ_a, daily_a, judge_a, trial_a_id) =
+    let (registry_path_a, econ_a, daily_a, judge_a, trial_a_id, _judge_sha256_a) =
         build_real_research_evidence("trial_binding_a", strategy_id);
     let oos_evidence =
         verify_promotion_oos_evidence(&registry_path_a, &trial_a_id, &econ_a, &daily_a, &judge_a)
             .expect("Trial A's evidence is genuinely, independently valid");
     assert_eq!(oos_evidence.strategy_id(), strategy_id);
-
-    // Trial B is ALSO real and independently registered under the SAME
-    // strategy_id -- proving Trial B is not "invalid", merely not the SAME
-    // trial that produced the P7C evidence above.
-    let (registry_path_b, econ_b, daily_b, judge_b, trial_b_id) =
-        build_real_research_evidence("trial_binding_b", strategy_id);
-    let trial_b_evidence =
-        verify_promotion_oos_evidence(&registry_path_b, &trial_b_id, &econ_b, &daily_b, &judge_b)
-            .expect("Trial B's evidence is also genuinely, independently valid");
-    assert_eq!(trial_b_evidence.strategy_id(), strategy_id);
     assert_ne!(trial_a_id, trial_b_id);
 
     let input = PromotionInput {
@@ -587,6 +633,10 @@ fn p10d_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
 fn p10e_same_trial_for_p9_and_p7c_is_accepted() {
     let strategy_id = "P10TrialBindingSameTrialStrategy";
 
+    let (registry_path, econ_json, daily_csv, judge_json, trial_id, judge_sha256) =
+        build_real_research_evidence("trial_binding_same", strategy_id);
+    assert_eq!(trial_id, "trial_trial_binding_same");
+
     let (report, root) = run_and_persist_full(
         "trial_binding_same",
         strategy_id,
@@ -595,12 +645,9 @@ fn p10e_same_trial_for_p9_and_p7c_is_accepted() {
         25,
         "trial_trial_binding_same",
         "econ_eval_trial_binding_same",
+        &judge_sha256,
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
-
-    let (registry_path, econ_json, daily_csv, judge_json, trial_id) =
-        build_real_research_evidence("trial_binding_same", strategy_id);
-    assert_eq!(trial_id, "trial_trial_binding_same");
     let oos_evidence =
         verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
             .expect("evidence must be genuinely valid");

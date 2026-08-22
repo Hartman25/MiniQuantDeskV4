@@ -231,6 +231,12 @@ struct ResearchEvidenceFixture {
     /// required by `p7a_p7b_economic_replay_stress_scenario`'s new
     /// exact-binding contract (never "the latest successful attempt").
     economic_eval_id: String,
+    /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the exact
+    /// `research_judge_artifacts.judge_artifact_sha256` this fixture
+    /// registered -- required by `dsr_pbo_sensitivity_scenario`'s new
+    /// `authoritative_judge_artifact_sha256` contract (the EXACT registered
+    /// judge scope, never derived from `trial_id`'s own hypothesis_id).
+    judge_artifact_sha256: String,
 }
 
 fn write_research_evidence_fixture(root: &Path, seed: &str) -> ResearchEvidenceFixture {
@@ -350,6 +356,7 @@ fn write_research_evidence_fixture_with_strategy(
         judge_path,
         trial_id,
         economic_eval_id,
+        judge_artifact_sha256: judge_sha,
     }
 }
 
@@ -445,6 +452,11 @@ fn write_real_research_evidence_via_production_pipeline(
          gates meaningfully: {parsed}"
     );
 
+    let judge_artifact_sha256 = parsed["judge_artifact_sha256"]
+        .as_str()
+        .expect("judge_artifact_sha256")
+        .to_string();
+
     let trials = parsed["trials"].as_array().expect("trials array");
     assert_eq!(trials.len(), entry_thresholds.len());
     trials
@@ -468,6 +480,7 @@ fn write_real_research_evidence_via_production_pipeline(
                 judge_path: judge_path.clone(),
                 trial_id,
                 economic_eval_id,
+                judge_artifact_sha256: judge_artifact_sha256.clone(),
             }
         })
         .collect()
@@ -621,11 +634,13 @@ impl Default for RealEvidenceOptions {
 /// `strategy_id` matching `report.strategy_name`, always `"swing_momentum"`
 /// for the real plugin this function always runs) by the time this is
 /// called.
+#[allow(clippy::too_many_arguments)]
 fn write_real_backtest_evidence(
     artifact_root: &Path,
     research_trial_id: &str,
     research_economic_eval_id: &str,
     research_registry_db: &Path,
+    research_judge_artifact_sha256: &str,
     symbol: &str,
     opts: RealEvidenceOptions,
 ) -> Uuid {
@@ -702,6 +717,7 @@ fn write_real_backtest_evidence(
                 research_registry_db,
                 research_trial_id,
                 &report.strategy_name,
+                research_judge_artifact_sha256,
                 &[8, 10],
                 0.25, // test-fixture-only threshold; not asserted as accepted policy
                 0.25,
@@ -1029,6 +1045,7 @@ async fn valid_paper_candidate_creates_first_transition() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1093,6 +1110,7 @@ async fn same_strategy_different_research_trial_for_p9_vs_p7c_is_rejected() {
         &research_b.trial_id,
         &research_b.economic_eval_id,
         &research_b.registry_db_path,
+        &research_b.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1162,6 +1180,7 @@ async fn real_research_production_trial_used_for_both_p7c_and_p9_passes() {
         &trial.trial_id,
         &trial.economic_eval_id,
         &trial.registry_db_path,
+        &trial.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1264,6 +1283,7 @@ async fn real_research_production_same_strategy_different_trial_for_p9_vs_p7c_is
         &trial_b.trial_id,
         &trial_b.economic_eval_id,
         &trial_b.registry_db_path,
+        &trial_b.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1632,6 +1652,7 @@ async fn valid_transition_visible_on_read_routes() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1710,6 +1731,7 @@ async fn history_remains_visible_after_later_transition() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1816,6 +1838,7 @@ async fn duplicate_transition_request_is_idempotent() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1886,6 +1909,7 @@ async fn tradable_live_always_false() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -1997,6 +2021,7 @@ async fn cross_candidate_backtest_evidence_strategy_mismatch_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2094,6 +2119,7 @@ async fn missing_backtest_evidence_artifact_root_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2146,6 +2172,7 @@ async fn missing_stress_evidence_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2182,6 +2209,7 @@ async fn missing_p9_robustness_evidence_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2223,6 +2251,7 @@ async fn incomplete_p9_missing_dsr_pbo_sensitivity_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2265,6 +2294,7 @@ async fn failed_p9_scenario_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: bars_that_fail_concentration(&symbol),
@@ -2304,6 +2334,7 @@ async fn artifact_tamper_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2348,6 +2379,7 @@ async fn dsr_below_threshold_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2400,6 +2432,7 @@ async fn pbo_above_threshold_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),
@@ -2462,6 +2495,7 @@ async fn duplicate_retry_with_mismatched_backtest_run_id_is_rejected() {
         &research.trial_id,
         &research.economic_eval_id,
         &research.registry_db_path,
+        &research.judge_artifact_sha256,
         &symbol,
         RealEvidenceOptions {
             bars: smooth_uptrend_bars(&symbol),

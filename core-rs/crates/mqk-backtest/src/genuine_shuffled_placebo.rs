@@ -31,6 +31,16 @@ use crate::robustness_gauntlet::RobustnessScenarioOutcome;
 /// `robustness_gauntlet::REQUIRED_ROBUSTNESS_SCENARIO_NAMES`.
 pub const GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME: &str = "genuine_shuffled_placebo";
 
+/// The exact accepted genuine shuffled placebo protocol identity, mirroring
+/// `mqk_research.ml.genuine_shuffled_placebo_cli.PLACEBO_PROTOCOL_ID`
+/// byte-for-byte -- see that module's own `_run_placebo` (or equivalent),
+/// which emits this under the evidence blob's `protocol_id` key on every
+/// "evaluated" result. FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 3:
+/// checked by `evaluate_promotion` against
+/// `mqk_artifacts::RobustnessGauntletArtifact::
+/// genuine_shuffled_placebo_protocol_id`.
+pub const GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID: &str = "genuine_shuffled_placebo_v1";
+
 /// Run the genuine shuffled placebo control for `trial_id`/`economic_eval_id`
 /// against `registry_db`. Same caller contract as
 /// [`crate::p7a_p7b_economic_replay_stress::p7a_p7b_economic_replay_stress_scenario`]:

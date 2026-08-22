@@ -43,17 +43,28 @@ fn py_str_literal(s: &str) -> String {
 /// the trial genuinely registered but NOT part of any judged comparison
 /// scope (mirrors `build_multiple_testing_judge`'s own `never_attempted`
 /// exclusion path -- see that function's `load_exclusions` handling).
-fn register_never_attempted_trial(registry_db: &Path, trial_id: &str, strategy_id: &str) {
+///
+/// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: also builds a REAL
+/// whole-experiment-scoped judge over `exp.rust_it` (idempotent, safe even
+/// when zero trials are economically evaluable -- `build_multiple_testing_
+/// judge` still registers its own artifact unconditionally) and returns its
+/// durable `judge_artifact_sha256`, which `dsr_pbo_sensitivity_scenario`
+/// now requires as a caller-supplied authority.
+fn register_never_attempted_trial(registry_db: &Path, trial_id: &str, strategy_id: &str) -> String {
     let script = format!(
         "from pathlib import Path\n\
+         from mqk_research.exp_distributed.hashing import canonical_json, sha256_bytes\n\
          from mqk_research.exp_distributed.storage import ResearchResultStore\n\
          from mqk_research.ml.economic_walkforward import PROTOCOL_ID\n\
+         from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge\n\
          store = ResearchResultStore(Path({db}))\n\
          store.register_hypothesis(hypothesis_id='hyp', experiment_id='exp.rust_it')\n\
          store.register_trial(\n\
          \ttrial_id={trial_id}, experiment_id='exp.rust_it', hypothesis_id='hyp',\n\
          \tstrategy_id={strategy_id}, protocol_id=PROTOCOL_ID, identity={{'minimal': True}},\n\
-         )\n",
+         )\n\
+         artifact = build_multiple_testing_judge(experiment_id='exp.rust_it', registry_db=Path({db}))\n\
+         print(sha256_bytes(canonical_json(artifact).encode('utf-8')), end='')\n",
         db = py_str_literal(&registry_db.display().to_string()),
         trial_id = py_str_literal(trial_id),
         strategy_id = py_str_literal(strategy_id),
@@ -72,11 +83,12 @@ fn register_never_attempted_trial(registry_db: &Path, trial_id: &str, strategy_i
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 #[test]
 #[ignore = "requires a real python with research-py's runtime deps (pandas/numpy) importable"]
-fn dpsr01a_never_attempted_trial_is_genuinely_inapplicable() {
+fn dpsr01a_never_attempted_trial_is_a_genuine_failure_never_inapplicable() {
     let dir = std::env::temp_dir().join(format!(
         "mqk_dpsr01a_{}_{}",
         std::process::id(),
@@ -87,7 +99,7 @@ fn dpsr01a_never_attempted_trial_is_genuinely_inapplicable() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let registry_db = dir.join("registry.sqlite3");
-    register_never_attempted_trial(&registry_db, "rust_it_never_attempted", "only");
+    let judge_sha256 = register_never_attempted_trial(&registry_db, "rust_it_never_attempted", "only");
 
     let outcome = dsr_pbo_sensitivity_scenario(
         &python_executable(),
@@ -95,17 +107,23 @@ fn dpsr01a_never_attempted_trial_is_genuinely_inapplicable() {
         &registry_db,
         "rust_it_never_attempted",
         "only",
+        &judge_sha256,
         &[8, 10],
         0.25, // test-fixture-only threshold; not asserted as accepted policy
         0.25,
     );
 
     assert_eq!(outcome.name, "dsr_pbo_sensitivity");
+    // FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 2 ("REQUIRED DSR/PBO MAY
+    // NEVER VANISH via applicable=false"): a never-attempted trial has no
+    // comparison scope at all, but dsr_pbo_sensitivity is a REQUIRED
+    // promotion-grade P9 slice -- this must be a genuine FAIL, never an
+    // inapplicable exemption.
     assert!(
-        !outcome.applicable,
-        "a never-attempted trial has no comparison scope at all -- must be genuinely \
-         inapplicable, not a failure: {outcome:?}"
+        outcome.applicable,
+        "dsr_pbo_sensitivity must NEVER report applicable: false: {outcome:?}"
     );
+    assert!(!outcome.passed, "a never-attempted trial must never silently pass: {outcome:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -124,7 +142,7 @@ fn dpsr01b_unknown_trial_id_is_a_real_failure_not_a_silent_pass() {
     std::fs::create_dir_all(&dir).unwrap();
     // Registry file created (empty DB, schema initialized) but no such
     // trial was ever registered.
-    register_never_attempted_trial(&dir.join("registry.sqlite3"), "some_other_trial", "only");
+    let judge_sha256 = register_never_attempted_trial(&dir.join("registry.sqlite3"), "some_other_trial", "only");
     let registry_db = dir.join("registry.sqlite3");
 
     let outcome = dsr_pbo_sensitivity_scenario(
@@ -133,6 +151,7 @@ fn dpsr01b_unknown_trial_id_is_a_real_failure_not_a_silent_pass() {
         &registry_db,
         "totally_unknown_trial_id",
         "only",
+        &judge_sha256, // unreachable -- trial_id lookup fails first
         &[8, 10],
         0.25, // test-fixture-only threshold; not asserted as accepted policy
         0.25,
@@ -158,7 +177,7 @@ fn dpsr01c_bad_python_executable_fails_closed_not_a_panic() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let registry_db = dir.join("registry.sqlite3");
-    register_never_attempted_trial(&registry_db, "trial_for_bad_python_test", "only");
+    let judge_sha256 = register_never_attempted_trial(&registry_db, "trial_for_bad_python_test", "only");
 
     let outcome = dsr_pbo_sensitivity_scenario(
         "mqk_definitely_not_a_real_python_executable_xyz",
@@ -166,6 +185,7 @@ fn dpsr01c_bad_python_executable_fails_closed_not_a_panic() {
         &registry_db,
         "trial_for_bad_python_test",
         "only",
+        &judge_sha256, // unreachable -- spawn fails first
         &[8, 10],
         0.25, // test-fixture-only threshold; not asserted as accepted policy
         0.25,
@@ -193,7 +213,8 @@ fn dpsr01d_research_trial_strategy_mismatch_is_rejected() {
     let registry_db = dir.join("registry.sqlite3");
     // Trial genuinely registered under strategy_id="registered_strategy" --
     // the backtest candidate claims to be a DIFFERENT strategy.
-    register_never_attempted_trial(&registry_db, "rust_it_mismatch_trial", "registered_strategy");
+    let judge_sha256 =
+        register_never_attempted_trial(&registry_db, "rust_it_mismatch_trial", "registered_strategy");
 
     let outcome = dsr_pbo_sensitivity_scenario(
         &python_executable(),
@@ -201,6 +222,7 @@ fn dpsr01d_research_trial_strategy_mismatch_is_rejected() {
         &registry_db,
         "rust_it_mismatch_trial",
         "a_completely_different_backtest_strategy",
+        &judge_sha256,
         &[8, 10],
         0.25, // test-fixture-only threshold; not asserted as accepted policy
         0.25,
