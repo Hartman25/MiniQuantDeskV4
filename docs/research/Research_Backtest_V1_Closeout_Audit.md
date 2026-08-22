@@ -2028,6 +2028,91 @@ it does not itself close P7C.
 
 ---
 
+## 1F. RESEARCH-BACKTEST-V1-CLOSURE-CONTROLLER-01 ADDENDUM (2026-08-21)
+
+Mission `RESEARCH-BACKTEST-V1-CLOSURE-CONTROLLER-01` executed seven
+patches (Patch A-G) against the SAME commit chain this document's
+Sections 1A-1E already describe, sequentially, one commit per patch, all
+local, unpushed. Per `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`'s
+own precedence rule (Section 0 of that file: current repo/code/tests/Git
+history outranks this document, and this document is not authoritative
+for current remaining-work status), **the master ledger is authoritative
+for the current status of every item below — this addendum records the
+same facts for this document's own historical continuity, and does not
+supersede the ledger.**
+
+**Patches executed, in order (all local, unpushed):**
+
+| Patch | Verdict | Commit (local, unpushed) |
+|---|---|---|
+| `BKT-PROMOTION-ARTIFACT-AUTHORITY-01` | **CLOSED_LOCAL** | `08a292cd` |
+| `PROMOTION-STRESS-SUITE-AUTHORITY-01` | **CLOSED_LOCAL** | `8bed1b6c` |
+| `PROMOTION-BACKTEST-EVIDENCE-SEAM-01` | **CLOSED_LOCAL** | `e56f94fb` |
+| `PROMOTION-WALKFORWARD-GATE-WIRING-01-REPAIR-CLOSURE` | **CLOSED_LOCAL** | `f8e9edf4` |
+| P9 `BKT-ROBUSTNESS-GAUNTLET-01` | **CLOSED_LOCAL** | `c66fe32d` |
+| P10 `RESEARCH-BACKTEST-FINAL-ACCEPTANCE-01` | **CLOSED_LOCAL** | `41c19cc7` |
+
+`CLOSED_LOCAL` here means: committed code, committed tests, passing
+against local HEAD at commit time. It does **not** mean independently
+reviewed, and it does **not** mean pushed — see the master ledger's own
+`audit_repo_truth_rules.md` vocabulary. Full detail (design rationale,
+investigation summaries, exact test lists) is in each commit's own
+message and in the master ledger's Section 5/24 entries for each item
+above, not repeated here.
+
+**What "V1" means for this addendum.** This wave closed exactly the chain
+the master ledger's own dependency diagram (Section 24) names as blocking
+`RESEARCH_BACKTEST_V1_COMPLETE`: the canonical Backtest-evidence authority
+(artifact + stress + evidence seam), the production promotion-route
+repair, P9, and P10. **It did not touch, and did not need to touch, P7A**
+(execution pricing parity) **or P7B** (weight-to-share parity) — those
+were already `ACCEPTED_LOCALLY, PUSHED` before this wave started (Wave 2,
+commit `b80749bd`; see the master ledger's Section 24 table). This
+document's own Section 16/16A gate definitions (below, dated 2026-08-15)
+predate Wave 2's P7A/P7B/P7C acceptance and still read "P7A, P7B, P7C
+remain OPEN" — that is stale, superseded by the master ledger exactly as
+Section 0's precedence rule anticipates, and is not corrected in place
+here (out of this wave's scope; the ledger is what a future session
+should read for current truth). What genuinely remains open and is
+correctly still tracked as such, independent of this wave: the DATA
+TRUTH / corporate-action-evidence-source gap Section 1B/1C describe
+(`BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`, not yet scoped) — that gap
+governs whether REAL, non-synthetic Research economic evaluation can run
+at all, and is unrelated to the Backtest/Promotion wiring this wave
+closed.
+
+**P9's honest scope reduction, recorded here for continuity with Section
+16's "ROBUSTNESS" line item:** 6 of P9's 8 required scenarios were
+implemented in Rust (`mqk-backtest::robustness_gauntlet`); 2 were
+deferred, not fabricated — DSR/PBO sensitivity (requires re-running the
+Python `multiple_testing_judge` under perturbation, which this Rust-only
+wave has no implementation of) and conservative P7A/P7B execution/
+capacity stress (P7A/P7B, though pushed, have no dedicated capacity-
+stress machinery of their own yet to build a stress scenario on top of).
+Both are recorded as `deferred` in the durable `robustness_gauntlet.json`
+artifact schema itself, not silently marked passing.
+
+**Verification gap, stated honestly.** This wave could not exercise the
+real HTTP `POST /api/v1/strategy/promotions/transition` route against a
+live Postgres instance — this development box had no `MQK_DATABASE_URL`
+configured, and the pre-existing local test-DB migration-checksum drift
+(documented since the original independent review of `242cb7c3`)
+independently blocks the two DB-backed integration test files regardless
+of this wave's changes. Everything provable without a live Postgres was
+proven: every gate `mqk-daemon`'s route calls is unit-tested with real
+end-to-end fixtures (real `BacktestEngine` runs, real SQLite Research
+registries), and `mqk-promotion`'s own test suite proves the full
+Research→Backtest→Robustness→Evidence-Resolution→`evaluate_promotion`
+chain end-to-end. A future session with real Postgres access should run
+`scenario_strategy_promotion_routes_01.rs` and
+`scenario_strategy_promotion_closure_proof_01f.rs` (after adding
+`backtest_run_id` to their JSON fixtures, which neither currently
+supplies) before treating the production route itself as proven.
+
+**Not pushed.** Nothing in this wave has been pushed to `origin/main`.
+
+---
+
 ## 2. Baseline
 
 ```
