@@ -20,6 +20,13 @@ pub use stress_suite_artifact::{
     StressSuiteArtifactError, STRESS_SUITE_ARTIFACT_SCHEMA_VERSION,
 };
 
+pub mod robustness_gauntlet_artifact; // P9 BKT-ROBUSTNESS-GAUNTLET-01
+pub use robustness_gauntlet_artifact::{
+    load_canonical_robustness_gauntlet, write_canonical_robustness_gauntlet,
+    RobustnessGauntletArtifact, RobustnessGauntletArtifactError,
+    ROBUSTNESS_GAUNTLET_ARTIFACT_SCHEMA_VERSION,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
     pub schema_version: i32,

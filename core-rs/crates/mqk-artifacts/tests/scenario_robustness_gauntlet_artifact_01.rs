@@ -1,0 +1,196 @@
+//! P9 `BKT-ROBUSTNESS-GAUNTLET-01` — durable, tamper-evident,
+//! candidate-bound artifact authority for `robustness_gauntlet.json`.
+//!
+//! Mirrors `scenario_stress_suite_authority_01.rs`'s structure; see that
+//! file for the fuller rationale behind each control.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use mqk_artifacts::{load_canonical_robustness_gauntlet, InitRunArtifactsArgs, RobustnessGauntletArtifactError};
+use mqk_backtest::{run_robustness_gauntlet, BacktestBar, BacktestConfig, BacktestEngine};
+use mqk_strategy::{Strategy, StrategyContext, StrategyOutput, StrategySpec, TargetPosition};
+
+const M: i64 = 1_000_000;
+static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+struct HoldFlat {
+    name: &'static str,
+}
+
+impl Strategy for HoldFlat {
+    fn spec(&self) -> StrategySpec {
+        StrategySpec::new(self.name, 60)
+    }
+
+    fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+        StrategyOutput::new(vec![TargetPosition::new("ES", 0)])
+    }
+}
+
+fn flat_bar(end_ts: i64, price_usd: i64) -> BacktestBar {
+    let p = price_usd * M;
+    BacktestBar::new("ES", end_ts, p, p, p, p, 1_000)
+}
+
+fn cfg_with_wide_cap() -> BacktestConfig {
+    let mut cfg = BacktestConfig::test_defaults();
+    cfg.max_gross_exposure_mult_micros = 100_000_000;
+    cfg
+}
+
+fn bars() -> Vec<BacktestBar> {
+    vec![flat_bar(1_700_000_060, 500), flat_bar(1_700_000_120, 501)]
+}
+
+fn run_and_persist(
+    label: &str,
+    strategy_name: &'static str,
+) -> (mqk_backtest::BacktestReport, PathBuf, BacktestConfig, Vec<BacktestBar>) {
+    let config = cfg_with_wide_cap();
+    let initial_cash = config.initial_cash_micros;
+    let bars = bars();
+
+    let mut engine = BacktestEngine::new(config.clone());
+    engine.add_strategy(Box::new(HoldFlat { name: strategy_name })).unwrap();
+    let report = engine.run(&bars).expect("engine.run must succeed");
+
+    let seq = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let root = std::env::temp_dir().join(format!("mqk_rga01_{}_{}_{}", label, std::process::id(), seq));
+    let _ = fs::remove_dir_all(&root);
+
+    let config_hash = report.config_id.to_string();
+    let init_result = mqk_artifacts::init_run_artifacts(InitRunArtifactsArgs {
+        exports_root: &root,
+        schema_version: 1,
+        run_id: report.run_id,
+        strategy_name: &report.strategy_name,
+        engine_id: "mqk-backtest",
+        mode: "backtest",
+        timeframe: None,
+        timeframe_secs: Some(60),
+        git_hash: "rga01_test_git_hash",
+        config_hash: &config_hash,
+        host_fingerprint: "rga01_test_host",
+        now_utc: chrono::Utc::now(),
+    })
+    .expect("init_run_artifacts must succeed");
+
+    mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, initial_cash)
+        .expect("write_backtest_report must succeed");
+
+    (report, init_result.run_dir, config, bars)
+}
+
+fn cleanup(root: &Path) {
+    let _ = fs::remove_dir_all(root);
+}
+
+fn tamper(run_dir: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+    let path = run_dir.join("robustness_gauntlet.json");
+    let raw = fs::read_to_string(&path).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    mutate(&mut v);
+    fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+}
+
+#[test]
+fn rga01a_real_round_trip() {
+    let (report, run_dir, config, bars) = run_and_persist("valid", "RgaValid");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaValid" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let loaded = load_canonical_robustness_gauntlet(&run_dir).expect("must load");
+    assert_eq!(loaded.scenarios_run(), output.scenarios.len());
+    assert_eq!(loaded.deferred_scenario_names().len(), 2);
+
+    cleanup(&run_dir);
+}
+
+#[test]
+fn rga01b_missing_artifact_rejected() {
+    let (_report, run_dir, _config, _bars) = run_and_persist("missing", "RgaMissing");
+    let err = load_canonical_robustness_gauntlet(&run_dir).unwrap_err();
+    assert_eq!(err, RobustnessGauntletArtifactError::MissingArtifact);
+    cleanup(&run_dir);
+}
+
+#[test]
+fn rga01c_zero_scenarios_rejected() {
+    let (report, run_dir, config, bars) = run_and_persist("zero", "RgaZero");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || Box::new(HoldFlat { name: "RgaZero" }));
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    tamper(&run_dir, |v| {
+        v["scenarios"] = serde_json::Value::Array(vec![]);
+    });
+
+    let err = load_canonical_robustness_gauntlet(&run_dir).unwrap_err();
+    assert_eq!(err, RobustnessGauntletArtifactError::ZeroScenarios);
+    cleanup(&run_dir);
+}
+
+#[test]
+fn rga01d_content_tampered_after_write_rejected() {
+    let (report, run_dir, config, bars) = run_and_persist("tamper", "RgaTamper");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || Box::new(HoldFlat { name: "RgaTamper" }));
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    tamper(&run_dir, |v| {
+        v["scenarios"][0]["passed"] = serde_json::Value::Bool(!v["scenarios"][0]["passed"].as_bool().unwrap());
+    });
+
+    let err = load_canonical_robustness_gauntlet(&run_dir).unwrap_err();
+    assert_eq!(err, RobustnessGauntletArtifactError::ContentHashMismatch);
+    cleanup(&run_dir);
+}
+
+#[test]
+fn rga01e_cross_candidate_swap_rejected() {
+    let (report_a, run_dir_a, config_a, bars_a) = run_and_persist("cross_a", "RgaCrossA");
+    let (report_b, run_dir_b, _config_b, _bars_b) = run_and_persist("cross_b", "RgaCrossB");
+    assert_ne!(report_a.run_id, report_b.run_id);
+
+    let output_a = run_robustness_gauntlet(&report_a, &config_a, &bars_a, || {
+        Box::new(HoldFlat { name: "RgaCrossA" })
+    });
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir_a, &output_a).unwrap();
+
+    fs::copy(
+        run_dir_a.join("robustness_gauntlet.json"),
+        run_dir_b.join("robustness_gauntlet.json"),
+    )
+    .unwrap();
+
+    let err = load_canonical_robustness_gauntlet(&run_dir_b).unwrap_err();
+    assert!(matches!(err, RobustnessGauntletArtifactError::RunIdMismatch { .. }));
+
+    cleanup(&run_dir_a);
+    cleanup(&run_dir_b);
+}
+
+#[test]
+fn rga01f_write_is_idempotent() {
+    let (report, run_dir, config, bars) = run_and_persist("idempotent", "RgaIdempotent");
+    let output = run_robustness_gauntlet(&report, &config, &bars, || {
+        Box::new(HoldFlat { name: "RgaIdempotent" })
+    });
+
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+    mqk_artifacts::write_canonical_robustness_gauntlet(&run_dir, &output).unwrap();
+
+    let audit_jsonl = fs::read_to_string(run_dir.join("audit.jsonl")).unwrap();
+    let count = audit_jsonl
+        .lines()
+        .filter(|l| l.contains("robustness_gauntlet_completed"))
+        .count();
+    assert_eq!(count, 1);
+
+    let verify = mqk_audit::verify_hash_chain_str(&audit_jsonl).unwrap();
+    assert!(matches!(verify, mqk_audit::VerifyResult::Valid { .. }));
+
+    cleanup(&run_dir);
+}

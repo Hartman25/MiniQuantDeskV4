@@ -20,6 +20,7 @@ mod engine;
 pub mod loader;
 pub mod market_frame; // BKT-MULTISYMBOL-MARKET-FRAME-01
 pub mod regime;
+pub mod robustness_gauntlet; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub mod strategy_lab;
 pub mod strategy_scan_review;
 pub mod strategy_scanner;
@@ -61,6 +62,10 @@ pub use strategy_scanner::{
     StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode, StrategyScanTruthState,
     DEFAULT_MIN_BARS,
 };
+pub use robustness_gauntlet::{
+    run_robustness_gauntlet, DeferredScenario, RobustnessGauntletOutput,
+    RobustnessScenarioOutcome, ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION,
+}; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub use stress_suite::{
     run_backtest_stress_suite, StressScenarioOutcome, StressSuiteRunOutput,
     STRESS_SUITE_PROTOCOL_VERSION,
