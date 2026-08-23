@@ -90,9 +90,18 @@ export type BuildBacktestEconomicsResult =
   | { ok: true; economics?: BacktestEconomicsRequest }
   | { ok: false; error: string };
 
-function parseOptionalInteger(raw: string, fieldName: string): { ok: true; value: number | null } | { ok: false; error: string } {
+export type ParseStrictIntegerResult = { ok: true; value: number } | { ok: false; error: string };
+
+/**
+ * GUI-BACKTEST-INPUT-INTEGER-SAFETY-01: strict, required integer parser for
+ * operator-entered numeric request fields. Unlike parseInt(), this rejects
+ * trailing/leading non-numeric junk (parseInt("120oops", 10) === 120) and
+ * magnitudes beyond Number.isSafeInteger (parseInt("9007199254740993", 10)
+ * silently rounds to 9007199254740992). Positivity is the caller's
+ * responsibility since fields differ on whether zero/negative is valid.
+ */
+export function parseStrictInteger(raw: string, fieldName: string): ParseStrictIntegerResult {
   const trimmed = raw.trim();
-  if (trimmed === "") return { ok: true, value: null };
   if (!/^-?\d+$/.test(trimmed)) {
     return { ok: false, error: `${fieldName} must be an integer.` };
   }
@@ -101,6 +110,18 @@ function parseOptionalInteger(raw: string, fieldName: string): { ok: true; value
     return { ok: false, error: `${fieldName} must be a safe integer.` };
   }
   return { ok: true, value };
+}
+
+/** Convenience wrapper for display-only derivations that can't surface an error. */
+export function parseStrictIntegerOrNull(raw: string): number | null {
+  const result = parseStrictInteger(raw, "value");
+  return result.ok ? result.value : null;
+}
+
+function parseOptionalInteger(raw: string, fieldName: string): { ok: true; value: number | null } | { ok: false; error: string } {
+  const trimmed = raw.trim();
+  if (trimmed === "") return { ok: true, value: null };
+  return parseStrictInteger(trimmed, fieldName);
 }
 
 export function buildBacktestEconomicsRequest(

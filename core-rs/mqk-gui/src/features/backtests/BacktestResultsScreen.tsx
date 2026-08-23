@@ -46,6 +46,8 @@ import {
   getBacktestJobs,
   isTerminalJobStatus,
   normalizeJobStatus,
+  parseStrictInteger,
+  parseStrictIntegerOrNull,
   sessionJobIdStillPresent,
   submitBacktestJob,
   validateMdBarsDateRange,
@@ -2689,19 +2691,30 @@ export function BacktestResultsScreen() {
   }, [symbol]);
 
   const handleSubmitJob = useCallback(async () => {
-    const tf = parseInt(timeframeSecs, 10);
-    const cash = parseInt(initialCashMicros, 10);
-    const staleThresholdRaw = integrityStaleThresholdTicks.trim();
-    const staleThreshold = staleThresholdRaw ? parseInt(staleThresholdRaw, 10) : null;
-
     if (!strategy.trim()) { setJobSubmitError("strategy is required."); return; }
     if (!symbol.trim()) { setJobSubmitError("symbol is required."); return; }
-    if (Number.isNaN(tf) || tf <= 0) { setJobSubmitError("timeframe_secs must be a positive integer."); return; }
-    if (Number.isNaN(cash) || cash <= 0) { setJobSubmitError("initial_cash_micros must be a positive integer."); return; }
-    if (staleThreshold !== null && (Number.isNaN(staleThreshold) || staleThreshold <= 0)) {
-      setJobSubmitError("Integrity stale threshold must be a positive integer (or leave blank for auto).");
-      return;
+
+    const tfResult = parseStrictInteger(timeframeSecs, "timeframe_secs");
+    if (!tfResult.ok) { setJobSubmitError(tfResult.error); return; }
+    if (tfResult.value <= 0) { setJobSubmitError("timeframe_secs must be a positive integer."); return; }
+    const tf = tfResult.value;
+
+    const cashResult = parseStrictInteger(initialCashMicros, "initial_cash_micros");
+    if (!cashResult.ok) { setJobSubmitError(cashResult.error); return; }
+    if (cashResult.value <= 0) { setJobSubmitError("initial_cash_micros must be a positive integer."); return; }
+    const cash = cashResult.value;
+
+    const staleThresholdRaw = integrityStaleThresholdTicks.trim();
+    let staleThreshold: number | null = null;
+    if (staleThresholdRaw) {
+      const staleThresholdResult = parseStrictInteger(staleThresholdRaw, "integrity_stale_threshold_ticks");
+      if (!staleThresholdResult.ok || staleThresholdResult.value <= 0) {
+        setJobSubmitError("Integrity stale threshold must be a positive integer (or leave blank for auto).");
+        return;
+      }
+      staleThreshold = staleThresholdResult.value;
     }
+
     const economicsResult = buildBacktestEconomicsRequest({
       contractMultiplier,
       initialMarginMicros,
@@ -2954,7 +2967,7 @@ export function BacktestResultsScreen() {
               <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
                 <div className="bt-field-hint" style={{ fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
                   Inclusive query range, bounded by bar end-timestamp. The database timeframe
-                  string (e.g. <code>{timeframeLabelFromSecs(parseInt(timeframeSecs, 10)) ?? "1D"}</code>)
+                  string (e.g. <code>{timeframeLabelFromSecs(parseStrictIntegerOrNull(timeframeSecs)) ?? "1D"}</code>)
                   is derived from the Timeframe selector below — no separate field needed.
                   If the database has no matching bars, the job fails with a clear no-data error
                   — results are never fabricated.
@@ -3128,13 +3141,13 @@ export function BacktestResultsScreen() {
               spellCheck={false}
               autoComplete="off"
               placeholder={
-                parseInt(timeframeSecs, 10) >= 86400
+                (parseStrictIntegerOrNull(timeframeSecs) ?? 0) >= 86400
                   ? "auto → 172800 (daily default)"
                   : "auto → 120 (intraday default)"
               }
             />
             <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
-              {parseInt(timeframeSecs, 10) >= 86400
+              {(parseStrictIntegerOrNull(timeframeSecs) ?? 0) >= 86400
                 ? <>
                     <strong>Daily bars detected.</strong>{" "}
                     Leave blank to use the safe default of <strong>172800</strong> (2 days).

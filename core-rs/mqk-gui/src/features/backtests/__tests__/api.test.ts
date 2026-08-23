@@ -9,6 +9,7 @@ import {
   buildSessionJobRow,
   getBacktestJobs,
   getInstrumentRegistryV2SourceStatus,
+  parseStrictInteger,
   sessionJobIdStillPresent,
   validateBacktestJobsListResponse,
   validateMdBarsDateRange,
@@ -987,4 +988,51 @@ test("JOBLIST-11: sessionJobIdStillPresent is false when the id vanished from th
 
 test("JOBLIST-12: sessionJobIdStillPresent is false against an empty fresh list", () => {
   assert.equal(sessionJobIdStillPresent("job-1", []), false);
+});
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-INPUT-INTEGER-SAFETY-01: parseStrictInteger negative controls
+// ---------------------------------------------------------------------------
+
+test("INT-01: a value one past MAX_SAFE_INTEGER is rejected, not silently rounded", () => {
+  const result = parseStrictInteger("9007199254740993", "initial_cash_micros");
+  assert.equal(result.ok, false, "parseInt would have silently rounded this to 9007199254740992");
+});
+
+test("INT-02: MAX_SAFE_INTEGER itself is accepted exactly", () => {
+  const result = parseStrictInteger(String(Number.MAX_SAFE_INTEGER), "initial_cash_micros");
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.value : NaN, Number.MAX_SAFE_INTEGER);
+});
+
+test("INT-03: trailing non-numeric junk is rejected, not truncated", () => {
+  const result = parseStrictInteger("100000000000oops", "initial_cash_micros");
+  assert.equal(result.ok, false, "parseInt would have silently truncated this to 100000000000");
+});
+
+test("INT-04: trailing junk on a short value is rejected", () => {
+  const result = parseStrictInteger("120oops", "integrity_stale_threshold_ticks");
+  assert.equal(result.ok, false, "parseInt would have silently truncated this to 120");
+});
+
+test("INT-05: leading non-numeric junk is rejected", () => {
+  const result = parseStrictInteger("oops120", "integrity_stale_threshold_ticks");
+  assert.equal(result.ok, false);
+});
+
+test("INT-06: whitespace-padded valid integer is accepted after trimming", () => {
+  const result = parseStrictInteger("  42  ", "timeframe_secs");
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.value : NaN, 42);
+});
+
+test("INT-07: an ordinary valid default value parses to the exact same number", () => {
+  const result = parseStrictInteger("86400", "timeframe_secs");
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.value : NaN, 86400);
+});
+
+test("INT-08: empty string is rejected (required field, unlike the optional economics parser)", () => {
+  const result = parseStrictInteger("", "initial_cash_micros");
+  assert.equal(result.ok, false);
 });
