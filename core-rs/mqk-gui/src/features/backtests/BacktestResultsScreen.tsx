@@ -45,6 +45,7 @@ import {
   isTerminalJobStatus,
   normalizeJobStatus,
   submitBacktestJob,
+  validateMdBarsDateRange,
 } from "./api.ts";
 import {
   classifyArtifactPathInput,
@@ -2391,8 +2392,8 @@ export function BacktestResultsScreen() {
         setJobSubmitError("Could not derive a database timeframe label from timeframe_secs.");
         return;
       }
-      if (!startDate.trim()) { setJobSubmitError("Start is required for the database source."); return; }
-      if (!endDate.trim()) { setJobSubmitError("End is required for the database source."); return; }
+      const dateRangeResult = validateMdBarsDateRange(startDate, endDate);
+      if (!dateRangeResult.ok) { setJobSubmitError(dateRangeResult.error); return; }
       request = {
         source: "md_bars",
         strategy: strategy.trim(),

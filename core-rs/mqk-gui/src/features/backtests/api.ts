@@ -128,6 +128,27 @@ export function buildBacktestEconomicsRequest(
     : { ok: true, economics };
 }
 
+export type ValidateMdBarsDateRangeResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Client-side pre-check mirroring the daemon's md_bars date-range validation
+ * (backtest_job_submit in routes/backtests.rs: start/end required, RFC3339,
+ * end >= start). The daemon remains the authoritative gate — this only stops
+ * an obviously invalid range from round-tripping to the server first.
+ */
+export function validateMdBarsDateRange(startRaw: string, endRaw: string): ValidateMdBarsDateRangeResult {
+  const start = startRaw.trim();
+  const end = endRaw.trim();
+  if (!start) return { ok: false, error: "Start is required for the database source." };
+  if (!end) return { ok: false, error: "End is required for the database source." };
+  const startMs = Date.parse(start);
+  if (Number.isNaN(startMs)) return { ok: false, error: "Start must be a valid RFC3339 timestamp." };
+  const endMs = Date.parse(end);
+  if (Number.isNaN(endMs)) return { ok: false, error: "End must be a valid RFC3339 timestamp." };
+  if (endMs < startMs) return { ok: false, error: "End must be >= start for the database source." };
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------

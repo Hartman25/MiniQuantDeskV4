@@ -9,6 +9,7 @@ import {
   buildSessionJobRow,
   getBacktestJobs,
   getInstrumentRegistryV2SourceStatus,
+  validateMdBarsDateRange,
 } from "../api.ts";
 import type {
   BacktestJobRequest,
@@ -818,4 +819,54 @@ test("A-10b: three rapid selections always converge on the last one", async () =
     { jobId: "C", resolveDelayMs: 1 },
   ]);
   assert.equal(result.finalBundleSource, "C");
+});
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-RUN-WORKBENCH-01 (Patch B): validateMdBarsDateRange
+// ---------------------------------------------------------------------------
+
+test("B-DATE-01: valid range with end after start is accepted", () => {
+  const result = validateMdBarsDateRange("2026-06-01T00:00:00Z", "2026-06-20T00:00:00Z");
+  assert.equal(result.ok, true);
+});
+
+test("B-DATE-02: equal start and end is accepted (inclusive range)", () => {
+  const result = validateMdBarsDateRange("2026-06-01T00:00:00Z", "2026-06-01T00:00:00Z");
+  assert.equal(result.ok, true);
+});
+
+test("B-DATE-03: end before start is rejected (invalid date ordering)", () => {
+  const result = validateMdBarsDateRange("2026-06-20T00:00:00Z", "2026-06-01T00:00:00Z");
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /end must be >= start/i);
+});
+
+test("B-DATE-04: blank start is rejected", () => {
+  const result = validateMdBarsDateRange("", "2026-06-01T00:00:00Z");
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /start is required/i);
+});
+
+test("B-DATE-05: blank end is rejected", () => {
+  const result = validateMdBarsDateRange("2026-06-01T00:00:00Z", "");
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /end is required/i);
+});
+
+test("B-DATE-06: non-parseable start timestamp is rejected before hitting the daemon", () => {
+  const result = validateMdBarsDateRange("not-a-date", "2026-06-01T00:00:00Z");
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /start must be a valid/i);
+});
+
+test("B-DATE-07: non-parseable end timestamp is rejected before hitting the daemon", () => {
+  const result = validateMdBarsDateRange("2026-06-01T00:00:00Z", "not-a-date");
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /end must be a valid/i);
+});
+
+test("B-DATE-08: whitespace-only fields are treated as blank", () => {
+  const result = validateMdBarsDateRange("   ", "2026-06-01T00:00:00Z");
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /start is required/i);
 });
