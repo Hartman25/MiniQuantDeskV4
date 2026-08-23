@@ -14,6 +14,7 @@ import {
   formatNullablePercent,
   instrumentRegistryV2SourceStatusLabel,
   manifestTimeframeLabel,
+  computeDrawdownSeries,
   microsToUsd,
   parseCsvRows,
   parseEquityCurve,
@@ -212,6 +213,49 @@ test("parseEquityCurve returns empty for header-only CSV", () => {
 test("parseEquityCurve returns empty for completely empty CSV", () => {
   const { rows } = parseEquityCurve("");
   assert.equal(rows.length, 0);
+});
+
+// --- computeDrawdownSeries (GUI-BACKTEST-RESULT-ANALYSIS-01) ---
+
+test("computeDrawdownSeries returns empty series for empty input", () => {
+  assert.deepEqual(computeDrawdownSeries([]), []);
+});
+
+test("computeDrawdownSeries reports 0% drawdown for a single point (peak == equity)", () => {
+  const series = computeDrawdownSeries([{ ts_utc: "t0", equity: 100 }]);
+  assert.equal(series.length, 1);
+  assert.equal(series[0].peak, 100);
+  assert.equal(series[0].drawdown_pct, 0);
+});
+
+test("computeDrawdownSeries tracks a running peak and reports correct trough drawdown", () => {
+  const series = computeDrawdownSeries([
+    { ts_utc: "t0", equity: 100 },
+    { ts_utc: "t1", equity: 120 },
+    { ts_utc: "t2", equity: 90 },
+    { ts_utc: "t3", equity: 110 },
+  ]);
+  assert.deepEqual(series.map((p) => p.peak), [100, 120, 120, 120]);
+  assert.equal(series[2].drawdown_pct, 25, "(120-90)/120 * 100 = 25%");
+  assert.equal(series[3].drawdown_pct, (120 - 110) / 120 * 100);
+});
+
+test("computeDrawdownSeries never overwrites/recomputes below-zero baselines with a fabricated percentage", () => {
+  // Non-positive running peak: 0% rather than a divide-by-non-positive result.
+  const series = computeDrawdownSeries([
+    { ts_utc: "t0", equity: -50 },
+    { ts_utc: "t1", equity: -20 },
+  ]);
+  assert.equal(series[0].drawdown_pct, 0);
+  assert.equal(series[1].drawdown_pct, 0, "peak is still <= 0, so drawdown_pct stays 0 rather than fabricated");
+});
+
+test("computeDrawdownSeries is monotonically non-decreasing peak across a rising curve", () => {
+  const rows = [10, 20, 30, 40, 50].map((equity, i) => ({ ts_utc: `t${i}`, equity }));
+  const series = computeDrawdownSeries(rows);
+  for (const p of series) {
+    assert.equal(p.drawdown_pct, 0, "a strictly rising curve has zero drawdown at every point");
+  }
 });
 
 // --- parseOrders ---

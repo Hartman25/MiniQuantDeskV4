@@ -5,6 +5,7 @@ import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import {
   classifyAlpha,
+  computeDrawdownSeries,
   describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
   describeNoTradeActivity,
@@ -434,14 +435,10 @@ function OperatorReviewSection({ bundle }: { bundle: ArtifactBundle }) {
   );
 }
 
-function MetricsSection({ m }: { m: BacktestMetrics }) {
+function PerformanceMetricsSection({ m }: { m: BacktestMetrics }) {
   const returnTone =
     m.total_return_micros > 0 ? "good" : m.total_return_micros < 0 ? "bad" : "neutral";
   const ddTone = m.max_drawdown_pct > 10 ? "bad" : m.max_drawdown_pct > 3 ? "warn" : "neutral";
-  const haltTone = m.halted ? "bad" : "neutral";
-  const economics = m.economics ?? null;
-  const economicsValue = (value: number | null | undefined): string =>
-    value == null || Number.isNaN(value) ? "not reported" : String(value);
 
   return (
     <>
@@ -517,6 +514,101 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
         />
       </div>
 
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Avg win"
+          value={formatMicrosAsDollars(m.average_win_micros)}
+          detail="Mean profit of winning trades"
+          tone="neutral"
+        />
+        <StatCard
+          title="Avg loss"
+          value={formatMicrosAsDollars(m.average_loss_micros)}
+          detail="Mean loss of losing trades"
+          tone="neutral"
+        />
+        <StatCard
+          title="Best trade"
+          value={formatMicrosAsDollars(m.best_trade_micros)}
+          tone="neutral"
+        />
+        <StatCard
+          title="Worst trade"
+          value={formatMicrosAsDollars(m.worst_trade_micros)}
+          tone="neutral"
+        />
+        <StatCard
+          title="HWM equity"
+          value={formatMicrosAsDollars(m.equity_high_water_mark_micros)}
+          detail="High-water mark — drawdown baseline"
+          tone="neutral"
+        />
+      </div>
+    </>
+  );
+}
+
+function DrawdownSection({ result }: { result: FileResult<ParsedCsvResult<EquityCurveRow>> }) {
+  if (result.kind !== "ok") return null;
+  const { rows } = result.data;
+  if (rows.length === 0) return null;
+
+  const series = computeDrawdownSeries(rows);
+  const maxDd = Math.max(...series.map((p) => p.drawdown_pct));
+
+  const width = 600;
+  const height = 60;
+  const points = series
+    .map((p, i) => {
+      const x = series.length === 1 ? width / 2 : (i / (series.length - 1)) * width;
+      const y = maxDd > 0 ? (p.drawdown_pct / maxDd) * height : 0;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <Panel
+      title="Drawdown"
+      subtitle="Derived from equity_curve.csv (display only) — not a substitute for metrics.json's authoritative max_drawdown."
+    >
+      <div className="bt-equity-meta">
+        <span>
+          <span className="eyebrow">peak-to-trough max</span> {maxDd.toFixed(2)}%
+        </span>
+        <span>
+          <span className="eyebrow">points</span> {series.length}
+        </span>
+      </div>
+      {maxDd === 0 ? (
+        <div className="empty-state">No drawdown in this run — equity never fell below its running peak.</div>
+      ) : (
+        <svg
+          className="bt-equity-svg"
+          viewBox={`0 0 ${width} ${height}`}
+          preserveAspectRatio="none"
+          aria-label="Drawdown from running peak"
+        >
+          <polyline
+            points={points}
+            fill="none"
+            stroke="var(--critical)"
+            strokeWidth="1.5"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      )}
+    </Panel>
+  );
+}
+
+function ExecutionCostsSection({ m }: { m: BacktestMetrics }) {
+  const haltTone = m.halted ? "bad" : "neutral";
+  const economics = m.economics ?? null;
+  const economicsValue = (value: number | null | undefined): string =>
+    value == null || Number.isNaN(value) ? "not reported" : String(value);
+
+  return (
+    <>
       <Panel
         title="Instrument economics"
         subtitle="Backtest economics metadata from metrics.json."
@@ -581,26 +673,6 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
           <div>
             <span>Gross loss</span>
             <strong>{formatMicrosAsDollars(m.gross_loss_micros)}</strong>
-          </div>
-          <div>
-            <span>Avg win</span>
-            <strong>{formatMicrosAsDollars(m.average_win_micros)}</strong>
-          </div>
-          <div>
-            <span>Avg loss</span>
-            <strong>{formatMicrosAsDollars(m.average_loss_micros)}</strong>
-          </div>
-          <div>
-            <span>Best trade</span>
-            <strong>{formatMicrosAsDollars(m.best_trade_micros)}</strong>
-          </div>
-          <div>
-            <span>Worst trade</span>
-            <strong>{formatMicrosAsDollars(m.worst_trade_micros)}</strong>
-          </div>
-          <div>
-            <span>HWM equity</span>
-            <strong>{formatMicrosAsDollars(m.equity_high_water_mark_micros)}</strong>
           </div>
           <div>
             <span>Symbols</span>
@@ -1951,21 +2023,31 @@ function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: 
         </div>
       )}
 
-      <div className="bt-group-heading">Operator review</div>
+      <div className="bt-group-heading">Overview</div>
       <OperatorReviewSection bundle={bundle} />
 
-      <div className="bt-group-heading">Run identity &amp; performance</div>
+      <div className="bt-group-heading">Provenance</div>
       <FileStatusNote label="manifest.json" result={bundle.manifest} />
       {bundle.manifest.kind === "ok" && (
         <ManifestSection manifest={bundle.manifest.data} />
       )}
 
+      <div className="bt-group-heading">Performance</div>
       <FileStatusNote label="metrics.json" result={bundle.metrics} />
       {bundle.metrics.kind === "ok" && (
-        <MetricsSection m={bundle.metrics.data} />
+        <PerformanceMetricsSection m={bundle.metrics.data} />
       )}
+      <EquityCurveSection result={bundle.equityCurve} />
+      <DrawdownSection result={bundle.equityCurve} />
 
-      <div className="bt-group-heading">Research &amp; promotion gates</div>
+      <div className="bt-group-heading">Execution &amp; costs</div>
+      {bundle.metrics.kind === "ok" && (
+        <ExecutionCostsSection m={bundle.metrics.data} />
+      )}
+      <OrdersSection result={bundle.orders} />
+      <FillsSection result={bundle.fills} />
+
+      <div className="bt-group-heading">Research &amp; promotion evidence</div>
       <StrategyFitPanel result={bundle.strategyFit} />
       <PaperReadinessPanel result={bundle.paperReadiness} />
       <WatchlistPromotionPanel result={bundle.watchlistPromotion} />
@@ -1974,11 +2056,6 @@ function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: 
 
       <div className="bt-group-heading">Observability reference</div>
       <DiscordWorkflowsPanel />
-
-      <div className="bt-group-heading">Execution detail</div>
-      <EquityCurveSection result={bundle.equityCurve} />
-      <OrdersSection result={bundle.orders} />
-      <FillsSection result={bundle.fills} />
     </>
   );
 }

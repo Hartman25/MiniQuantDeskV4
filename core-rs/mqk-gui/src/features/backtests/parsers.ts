@@ -81,6 +81,33 @@ export function parseEquityCurve(csv: string): ParsedCsvResult<EquityCurveRow> {
   return { rows: parsed, malformed };
 }
 
+export interface DrawdownPoint {
+  ts_utc: string;
+  equity: number;
+  peak: number;
+  drawdown_pct: number;
+}
+
+/**
+ * GUI-BACKTEST-RESULT-ANALYSIS-01: derives a running peak-to-trough drawdown
+ * series from an equity curve for display only. Never overwrites
+ * metrics.json's authoritative max_drawdown_pct/max_drawdown_micros — this is
+ * a client-derived visualization, not a second source of truth. Pure and
+ * total: empty input yields an empty series; a non-positive running peak
+ * yields 0% (no division by a non-positive baseline) rather than a
+ * fabricated or negative percentage.
+ */
+export function computeDrawdownSeries(rows: EquityCurveRow[]): DrawdownPoint[] {
+  let peak = -Infinity;
+  const out: DrawdownPoint[] = [];
+  for (const r of rows) {
+    if (r.equity > peak) peak = r.equity;
+    const drawdown_pct = peak > 0 ? ((peak - r.equity) / peak) * 100 : 0;
+    out.push({ ts_utc: r.ts_utc, equity: r.equity, peak, drawdown_pct });
+  }
+  return out;
+}
+
 export function parseOrders(csv: string): ParsedCsvResult<OrderRow> {
   const { rows } = parseCsvRows(csv);
   let malformed = 0;
