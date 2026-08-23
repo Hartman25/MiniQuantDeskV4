@@ -67,19 +67,46 @@ export function parseCsvRows(csv: string): { headers: string[]; rows: Record<str
   return { headers, rows };
 }
 
+/**
+ * GUI-BACKTEST-EQUITY-DISPLAY-ROBUSTNESS-01: a row is valid only if `equity`
+ * is present, non-blank, and Number.isFinite once converted — Number("")===0
+ * and Number("Infinity")===Infinity would otherwise pass a bare isNaN check
+ * and later corrupt min/max/drawdown geometry with 0/Infinity instead of a
+ * truthfully skipped malformed row.
+ */
 export function parseEquityCurve(csv: string): ParsedCsvResult<EquityCurveRow> {
   const { rows } = parseCsvRows(csv);
   let malformed = 0;
   const parsed: EquityCurveRow[] = [];
   for (const r of rows) {
+    if (!Object.prototype.hasOwnProperty.call(r, "equity") || r.equity.trim() === "") {
+      malformed++;
+      continue;
+    }
     const equity = Number(r.equity);
-    if (!Object.prototype.hasOwnProperty.call(r, "equity") || Number.isNaN(equity)) {
+    if (!Number.isFinite(equity)) {
       malformed++;
       continue;
     }
     parsed.push({ ts_utc: r.ts_utc ?? "", equity });
   }
   return { rows: parsed, malformed };
+}
+
+/**
+ * O(n) min/max over a finite-number array. Never spreads into Math.min/max —
+ * `Math.max(...values)` overflows the JS call stack (RangeError) once
+ * `values` reaches tens of thousands of entries, which a long intraday
+ * backtest's equity curve realistically can.
+ */
+export function minMax(values: number[]): { min: number; max: number } {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return { min, max };
 }
 
 export interface DrawdownPoint {

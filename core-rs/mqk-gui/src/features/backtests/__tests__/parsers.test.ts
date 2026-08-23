@@ -17,6 +17,7 @@ import {
   computeDrawdownSeries,
   extractComparisonSnapshot,
   microsToUsd,
+  minMax,
   parseCsvRows,
   parseEquityCurve,
   parseEvidenceReview,
@@ -215,6 +216,73 @@ test("parseEquityCurve returns empty for header-only CSV", () => {
 test("parseEquityCurve returns empty for completely empty CSV", () => {
   const { rows } = parseEquityCurve("");
   assert.equal(rows.length, 0);
+});
+
+// --- GUI-BACKTEST-EQUITY-DISPLAY-ROBUSTNESS-01: parseEquityCurve non-finite/blank rows ---
+
+test("EQ-01: a blank equity field is malformed, not coerced to 0", () => {
+  const csv = "ts_utc,equity\n60,\n120,100500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 1, "Number('') === 0 must not silently pass as a valid equity row");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].equity, 100_500_000_000);
+});
+
+test("EQ-02: an 'Infinity' equity field is malformed, not accepted", () => {
+  const csv = "ts_utc,equity\n60,Infinity\n120,100500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 1);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].equity, 100_500_000_000);
+});
+
+test("EQ-03: a '-Infinity' equity field is malformed, not accepted", () => {
+  const csv = "ts_utc,equity\n60,-Infinity\n120,100500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 1);
+  assert.equal(rows.length, 1);
+});
+
+test("EQ-04: an ordinary finite negative equity value is kept, not treated as malformed", () => {
+  const csv = "ts_utc,equity\n60,-500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 0);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].equity, -500_000_000);
+});
+
+// --- GUI-BACKTEST-EQUITY-DISPLAY-ROBUSTNESS-01: minMax (no Math.min/max spread) ---
+
+test("MINMAX-01: computes correct min/max for a small array", () => {
+  assert.deepEqual(minMax([3, 1, 4, 1, 5, 9, 2, 6]), { min: 1, max: 9 });
+});
+
+test("MINMAX-02: handles a single-element array", () => {
+  assert.deepEqual(minMax([42]), { min: 42, max: 42 });
+});
+
+test("MINMAX-03: handles negative values", () => {
+  assert.deepEqual(minMax([-5, -1, -10, -3]), { min: -10, max: -1 });
+});
+
+test("MINMAX-04: does not throw a RangeError on a 200,000-element array (Math.min(...arr) would)", () => {
+  const values = Array.from({ length: 200_000 }, (_, i) => i);
+  const result = minMax(values);
+  assert.equal(result.min, 0);
+  assert.equal(result.max, 199_999);
+});
+
+test("MINMAX-05: a 200,000-point parsed equity curve computes min/max without a RangeError", () => {
+  const lines = ["ts_utc,equity"];
+  for (let i = 0; i < 200_000; i++) {
+    lines.push(`${i},${100_000_000_000 + i}`);
+  }
+  const { rows, malformed } = parseEquityCurve(lines.join("\n"));
+  assert.equal(malformed, 0);
+  assert.equal(rows.length, 200_000);
+  const { min, max } = minMax(rows.map((r) => r.equity));
+  assert.equal(min, 100_000_000_000);
+  assert.equal(max, 100_000_000_000 + 199_999);
 });
 
 // --- computeDrawdownSeries (GUI-BACKTEST-RESULT-ANALYSIS-01) ---

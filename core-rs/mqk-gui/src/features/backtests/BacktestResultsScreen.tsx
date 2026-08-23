@@ -16,6 +16,7 @@ import {
   formatNullableNumber,
   formatNullablePercent,
   manifestTimeframeLabel,
+  minMax,
   timeframeLabelFromSecs,
   PAPER_READINESS_SCHEMA_VERSION,
   PAPER_READINESS_STATUS_BLOCKED,
@@ -559,7 +560,7 @@ function DrawdownSection({ result }: { result: FileResult<ParsedCsvResult<Equity
   if (rows.length === 0) return null;
 
   const series = computeDrawdownSeries(rows);
-  const maxDd = Math.max(...series.map((p) => p.drawdown_pct));
+  const maxDd = minMax(series.map((p) => p.drawdown_pct)).max;
 
   const width = 600;
   const height = 60;
@@ -1807,8 +1808,7 @@ function EquityCurveContent({ data }: { data: ParsedCsvResult<EquityCurveRow> })
   }
 
   const equities = rows.map((r) => r.equity);
-  const minEq = Math.min(...equities);
-  const maxEq = Math.max(...equities);
+  const { min: minEq, max: maxEq } = minMax(equities);
   const range = maxEq - minEq;
   const flat = range === 0;
 
