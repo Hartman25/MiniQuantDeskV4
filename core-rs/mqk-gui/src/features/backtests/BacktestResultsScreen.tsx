@@ -11,6 +11,7 @@ import {
   describeNoTradeActivity,
   DISCORD_WORKFLOWS,
   EVIDENCE_REVIEW_SCHEMA_VERSION,
+  extractComparisonSnapshot,
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
@@ -79,6 +80,7 @@ import type {
   StrategyFitParseResult,
   WatchlistPromotionParseResult,
 } from "./types.ts";
+import type { ComparisonSnapshot } from "./parsers.ts";
 
 // ---------------------------------------------------------------------------
 // Artifact loading
@@ -2167,6 +2169,136 @@ function SessionJobsPanel({
 }
 
 // ---------------------------------------------------------------------------
+// GUI-BACKTEST-RUN-COMPARISON-01: side-by-side comparison of two completed
+// runs. Display-only — no winner badge, no statistical claim, no promotion
+// action. Reuses the same completed-session-job selection + fencing pattern
+// as Workflow C (SessionJobsPanel / handleSelectSessionJob).
+// ---------------------------------------------------------------------------
+
+interface ComparisonRow {
+  label: string;
+  a: string;
+  b: string;
+}
+
+function buildComparisonRows(a: ComparisonSnapshot | null, b: ComparisonSnapshot | null): ComparisonRow[] {
+  const pct = (v: number | null) => (v == null ? "—" : `${v.toFixed(2)}%`);
+  const num = (v: number | null, digits = 2) => (v == null ? "—" : v.toFixed(digits));
+  const usd = (v: number | null) => formatMicrosAsDollars(v);
+
+  return [
+    { label: "Strategy", a: a?.strategy ?? "—", b: b?.strategy ?? "—" },
+    { label: "Symbol(s)", a: a?.symbols ?? "—", b: b?.symbols ?? "—" },
+    { label: "Timeframe", a: a?.timeframe ?? "—", b: b?.timeframe ?? "—" },
+    { label: "Data range", a: a?.dataRange ?? "—", b: b?.dataRange ?? "—" },
+    { label: "Total return", a: a ? pct(a.totalReturnPct) : "—", b: b ? pct(b.totalReturnPct) : "—" },
+    { label: "Alpha vs buy & hold", a: a ? pct(a.alphaPct) : "—", b: b ? pct(b.alphaPct) : "—" },
+    { label: "Max drawdown", a: a ? pct(a.maxDrawdownPct) : "—", b: b ? pct(b.maxDrawdownPct) : "—" },
+    { label: "Sharpe ratio", a: a ? num(a.sharpeRatio, 3) : "—", b: b ? num(b.sharpeRatio, 3) : "—" },
+    { label: "Sortino ratio", a: a ? num(a.sortinoRatio, 3) : "—", b: b ? num(b.sortinoRatio, 3) : "—" },
+    { label: "Trade count", a: a ? String(a.tradeCount) : "—", b: b ? String(b.tradeCount) : "—" },
+    { label: "Win rate", a: a ? pct(a.winRatePct) : "—", b: b ? pct(b.winRatePct) : "—" },
+    { label: "Profit factor", a: a ? num(a.profitFactor) : "—", b: b ? num(b.profitFactor) : "—" },
+    { label: "Expectancy", a: a ? usd(a.expectancyMicros) : "—", b: b ? usd(b.expectancyMicros) : "—" },
+    { label: "Commissions", a: a ? usd(a.commissionMicros) : "—", b: b ? usd(b.commissionMicros) : "—" },
+  ];
+}
+
+function ComparisonPanel({
+  jobs,
+  jobAId,
+  jobBId,
+  onSelectA,
+  onSelectB,
+  loadingA,
+  loadingB,
+  errorA,
+  errorB,
+  snapshotA,
+  snapshotB,
+}: {
+  jobs: SessionJobRow[];
+  jobAId: string;
+  jobBId: string;
+  onSelectA: (jobId: string) => void;
+  onSelectB: (jobId: string) => void;
+  loadingA: boolean;
+  loadingB: boolean;
+  errorA: string | null;
+  errorB: string | null;
+  snapshotA: ComparisonSnapshot | null;
+  snapshotB: ComparisonSnapshot | null;
+}) {
+  const eligible = jobs.filter((j) => j.status === "completed" && j.artifactDir);
+
+  return (
+    <Panel
+      title="Compare two completed runs"
+      subtitle="Side-by-side authoritative metrics from two completed session jobs. Display comparison only — no winner is declared and nothing here changes Research/Promotion status."
+    >
+      {eligible.length < 2 && (
+        <div className="empty-state">
+          Need at least two completed jobs with artifacts in the current session to compare.
+        </div>
+      )}
+
+      {eligible.length >= 2 && (
+        <div className="bt-job-form-grid">
+          <div className="bt-job-field">
+            <label htmlFor="bt-compare-a">Run A</label>
+            <select id="bt-compare-a" value={jobAId} onChange={(e) => onSelectA(e.target.value)}>
+              <option value="">— select —</option>
+              {eligible.map((j) => (
+                <option key={j.jobId} value={j.jobId}>
+                  {j.jobId.slice(0, 8)}… — {j.strategy}/{j.symbol}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-compare-b">Run B</label>
+            <select id="bt-compare-b" value={jobBId} onChange={(e) => onSelectB(e.target.value)}>
+              <option value="">— select —</option>
+              {eligible.map((j) => (
+                <option key={j.jobId} value={j.jobId}>
+                  {j.jobId.slice(0, 8)}… — {j.strategy}/{j.symbol}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+
+      {(loadingA || loadingB) && <div className="empty-state">Loading comparison artifacts…</div>}
+      {errorA && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+          <strong>Run A load failed:</strong> {errorA}
+        </div>
+      )}
+      {errorB && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+          <strong>Run B load failed:</strong> {errorB}
+        </div>
+      )}
+
+      {(snapshotA || snapshotB) && !loadingA && !loadingB && (
+        <div style={{ marginTop: 12 }}>
+          <DataTable
+            rows={buildComparisonRows(snapshotA, snapshotB)}
+            rowKey={(row) => row.label}
+            columns={[
+              { key: "metric", title: "Metric", render: (row) => row.label },
+              { key: "a", title: "Run A", render: (row) => row.a },
+              { key: "b", title: "Run B", render: (row) => row.b },
+            ]}
+          />
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Portable default path builder — derives defaults from the repo root
 // injected by the launcher via MQK_REPO_ROOT. Returns "" when unavailable
 // so the operator sees a blank field with placeholder instead of a stale path.
@@ -2319,6 +2451,75 @@ export function BacktestResultsScreen() {
         setSelectedSessionJobBundleLoading(false);
       });
   }, []);
+
+  // --- Workflow D (optional): compare two completed session jobs ---
+  const [compareAJobId, setCompareAJobId] = useState("");
+  const [compareBJobId, setCompareBJobId] = useState("");
+  const [compareASnapshot, setCompareASnapshot] = useState<ComparisonSnapshot | null>(null);
+  const [compareBSnapshot, setCompareBSnapshot] = useState<ComparisonSnapshot | null>(null);
+  const [compareALoading, setCompareALoading] = useState(false);
+  const [compareBLoading, setCompareBLoading] = useState(false);
+  const [compareAError, setCompareAError] = useState<string | null>(null);
+  const [compareBError, setCompareBError] = useState<string | null>(null);
+  const compareAGenerationRef = useRef(0);
+  const compareBGenerationRef = useRef(0);
+
+  const loadComparisonSide = useCallback(
+    (
+      jobId: string,
+      generationRef: React.MutableRefObject<number>,
+      setLoading: (v: boolean) => void,
+      setError: (v: string | null) => void,
+      setSnapshot: (v: ComparisonSnapshot | null) => void,
+    ) => {
+      const generation = ++generationRef.current;
+      setSnapshot(null);
+      setError(null);
+      const job = sessionJobs.find((j) => j.jobId === jobId);
+      if (!job || job.status !== "completed" || !job.artifactDir) {
+        if (job && job.status !== "completed") {
+          setError(`Selected job is ${job.status}, not completed — nothing to compare yet.`);
+        } else if (job && !job.artifactDir) {
+          setError("Selected job completed without an artifact_dir — nothing to load.");
+        }
+        return;
+      }
+      setLoading(true);
+      loadBundle(job.artifactDir)
+        .then((b) => {
+          if (generationRef.current !== generation) return;
+          setLoading(false);
+          const snap = extractComparisonSnapshot(b);
+          if (!snap) {
+            setError("metrics.json unavailable for this run — cannot compare.");
+            return;
+          }
+          setSnapshot(snap);
+        })
+        .catch((e) => {
+          if (generationRef.current !== generation) return;
+          setLoading(false);
+          setError(String(e));
+        });
+    },
+    [sessionJobs],
+  );
+
+  const handleSelectCompareA = useCallback(
+    (jobId: string) => {
+      setCompareAJobId(jobId);
+      loadComparisonSide(jobId, compareAGenerationRef, setCompareALoading, setCompareAError, setCompareASnapshot);
+    },
+    [loadComparisonSide],
+  );
+
+  const handleSelectCompareB = useCallback(
+    (jobId: string) => {
+      setCompareBJobId(jobId);
+      loadComparisonSide(jobId, compareBGenerationRef, setCompareBLoading, setCompareBError, setCompareBSnapshot);
+    },
+    [loadComparisonSide],
+  );
 
   // Polling: fire when a non-terminal job is active. Bounded cadence: 2s.
   // Cancellation token prevents state updates after unmount or job change.
@@ -3061,6 +3262,34 @@ export function BacktestResultsScreen() {
           source="Loaded results — Workflow C (current session job selection)"
         />
       )}
+
+      <hr className="bt-section-divider" />
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Workflow D (optional) — Compare two completed session jobs           */}
+      {/* ------------------------------------------------------------------ */}
+
+      <div className="bt-workflow-heading">
+        <span className="bt-workflow-tag">Workflow D · Compare runs (optional)</span>
+        <span className="bt-workflow-caption">
+          Pick two completed jobs from the current session and view their authoritative metrics
+          side by side. No winner is declared and this never changes Research/Promotion status.
+        </span>
+      </div>
+
+      <ComparisonPanel
+        jobs={sessionJobs}
+        jobAId={compareAJobId}
+        jobBId={compareBJobId}
+        onSelectA={handleSelectCompareA}
+        onSelectB={handleSelectCompareB}
+        loadingA={compareALoading}
+        loadingB={compareBLoading}
+        errorA={compareAError}
+        errorB={compareBError}
+        snapshotA={compareASnapshot}
+        snapshotB={compareBSnapshot}
+      />
     </div>
   );
 }

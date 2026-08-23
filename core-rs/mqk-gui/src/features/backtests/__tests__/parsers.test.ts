@@ -15,6 +15,7 @@ import {
   instrumentRegistryV2SourceStatusLabel,
   manifestTimeframeLabel,
   computeDrawdownSeries,
+  extractComparisonSnapshot,
   microsToUsd,
   parseCsvRows,
   parseEquityCurve,
@@ -30,6 +31,7 @@ import {
   timeframeLabelFromSecs,
 } from "../parsers.ts";
 import type {
+  ArtifactBundle,
   BacktestEconomicsSuggestionResponse,
   BacktestMetrics,
   InstrumentRegistryV2SourceStatusResponse,
@@ -256,6 +258,117 @@ test("computeDrawdownSeries is monotonically non-decreasing peak across a rising
   for (const p of series) {
     assert.equal(p.drawdown_pct, 0, "a strictly rising curve has zero drawdown at every point");
   }
+});
+
+// --- extractComparisonSnapshot (GUI-BACKTEST-RUN-COMPARISON-01) ---
+
+function baseBundle(overrides: Partial<ArtifactBundle> = {}): ArtifactBundle {
+  return {
+    manifest: { kind: "missing" },
+    metrics: { kind: "ok", data: baseMetrics() },
+    equityCurve: { kind: "ok", data: { rows: [], malformed: 0 } },
+    orders: { kind: "missing" },
+    fills: { kind: "missing" },
+    strategyFit: { kind: "missing" },
+    paperReadiness: { kind: "missing" },
+    watchlistPromotion: { kind: "missing" },
+    premarketRevalidation: { kind: "missing" },
+    evidenceReview: { kind: "missing" },
+    ...overrides,
+  };
+}
+
+test("extractComparisonSnapshot returns null when metrics.json is unavailable", () => {
+  const bundle = baseBundle({ metrics: { kind: "missing" } });
+  assert.equal(extractComparisonSnapshot(bundle), null);
+});
+
+test("extractComparisonSnapshot maps core metrics fields", () => {
+  const bundle = baseBundle({
+    metrics: {
+      kind: "ok",
+      data: baseMetrics({
+        total_return_pct: 12.5,
+        max_drawdown_pct: 4.2,
+        sharpe_ratio: 1.1,
+        sortino_ratio: 1.4,
+        trade_count: 7,
+        win_rate_pct: 57.1,
+        profit_factor: 1.8,
+        expectancy_micros: 5_000_000,
+        total_commission_micros: 1_200_000,
+      }),
+    },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.ok(snap);
+  assert.equal(snap!.totalReturnPct, 12.5);
+  assert.equal(snap!.maxDrawdownPct, 4.2);
+  assert.equal(snap!.sharpeRatio, 1.1);
+  assert.equal(snap!.sortinoRatio, 1.4);
+  assert.equal(snap!.tradeCount, 7);
+  assert.equal(snap!.winRatePct, 57.1);
+  assert.equal(snap!.profitFactor, 1.8);
+  assert.equal(snap!.expectancyMicros, 5_000_000);
+  assert.equal(snap!.commissionMicros, 1_200_000);
+});
+
+test("extractComparisonSnapshot falls back to metrics.strategy_name when manifest is unavailable", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "missing" },
+    metrics: { kind: "ok", data: baseMetrics({ strategy_name: "mean_reversion" }) },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.strategy, "mean_reversion");
+});
+
+test("extractComparisonSnapshot reports null alpha when metrics carries no benchmark", () => {
+  const bundle = baseBundle();
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.alphaPct, null, "no benchmark means alpha is genuinely unavailable, not zero");
+});
+
+test("extractComparisonSnapshot reports alpha from metrics.benchmark when present", () => {
+  const bundle = baseBundle({
+    metrics: {
+      kind: "ok",
+      data: baseMetrics({
+        benchmark: {
+          first_bar_open_micros: 100_000_000,
+          last_bar_close_micros: 110_000_000,
+          buy_and_hold_return_pct: 10,
+          strategy_total_return_pct: 15,
+          alpha_pct: 5,
+          assumption: "test",
+        },
+      }),
+    },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.alphaPct, 5);
+});
+
+test("extractComparisonSnapshot reports 'not reported' data range when equity curve is empty", () => {
+  const bundle = baseBundle();
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.dataRange, "not reported");
+});
+
+test("extractComparisonSnapshot derives data range from the equity curve's first/last rows", () => {
+  const bundle = baseBundle({
+    equityCurve: {
+      kind: "ok",
+      data: {
+        rows: [
+          { ts_utc: "2026-06-01T00:00:00Z", equity: 100 },
+          { ts_utc: "2026-06-20T00:00:00Z", equity: 110 },
+        ],
+        malformed: 0,
+      },
+    },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.dataRange, "2026-06-01T00:00:00Z -> 2026-06-20T00:00:00Z");
 });
 
 // --- parseOrders ---

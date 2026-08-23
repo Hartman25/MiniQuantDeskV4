@@ -1,4 +1,5 @@
 import type {
+  ArtifactBundle,
   BacktestEconomicsSuggestionResponse,
   BacktestManifest,
   BacktestMetrics,
@@ -223,6 +224,61 @@ export function manifestTimeframeLabel(
 ): string | null {
   if (typeof timeframe === "string" && timeframe.trim() !== "") return timeframe.trim();
   return timeframeLabelFromSecs(timeframeSecs);
+}
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-RUN-COMPARISON-01: side-by-side comparison snapshot
+// ---------------------------------------------------------------------------
+
+export interface ComparisonSnapshot {
+  strategy: string;
+  symbols: string;
+  timeframe: string;
+  dataRange: string;
+  totalReturnPct: number;
+  alphaPct: number | null;
+  maxDrawdownPct: number;
+  sharpeRatio: number | null;
+  sortinoRatio: number | null;
+  tradeCount: number;
+  winRatePct: number | null;
+  profitFactor: number | null;
+  expectancyMicros: number | null;
+  commissionMicros: number;
+}
+
+/**
+ * Extracts already-authoritative metrics/manifest values into a flat
+ * comparison snapshot. Pure display mapping only — never recomputes or
+ * derives a "winner"; a null field means the source artifact did not report
+ * that value, rendered as such by the caller.
+ */
+export function extractComparisonSnapshot(bundle: ArtifactBundle): ComparisonSnapshot | null {
+  if (bundle.metrics.kind !== "ok") return null;
+  const m = bundle.metrics.data;
+  const manifest = bundle.manifest.kind === "ok" ? bundle.manifest.data : null;
+  const equityRows = bundle.equityCurve.kind === "ok" ? bundle.equityCurve.data.rows : [];
+  const dataRange =
+    equityRows.length > 0
+      ? `${equityRows[0].ts_utc || "—"} -> ${equityRows[equityRows.length - 1].ts_utc || "—"}`
+      : "not reported";
+
+  return {
+    strategy: manifest?.strategy_name ?? m.strategy_name,
+    symbols: m.symbols.length > 0 ? m.symbols.join(", ") : "not reported",
+    timeframe: manifestTimeframeLabel(manifest?.timeframe, manifest?.timeframe_secs) ?? "not reported",
+    dataRange,
+    totalReturnPct: m.total_return_pct,
+    alphaPct: m.benchmark?.alpha_pct ?? null,
+    maxDrawdownPct: m.max_drawdown_pct,
+    sharpeRatio: m.sharpe_ratio,
+    sortinoRatio: m.sortino_ratio,
+    tradeCount: m.trade_count,
+    winRatePct: m.win_rate_pct,
+    profitFactor: m.profit_factor,
+    expectancyMicros: m.expectancy_micros,
+    commissionMicros: m.total_commission_micros,
+  };
 }
 
 // ---------------------------------------------------------------------------
