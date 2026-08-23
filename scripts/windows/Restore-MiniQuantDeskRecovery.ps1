@@ -141,7 +141,16 @@ foreach ($entry in $manifestFiles) {
     try { $sha256 = [string]$entry.sha256 } catch {}
     try { $sizeBytes = $entry.size_bytes } catch {}
 
-    if ([string]::IsNullOrWhiteSpace($relPath) -or [string]::IsNullOrWhiteSpace($sha256) -or ($sha256 -notmatch '^[0-9a-fA-F]{64}$') -or ($null -eq $sizeBytes) -or -not ($sizeBytes -is [int] -or $sizeBytes -is [long] -or $sizeBytes -is [double]) -or ([double]$sizeBytes -lt 0)) {
+    # size_bytes must be a non-negative, non-fractional value that fits in a
+    # 64-bit file length -- a stray fraction or an out-of-range magnitude
+    # must be refused here rather than silently truncated/overflowing at the
+    # size-identity comparison below (D-R1-R2 defect 01).
+    $sizeBytesWellFormed = ($null -ne $sizeBytes) -and ($sizeBytes -is [int] -or $sizeBytes -is [long] -or $sizeBytes -is [double]) `
+        -and -not [double]::IsNaN([double]$sizeBytes) -and -not [double]::IsInfinity([double]$sizeBytes) `
+        -and ([double]$sizeBytes -ge 0) -and ([double]$sizeBytes -le [long]::MaxValue) `
+        -and ([double]$sizeBytes -eq [math]::Floor([double]$sizeBytes))
+
+    if ([string]::IsNullOrWhiteSpace($relPath) -or [string]::IsNullOrWhiteSpace($sha256) -or ($sha256 -notmatch '^[0-9a-fA-F]{64}$') -or -not $sizeBytesWellFormed) {
         Write-Fail "Malformed manifest entry -- refusing to trust it: $($entry | ConvertTo-Json -Compress -Depth 3)"
         $manifestVerificationFailed = $true
         continue
@@ -177,6 +186,19 @@ foreach ($entry in $manifestFiles) {
     $actualEntryHash = (Get-FileHash -Path $resolvedCandidate -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualEntryHash -ne $sha256.ToLowerInvariant()) {
         Write-Fail "SHA-256 mismatch for ${relPath}: manifest=$sha256 actual=$actualEntryHash"
+        $manifestVerificationFailed = $true
+        continue
+    }
+
+    # D-R1-R2 defect 01: size_bytes was parsed/type-checked above but never
+    # compared to the real restored file length, so a manifest with a
+    # correct hash and a wrong size_bytes silently "verified". Require exact
+    # integer identity between the manifest value and the actual file length
+    # -- this must fail closed BEFORE pg_restore is ever invoked.
+    $actualSizeBytes = (Get-Item -LiteralPath $resolvedCandidate).Length
+    $manifestSizeBytes = [long]$sizeBytes
+    if ($manifestSizeBytes -ne $actualSizeBytes) {
+        Write-Fail "size_bytes mismatch for ${relPath}: manifest=$manifestSizeBytes actual=$actualSizeBytes"
         $manifestVerificationFailed = $true
         continue
     }

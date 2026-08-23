@@ -127,6 +127,8 @@ Assert-True 'Restore script rejects duplicate manifest paths' `
     ($RestoreText -match [regex]::Escape('lists duplicate path'))
 Assert-True 'Restore script rejects absolute/traversal manifest paths' `
     ($RestoreText -match [regex]::Escape('IsPathRooted') -and $RestoreText -match [regex]::Escape('resolves outside the backup root'))
+Assert-True 'Restore script compares actual restored file length against manifest size_bytes (D-R1-R2 defect 01)' `
+    ($RestoreText -match [regex]::Escape('size_bytes mismatch for'))
 
 $BackupText = Get-Content -Path $BackupScript -Raw
 Assert-True 'Backup script never copies the Postgres data directory (pg_dump only)' `
@@ -295,6 +297,22 @@ $mutationCases = @(
         FilesEntries = @(
             @{ path = 'paper_db.dump'; sha256 = $dumpHashForMutations; size_bytes = 37 },
             @{ path = 'extra.txt'; sha256 = 'not-a-real-hash'; size_bytes = 19 }
+        )
+        OmitExtraFile = $false
+    },
+    @{
+        Name = 'size_bytes mismatch on a hash-correct file (D-R1-R2 defect 01)'
+        FilesEntries = @(
+            @{ path = 'paper_db.dump'; sha256 = $dumpHashForMutations; size_bytes = 999999 },
+            @{ path = 'extra.txt'; sha256 = $extraHashCorrect; size_bytes = 19 }
+        )
+        OmitExtraFile = $false
+    },
+    @{
+        Name = 'size_bytes fractional value (D-R1-R2 defect 01)'
+        FilesEntries = @(
+            @{ path = 'paper_db.dump'; sha256 = $dumpHashForMutations; size_bytes = 37.5 },
+            @{ path = 'extra.txt'; sha256 = $extraHashCorrect; size_bytes = 19 }
         )
         OmitExtraFile = $false
     }
