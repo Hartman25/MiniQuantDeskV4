@@ -32,7 +32,17 @@
 #   - runs `restic forget` without --dry-run, or `restic prune`;
 #   - deletes the only/any existing snapshot;
 #   - touches Live, a broker, or the real Paper DB beyond the same read-only
-#     pg_dump Backup-MiniQuantDeskRecovery.ps1 already performs.
+#     pg_dump Backup-MiniQuantDeskRecovery.ps1 already performs;
+#   - emits REAL_B2_PROOF=PASS for any repository identity that is not
+#     provably an S3-compatible *.backblazeb2.com URL bound to the frozen
+#     bucket 'miniquantdesk-recovery-8f42c1' -- any other repository
+#     (including a local/opaque MQK_RESTIC_REPOSITORY override) can only
+#     ever produce LOCAL_RESTIC_ORCHESTRATION_PASS;
+#   - accepts a restic repository password file that is relative, missing,
+#     or resolves inside the primary repo/this repair worktree/any other
+#     linked Git worktree;
+#   - reports success (of either kind) before its own scratch-directory
+#     cleanup is proven to have actually removed what it created.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Invoke-MiniQuantDeskOffsiteBackup.ps1 `
@@ -54,11 +64,21 @@ param(
     [string] $B2Region              = '',
     [string] $RepositoryPrefix      = 'miniquantdesk-recovery',
     [string] $DisposableDbContainer = 'mqk-test-postgres',
-    [ValidateRange(1, [int]::MaxValue)][int] $ResticTimeoutSeconds = 600
+    [ValidateRange(1, [int]::MaxValue)][int] $ResticTimeoutSeconds = 600,
+
+    # D-R2-R2-03 test-only mutation seam: when supplied, this exact path is
+    # used as the staging scratch directory instead of a fresh GUID-named
+    # one, so a test can pre-create it with a locked file inside to force a
+    # real, deterministic Windows cleanup failure (no production behavior
+    # change -- empty by default, and never documented as a real usage flag).
+    [string] $StagingDirOverrideForCleanupTest = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# D-R2-R2-01: the only bucket a REAL_B2_PROOF=PASS claim may be bound to.
+$RequiredB2Bucket = 'miniquantdesk-recovery-8f42c1'
 
 function Write-Step { param([string]$M) Write-Host "[OFFSITE-B2] $M"       -ForegroundColor Cyan   }
 function Write-Ok   { param([string]$M) Write-Host "[OFFSITE-B2] OK: $M"   -ForegroundColor Green  }
@@ -197,6 +217,14 @@ Write-Ok "restic found: $resticVersionInfo"
 Write-Sect 'B2 transport configuration'
 $repositoryOverride = Get-AllowlistedLocalConfigValue -RepoRoot $RepoRoot -Name 'MQK_RESTIC_REPOSITORY'
 
+# D-R2-R2-01: REAL_B2_PROOF=PASS may only ever be emitted for a repository
+# identity that is provably S3-compatible, provably a *.backblazeb2.com
+# endpoint, AND provably bound to the one frozen intended bucket. Every
+# other repository identity (including an arbitrary local/opaque
+# MQK_RESTIC_REPOSITORY override) is LOCAL/TEST ORCHESTRATION ONLY and must
+# never be reported as real-B2 authority.
+$isRealB2Mode = $false
+
 if ([string]::IsNullOrWhiteSpace($repositoryOverride)) {
     if ([string]::IsNullOrWhiteSpace($B2Bucket))   { $B2Bucket   = Get-AllowlistedLocalConfigValue -RepoRoot $RepoRoot -Name 'MQK_B2_BUCKET' }
     if ([string]::IsNullOrWhiteSpace($B2Endpoint)) { $B2Endpoint = Get-AllowlistedLocalConfigValue -RepoRoot $RepoRoot -Name 'MQK_B2_ENDPOINT' }
@@ -208,23 +236,98 @@ if ([string]::IsNullOrWhiteSpace($repositoryOverride)) {
         Write-Fail 'These three values are visible on the bucket''s own settings/details page in the Backblaze B2 dashboard -- never a secret.'
         exit 1
     }
+    if ($B2Bucket -ne $RequiredB2Bucket) {
+        Write-Fail "B2_BUCKET_MISMATCH: bucket '$B2Bucket' does not match the frozen intended bucket '$RequiredB2Bucket'. A REAL_B2_PROOF=PASS claim requires exactly this bucket."
+        exit 1
+    }
+    if ($B2Endpoint -notmatch '(?i)\.backblazeb2\.com$') {
+        Write-Fail "B2_TRANSPORT_CONFIG_REQUIRED: endpoint '$B2Endpoint' does not look like a Backblaze B2 S3-compatible endpoint (expected a host ending in .backblazeb2.com)."
+        exit 1
+    }
     $resticRepository = "s3:https://$B2Endpoint/$B2Bucket/$RepositoryPrefix"
+    $isRealB2Mode = $true
     Write-Ok "B2 transport resolved: bucket=$B2Bucket endpoint=$B2Endpoint region=$B2Region prefix=$RepositoryPrefix"
 } else {
+    # An override CAN still qualify for real-B2 authority, but only if it is
+    # itself provably an s3: URL against a *.backblazeb2.com host bound to
+    # the frozen bucket -- an opaque/local/file repository never matches
+    # this pattern and therefore can never claim REAL_B2_PROOF=PASS.
     $resticRepository = $repositoryOverride
-    Write-Ok "Using explicit MQK_RESTIC_REPOSITORY override (bucket/endpoint/region composition skipped)."
+    if ($repositoryOverride -match '(?i)^s3:https?://([^/]+)/([^/]+)(/.*)?$') {
+        $overrideHost = $Matches[1]
+        $overrideBucket = $Matches[2]
+        if ($overrideHost -match '(?i)\.backblazeb2\.com$' -and $overrideBucket -eq $RequiredB2Bucket) {
+            $isRealB2Mode = $true
+        }
+    }
+    if ($isRealB2Mode) {
+        Write-Ok "Using explicit MQK_RESTIC_REPOSITORY override -- validated as an S3-compatible Backblaze B2 URL bound to bucket '$RequiredB2Bucket'; real-B2 authority preserved."
+    } else {
+        Write-Warn "MQK_RESTIC_REPOSITORY override does not satisfy the S3 + *.backblazeb2.com + bucket='$RequiredB2Bucket' identity check -- this run is LOCAL/TEST ORCHESTRATION ONLY and cannot emit REAL_B2_PROOF=PASS."
+    }
 }
 
 # =============================================================================
 # 3. restic repository password -- never generated or printed here.
+#    D-R2-R2-02: location authority is more than "the path exists" -- it must
+#    be an absolute path to a regular file that lives entirely outside every
+#    Git worktree this workflow touches, so it can never be swept up by the
+#    backup staging step (which only ever reads from inside $RepoRoot).
 # =============================================================================
+function Get-GitWorktreeRoots {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $porcelain = $null
+    try { $porcelain = & git -C $RepoRoot worktree list --porcelain 2>$null } catch { $porcelain = $null }
+    if ($LASTEXITCODE -ne 0 -or $null -eq $porcelain) { return $null }
+    $roots = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in $porcelain) {
+        if ($line -match '^worktree\s+(.+)$') {
+            try {
+                $resolved = (Resolve-Path -LiteralPath $Matches[1] -ErrorAction Stop).Path.TrimEnd('\')
+                $roots.Add($resolved)
+            } catch {}
+        }
+    }
+    return @($roots)
+}
+
+function Test-ResticPasswordFileAuthority {
+    param(
+        [string]$PasswordFilePath,
+        [string[]]$WorktreeRoots
+    )
+    $r = [ordered]@{ Present = $false; Absolute = $false; IsLeaf = $false; OutsideWorktrees = $false }
+    if ([string]::IsNullOrWhiteSpace($PasswordFilePath)) { return [pscustomobject]$r }
+    $r.Present = $true
+    # Reject relative paths BEFORE any resolution -- Resolve-Path would
+    # silently anchor a relative path to the current directory, defeating
+    # the "must be absolute" requirement.
+    if (-not [System.IO.Path]::IsPathRooted($PasswordFilePath)) { return [pscustomobject]$r }
+    $r.Absolute = $true
+    $resolved = $null
+    try { $resolved = (Resolve-Path -LiteralPath $PasswordFilePath -ErrorAction Stop).Path } catch {}
+    if ([string]::IsNullOrWhiteSpace($resolved) -or -not (Test-Path -LiteralPath $resolved -PathType Leaf)) { return [pscustomobject]$r }
+    $r.IsLeaf = $true
+    $resolvedTrimmed = $resolved.TrimEnd('\')
+    $insideAny = $false
+    foreach ($root in $WorktreeRoots) {
+        if ($resolvedTrimmed.Equals($root, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $resolvedTrimmed.StartsWith(($root + '\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+            $insideAny = $true
+            break
+        }
+    }
+    $r.OutsideWorktrees = -not $insideAny
+    return [pscustomobject]$r
+}
+
 Write-Sect 'restic repository password'
 $passwordFilePath = Get-AllowlistedLocalConfigValue -RepoRoot $RepoRoot -Name 'MQK_RESTIC_PASSWORD_FILE'
 if ([string]::IsNullOrWhiteSpace($passwordFilePath)) {
     $passwordFilePath = Get-AllowlistedLocalConfigValue -RepoRoot $RepoRoot -Name 'RESTIC_PASSWORD_FILE'
 }
-if ([string]::IsNullOrWhiteSpace($passwordFilePath) -or -not (Test-Path -LiteralPath $passwordFilePath -PathType Leaf)) {
-    Write-Fail 'OPERATOR_SECRET_SETUP_REQUIRED: no existing restic repository password file was found.'
+
+$OperatorSecretSetupHelp = {
     Write-Fail 'This script will not generate or print a password. Run this yourself, OUTSIDE the repo, then set MQK_RESTIC_PASSWORD_FILE (or RESTIC_PASSWORD_FILE) in .env.local to the resulting path:'
     Write-Host ''
     Write-Host '  $dir = Join-Path $env:USERPROFILE ''.miniquantdesk''' -ForegroundColor Yellow
@@ -234,9 +337,28 @@ if ([string]::IsNullOrWhiteSpace($passwordFilePath) -or -not (Test-Path -Literal
     Write-Host '  [Convert]::ToBase64String($bytes) | Set-Content -NoNewline -Path (Join-Path $dir ''restic-password'')' -ForegroundColor Yellow
     Write-Host ''
     Write-Fail 'Losing this password file makes the entire repository unrecoverable -- back it up separately, outside Git.'
+}
+
+$worktreeRoots = Get-GitWorktreeRoots -RepoRoot $RepoRoot
+if ($null -eq $worktreeRoots) {
+    Write-Fail 'WORKTREE_AUTHORITY_UNAVAILABLE: unable to enumerate Git worktree roots via "git -C <repo> worktree list" -- refusing to trust an unproven password-file-location authority.'
     exit 1
 }
-Write-Ok "Repository password file found (path only, contents never read/printed by this script)."
+
+$pwCheck = Test-ResticPasswordFileAuthority -PasswordFilePath $passwordFilePath -WorktreeRoots $worktreeRoots
+if (-not ($pwCheck.Present -and $pwCheck.Absolute -and $pwCheck.IsLeaf)) {
+    Write-Fail 'OPERATOR_SECRET_SETUP_REQUIRED: no existing, absolute-path restic repository password file was found.'
+    & $OperatorSecretSetupHelp
+    exit 1
+}
+if (-not $pwCheck.OutsideWorktrees) {
+    Write-Fail 'OPERATOR_SECRET_SETUP_REQUIRED: the configured restic repository password file resolves inside a Git worktree root used by this workflow (primary repo, this repair worktree, or another linked worktree). It must live entirely outside all repo/worktree authority.'
+    & $OperatorSecretSetupHelp
+    exit 1
+}
+Write-Ok 'RESTIC_PASSWORD_FILE_PRESENT=YES'
+Write-Ok 'RESTIC_PASSWORD_FILE_ABSOLUTE=YES'
+Write-Ok 'RESTIC_PASSWORD_FILE_OUTSIDE_WORKTREES=YES'
 
 # =============================================================================
 # 4. B2 application key -- maps to AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
@@ -271,10 +393,12 @@ $ResticEnv = @{
 # one cleanup site instead of a Remove-Item repeated at each failure branch.
 $stagingDir = $null
 $restoreTargetDir = $null
+$cleanupSucceeded = $true
+$cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
 try {
 
 Write-Sect 'Stage fresh recovery set'
-$stagingDir = Join-Path $env:TEMP ("mqk_offsite_stage_" + [guid]::NewGuid().ToString('N'))
+$stagingDir = if (-not [string]::IsNullOrWhiteSpace($StagingDirOverrideForCleanupTest)) { $StagingDirOverrideForCleanupTest } else { Join-Path $env:TEMP ("mqk_offsite_stage_" + [guid]::NewGuid().ToString('N')) }
 & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $BackupScript -RepoRoot $RepoRoot -OutDir $stagingDir | Out-Host
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "Backup-MiniQuantDeskRecovery.ps1 failed to stage a clean recovery set (exit $LASTEXITCODE) -- refusing to snapshot an unproven set."
@@ -444,16 +568,57 @@ if ($canaryRescanHit) {
 }
 Write-Ok "No allowlisted local secret value found in the restic-restored material ($($canaryValuesRescan.Count) value(s) checked)."
 
-Write-Sect 'Summary'
-Write-Ok "OPS_OFFSITE_BACKUP_CODE_AND_REAL_B2_PROOF=PASS"
-Write-Ok "snapshot_id=$snapshotId"
-exit 0
+# D-R2-R2-03: the workflow body falls through here on success WITHOUT
+# exiting -- cleanup authority (below, in `finally`) must run and be proven
+# successful before any success status is printed or the process exits 0.
+# Every failure branch above still exits 1 directly and immediately, which
+# is already correct: a failed run must never print a success token
+# regardless of what cleanup does afterward.
 
 } finally {
-    # Runs on every exit path above (success or `exit 1`) -- the disposable
-    # DB itself is already cleaned up by Restore-MiniQuantDeskRecovery.ps1
-    # (D-R1's own cleanup-failure-fails-the-proof guarantee), this only
-    # removes the two local scratch directories this script created.
-    if ($null -ne $stagingDir) { Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($null -ne $restoreTargetDir) { Remove-Item -Path $restoreTargetDir -Recurse -Force -ErrorAction SilentlyContinue }
+    # Runs on every exit path above (success fallthrough or an `exit 1`
+    # failure branch) -- the disposable DB itself is already cleaned up by
+    # Restore-MiniQuantDeskRecovery.ps1 (D-R1's own cleanup-failure-fails-
+    # the-proof guarantee). This only removes the two local scratch
+    # directories this script created, and -- unlike the prior
+    # SilentlyContinue version -- a failure here is recorded rather than
+    # swallowed, because a PASS claim over a proof that fails to clean up
+    # after itself is not proof-grade.
+    foreach ($dir in @($stagingDir, $restoreTargetDir)) {
+        if ($null -eq $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
+        try {
+            Remove-Item -Path $dir -Recurse -Force -ErrorAction Stop
+        } catch {
+            $cleanupSucceeded = $false
+            $cleanupErrors.Add("Failed to remove scratch directory '$dir': $($_.Exception.Message)")
+            continue
+        }
+        if (Test-Path -LiteralPath $dir) {
+            $cleanupSucceeded = $false
+            $cleanupErrors.Add("Scratch directory '$dir' still exists after Remove-Item reported success.")
+        }
+    }
 }
+
+# Only reached on the success fallthrough path above (every failure branch
+# already called `exit 1` from inside the try block, which takes effect
+# once `finally` completes -- PowerShell does not resume script execution
+# after that point). Cleanup authority gates the final result: a workflow
+# success with a failed cleanup is still an overall failure, and
+# REAL_B2_PROOF=PASS / LOCAL_RESTIC_ORCHESTRATION_PASS may only be printed
+# after cleanup is proven to have held.
+foreach ($msg in $cleanupErrors) { Write-Fail $msg }
+if (-not $cleanupSucceeded) {
+    Write-Fail 'Scratch-directory cleanup failed -- this is not an acceptable recovery proof regardless of workflow success.'
+    exit 1
+}
+
+Write-Sect 'Summary'
+if ($isRealB2Mode) {
+    Write-Ok 'OPS_OFFSITE_BACKUP_CODE_AND_REAL_B2_PROOF=PASS'
+    Write-Ok 'REAL_B2_PROOF=PASS'
+} else {
+    Write-Ok 'LOCAL_RESTIC_ORCHESTRATION_PASS'
+}
+Write-Ok "snapshot_id=$snapshotId"
+exit 0
