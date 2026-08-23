@@ -25,6 +25,7 @@ chrono.workspace = true
 clap.workspace = true
 # PATCH S1: dev-time .env.local bootstrap
 dotenvy.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # MARKET-DATA-PROVIDER-PROVENANCE-01: promoted from dev-dependencies — the
@@ -55,3 +56,6 @@ mqk-reconcile = { path = "../mqk-reconcile" }
 assert_cmd = "2"
 predicates = "3"
 # sqlx itself moved to [dependencies] above (MARKET-DATA-PROVIDER-PROVENANCE-01).
+# CLI-DAEMON-CONTROL-PASSTHROUGH-01: same hermetic HTTP-mock seam mqk-md
+# already uses (crates/mqk-md/Cargo.toml) for provider-adapter tests.
+httpmock = "0.7"

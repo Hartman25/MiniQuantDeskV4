@@ -13,6 +13,7 @@ use commands::{
         run_regime_detect, run_review_scan, run_strategy_lab_evaluate, run_strategy_lab_rank,
         run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
     },
+    daemon::{daemon_arm, daemon_clear_halted_run, daemon_disarm, daemon_halt, daemon_status},
     load_payload,
     md::{
         md_coinlore_latest_mark, md_crypto_registry_readiness, md_ingest_csv, md_ingest_provider,
@@ -85,6 +86,64 @@ enum Commands {
     Autonomous {
         #[command(subcommand)]
         cmd: AutonomousCmd,
+    },
+
+    /// CLI-DAEMON-CONTROL-PASSTHROUGH-01: thin passthrough to existing
+    /// mqk-daemon operator/control HTTP routes. Never mutates the DB
+    /// directly -- every mutating action is the same
+    /// `POST /api/v1/ops/action` call the GUI and PowerShell operator
+    /// scripts already use, over the same Bearer-token convention.
+    Daemon {
+        #[command(subcommand)]
+        cmd: DaemonCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Read-only daemon status snapshot (GET /api/v1/system/status). No
+    /// operator token required -- mirrors Start-MiniQuantDesk.ps1's own use
+    /// of this route.
+    Status {
+        /// Daemon base URL override (default: MQK_DAEMON_URL env, else
+        /// http://127.0.0.1:8899).
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+
+    /// Arm execution (action_key=arm-execution).
+    Arm {
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+
+    /// Disarm execution (action_key=disarm-execution).
+    Disarm {
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+
+    /// Halt execution immediately (action_key=kill-switch). Safety-sensitive:
+    /// requires --yes, or the command refuses before any HTTP request.
+    Halt {
+        #[arg(long)]
+        base_url: Option<String>,
+
+        /// Required confirmation for this safety-sensitive action.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
+    /// Clear a halted run so execution can be re-armed
+    /// (action_key=clear-halted-run). Safety-sensitive: requires --yes, or
+    /// the command refuses before any HTTP request.
+    ClearHaltedRun {
+        #[arg(long)]
+        base_url: Option<String>,
+
+        /// Required confirmation for this safety-sensitive action.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
 }
 
@@ -1758,6 +1817,24 @@ async fn run_cli() -> Result<()> {
                 if let Some(h) = db_ev.hash_self {
                     println!("hash_self={}", h);
                 }
+            }
+        },
+
+        Commands::Daemon { cmd } => match cmd {
+            DaemonCmd::Status { base_url } => {
+                daemon_status(base_url).await?;
+            }
+            DaemonCmd::Arm { base_url } => {
+                daemon_arm(base_url).await?;
+            }
+            DaemonCmd::Disarm { base_url } => {
+                daemon_disarm(base_url).await?;
+            }
+            DaemonCmd::Halt { base_url, yes } => {
+                daemon_halt(base_url, yes).await?;
+            }
+            DaemonCmd::ClearHaltedRun { base_url, yes } => {
+                daemon_clear_halted_run(base_url, yes).await?;
             }
         },
 

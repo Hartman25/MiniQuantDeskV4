@@ -4,6 +4,7 @@
 //! Command-specific logic lives in the submodules.
 
 pub mod bkt;
+pub mod daemon;
 pub mod md;
 pub mod run;
 
