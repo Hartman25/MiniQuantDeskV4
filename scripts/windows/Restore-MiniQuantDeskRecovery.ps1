@@ -68,6 +68,14 @@ if ($DisposableDbName -match '(?i)paper|live') {
     Write-Fail "REFUSING: disposable database name '$DisposableDbName' contains 'paper' or 'live'. Choose a name that cannot be confused with a real target."
     exit 1
 }
+# SQL-identifier safety (D-R1 defect 5): DisposableDbName is interpolated
+# directly into CREATE DATABASE / DROP DATABASE statements below. Require a
+# conservative identifier before it ever reaches docker/SQL -- rejects
+# anything that could break out of the intended identifier position.
+if ($DisposableDbName -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+    Write-Fail "REFUSING: disposable database name '$DisposableDbName' is not a conservative SQL identifier (expected ^[A-Za-z_][A-Za-z0-9_]*`$)."
+    exit 1
+}
 
 if (-not (Test-Path -LiteralPath $BackupDir)) {
     Write-Fail "BackupDir not found: $BackupDir"
@@ -106,22 +114,87 @@ if ($secretHits -and $secretHits.Count -gt 0) {
 Write-Ok 'No secret-pattern files found in the staged set.'
 
 # ---------------------------------------------------------------------------
-# Integrity check against the manifest (D11) before attempting restore.
+# Full manifest verification (D-R1 defect 2) before attempting restore.
+# Every listed file -- not paper_db.dump alone -- must: have a well-formed
+# entry (nonblank path, 32-hex-char-lowercase-normalized sha256, numeric
+# size_bytes), resolve strictly inside $BackupDir (no absolute path, no ..
+# traversal), exist on disk, and hash-match. Duplicate manifest paths fail
+# closed rather than silently verifying only the first/last occurrence.
 # ---------------------------------------------------------------------------
-Write-Sect 'Manifest integrity check'
+Write-Sect 'Full manifest verification'
 $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+$manifestFiles = @($manifest.files)
+if ($manifestFiles.Count -eq 0) {
+    Write-Fail 'manifest.json lists zero files -- refusing to trust an empty manifest.'
+    exit 1
+}
+
+$backupRootFull = (Resolve-Path -LiteralPath $BackupDir).Path.TrimEnd('\')
+$seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+$manifestVerificationFailed = $false
+
+foreach ($entry in $manifestFiles) {
+    $relPath = $null
+    $sha256 = $null
+    $sizeBytes = $null
+    try { $relPath = [string]$entry.path } catch {}
+    try { $sha256 = [string]$entry.sha256 } catch {}
+    try { $sizeBytes = $entry.size_bytes } catch {}
+
+    if ([string]::IsNullOrWhiteSpace($relPath) -or [string]::IsNullOrWhiteSpace($sha256) -or ($sha256 -notmatch '^[0-9a-fA-F]{64}$') -or ($null -eq $sizeBytes) -or -not ($sizeBytes -is [int] -or $sizeBytes -is [long] -or $sizeBytes -is [double]) -or ([double]$sizeBytes -lt 0)) {
+        Write-Fail "Malformed manifest entry -- refusing to trust it: $($entry | ConvertTo-Json -Compress -Depth 3)"
+        $manifestVerificationFailed = $true
+        continue
+    }
+
+    if ([System.IO.Path]::IsPathRooted($relPath) -or ($relPath -match '(^|[\\/])\.\.([\\/]|$)')) {
+        Write-Fail "Manifest entry has an absolute or traversal path -- refusing: $relPath"
+        $manifestVerificationFailed = $true
+        continue
+    }
+
+    if (-not $seenPaths.Add($relPath)) {
+        Write-Fail "Manifest lists duplicate path -- refusing to trust an ambiguous manifest: $relPath"
+        $manifestVerificationFailed = $true
+        continue
+    }
+
+    $candidateFull = Join-Path $BackupDir $relPath
+    $resolvedCandidate = $null
+    try { $resolvedCandidate = (Resolve-Path -LiteralPath $candidateFull -ErrorAction Stop).Path } catch {}
+    if ([string]::IsNullOrWhiteSpace($resolvedCandidate) -or -not ($resolvedCandidate.TrimEnd('\').StartsWith($backupRootFull, [System.StringComparison]::OrdinalIgnoreCase))) {
+        Write-Fail "Manifest entry resolves outside the backup root -- refusing: $relPath"
+        $manifestVerificationFailed = $true
+        continue
+    }
+
+    if (-not (Test-Path -LiteralPath $resolvedCandidate -PathType Leaf)) {
+        Write-Fail "Manifest-listed file is missing on disk: $relPath"
+        $manifestVerificationFailed = $true
+        continue
+    }
+
+    $actualEntryHash = (Get-FileHash -Path $resolvedCandidate -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualEntryHash -ne $sha256.ToLowerInvariant()) {
+        Write-Fail "SHA-256 mismatch for ${relPath}: manifest=$sha256 actual=$actualEntryHash"
+        $manifestVerificationFailed = $true
+        continue
+    }
+}
+
+if ($manifestVerificationFailed) {
+    Write-Fail 'Full manifest verification failed -- refusing to restore any content from this backup set.'
+    exit 1
+}
+Write-Ok "Full manifest verification passed: $($manifestFiles.Count) file(s) verified against $BackupDir."
+
 $dumpRelPath = 'paper_db.dump'
 $dumpEntry = $manifest.files | Where-Object { $_.path -eq $dumpRelPath } | Select-Object -First 1
 if (-not $dumpEntry) {
     Write-Fail "manifest.json does not list $dumpRelPath -- refusing to trust an unlisted file."
     exit 1
 }
-$actualHash = (Get-FileHash -Path $dumpPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actualHash -ne $dumpEntry.sha256) {
-    Write-Fail "paper_db.dump SHA-256 mismatch: manifest=$($dumpEntry.sha256) actual=$actualHash"
-    exit 1
-}
-Write-Ok "paper_db.dump integrity verified (sha256=$actualHash)."
+Write-Ok "paper_db.dump integrity verified as part of the full manifest above (sha256=$($dumpEntry.sha256))."
 
 # ---------------------------------------------------------------------------
 # Confirm the disposable container exists/is running before anything else.
@@ -153,14 +226,19 @@ if ($LASTEXITCODE -ne 0) {
 Write-Ok "Disposable database '$DisposableDbName' created."
 
 $restoreFailed = $false
+$cleanupFailed = $false
 try {
     Write-Sect 'pg_restore into disposable database'
     docker exec $DisposableDbContainer pg_restore -U $DisposableDbUser --no-owner --no-privileges -d $DisposableDbName $containerDumpPath 2>&1 | Out-Host
-    # pg_restore can exit nonzero on benign warnings (e.g. missing roles);
-    # the real proof is the post-restore table/row verification below, not
-    # this exit code alone.
+    # D-R1 defect 1: a nonzero pg_restore exit is no longer treated as
+    # benign. --no-owner --no-privileges already suppresses the expected
+    # ownership/role noise, so a remaining nonzero exit means a genuine
+    # restore problem and must fail this proof outright.
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "pg_restore reported a nonzero exit (may include benign role/permission warnings); verifying actual restored content below."
+        Write-Fail "pg_restore exited nonzero ($LASTEXITCODE) -- this is not an acceptable recovery proof."
+        $restoreFailed = $true
+    } else {
+        Write-Ok 'pg_restore exited 0.'
     }
 
     Write-Sect 'Post-restore verification'
@@ -180,7 +258,11 @@ try {
         Write-Sect "Cleanup: dropping disposable database '$DisposableDbName'"
         docker exec $DisposableDbContainer psql -U $DisposableDbUser -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS $DisposableDbName;" 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Failed to drop disposable database '$DisposableDbName' (exit $LASTEXITCODE) -- operator cleanup required."
+            # D-R1 defect 6: cleanup failure must fail the overall proof,
+            # not just warn -- a PASS must never be printed alongside a
+            # disposable database left behind un-dropped.
+            Write-Fail "Failed to drop disposable database '$DisposableDbName' (exit $LASTEXITCODE) -- operator cleanup required."
+            $cleanupFailed = $true
         } else {
             Write-Ok "Disposable database '$DisposableDbName' dropped."
         }
@@ -189,7 +271,7 @@ try {
     }
 }
 
-if ($restoreFailed) {
+if ($restoreFailed -or $cleanupFailed) {
     exit 1
 }
 Write-Sect 'Summary'

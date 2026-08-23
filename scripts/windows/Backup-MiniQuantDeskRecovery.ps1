@@ -105,19 +105,86 @@ $Components = [ordered]@{}
 $RequiredComponentFailed = $false
 
 # ---------------------------------------------------------------------------
+# 0. Local secret-store exclusion authority (D-R1 defect 4a) -- proven BEFORE
+#    anything is staged. A git bundle can only ever contain committed
+#    objects, so this is what actually establishes that .env.local/.env
+#    cannot reach the bundle: they must be both gitignored (so a future
+#    accidental `git add` is blocked) and currently untracked (so no
+#    historical commit already carries one into HEAD). If either check
+#    fails, staging is refused outright rather than proceeding on an
+#    unproven assumption.
+# ---------------------------------------------------------------------------
+Write-Sect 'Local secret-store exclusion authority'
+
+# The expected/normal outcome of `git check-ignore` (no match) and
+# `git ls-files --error-unmatch` (file not tracked) is a nonzero exit with a
+# message on the native process's OWN stderr -- under this script's
+# $ErrorActionPreference = 'Stop', that stderr text would otherwise be
+# converted into an uncaught terminating error for what is actually the
+# expected control-flow path. Locally relax to 'Continue' for just these
+# probes so only $LASTEXITCODE is consulted, then restore 'Stop'.
+function Test-GitCommandSucceeds {
+    param([Parameter(Mandatory = $true)][string[]]$GitArgs)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & git @GitArgs *> $null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+$LocalSecretStoreRelPaths = @('.env.local', '.env')
+$secretStoreProofFailed = $false
+$secretStoreProofDetail = @()
+foreach ($rel in $LocalSecretStoreRelPaths) {
+    $full = Join-Path $RepoRoot $rel
+    if (-not (Test-Path -LiteralPath $full)) {
+        Write-Ok "$rel does not exist on this machine -- nothing to prove."
+        continue
+    }
+    $isIgnored = Test-GitCommandSucceeds -GitArgs @('-C', $RepoRoot, 'check-ignore', '-q', '--', $rel)
+    if (-not $isIgnored) {
+        Write-Fail "$rel exists but is NOT gitignored -- refusing to stage anything."
+        $secretStoreProofFailed = $true
+        $secretStoreProofDetail += "${rel}:not_gitignored"
+        continue
+    }
+    $isTracked = Test-GitCommandSucceeds -GitArgs @('-C', $RepoRoot, 'ls-files', '--error-unmatch', '--', $rel)
+    if ($isTracked) {
+        Write-Fail "$rel is TRACKED by git -- refusing to stage anything (expected untracked)."
+        $secretStoreProofFailed = $true
+        $secretStoreProofDetail += "${rel}:tracked"
+        continue
+    }
+    Write-Ok "$rel confirmed gitignored and untracked."
+    $secretStoreProofDetail += "${rel}:ok"
+}
+if ($secretStoreProofFailed) {
+    $Components['secret_store_exclusion_proof'] = @{ status = 'failed'; detail = $secretStoreProofDetail }
+    $RequiredComponentFailed = $true
+} else {
+    $Components['secret_store_exclusion_proof'] = @{ status = 'ok'; detail = $secretStoreProofDetail }
+}
+
+# ---------------------------------------------------------------------------
 # 1. Exact source/Git identity (D2). A bundle of HEAD -- self-contained,
 #    restorable via `git clone <bundle>` -- plus a small identity JSON.
 #    Never includes untracked/ignored files (git bundle only ever contains
 #    committed objects), so this cannot smuggle a secret that was never
 #    committed.
+#
+#    The Git remote URL is deliberately NEVER captured here (D-R1 defect 3):
+#    a remote may embed userinfo/token credentials, and the commit SHA plus
+#    bundle identity are the actual recovery authority -- a remote URL is
+#    not needed to restore from this backup set.
 # ---------------------------------------------------------------------------
 Write-Sect 'Git identity + bundle'
 try {
     $headSha    = (git -C $RepoRoot rev-parse HEAD).Trim()
     $branch     = (git -C $RepoRoot rev-parse --abbrev-ref HEAD).Trim()
     $shortStat  = (git -C $RepoRoot status --short) -join "`n"
-    $remoteUrl  = $null
-    try { $remoteUrl = (git -C $RepoRoot remote get-url origin 2>$null).Trim() } catch {}
 
     $bundlePath = Join-Path $OutDir 'source.bundle'
     git -C $RepoRoot bundle create $bundlePath HEAD 2>&1 | Out-Null
@@ -128,7 +195,6 @@ try {
     $identity = [ordered]@{
         head_sha            = $headSha
         branch              = $branch
-        remote_url          = $remoteUrl
         working_tree_dirty  = -not [string]::IsNullOrWhiteSpace($shortStat)
         working_tree_status = $shortStat
         captured_at_utc     = (Get-Date).ToUniversalTime().ToString('o')
@@ -314,6 +380,71 @@ if ($secretHits -and $secretHits.Count -gt 0) {
 }
 
 # ---------------------------------------------------------------------------
+# 6b. Content-canary secret scan (D-R1 defect 4b, defense in depth beyond
+#     filename matching). Reads the VALUES of an allowlisted set of known
+#     local secret variable names out of .env.local/.env (never their
+#     names alone -- an attacker-controlled config value could otherwise
+#     collide with a name check), then scans every staged non-binary file
+#     for those exact values. Never prints a matched value -- only the path
+#     of the file it was found in.
+# ---------------------------------------------------------------------------
+Write-Sect 'Content-canary secret scan'
+function Get-AllowlistedLocalSecretValues {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $allowlistedNames = @(
+        'MQK_OPERATOR_TOKEN', 'MQK_DATABASE_URL', 'MQK_RESTIC_REPOSITORY', 'MQK_RESTIC_PASSWORD_FILE',
+        'ALPACA_API_KEY_ID', 'ALPACA_API_SECRET_KEY', 'ALPACA_API_KEY', 'ALPACA_API_SECRET',
+        'B2_ACCOUNT_ID', 'B2_ACCOUNT_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'
+    )
+    $values = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($candidate in @((Join-Path $RepoRoot '.env.local'), (Join-Path $RepoRoot '.env'))) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        foreach ($line in Get-Content -Path $candidate) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith('#')) { continue }
+            $idx = $trimmed.IndexOf('=')
+            if ($idx -lt 1) { continue }
+            $name = $trimmed.Substring(0, $idx).Trim()
+            $value = $trimmed.Substring($idx + 1).Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                if ($value.Length -ge 2) { $value = $value.Substring(1, $value.Length - 2) }
+            }
+            # A minimum length avoids a short/trivial value producing
+            # spurious matches against unrelated staged content.
+            if (($allowlistedNames -contains $name) -and ($value.Length -ge 8)) {
+                [void]$values.Add($value)
+            }
+        }
+    }
+    return @($values)
+}
+
+$canaryValues = @(Get-AllowlistedLocalSecretValues -RepoRoot $RepoRoot)
+$canaryHit = $false
+$binaryExtensions = @('.dump', '.sqlite')
+if ($canaryValues.Count -gt 0) {
+    $textCandidates = Get-ChildItem -Path $OutDir -Recurse -File | Where-Object { $binaryExtensions -notcontains $_.Extension }
+    foreach ($f in $textCandidates) {
+        $content = Get-Content -Path $f.FullName -Raw -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrEmpty($content)) { continue }
+        foreach ($val in $canaryValues) {
+            if ($content.Contains($val)) {
+                Write-Fail "SECRET CANARY MATCH in staged file (value withheld from log): $($f.FullName)"
+                $canaryHit = $true
+            }
+        }
+    }
+}
+if ($canaryHit) {
+    $Components['secret_canary_scan'] = @{ status = 'failed' }
+    $RequiredComponentFailed = $true
+} else {
+    Write-Ok "No allowlisted local secret value found in any staged non-binary file ($($canaryValues.Count) value(s) checked)."
+    $Components['secret_canary_scan'] = @{ status = 'ok'; values_checked = $canaryValues.Count }
+}
+
+# ---------------------------------------------------------------------------
 # 7. Manifest: SHA-256 + size for every staged file (D7), total backup-set
 #    size (D16), and a documented (not yet enforced -- no restic repo
 #    exists) retention policy (D10).
@@ -353,6 +484,11 @@ if (-not $resticCmd) {
 
 $manifest = [ordered]@{
     schema_version    = 'mqk-recovery-backup-manifest-v1'
+    # This script's own authority is LOCAL staging only -- it never uploads
+    # anywhere. Whatever the restic status below, this field must never read
+    # as an offsite-backup success claim (D-R1 defect 7); a real offsite
+    # result comes only from the operational restic snapshot/check workflow.
+    overall_status    = 'LOCAL_RECOVERY_SET_STAGED'
     captured_at_utc   = (Get-Date).ToUniversalTime().ToString('o')
     staging_dir       = $OutDir
     components        = $Components
@@ -380,7 +516,8 @@ if ($RequiredComponentFailed) {
     Write-Fail 'One or more REQUIRED components failed -- this backup set MUST NOT be reported as successful.'
     exit 1
 }
-Write-Ok 'All REQUIRED components staged successfully.'
+Write-Ok 'LOCAL_RECOVERY_SET_STAGED: all REQUIRED components staged successfully.'
+Write-Warn 'This is a LOCAL staging result only -- it is NOT an offsite/encrypted backup success claim.'
 if (-not $resticCmd) {
     Write-Warn 'RESTIC_INSTALL_REQUIRED -- no encrypted/offsite step was performed.'
 }
