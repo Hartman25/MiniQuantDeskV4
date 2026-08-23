@@ -24,13 +24,20 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def base_config(**overrides) -> dict:
+    # Defaults represent a scaffold that WOULD be structurally valid if
+    # enabled -- node_id/lease_backend/expected_git_sha are all nonblank and
+    # consistent with base_payload()'s own defaults below, so an individual
+    # test only needs to override the one field it's actually exercising
+    # (E-R1 repair: node_id/lease_backend/git_sha blankness are now each
+    # independently gating, so a shared "everything blank" baseline would
+    # make every enabled-config test collide on the same early verdict).
     cfg = {
         "enabled": False,
         "provider": "",
         "standby_endpoint": "",
-        "node_id": "",
-        "expected_git_sha": "",
-        "lease_backend": "",
+        "node_id": "node-1",
+        "expected_git_sha": "a" * 40,
+        "lease_backend": "future-lease-x",
         "deployment_mode": "paper",
         "live_capability_requested": False,
     }
@@ -41,11 +48,11 @@ def base_config(**overrides) -> dict:
 def base_payload(**overrides) -> dict:
     payload = {
         "schema_version": vs.SCHEMA_VERSION,
-        "node_id": "",
+        "node_id": "node-1",
         "node_role": "standby",
         "deployment_mode": "paper",
         "live_capability": False,
-        "git_sha": "",
+        "git_sha": "a" * 40,
         "config_identity": "",
         "protocol_schema_identity": vs.SCHEMA_VERSION,
         "database_recovery_snapshot_identity": "",
@@ -54,8 +61,8 @@ def base_payload(**overrides) -> dict:
         "last_verified_backup_snapshot_identity": "",
         "reconcile_status_summary": "unavailable",
         "local_runtime_authority_status": "unavailable",
-        "future_lease_backend": "",
-        "future_fencing_generation": None,
+        "future_lease_backend": "future-lease-x",
+        "future_fencing_generation": 1,
         "standby_readiness": "not_configured",
     }
     payload.update(overrides)
@@ -115,13 +122,16 @@ class ScaffoldValidatorTests(unittest.TestCase):
         result = vs.validate(cfg, payload)
         self.assertEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
 
-    def test_e4_blank_expected_sha_does_not_block(self):
-        # expected_git_sha not yet set (empty) -- must not be treated as a
-        # mismatch against any observed value.
-        cfg = base_config(enabled=True, lease_backend="future-lease-x", expected_git_sha="")
+    def test_e4_blank_expected_sha_now_blocks(self):
+        # E-R1 repair: expected_git_sha="" in an ENABLED config used to be
+        # treated as "no claim to check" and fall through to SCAFFOLD_VALID
+        # -- one of the exact independent-review false positives. An enabled
+        # config must declare a real expected_git_sha; a blank one now fails
+        # closed instead of silently skipping identity verification.
+        cfg = base_config(enabled=True, expected_git_sha="")
         payload = base_payload(git_sha="c" * 40)
         result = vs.validate(cfg, payload)
-        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.IDENTITY_MISMATCH)
 
     # --- E5: malformed config fails closed --------------------------------
     def test_e5_none_config_is_malformed(self):
@@ -205,6 +215,113 @@ class ScaffoldValidatorTests(unittest.TestCase):
             local_runtime_authority_status="available",
         )
         self.assertEqual(vs.compute_granular_standby_readiness(payload), "ready_for_future_takeover_evaluation")
+
+    # --- ER1-ER5: exact independent-review false-positive mutation tests --
+    # Each mutates exactly ONE field away from an otherwise-valid enabled
+    # scaffold and proves SCAFFOLD_VALID (and therefore
+    # ready_for_future_takeover_evaluation) is unreachable.
+    def test_er1_blank_payload_git_sha_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(git_sha=""))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.IDENTITY_MISMATCH)
+        self.assertNotIn("granular_standby_readiness", result)
+
+    def test_er2_blank_payload_future_lease_backend_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(future_lease_backend=""))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MISSING_FENCING_BACKEND)
+        self.assertNotIn("granular_standby_readiness", result)
+
+    def test_er3_null_fencing_generation_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(future_fencing_generation=None))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MISSING_FENCING_BACKEND)
+        self.assertNotIn("granular_standby_readiness", result)
+
+    def test_er4_invalid_node_role_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(node_role="banana"))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+        self.assertNotIn("granular_standby_readiness", result)
+
+    def test_er5_invalid_protocol_schema_identity_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(protocol_schema_identity="other"))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+        self.assertNotIn("granular_standby_readiness", result)
+
+    # --- type confusion: malformed field TYPES must fail closed, never pass
+    #     via Python truthiness ---------------------------------------------
+    def test_type_confusion_enabled_as_string_is_refused(self):
+        result = vs.validate(base_config(enabled="true"), base_payload())
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+
+    def test_type_confusion_live_capability_as_zero_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(live_capability=0))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+
+    def test_type_confusion_fencing_generation_as_string_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(future_fencing_generation="1"))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+
+    def test_type_confusion_fencing_generation_negative_int_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(future_fencing_generation=-1))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+
+    def test_type_confusion_fencing_generation_bool_is_refused(self):
+        # bool is a subclass of int in Python -- True/False must never
+        # silently pass as a fencing-generation integer.
+        result = vs.validate(base_config(enabled=True), base_payload(future_fencing_generation=True))
+        self.assertNotEqual(result["verdict"], vs.ScaffoldVerdict.SCAFFOLD_VALID)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+
+    # --- Other E-R1 checks: node_id identity binding, lease-backend match,
+    #     unknown-field rejection --------------------------------------------
+    def test_config_node_id_blank_in_enabled_config_is_refused(self):
+        result = vs.validate(base_config(enabled=True, node_id=""), base_payload())
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.IDENTITY_MISMATCH)
+
+    def test_payload_node_id_blank_is_refused(self):
+        result = vs.validate(base_config(enabled=True), base_payload(node_id=""))
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.IDENTITY_MISMATCH)
+
+    def test_node_id_mismatch_is_refused(self):
+        result = vs.validate(base_config(enabled=True, node_id="node-1"), base_payload(node_id="node-2"))
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.IDENTITY_MISMATCH)
+
+    def test_future_lease_backend_mismatch_is_refused(self):
+        result = vs.validate(
+            base_config(enabled=True, lease_backend="future-lease-x"),
+            base_payload(future_lease_backend="future-lease-y"),
+        )
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MISSING_FENCING_BACKEND)
+
+    def test_config_unknown_field_is_malformed(self):
+        cfg = base_config()
+        cfg["unexpected_extra_field"] = "x"
+        result = vs.validate(cfg, base_payload())
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+
+    def test_payload_unknown_field_is_malformed(self):
+        payload = base_payload()
+        payload["unexpected_extra_field"] = "x"
+        result = vs.validate(base_config(), payload)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.MALFORMED_CONFIG)
+
+    def test_comment_metadata_key_is_tolerated(self):
+        # _comment is the one always-allowed non-functional annotation key
+        # (used by the committed example fixtures) -- it must not itself
+        # trigger the unknown-field rejection.
+        cfg = base_config()
+        cfg["_comment"] = "explanatory text"
+        payload = base_payload()
+        payload["_comment"] = "explanatory text"
+        result = vs.validate(cfg, payload)
+        self.assertEqual(result["verdict"], vs.ScaffoldVerdict.NOT_CONFIGURED)
 
     # --- Real example fixtures round-trip ----------------------------------
     def test_real_example_files_are_not_configured_as_shipped(self):
