@@ -363,6 +363,31 @@ export async function getBacktestJob(jobId: string): Promise<GetBacktestJobResul
   return { ok: true, data: result.data };
 }
 
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-COMPARISON-LOADING-FENCE-01
+// ---------------------------------------------------------------------------
+
+export type ComparisonSideResolution =
+  | { kind: "no_job" }
+  | { kind: "not_completed"; status: BacktestJobStatusKind }
+  | { kind: "missing_artifact" }
+  | { kind: "ready"; artifactDir: string };
+
+/**
+ * Pure decision step for loadComparisonSide: given a candidate jobId and the
+ * current-session job list, decides whether there is anything to load. Kept
+ * separate from the loading-state transition so every outcome (including
+ * "no_job" for a cleared/blank selection) is enumerated and the caller cannot
+ * forget to terminate a loading flag for a case it didn't anticipate.
+ */
+export function resolveComparisonSideJob(jobId: string, jobs: SessionJobRow[]): ComparisonSideResolution {
+  const job = jobs.find((j) => j.jobId === jobId);
+  if (!job) return { kind: "no_job" };
+  if (job.status !== "completed") return { kind: "not_completed", status: job.status };
+  if (!job.artifactDir) return { kind: "missing_artifact" };
+  return { kind: "ready", artifactDir: job.artifactDir };
+}
+
 export async function getBacktestEconomicsSuggestion(
   symbol: string,
 ): Promise<GetBacktestEconomicsSuggestionResult> {

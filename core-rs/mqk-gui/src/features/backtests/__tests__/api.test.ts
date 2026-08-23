@@ -10,6 +10,7 @@ import {
   getBacktestJobs,
   getInstrumentRegistryV2SourceStatus,
   parseStrictInteger,
+  resolveComparisonSideJob,
   sessionJobIdStillPresent,
   validateBacktestJobsListResponse,
   validateMdBarsDateRange,
@@ -1035,4 +1036,34 @@ test("INT-07: an ordinary valid default value parses to the exact same number", 
 test("INT-08: empty string is rejected (required field, unlike the optional economics parser)", () => {
   const result = parseStrictInteger("", "initial_cash_micros");
   assert.equal(result.ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-COMPARISON-LOADING-FENCE-01: resolveComparisonSideJob — the
+// exact decision step loadComparisonSide calls in production.
+// ---------------------------------------------------------------------------
+
+test("CMP-01: a blank/absent jobId resolves to no_job", () => {
+  const rows = [makeSessionJobRow({ jobId: "job-1" })];
+  assert.deepEqual(resolveComparisonSideJob("", rows), { kind: "no_job" });
+});
+
+test("CMP-02: a jobId that cleared mid-flight (no longer in the list) resolves to no_job", () => {
+  const rows = [makeSessionJobRow({ jobId: "job-2" })];
+  assert.deepEqual(resolveComparisonSideJob("job-1", rows), { kind: "no_job" });
+});
+
+test("CMP-03: a queued/running/failed job resolves to not_completed with its status", () => {
+  const rows = [makeSessionJobRow({ jobId: "job-1", status: "running" })];
+  assert.deepEqual(resolveComparisonSideJob("job-1", rows), { kind: "not_completed", status: "running" });
+});
+
+test("CMP-04: a completed job without an artifact_dir resolves to missing_artifact", () => {
+  const rows = [makeSessionJobRow({ jobId: "job-1", status: "completed", artifactDir: null })];
+  assert.deepEqual(resolveComparisonSideJob("job-1", rows), { kind: "missing_artifact" });
+});
+
+test("CMP-05: a completed job with an artifact_dir resolves to ready", () => {
+  const rows = [makeSessionJobRow({ jobId: "job-1", status: "completed", artifactDir: "C:\\out\\run-1" })];
+  assert.deepEqual(resolveComparisonSideJob("job-1", rows), { kind: "ready", artifactDir: "C:\\out\\run-1" });
 });

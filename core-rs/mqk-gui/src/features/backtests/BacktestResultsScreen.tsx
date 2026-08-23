@@ -49,6 +49,7 @@ import {
   normalizeJobStatus,
   parseStrictInteger,
   parseStrictIntegerOrNull,
+  resolveComparisonSideJob,
   sessionJobIdStillPresent,
   submitBacktestJob,
   validateMdBarsDateRange,
@@ -2542,17 +2543,31 @@ export function BacktestResultsScreen() {
       const generation = ++generationRef.current;
       setSnapshot(null);
       setError(null);
-      const job = sessionJobs.find((j) => j.jobId === jobId);
-      if (!job || job.status !== "completed" || !job.artifactDir) {
-        if (job && job.status !== "completed") {
-          setError(`Selected job is ${job.status}, not completed — nothing to compare yet.`);
-        } else if (job && !job.artifactDir) {
+      // Every selection transition owns a complete loading-state transition:
+      // establish loading=false as the baseline for every outcome, then only
+      // flip to true once resolution confirms there is something to load.
+      // GUI-BACKTEST-COMPARISON-LOADING-FENCE-01: previously the "no_job"
+      // outcome (e.g. clearing the selection back to the blank option while a
+      // prior load was pending) fell through without ever calling
+      // setLoading(false), leaving that side stuck in "Loading…" forever.
+      setLoading(false);
+
+      const resolution = resolveComparisonSideJob(jobId, sessionJobs);
+      switch (resolution.kind) {
+        case "no_job":
+          return;
+        case "not_completed":
+          setError(`Selected job is ${resolution.status}, not completed — nothing to compare yet.`);
+          return;
+        case "missing_artifact":
           setError("Selected job completed without an artifact_dir — nothing to load.");
-        }
-        return;
+          return;
+        case "ready":
+          break;
       }
+
       setLoading(true);
-      loadBundle(job.artifactDir)
+      loadBundle(resolution.artifactDir)
         .then((b) => {
           if (generationRef.current !== generation) return;
           setLoading(false);
