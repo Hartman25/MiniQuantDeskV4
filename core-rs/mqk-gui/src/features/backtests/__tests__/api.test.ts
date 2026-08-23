@@ -6,11 +6,14 @@ import {
   extractArtifactDir,
   buildActiveJob,
   buildBacktestEconomicsRequest,
+  buildSessionJobRow,
+  getBacktestJobs,
   getInstrumentRegistryV2SourceStatus,
 } from "../api.ts";
 import type {
   BacktestJobRequest,
   BacktestJobStatusResponse,
+  BacktestJobSummary,
   FileResult,
   InstrumentRegistryV2SourceStatusResponse,
 } from "../types.ts";
@@ -656,4 +659,163 @@ test("getInstrumentRegistryV2SourceStatus reports a friendly error when the rout
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-JOB-LIST-AND-SELECTION-01: buildSessionJobRow / getBacktestJobs
+// ---------------------------------------------------------------------------
+
+function makeJobSummary(overrides: Partial<BacktestJobSummary> = {}): BacktestJobSummary {
+  return {
+    job_id: "11111111-1111-1111-1111-111111111111",
+    status: "completed",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    created_at_utc: "2026-08-01T12:00:00Z",
+    started_at_utc: "2026-08-01T12:00:01Z",
+    completed_at_utc: "2026-08-01T12:00:05Z",
+    artifact_dir: "C:\\repo\\exports\\backtests\\run-1",
+    error: null,
+    ...overrides,
+  };
+}
+
+test("A-01: buildSessionJobRow maps a completed job with artifact_dir", () => {
+  const row = buildSessionJobRow(makeJobSummary());
+  assert.equal(row.jobId, "11111111-1111-1111-1111-111111111111");
+  assert.equal(row.status, "completed");
+  assert.equal(row.artifactDir, "C:\\repo\\exports\\backtests\\run-1");
+});
+
+test("A-02: buildSessionJobRow never coerces an unrecognized daemon status to completed", () => {
+  const row = buildSessionJobRow(makeJobSummary({ status: "mystery_state", completed_at_utc: null, artifact_dir: null }));
+  assert.equal(row.status, "unknown", "unrecognized status must surface as unknown, not completed");
+});
+
+test("A-03: buildSessionJobRow surfaces a failed job's error", () => {
+  const row = buildSessionJobRow(
+    makeJobSummary({ status: "failed", artifact_dir: null, error: "load bars csv failed: file not found" }),
+  );
+  assert.equal(row.status, "failed");
+  assert.equal(row.error, "load bars csv failed: file not found");
+  assert.equal(row.artifactDir, null, "failed job must never carry an artifact_dir");
+});
+
+test("A-04: buildSessionJobRow on a completed job without artifact_dir does not fabricate a path", () => {
+  const row = buildSessionJobRow(makeJobSummary({ artifact_dir: null }));
+  assert.equal(row.status, "completed");
+  assert.equal(row.artifactDir, null, "completed-without-artifact must stay null, never a guessed path");
+});
+
+test("A-05: getBacktestJobs parses a well-formed job list", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    jsonResponse({ truth_state: "active", jobs: [makeJobSummary()] })) as typeof fetch;
+  try {
+    const result = await getBacktestJobs();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.jobs.length, 1);
+    assert.equal(result.data?.jobs[0].job_id, "11111111-1111-1111-1111-111111111111");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("A-06: getBacktestJobs surfaces a route-not-found 404 truthfully, not as an empty list", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse({ error: "not found" }, 404)) as typeof fetch;
+  try {
+    const result = await getBacktestJobs();
+    assert.equal(result.ok, false, "a 404 must never present as an authoritative empty job list");
+    assert.match(result.error ?? "", /route not found/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("A-07: getBacktestJobs fails visibly on a malformed payload (jobs not an array)", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse({ truth_state: "active", jobs: "not-an-array" })) as typeof fetch;
+  try {
+    const result = await getBacktestJobs();
+    assert.equal(result.ok, false, "malformed 'jobs' field must fail visibly, not render fake data");
+    assert.match(result.error ?? "", /Malformed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("A-08: getBacktestJobs fails visibly when 'jobs' is entirely missing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse({ truth_state: "active" })) as typeof fetch;
+  try {
+    const result = await getBacktestJobs();
+    assert.equal(result.ok, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("A-09: getBacktestJobs surfaces a network failure truthfully", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network down");
+  }) as typeof fetch;
+  try {
+    const result = await getBacktestJobs();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /network down/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A-10: Stale selection fencing — pure mirror of the BacktestResultsScreen
+// handleSelectSessionJob generation-token logic. Selecting job A, then
+// immediately selecting job B, must always end on B even if A's slower
+// artifact read resolves after B's.
+// ---------------------------------------------------------------------------
+
+interface FenceSimResult {
+  finalBundleSource: string | null;
+}
+
+async function simulateSelectionFencing(
+  selections: { jobId: string; resolveDelayMs: number }[],
+): Promise<FenceSimResult> {
+  let generation = 0;
+  let finalBundleSource: string | null = null;
+
+  const runs = selections.map((sel) => {
+    const myGeneration = ++generation;
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        if (myGeneration === generation) {
+          finalBundleSource = sel.jobId;
+        }
+        resolve();
+      }, sel.resolveDelayMs);
+    });
+  });
+
+  await Promise.all(runs);
+  return { finalBundleSource };
+}
+
+test("A-10: rapid A then B selection shows B even when A's load resolves later", async () => {
+  const result = await simulateSelectionFencing([
+    { jobId: "A", resolveDelayMs: 30 },
+    { jobId: "B", resolveDelayMs: 5 },
+  ]);
+  assert.equal(result.finalBundleSource, "B", "the latest selection must win regardless of load order");
+});
+
+test("A-10b: three rapid selections always converge on the last one", async () => {
+  const result = await simulateSelectionFencing([
+    { jobId: "A", resolveDelayMs: 40 },
+    { jobId: "B", resolveDelayMs: 25 },
+    { jobId: "C", resolveDelayMs: 1 },
+  ]);
+  assert.equal(result.finalBundleSource, "C");
 });

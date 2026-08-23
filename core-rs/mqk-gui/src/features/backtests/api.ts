@@ -14,6 +14,9 @@ import type {
   BacktestJobRequest,
   BacktestJobStatusKind,
   BacktestJobStatusResponse,
+  BacktestJobsListResponse,
+  BacktestJobSummary,
+  SessionJobRow,
 } from "./types";
 export { getInstrumentRegistryV2SourceStatus } from "../system/api";
 
@@ -42,6 +45,25 @@ export function extractArtifactDir(response: BacktestJobStatusResponse): string 
     return response.artifact_dir;
   }
   return null;
+}
+
+/**
+ * Maps one daemon job-list row into the GUI's normalized SessionJobRow.
+ * Pure — status goes through normalizeJobStatus so an unrecognized daemon
+ * status string surfaces as "unknown", never silently coerced to "completed".
+ */
+export function buildSessionJobRow(summary: BacktestJobSummary): SessionJobRow {
+  return {
+    jobId: summary.job_id,
+    status: normalizeJobStatus(summary.status),
+    strategy: summary.strategy,
+    symbol: summary.symbol,
+    createdAt: summary.created_at_utc,
+    startedAt: summary.started_at_utc ?? null,
+    completedAt: summary.completed_at_utc ?? null,
+    artifactDir: summary.artifact_dir ?? null,
+    error: summary.error ?? null,
+  };
 }
 
 export function buildActiveJob(response: BacktestJobStatusResponse): ActiveBacktestJob {
@@ -154,6 +176,39 @@ export async function submitBacktestJob(req: BacktestJobRequest): Promise<Submit
   }
 
   return { ok: true, status: result.status, data: result.data };
+}
+
+export interface GetBacktestJobsResult {
+  ok: boolean;
+  status?: number;
+  data?: BacktestJobsListResponse;
+  error?: string;
+}
+
+/**
+ * Fetch the current daemon-session job list (GET /api/v1/backtests/jobs).
+ * This is process-lifetime/in-memory history — never durable. A malformed
+ * payload (missing/non-array `jobs`) fails visibly rather than rendering a
+ * fake empty list, so a broken response can never look like "no jobs yet".
+ */
+export async function getBacktestJobs(): Promise<GetBacktestJobsResult> {
+  const result = await fetchJsonCandidate<BacktestJobsListResponse>("/api/v1/backtests/jobs");
+
+  if (!result.ok) {
+    const isNotFound = result.error === "HTTP 404";
+    return {
+      ok: false,
+      error: isNotFound
+        ? "Backtest job list API unavailable (route not found)."
+        : (result.error ?? "Job list fetch failed."),
+    };
+  }
+
+  if (!result.data || !Array.isArray(result.data.jobs)) {
+    return { ok: false, error: "Malformed backtest job list response: 'jobs' is not an array." };
+  }
+
+  return { ok: true, data: result.data };
 }
 
 export async function getBacktestJob(jobId: string): Promise<GetBacktestJobResult> {

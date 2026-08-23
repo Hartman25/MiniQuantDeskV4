@@ -502,3 +502,44 @@ export interface ActiveBacktestJob {
   artifactDir: string | null;
   error: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-JOB-LIST-AND-SELECTION-01: current daemon-session job list
+// ---------------------------------------------------------------------------
+
+/** One row of GET /api/v1/backtests/jobs. Mirrors the Rust BacktestJobSummary. */
+export interface BacktestJobSummary {
+  job_id: string;
+  status: string;
+  strategy: string;
+  symbol: string;
+  created_at_utc: string;
+  started_at_utc: string | null;
+  completed_at_utc: string | null;
+  artifact_dir: string | null;
+  error: string | null;
+}
+
+/** Response to GET /api/v1/backtests/jobs. Mirrors the Rust BacktestJobsListResponse. */
+export interface BacktestJobsListResponse {
+  truth_state: string;
+  jobs: BacktestJobSummary[];
+}
+
+/**
+ * Normalized session job row for the GUI job table. This is
+ * process-lifetime/in-memory daemon-session history, not durable history —
+ * callers must label it as "current daemon session" in the UI, never as a
+ * persisted job log.
+ */
+export interface SessionJobRow {
+  jobId: string;
+  status: BacktestJobStatusKind;
+  strategy: string;
+  symbol: string;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  artifactDir: string | null;
+  error: string | null;
+}

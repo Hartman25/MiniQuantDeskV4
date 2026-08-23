@@ -37,9 +37,11 @@ import {
 import {
   buildBacktestEconomicsRequest,
   buildActiveJob,
+  buildSessionJobRow,
   extractArtifactDir,
   getBacktestEconomicsSuggestion,
   getBacktestJob,
+  getBacktestJobs,
   isTerminalJobStatus,
   normalizeJobStatus,
   submitBacktestJob,
@@ -70,6 +72,7 @@ import type {
   PaperReadinessParseResult,
   ParsedCsvResult,
   PremarketRevalidationParseResult,
+  SessionJobRow,
   StrategyFitGateFlags,
   StrategyFitParseResult,
   WatchlistPromotionParseResult,
@@ -1996,6 +1999,96 @@ function JobStatusBadge({ status }: { status: BacktestJobStatusKind }) {
 }
 
 // ---------------------------------------------------------------------------
+// GUI-BACKTEST-JOB-LIST-AND-SELECTION-01: current daemon-session job panel
+// ---------------------------------------------------------------------------
+
+function formatSessionJobDuration(row: SessionJobRow): string {
+  if (!row.startedAt) return "—";
+  const end = row.completedAt ?? new Date().toISOString();
+  const startMs = Date.parse(row.startedAt);
+  const endMs = Date.parse(end);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) return "—";
+  const secs = Math.round((endMs - startMs) / 1000);
+  return `${secs}s`;
+}
+
+function SessionJobsPanel({
+  jobs,
+  loading,
+  error,
+  selectedJobId,
+  onRefresh,
+  onSelect,
+}: {
+  jobs: SessionJobRow[];
+  loading: boolean;
+  error: string | null;
+  selectedJobId: string | null;
+  onRefresh: () => void;
+  onSelect: (job: SessionJobRow) => void;
+}) {
+  return (
+    <Panel
+      title="Current daemon session — job history"
+      subtitle="Jobs known to this running daemon process. Process-lifetime / in-memory only — not durable history. Restarting the daemon clears this list."
+    >
+      <div className="bt-path-row" style={{ marginBottom: 8 }}>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onRefresh}
+          disabled={loading}
+        >
+          {loading ? "Refreshing…" : "Refresh job list"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+          <strong>Job list unavailable:</strong> {error}
+        </div>
+      )}
+
+      {!error && jobs.length === 0 && !loading && (
+        <div className="empty-state">No jobs in this daemon session yet.</div>
+      )}
+
+      {jobs.length > 0 && (
+        <DataTable
+          rows={jobs}
+          rowKey={(row) => row.jobId}
+          columns={[
+            {
+              key: "status",
+              title: "Status",
+              render: (row) => <JobStatusBadge status={row.status} />,
+            },
+            { key: "strategy", title: "Strategy", render: (row) => row.strategy },
+            { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+            { key: "created", title: "Created", render: (row) => formatDateTime(row.createdAt) },
+            { key: "duration", title: "Duration", render: (row) => formatSessionJobDuration(row) },
+            {
+              key: "action",
+              title: "",
+              render: (row) => (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => onSelect(row)}
+                  disabled={selectedJobId === row.jobId}
+                >
+                  {selectedJobId === row.jobId ? "Selected" : "Select"}
+                </button>
+              ),
+            },
+          ]}
+        />
+      )}
+    </Panel>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Portable default path builder — derives defaults from the repo root
 // injected by the launcher via MQK_REPO_ROOT. Returns "" when unavailable
 // so the operator sees a blank field with placeholder instead of a stale path.
@@ -2092,6 +2185,62 @@ export function BacktestResultsScreen() {
   const [economicsSuggestionLoading, setEconomicsSuggestionLoading] = useState(false);
   const [economicsSuggestion, setEconomicsSuggestion] = useState<BacktestEconomicsSuggestionResponse | null>(null);
   const [economicsSuggestionError, setEconomicsSuggestionError] = useState<string | null>(null);
+
+  // --- Workflow C: current daemon-session job list + selection ---
+  const [sessionJobs, setSessionJobs] = useState<SessionJobRow[]>([]);
+  const [sessionJobsLoading, setSessionJobsLoading] = useState(false);
+  const [sessionJobsError, setSessionJobsError] = useState<string | null>(null);
+  const [selectedSessionJob, setSelectedSessionJob] = useState<SessionJobRow | null>(null);
+  const [selectedSessionJobBundle, setSelectedSessionJobBundle] = useState<ArtifactBundle | null>(null);
+  const [selectedSessionJobBundleLoading, setSelectedSessionJobBundleLoading] = useState(false);
+  const [selectedSessionJobBundleError, setSelectedSessionJobBundleError] = useState<string | null>(null);
+
+  // Fences stale async artifact loads: bumped on every selection, so a slow
+  // load for a previously-selected job can never overwrite a later selection
+  // (rapid A -> B switching must always end up showing B, not a delayed A).
+  const selectionGenerationRef = useRef(0);
+
+  const fetchSessionJobs = useCallback(async () => {
+    setSessionJobsLoading(true);
+    setSessionJobsError(null);
+    const result = await getBacktestJobs();
+    setSessionJobsLoading(false);
+    if (!result.ok || !result.data) {
+      setSessionJobsError(result.error ?? "Job list fetch failed.");
+      return;
+    }
+    setSessionJobs(result.data.jobs.map(buildSessionJobRow));
+  }, []);
+
+  useEffect(() => {
+    void fetchSessionJobs();
+  }, [fetchSessionJobs]);
+
+  const handleSelectSessionJob = useCallback((row: SessionJobRow) => {
+    const generation = ++selectionGenerationRef.current;
+    setSelectedSessionJob(row);
+    setSelectedSessionJobBundle(null);
+    setSelectedSessionJobBundleError(null);
+    setSelectedSessionJobBundleLoading(false);
+
+    // Only a completed job with a real artifact_dir has anything to load.
+    // queued/running/failed/unknown all render from `row` alone below —
+    // never fabricate a bundle for a non-completed or pathless job.
+    if (row.status !== "completed" || !row.artifactDir) return;
+
+    setSelectedSessionJobBundleLoading(true);
+    loadBundle(row.artifactDir)
+      .then((b) => {
+        if (selectionGenerationRef.current !== generation) return; // superseded by a later selection
+        setSelectedSessionJobBundle(b);
+        setSelectedSessionJobBundleLoading(false);
+      })
+      .catch((e) => {
+        if (selectionGenerationRef.current !== generation) return;
+        setSelectedSessionJobBundleError(String(e));
+        setSelectedSessionJobBundleLoading(false);
+      });
+  }, []);
 
   // Polling: fire when a non-terminal job is active. Bounded cadence: 2s.
   // Cancellation token prevents state updates after unmount or job change.
@@ -2747,6 +2896,93 @@ export function BacktestResultsScreen() {
       )}
 
       {jobBundle && <ArtifactDisplay bundle={jobBundle} source="Loaded results — Workflow B (submitted job)" />}
+
+      <hr className="bt-section-divider" />
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Workflow C — Current daemon session job history / selection          */}
+      {/* ------------------------------------------------------------------ */}
+
+      <div className="bt-workflow-heading">
+        <span className="bt-workflow-tag">Workflow C · Current session jobs</span>
+        <span className="bt-workflow-caption">
+          Every job this daemon process knows about — queued, running, completed, or failed.
+          Select any completed job to reopen its real artifact results.
+        </span>
+      </div>
+
+      <SessionJobsPanel
+        jobs={sessionJobs}
+        loading={sessionJobsLoading}
+        error={sessionJobsError}
+        selectedJobId={selectedSessionJob?.jobId ?? null}
+        onRefresh={() => void fetchSessionJobs()}
+        onSelect={handleSelectSessionJob}
+      />
+
+      {selectedSessionJob && (
+        <Panel
+          title="Selected session job"
+          subtitle="Status reported directly by the daemon for the selected job."
+        >
+          <div className="bt-job-status-row">
+            <JobStatusBadge status={selectedSessionJob.status} />
+            <span className="bt-job-meta" title={selectedSessionJob.jobId}>
+              job {selectedSessionJob.jobId.slice(0, 8)}…
+            </span>
+            <span className="bt-job-meta">
+              {selectedSessionJob.strategy} / {selectedSessionJob.symbol}
+            </span>
+          </div>
+
+          {selectedSessionJob.status === "unknown" && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 4 }}>
+              <strong>Unrecognized job status.</strong> The daemon reported a status this GUI does
+              not recognize — never treated as completed or successful. Refresh and verify daemon
+              version.
+            </div>
+          )}
+
+          {(selectedSessionJob.status === "queued" || selectedSessionJob.status === "running") && (
+            <div className="unavailable-notice" style={{ marginTop: 4 }}>
+              Job is still {selectedSessionJob.status}. Refresh the job list above to check for
+              completion — this panel does not poll automatically.
+            </div>
+          )}
+
+          {selectedSessionJob.status === "failed" && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 4 }}>
+              <strong>Job failed:</strong> {selectedSessionJob.error ?? "No error message reported."}
+            </div>
+          )}
+
+          {selectedSessionJob.status === "completed" && !selectedSessionJob.artifactDir && (
+            <div className="unavailable-notice" style={{ marginTop: 4 }}>
+              <strong>Completed without artifact path.</strong> Job completed but the daemon
+              reported no artifact_dir. Results cannot be loaded from this panel.
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {selectedSessionJobBundleLoading && (
+        <div className="empty-state" style={{ padding: "16px 0" }}>
+          Loading selected job's artifact results…
+        </div>
+      )}
+
+      {selectedSessionJobBundleError && (
+        <div className="unavailable-notice unavailable-critical" style={{ margin: "8px 0" }}>
+          <strong>Selected job's artifact load failed:</strong> {selectedSessionJobBundleError}
+        </div>
+      )}
+
+      {selectedSessionJobBundle && (
+        <ArtifactDisplay
+          bundle={selectedSessionJobBundle}
+          source="Loaded results — Workflow C (current session job selection)"
+        />
+      )}
     </div>
   );
 }
