@@ -26,6 +26,9 @@ from mqk_research.factors.fdr import (
     FDR_POPULATION_STATUS_COMPLETE,
     FDR_POPULATION_STATUS_INCOMPLETE,
     FDR_POPULATION_STATUS_NOT_EVALUABLE,
+    FDR_REASON_FAILED,
+    FDR_REASON_IN_PROGRESS,
+    FDR_REASON_NOT_EVALUABLE,
     FactorPValueEvidence,
     benjamini_hochberg,
     build_fdr_population_report,
@@ -292,12 +295,93 @@ def test_registry_population_distinguishes_failed_from_unsupplied(tmp_path):
         p_value_evidence=[FactorPValueEvidence(factor_id=evaluable_factor_id, evaluation_id=evaluation_id_ok, p_value=0.02)],
         alpha=0.05,
     )
-    assert report["excluded_factor_ids_with_reasons"][failed_factor_id] == "no_succeeded_evaluation"
+    assert report["excluded_factor_ids_with_reasons"][failed_factor_id] == FDR_REASON_FAILED
     assert report["included_factor_ids"] == [evaluable_factor_id]
     # A failed (attempted, terminal) factor is a typed exclusion, not an
     # incompleteness -- the population IS fully accounted for.
     assert report["status"] == FDR_POPULATION_STATUS_COMPLETE
     assert report["hypothesis_count"] == 1
+
+
+def test_inflight_attempt_blocks_bh_decision(tmp_path):
+    """RESEARCH-FACTOR-FDR-INFLIGHT-POPULATION-FENCE-01 control 1:
+    A succeeded+p-valued, B has only a currently `started` attempt -- the
+    declared population is not complete while B is still in flight."""
+    registry_db = tmp_path / "registry.sqlite3"
+    factor_a = register_factor(registry_db, _spec("ready"))
+    factor_b = register_factor(registry_db, _spec("in_flight"))
+    evaluation_id_a = _succeed_factor(registry_db, factor_a)
+    begin_factor_evaluation(registry_db, _eval_spec(factor_b))  # left started, never finalized
+
+    report = build_fdr_population_report(
+        registry_db,
+        family="momentum",
+        p_value_evidence=[FactorPValueEvidence(factor_id=factor_a, evaluation_id=evaluation_id_a, p_value=0.01)],
+        alpha=0.05,
+    )
+    assert report["status"] == FDR_POPULATION_STATUS_INCOMPLETE
+    assert report["excluded_factor_ids_with_reasons"][factor_b] == FDR_REASON_IN_PROGRESS
+    assert report["rejected_factor_ids"] is None
+    assert report["q_values"] is None
+    assert report["hypothesis_count"] is None
+
+
+def test_not_evaluable_factor_is_complete_typed_exclusion(tmp_path):
+    """RESEARCH-FACTOR-FDR-INFLIGHT-POPULATION-FENCE-01 control 3:
+    A succeeded+p-valued, B terminally not_evaluable -- complete, with B
+    excluded under its OWN distinct reason (never collapsed with 'failed')."""
+    registry_db = tmp_path / "registry.sqlite3"
+    factor_a = register_factor(registry_db, _spec("ready2"))
+    factor_b = register_factor(registry_db, _spec("degenerate"))
+    evaluation_id_a = _succeed_factor(registry_db, factor_a)
+    attempt_id, evaluation_id_b, _ = begin_factor_evaluation(registry_db, _eval_spec(factor_b))
+    finalize_factor_evaluation(
+        registry_db,
+        attempt_id,
+        FactorEvaluationResult(
+            eval_id=evaluation_id_b, factor_id=factor_b, status="not_evaluable", reason="zero_variance_factor"
+        ),
+    )
+
+    report = build_fdr_population_report(
+        registry_db,
+        family="momentum",
+        p_value_evidence=[FactorPValueEvidence(factor_id=factor_a, evaluation_id=evaluation_id_a, p_value=0.01)],
+        alpha=0.05,
+    )
+    assert report["status"] == FDR_POPULATION_STATUS_COMPLETE
+    assert report["excluded_factor_ids_with_reasons"][factor_b] == FDR_REASON_NOT_EVALUABLE
+    assert report["hypothesis_count"] == 1
+
+
+def test_older_failed_attempt_with_current_inflight_retry_is_incomplete(tmp_path):
+    """RESEARCH-FACTOR-FDR-INFLIGHT-POPULATION-FENCE-01 control 4:
+    B has an OLDER failed attempt plus a CURRENT started retry and no
+    succeeded result -- incomplete, never terminally excluded as 'failed'."""
+    registry_db = tmp_path / "registry.sqlite3"
+    factor_a = register_factor(registry_db, _spec("ready3"))
+    factor_b = register_factor(registry_db, _spec("retrying_after_failure"))
+    evaluation_id_a = _succeed_factor(registry_db, factor_a)
+
+    eval_spec_b = _eval_spec(factor_b)
+    old_attempt_id, old_eval_id, _ = begin_factor_evaluation(registry_db, eval_spec_b)
+    finalize_factor_evaluation(
+        registry_db,
+        old_attempt_id,
+        FactorEvaluationResult(eval_id=old_eval_id, factor_id=factor_b, status="failed", reason="transient"),
+    )
+    begin_factor_evaluation(registry_db, eval_spec_b)  # current retry, left started
+
+    report = build_fdr_population_report(
+        registry_db,
+        family="momentum",
+        p_value_evidence=[FactorPValueEvidence(factor_id=factor_a, evaluation_id=evaluation_id_a, p_value=0.01)],
+        alpha=0.05,
+    )
+    assert report["status"] == FDR_POPULATION_STATUS_INCOMPLETE
+    assert report["excluded_factor_ids_with_reasons"][factor_b] == FDR_REASON_IN_PROGRESS
+    assert report["rejected_factor_ids"] is None
+    assert report["q_values"] is None
 
 
 def test_population_all_failed_is_not_evaluable_not_incomplete(tmp_path):

@@ -41,7 +41,7 @@ from typing import Any, Callable, Dict, Iterable, Optional
 
 import pandas as pd
 
-from .contracts import EVAL_STATUS_SUCCEEDED, FactorEvaluationSpec
+from .contracts import EVAL_STATUS_FAILED, EVAL_STATUS_NOT_EVALUABLE, EVAL_STATUS_SUCCEEDED, FactorEvaluationSpec
 from .diagnostics import FactorDiagnosticsReport, evaluate_factor_ic_ir
 from .null_controls import CONTROL_KIND_CROSS_SECTIONAL_PERMUTATION, FactorNullControlSpec, run_null_control
 from .registry import list_factor_evaluation_attempts, list_factors
@@ -57,6 +57,22 @@ _VALID_FDR_POPULATION_STATUSES = (
     FDR_POPULATION_STATUS_INCOMPLETE,
     FDR_POPULATION_STATUS_NOT_EVALUABLE,
 )
+
+# Durable attempt row status meaning "opened, not yet terminal" (see
+# ResearchResultStore.begin_factor_evaluation_attempt). Not one of the three
+# terminal statuses a FactorEvaluationResult can carry (EVAL_STATUS_*).
+_ATTEMPT_STATUS_STARTED = "started"
+
+# Typed exclusion/incompleteness reasons for one registered factor. These are
+# distinct on purpose (RESEARCH-FACTOR-FDR-INFLIGHT-POPULATION-FENCE-01):
+# an in-flight attempt must never be conflated with "never attempted", and a
+# terminal "failed" outcome must never be conflated with a terminal
+# "not_evaluable" outcome -- each is independently actionable evidence.
+FDR_REASON_NO_ATTEMPT = "no_evaluation_attempted"
+FDR_REASON_IN_PROGRESS = "evaluation_in_progress"
+FDR_REASON_PVALUE_NOT_SUPPLIED = "p_value_not_supplied"
+FDR_REASON_FAILED = "evaluation_failed"
+FDR_REASON_NOT_EVALUABLE = "evaluation_not_evaluable"
 
 
 @dataclass(frozen=True)
@@ -179,16 +195,26 @@ def build_fdr_population_report(
     from `p_value_evidence`'s own factor_ids. Every registered factor is
     accounted for as exactly one of: included (succeeded evaluation, with
     p-value evidence bound to that exact succeeded evaluation_id), or
-    excluded with an explicit typed reason (no attempt / no succeeded
-    evaluation).
+    excluded/incomplete with an explicit typed reason
+    (`FDR_REASON_NO_ATTEMPT` / `FDR_REASON_IN_PROGRESS` /
+    `FDR_REASON_PVALUE_NOT_SUPPLIED` / `FDR_REASON_FAILED` /
+    `FDR_REASON_NOT_EVALUABLE`).
+
+    RESEARCH-FACTOR-FDR-INFLIGHT-POPULATION-FENCE-01: a factor with a
+    currently `started` (in-flight) durable attempt and no succeeded result
+    is INCOMPLETE, never a terminal exclusion -- even if an older attempt of
+    the same factor already reached a terminal outcome. `failed` and
+    `not_evaluable` terminal outcomes are distinct typed exclusions and are
+    never collapsed into one reason.
 
     Returns `status`:
       - "complete": every registered factor was accounted for and at least
         one was included -- `rejected_factor_ids`/`q_values` are a real BH
         decision.
-      - "incomplete": a registered factor was never attempted, or succeeded
-        but has no bound p-value evidence yet -- NOT an authoritative
-        decision; `rejected_factor_ids`/`q_values` are None.
+      - "incomplete": a registered factor was never attempted, has a
+        currently in-flight attempt with no succeeded result yet, or
+        succeeded but has no bound p-value evidence yet -- NOT an
+        authoritative decision; `rejected_factor_ids`/`q_values` are None.
       - "not_evaluable": every registered factor was accounted for but none
         succeeded (nothing to correct) -- also not authoritative.
 
@@ -226,7 +252,8 @@ def build_fdr_population_report(
 
     for factor_id in declared_factor_ids:
         attempts = list_factor_evaluation_attempts(registry_db, factor_id)
-        succeeded_attempts = [a for a in attempts if a["status"] == "succeeded"]
+        succeeded_attempts = [a for a in attempts if a["status"] == EVAL_STATUS_SUCCEEDED]
+        started_attempts = [a for a in attempts if a["status"] == _ATTEMPT_STATUS_STARTED]
         succeeded_evaluation_ids = {a["evaluation_id"] for a in succeeded_attempts if a.get("evaluation_id")}
         evidence = evidence_by_factor.get(factor_id)
 
@@ -238,15 +265,40 @@ def build_fdr_population_report(
             )
 
         if not attempts:
-            excluded[factor_id] = "no_evaluation_attempted"
+            # Never attempted: population cannot be declared complete.
+            excluded[factor_id] = FDR_REASON_NO_ATTEMPT
             incomplete = True
-        elif not succeeded_attempts:
-            excluded[factor_id] = "no_succeeded_evaluation"
-        elif evidence is None:
-            excluded[factor_id] = "p_value_not_supplied"
+        elif succeeded_attempts and evidence is not None:
+            included[factor_id] = evidence.p_value
+        elif succeeded_attempts and evidence is None:
+            # Succeeded but the caller has not yet bound a p-value to it.
+            excluded[factor_id] = FDR_REASON_PVALUE_NOT_SUPPLIED
+            incomplete = True
+        elif started_attempts:
+            # A currently in-flight attempt exists and nothing has succeeded
+            # yet -- this factor's screening result is not yet known, even if
+            # an OLDER attempt already reached a terminal outcome (a stale
+            # failed/not_evaluable retry never masks a current in-flight
+            # re-evaluation). The population cannot be declared complete
+            # while this is true.
+            excluded[factor_id] = FDR_REASON_IN_PROGRESS
             incomplete = True
         else:
-            included[factor_id] = evidence.p_value
+            # Every attempt is terminal and none succeeded: a real typed
+            # terminal exclusion. Multiple terminal retries are resolved by
+            # the most recent attempt (list_factor_evaluation_attempts is
+            # ordered by attempt_index ascending) -- the latest terminal
+            # outcome is the factor's current, authoritative disposition.
+            latest_status = attempts[-1]["status"]
+            if latest_status == EVAL_STATUS_NOT_EVALUABLE:
+                excluded[factor_id] = FDR_REASON_NOT_EVALUABLE
+            elif latest_status == EVAL_STATUS_FAILED:
+                excluded[factor_id] = FDR_REASON_FAILED
+            else:
+                raise ValueError(
+                    f"factor_id={factor_id!r} has an unrecognized terminal attempt status "
+                    f"{latest_status!r}; refusing to classify it for FDR population accounting"
+                )
 
     base_report = {
         "protocol_version": FDR_PROTOCOL_VERSION,
