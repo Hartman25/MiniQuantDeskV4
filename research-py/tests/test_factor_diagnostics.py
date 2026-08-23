@@ -33,6 +33,8 @@ from mqk_research.factors.diagnostics import (
     NOT_EVALUABLE_TIME_ORDER_VIOLATION,
     NOT_EVALUABLE_UNUSABLE_LABEL_POPULATION,
     NOT_EVALUABLE_ZERO_VARIANCE_FACTOR,
+    _is_effectively_constant,
+    _spearman_rank_ic,
     build_factor_diagnostics_artifact,
     compare_to_benchmark,
     evaluate_factor_ic_ir,
@@ -139,6 +141,48 @@ def test_constant_factor_not_evaluable():
     assert report.status == EVAL_STATUS_NOT_EVALUABLE
     assert report.reason == NOT_EVALUABLE_ZERO_VARIANCE_FACTOR
     assert report.metrics == {}
+
+
+def test_rank_degeneracy_check_ignores_additive_translation():
+    """RESEARCH-FACTOR-RANK-AND-NEUTRALIZATION-NUMERICS-02: a std-vs-max(abs)
+    relative tolerance is invariant to positive scaling but NOT to additive
+    translation -- [0,1,2,3,4]+1e12 was falsely classified constant. Rank
+    (and therefore evaluability/IC) must depend only on order."""
+    x = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    translated = x + 1e12
+    assert _is_effectively_constant(x) is False
+    assert _is_effectively_constant(translated) is False
+    assert _spearman_rank_ic(x, x) == pytest.approx(_spearman_rank_ic(translated, translated))
+    assert _spearman_rank_ic(x, x) == pytest.approx(1.0)
+
+
+def test_rank_degeneracy_check_ignores_positive_scaling():
+    x = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    scaled = x * 1e-12
+    assert _is_effectively_constant(scaled) is False
+    assert _spearman_rank_ic(x, x) == pytest.approx(_spearman_rank_ic(scaled, scaled))
+
+
+def test_actually_constant_vector_remains_constant_at_any_scale_or_offset():
+    constant = np.array([5.0, 5.0, 5.0, 5.0, 5.0])
+    assert _is_effectively_constant(constant) is True
+    assert _is_effectively_constant(constant + 1e12) is True
+    assert _is_effectively_constant(constant * 1e-12) is True
+
+
+def test_translated_factor_produces_same_ic_via_public_evaluator():
+    """Same invariant proven through the real production entry point, not
+    just the private helper -- a translated (large-offset) factor must
+    remain evaluable and reproduce the untranslated factor's IC exactly."""
+    baseline_df = _monotonic_dataset()
+    translated_df = baseline_df.copy()
+    translated_df["factor_value"] = translated_df["factor_value"] + 1e12
+
+    baseline = evaluate_factor_ic_ir(baseline_df, n_quantiles=3, min_cross_section=3)
+    translated = evaluate_factor_ic_ir(translated_df, n_quantiles=3, min_cross_section=3)
+    assert baseline.status == EVAL_STATUS_SUCCEEDED
+    assert translated.status == EVAL_STATUS_SUCCEEDED
+    assert translated.metrics["mean_ic"] == pytest.approx(baseline.metrics["mean_ic"])
 
 
 def test_duplicate_observation_fails_closed():

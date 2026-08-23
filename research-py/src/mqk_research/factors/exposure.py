@@ -11,8 +11,9 @@ consumed by `mqk_research.factors.diagnostics`.
 Neutralization is a deterministic per-PERIOD cross-sectional OLS
 residualization: each period's regression uses ONLY that period's own rows,
 so a later period's exposure values can never leak into an earlier period's
-residual. A singular/rank-deficient design matrix for a period excludes that
-period (typed reason) rather than fabricating a residual.
+residual. A singular OR materially ill-conditioned design matrix for a
+period excludes that period (typed reason) rather than fabricating an
+unstable residual (RESEARCH-FACTOR-RANK-AND-NEUTRALIZATION-NUMERICS-02).
 
 This module makes no causal claims -- "loses signal after neutralization"
 is an observed association, not proof of mechanism.
@@ -46,20 +47,34 @@ EXPOSURE_SCHEMA_PROTOCOL_VERSION = "factor_exposure_schema_v1"
 EXPOSURE_ATTRIBUTION_PROTOCOL_VERSION = "factor_exposure_attribution_v1"
 
 NOT_EVALUABLE_SINGULAR_EXPOSURE_MATRIX = "singular_exposure_design_matrix"
+NOT_EVALUABLE_ILL_CONDITIONED_EXPOSURE_MATRIX = "ill_conditioned_exposure_design_matrix"
 NOT_EVALUABLE_INSUFFICIENT_PERIODS_FOR_NEUTRALIZATION = "insufficient_periods_for_neutralization"
 NOT_EVALUABLE_BASELINE_NOT_EVALUABLE = "baseline_not_evaluable"
 
-# RESEARCH-FACTOR-DIAGNOSTICS-CAUSALITY-AND-NUMERICS-01: an exactly (or
+# RESEARCH-FACTOR-RANK-AND-NEUTRALIZATION-NUMERICS-02: an exactly (or
 # near-exactly) collinear per-period fit leaves an OLS residual that is pure
-# floating-point dust (~1e-16), never exact 0.0, but whose apparent "rank
-# order" is numerical noise, not signal. Comparing that dust to ITS OWN
-# scale cannot distinguish it from genuine tiny-scale signal (dust vs dust
-# looks like real relative variation). The only sound comparison is against
-# the ORIGINAL pre-residual regression scale -- this is the one place in the
-# factor pipeline allowed to do that, per CLAUDE.md/mission: the generic
-# rank evaluator (diagnostics._is_effectively_constant) stays purely
-# relative-to-its-own-data and must never carry this absolute-feeling floor.
-_RESIDUAL_DUST_REL_TOL = 1e-9
+# floating-point dust, never exact 0.0, but whose apparent "rank order" is
+# numerical noise, not signal. That dust must be told apart from a genuine
+# small residual using the actual numerical error scale of THIS regression,
+# not a fixed fraction of the business data's magnitude -- a fixed fraction
+# of a huge original factor (e.g. 1e9 * exposure) can dwarf a real small
+# independent signal and erase it.
+#
+# The forward error in an OLS residual computed via SVD-based least squares
+# is bounded (Golub & Van Loan, Matrix Computations, ch. 5) by a small
+# multiple of: machine epsilon * design conditioning * the scale of the
+# fitted values (design @ coef) -- since the fitted values are exactly the
+# quantity whose floating-point computation pollutes the residual. Using
+# `p` (design column count) as that small multiple is a standard, modest,
+# dimension-driven constant, not an arbitrary tolerance.
+_EPS = float(np.finfo(np.float64).eps)
+
+# Numerical-analysis threshold beyond which a least-squares solve is
+# expected to lose more than half of its available significant digits
+# (the classical sqrt(eps)^-1 rule of thumb; Golub & Van Loan ch. 5.3) --
+# not a business-magnitude tolerance. A design at or beyond this condition
+# number fails closed rather than returning an unstable residual.
+_MAX_CONDITION_NUMBER = 1.0 / (_EPS**0.5)
 
 
 @dataclass(frozen=True)
@@ -207,20 +222,40 @@ def neutralize_factor(
             excluded[period_key] = "insufficient_cross_section_for_regression"
             continue
         design = _build_design_matrix(group, schema, vocab)
-        if np.linalg.matrix_rank(design) < design.shape[1]:
+        singular_values = np.linalg.svd(design, compute_uv=False)
+        # Same rank-deficiency test as np.linalg.matrix_rank's own default
+        # (largest singular value * max(shape) * eps) -- computed manually
+        # here so the SAME decomposition also yields the condition number
+        # below, rather than running the SVD twice.
+        rank_tol = (singular_values[0] * max(design.shape) * _EPS) if singular_values.size else 0.0
+        effective_rank = int(np.sum(singular_values > rank_tol))
+        if effective_rank < design.shape[1]:
             excluded[period_key] = NOT_EVALUABLE_SINGULAR_EXPOSURE_MATRIX
+            continue
+        smallest_sv = float(singular_values[-1])
+        condition_number = float(singular_values[0] / smallest_sv) if smallest_sv > 0.0 else float("inf")
+        if condition_number > _MAX_CONDITION_NUMBER:
+            # Full rank in floating point, but materially ill-conditioned:
+            # a least-squares solve here would already have lost more than
+            # half its significant digits (Patch F contract) -- fail closed
+            # rather than return an unstable residual.
+            excluded[period_key] = NOT_EVALUABLE_ILL_CONDITIONED_EXPOSURE_MATRIX
             continue
         y = group[FACTOR_VALUE_COL].to_numpy(dtype=np.float64)
         coef, _, _, _ = np.linalg.lstsq(design, y, rcond=None)
-        residual = y - design @ coef
-        # Exact-collinear numerical dust: the residual is dust RELATIVE TO
-        # THE ORIGINAL FACTOR SCALE for this period, not relative to its own
-        # (also-tiny) internal spread -- force it to exact zero so the
-        # generic rank evaluator deterministically treats it as constant
-        # rather than as accidental sub-machine-epsilon "signal".
-        y_scale = float(np.max(np.abs(y))) if y.size else 0.0
+        fitted = design @ coef
+        residual = y - fitted
+        # Exact-collinear numerical dust: bound the acceptable dust by the
+        # actual floating-point error scale of THIS regression -- machine
+        # epsilon, design column count, and this period's own condition
+        # number and fitted-value scale -- never a fixed fraction of the
+        # original factor's business magnitude (see module docstring/
+        # _MAX_CONDITION_NUMBER). A real independent residual, whose scale
+        # does not shrink with the design's conditioning, is never zeroed.
+        fitted_scale = float(np.max(np.abs(fitted))) if fitted.size else 0.0
+        dust_tolerance = design.shape[1] * _EPS * condition_number * fitted_scale
         residual_scale = float(np.max(np.abs(residual))) if residual.size else 0.0
-        if y_scale > 0.0 and residual_scale <= y_scale * _RESIDUAL_DUST_REL_TOL:
+        if fitted_scale > 0.0 and residual_scale <= dust_tolerance:
             residual = np.zeros_like(residual)
         neutralized_group = group.copy()
         neutralized_group[FACTOR_VALUE_COL] = residual

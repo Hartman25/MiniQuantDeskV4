@@ -62,13 +62,6 @@ NOT_EVALUABLE_TIME_ORDER_VIOLATION = "time_order_violation"
 NOT_EVALUABLE_MISSING_CAUSAL_METADATA = "missing_causal_metadata"
 NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET = "empty_quantile_bucket"
 
-# Generic rank-degeneracy tolerance: RELATIVE ONLY (no absolute floor), so
-# constancy detection is invariant to multiplying all values by any positive
-# constant (see _is_effectively_constant). The exact-collinear OLS residual
-# numerical-dust case is a distinct problem handled at the neutralization
-# seam (mqk_research.factors.exposure.neutralize_factor), never here.
-_RANK_DEGENERACY_REL_TOL = 1e-9
-
 
 def _parse_ts(value: Any) -> datetime:
     text = str(value).strip().replace("Z", "+00:00")
@@ -111,25 +104,28 @@ def _quantile_buckets(values: np.ndarray, n_quantiles: int) -> np.ndarray:
 
 
 def _is_effectively_constant(values: np.ndarray) -> bool:
-    """True if `values` has no real variance, relative to the data's OWN
-    magnitude only -- no absolute floor. This makes constancy detection
-    (and therefore Spearman rank evaluability) invariant to multiplying
-    every value by any positive constant: scaling `values` by k scales both
-    `scale` and `std` by k, leaving std/scale unchanged. A genuinely
-    ordered factor at any scale (e.g. 1e-12) is therefore never misclassified
-    as constant.
+    """True if `values` carries no distinguishable cross-sectional RANK
+    variation -- every value compares exactly equal to the first. Ranks
+    (and therefore Spearman IC) depend only on ORDER, which is invariant to
+    both positive scaling AND additive translation of `values`; testing
+    exact equality is the one comparison that shares that invariance, since
+    it makes no reference to the data's absolute level or scale. A genuinely
+    ordered factor is therefore never misclassified as constant merely
+    because it sits at a large offset (e.g. ~1e12) or a tiny scale (e.g.
+    1e-12) -- only a truly constant vector (all represented values equal) is
+    degenerate.
 
-    This is NOT where exact-collinear OLS residual numerical dust is
-    handled -- that requires comparing the residual's magnitude to the
-    ORIGINAL (pre-residual) regression scale, which this function has no
-    access to. See mqk_research.factors.exposure.neutralize_factor, which
-    zeroes genuine collinear dust at the neutralization seam before it ever
-    reaches this generic evaluator."""
+    This is deliberately NOT where exact-collinear OLS residual numerical
+    dust is handled -- that requires comparing the residual's magnitude to
+    the ORIGINAL (pre-residual) regression scale and conditioning, which
+    this function has no access to and must not approximate with another
+    magnitude-based tolerance. See
+    mqk_research.factors.exposure.neutralize_factor, which zeroes genuine
+    collinear dust at the neutralization seam before it ever reaches this
+    generic evaluator."""
     if values.size == 0:
         return True
-    scale = float(np.max(np.abs(values)))
-    tol = scale * _RANK_DEGENERACY_REL_TOL
-    return float(np.std(values)) <= tol
+    return bool(np.all(values == values[0]))
 
 
 def _spearman_rank_ic(factor_values: np.ndarray, label_values: np.ndarray) -> Optional[float]:

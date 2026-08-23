@@ -24,6 +24,7 @@ from mqk_research.factors.contracts import (
     TIMING_NEXT_BAR_TRADABLE,
 )
 from mqk_research.factors.exposure import (
+    NOT_EVALUABLE_ILL_CONDITIONED_EXPOSURE_MATRIX,
     NOT_EVALUABLE_INSUFFICIENT_PERIODS_FOR_NEUTRALIZATION,
     NOT_EVALUABLE_SINGULAR_EXPOSURE_MATRIX,
     ExposureSchema,
@@ -80,6 +81,18 @@ def _independent_factor_dataset(n_symbols=6, n_periods=8, seed=3) -> pd.DataFram
 
 def _schema() -> ExposureSchema:
     return ExposureSchema(numeric_exposure_columns=["size"])
+
+
+def _single_period_frame(factor_values: np.ndarray, exposure_values: np.ndarray) -> pd.DataFrame:
+    n = len(factor_values)
+    return pd.DataFrame(
+        {
+            "symbol": _symbols(n),
+            "period_ts_utc": ["2024-01-01T00:00:00+00:00"] * n,
+            "factor_value": factor_values,
+            "size": exposure_values,
+        }
+    )
 
 
 def _kwargs():
@@ -200,6 +213,78 @@ def test_singular_exposure_matrix_not_evaluable():
     report = evaluate_factor_exposure_diagnostics(df, schema, **_kwargs())
     assert report.status == EVAL_STATUS_NOT_EVALUABLE
     assert report.reason == NOT_EVALUABLE_INSUFFICIENT_PERIODS_FOR_NEUTRALIZATION
+
+
+# -- residual numerical-dust tolerance is scale-of-the-regression-derived,
+# never a fixed fraction of the original factor's business magnitude ------
+# RESEARCH-FACTOR-RANK-AND-NEUTRALIZATION-NUMERICS-02
+
+def test_exact_collinear_residual_becomes_numerical_dust_zero():
+    rng = np.random.default_rng(5)
+    exposure = rng.permutation(8).astype(float)
+    factor = 3.0 * exposure  # exact linear function of the exposure -- nothing else
+    schema = ExposureSchema(numeric_exposure_columns=["size"])
+    result = neutralize_factor(_single_period_frame(factor, exposure), schema)
+    residual = result["neutralized_observations"]["factor_value"].to_numpy()
+    assert np.all(residual == 0.0)
+
+
+def test_large_exposure_coefficient_does_not_erase_small_independent_signal():
+    """factor = 1e9*exposure + 0.1*independent_signal: the real ~0.1 residual
+    is NOT numerical dust and must survive neutralization even though the
+    original factor's scale is dominated by a huge exposure coefficient."""
+    rng = np.random.default_rng(6)
+    exposure = rng.permutation(8).astype(float)
+    independent = rng.permutation(8).astype(float) - 3.5
+    factor = 1e9 * exposure + 0.1 * independent
+    schema = ExposureSchema(numeric_exposure_columns=["size"])
+    result = neutralize_factor(_single_period_frame(factor, exposure), schema)
+    residual = result["neutralized_observations"]["factor_value"].to_numpy()
+    assert not np.all(residual == 0.0)
+    assert np.max(np.abs(residual)) > 0.01
+
+
+def test_large_exposure_signal_conclusion_invariant_to_positive_rescaling():
+    rng = np.random.default_rng(6)
+    exposure = rng.permutation(8).astype(float)
+    independent = rng.permutation(8).astype(float) - 3.5
+    factor = 1e9 * exposure + 0.1 * independent
+    schema = ExposureSchema(numeric_exposure_columns=["size"])
+
+    result = neutralize_factor(_single_period_frame(factor, exposure), schema)
+    residual = result["neutralized_observations"]["factor_value"].to_numpy()
+
+    k = 7.0
+    scaled_result = neutralize_factor(_single_period_frame(factor * k, exposure), schema)
+    scaled_residual = scaled_result["neutralized_observations"]["factor_value"].to_numpy()
+
+    assert not np.all(residual == 0.0)
+    assert not np.all(scaled_residual == 0.0)
+    # A generous tolerance: the factor's huge dynamic range (1e9 exposure
+    # term vs 0.1 independent term) means the two independent OLS solves
+    # (unscaled vs k-scaled) each lose a few digits of floating-point
+    # precision on their own -- this checks the SAME conclusion (real signal
+    # survives, same sign/order, scales with k), not bit-for-bit equality.
+    np.testing.assert_allclose(scaled_residual, residual * k, rtol=1e-3)
+
+
+def test_ill_conditioned_but_full_rank_design_fails_closed():
+    """A design matrix that is full rank in floating point but materially
+    ill-conditioned (near-duplicate, not exactly collinear, columns) must
+    fail closed rather than return an unstable residual -- distinct from
+    the exactly-singular case."""
+    rng = np.random.default_rng(9)
+    base = rng.permutation(8).astype(float)
+    near_duplicate = base + 1e-10 * rng.standard_normal(8)
+    df = _single_period_frame(base, base)
+    df["size_near_dup"] = near_duplicate
+    schema = ExposureSchema(numeric_exposure_columns=["size", "size_near_dup"])
+
+    result = neutralize_factor(df, schema)
+    assert len(result["neutralized_observations"]) == 0
+    assert all(
+        reason == NOT_EVALUABLE_ILL_CONDITIONED_EXPOSURE_MATRIX for reason in result["excluded_periods"].values()
+    )
 
 
 # -- exposure column/schema change -> evaluation identity change ----------
