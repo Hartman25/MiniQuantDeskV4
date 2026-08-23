@@ -46,6 +46,7 @@ import {
   getBacktestJobs,
   isTerminalJobStatus,
   normalizeJobStatus,
+  sessionJobIdStillPresent,
   submitBacktestJob,
   validateMdBarsDateRange,
 } from "./api.ts";
@@ -2410,16 +2411,73 @@ export function BacktestResultsScreen() {
   // (rapid A -> B switching must always end up showing B, not a delayed A).
   const selectionGenerationRef = useRef(0);
 
+  // Latest-value ref (kept fresh every render, not inside an effect) so
+  // fetchSessionJobs can read the current selection without depending on it —
+  // depending on it would recreate the callback and re-fire the mount effect
+  // below on every selection change, causing spurious refetches. The
+  // compareA/B equivalents are declared below, alongside their state.
+  const selectedSessionJobRef = useRef<SessionJobRow | null>(null);
+  selectedSessionJobRef.current = selectedSessionJob;
+
   const fetchSessionJobs = useCallback(async () => {
     setSessionJobsLoading(true);
     setSessionJobsError(null);
     const result = await getBacktestJobs();
     setSessionJobsLoading(false);
+
     if (!result.ok || !result.data) {
       setSessionJobsError(result.error ?? "Job list fetch failed.");
+      // Fail-closed: a failed refresh must never leave the prior fetch's rows
+      // presented as current authoritative daemon-session truth.
+      setSessionJobs([]);
+      ++selectionGenerationRef.current;
+      setSelectedSessionJob(null);
+      setSelectedSessionJobBundle(null);
+      setSelectedSessionJobBundleError(null);
+      setSelectedSessionJobBundleLoading(false);
+      ++compareAGenerationRef.current;
+      ++compareBGenerationRef.current;
+      setCompareAJobId("");
+      setCompareBJobId("");
+      setCompareASnapshot(null);
+      setCompareBSnapshot(null);
+      setCompareAError(null);
+      setCompareBError(null);
+      setCompareALoading(false);
+      setCompareBLoading(false);
       return;
     }
-    setSessionJobs(result.data.jobs.map(buildSessionJobRow));
+
+    const newJobs = result.data.jobs.map(buildSessionJobRow);
+    setSessionJobs(newJobs);
+
+    // GUI-BACKTEST-JOB-LIST-AUTHORITY-REPAIR-01: a job selected from an older
+    // daemon session (e.g. before a daemon restart) may no longer exist in
+    // this freshly fetched current-session list. Clear it and fence any
+    // in-flight artifact read for it so a slow resolution cannot restore it.
+    if (selectedSessionJobRef.current && !sessionJobIdStillPresent(selectedSessionJobRef.current.jobId, newJobs)) {
+      ++selectionGenerationRef.current;
+      setSelectedSessionJob(null);
+      setSelectedSessionJobBundle(null);
+      setSelectedSessionJobBundleError(null);
+      setSelectedSessionJobBundleLoading(false);
+    }
+
+    if (compareAJobIdRef.current && !sessionJobIdStillPresent(compareAJobIdRef.current, newJobs)) {
+      ++compareAGenerationRef.current;
+      setCompareAJobId("");
+      setCompareASnapshot(null);
+      setCompareAError(null);
+      setCompareALoading(false);
+    }
+
+    if (compareBJobIdRef.current && !sessionJobIdStillPresent(compareBJobIdRef.current, newJobs)) {
+      ++compareBGenerationRef.current;
+      setCompareBJobId("");
+      setCompareBSnapshot(null);
+      setCompareBError(null);
+      setCompareBLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -2463,6 +2521,13 @@ export function BacktestResultsScreen() {
   const [compareBError, setCompareBError] = useState<string | null>(null);
   const compareAGenerationRef = useRef(0);
   const compareBGenerationRef = useRef(0);
+
+  // Latest-value refs read by fetchSessionJobs above — see its comment on
+  // selectedSessionJobRef for why these are refs rather than useCallback deps.
+  const compareAJobIdRef = useRef("");
+  compareAJobIdRef.current = compareAJobId;
+  const compareBJobIdRef = useRef("");
+  compareBJobIdRef.current = compareBJobId;
 
   const loadComparisonSide = useCallback(
     (

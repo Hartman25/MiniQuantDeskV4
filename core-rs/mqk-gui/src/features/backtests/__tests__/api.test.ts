@@ -9,6 +9,8 @@ import {
   buildSessionJobRow,
   getBacktestJobs,
   getInstrumentRegistryV2SourceStatus,
+  sessionJobIdStillPresent,
+  validateBacktestJobsListResponse,
   validateMdBarsDateRange,
 } from "../api.ts";
 import type {
@@ -17,6 +19,7 @@ import type {
   BacktestJobSummary,
   FileResult,
   InstrumentRegistryV2SourceStatusResponse,
+  SessionJobRow,
 } from "../types.ts";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -869,4 +872,119 @@ test("B-DATE-08: whitespace-only fields are treated as blank", () => {
   const result = validateMdBarsDateRange("   ", "2026-06-01T00:00:00Z");
   assert.equal(result.ok, false);
   assert.match(result.ok ? "" : result.error, /start is required/i);
+});
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-JOB-LIST-AUTHORITY-REPAIR-01: validateBacktestJobsListResponse
+// negative controls. This is the exact seam getBacktestJobs calls in
+// production, so these tests exercise the real production path rather than a
+// mirror of it.
+// ---------------------------------------------------------------------------
+
+test("JOBLIST-01: a job row of null is rejected structurally, not thrown", () => {
+  const result = validateBacktestJobsListResponse({ truth_state: "active", jobs: [null] });
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /is not an object/);
+});
+
+test("JOBLIST-02: a numeric job_id is rejected", () => {
+  const result = validateBacktestJobsListResponse({
+    truth_state: "active",
+    jobs: [{ ...makeJobSummary(), job_id: 12345 }],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /job_id.*must be a string/);
+});
+
+test("JOBLIST-03: a nullable field of the wrong type (number) is rejected", () => {
+  const result = validateBacktestJobsListResponse({
+    truth_state: "active",
+    jobs: [{ ...makeJobSummary(), artifact_dir: 42 }],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /artifact_dir.*must be a string or null/);
+});
+
+test("JOBLIST-04: truth_state != active is unavailable, never an authoritative empty list", () => {
+  const result = validateBacktestJobsListResponse({ truth_state: "not_wired", jobs: [] });
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /unavailable/);
+});
+
+test("JOBLIST-05: an unknown status string in an otherwise-valid row passes structural validation", () => {
+  const result = validateBacktestJobsListResponse({
+    truth_state: "active",
+    jobs: [makeJobSummary({ status: "some_future_status" })],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.data.jobs[0].status : "", "some_future_status");
+});
+
+test("JOBLIST-06: response that is not an object is rejected", () => {
+  const result = validateBacktestJobsListResponse("not-an-object");
+  assert.equal(result.ok, false);
+});
+
+test("JOBLIST-07: response that is an array is rejected (not a jobs-list object)", () => {
+  const result = validateBacktestJobsListResponse([]);
+  assert.equal(result.ok, false);
+});
+
+test("JOBLIST-08: getBacktestJobs surfaces jobs=[null] as a visible malformed error, never throws", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse({ truth_state: "active", jobs: [null] })) as typeof fetch;
+  try {
+    const result = await getBacktestJobs();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /Malformed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("JOBLIST-09: getBacktestJobs reports a non-active truth_state as unavailable, not an empty list", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse({ truth_state: "not_wired", jobs: [] })) as typeof fetch;
+  try {
+    const result = await getBacktestJobs();
+    assert.equal(result.ok, false);
+    assert.equal(result.data, undefined, "a non-active truth_state must never present as an authoritative empty list");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-JOB-LIST-AUTHORITY-REPAIR-01: sessionJobIdStillPresent — the
+// exact predicate the screen's fetchSessionJobs uses to invalidate a stale
+// selection/comparison side after a successful refresh.
+// ---------------------------------------------------------------------------
+
+function makeSessionJobRow(overrides: Partial<SessionJobRow> = {}): SessionJobRow {
+  return {
+    jobId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    status: "completed",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    createdAt: "2026-08-01T12:00:00Z",
+    startedAt: "2026-08-01T12:00:01Z",
+    completedAt: "2026-08-01T12:00:05Z",
+    artifactDir: "C:\\repo\\exports\\backtests\\run-1",
+    error: null,
+    ...overrides,
+  };
+}
+
+test("JOBLIST-10: sessionJobIdStillPresent is true when the id is in the fresh list", () => {
+  const rows = [makeSessionJobRow({ jobId: "job-1" })];
+  assert.equal(sessionJobIdStillPresent("job-1", rows), true);
+});
+
+test("JOBLIST-11: sessionJobIdStillPresent is false when the id vanished from the fresh list (e.g. daemon restart)", () => {
+  const rows = [makeSessionJobRow({ jobId: "job-2" })];
+  assert.equal(sessionJobIdStillPresent("job-1", rows), false);
+});
+
+test("JOBLIST-12: sessionJobIdStillPresent is false against an empty fresh list", () => {
+  assert.equal(sessionJobIdStillPresent("job-1", []), false);
 });

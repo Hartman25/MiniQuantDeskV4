@@ -206,14 +206,96 @@ export interface GetBacktestJobsResult {
   error?: string;
 }
 
+const BACKTEST_JOB_REQUIRED_STRING_FIELDS = [
+  "job_id",
+  "status",
+  "strategy",
+  "symbol",
+  "created_at_utc",
+] as const;
+
+const BACKTEST_JOB_NULLABLE_STRING_FIELDS = [
+  "started_at_utc",
+  "completed_at_utc",
+  "artifact_dir",
+  "error",
+] as const;
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+/**
+ * Structural runtime check for one job-list row. An unrecognized `status`
+ * string (e.g. a forward-compatible daemon status) is accepted here — it is
+ * not a shape defect. normalizeJobStatus (via buildSessionJobRow) is what
+ * maps an unrecognized status to "unknown" for display.
+ */
+function validateBacktestJobSummaryShape(job: unknown, index: number): { ok: true } | { ok: false; error: string } {
+  if (typeof job !== "object" || job === null || Array.isArray(job)) {
+    return { ok: false, error: `Malformed backtest job list response: job at index ${index} is not an object.` };
+  }
+  const row = job as Record<string, unknown>;
+  for (const field of BACKTEST_JOB_REQUIRED_STRING_FIELDS) {
+    if (typeof row[field] !== "string") {
+      return {
+        ok: false,
+        error: `Malformed backtest job list response: job at index ${index} field '${field}' must be a string.`,
+      };
+    }
+  }
+  for (const field of BACKTEST_JOB_NULLABLE_STRING_FIELDS) {
+    if (!isNullableString(row[field])) {
+      return {
+        ok: false,
+        error: `Malformed backtest job list response: job at index ${index} field '${field}' must be a string or null.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+export type ValidateBacktestJobsListResponseResult =
+  | { ok: true; data: BacktestJobsListResponse }
+  | { ok: false; error: string };
+
+/**
+ * GUI-BACKTEST-JOB-LIST-AUTHORITY-REPAIR-01: full structural + authority
+ * runtime validation for the GET /api/v1/backtests/jobs payload. Guards the
+ * production `.map(buildSessionJobRow)` call from throwing on a malformed
+ * response (e.g. `jobs: [null]`) and refuses to treat a non-"active"
+ * truth_state as an authoritative empty list.
+ */
+export function validateBacktestJobsListResponse(data: unknown): ValidateBacktestJobsListResponseResult {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return { ok: false, error: "Malformed backtest job list response: response is not an object." };
+  }
+  const body = data as Record<string, unknown>;
+  if (body.truth_state !== "active") {
+    return {
+      ok: false,
+      error: `Backtest job list unavailable (truth_state=${JSON.stringify(body.truth_state ?? null)}).`,
+    };
+  }
+  if (!Array.isArray(body.jobs)) {
+    return { ok: false, error: "Malformed backtest job list response: 'jobs' is not an array." };
+  }
+  for (let i = 0; i < body.jobs.length; i++) {
+    const validation = validateBacktestJobSummaryShape(body.jobs[i], i);
+    if (!validation.ok) return validation;
+  }
+  return { ok: true, data: { truth_state: body.truth_state, jobs: body.jobs as BacktestJobSummary[] } };
+}
+
 /**
  * Fetch the current daemon-session job list (GET /api/v1/backtests/jobs).
  * This is process-lifetime/in-memory history — never durable. A malformed
- * payload (missing/non-array `jobs`) fails visibly rather than rendering a
- * fake empty list, so a broken response can never look like "no jobs yet".
+ * payload (missing/non-array `jobs`, a non-object job row, wrong-typed
+ * fields, or a non-"active" truth_state) fails visibly rather than throwing
+ * downstream or rendering a fake empty list.
  */
 export async function getBacktestJobs(): Promise<GetBacktestJobsResult> {
-  const result = await fetchJsonCandidate<BacktestJobsListResponse>("/api/v1/backtests/jobs");
+  const result = await fetchJsonCandidate<unknown>("/api/v1/backtests/jobs");
 
   if (!result.ok) {
     const isNotFound = result.error === "HTTP 404";
@@ -225,11 +307,22 @@ export async function getBacktestJobs(): Promise<GetBacktestJobsResult> {
     };
   }
 
-  if (!result.data || !Array.isArray(result.data.jobs)) {
-    return { ok: false, error: "Malformed backtest job list response: 'jobs' is not an array." };
+  const validated = validateBacktestJobsListResponse(result.data);
+  if (!validated.ok) {
+    return { ok: false, error: validated.error };
   }
 
-  return { ok: true, data: result.data };
+  return { ok: true, data: validated.data };
+}
+
+/**
+ * GUI-BACKTEST-JOB-LIST-AUTHORITY-REPAIR-01: true if `jobId` still appears in
+ * a freshly fetched current-session job list. Used to decide whether a
+ * selection/comparison side referencing an older daemon session must be
+ * invalidated after a successful job-list refresh (e.g. daemon restart).
+ */
+export function sessionJobIdStillPresent(jobId: string, jobs: SessionJobRow[]): boolean {
+  return jobs.some((j) => j.jobId === jobId);
 }
 
 export async function getBacktestJob(jobId: string): Promise<GetBacktestJobResult> {
