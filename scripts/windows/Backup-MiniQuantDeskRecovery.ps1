@@ -389,6 +389,44 @@ if ($secretHits -and $secretHits.Count -gt 0) {
 #     of the file it was found in.
 # ---------------------------------------------------------------------------
 Write-Sect 'Content-canary secret scan'
+
+# The canonical local Paper Postgres connection string is already
+# intentionally plaintext, tracked production launcher config (identical in
+# both Start-MiniQuantDesk.ps1 and Start-PaperTradingSmoke.ps1 -- a
+# well-known, non-secret "postgres:postgres" loopback dev default). Without
+# this narrow exemption, MQK_DATABASE_URL colliding with that exact,
+# already-public string anywhere in tracked recovery material (e.g. an
+# audit ledger quoting it) is a deterministic false positive that blocks
+# every backup. This does NOT exempt MQK_DATABASE_URL in general, all
+# loopback URLs, or all Postgres URLs -- only this one exact, fully
+# structurally-verified value.
+$CanonicalLocalPaperDatabaseUrl = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable'
+
+function Test-IsCanonicalLocalPaperDatabaseUrl {
+    param([string]$Value)
+    # Exact-string equality against the known-public canonical value is
+    # already sufficient on its own, but a full structural re-check is kept
+    # as an explicit, independent guard: a future edit that weakens the
+    # string comparison (e.g. to a prefix/contains check) would still be
+    # caught here before the exemption could silently broaden.
+    if ($Value -cne $CanonicalLocalPaperDatabaseUrl) { return $false }
+    $uri = $null
+    try { $uri = [System.Uri]$Value } catch { return $false }
+    if ($uri.Scheme -notin @('postgres', 'postgresql')) { return $false }
+    if ($uri.Host -notin @('127.0.0.1', 'localhost', '::1')) { return $false }
+    if ($uri.Port -ne 5440) { return $false }
+    if ($uri.AbsolutePath.TrimStart('/') -ne 'miniquantdesk_paper') { return $false }
+    $secretLikeParamNames = @('token', 'secret', 'key', 'apikey', 'api_key', 'auth', 'password', 'passwd', 'credential')
+    foreach ($pair in $uri.Query.TrimStart('?').Split('&')) {
+        if ([string]::IsNullOrEmpty($pair)) { continue }
+        $paramName = $pair.Split('=')[0]
+        foreach ($pat in $secretLikeParamNames) {
+            if ($paramName -match "(?i)$pat") { return $false }
+        }
+    }
+    return $true
+}
+
 function Get-AllowlistedLocalSecretValues {
     param([Parameter(Mandatory = $true)][string]$RepoRoot)
     $allowlistedNames = @(
@@ -397,6 +435,7 @@ function Get-AllowlistedLocalSecretValues {
         'B2_ACCOUNT_ID', 'B2_ACCOUNT_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'
     )
     $values = New-Object 'System.Collections.Generic.HashSet[string]'
+    $canonicalLocalDbExempted = $false
     foreach ($candidate in @((Join-Path $RepoRoot '.env.local'), (Join-Path $RepoRoot '.env'))) {
         if (-not (Test-Path -LiteralPath $candidate)) { continue }
         foreach ($line in Get-Content -Path $candidate) {
@@ -410,12 +449,20 @@ function Get-AllowlistedLocalSecretValues {
             if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
                 if ($value.Length -ge 2) { $value = $value.Substring(1, $value.Length - 2) }
             }
+            if (-not ($allowlistedNames -contains $name)) { continue }
+            if ($name -eq 'MQK_DATABASE_URL' -and (Test-IsCanonicalLocalPaperDatabaseUrl -Value $value)) {
+                $canonicalLocalDbExempted = $true
+                continue
+            }
             # A minimum length avoids a short/trivial value producing
             # spurious matches against unrelated staged content.
-            if (($allowlistedNames -contains $name) -and ($value.Length -ge 8)) {
+            if ($value.Length -ge 8) {
                 [void]$values.Add($value)
             }
         }
+    }
+    if ($canonicalLocalDbExempted) {
+        Write-Ok 'CANONICAL_LOCAL_PAPER_DB_CONFIG=YES (MQK_DATABASE_URL matches the known-public canonical loopback Paper DB default -- exempted from the content canary; every other allowlisted value remains fail-closed).'
     }
     return @($values)
 }

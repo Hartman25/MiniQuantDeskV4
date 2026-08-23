@@ -408,6 +408,163 @@ Assert-True 'SQL-identifier negative control: a DisposableDbName starting with a
 Remove-Item -Path $sqlUnsafeBackupDir -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
+# Section 9: canonical local Paper DB canary exemption (real invocations).
+# The content-canary scan in Backup-MiniQuantDeskRecovery.ps1 must exempt
+# ONLY the exact, fully structurally-verified canonical local Paper Postgres
+# URL under the MQK_DATABASE_URL name -- never MQK_DATABASE_URL in general,
+# never all loopback URLs, never all Postgres URLs, and never another
+# variable name merely because its value happens to look the same.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 9: canonical local Paper DB canary exemption (real) ==='
+
+$CanonicalLocalPaperDbUrlForTest = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable'
+
+# Builds a fresh, git-initialized fixture repo whose tracked ledger doc
+# quotes $LedgerValue verbatim, with .env.local setting $EnvVarName=$EnvValue
+# (properly gitignored/untracked, so only the canary logic itself is under
+# test). Returns the repo root; caller is responsible for cleanup.
+function New-CanaryFixtureRepo {
+    param(
+        [Parameter(Mandatory = $true)][string]$EnvVarName,
+        [Parameter(Mandatory = $true)][string]$EnvValue,
+        [Parameter(Mandatory = $true)][string]$LedgerValue
+    )
+    $repoRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_canary_fixture_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $repoRoot | Out-Null
+    Set-Content -Path (Join-Path $repoRoot '.gitignore') -Value '.env.local' -Encoding UTF8
+    Set-Content -Path (Join-Path $repoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md') -Value "Fixture doc quoting: $LedgerValue" -Encoding UTF8
+    & git -C $repoRoot init -q 2>&1 | Out-Null
+    & git -C $repoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore MiniQuantDesk_Master_Patch_Ledger_v2_updated.md 2>&1 | Out-Null
+    & git -C $repoRoot -c user.email='test@example.com' -c user.name='test' commit -q -m 'fixture' 2>&1 | Out-Null
+    Set-Content -Path (Join-Path $repoRoot '.env.local') -Value "$EnvVarName=$EnvValue" -Encoding UTF8
+    return $repoRoot
+}
+
+function Invoke-CanaryFixtureBackup {
+    param([Parameter(Mandatory = $true)][string]$RepoRootPath)
+    $outDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_canary_fixture_out_" + [guid]::NewGuid().ToString('N'))
+    $r = Invoke-TestSubprocess -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $BackupScript, '-RepoRoot', $RepoRootPath, '-OutDir', $outDir)
+    Remove-Item -Path $outDir -Recurse -Force -ErrorAction SilentlyContinue
+    return $r
+}
+
+# Same as above but also captures stdout, for the one control (C13) that
+# needs to inspect captured output rather than just the exit code.
+function Invoke-CanaryFixtureBackupWithStdout {
+    param([Parameter(Mandatory = $true)][string]$RepoRootPath)
+    $outDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_canary_fixture_out_" + [guid]::NewGuid().ToString('N'))
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+    try {
+        $proc = Start-Process -FilePath 'powershell.exe' -NoNewWindow -Wait -PassThru `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $BackupScript, '-RepoRoot', $RepoRootPath, '-OutDir', $outDir) `
+            -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+        $stdout = Get-Content -Path $stdoutFile -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content -Path $stderrFile -Raw -ErrorAction SilentlyContinue
+        return [pscustomobject]@{ ExitCode = $proc.ExitCode; Stdout = $stdout; Stderr = $stderr }
+    } finally {
+        Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $outDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# C1: exact canonical value -- must NOT trigger the canary.
+$c1Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_DATABASE_URL' -EnvValue $CanonicalLocalPaperDbUrlForTest -LedgerValue $CanonicalLocalPaperDbUrlForTest
+$c1Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c1Repo
+Assert-True 'C1: exact canonical local Paper DB URL in tracked docs does NOT trigger the secret canary (backup succeeds)' ($c1Exit -eq 0)
+Remove-Item -Path $c1Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C2: non-loopback host -- must trigger.
+$c2Value = 'postgres://postgres:postgres@example.com:5440/miniquantdesk_paper?sslmode=disable'
+$c2Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_DATABASE_URL' -EnvValue $c2Value -LedgerValue $c2Value
+$c2Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c2Repo
+Assert-True 'C2: MQK_DATABASE_URL with a non-loopback host is refused (nonzero exit)' ($c2Exit -ne 0)
+Remove-Item -Path $c2Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C3: loopback but different credential -- must trigger.
+$c3Value = 'postgres://postgres:differentpw1@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable'
+$c3Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_DATABASE_URL' -EnvValue $c3Value -LedgerValue $c3Value
+$c3Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c3Repo
+Assert-True 'C3: MQK_DATABASE_URL on loopback with a different credential than canonical is refused (nonzero exit)' ($c3Exit -ne 0)
+Remove-Item -Path $c3Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C4: wrong port -- must trigger.
+$c4Value = 'postgres://postgres:postgres@127.0.0.1:5432/miniquantdesk_paper?sslmode=disable'
+$c4Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_DATABASE_URL' -EnvValue $c4Value -LedgerValue $c4Value
+$c4Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c4Repo
+Assert-True 'C4: MQK_DATABASE_URL on the wrong port is refused (nonzero exit)' ($c4Exit -ne 0)
+Remove-Item -Path $c4Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C5: different database identity -- must trigger.
+$c5Value = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_other?sslmode=disable'
+$c5Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_DATABASE_URL' -EnvValue $c5Value -LedgerValue $c5Value
+$c5Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c5Repo
+Assert-True 'C5: MQK_DATABASE_URL targeting a different database identity is refused (nonzero exit)' ($c5Exit -ne 0)
+Remove-Item -Path $c5Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C6: malformed URL -- must NOT receive the canonical exemption.
+$c6Value = 'not-a-valid-postgres-url-but-long-enough'
+$c6Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_DATABASE_URL' -EnvValue $c6Value -LedgerValue $c6Value
+$c6Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c6Repo
+Assert-True 'C6: a malformed MQK_DATABASE_URL value is refused, never exempted (nonzero exit)' ($c6Exit -ne 0)
+Remove-Item -Path $c6Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C7: B2_ACCOUNT_KEY collision -- must still fail closed (regression).
+$c7Value = 'fixture-b2-account-key-not-real-12345'
+$c7Repo = New-CanaryFixtureRepo -EnvVarName 'B2_ACCOUNT_KEY' -EnvValue $c7Value -LedgerValue $c7Value
+$c7Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c7Repo
+Assert-True 'C7: a B2_ACCOUNT_KEY collision in tracked content still fails closed (nonzero exit, regression)' ($c7Exit -ne 0)
+Remove-Item -Path $c7Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C8: MQK_OPERATOR_TOKEN collision -- must still fail closed (regression).
+$c8Value = 'fixture-operator-token-not-real-67890'
+$c8Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_OPERATOR_TOKEN' -EnvValue $c8Value -LedgerValue $c8Value
+$c8Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c8Repo
+Assert-True 'C8: an MQK_OPERATOR_TOKEN collision in tracked content still fails closed (nonzero exit, regression)' ($c8Exit -ne 0)
+Remove-Item -Path $c8Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C9: another allowlisted canary (ALPACA_API_KEY) remains unchanged/fail closed.
+$c9Value = 'fixture-alpaca-api-key-not-real-11223'
+$c9Repo = New-CanaryFixtureRepo -EnvVarName 'ALPACA_API_KEY' -EnvValue $c9Value -LedgerValue $c9Value
+$c9Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c9Repo
+Assert-True 'C9: an ALPACA_API_KEY collision (a canary untouched by this patch) still fails closed (nonzero exit)' ($c9Exit -ne 0)
+Remove-Item -Path $c9Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C10: the exemption cannot be obtained merely by a loopback-shaped value
+# under a DIFFERENT allowlisted variable name -- gating is on the exact
+# name (MQK_DATABASE_URL) AND the exact canonical value together, not on
+# "looks like localhost" alone.
+$c10Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_OPERATOR_TOKEN' -EnvValue $CanonicalLocalPaperDbUrlForTest -LedgerValue $CanonicalLocalPaperDbUrlForTest
+$c10Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c10Repo
+Assert-True 'C10: the canonical DB URL string under a DIFFERENT variable name (MQK_OPERATOR_TOKEN) is NOT exempted (nonzero exit -- name+value must both match)' ($c10Exit -ne 0)
+Remove-Item -Path $c10Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C12: MQK_RESTIC_PASSWORD_FILE collisions remain excluded/fail-closed
+# (unaffected by this patch -- regression).
+$c12Value = 'fixture-restic-password-file-path-not-real'
+$c12Repo = New-CanaryFixtureRepo -EnvVarName 'MQK_RESTIC_PASSWORD_FILE' -EnvValue $c12Value -LedgerValue $c12Value
+$c12Exit = Invoke-CanaryFixtureBackup -RepoRootPath $c12Repo
+Assert-True 'C12: an MQK_RESTIC_PASSWORD_FILE value collision in tracked content still fails closed (nonzero exit, regression)' ($c12Exit -ne 0)
+Remove-Item -Path $c12Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# C11: .env.local never appears as a staged manifest entry (re-verified
+# from Section 3's own real end-to-end manifest, already asserted upstream).
+Assert-True 'C11: .env.local never appears as a staged manifest entry (re-verified from Section 3''s own manifest)' `
+    (-not ($manifest.files | Where-Object { $_.path -match '(?i)\.env\.local' }))
+
+# C13: no fixture secret-shaped value (including the B2_ACCOUNT_KEY-style
+# one from C7) ever appears in captured stdout/stderr, even though the
+# canary correctly refuses the backup because of it.
+$c13Value = 'fixture-b2-account-key-stdout-check-99887'
+$c13Repo = New-CanaryFixtureRepo -EnvVarName 'B2_ACCOUNT_KEY' -EnvValue $c13Value -LedgerValue $c13Value
+$c13Result = Invoke-CanaryFixtureBackupWithStdout -RepoRootPath $c13Repo
+Assert-True 'C13 setup: the B2_ACCOUNT_KEY collision fixture is refused (nonzero exit)' ($c13Result.ExitCode -ne 0)
+Assert-True 'C13: the fixture secret value never appears in captured stdout' (-not ($c13Result.Stdout -and $c13Result.Stdout.Contains($c13Value)))
+Assert-True 'C13: the fixture secret value never appears in captured stderr' (-not ($c13Result.Stderr -and $c13Result.Stderr.Contains($c13Value)))
+Remove-Item -Path $c13Repo -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Show-Info ''
