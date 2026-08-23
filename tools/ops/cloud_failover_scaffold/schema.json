@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "mqk-ops-cloud-failover-paper-scaffold-v1",
+  "title": "OPS-CLOUD-FAILOVER-PAPER-SCAFFOLD-01 standby identity/status payload",
+  "description": "SCAFFOLD ONLY. This schema does not grant execution authority, does not implement cloud failover, and does not describe a runtime-integrated status report -- it is the future connection contract a separate OPS-CLOUD-FAILOVER-PAPER-01 program would implement against. `standby_readiness: ready_for_future_takeover_evaluation` never means permission to trade.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "node_id",
+    "node_role",
+    "deployment_mode",
+    "live_capability",
+    "git_sha",
+    "config_identity",
+    "protocol_schema_identity",
+    "database_recovery_snapshot_identity",
+    "last_verified_backup_snapshot_identity",
+    "reconcile_status_summary",
+    "local_runtime_authority_status",
+    "future_lease_backend",
+    "future_fencing_generation",
+    "standby_readiness"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ops-cloud-failover-paper-scaffold-v1"
+    },
+    "node_id": { "type": "string" },
+    "node_role": { "type": "string", "enum": ["primary", "standby"] },
+    "deployment_mode": {
+      "type": "string",
+      "const": "paper",
+      "description": "This scaffold supports PAPER only. Any other value is UNSUPPORTED_LIVE_MODE."
+    },
+    "live_capability": {
+      "type": "boolean",
+      "const": false,
+      "description": "Must always be false/disabled in this scaffold. There is no transition to true anywhere in this contract."
+    },
+    "git_sha": { "type": "string" },
+    "config_identity": {
+      "type": "string",
+      "description": "Hash of this node's local layered config, for cross-node identity comparison."
+    },
+    "protocol_schema_identity": {
+      "type": "string",
+      "description": "Identifies which version of THIS schema the payload was produced against."
+    },
+    "database_recovery_snapshot_identity": {
+      "type": "string",
+      "description": "Identity of the most recent recovery-backup DB snapshot this node knows about (see OPS-OFFSITE-BACKUP-01 manifest.json)."
+    },
+    "research_registry_identity": { "type": ["string", "null"] },
+    "promotion_evidence_identity": { "type": ["string", "null"] },
+    "last_verified_backup_snapshot_identity": { "type": "string" },
+    "reconcile_status_summary": { "type": "string" },
+    "local_runtime_authority_status": { "type": "string" },
+    "future_lease_backend": {
+      "type": "string",
+      "description": "Placeholder identifier for a FUTURE durable renewable-leadership lease backend. Empty string = not configured. This scaffold never acquires a lease."
+    },
+    "future_fencing_generation": {
+      "type": ["integer", "null"],
+      "description": "Placeholder generation/fencing token field for a FUTURE fencing implementation. This scaffold never generates one."
+    },
+    "standby_readiness": {
+      "type": "string",
+      "enum": [
+        "not_configured",
+        "identity_mismatch",
+        "backup_stale",
+        "reconcile_required",
+        "authority_unavailable",
+        "ready_for_future_takeover_evaluation"
+      ],
+      "description": "ready_for_future_takeover_evaluation means only that this scaffold's own checks passed -- it is NOT permission to trade, arm, or promote a standby, and this contract defines no transition to execution."
+    }
+  },
+  "additionalProperties": false
+}
