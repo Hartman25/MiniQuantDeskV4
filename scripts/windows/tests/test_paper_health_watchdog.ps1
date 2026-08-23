@@ -133,8 +133,12 @@ Assert-True 'RestartCount 2' `
 Assert-True 'ExecutionTimeLimit 1 hour (bounded, not indefinite)' `
     ($RegHelperText -match [regex]::Escape('-ExecutionTimeLimit (New-TimeSpan -Hours 1)'))
 
-Assert-True 'default daily window starts at 06:00 (after the 02:00 pre-open task''s 1h ExecutionTimeLimit -- no scheduled overlap by construction)' `
-    ($RegHelperText -match [regex]::Escape('$DailyStart       = ''06:00'''))
+Assert-True 'default daily window starts at 03:05 (shortly after the 02:00 pre-open task''s 1h ExecutionTimeLimit ends at 03:00 -- no scheduled overlap by construction, and covers Hawaii-local early US equity market open)' `
+    ($RegHelperText -match [regex]::Escape('$DailyStart       = ''03:05'''))
+
+Assert-True 'IntervalMinutes/DurationHours are range-validated (malformed values cannot disable recovery bounding)' `
+    ($RegHelperText -match [regex]::Escape('[ValidateRange(1, [int]::MaxValue)][int] $IntervalMinutes') -and `
+     $RegHelperText -match [regex]::Escape('[ValidateRange(1, [int]::MaxValue)][int] $DurationHours'))
 
 Assert-True 'new task defaults DISABLED (desiredEnabled=false when no prior task and no -Enable)' `
     ($RegHelperText -match [regex]::Escape('$desiredEnabled = $false'))
@@ -194,6 +198,36 @@ Assert-True 'machine-wide recovery mutex present' `
 Assert-True 'dot-source guard mirrors the official launcher''s own convention (safe to test without executing MAIN DISPATCH)' `
     ($WatchdogText -match [regex]::Escape("if (`$MyInvocation.InvocationName -ne '.') {"))
 
+Assert-True 'launcher process uses async output capture (BeginOutputReadLine/BeginErrorReadLine), never a blocking ReadToEnd before WaitForExit' `
+    ($WatchdogText -match [regex]::Escape('$process.BeginOutputReadLine()') -and `
+     $WatchdogText -match [regex]::Escape('$process.BeginErrorReadLine()') -and `
+     -not ($WatchdogText -match [regex]::Escape('StandardOutput.ReadToEnd()')) -and `
+     -not ($WatchdogText -match [regex]::Escape('StandardError.ReadToEnd()')))
+
+Assert-True 'WaitForExit(timeout) is called before any output is consumed (genuinely bounds the child''s wall-clock lifetime)' `
+    ($WatchdogText -match [regex]::Escape('$finished = $process.WaitForExit($TimeoutSeconds * 1000)'))
+
+Assert-True 'corrupt/malformed recovery state fails closed (typed CORRUPT_FAIL_CLOSED verdict, never silently treated as zero attempts)' `
+    ($WatchdogText -match [regex]::Escape("Verdict = 'CORRUPT_FAIL_CLOSED'") -and `
+     $WatchdogText -match [regex]::Escape("Verdict = 'CORRUPT_RECOVERY_STATE_FAIL_CLOSED'"))
+
+Assert-True 'recovery-state writes are staged to a temp sibling file and replaced atomically (Move-Item -Force), never a direct Set-Content on the authoritative path' `
+    ($WatchdogText -match [regex]::Escape('Move-Item -LiteralPath $tempPath -Destination $Path -Force'))
+
+Assert-True 'post-mutex health recheck present (mutex alone does not prove global startup authority)' `
+    ($WatchdogText -match [regex]::Escape('$recheck = Test-DaemonHealthy'))
+
+Assert-True 'read-only pre-open scheduled-task running fence present, and never mutates that task (no Stop-ScheduledTask/Disable-ScheduledTask/Unregister-ScheduledTask calls anywhere in the watchdog)' `
+    ($WatchdogText -match 'function Test-PreopenLauncherTaskRunning' -and `
+     -not ($WatchdogText -match [regex]::Escape('Stop-ScheduledTask') -or $WatchdogText -match [regex]::Escape('Disable-ScheduledTask') -or $WatchdogText -match [regex]::Escape('Unregister-ScheduledTask')))
+
+Assert-True 'MaxAttempts/WindowMinutes/HealthTimeoutSec/MutexWaitMilliseconds/LauncherTimeoutSeconds are all range-validated (malformed values cannot disable recovery bounding)' `
+    (($WatchdogText -match [regex]::Escape('[ValidateRange(1, [int]::MaxValue)][int] $MaxAttempts')) -and `
+     ($WatchdogText -match [regex]::Escape('[ValidateRange(1, [int]::MaxValue)][int] $WindowMinutes')) -and `
+     ($WatchdogText -match [regex]::Escape('[ValidateRange(1, [int]::MaxValue)][int] $HealthTimeoutSec')) -and `
+     ($WatchdogText -match [regex]::Escape('[ValidateRange(1, [int]::MaxValue)][int] $MutexWaitMilliseconds')) -and `
+     ($WatchdogText -match [regex]::Escape('[ValidateRange(1, [int]::MaxValue)][int] $LauncherTimeoutSeconds')))
+
 # ---------------------------------------------------------------------------
 # Section 5: functional proof -- dot-source the real watchdog, shadow its
 # I/O boundary functions, exercise Invoke-PaperRecoveryCycle end-to-end.
@@ -210,6 +244,7 @@ $script:MockHealthy = $true
 $script:LauncherInvocationCount = 0
 $script:MockLauncherExitCode = 0
 $script:MockMutexAcquired = $true
+$script:MockPreopenRunning = $false
 
 function Test-DaemonHealthy {
     param([string]$DaemonBaseUrl, [int]$TimeoutSec = 5)
@@ -229,6 +264,11 @@ function Enter-RecoveryMutex {
 
 function Exit-RecoveryMutex {
     param($MutexHandle)
+}
+
+function Test-PreopenLauncherTaskRunning {
+    param([string]$TaskName = 'MiniQuantDesk-Paper-Preopen-Startup', [string]$TaskPath = '\MiniQuantDesk\')
+    return $script:MockPreopenRunning
 }
 
 function Invoke-Cycle {
@@ -278,6 +318,48 @@ Assert-True 'A1 duplicate recovery: mutex refusal reports RECOVERY_ALREADY_IN_FL
 Assert-True 'A1 duplicate recovery: launcher never invoked when mutex is held elsewhere' (-not $result.LauncherInvoked -and $script:LauncherInvocationCount -eq 0)
 $script:MockMutexAcquired = $true
 
+# --- AR4: daemon becomes healthy while waiting for mutex -> zero launch ----
+Remove-Item -Path (Join-Path $ScratchRoot 'exports') -Recurse -Force -ErrorAction SilentlyContinue
+$script:HealthCallCount = 0
+function Test-DaemonHealthy {
+    param([string]$DaemonBaseUrl, [int]$TimeoutSec = 5)
+    $script:HealthCallCount++
+    if ($script:HealthCallCount -eq 1) { return [pscustomobject]@{ Healthy = $false; Detail = 'mocked-initial-unhealthy' } }
+    return [pscustomobject]@{ Healthy = $true; Detail = 'mocked-recovered-while-waiting' }
+}
+$script:LauncherInvocationCount = 0
+$result = Invoke-Cycle
+Assert-True 'AR4 daemon recovers while waiting for mutex: verdict is HEALTHY_NO_ACTION' ($result.Verdict -eq 'HEALTHY_NO_ACTION')
+Assert-True 'AR4 daemon recovers while waiting for mutex: launcher never invoked' (-not $result.LauncherInvoked -and $script:LauncherInvocationCount -eq 0)
+Assert-True 'AR4 post-mutex recheck actually ran (health probed twice: initial + post-mutex)' ($script:HealthCallCount -eq 2)
+function Test-DaemonHealthy {
+    param([string]$DaemonBaseUrl, [int]$TimeoutSec = 5)
+    return [pscustomobject]@{ Healthy = $script:MockHealthy; Detail = 'mocked' }
+}
+
+# --- AR5: accepted pre-open scheduled task already Running -> zero launch --
+Remove-Item -Path (Join-Path $ScratchRoot 'exports') -Recurse -Force -ErrorAction SilentlyContinue
+$script:MockHealthy = $false
+$script:MockPreopenRunning = $true
+$script:LauncherInvocationCount = 0
+$result = Invoke-Cycle
+Assert-True 'AR5 pre-open task running: verdict is STARTUP_AUTHORITY_ALREADY_IN_FLIGHT' ($result.Verdict -eq 'STARTUP_AUTHORITY_ALREADY_IN_FLIGHT')
+Assert-True 'AR5 pre-open task running: launcher never invoked' (-not $result.LauncherInvoked -and $script:LauncherInvocationCount -eq 0)
+$script:MockPreopenRunning = $false
+
+# --- AR2: corrupt/malformed recovery state, full cycle -> zero launch ------
+Remove-Item -Path (Join-Path $ScratchRoot 'exports') -Recurse -Force -ErrorAction SilentlyContinue
+$corruptStatePath = Get-RecoveryStatePath -RepoRoot $ScratchRoot
+Set-Content -Path $corruptStatePath -Value '{ not valid json ' -Encoding UTF8
+$script:MockHealthy = $false
+$script:LauncherInvocationCount = 0
+$result = Invoke-Cycle
+Assert-True 'AR2 corrupt state (full cycle): verdict is CORRUPT_RECOVERY_STATE_FAIL_CLOSED' ($result.Verdict -eq 'CORRUPT_RECOVERY_STATE_FAIL_CLOSED')
+Assert-True 'AR2 corrupt state (full cycle): launcher never invoked' (-not $result.LauncherInvoked -and $script:LauncherInvocationCount -eq 0)
+Assert-True 'AR2 corrupt state (full cycle): bounded refusal exit code (1), not a crash' ($result.ExitCode -eq 1)
+Assert-True 'AR2 corrupt state (full cycle): corrupt file left untouched for operator inspection (not silently reset)' `
+    ((Get-Content -Path $corruptStatePath -Raw).TrimEnd("`r", "`n") -eq '{ not valid json ')
+
 # --- Test-RecoveryBackoffAllowed unit proof: attempts outside the window
 #     are pruned and do not count against the limit ------------------------
 $nowUtc = (Get-Date).ToUniversalTime()
@@ -287,14 +369,87 @@ $backoffCheck = Test-RecoveryBackoffAllowed -Attempts @($staleAttempt, $freshAtt
 Assert-True 'stale (out-of-window) attempts are pruned and do not count toward the bounded limit' `
     (@($backoffCheck.PrunedAttempts).Count -eq 1 -and -not $backoffCheck.Allowed)
 
-# --- corrupt state file fails closed to empty history, not a crash --------
+# --- corrupt state file fails closed with a typed verdict, not a crash ----
 $corruptPath = Join-Path $ScratchRoot 'corrupt_state.json'
 Set-Content -Path $corruptPath -Value '{ not valid json ' -Encoding UTF8
 $recovered = Read-RecoveryState -Path $corruptPath
-Assert-True 'corrupt recovery-state file fails closed to empty attempt history rather than throwing' `
-    (@($recovered.attempts).Count -eq 0)
+Assert-True 'corrupt recovery-state file yields typed CORRUPT_FAIL_CLOSED verdict, not a crash and not zero-attempts-as-fresh-budget' `
+    ($recovered.Verdict -eq 'CORRUPT_FAIL_CLOSED')
+
+# --- atomic write: Save-RecoveryState leaves no stray temp file behind and
+#     the saved content round-trips correctly ------------------------------
+$atomicPath = Join-Path $ScratchRoot 'atomic_state.json'
+Save-RecoveryState -Path $atomicPath -State ([pscustomobject]@{ schema_version = 'paper-recovery-state-v1'; attempts = @('2026-08-22T00:00:00.0000000Z') })
+$atomicReadBack = Read-RecoveryState -Path $atomicPath
+Assert-True 'atomic write: saved state round-trips (VALID verdict, 1 attempt)' `
+    ($atomicReadBack.Verdict -eq 'VALID' -and @($atomicReadBack.attempts).Count -eq 1)
+$strayTempFiles = @(Get-ChildItem -Path $ScratchRoot -Filter '.atomic_state.json.*.tmp' -File -ErrorAction SilentlyContinue)
+Assert-True 'atomic write: no stray .tmp file left behind after a successful save' ($strayTempFiles.Count -eq 0)
 
 Remove-Item -Path $ScratchRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------------
+# Section 6: real production-function timeout negative control. Calls the
+# REAL (unshadowed) Invoke-PaperLauncherProcess -- not a mock -- against a
+# scratch RepoRoot whose scripts\windows\Start-MiniQuantDesk.ps1 is a
+# harmless stub that sleeps far longer than the bounded timeout. Proves
+# WaitForExit(timeout) actually governs the child's wall-clock lifetime
+# (TimedOut=true within a small bound), not a blocking ReadToEnd first.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 6: real production timeout negative control ==='
+
+# Section 5 shadowed Invoke-PaperLauncherProcess (and other I/O boundary
+# functions) by redefining them at script scope. Re-dot-source the real
+# watchdog file to restore the genuine, unshadowed production functions
+# before this negative control -- it must call the REAL
+# Invoke-PaperLauncherProcess, never the Section 5 mock.
+. $Watchdog
+
+$TimeoutScratchRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_health_watchdog_timeout_test_" + [guid]::NewGuid().ToString('N'))
+$TimeoutScratchScriptsDir = Join-Path $TimeoutScratchRoot 'scripts\windows'
+New-Item -ItemType Directory -Force -Path $TimeoutScratchScriptsDir | Out-Null
+$HarmlessHungStub = Join-Path $TimeoutScratchScriptsDir 'Start-MiniQuantDesk.ps1'
+Set-Content -Path $HarmlessHungStub -Encoding UTF8 -Value @'
+param([Parameter(ValueFromRemainingArguments = $true)] $Ignored)
+Start-Sleep -Seconds 120
+'@
+
+$boundedTimeoutSeconds = 2
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$timeoutResult = Invoke-PaperLauncherProcess -RepoRoot $TimeoutScratchRoot -TimeoutSeconds $boundedTimeoutSeconds
+$sw.Stop()
+
+Assert-True 'real Invoke-PaperLauncherProcess: hung child reports TimedOut=true' ($timeoutResult.TimedOut -eq $true)
+Assert-True 'real Invoke-PaperLauncherProcess: hung child reports nonzero ExitCode' ($timeoutResult.ExitCode -ne 0)
+Assert-True 'real Invoke-PaperLauncherProcess: returns within a bounded wall-clock interval, not the child''s full 120s sleep' `
+    ($sw.Elapsed.TotalSeconds -lt ($boundedTimeoutSeconds + 15))
+
+Start-Sleep -Milliseconds 300
+$stillRunning = Get-Process -Id $timeoutResult.ProcessId -ErrorAction SilentlyContinue
+Assert-True 'real Invoke-PaperLauncherProcess: the timed-out wrapper child is actually terminated (not left running)' ($null -eq $stillRunning)
+
+Remove-Item -Path $TimeoutScratchRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---------------------------------------------------------------------------
+# AR7: malformed parameter ranges are rejected before any recovery action.
+# Real subprocess invocation of the watchdog script itself (not dot-sourced)
+# with -MaxAttempts 0 -- PowerShell's [ValidateRange] parameter binding
+# throws before the script body (and therefore any health check, mutex, or
+# launcher invocation) ever executes.
+# ---------------------------------------------------------------------------
+$paramScratchRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_health_watchdog_paramtest_" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $paramScratchRoot | Out-Null
+$paramStdoutLog = Join-Path $paramScratchRoot 'stdout.log'
+$paramStderrLog = Join-Path $paramScratchRoot 'stderr.log'
+# Start-Process (not the `&` call operator) -- avoids $ErrorActionPreference
+# = 'Stop' (inherited from dot-sourcing the watchdog script above) turning
+# ordinary native-command stderr output into a terminating NativeCommandError.
+$paramProc = Start-Process -FilePath 'powershell.exe' -NoNewWindow -Wait -PassThru `
+    -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Watchdog, '-RepoRoot', $paramScratchRoot, '-MaxAttempts', '0') `
+    -RedirectStandardOutput $paramStdoutLog -RedirectStandardError $paramStderrLog
+Assert-True 'AR7 malformed MaxAttempts=0 is rejected (nonzero exit from parameter validation, before any recovery action)' ($paramProc.ExitCode -ne 0)
+Remove-Item -Path $paramScratchRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -52,11 +52,11 @@
 param(
     [string] $RepoRoot            = '',
     [string] $DaemonBaseUrl       = 'http://127.0.0.1:8899',
-    [int]    $MaxAttempts         = 3,
-    [int]    $WindowMinutes       = 30,
-    [int]    $HealthTimeoutSec    = 5,
-    [int]    $MutexWaitMilliseconds = 3000,
-    [int]    $LauncherTimeoutSeconds = 2400
+    [ValidateRange(1, [int]::MaxValue)][int] $MaxAttempts         = 3,
+    [ValidateRange(1, [int]::MaxValue)][int] $WindowMinutes       = 30,
+    [ValidateRange(1, [int]::MaxValue)][int] $HealthTimeoutSec    = 5,
+    [ValidateRange(1, [int]::MaxValue)][int] $MutexWaitMilliseconds = 3000,
+    [ValidateRange(1, [int]::MaxValue)][int] $LauncherTimeoutSeconds = 2400
 )
 
 Set-StrictMode -Version Latest
@@ -101,31 +101,53 @@ function Get-RecoveryLogPath {
     return (Join-Path $dir "recovery_$stamp.json")
 }
 
+# Fail-closed verdicts for recovery-state readability:
+#   VALID               -- file present, parses, well-formed attempts array.
+#   MISSING_NEW_STATE    -- file does not exist yet (legitimate first run;
+#                            grants a fresh recovery budget).
+#   CORRUPT_FAIL_CLOSED  -- file exists but is unreadable/malformed/partially
+#                            written. This must NEVER be treated as "zero
+#                            attempts" (that would grant a fresh budget to a
+#                            state we cannot actually verify) -- callers must
+#                            refuse a new launcher attempt on this verdict.
 function Read-RecoveryState {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
-        return [pscustomobject]@{ schema_version = 'paper-recovery-state-v1'; attempts = @() }
+        return [pscustomobject]@{ Verdict = 'MISSING_NEW_STATE'; schema_version = 'paper-recovery-state-v1'; attempts = @() }
     }
     try {
         $raw = Get-Content -Path $Path -Raw
         if ([string]::IsNullOrWhiteSpace($raw)) {
-            return [pscustomobject]@{ schema_version = 'paper-recovery-state-v1'; attempts = @() }
+            return [pscustomobject]@{ Verdict = 'CORRUPT_FAIL_CLOSED'; schema_version = 'paper-recovery-state-v1'; attempts = @() }
         }
-        $parsed = $raw | ConvertFrom-Json
-        $attempts = @()
-        if ($null -ne $parsed.PSObject.Properties['attempts']) { $attempts = @($parsed.attempts) }
-        return [pscustomobject]@{ schema_version = 'paper-recovery-state-v1'; attempts = $attempts }
+        $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $parsed.PSObject.Properties['attempts']) {
+            return [pscustomobject]@{ Verdict = 'CORRUPT_FAIL_CLOSED'; schema_version = 'paper-recovery-state-v1'; attempts = @() }
+        }
+        $attempts = @($parsed.attempts)
+        foreach ($a in $attempts) {
+            try {
+                [void][datetime]::Parse([string]$a, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+            } catch {
+                return [pscustomobject]@{ Verdict = 'CORRUPT_FAIL_CLOSED'; schema_version = 'paper-recovery-state-v1'; attempts = @() }
+            }
+        }
+        return [pscustomobject]@{ Verdict = 'VALID'; schema_version = 'paper-recovery-state-v1'; attempts = $attempts }
     } catch {
-        # Fail closed on a corrupt state file: treat as empty history rather
-        # than crashing, but never silently invent a permissive state beyond
-        # "no known prior attempts".
-        return [pscustomobject]@{ schema_version = 'paper-recovery-state-v1'; attempts = @() }
+        return [pscustomobject]@{ Verdict = 'CORRUPT_FAIL_CLOSED'; schema_version = 'paper-recovery-state-v1'; attempts = @() }
     }
 }
 
+# Atomic write: stage to a temp sibling file, then Move-Item -Force to
+# replace the authoritative state file. Avoids ever leaving a
+# partially-written state file behind on a successful update.
 function Save-RecoveryState {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$State)
-    ($State | ConvertTo-Json -Depth 4) | Set-Content -Path $Path -Encoding UTF8
+    $json = ($State | ConvertTo-Json -Depth 4)
+    $dir = Split-Path -Parent $Path
+    $tempPath = Join-Path $dir (".{0}.{1}.tmp" -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString('N'))
+    Set-Content -Path $tempPath -Value $json -Encoding UTF8 -NoNewline
+    Move-Item -LiteralPath $tempPath -Destination $Path -Force
 }
 
 # ---------------------------------------------------------------------------
@@ -182,9 +204,41 @@ function Exit-RecoveryMutex {
 }
 
 # ---------------------------------------------------------------------------
+# Read-only, best-effort defense-in-depth: never a security boundary by
+# itself (the mutex + bounded backoff remain the enforced authority). Never
+# mutates the pre-open task -- Get-ScheduledTask only. If the task cannot be
+# resolved (module unavailable, task not registered on this machine), treats
+# it as not-running rather than blocking recovery indefinitely. Overridable
+# (shadowable) for tests so functional proofs never depend on real Task
+# Scheduler state.
+# ---------------------------------------------------------------------------
+function Test-PreopenLauncherTaskRunning {
+    param(
+        [string]$TaskName = 'MiniQuantDesk-Paper-Preopen-Startup',
+        [string]$TaskPath = '\MiniQuantDesk\'
+    )
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+        if ($null -eq $task) { return $false }
+        return ($task.State -eq 'Running')
+    } catch {
+        return $false
+    }
+}
+
+# ---------------------------------------------------------------------------
 # The ONE authorized side effect. Hardcodes -Mode Paper -Scheduled -- no
 # parameter of this script can change the invoked mode. Overridable
 # (shadowable) for tests so functional proofs never actually launch a daemon.
+#
+# Uses the same async stdout/stderr capture pattern as the already-accepted
+# Invoke-BoundedChildScript in Start-MiniQuantDesk.ps1: BeginOutputReadLine /
+# BeginErrorReadLine feed StringBuilders via event subscriptions, so
+# WaitForExit($TimeoutSeconds * 1000) alone -- never a blocking synchronous
+# stream-drain call made beforehand -- governs the child's actual wall-clock
+# lifetime. On timeout, only this direct
+# powershell.exe child is killed; a daemon it may have started independently
+# (via its own Start-Process) is left running per contract.
 # ---------------------------------------------------------------------------
 function Invoke-PaperLauncherProcess {
     param(
@@ -206,15 +260,31 @@ function Invoke-PaperLauncherProcess {
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
-    [void]$process.Start()
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $finished = $process.WaitForExit($TimeoutSeconds * 1000)
-    if (-not $finished) {
-        try { $process.Kill() } catch {}
-        return [pscustomobject]@{ ExitCode = 1; TimedOut = $true; Stdout = $stdout; Stderr = $stderr }
+
+    $stdoutBuilder = New-Object System.Text.StringBuilder
+    $stderrBuilder = New-Object System.Text.StringBuilder
+    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stdoutBuilder | Out-Null
+    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stderrBuilder | Out-Null
+
+    try {
+        [void]$process.Start()
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+
+        $finished = $process.WaitForExit($TimeoutSeconds * 1000)
+
+        if (-not $finished) {
+            try {
+                $process.Kill()
+                $process.WaitForExit(5000) | Out-Null
+            } catch {}
+            return [pscustomobject]@{ ExitCode = 1; TimedOut = $true; ProcessId = $process.Id; Stdout = $stdoutBuilder.ToString(); Stderr = $stderrBuilder.ToString() }
+        }
+
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; ProcessId = $process.Id; Stdout = $stdoutBuilder.ToString(); Stderr = $stderrBuilder.ToString() }
+    } finally {
+        Get-EventSubscriber | Where-Object { $_.SourceObject -eq $process } | Unregister-Event
     }
-    return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; Stdout = $stdout; Stderr = $stderr }
 }
 
 # ---------------------------------------------------------------------------
@@ -244,8 +314,32 @@ function Invoke-PaperRecoveryCycle {
             return [pscustomobject]@{ Verdict = 'RECOVERY_ALREADY_IN_FLIGHT'; Detail = 'another recovery invocation holds the mutex'; LauncherInvoked = $false; ExitCode = 1 }
         }
 
+        # The mutex only serializes THIS watchdog's own instances -- it does
+        # not by itself prove global startup authority. Re-check health
+        # after acquiring it: another actor (a concurrent watchdog run that
+        # already recovered the daemon, the operator, or the accepted
+        # pre-open task) may have already fixed things while this instance
+        # waited.
+        $recheck = Test-DaemonHealthy -DaemonBaseUrl $DaemonBaseUrl -TimeoutSec $HealthTimeoutSec
+        if ($recheck.Healthy) {
+            return [pscustomobject]@{ Verdict = 'HEALTHY_NO_ACTION'; Detail = $recheck.Detail; LauncherInvoked = $false; ExitCode = 0 }
+        }
+
+        # Read-only fence against the accepted pre-open scheduled task: never
+        # invoke a second official-launcher process while that task is
+        # itself Running. Never mutates/stops/disables it.
+        if (Test-PreopenLauncherTaskRunning) {
+            return [pscustomobject]@{ Verdict = 'STARTUP_AUTHORITY_ALREADY_IN_FLIGHT'; Detail = 'accepted pre-open scheduled task is currently Running'; LauncherInvoked = $false; ExitCode = 1 }
+        }
+
         $statePath = Get-RecoveryStatePath -RepoRoot $RepoRoot
         $state = Read-RecoveryState -Path $statePath
+        if ($state.Verdict -eq 'CORRUPT_FAIL_CLOSED') {
+            # Never overwrite the corrupt file here -- leave it for operator
+            # inspection/repair rather than silently resetting the clock.
+            return [pscustomobject]@{ Verdict = 'CORRUPT_RECOVERY_STATE_FAIL_CLOSED'; Detail = "unreadable/malformed recovery state at $statePath; refusing a new attempt until repaired/replaced"; LauncherInvoked = $false; ExitCode = 1 }
+        }
+
         $nowUtc = (Get-Date).ToUniversalTime()
         $backoff = Test-RecoveryBackoffAllowed -Attempts $state.attempts -MaxAttempts $MaxAttempts -WindowMinutes $WindowMinutes -NowUtc $nowUtc
 
@@ -295,11 +389,13 @@ if ($MyInvocation.InvocationName -ne '.') {
         -MutexWaitMilliseconds $MutexWaitMilliseconds -LauncherTimeoutSeconds $LauncherTimeoutSeconds
 
     switch ($cycle.Verdict) {
-        'HEALTHY_NO_ACTION'          { Write-Ok "Daemon healthy ($($cycle.Detail)); no recovery action taken." }
-        'RECOVERY_ALREADY_IN_FLIGHT' { Write-Warn "Recovery mutex held by another instance; skipping this run ($($cycle.Detail))." }
-        'BOUNDED_BACKOFF_EXCEEDED'   { Write-Fail "Bounded recovery backoff exceeded; refusing to invoke the launcher again this window ($($cycle.Detail))." }
-        'RECOVERY_INVOKED'           { Write-Step "Recovery invoked the official launcher ($($cycle.Detail))." }
-        default                      { Write-Warn "Unrecognized recovery verdict: $($cycle.Verdict)" }
+        'HEALTHY_NO_ACTION'                    { Write-Ok "Daemon healthy ($($cycle.Detail)); no recovery action taken." }
+        'RECOVERY_ALREADY_IN_FLIGHT'           { Write-Warn "Recovery mutex held by another instance; skipping this run ($($cycle.Detail))." }
+        'STARTUP_AUTHORITY_ALREADY_IN_FLIGHT'  { Write-Warn "Accepted pre-open scheduled task is already running; skipping this run ($($cycle.Detail))." }
+        'CORRUPT_RECOVERY_STATE_FAIL_CLOSED'   { Write-Fail "Recovery state file is unreadable/malformed; refusing a new attempt ($($cycle.Detail))." }
+        'BOUNDED_BACKOFF_EXCEEDED'             { Write-Fail "Bounded recovery backoff exceeded; refusing to invoke the launcher again this window ($($cycle.Detail))." }
+        'RECOVERY_INVOKED'                     { Write-Step "Recovery invoked the official launcher ($($cycle.Detail))." }
+        default                                { Write-Warn "Unrecognized recovery verdict: $($cycle.Verdict)" }
     }
 
     exit $cycle.ExitCode

@@ -28,11 +28,16 @@
 #     session so a mid-day crash is caught and recovered without waiting
 #     for the next calendar day's pre-open task.
 #
-# The daily repetition window intentionally starts well after the existing
-# 02:00 pre-open task's 1-hour ExecutionTimeLimit, so the two permanent
-# tasks' own scheduled fire times never overlap by construction (defense in
-# depth on top of Watch-MiniQuantDeskPaperHealth.ps1's own machine-wide
-# recovery mutex and bounded backoff, which guard any residual overlap).
+# The daily repetition window default (03:05) starts shortly after the
+# existing 02:00 pre-open task's own 1-hour ExecutionTimeLimit (which ends by
+# 03:00), so the two permanent tasks' own scheduled fire times never overlap
+# by construction (defense in depth on top of
+# Watch-MiniQuantDeskPaperHealth.ps1's own machine-wide recovery mutex,
+# post-mutex health recheck, pre-open-task-running fence, and bounded
+# backoff, which guard any residual overlap). This repo is operated in
+# Hawaii local time, where US equity regular-market open occurs well before
+# a 06:00 local start would cover -- 03:05 closes that early-session gap
+# without cutting into the pre-open task's own execution window.
 #
 # TEMPORARY-SOAK COEXISTENCE: mirrors Register-PaperStartupTask.ps1 exactly
 # -- a newly created permanent task is registered DISABLED by default; pass
@@ -54,7 +59,8 @@
 #                      MiniQuantDesk-Paper-HealthWatchdog
 #   -TaskPath         Task Scheduler folder. Default: \MiniQuantDesk\
 #   -DailyStart       Local HH:mm the daily repetition window begins.
-#                      Default: 06:00
+#                      Default: 03:05 (shortly after the 02:00 pre-open
+#                      task's 1-hour ExecutionTimeLimit ends at 03:00)
 #   -IntervalMinutes  Minutes between health checks within the window.
 #                      Default: 15
 #   -DurationHours    Hours the repetition window lasts from -DailyStart.
@@ -71,9 +77,9 @@ param(
     [string] $RepoRoot         = '',
     [string] $TaskName         = 'MiniQuantDesk-Paper-HealthWatchdog',
     [string] $TaskPath         = '\MiniQuantDesk\',
-    [string] $DailyStart       = '06:00',
-    [int]    $IntervalMinutes  = 15,
-    [int]    $DurationHours    = 16,
+    [string] $DailyStart       = '03:05',
+    [ValidateRange(1, [int]::MaxValue)][int] $IntervalMinutes  = 15,
+    [ValidateRange(1, [int]::MaxValue)][int] $DurationHours    = 16,
     [switch] $Enable
 )
 
