@@ -30,26 +30,27 @@ No research-py source file is modified by this script. Feature isolation
 (selecting only slope_60) is done in THIS driver, after calling the
 unmodified build_feature_set_v1, never inside feature_set_v1.py itself.
 
-The causal placebo helper (`build_causal_placebo_targets`) is IMPORTED
-directly from the accepted, PUSHED-VERIFIED
-research-alpha-gap-discovery-01-clean worktree
+The causal placebo helper (`build_causal_placebo_targets`) is an exact,
+self-contained reproduction of the accepted, PUSHED-VERIFIED
+research-alpha-gap-discovery-01-clean worktree's implementation
 (research-py/experiments/alpha_discovery_01/run_experiment.py, commit
-28497968) rather than re-implemented here, per mission instruction to
-prefer reuse over a subtly different reimplementation. The accepted
-worktree's own path-based safety assertion (its `__file__` must resolve
-under a directory containing "alpha-discovery") passes naturally there --
-it is never bypassed or patched. This driver's OWN production imports
-(`mqk_research.*`) are all resolved from THIS worktree's own src/ BEFORE
-that import happens, so every executed line of production code -- other
-than the one pure, no-side-effect placebo-permutation function -- comes
-from this isolated SHORT-01 worktree, not the alpha-discovery one.
+28497968cada7870efe38295b5712b49b0d32398). It was ORIGINALLY imported live
+from that sibling worktree's driver via `importlib`, which made a checkout
+of this branch alone non-functional without that exact external worktree
+present on disk at a fixed Windows path. SHORT-01-DRIVER-PORTABILITY-01
+inlined the function verbatim (same permutation logic, same fail-closed
+effectiveness check, same deterministic seeding) so this experiment is
+runnable from a bare checkout of this branch. Semantics are unchanged and
+verified byte-for-byte identical against the accepted source at inline
+time; the accepted worktree/commit remains the attribution source, not a
+runtime dependency. This driver's OWN production imports (`mqk_research.*`)
+are all resolved from THIS worktree's own src/, so every executed line of
+production code comes from this isolated SHORT-01 worktree.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -83,43 +84,64 @@ from mqk_research.ml.schema import generate_feature_schema
 from mqk_research.ml.weight_to_share import WeightToShareSpec
 
 # ---------------------------------------------------------------------------
-# Reuse the ACCEPTED causal placebo helper from the accepted research branch
-# worktree, instead of re-implementing a subtly different permutation.
+# Self-contained, exact reproduction of the accepted causal placebo helper
+# (research-alpha-gap-discovery-01-clean worktree, commit
+# 28497968cada7870efe38295b5712b49b0d32398,
+# research-py/experiments/alpha_discovery_01/run_experiment.py). Inlined by
+# SHORT-01-DRIVER-PORTABILITY-01 so a bare checkout of THIS branch does not
+# require that sibling worktree to exist on disk. Semantics unchanged.
 # ---------------------------------------------------------------------------
-ACCEPTED_ALPHA_WORKTREE = Path("C:/Users/Zacha/Desktop/MiniQuantDeskV4-alpha-discovery-clean")
-ACCEPTED_ALPHA_HEAD = "28497968cada7870efe38295b5712b49b0d32398"
-ACCEPTED_ALPHA_DRIVER = ACCEPTED_ALPHA_WORKTREE / "research-py" / "experiments" / "alpha_discovery_01" / "run_experiment.py"
 
 
-def _load_accepted_build_causal_placebo_targets():
-    if not ACCEPTED_ALPHA_DRIVER.exists():
+def build_causal_placebo_targets(targets: pd.DataFrame, *, seed: int) -> pd.DataFrame:
+    """Deterministic negative control that destroys symbol-specific
+    predictive association WITHOUT moving information across temporal label
+    horizons: permutes the (fwd_ret, target) PAIR only within rows sharing
+    the EXACT same (end_ts, label_end_ts). `symbol`/`end_ts` identity and
+    `label_end_ts` are left untouched for every row; only which row receives
+    which (fwd_ret, target) outcome changes. A group of size 1 has no other
+    row to swap with, so it is left unchanged (a size-1 permutation is the
+    identity). Group iteration is over `sorted()` (end_ts, label_end_ts) key
+    tuples so the result is reproducible across runs/platforms for a fixed
+    seed, independent of pandas groupby internal ordering.
+
+    Fail-closed effectiveness check: the classifier consumes `target`, so the
+    negative control is only valid if at least one row's `target` actually
+    changes from the ORIGINAL input. A valid input can contain groups whose
+    target values are all identical, in which case fwd_ret/target pairs get
+    permuted (indices/pair identities move) while every target VALUE stays
+    the same -- an ineffective placebo the classifier cannot distinguish
+    from the real labels. Raise RuntimeError in that case instead of
+    silently returning an ineffective negative control.
+    """
+    rng = np.random.default_rng(seed)
+    out = targets.copy().reset_index(drop=True)
+    original_target = out["target"].to_numpy(copy=True)
+    fwd_ret = out["fwd_ret"].to_numpy(copy=True)
+    target = out["target"].to_numpy(copy=True)
+
+    group_indices = out.groupby(["end_ts", "label_end_ts"], sort=False).indices
+    for key in sorted(group_indices.keys()):
+        idx = group_indices[key]
+        if len(idx) <= 1:
+            continue
+        perm = rng.permutation(len(idx))
+        fwd_ret[idx] = fwd_ret[idx][perm]
+        target[idx] = target[idx][perm]
+
+    changed_target_count = int(np.sum(target != original_target))
+    if changed_target_count == 0:
         raise RuntimeError(
-            f"Fail-closed: accepted alpha-discovery worktree driver not found at {ACCEPTED_ALPHA_DRIVER} "
-            "-- cannot reuse the accepted causal placebo helper."
+            "Fail-closed: causal placebo produced zero changed target assignments "
+            "(every same-horizon group's target values were already identical, so "
+            "permutation could not change any target) -- this is not a valid "
+            "classifier negative control."
         )
-    actual_head = subprocess.run(
-        ["git", "-C", str(ACCEPTED_ALPHA_WORKTREE), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    if actual_head != ACCEPTED_ALPHA_HEAD:
-        raise RuntimeError(
-            f"Fail-closed: accepted alpha-discovery worktree HEAD drifted -- expected {ACCEPTED_ALPHA_HEAD}, "
-            f"got {actual_head}. Refusing to reuse a placebo helper from an unverified commit."
-        )
-    # mqk_research.* is already imported above from THIS worktree's own src/
-    # and is therefore cached in sys.modules; the accepted module's own
-    # `sys.path.insert(0, <alpha worktree src>)` (which runs as a side
-    # effect of loading it) cannot cause any ALREADY-imported mqk_research
-    # submodule to be re-resolved from the alpha-discovery worktree.
-    spec = importlib.util.spec_from_file_location(
-        "accepted_alpha_discovery_01_run_experiment", ACCEPTED_ALPHA_DRIVER
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.build_causal_placebo_targets
 
+    out["fwd_ret"] = fwd_ret
+    out["target"] = target
+    return out
 
-build_causal_placebo_targets = _load_accepted_build_causal_placebo_targets()
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parent
 RUN_ROOT = EXPERIMENT_ROOT / "runs" / "run_01"

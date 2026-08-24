@@ -1,18 +1,16 @@
 """Focused negative-control proofs for SHORT-01-ETF-LONG-SHORT-TIME-SERIES-TREND.
 
-Covers ONLY the invariants that are specific to THIS experiment's own
-parameters (slope_60 feature isolation, entry_threshold=0.55/
-short_threshold=0.45 direction resolution, long-only-vs-long-short trial
-identity separation) and the driver's own reuse wiring of the accepted
-causal placebo helper. Deliberately does NOT re-derive the placebo
-function's own general correctness proofs (pair-multiset preservation,
-no-cross-horizon-leak, fail-closed-on-ineffective-placebo, etc.) -- those
-already exist, unmodified, in the accepted
-research-alpha-gap-discovery-01-clean worktree's
-test_causal_placebo.py and apply unchanged since `build_causal_placebo_
-targets` is imported, not reimplemented (CLAUDE.md #13: test quality over
-test count; mission instruction: reuse existing production tests/contracts
-rather than duplicating).
+Covers the invariants specific to THIS experiment's own parameters
+(slope_60 feature isolation, entry_threshold=0.55/short_threshold=0.45
+direction resolution, long-only-vs-long-short trial identity separation)
+and the driver's now-self-contained (SHORT-01-DRIVER-PORTABILITY-01)
+inlined causal placebo helper. `build_causal_placebo_targets` was
+originally imported live from the accepted
+research-alpha-gap-discovery-01-clean worktree; it is now inlined verbatim
+in run_experiment.py so this branch is runnable from a bare checkout, so
+this file also carries its own focused correctness proofs (same-horizon
+pair-multiset preservation, fail-closed-on-ineffective-placebo,
+determinism) rather than relying on that sibling worktree's test suite.
 
 Uses only synthetic fixture data -- no network calls, no Alpaca access, no
 research-py/src modification.
@@ -27,6 +25,7 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run_experiment  # noqa: E402
 from run_experiment import (  # noqa: E402
     HYPOTHESIS_ID_LONG_ONLY,
     HYPOTHESIS_ID_LONG_SHORT,
@@ -169,3 +168,103 @@ def test_driver_reuses_accepted_placebo_helper_and_it_changes_targets() -> None:
     pd.testing.assert_series_equal(placebo["end_ts"], targets["end_ts"])
     pd.testing.assert_series_equal(placebo["label_end_ts"], targets["label_end_ts"])
     assert int((placebo["target"].to_numpy() != targets["target"].to_numpy()).sum()) > 0
+
+
+# ---------------------------------------------------------------------------
+# SHORT-01-DRIVER-PORTABILITY-01: build_causal_placebo_targets is now
+# inlined verbatim in run_experiment.py and no longer depends on the
+# sibling research-alpha-gap-discovery-01-clean worktree existing on disk
+# at a fixed Windows path. Prove portability structurally, and re-prove the
+# placebo's own core correctness invariants locally now that this file no
+# longer inherits coverage from that sibling worktree's test suite.
+# ---------------------------------------------------------------------------
+
+
+def test_driver_has_no_sibling_worktree_dependency() -> None:
+    # No path/HEAD pointer to the sibling worktree, and no dynamic-loader
+    # machinery left over from the old importlib-based live import.
+    assert not hasattr(run_experiment, "ACCEPTED_ALPHA_WORKTREE")
+    assert not hasattr(run_experiment, "ACCEPTED_ALPHA_DRIVER")
+    assert not hasattr(run_experiment, "_load_accepted_build_causal_placebo_targets")
+    assert "importlib" not in run_experiment.__dict__
+    assert "subprocess" not in run_experiment.__dict__
+
+    # build_causal_placebo_targets is DEFINED in this module's own source
+    # file, not dynamically loaded from another file at runtime.
+    assert build_causal_placebo_targets.__module__ == run_experiment.__name__
+    import inspect
+    assert inspect.getsourcefile(build_causal_placebo_targets) == run_experiment.__file__
+
+
+def _same_horizon_fixture() -> pd.DataFrame:
+    rows = []
+    for g in range(6):
+        end_ts = f"2020-01-{g + 1:02d} 00:00:00"
+        label_end_ts = pd.Timestamp(f"2020-02-{g + 1:02d}T00:00:00+00:00").isoformat()
+        for si, sym in enumerate(("SPY", "QQQ", "IWM", "DIA")):
+            fwd_ret = ((-1) ** (g + si)) * (0.001 * (si + 1) + 0.0001 * g)
+            rows.append(
+                {
+                    "symbol": sym,
+                    "end_ts": end_ts,
+                    "fwd_ret": fwd_ret,
+                    "target": 1 if fwd_ret > 0.0 else 0,
+                    "label_end_ts": label_end_ts,
+                }
+            )
+    rows.append(
+        {
+            "symbol": "SOLO",
+            "end_ts": "2099-01-01 00:00:00",
+            "fwd_ret": 0.05,
+            "target": 1,
+            "label_end_ts": pd.Timestamp("2099-02-01T00:00:00+00:00").isoformat(),
+        }
+    )
+    return pd.DataFrame(rows)
+
+
+def test_placebo_pair_multiset_preserved_within_each_same_horizon_group() -> None:
+    targets = _same_horizon_fixture()
+    placebo = build_causal_placebo_targets(targets, seed=1234)
+    for key, orig_group in targets.groupby(["end_ts", "label_end_ts"]):
+        placebo_group = placebo[(placebo["end_ts"] == key[0]) & (placebo["label_end_ts"] == key[1])]
+        orig_pairs = sorted(zip(orig_group["fwd_ret"], orig_group["target"]))
+        placebo_pairs = sorted(zip(placebo_group["fwd_ret"], placebo_group["target"]))
+        assert orig_pairs == placebo_pairs, f"pair multiset changed within group {key}"
+
+
+def test_placebo_singleton_group_unchanged() -> None:
+    targets = _same_horizon_fixture()
+    placebo = build_causal_placebo_targets(targets, seed=1234)
+    solo_orig = targets[targets["symbol"] == "SOLO"].iloc[0]
+    solo_placebo = placebo[placebo["symbol"] == "SOLO"].iloc[0]
+    assert solo_orig["fwd_ret"] == solo_placebo["fwd_ret"]
+    assert solo_orig["target"] == solo_placebo["target"]
+
+
+def test_placebo_fails_closed_on_ineffective_permutation() -> None:
+    end_ts = "2020-01-01 00:00:00"
+    label_end_ts = pd.Timestamp("2020-02-01T00:00:00+00:00").isoformat()
+    all_same_target_group = pd.DataFrame(
+        [
+            {"symbol": sym, "end_ts": end_ts, "fwd_ret": 0.001 * (i + 1), "target": 1, "label_end_ts": label_end_ts}
+            for i, sym in enumerate(("A", "B", "C", "D"))
+        ]
+    )
+    with pytest.raises(RuntimeError, match="zero changed target assignments"):
+        build_causal_placebo_targets(all_same_target_group, seed=1234)
+
+
+def test_placebo_deterministic_across_calls() -> None:
+    targets = _same_horizon_fixture()
+    p1 = build_causal_placebo_targets(targets, seed=1234)
+    p2 = build_causal_placebo_targets(targets, seed=1234)
+    pd.testing.assert_frame_equal(p1, p2)
+
+
+def test_placebo_mixed_label_fixture_changes_at_least_one_target() -> None:
+    targets = _same_horizon_fixture()
+    placebo = build_causal_placebo_targets(targets, seed=1234)
+    changed = int((placebo["target"].to_numpy() != targets["target"].to_numpy()).sum())
+    assert changed > 0
