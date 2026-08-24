@@ -38,8 +38,9 @@ default) — no `research-py/src` change was needed. Enforced by
 Same frozen spec as SHORT-02 (`train_years=3, test_months=3,
 step_months=3, holdout_months=6, min_rows_per_fold=300, purge_enabled=True,
 embargo_seconds=0`). All three trials: `folds_used=18/18, folds_skipped=0`
-(one more fold than SHORT-02/04 due to this feature's own NaN-dropout
-pattern shifting the earliest usable row slightly). OOS reference window:
+(one more fold than SHORT-02; same fold count as SHORT-04 — due to this
+feature's own NaN-dropout pattern shifting the earliest usable row
+slightly relative to SHORT-02). OOS reference window:
 `2019-01-02` – `2023-06-30` (1,132 dates, identical across all three
 trials — verified by `verify_oos_date_alignment`).
 `holdout_start_utc=2023-07-01T00:00:00+00:00`. **Final holdout not
@@ -126,7 +127,19 @@ occurred.
 `BORROW_MODEL=research_assumed_shortable_universe_v1`. Same limitation as
 SHORT-02 §10.
 
-## 11. Safety confirmation
+## 11. Model coefficient/sign reporting
+
+`MODEL_COEFFICIENT_ARTIFACT=NOT_DURABLY_PERSISTED` — the walk-forward
+evaluation harness used for this trial does not write a fitted
+coefficient/sign artifact to any registered per-fold or per-trial output
+(confirmed against the actual run artifacts under
+`short_03/{long_only,long_short,placebo}/eval/`, which contain only
+`walk_forward_eval.json`, `walk_forward_oos_predictions.csv`, and the
+economic-return files — no `model_logreg_v1.json` or equivalent).
+`MODEL_COEFFICIENT_USED_AS_ACCEPTANCE_EVIDENCE=NO`. No coefficient was
+reconstructed or retrained to obtain one.
+
+## 12. Safety confirmation
 
 `PRIMARY_PAPER_REPO_UNTOUCHED=YES`, `PAPER_DB_MUTATED=NO`,
 `PAPER_RUNTIME_MUTATED=NO`, `LIVE_ENABLED=NO`, `ORDERS_SUBMITTED=NO`. No

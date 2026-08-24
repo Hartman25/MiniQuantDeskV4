@@ -124,8 +124,9 @@ instrument-specific edge beyond shared same-date market structure", not
 
 ## 5. Short exposure (wave-wide)
 
-**Zero short-eligible predictions occurred in any of the six real
-long-short trials.** `ml_score` never dropped to or below
+**Zero short-eligible predictions occurred in any of the three real
+long/short candidates, within the six-real-trial family population.**
+`ml_score` never dropped to or below
 `short_threshold=0.45` in any OOS row, in any fold, in any family:
 
 | Family | OOS rows | `BEARISH_PREDICTION_COUNT` | `ml_score` range |
@@ -230,7 +231,10 @@ VERDICT=SHORT_WAVE_02_ALL_THREE_FAMILIES_REJECTED_NOT_ADVANCED_SHORT_VALUE_INCON
 WORKTREE=C:\Users\Zacha\Desktop\MiniQuantDeskV4-short-wave-02
 BRANCH=research-short-wave-02
 BASE_HEAD=e31a49143e16cc61bbf7459f1c569fc1ce6a4851
-FINAL_HEAD=ff21bb9bce89a392a06aa9c06960a7b6a924c008
+CLOSEOUT_CONTENT_COMMIT=ff21bb9bce89a392a06aa9c06960a7b6a924c008
+PATCH_A_E_COMMITS=92ac16a6,6b7a4313,8ce0500e,204309a9,ff21bb9b
+BRANCH_HEAD_AUTHORITY=VERIFY_FROM_GIT_NOT_SELF_ASSERTED_IN_THIS_REPORT
+POST_CLOSEOUT_METADATA_COMMIT=1977f6459ed0dd77b0d1139de633e456d690780f
 
 PREDECLARATION_COMMIT=92ac16a639d355337c68d91e0ac4a4dc45d63e25
 
@@ -250,7 +254,7 @@ SHORT_02_MODEL_VERDICT=REJECTED_NOT_ADVANCED
 SHORT_02_SHORT_VALUE_VERDICT=INCONCLUSIVE
 SHORT_02_LONG_ONLY_RESULT=net_total_return=0.24823 net_sharpe=0.35686 max_drawdown=-0.34773
 SHORT_02_LONG_SHORT_RESULT=net_total_return=0.24823 net_sharpe=0.35686 max_drawdown=-0.34773 (execution-identical to long-only)
-SHORT_02_PLACEBO_RESULT=net_total_return=0.24823 net_sharpe=0.35686 (execution-identical to real; excluded from family judge on date-alignment grounds)
+SHORT_02_PLACEBO_RESULT=net_total_return=0.24823 net_sharpe=0.35686 (execution-identical to real; NOT_INCLUDED_IN_REAL_FAMILY_JUDGE_BY_CONSTRUCTION -- registered under the separate SHORT-WAVE-02-DIAGNOSTIC-PLACEBOS-V1 experiment id, not a date-alignment exclusion)
 SHORT_02_SHORT_EXPOSURE=0/12816 OOS rows short-eligible; ml_score in [0.57225,0.65093]
 
 SHORT_03_MODEL_VERDICT=REJECTED_NOT_ADVANCED

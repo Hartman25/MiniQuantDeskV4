@@ -120,7 +120,19 @@ occurred.
 `BORROW_MODEL=research_assumed_shortable_universe_v1`. Same limitation as
 SHORT-02 §10.
 
-## 11. Safety confirmation
+## 11. Model coefficient/sign reporting
+
+`MODEL_COEFFICIENT_ARTIFACT=NOT_DURABLY_PERSISTED` — the walk-forward
+evaluation harness used for this trial does not write a fitted
+coefficient/sign artifact to any registered per-fold or per-trial output
+(confirmed against the actual run artifacts under
+`short_04/{long_only,long_short,placebo}/eval/`, which contain only
+`walk_forward_eval.json`, `walk_forward_oos_predictions.csv`, and the
+economic-return files — no `model_logreg_v1.json` or equivalent).
+`MODEL_COEFFICIENT_USED_AS_ACCEPTANCE_EVIDENCE=NO`. No coefficient was
+reconstructed or retrained to obtain one.
+
+## 12. Safety confirmation
 
 `PRIMARY_PAPER_REPO_UNTOUCHED=YES`, `PAPER_DB_MUTATED=NO`,
 `PAPER_RUNTIME_MUTATED=NO`, `LIVE_ENABLED=NO`, `ORDERS_SUBMITTED=NO`. No
@@ -128,7 +140,7 @@ SHORT-02 §10.
 file was modified. No experiment code was changed after seeing this
 result.
 
-## 12. Wave-level short-exposure summary (all three predeclared families)
+## 13. Wave-level short-exposure summary (all three predeclared families)
 
 Across all six real trials (SHORT-02/03/04 × long-only/long-short),
 **zero short-eligible predictions occurred anywhere in the wave**

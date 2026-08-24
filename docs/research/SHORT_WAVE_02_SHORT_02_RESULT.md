@@ -155,7 +155,19 @@ recall risk is modeled. A positive family verdict here could at most be
 `DEVELOPMENT_PROMISING_WITH_BORROW_MODEL_LIMITATION`, never
 promotion-ready evidence.
 
-## 11. Safety confirmation
+## 11. Model coefficient/sign reporting
+
+`MODEL_COEFFICIENT_ARTIFACT=NOT_DURABLY_PERSISTED` — the walk-forward
+evaluation harness used for this trial does not write a fitted
+coefficient/sign artifact to any registered per-fold or per-trial output
+(confirmed against the actual run artifacts under
+`short_02/{long_only,long_short,placebo}/eval/`, which contain only
+`walk_forward_eval.json`, `walk_forward_oos_predictions.csv`, and the
+economic-return files — no `model_logreg_v1.json` or equivalent).
+`MODEL_COEFFICIENT_USED_AS_ACCEPTANCE_EVIDENCE=NO`. No coefficient was
+reconstructed or retrained to obtain one.
+
+## 12. Safety confirmation
 
 `PRIMARY_PAPER_REPO_UNTOUCHED=YES`, `PAPER_DB_MUTATED=NO`,
 `PAPER_RUNTIME_MUTATED=NO`, `LIVE_ENABLED=NO`, `ORDERS_SUBMITTED=NO`. No
