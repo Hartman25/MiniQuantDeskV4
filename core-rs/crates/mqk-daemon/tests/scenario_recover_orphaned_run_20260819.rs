@@ -37,8 +37,11 @@
 //! | R09  | mismatched local runtime (owns a DIFFERENT run) -> 409 local_execution_loop_active |
 //! | R10  | unapplied inbox row negative control via the real route (PAPER-SOAK-UNRESOLVED- \
 //! |      | BROKER-EVIDENCE-GATE-01) -> 409 unapplied_inbox, zero mutation |
+//! | S01  | PAPER-SOAK-ORPHAN-RECOVERY-PAPER-SCOPE-01: non-Paper mode -> 403 not_paper_mode, \
+//! |      | gated before any DB lookup |
+//! | S02  | non-Paper catalog entry: disabled, paper-only reason, no DB query for a Live run |
 //!
-//! R01-R02 are pure in-process (no DB required). R03-R10 require
+//! R01-R02 and S01-S02 are pure in-process (no DB required). R03-R10 require
 //! `MQK_DATABASE_URL` and run against an isolated disposable database via
 //! `mqk_db::run_isolated` (never the shared/Paper database) -- marked
 //! `#[ignore]`. Run with:
@@ -64,6 +67,13 @@ use uuid::Uuid;
 
 fn no_db_router() -> axum::Router {
     let st = Arc::new(AppState::new_for_test_with_mode(DeploymentMode::Paper));
+    build_router(st)
+}
+
+fn live_capital_no_db_router() -> axum::Router {
+    let st = Arc::new(AppState::new_for_test_with_mode(
+        DeploymentMode::LiveCapital,
+    ));
     build_router(st)
 }
 
@@ -594,4 +604,54 @@ async fn r10_unapplied_inbox_blocks_release_via_route() {
         );
     })
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// S01/S02: PAPER-SOAK-ORPHAN-RECOVERY-PAPER-SCOPE-01 -- recover-orphaned-run
+// is paper-only.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn s01_non_paper_mode_returns_403_before_any_db_lookup() {
+    let (status, j) = post_action(
+        live_capital_no_db_router(),
+        serde_json::json!({ "action_key": "recover-orphaned-run" }),
+    )
+    .await;
+
+    // No DB is configured on this router at all -- a 403 here (rather than
+    // the 503 db_unavailable R01 proves for Paper mode) is itself proof the
+    // Paper-mode gate runs strictly before the DB-lookup gate.
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "S01: non-Paper mode must return 403, gated before any DB lookup; body: {j}"
+    );
+    assert_eq!(j["accepted"], false, "S01: body: {j}");
+    assert_eq!(
+        j["disposition"].as_str(),
+        Some("not_paper_mode"),
+        "S01: body: {j}"
+    );
+}
+
+#[tokio::test]
+async fn s02_non_paper_catalog_entry_is_disabled_with_paper_only_reason() {
+    let j = get_catalog(live_capital_no_db_router()).await;
+    let actions = j["actions"].as_array().expect("actions must be an array");
+
+    let entry = actions
+        .iter()
+        .find(|a| a["action_key"].as_str() == Some("recover-orphaned-run"))
+        .expect("S02: recover-orphaned-run must be in catalog");
+
+    assert_eq!(
+        entry["enabled"], false,
+        "S02: must be disabled for non-Paper mode; entry: {entry}"
+    );
+    assert_eq!(
+        entry["disabled_reason"].as_str(),
+        Some("recover-orphaned-run is paper-only"),
+        "S02: disabled_reason must truthfully state paper-only; entry: {entry}"
+    );
 }

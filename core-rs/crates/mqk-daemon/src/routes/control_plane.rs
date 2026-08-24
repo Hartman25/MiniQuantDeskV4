@@ -1244,6 +1244,37 @@ pub(crate) async fn ops_action(
         "recover-orphaned-run" => {
             let env_label = st.deployment_mode().as_api_label().to_string();
 
+            // PAPER-SOAK-ORPHAN-RECOVERY-PAPER-SCOPE-01: paper-only, gated
+            // first, before any DB lookup/mutation -- mirrors the
+            // flatten-paper-positions Paper-only convention (Gate 1 there).
+            if !matches!(st.deployment_mode(), DeploymentMode::Paper) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "not_paper_mode".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "recover-orphaned-run is paper-only; current mode is '{}'",
+                            env_label
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            }
+
             let Some(db) = st.db.as_ref() else {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -2514,16 +2545,25 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
     // durable ARMED/RUNNING run with no local owner so the
     // recover-orphaned-run catalog entry reflects real availability. Same
     // pattern as has_halted_run above.
-    let has_orphaned_active_run = if let Some(db) = st.db.as_ref() {
-        let active = mqk_db::fetch_active_run_for_engine(
-            db,
-            DAEMON_ENGINE_ID,
-            st.deployment_mode().as_db_mode(),
-        )
-        .await
-        .ok()
-        .flatten();
-        active.is_some() && st.locally_owned_run_id().await.is_none()
+    //
+    // PAPER-SOAK-ORPHAN-RECOVERY-PAPER-SCOPE-01: this action is paper-only
+    // (see the route handler's Paper-mode gate above) -- the query itself is
+    // skipped entirely for non-Paper mode so a Live run is never read merely
+    // to decide catalog availability.
+    let has_orphaned_active_run = if matches!(st.deployment_mode(), DeploymentMode::Paper) {
+        if let Some(db) = st.db.as_ref() {
+            let active = mqk_db::fetch_active_run_for_engine(
+                db,
+                DAEMON_ENGINE_ID,
+                st.deployment_mode().as_db_mode(),
+            )
+            .await
+            .ok()
+            .flatten();
+            active.is_some() && st.locally_owned_run_id().await.is_none()
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -2718,7 +2758,9 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             requires_reason: false,
             confirm_text: "Confirm: stop orphaned run and allow fresh start".to_string(),
             enabled: has_orphaned_active_run,
-            disabled_reason: if !has_orphaned_active_run {
+            disabled_reason: if !matches!(st.deployment_mode(), DeploymentMode::Paper) {
+                Some("recover-orphaned-run is paper-only".to_string())
+            } else if !has_orphaned_active_run {
                 if st.db.is_none() {
                     Some("Backend unavailable; cannot query for an orphaned active run."
                         .to_string())
