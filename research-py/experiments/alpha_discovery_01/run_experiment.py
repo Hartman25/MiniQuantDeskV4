@@ -202,9 +202,19 @@ def build_causal_placebo_targets(targets: pd.DataFrame, *, seed: int) -> pd.Data
     identity). Group iteration is over `sorted()` (end_ts, label_end_ts) key
     tuples so the result is reproducible across runs/platforms for a fixed
     seed, independent of pandas groupby internal ordering.
+
+    Fail-closed effectiveness check: the classifier consumes `target`, so the
+    negative control is only valid if at least one row's `target` actually
+    changes from the ORIGINAL input. A valid input can contain groups whose
+    target values are all identical, in which case fwd_ret/target pairs get
+    permuted (indices/pair identities move) while every target VALUE stays
+    the same -- an ineffective placebo the classifier cannot distinguish
+    from the real labels. Raise RuntimeError in that case instead of
+    silently returning an ineffective negative control.
     """
     rng = np.random.default_rng(seed)
     out = targets.copy().reset_index(drop=True)
+    original_target = out["target"].to_numpy(copy=True)
     fwd_ret = out["fwd_ret"].to_numpy(copy=True)
     target = out["target"].to_numpy(copy=True)
 
@@ -216,6 +226,15 @@ def build_causal_placebo_targets(targets: pd.DataFrame, *, seed: int) -> pd.Data
         perm = rng.permutation(len(idx))
         fwd_ret[idx] = fwd_ret[idx][perm]
         target[idx] = target[idx][perm]
+
+    changed_target_count = int(np.sum(target != original_target))
+    if changed_target_count == 0:
+        raise RuntimeError(
+            "Fail-closed: causal placebo produced zero changed target assignments "
+            "(every same-horizon group's target values were already identical, so "
+            "permutation could not change any target) -- this is not a valid "
+            "classifier negative control."
+        )
 
     out["fwd_ret"] = fwd_ret
     out["target"] = target

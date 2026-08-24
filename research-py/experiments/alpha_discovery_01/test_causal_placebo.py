@@ -214,6 +214,37 @@ def test_fwd_ret_target_internally_consistent(targets: pd.DataFrame) -> None:
     assert (placebo["target"] == expected).all()
 
 
+def test_all_identical_targets_in_group_fails_closed() -> None:
+    """RED/GREEN for ALPHA-DISCOVERY-01-PLACEBO-EFFECTIVENESS-FAIL-CLOSED-01:
+    a valid input can contain a multi-row same-(end_ts, label_end_ts) group
+    whose target values are ALL identical. The RNG can then permute
+    rows/fwd_ret while every target assignment stays unchanged -- an
+    ineffective negative control, since the classifier consumes `target`.
+    The driver must raise RuntimeError rather than silently returning it.
+    Fails against the pre-repair 8367c8dc implementation (which returns
+    normally here) and passes after the repair.
+    """
+    end_ts = "2020-01-01 00:00:00"
+    label_end_ts = pd.Timestamp("2020-02-01T00:00:00+00:00").isoformat()
+    all_same_target_group = pd.DataFrame(
+        [
+            {"symbol": sym, "end_ts": end_ts, "fwd_ret": 0.001 * (i + 1), "target": 1, "label_end_ts": label_end_ts}
+            for i, sym in enumerate(("A", "B", "C", "D"))
+        ]
+    )
+    with pytest.raises(RuntimeError, match="zero changed target assignments"):
+        build_causal_placebo_targets(all_same_target_group, seed=PLACEBO_SEED)
+
+
+def test_mixed_label_fixture_still_succeeds_and_changes_at_least_one_target(targets: pd.DataFrame) -> None:
+    """Confirms the repair does not over-trigger: the normal mixed-label
+    fixture (mixed target values within groups) continues to return
+    normally and changes at least one target assignment."""
+    placebo = build_causal_placebo_targets(targets, seed=PLACEBO_SEED)
+    changed = int((placebo["target"].to_numpy() != targets["target"].to_numpy()).sum())
+    assert changed > 0
+
+
 def test_deterministic_across_calls(targets: pd.DataFrame) -> None:
     p1 = build_causal_placebo_targets(targets, seed=PLACEBO_SEED)
     p2 = build_causal_placebo_targets(targets, seed=PLACEBO_SEED)
