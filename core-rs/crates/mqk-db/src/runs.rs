@@ -952,13 +952,26 @@ pub async fn clear_halted_run_and_reset_stale_claims(
 /// Typed outcome of [`stop_run_if_evidence_clean`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopRunIfEvidenceCleanOutcome {
-    /// The run was durably `ARMED`/`RUNNING` with zero unacked outbox rows
-    /// and a clean global reconcile status; it is now `STOPPED`.
+    /// The run was durably `ARMED`/`RUNNING` with no active runtime lease,
+    /// zero unacked outbox rows, zero unapplied inbox rows, and a clean
+    /// global reconcile status; it is now `STOPPED`.
     Stopped,
     /// Refused: the run was not durably `ARMED`/`RUNNING` at the instant
     /// checked (already `STOPPED`, `HALTED`, or a concurrent transition
     /// landed first). Zero mutation.
     NotActive { actual_status: String },
+    /// Refused: an unexpired `runtime_leader_lease` exists, so some runtime
+    /// process (possibly this daemon, possibly a stale/partitioned one) may
+    /// still hold durable claim/dispatch authority over this run. The
+    /// caller's "no local owner" observation is only process-local evidence
+    /// and does not prove global absence of authority. Zero mutation.
+    ///
+    /// PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01.
+    ActiveRuntimeLease {
+        holder_id: String,
+        epoch: i64,
+        lease_expires_at: DateTime<Utc>,
+    },
     /// Refused: at least one outbox row for this run has not reached
     /// `ACKED` — an order may still be in flight to or from the broker with
     /// no local runtime left to resolve it. Zero mutation.
@@ -980,36 +993,142 @@ pub enum StopRunIfEvidenceCleanOutcome {
 /// and the durable `runs` row was never terminated), but only when the
 /// exact same unacked-outbox and global-reconcile evidence already trusted
 /// by `reconcile_durable_run_without_local_owner`
-/// (`mqk-daemon::state::autonomous_daily_coordinator`) is clean for it.
+/// (`mqk-daemon::state::autonomous_daily_coordinator`) is clean for it, and
+/// no durable runtime lease authority could still be exercised over it.
 ///
 /// This function has no notion of in-process runtime ownership — callers
 /// are responsible for independently proving "no local owner" (e.g. via
-/// `AppState::locally_owned_run_id`) before calling it. It must never be
-/// invoked against a run this process is still actively driving; doing so
-/// would race the exact runtime this run is currently running.
+/// `AppState::locally_owned_run_id`) before calling it. That is only
+/// process-local evidence, though: a stale or network-partitioned second
+/// runtime could still hold a durably unexpired
+/// [`runtime_leader_lease`](crate::runtime_lease), so this function
+/// independently re-proves global absence of authority via the lease check
+/// below rather than trusting the caller's local observation alone.
 ///
-/// CAS-guarded exactly like [`stop_run`] (reused directly, not
-/// reimplemented): the underlying `UPDATE` only applies when `status` is
-/// still `ARMED` or `RUNNING`, so a concurrent `halt_run` landing first is
-/// never silently overwritten. Zero mutation on any refusal — the
-/// unacked-outbox and reconcile checks run strictly before the CAS
-/// transition, and neither is ever inferred from an empty/absent row: no
-/// durable reconcile status at all (`None`) is `ReconcileDirty`, not clean.
+/// # PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01 — why this is one transaction
+///
+/// A prior shape of this function ran its evidence checks (`fetch_run`,
+/// `outbox_list_unacked_for_run`, `inbox_load_unapplied_for_run`,
+/// `load_reconcile_status_state`) as independent pool calls and only then
+/// called the separately-committed [`stop_run`] — check-then-act across
+/// multiple transactions. That left a window: a still-authoritative runtime
+/// could observe clean evidence here, then — between this function's last
+/// read and its `stop_run` call — acquire/refresh its lease and commit an
+/// outbox `CLAIMED` row via
+/// [`crate::orders::outbox_claim_batch_for_run_with_lease_authority`], after
+/// which this function's `stop_run` would still land (its `UPDATE` only
+/// guards on `status`, not on lease/outbox state) and transition the run to
+/// `STOPPED` out from under a runtime that had just proven it still owned
+/// dispatch authority. `outbox_mark_dispatching` guards on outbox claim
+/// ownership only, not current run status, so that already-claimed row could
+/// then reach the broker after durable `STOPPED` — the exact race this fence
+/// closes.
+///
+/// This function now locks the `runs` row with `SELECT ... FOR UPDATE`
+/// *first* and holds that lock for every evidence check plus the final
+/// `STOPPED` mutation, all inside one transaction — the same serialization
+/// boundary [`crate::runtime_lease::acquire_or_refresh_lease_for_running_run`],
+/// [`crate::orders::outbox_claim_batch_for_run_with_lease_authority`], and
+/// [`clear_halted_run_and_reset_stale_claims`] all use on this exact row.
+/// Postgres serializes any two transactions contending for the same row
+/// lock: whichever reaches its `FOR UPDATE`/`UPDATE` first runs to
+/// completion (commit or rollback) before the other's lock acquisition
+/// proceeds. That makes the two possible orderings deterministic instead of
+/// timing-dependent:
+///
+/// - **Recovery wins the lock first**: it observes no active lease and
+///   clean evidence, commits `STOPPED`; a runtime that reaches
+///   `acquire_or_refresh_lease_for_running_run`/`outbox_claim_batch_for_run_with_lease_authority`
+///   afterward locks the same row, observes `status != 'RUNNING'`, and
+///   refuses (`RunNotRunning`) — it can never claim/dispatch against the
+///   now-`STOPPED` run.
+/// - **A runtime's lease/claim wins the lock first**: it commits its lease
+///   acquisition/refresh or outbox claim and releases the row lock;
+///   recovery then locks the row, observes the still-unexpired lease (or,
+///   for the claim case, the still-`RUNNING` status the runtime just
+///   proved current authority over), and refuses
+///   (`ActiveRuntimeLease`/whatever evidence check fires), performing zero
+///   mutation.
+///
+/// The `UPDATE` itself is CAS-guarded identically to [`stop_run`] (`WHERE
+/// status IN ('ARMED', 'RUNNING')`), inlined here rather than calling
+/// `stop_run` directly: calling it separately would require a second pool
+/// connection to run a second, separately-committed transaction against a
+/// row this transaction is still holding locked, which would deadlock
+/// against itself rather than compose safely.
+///
+/// An expired lease is not active authority — it does not block recovery
+/// (mirrors `clear_halted_run_and_reset_stale_claims`'s Layer A). Zero
+/// mutation on any refusal path: every check runs strictly before the
+/// `STOPPED` transition, and no durable reconcile status at all (`None`) is
+/// `ReconcileDirty`, not assumed clean.
+///
+/// `now_utc` is caller-supplied (FC-9: no wall-clock reads in enforcement
+/// paths) so lease-expiry races are deterministic in tests.
 pub async fn stop_run_if_evidence_clean(
     pool: &PgPool,
     run_id: Uuid,
+    now_utc: DateTime<Utc>,
 ) -> Result<StopRunIfEvidenceCleanOutcome> {
-    let run = fetch_run(pool, run_id).await?;
-    if !matches!(run.status, RunStatus::Armed | RunStatus::Running) {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("stop_run_if_evidence_clean: begin tx failed")?;
+
+    // Lock the run row FIRST -- see doc comment above for the serialization
+    // boundary this shares with the lease/claim/clear-halted-run primitives.
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("stop_run_if_evidence_clean: run lock failed")?;
+
+    let Some(status) = status else {
+        tx.rollback().await.ok();
+        return Err(anyhow!("stop_run_if_evidence_clean: run {run_id} not found"));
+    };
+
+    if !matches!(status.as_str(), "ARMED" | "RUNNING") {
+        tx.rollback()
+            .await
+            .context("stop_run_if_evidence_clean: rollback (not active) failed")?;
         return Ok(StopRunIfEvidenceCleanOutcome::NotActive {
-            actual_status: run.status.as_str().to_string(),
+            actual_status: status,
         });
     }
 
-    let unacked = crate::orders::outbox_list_unacked_for_run(pool, run_id)
+    // Active-runtime-lease check: durable evidence a runtime could still
+    // hold claim/dispatch authority, independent of this caller's
+    // process-local "no local owner" observation. An expired lease is not
+    // active authority and does not block recovery.
+    let lease: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .context("stop_run_if_evidence_clean: lease read failed")?;
+
+    if let Some((holder_id, epoch, lease_expires_at)) = lease {
+        if lease_expires_at > now_utc {
+            tx.rollback()
+                .await
+                .context("stop_run_if_evidence_clean: rollback (active lease) failed")?;
+            return Ok(StopRunIfEvidenceCleanOutcome::ActiveRuntimeLease {
+                holder_id,
+                epoch,
+                lease_expires_at,
+            });
+        }
+    }
+
+    let unacked = crate::orders::outbox_list_unacked_for_run(&mut *tx, run_id)
         .await
         .context("stop_run_if_evidence_clean: outbox_list_unacked_for_run failed")?;
     if !unacked.is_empty() {
+        tx.rollback()
+            .await
+            .context("stop_run_if_evidence_clean: rollback (unacked outbox) failed")?;
         return Ok(StopRunIfEvidenceCleanOutcome::UnacknowledgedOutbox {
             unacked_count: unacked.len(),
         });
@@ -1019,16 +1138,19 @@ pub async fn stop_run_if_evidence_clean(
     // row is durably received but not-yet-applied crash-recovery evidence --
     // exactly as load-bearing as an unacked outbox row. Checked before the
     // CAS transition, never inferred.
-    let unapplied = crate::inbox::inbox_load_unapplied_for_run(pool, run_id)
+    let unapplied = crate::inbox::inbox_load_unapplied_for_run(&mut *tx, run_id)
         .await
         .context("stop_run_if_evidence_clean: inbox_load_unapplied_for_run failed")?;
     if !unapplied.is_empty() {
+        tx.rollback()
+            .await
+            .context("stop_run_if_evidence_clean: rollback (unapplied inbox) failed")?;
         return Ok(StopRunIfEvidenceCleanOutcome::UnappliedInbox {
             unapplied_count: unapplied.len(),
         });
     }
 
-    let reconcile_clean = match crate::reconcile_state::load_reconcile_status_state(pool)
+    let reconcile_clean = match crate::reconcile_state::load_reconcile_status_state(&mut *tx)
         .await
         .context("stop_run_if_evidence_clean: load_reconcile_status_state failed")?
     {
@@ -1044,10 +1166,45 @@ pub async fn stop_run_if_evidence_clean(
         None => false,
     };
     if !reconcile_clean {
+        tx.rollback()
+            .await
+            .context("stop_run_if_evidence_clean: rollback (reconcile dirty) failed")?;
         return Ok(StopRunIfEvidenceCleanOutcome::ReconcileDirty);
     }
 
-    stop_run(pool, run_id).await?;
+    let done = sqlx::query(
+        r#"
+        update runs
+        set status = 'STOPPED',
+            stopped_at_utc = $2
+        where run_id = $1
+          and status in ('ARMED', 'RUNNING')
+        "#,
+    )
+    .bind(run_id)
+    .bind(now_utc)
+    .execute(&mut *tx)
+    .await
+    .context("stop_run_if_evidence_clean: stop update failed")?;
+
+    if done.rows_affected() != 1 {
+        // Unreachable given the row lock + status check above (no other
+        // writer can change `status` while this tx holds the row lock), but
+        // fail closed rather than assume it.
+        tx.rollback().await.ok();
+        let r = fetch_run(pool, run_id).await?;
+        return Err(anyhow::Error::new(StaleRunTransition {
+            run_id,
+            operation: "stop_run_if_evidence_clean",
+            expected: "ARMED or RUNNING",
+            actual: r.status.as_str().to_string(),
+        }));
+    }
+
+    tx.commit()
+        .await
+        .context("stop_run_if_evidence_clean: commit failed")?;
+
     Ok(StopRunIfEvidenceCleanOutcome::Stopped)
 }
 

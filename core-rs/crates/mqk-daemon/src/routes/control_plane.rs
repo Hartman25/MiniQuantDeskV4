@@ -1232,8 +1232,16 @@ pub(crate) async fn ops_action(
         //      execution-loop run — this action is for the cold,
         //      no-local-runtime-at-all case only; a live daemon with its own
         //      active run must use stop-system, never this shortcut.
-        //   4. `stop_run_if_evidence_clean` — zero unacked outbox rows and a
-        //      clean global reconcile status, or refuse with zero mutation.
+        //   4. `stop_run_if_evidence_clean` — atomically (single transaction,
+        //      `runs` row locked FIRST via `SELECT ... FOR UPDATE`): no
+        //      active runtime lease, zero unacked outbox rows, zero
+        //      unapplied inbox rows, and a clean global reconcile status, or
+        //      refuse with zero mutation. The local-ownership check in step
+        //      3 is only process-local evidence; the lease check inside
+        //      `stop_run_if_evidence_clean` independently proves no other
+        //      (possibly stale/partitioned) runtime process could still
+        //      claim/dispatch for this run before committing STOPPED
+        //      (PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01).
         //
         // Never touches `sys_autonomous_daily_operations` — the existing
         // coordinator (`reconcile_durable_run_without_local_owner`, reached
@@ -1385,7 +1393,7 @@ pub(crate) async fn ops_action(
                     .into_response();
             }
 
-            match mqk_db::stop_run_if_evidence_clean(db, run_id).await {
+            match mqk_db::stop_run_if_evidence_clean(db, run_id, Utc::now()).await {
                 Ok(mqk_db::StopRunIfEvidenceCleanOutcome::Stopped) => {
                     info!(run_id = %run_id, "ops/action recover-orphaned-run: stopped");
                     let audit_uuid = write_operator_audit_event(
@@ -1463,6 +1471,57 @@ pub(crate) async fn ops_action(
                     }),
                 )
                     .into_response(),
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::ActiveRuntimeLease {
+                    holder_id,
+                    epoch,
+                    lease_expires_at,
+                }) => {
+                    // PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01: an
+                    // unexpired runtime leader lease is durable evidence a
+                    // runtime process (possibly stale/partitioned, not
+                    // necessarily this daemon) may still hold claim/dispatch
+                    // authority over this run -- "no local owner" on this
+                    // process is only process-local evidence. Zero mutation:
+                    // runs.status and the lease row are untouched.
+                    info!(
+                        run_id = %run_id,
+                        holder_id = %holder_id,
+                        epoch,
+                        lease_expires_at = %lease_expires_at.to_rfc3339(),
+                        "ops/action recover-orphaned-run refused: active runtime lease"
+                    );
+                    (
+                        StatusCode::CONFLICT,
+                        Json(OperatorActionResponse {
+                            requested_action: "recover-orphaned-run".to_string(),
+                            accepted: false,
+                            disposition: "active_runtime_lease".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![format!(
+                                "runtime.recover_orphaned_run.active_runtime_lease: run \
+                                 {run_id} still has an unexpired runtime leader lease \
+                                 (holder={holder_id}, epoch={epoch}, expires_at={}); a \
+                                 runtime process may still be able to claim/dispatch for it. \
+                                 Wait for it to release the lease (normal shutdown) or for the \
+                                 lease to expire (crashed process), then retry \
+                                 recover-orphaned-run.",
+                                lease_expires_at.to_rfc3339(),
+                            )],
+                            warnings: vec![],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                            captured_baseline: None,
+                        }),
+                    )
+                        .into_response()
+                }
                 Ok(mqk_db::StopRunIfEvidenceCleanOutcome::UnacknowledgedOutbox {
                     unacked_count,
                 }) => (

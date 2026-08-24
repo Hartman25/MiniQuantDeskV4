@@ -77,7 +77,9 @@ pub async fn persist_reconcile_status_state(
 }
 
 /// Load the last persisted reconcile status posture.
-pub async fn load_reconcile_status_state(pool: &PgPool) -> Result<Option<ReconcileStatusState>> {
+pub async fn load_reconcile_status_state(
+    pool: impl sqlx::PgExecutor<'_>,
+) -> Result<Option<ReconcileStatusState>> {
     let row = sqlx::query(
         r#"
         select status,

@@ -37,6 +37,9 @@
 //! | R09  | mismatched local runtime (owns a DIFFERENT run) -> 409 local_execution_loop_active |
 //! | R10  | unapplied inbox row negative control via the real route (PAPER-SOAK-UNRESOLVED- \
 //! |      | BROKER-EVIDENCE-GATE-01) -> 409 unapplied_inbox, zero mutation |
+//! | R11  | PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01: an unexpired runtime leader lease via \
+//! |      | the real route -> 409 active_runtime_lease, zero mutation -- the run-level fence \
+//! |      | proven end to end through the operator action route, not just the DB primitive |
 //! | S01  | PAPER-SOAK-ORPHAN-RECOVERY-PAPER-SCOPE-01: non-Paper mode -> 403 not_paper_mode, \
 //! |      | gated before any DB lookup |
 //! | S02  | non-Paper catalog entry: disabled, paper-only reason, no DB query for a Live run |
@@ -601,6 +604,71 @@ async fn r10_unapplied_inbox_blocks_release_via_route() {
         assert!(
             matches!(after.status, mqk_db::RunStatus::Running),
             "R10: a refused release must not mutate run status"
+        );
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// R11: PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01 -- active runtime lease
+// negative control via the real route.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn r11_active_runtime_lease_blocks_release_via_route() {
+    mqk_db::run_isolated("recover_orphan_r11", |pool| async move {
+        let run_id = run_id_for("mqk-daemon.orphan-repair-route.r11");
+        seed_run(&pool, run_id).await;
+        mqk_db::arm_run(&pool, run_id).await.expect("arm_run");
+        mqk_db::begin_run(&pool, run_id).await.expect("begin_run");
+        seed_clean_reconcile(&pool).await;
+
+        // This AppState never called start_execution_runtime (no local
+        // owner, exactly the crash-orphan shape) -- but a durably unexpired
+        // runtime_leader_lease still exists, e.g. from a stale/partitioned
+        // second daemon process. That is durable evidence, not just this
+        // process's local absence of ownership, and must independently
+        // refuse the release.
+        mqk_db::runtime_lease::acquire_or_refresh_lease_for_running_run(
+            &pool,
+            run_id,
+            "runtime-r11-stale-holder",
+            None,
+            Utc::now(),
+            300,
+        )
+        .await
+        .expect("acquire lease");
+
+        let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            DeploymentMode::Paper,
+            BrokerKind::Paper,
+        ));
+        let router = build_router(st);
+
+        let (status, j) = post_action(
+            router,
+            serde_json::json!({ "action_key": "recover-orphaned-run" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "R11: body: {j}");
+        assert_eq!(
+            j["disposition"].as_str(),
+            Some("active_runtime_lease"),
+            "R11: body: {j}"
+        );
+        assert_eq!(
+            j["audit"]["durable_db_write"], false,
+            "R11: a refused release must report no durable DB write; body: {j}"
+        );
+
+        let after = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+        assert!(
+            matches!(after.status, mqk_db::RunStatus::Running),
+            "R11: a refused release must not mutate run status"
         );
     })
     .await;

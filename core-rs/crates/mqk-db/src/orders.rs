@@ -1104,7 +1104,10 @@ pub async fn outbox_reset_ambiguous_to_pending(
 ///
 /// NOTE: This does NOT talk to broker yet.
 /// It provides the minimal deterministic input required for a future reconcile step.
-pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<OutboxRow>> {
+pub async fn outbox_list_unacked_for_run(
+    pool: impl sqlx::PgExecutor<'_>,
+    run_id: Uuid,
+) -> Result<Vec<OutboxRow>> {
     let rows = sqlx::query(
         r#"
         select outbox_id, run_id, idempotency_key, order_json, status,
