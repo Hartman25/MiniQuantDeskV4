@@ -1,0 +1,191 @@
+{
+  "mission_id": "DIRECT-RANK-AND-BROAD-UNIVERSE-RESEARCH-01-CONTROLLER",
+  "predeclaration_patch": "SHORT-WAVE-03-BROAD-DIRECT-RANK-PREDECLARATION-01",
+  "worktree": "C:\\Users\\Zacha\\Desktop\\MiniQuantDeskV4-direct-rank-policy",
+  "branch": "research-direct-rank-policy-01",
+  "base_head": "f0113f68ded39d5a034c9b1278f9116829bff12a",
+  "wave_classification": "POST_HOC_DIRECT_RANK_AND_BROAD_UNIVERSE_DEVELOPMENT_STUDY",
+  "wave_classification_reasons": [
+    "direct rank was motivated by SHORT-01/SHORT-WAVE-02 observing that the classifier-probability threshold policy could not generate a usable short book",
+    "the universe is being widened from the 12-ETF fixed universe after observing those results",
+    "the current-registry historical seed is not point-in-time membership (see docs/research/BROAD_RESEARCH_UNIVERSE_CURRENT_TRUTH_AUDIT.md)"
+  ],
+  "allowed_verdicts": [
+    "REJECTED_NOT_ADVANCED",
+    "INCONCLUSIVE",
+    "MECHANISM_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION"
+  ],
+  "forbidden_verdicts": ["PROVEN_ALPHA", "PROMOTION_READY"],
+  "real_experiment_id": "SHORT-WAVE-03-BROAD-DIRECT-RANK-REAL-V1",
+  "placebo_experiment_id": "SHORT-WAVE-03-BROAD-DIRECT-RANK-PLACEBOS-V1",
+  "seed_universe": {
+    "path": "SEED_UNIVERSE.json",
+    "source": "mqk_research.universe.snapshot.build_current_enabled_equity_registry_snapshot(config/instruments/equities.json)",
+    "universe_source_kind": "current_enabled_equity_registry_snapshot_v1",
+    "universe_id": "f25e8ec952c1429af7ac3bb58169408e",
+    "symbol_count": 88,
+    "point_in_time_membership": false,
+    "survivorship_classification": "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME",
+    "note": "Frozen BEFORE any Wave-03 result is observed. This 88-symbol set is NOT historical point-in-time membership -- see docs/research/BROAD_RESEARCH_UNIVERSE_CURRENT_TRUTH_AUDIT.md. A later symbol enabled/disabled in the live registry does NOT change this frozen seed; regenerate this file explicitly (a new, separately-reviewed decision) if a future wave needs a refreshed seed."
+  },
+  "dynamic_cross_section": {
+    "policy": "RANKABLE_SET(T) = seed-universe symbols with a valid OOS ml_score at exact decision timestamp T",
+    "no_stale_carry_forward": true,
+    "no_future_backfill": true,
+    "no_full_seed_coverage_required_per_symbol": true,
+    "note": "A symbol need not have OOS coverage on every historical date (listing date, feature warm-up, data availability, walk-forward eligibility all vary). Do NOT require a symbol to exist in 2016 merely to remain in the seed -- this prevents a later IPO from being falsely projected backward. cross_section_size(T) must be recorded by the future RUN."
+  },
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2024-01-01T00:00:00Z",
+    "asof": "2024-01-01"
+  },
+  "cache_safety": {
+    "policy": "Reuse a cache ONLY after fail-closed verification that manifest/content exactly matches: provider, feed, adjustment, asof, requested window, seed universe, corporate-action evidence, canonical semantic bars hash. If exact verification is unavailable, fetch fresh. No existence-only cache reuse (this is the documented SHORT-WAVE-02 lesson -- see mission 'CACHE SAFETY REPAIR FROM WAVE-02 LESSON')."
+  },
+  "label": {
+    "horizon_bars": 10,
+    "ret_threshold": 0.0,
+    "definition": "fwd_ret = log(close[t+10]/close[t]); target = 1 iff fwd_ret > 0"
+  },
+  "walk_forward": {
+    "train_years": 3,
+    "test_months": 3,
+    "step_months": 3,
+    "holdout_months": 6,
+    "min_rows_per_fold": 300,
+    "purge_enabled": true,
+    "embargo_seconds": 0
+  },
+  "model": {
+    "l2": 0.001,
+    "lr": 0.05,
+    "steps": 300,
+    "standardize": true,
+    "clip_z": 8.0
+  },
+  "cost_model": {
+    "commission_bps_per_side": 10.0,
+    "slippage_bps_per_side": 0.0,
+    "note": "CONSERVATIVE RESEARCH COST ASSUMPTION, not actual Alpaca commission."
+  },
+  "execution_pricing": {
+    "pricing_model_id": "rust_conservative_bar_range_v1",
+    "slippage_bps": 5,
+    "volatility_mult_bps": 0
+  },
+  "weight_to_share": {
+    "equity_usd": 100000.0,
+    "max_gross_exposure": 1.0
+  },
+  "rank_side_count": 5,
+  "long_only_rank_weight_rule": "top 5 scored names, each desired weight = +0.20",
+  "long_short_rank_weight_rule": "top 5 LONG each +0.10, bottom 5 SHORT each -0.10; gross=1.0, net=0.0",
+  "long_short_min_rankable_symbols": 10,
+  "borrow_model": "research_assumed_shortable_universe_v1",
+  "boundary_tie_policy": "fail_closed_boundary_ties_v1",
+  "signal_policies": {
+    "rank_long_only": {
+      "direction_policy": "cross_sectional_rank_long_only_v1",
+      "long_only": true,
+      "rank_side_count": 5,
+      "entry_threshold": 0.5,
+      "max_gross_exposure": 1.0
+    },
+    "rank_long_short": {
+      "direction_policy": "cross_sectional_rank_long_short_v1",
+      "long_only": false,
+      "rank_side_count": 5,
+      "entry_threshold": 0.5,
+      "max_gross_exposure": 1.0,
+      "borrow_model": "research_assumed_shortable_universe_v1"
+    }
+  },
+  "placebo_seed": 1234,
+  "hypotheses": {
+    "RANK-01": {
+      "name": "single-feature OOS classifier-score cross-sectional rank, momentum-rank predictor",
+      "feature_columns": ["ret_rank_20"],
+      "strategy_id": "pooled_single_feature_xs_momentum_rank_direct_rank_v1",
+      "hypothesis_id_long_only": "wave03_rank01_momentum_rank_long_only_v1",
+      "hypothesis_id_long_short": "wave03_rank01_momentum_rank_long_short_v1",
+      "hypothesis_id_placebo": "wave03_rank01_momentum_rank_placebo_v1"
+    },
+    "RANK-02": {
+      "name": "single-feature OOS classifier-score cross-sectional rank, short-term-reversal predictor",
+      "feature_columns": ["ret_5"],
+      "strategy_id": "pooled_single_feature_short_term_reversal_direct_rank_v1",
+      "hypothesis_id_long_only": "wave03_rank02_short_term_reversal_long_only_v1",
+      "hypothesis_id_long_short": "wave03_rank02_short_term_reversal_long_short_v1",
+      "hypothesis_id_placebo": "wave03_rank02_short_term_reversal_placebo_v1"
+    },
+    "RANK-03": {
+      "name": "single-feature OOS classifier-score cross-sectional rank, gap-reversal predictor",
+      "feature_columns": ["gap_pct_1"],
+      "strategy_id": "pooled_single_feature_gap_reversal_direct_rank_v1",
+      "hypothesis_id_long_only": "wave03_rank03_gap_reversal_long_only_v1",
+      "hypothesis_id_long_short": "wave03_rank03_gap_reversal_long_short_v1",
+      "hypothesis_id_placebo": "wave03_rank03_gap_reversal_placebo_v1"
+    }
+  },
+  "same_features_as_wave02_disclosure": "RANK-01/02/03 deliberately reuse the SAME THREE single-feature families as SHORT-WAVE-02 (ret_rank_20, ret_5, gap_pct_1) to isolate PORTFOLIO-CONSTRUCTION MECHANISM. Because the universe itself changed (12 ETFs -> 88-symbol registry seed), this does NOT purely isolate portfolio construction in isolation -- for ret_rank_20 especially, expanding the universe changes the cross-sectional feature itself (its rank is computed over a different, larger cross-section). This is documented, not hidden.",
+  "real_candidate_population": [
+    "wave03_rank01_momentum_rank_long_only_v1",
+    "wave03_rank01_momentum_rank_long_short_v1",
+    "wave03_rank02_short_term_reversal_long_only_v1",
+    "wave03_rank02_short_term_reversal_long_short_v1",
+    "wave03_rank03_gap_reversal_long_only_v1",
+    "wave03_rank03_gap_reversal_long_short_v1"
+  ],
+  "diagnostic_placebo_population": [
+    "wave03_rank01_momentum_rank_placebo_v1",
+    "wave03_rank02_short_term_reversal_placebo_v1",
+    "wave03_rank03_gap_reversal_placebo_v1"
+  ],
+  "benchmark": {
+    "kind": "family_specific_dynamic_equal_weight_causally_rankable_v1",
+    "definition": "At each economic decision date, equal-weight the SAME causally rankable symbol set available to that family at that date (RANKABLE_SET(T) as defined above) -- no future membership, no holdout. Fold-reset semantics remain aligned to economic_returns.csv, mirroring SHORT-WAVE-02's build_fold_reset_benchmark convention.",
+    "not_a_fixed_12_symbol_benchmark": true,
+    "predeclared_before_results": true,
+    "implementation_status": "formula predeclared here; NOT implemented/exercised by this controller (run_wave.py raises NotImplementedError for this stage) -- per mission: 'If implementation of this benchmark requires new behavior later: STOP before interpreting Wave-03 results. Do not invent a benchmark after seeing returns.' Implementation is the Wave-03 RUN mission's job, built and reviewed before any real trial executes."
+  },
+  "required_future_run_recording_fields": [
+    "seed_universe_count", "seed_universe_id",
+    "per_date_rankable_cross_section_min_median_max", "dates_below_rank_minimum",
+    "symbols_ever_rankable", "symbols_never_rankable",
+    "first_last_rankable_date_per_symbol_if_practical",
+    "target_long_symbol_days", "target_short_symbol_days",
+    "executed_long_symbol_days", "executed_short_symbol_days",
+    "max_concurrent_longs", "max_concurrent_shorts",
+    "desired_gross_exposure", "actual_gross_exposure",
+    "desired_net_exposure", "actual_net_exposure",
+    "turnover", "cost_drag", "net_return", "sharpe", "max_drawdown",
+    "long_short_minus_long_only_paired_deltas",
+    "matched_placebo_comparison", "fold_concentration"
+  ],
+  "no_standalone_short_leg_pnl_without_exact_attribution": true,
+  "prohibited_after_predeclaration": [
+    "adaptive rank_side_count/window/universe/horizon retuning based on observed results",
+    "mixing placebo trials into the real-candidate experiment id",
+    "changing the seed universe after seeing any trial result",
+    "inventing or adjusting the benchmark definition after seeing returns",
+    "claiming PROVEN_ALPHA or PROMOTION_READY for this post-hoc development study"
+  ],
+  "commit_sequence": [
+    "PATCH A: RESEARCH-DIRECT-RANK-SIGNAL-POLICY-01",
+    "PATCH B: RESEARCH-DIRECT-RANK-REGISTERED-IDENTITY-01",
+    "PATCH C: BROAD-RESEARCH-UNIVERSE-CURRENT-TRUTH-AUDIT-01",
+    "PATCH D: RESEARCH-UNIVERSE-SNAPSHOT-IDENTITY-01",
+    "PATCH E: SHORT-WAVE-03-BROAD-DIRECT-RANK-PREDECLARATION-01"
+  ],
+  "execution_guard": {
+    "check_mode_stages": ["check"],
+    "execute_required_stages": ["rank01", "rank02", "rank03", "judge"],
+    "explicit_flag_required": "--execute",
+    "network_contact_in_check_mode": false,
+    "note": "run_wave.py's main() refuses any network-touching stage unless the literal --execute flag is present in argv. This predeclaration controller NEVER calls main() with --execute."
+  }
+}
