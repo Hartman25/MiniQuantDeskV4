@@ -74,6 +74,7 @@ from mqk_research.ml.economic_walkforward import (
     EconomicWalkForwardSpec,
     SignalPolicySpec,
 )
+from mqk_research.ml.economics import compute_max_drawdown, compute_sharpe
 from mqk_research.ml.eval_walkforward import WalkForwardSpec
 from mqk_research.ml.execution_pricing import (
     EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
@@ -386,7 +387,15 @@ def build_benchmark_over_oos_dates(
     """Equal-weight DAILY-REBALANCED benchmark of the fixed 12-ETF universe,
     built ONLY over the exact reference_dates the admitted trials actually
     used. Fails closed if any reference date falls at/after the reserved
-    holdout boundary."""
+    holdout boundary.
+
+    CONTINUOUS_DATE_ALIGNED_CONTEXT_BENCHMARK: pct_change is computed before
+    OOS filtering, so each fold's first OOS date carries a return from the
+    prior close -- which may be a pre-fold or cross-fold-gap date the
+    strategy itself was never economically exposed to (it starts every fold
+    flat). This is a same-date-range CONTEXT comparator, not an
+    apples-to-apples measurement-convention match; use
+    `build_fold_reset_benchmark` for the direct comparator."""
     ref_ts = pd.to_datetime(pd.Index(reference_dates), utc=True)
     holdout_ts = pd.Timestamp(holdout_start_utc)
     if holdout_ts.tzinfo is None:
@@ -422,6 +431,104 @@ def build_benchmark_over_oos_dates(
         "cumulative_return_over_reference_dates": cumulative_return,
         "holdout_start_utc": holdout_ts.isoformat(),
     }
+
+
+def fold_first_oos_dates(oos_predictions_csv: Path) -> set[str]:
+    """Returns the set of first-actual-OOS-date strings, one per registered
+    walk-forward fold, read from the trial's own
+    walk_forward_oos_predictions.csv (`fold`, `decision_ts` columns) --
+    the same fold assignment the economic engine itself used. Fail closed
+    if any calendar date maps to more than one fold (would make "first OOS
+    date of a fold" ambiguous)."""
+    preds = pd.read_csv(oos_predictions_csv)
+    if "fold" not in preds.columns or "decision_ts" not in preds.columns:
+        raise RuntimeError(
+            f"Fail-closed: {oos_predictions_csv} missing required 'fold'/'decision_ts' column(s)"
+        )
+    preds = preds.copy()
+    preds["date"] = pd.to_datetime(preds["decision_ts"], utc=True).dt.strftime("%Y-%m-%d")
+    fold_sets_by_date = preds.groupby("date")["fold"].agg(lambda s: sorted(set(s)))
+    ambiguous = {d: fs for d, fs in fold_sets_by_date.items() if len(fs) != 1}
+    if ambiguous:
+        raise RuntimeError(
+            f"Fail-closed: date(s) mapped to more than one walk-forward fold in "
+            f"{oos_predictions_csv}: {dict(list(ambiguous.items())[:5])}"
+        )
+    fold_of_date = fold_sets_by_date.map(lambda fs: fs[0])
+    first_date_of_fold = fold_of_date.reset_index().groupby("fold")["date"].min()
+    return set(first_date_of_fold.tolist())
+
+
+def build_fold_reset_benchmark(
+    bars: pd.DataFrame,
+    symbols: list[str],
+    oos_predictions_csv: Path,
+    reference_dates: list[str],
+    holdout_start_utc: str,
+) -> dict:
+    """Equal-weight DAILY-REBALANCED benchmark of the fixed ETF universe,
+    measured under the SAME fold-reset convention the economic strategy
+    itself uses: every fold starts flat, so the benchmark's return on each
+    fold's first actual OOS date is forced to 0.0 rather than a pct_change
+    carried over from the prior close (which may be a pre-fold or
+    cross-fold-gap date not economically held by the strategy on that day).
+    All other OOS dates use the normal daily-rebalanced benchmark return.
+    Never touches holdout dates. Fails closed on any date/fold mismatch."""
+    ref_ts = pd.to_datetime(pd.Index(reference_dates), utc=True)
+    holdout_ts = pd.Timestamp(holdout_start_utc)
+    if holdout_ts.tzinfo is None:
+        holdout_ts = holdout_ts.tz_localize("UTC")
+    if (ref_ts >= holdout_ts).any():
+        bad = sorted(str(d) for d in ref_ts[ref_ts >= holdout_ts])
+        raise RuntimeError(
+            f"Fail-closed: {len(bad)} benchmark reference date(s) fall at/after the reserved holdout "
+            f"boundary ({holdout_ts.isoformat()}): {bad[:5]}{'...' if len(bad) > 5 else ''}"
+        )
+
+    fold_start_dates = fold_first_oos_dates(oos_predictions_csv)
+    reference_date_set = set(pd.Index(reference_dates).astype(str))
+    missing_fold_assignment = sorted(d for d in reference_date_set if d not in _all_fold_dates(oos_predictions_csv))
+    if missing_fold_assignment:
+        raise RuntimeError(
+            f"Fail-closed: {len(missing_fold_assignment)} reference date(s) have no walk-forward fold "
+            f"assignment in {oos_predictions_csv}: {missing_fold_assignment[:5]}"
+        )
+
+    b = bars.copy()
+    b["end_ts"] = pd.to_datetime(b["end_ts"], utc=True)
+    b = b.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+    b["date"] = b["end_ts"].dt.strftime("%Y-%m-%d")
+    b["daily_ret"] = b.groupby("symbol")["close"].pct_change()
+
+    scoped = b[b["date"].isin(reference_date_set) & b["symbol"].isin(symbols)]
+    per_date = scoped.groupby("date")["daily_ret"].mean().reindex(sorted(reference_date_set))
+    for d in fold_start_dates & reference_date_set:
+        per_date.loc[d] = 0.0
+
+    missing_dates = sorted(d for d in reference_date_set if d not in per_date.dropna().index)
+    daily_series = per_date.dropna()
+    cumulative_return = float(np.prod(1.0 + daily_series.to_numpy()) - 1.0) if len(daily_series) else None
+    sharpe = compute_sharpe(daily_series) if len(daily_series) else None
+    max_drawdown = compute_max_drawdown(daily_series) if len(daily_series) else None
+
+    return {
+        "benchmark_type": "equal_weight_daily_rebalanced_fold_reset",
+        "reference_date_count": len(reference_dates),
+        "reference_date_start": str(min(reference_dates)),
+        "reference_date_end": str(max(reference_dates)),
+        "fold_reset_dates_count": len(fold_start_dates & reference_date_set),
+        "dates_with_no_return_observation": missing_dates,
+        "daily_return_observations_used": int(len(daily_series)),
+        "cumulative_return_over_reference_dates": cumulative_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "holdout_start_utc": holdout_ts.isoformat(),
+    }
+
+
+def _all_fold_dates(oos_predictions_csv: Path) -> set[str]:
+    preds = pd.read_csv(oos_predictions_csv)
+    return set(pd.to_datetime(preds["decision_ts"], utc=True).dt.strftime("%Y-%m-%d").tolist())
 
 
 def verify_oos_date_alignment(trials: list[dict]) -> list[str]:
@@ -559,11 +666,18 @@ def main() -> None:
     reference_dates = verify_oos_date_alignment(results)
     holdout_start_utc = results[0]["holdout_start_utc"]
     bench = build_benchmark_over_oos_dates(bars, SYMBOLS, reference_dates, holdout_start_utc)
+    fold_reset_bench = build_fold_reset_benchmark(
+        bars, SYMBOLS, run_dir_a / "eval" / "walk_forward_oos_predictions.csv", reference_dates, holdout_start_utc
+    )
     print(f"BENCHMARK_TYPE={bench['benchmark_type']}")
     print(f"BENCHMARK_EXACT_DATE_ALIGNMENT=PASS")
     print(f"OOS_REFERENCE_DATE_START={bench['reference_date_start']}")
     print(f"OOS_REFERENCE_DATE_END={bench['reference_date_end']}")
     print(f"OOS_REFERENCE_DATE_COUNT={bench['reference_date_count']}")
+    print(f"FOLD_RESET_BENCHMARK_TYPE={fold_reset_bench['benchmark_type']}")
+    print(f"FOLD_RESET_BENCHMARK_CUMULATIVE_RETURN={fold_reset_bench['cumulative_return_over_reference_dates']}")
+    print(f"FOLD_RESET_BENCHMARK_SHARPE={fold_reset_bench['sharpe']}")
+    print(f"FOLD_RESET_BENCHMARK_MAX_DRAWDOWN={fold_reset_bench['max_drawdown']}")
 
     paired_delta = compute_paired_delta(r_a, r_b)
 
@@ -584,6 +698,7 @@ def main() -> None:
         "registry_population": judge.get("registry_population"),
         "trial_admission": trial_admission,
         "benchmark_over_oos_reference_dates": bench,
+        "fold_reset_benchmark_over_oos_reference_dates": fold_reset_bench,
         "paired_long_short_vs_long_only_delta": paired_delta,
         "long_short_attribution": "UNKNOWN_NEEDS_PROOF",
         "long_short_attribution_missing_evidence": (
@@ -615,6 +730,7 @@ def main() -> None:
         "trial_admission": trial_admission,
         "paired_delta": paired_delta,
         "benchmark": bench,
+        "fold_reset_benchmark": fold_reset_bench,
     }, indent=2, default=str))
 
 

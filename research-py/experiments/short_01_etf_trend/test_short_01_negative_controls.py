@@ -2,10 +2,11 @@
 
 Covers the invariants specific to THIS experiment's own parameters
 (slope_60 feature isolation, entry_threshold=0.55/short_threshold=0.45
-direction resolution, long-only-vs-long-short trial identity separation)
-and the driver's now-self-contained (SHORT-01-DRIVER-PORTABILITY-01)
-inlined causal placebo helper. `build_causal_placebo_targets` was
-originally imported live from the accepted
+direction resolution, long-only-vs-long-short trial identity separation),
+the driver's now-self-contained (SHORT-01-DRIVER-PORTABILITY-01) inlined
+causal placebo helper, and the fold-reset benchmark comparator
+(SHORT-01-BENCHMARK-MEASUREMENT-PARITY-01). `build_causal_placebo_targets`
+was originally imported live from the accepted
 research-alpha-gap-discovery-01-clean worktree; it is now inlined verbatim
 in run_experiment.py so this branch is runnable from a bare checkout, so
 this file also carries its own focused correctness proofs (same-horizon
@@ -32,6 +33,8 @@ from run_experiment import (  # noqa: E402
     LONG_ENTRY_THRESHOLD,
     SHORT_THRESHOLD,
     build_causal_placebo_targets,
+    build_fold_reset_benchmark,
+    fold_first_oos_dates,
     isolate_slope_feature,
     _signal_policy_for,
 )
@@ -268,3 +271,74 @@ def test_placebo_mixed_label_fixture_changes_at_least_one_target() -> None:
     placebo = build_causal_placebo_targets(targets, seed=1234)
     changed = int((placebo["target"].to_numpy() != targets["target"].to_numpy()).sum())
     assert changed > 0
+
+
+# ---------------------------------------------------------------------------
+# SHORT-01-BENCHMARK-MEASUREMENT-PARITY-01: fold-reset benchmark comparator.
+# ---------------------------------------------------------------------------
+
+
+def test_fold_first_oos_dates_reads_one_first_date_per_fold(tmp_path: Path) -> None:
+    oos = pd.DataFrame(
+        [
+            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-03T00:00:00+00:00"},
+            {"fold": 2, "symbol": "A", "decision_ts": "2020-06-01T00:00:00+00:00"},
+            {"fold": 2, "symbol": "A", "decision_ts": "2020-06-02T00:00:00+00:00"},
+        ]
+    )
+    csv_path = tmp_path / "walk_forward_oos_predictions.csv"
+    oos.to_csv(csv_path, index=False)
+    assert fold_first_oos_dates(csv_path) == {"2020-01-02", "2020-06-01"}
+
+
+def test_fold_first_oos_dates_fails_closed_on_ambiguous_fold_assignment(tmp_path: Path) -> None:
+    oos = pd.DataFrame(
+        [
+            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-02T00:00:00+00:00"},
+            {"fold": 2, "symbol": "B", "decision_ts": "2020-01-02T00:00:00+00:00"},
+        ]
+    )
+    csv_path = tmp_path / "walk_forward_oos_predictions.csv"
+    oos.to_csv(csv_path, index=False)
+    with pytest.raises(RuntimeError, match="more than one walk-forward fold"):
+        fold_first_oos_dates(csv_path)
+
+
+def test_fold_reset_benchmark_zeroes_large_pre_fold_jump(tmp_path: Path) -> None:
+    """A large overnight/pre-fold return must not leak into the benchmark's
+    first fold day: the strategy starts every fold flat with
+    net_daily_return=0 on that date, so the benchmark must match."""
+    bars = pd.DataFrame(
+        [
+            {"symbol": "A", "end_ts": "2020-01-01 00:00:00", "close": 100.0},
+            {"symbol": "A", "end_ts": "2020-01-02 00:00:00", "close": 200.0},  # huge pre-fold jump
+            {"symbol": "A", "end_ts": "2020-01-03 00:00:00", "close": 202.0},
+        ]
+    )
+    oos = pd.DataFrame(
+        [
+            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-03T00:00:00+00:00"},
+        ]
+    )
+    csv_path = tmp_path / "walk_forward_oos_predictions.csv"
+    oos.to_csv(csv_path, index=False)
+
+    result = build_fold_reset_benchmark(
+        bars, ["A"], csv_path, ["2020-01-02", "2020-01-03"], "2099-01-01T00:00:00Z"
+    )
+    # naive pct_change would give (200-100)/100=1.0 on 2020-01-02; fold-reset
+    # forces it to 0.0, leaving only the 2020-01-03 return of (202-200)/200.
+    assert result["cumulative_return_over_reference_dates"] == pytest.approx((202.0 / 200.0) - 1.0)
+
+
+def test_fold_reset_benchmark_fails_closed_on_holdout_date() -> None:
+    bars = pd.DataFrame(
+        [
+            {"symbol": "A", "end_ts": "2020-01-01 00:00:00", "close": 100.0},
+            {"symbol": "A", "end_ts": "2020-01-02 00:00:00", "close": 101.0},
+        ]
+    )
+    with pytest.raises(RuntimeError, match="reserved holdout"):
+        build_fold_reset_benchmark(bars, ["A"], Path("unused.csv"), ["2020-01-02"], "2020-01-01T00:00:00Z")
