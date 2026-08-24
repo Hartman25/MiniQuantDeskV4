@@ -402,6 +402,100 @@ if (-not $resticCmd) {
 }
 
 # ---------------------------------------------------------------------------
+# Section 5: D-R2-R4 real end-to-end post-restore canary classification
+# parity. Before this repair, the post-restore re-scan applied no
+# canonical-local-Paper-DB exemption at all, so a tracked doc quoting the
+# exact canonical local Paper Postgres URL under MQK_DATABASE_URL would pass
+# the pre-stage scan (9f0496ee) but then be deterministically re-flagged
+# after the restic round trip -- this is the real production defect, proven
+# here against the REAL Invoke-MiniQuantDeskOffsiteBackup.ps1 (not a copy),
+# through a real restic backup+restore, not a unit-level shortcut.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 5: D-R2-R4 post-restore canary classification parity (real, local restic repository) ==='
+
+$CanonicalLocalPaperDbUrlForCanaryTest = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable'
+
+if (-not $resticCmd) {
+    Show-Info '  INFO -- restic not installed on this box: skipping Section 5 (same gap Sections 3/4 already report).'
+} else {
+    # --- R4-1 (positive): canonical local Paper DB URL survives the full
+    # round trip -- pre-stage AND post-restore both allow it. -------------
+    $r4PosRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_offsite_canaryparity_pos_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $r4PosRoot | Out-Null
+    $r4PosFixtureRepoRoot = Join-Path $r4PosRoot 'fixture_repo'
+    New-Item -ItemType Directory -Force -Path (Join-Path $r4PosFixtureRepoRoot 'config') | Out-Null
+    Set-Content -Path (Join-Path $r4PosFixtureRepoRoot '.gitignore') -Value '.env.local' -Encoding UTF8
+    Set-Content -Path (Join-Path $r4PosFixtureRepoRoot 'config\fixture.json') -Value '{"fixture": true}' -Encoding UTF8
+    # Backup-MiniQuantDeskRecovery.ps1 only stages two specifically-named
+    # root-level docs (plus the whole config\ tree) as safe_config content --
+    # an arbitrary root-level filename is never staged/scanned at all, so the
+    # fixture MUST use this exact name for the canary collision to actually
+    # reach staged (and later restic-restored) material.
+    Set-Content -Path (Join-Path $r4PosFixtureRepoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md') -Value "Fixture doc quoting: $CanonicalLocalPaperDbUrlForCanaryTest" -Encoding UTF8
+    & git -C $r4PosFixtureRepoRoot init -q 2>&1 | Out-Null
+    & git -C $r4PosFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore config MiniQuantDesk_Master_Patch_Ledger_v2_updated.md 2>&1 | Out-Null
+    & git -C $r4PosFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' commit -q -m 'fixture' 2>&1 | Out-Null
+
+    $r4PosResticRepoDir = Join-Path $r4PosRoot 'restic_repo'
+    New-Item -ItemType Directory -Force -Path $r4PosResticRepoDir | Out-Null
+    $r4PosPasswordFile = Join-Path $r4PosRoot 'restic-password.txt'
+    Set-Content -Path $r4PosPasswordFile -Value 'fixture-local-repo-password-not-a-real-secret' -Encoding UTF8 -NoNewline
+    $r4PosEnvLines = @(
+        "MQK_RESTIC_REPOSITORY=$r4PosResticRepoDir",
+        "MQK_RESTIC_PASSWORD_FILE=$r4PosPasswordFile",
+        'B2_ACCOUNT_ID=fixture-not-a-real-b2-account-id',
+        'B2_ACCOUNT_KEY=fixture-not-a-real-b2-account-key',
+        "MQK_DATABASE_URL=$CanonicalLocalPaperDbUrlForCanaryTest"
+    )
+    Set-Content -Path (Join-Path $r4PosFixtureRepoRoot '.env.local') -Value ($r4PosEnvLines -join "`n") -Encoding UTF8
+
+    $r4Pos = Invoke-TestSubprocess -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript, '-RepoRoot', $r4PosFixtureRepoRoot, '-DisposableDbContainer', 'mqk-test-postgres', '-ResticTimeoutSeconds', '120')
+    Assert-True 'R4-1/R4-12: canonical local Paper DB URL in tracked docs survives the FULL real round trip (pre-stage AND post-restore both allow it, orchestration exits 0)' ($r4Pos.ExitCode -eq 0)
+    Assert-True 'R4-1: pre-stage scan reports the canonical exemption' ($r4Pos.Stdout -match [regex]::Escape('CANONICAL_LOCAL_PAPER_DB_CONFIG=YES'))
+    Assert-True 'R4-1: post-restore re-scan independently reports the SAME canonical exemption (not just the pre-stage one)' `
+        ($r4Pos.Stdout -match [regex]::Escape('CANONICAL_LOCAL_PAPER_DB_CONFIG=YES (post-restore re-scan:'))
+    Assert-True 'R4-1: post-restore re-scan itself still ran to completion and reported no OTHER canary hit' ($r4Pos.Stdout -match [regex]::Escape('No allowlisted local secret value found in the restic-restored material'))
+
+    Remove-Item -Path $r4PosRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+    # --- R4-3 (negative): a loopback URL that differs from canonical only
+    # by password must still fail closed through the FULL round trip
+    # (pre-stage refuses it -- proves the exemption stays narrow end-to-end,
+    # not just at the unit level). ------------------------------------------
+    $r4NegRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_offsite_canaryparity_neg_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $r4NegRoot | Out-Null
+    $r4NegFixtureRepoRoot = Join-Path $r4NegRoot 'fixture_repo'
+    $r4NegValue = 'postgres://postgres:differentpw1@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable'
+    New-Item -ItemType Directory -Force -Path (Join-Path $r4NegFixtureRepoRoot 'config') | Out-Null
+    Set-Content -Path (Join-Path $r4NegFixtureRepoRoot '.gitignore') -Value '.env.local' -Encoding UTF8
+    Set-Content -Path (Join-Path $r4NegFixtureRepoRoot 'config\fixture.json') -Value '{"fixture": true}' -Encoding UTF8
+    Set-Content -Path (Join-Path $r4NegFixtureRepoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md') -Value "Fixture doc quoting: $r4NegValue" -Encoding UTF8
+    & git -C $r4NegFixtureRepoRoot init -q 2>&1 | Out-Null
+    & git -C $r4NegFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore config MiniQuantDesk_Master_Patch_Ledger_v2_updated.md 2>&1 | Out-Null
+    & git -C $r4NegFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' commit -q -m 'fixture' 2>&1 | Out-Null
+
+    $r4NegResticRepoDir = Join-Path $r4NegRoot 'restic_repo'
+    New-Item -ItemType Directory -Force -Path $r4NegResticRepoDir | Out-Null
+    $r4NegPasswordFile = Join-Path $r4NegRoot 'restic-password.txt'
+    Set-Content -Path $r4NegPasswordFile -Value 'fixture-local-repo-password-not-a-real-secret' -Encoding UTF8 -NoNewline
+    $r4NegEnvLines = @(
+        "MQK_RESTIC_REPOSITORY=$r4NegResticRepoDir",
+        "MQK_RESTIC_PASSWORD_FILE=$r4NegPasswordFile",
+        'B2_ACCOUNT_ID=fixture-not-a-real-b2-account-id',
+        'B2_ACCOUNT_KEY=fixture-not-a-real-b2-account-key',
+        "MQK_DATABASE_URL=$r4NegValue"
+    )
+    Set-Content -Path (Join-Path $r4NegFixtureRepoRoot '.env.local') -Value ($r4NegEnvLines -join "`n") -Encoding UTF8
+
+    $r4Neg = Invoke-TestSubprocess -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript, '-RepoRoot', $r4NegFixtureRepoRoot, '-DisposableDbContainer', 'mqk-test-postgres', '-ResticTimeoutSeconds', '120')
+    Assert-True 'R4-3: a loopback MQK_DATABASE_URL differing from canonical only by password is refused end-to-end (nonzero exit, never exempted)' ($r4Neg.ExitCode -ne 0)
+    Assert-True 'R4-3: the non-canonical value itself never appears in captured stdout (no secret printed, R4-13)' (-not ($r4Neg.Stdout -match [regex]::Escape($r4NegValue)))
+
+    Remove-Item -Path $r4NegRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Show-Info ''

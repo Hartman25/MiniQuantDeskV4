@@ -100,6 +100,10 @@ foreach ($p in @($BackupScript, $RestoreScript)) {
     }
 }
 
+# D-R2-R4: same shared classification helper Backup-MiniQuantDeskRecovery.ps1
+# dot-sources for its pre-stage scan -- see lib\CanonicalPaperDbCanary.ps1.
+. (Join-Path $PSScriptRoot 'lib\CanonicalPaperDbCanary.ps1')
+
 # ---------------------------------------------------------------------------
 # Narrow local-config reader: reads ONE allowlisted variable name out of the
 # same candidate .env.local/.env files the official launcher uses, WITHOUT
@@ -575,10 +579,27 @@ $allowlistedNames = @(
     'ALPACA_API_KEY_ID', 'ALPACA_API_SECRET_KEY', 'ALPACA_API_KEY', 'ALPACA_API_SECRET',
     'B2_ACCOUNT_ID', 'B2_ACCOUNT_KEY', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'
 )
+# D-R2-R4: apply the SAME narrow canonical-local-Paper-DB classification the
+# pre-stage scan (Backup-MiniQuantDeskRecovery.ps1, via the shared
+# lib\CanonicalPaperDbCanary.ps1 helper dot-sourced above) already applies --
+# without this, the post-restore re-scan would deterministically rediscover
+# that exact, already-public value in restored tracked source/docs and fail
+# a run the pre-stage scan already correctly allowed through. Every other
+# MQK_DATABASE_URL value, and every other allowlisted name, remains
+# fail-closed exactly as before.
 $canaryValuesRescan = New-Object 'System.Collections.Generic.HashSet[string]'
+$canonicalLocalDbExemptedRescan = $false
 foreach ($name in $allowlistedNames) {
     $v = Get-AllowlistedLocalConfigValue -RepoRoot $RepoRoot -Name $name
-    if (-not [string]::IsNullOrWhiteSpace($v) -and $v.Length -ge 8) { [void]$canaryValuesRescan.Add($v) }
+    if ([string]::IsNullOrWhiteSpace($v) -or $v.Length -lt 8) { continue }
+    if ($name -eq 'MQK_DATABASE_URL' -and (Test-IsCanonicalLocalPaperDatabaseUrl -Value $v)) {
+        $canonicalLocalDbExemptedRescan = $true
+        continue
+    }
+    [void]$canaryValuesRescan.Add($v)
+}
+if ($canonicalLocalDbExemptedRescan) {
+    Write-Ok 'CANONICAL_LOCAL_PAPER_DB_CONFIG=YES (post-restore re-scan: MQK_DATABASE_URL matches the known-public canonical loopback Paper DB default -- exempted from the content canary; every other allowlisted value remains fail-closed).'
 }
 $canaryValuesRescan = @($canaryValuesRescan)
 $canaryRescanHit = $false
