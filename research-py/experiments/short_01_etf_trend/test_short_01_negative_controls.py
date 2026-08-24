@@ -34,7 +34,7 @@ from run_experiment import (  # noqa: E402
     SHORT_THRESHOLD,
     build_causal_placebo_targets,
     build_fold_reset_benchmark,
-    fold_first_oos_dates,
+    economic_fold_date_authority,
     isolate_slope_feature,
     _signal_policy_for,
 )
@@ -274,41 +274,53 @@ def test_placebo_mixed_label_fixture_changes_at_least_one_target() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SHORT-01-BENCHMARK-MEASUREMENT-PARITY-01: fold-reset benchmark comparator.
+# SHORT-01-BENCHMARK-FOLD-AUTHORITY-REPAIR-02: fold-reset benchmark
+# comparator, bound to economic_returns.csv (fold/timestamp) as the
+# fold/date authority instead of walk_forward_oos_predictions.csv.
+# walk_forward_oos_predictions.csv is structurally incomplete: the last
+# LABEL_HORIZON_BARS economic dates of every fold can never carry a
+# forward-label OOS prediction row while preserving the reserved holdout, so
+# it under-counts real fold membership. economic_returns.csv is the exact
+# fold/timestamp artifact underlying the realized economic return series and
+# has no such gap.
 # ---------------------------------------------------------------------------
 
 
-def test_fold_first_oos_dates_reads_one_first_date_per_fold(tmp_path: Path) -> None:
-    oos = pd.DataFrame(
+def test_economic_fold_date_authority_reads_reset_date_and_full_date_set(tmp_path: Path) -> None:
+    econ = pd.DataFrame(
         [
-            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-02T00:00:00+00:00"},
-            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-03T00:00:00+00:00"},
-            {"fold": 2, "symbol": "A", "decision_ts": "2020-06-01T00:00:00+00:00"},
-            {"fold": 2, "symbol": "A", "decision_ts": "2020-06-02T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-03T00:00:00+00:00"},
+            {"fold": 2, "timestamp": "2020-06-01T00:00:00+00:00"},
+            {"fold": 2, "timestamp": "2020-06-02T00:00:00+00:00"},
         ]
     )
-    csv_path = tmp_path / "walk_forward_oos_predictions.csv"
-    oos.to_csv(csv_path, index=False)
-    assert fold_first_oos_dates(csv_path) == {"2020-01-02", "2020-06-01"}
+    csv_path = tmp_path / "economic_returns.csv"
+    econ.to_csv(csv_path, index=False)
+    authority = economic_fold_date_authority(csv_path)
+    assert authority["reset_dates"] == {"2020-01-02", "2020-06-01"}
+    assert authority["date_set"] == {"2020-01-02", "2020-01-03", "2020-06-01", "2020-06-02"}
 
 
-def test_fold_first_oos_dates_fails_closed_on_ambiguous_fold_assignment(tmp_path: Path) -> None:
-    oos = pd.DataFrame(
+def test_economic_fold_date_authority_fails_closed_on_ambiguous_fold_assignment(tmp_path: Path) -> None:
+    """Negative control 2: a calendar date mapped to two economic folds
+    must fail closed."""
+    econ = pd.DataFrame(
         [
-            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-02T00:00:00+00:00"},
-            {"fold": 2, "symbol": "B", "decision_ts": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-02T00:00:00+00:00"},
+            {"fold": 2, "timestamp": "2020-01-02T00:00:00+00:00"},
         ]
     )
-    csv_path = tmp_path / "walk_forward_oos_predictions.csv"
-    oos.to_csv(csv_path, index=False)
-    with pytest.raises(RuntimeError, match="more than one walk-forward fold"):
-        fold_first_oos_dates(csv_path)
+    csv_path = tmp_path / "economic_returns.csv"
+    econ.to_csv(csv_path, index=False)
+    with pytest.raises(RuntimeError, match="more than one economic fold"):
+        economic_fold_date_authority(csv_path)
 
 
 def test_fold_reset_benchmark_zeroes_large_pre_fold_jump(tmp_path: Path) -> None:
-    """A large overnight/pre-fold return must not leak into the benchmark's
-    first fold day: the strategy starts every fold flat with
-    net_daily_return=0 on that date, so the benchmark must match."""
+    """Negative control 1: a large overnight/pre-fold return must not leak
+    into the benchmark's fold-reset day: the strategy starts every fold flat
+    with net_daily_return=0 on that date, so the benchmark must match."""
     bars = pd.DataFrame(
         [
             {"symbol": "A", "end_ts": "2020-01-01 00:00:00", "close": 100.0},
@@ -316,14 +328,14 @@ def test_fold_reset_benchmark_zeroes_large_pre_fold_jump(tmp_path: Path) -> None
             {"symbol": "A", "end_ts": "2020-01-03 00:00:00", "close": 202.0},
         ]
     )
-    oos = pd.DataFrame(
+    econ = pd.DataFrame(
         [
-            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-02T00:00:00+00:00"},
-            {"fold": 1, "symbol": "A", "decision_ts": "2020-01-03T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-03T00:00:00+00:00"},
         ]
     )
-    csv_path = tmp_path / "walk_forward_oos_predictions.csv"
-    oos.to_csv(csv_path, index=False)
+    csv_path = tmp_path / "economic_returns.csv"
+    econ.to_csv(csv_path, index=False)
 
     result = build_fold_reset_benchmark(
         bars, ["A"], csv_path, ["2020-01-02", "2020-01-03"], "2099-01-01T00:00:00Z"
@@ -334,6 +346,7 @@ def test_fold_reset_benchmark_zeroes_large_pre_fold_jump(tmp_path: Path) -> None
 
 
 def test_fold_reset_benchmark_fails_closed_on_holdout_date() -> None:
+    """Negative control 5: a reference date at/after holdout fails closed."""
     bars = pd.DataFrame(
         [
             {"symbol": "A", "end_ts": "2020-01-01 00:00:00", "close": 100.0},
@@ -342,3 +355,98 @@ def test_fold_reset_benchmark_fails_closed_on_holdout_date() -> None:
     )
     with pytest.raises(RuntimeError, match="reserved holdout"):
         build_fold_reset_benchmark(bars, ["A"], Path("unused.csv"), ["2020-01-02"], "2020-01-01T00:00:00Z")
+
+
+def test_fold_reset_benchmark_fails_closed_when_reference_date_missing_from_economic_authority(
+    tmp_path: Path,
+) -> None:
+    """Negative control 3: a reference date absent from economic_returns.csv
+    must fail closed (subset is not sufficient -- exact equality required)."""
+    bars = pd.DataFrame(
+        [
+            {"symbol": "A", "end_ts": "2020-01-02 00:00:00", "close": 100.0},
+            {"symbol": "A", "end_ts": "2020-01-03 00:00:00", "close": 101.0},
+        ]
+    )
+    econ = pd.DataFrame([{"fold": 1, "timestamp": "2020-01-02T00:00:00+00:00"}])
+    csv_path = tmp_path / "economic_returns.csv"
+    econ.to_csv(csv_path, index=False)
+    with pytest.raises(RuntimeError, match="not identical"):
+        build_fold_reset_benchmark(bars, ["A"], csv_path, ["2020-01-02", "2020-01-03"], "2099-01-01T00:00:00Z")
+
+
+def test_fold_reset_benchmark_fails_closed_when_economic_authority_has_extra_date(tmp_path: Path) -> None:
+    """Negative control 4: an economic-return date absent from
+    reference_dates must also fail closed (equality is symmetric)."""
+    bars = pd.DataFrame([{"symbol": "A", "end_ts": "2020-01-02 00:00:00", "close": 100.0}])
+    econ = pd.DataFrame(
+        [
+            {"fold": 1, "timestamp": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-03T00:00:00+00:00"},
+        ]
+    )
+    csv_path = tmp_path / "economic_returns.csv"
+    econ.to_csv(csv_path, index=False)
+    with pytest.raises(RuntimeError, match="not identical"):
+        build_fold_reset_benchmark(bars, ["A"], csv_path, ["2020-01-02"], "2099-01-01T00:00:00Z")
+
+
+def test_fold_reset_benchmark_succeeds_with_tail_dates_beyond_any_oos_prediction(tmp_path: Path) -> None:
+    """Negative control 6: a valid economic fold may contain dates with NO
+    walk-forward OOS prediction row -- this is NOT an error. Protects the
+    real LABEL_HORIZON_BARS condition (SHORT-01 Trial A Fold 17: 20 tail
+    economic dates 2023-05-03..2023-05-31 with no forward-label OOS
+    prediction) by proving the benchmark computes purely from
+    economic_returns.csv with no dependency on walk_forward_oos_predictions.csv
+    at all."""
+    bars = pd.DataFrame(
+        [
+            {"symbol": "A", "end_ts": "2020-01-02 00:00:00", "close": 100.0},
+            {"symbol": "A", "end_ts": "2020-01-03 00:00:00", "close": 101.0},
+            {"symbol": "A", "end_ts": "2020-01-04 00:00:00", "close": 102.0},
+        ]
+    )
+    econ = pd.DataFrame(
+        [
+            {"fold": 1, "timestamp": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-03T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-04T00:00:00+00:00"},
+        ]
+    )
+    csv_path = tmp_path / "economic_returns.csv"
+    econ.to_csv(csv_path, index=False)
+    result = build_fold_reset_benchmark(
+        bars, ["A"], csv_path, ["2020-01-02", "2020-01-03", "2020-01-04"], "2099-01-01T00:00:00Z"
+    )
+    assert result["daily_return_observations_used"] == 3
+
+
+def test_economic_returns_csv_read_exactly_once_per_benchmark_call(tmp_path: Path, monkeypatch) -> None:
+    """Negative control 7: economic_returns.csv must be read ONCE per
+    benchmark call, not reparsed once per reference date."""
+    bars = pd.DataFrame(
+        [
+            {"symbol": "A", "end_ts": "2020-01-02 00:00:00", "close": 100.0},
+            {"symbol": "A", "end_ts": "2020-01-03 00:00:00", "close": 101.0},
+        ]
+    )
+    econ = pd.DataFrame(
+        [
+            {"fold": 1, "timestamp": "2020-01-02T00:00:00+00:00"},
+            {"fold": 1, "timestamp": "2020-01-03T00:00:00+00:00"},
+        ]
+    )
+    csv_path = tmp_path / "economic_returns.csv"
+    econ.to_csv(csv_path, index=False)
+
+    real_read_csv = pd.read_csv
+    call_count = {"n": 0}
+
+    def counting_read_csv(path, *args, **kwargs):
+        if Path(path) == csv_path:
+            call_count["n"] += 1
+        return real_read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(run_experiment.pd, "read_csv", counting_read_csv)
+    build_fold_reset_benchmark(bars, ["A"], csv_path, ["2020-01-02", "2020-01-03"], "2099-01-01T00:00:00Z")
+    assert call_count["n"] == 1

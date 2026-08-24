@@ -372,6 +372,7 @@ def run_one_trial(*, run_dir: Path, hypothesis_id: str, bars_path: Path, bars_pr
         "economic_eval_id": economic_out["ids"]["economic_eval_id"],
         "economic_walk_forward_json": str(economic_out_path),
         "economic_daily_returns_csv": economic_out.get("outputs", {}).get("economic_daily_returns_csv", {}).get("path"),
+        "economic_returns_csv": economic_out.get("outputs", {}).get("economic_returns_csv", {}).get("path"),
         "aggregate": aggregate,
         "holdout": economic_out.get("holdout"),
         "holdout_start_utc": holdout_start_utc,
@@ -433,47 +434,58 @@ def build_benchmark_over_oos_dates(
     }
 
 
-def fold_first_oos_dates(oos_predictions_csv: Path) -> set[str]:
-    """Returns the set of first-actual-OOS-date strings, one per registered
-    walk-forward fold, read from the trial's own
-    walk_forward_oos_predictions.csv (`fold`, `decision_ts` columns) --
-    the same fold assignment the economic engine itself used. Fail closed
-    if any calendar date maps to more than one fold (would make "first OOS
-    date of a fold" ambiguous)."""
-    preds = pd.read_csv(oos_predictions_csv)
-    if "fold" not in preds.columns or "decision_ts" not in preds.columns:
+def economic_fold_date_authority(economic_returns_csv: Path) -> dict:
+    """Reads the trial's own economic_returns.csv ONCE (`fold`, `timestamp`
+    columns) -- the exact fold/date rows whose daily aggregation produced
+    the strategy's actual economic return series -- and returns:
+      - "date_set": every calendar date the economic engine measured
+      - "reset_dates": each fold's reset date (the minimum actual economic
+        date belonging to that fold, i.e. the date the strategy starts flat)
+
+    This is the correct fold/date authority, NOT
+    walk_forward_oos_predictions.csv: LABEL_HORIZON_BARS reserves the last
+    LABEL_HORIZON_BARS economic dates of every fold from ever carrying a
+    forward-label OOS prediction row (preserving the reserved holdout), so
+    walk_forward_oos_predictions.csv is structurally incomplete as fold/date
+    authority for the real run. Fails closed if any calendar date maps to
+    more than one fold."""
+    econ = pd.read_csv(economic_returns_csv)
+    if "fold" not in econ.columns or "timestamp" not in econ.columns:
         raise RuntimeError(
-            f"Fail-closed: {oos_predictions_csv} missing required 'fold'/'decision_ts' column(s)"
+            f"Fail-closed: {economic_returns_csv} missing required 'fold'/'timestamp' column(s)"
         )
-    preds = preds.copy()
-    preds["date"] = pd.to_datetime(preds["decision_ts"], utc=True).dt.strftime("%Y-%m-%d")
-    fold_sets_by_date = preds.groupby("date")["fold"].agg(lambda s: sorted(set(s)))
+    econ = econ.copy()
+    econ["date"] = pd.to_datetime(econ["timestamp"], utc=True).dt.strftime("%Y-%m-%d")
+    fold_sets_by_date = econ.groupby("date")["fold"].agg(lambda s: sorted(set(s)))
     ambiguous = {d: fs for d, fs in fold_sets_by_date.items() if len(fs) != 1}
     if ambiguous:
         raise RuntimeError(
-            f"Fail-closed: date(s) mapped to more than one walk-forward fold in "
-            f"{oos_predictions_csv}: {dict(list(ambiguous.items())[:5])}"
+            f"Fail-closed: date(s) mapped to more than one economic fold in "
+            f"{economic_returns_csv}: {dict(list(ambiguous.items())[:5])}"
         )
     fold_of_date = fold_sets_by_date.map(lambda fs: fs[0])
-    first_date_of_fold = fold_of_date.reset_index().groupby("fold")["date"].min()
-    return set(first_date_of_fold.tolist())
+    reset_dates = set(fold_of_date.reset_index().groupby("fold")["date"].min().tolist())
+    return {"date_set": set(fold_of_date.index.tolist()), "reset_dates": reset_dates}
 
 
 def build_fold_reset_benchmark(
     bars: pd.DataFrame,
     symbols: list[str],
-    oos_predictions_csv: Path,
+    economic_returns_csv: Path,
     reference_dates: list[str],
     holdout_start_utc: str,
 ) -> dict:
     """Equal-weight DAILY-REBALANCED benchmark of the fixed ETF universe,
     measured under the SAME fold-reset convention the economic strategy
     itself uses: every fold starts flat, so the benchmark's return on each
-    fold's first actual OOS date is forced to 0.0 rather than a pct_change
-    carried over from the prior close (which may be a pre-fold or
-    cross-fold-gap date not economically held by the strategy on that day).
-    All other OOS dates use the normal daily-rebalanced benchmark return.
-    Never touches holdout dates. Fails closed on any date/fold mismatch."""
+    fold's reset date (the minimum actual economic date of that fold) is
+    forced to 0.0 rather than a pct_change carried over from the prior close
+    (which may be a pre-fold or cross-fold-gap date not economically held by
+    the strategy on that day). All other dates use the normal
+    daily-rebalanced benchmark return. Never touches holdout dates. Fails
+    closed on any date/fold mismatch, including reference dates the economic
+    fold authority does not also cover (and vice versa) -- exact equality is
+    required, not merely a subset."""
     ref_ts = pd.to_datetime(pd.Index(reference_dates), utc=True)
     holdout_ts = pd.Timestamp(holdout_start_utc)
     if holdout_ts.tzinfo is None:
@@ -485,13 +497,17 @@ def build_fold_reset_benchmark(
             f"boundary ({holdout_ts.isoformat()}): {bad[:5]}{'...' if len(bad) > 5 else ''}"
         )
 
-    fold_start_dates = fold_first_oos_dates(oos_predictions_csv)
+    authority = economic_fold_date_authority(economic_returns_csv)
+    economic_date_set = authority["date_set"]
+    fold_start_dates = authority["reset_dates"]
     reference_date_set = set(pd.Index(reference_dates).astype(str))
-    missing_fold_assignment = sorted(d for d in reference_date_set if d not in _all_fold_dates(oos_predictions_csv))
-    if missing_fold_assignment:
+    if reference_date_set != economic_date_set:
+        only_reference = sorted(reference_date_set - economic_date_set)
+        only_economic = sorted(economic_date_set - reference_date_set)
         raise RuntimeError(
-            f"Fail-closed: {len(missing_fold_assignment)} reference date(s) have no walk-forward fold "
-            f"assignment in {oos_predictions_csv}: {missing_fold_assignment[:5]}"
+            f"Fail-closed: reference date(s) and economic fold-authority date(s) in "
+            f"{economic_returns_csv} are not identical -- "
+            f"reference_only={only_reference[:5]} economic_only={only_economic[:5]}"
         )
 
     b = bars.copy()
@@ -524,11 +540,6 @@ def build_fold_reset_benchmark(
         "max_drawdown": max_drawdown,
         "holdout_start_utc": holdout_ts.isoformat(),
     }
-
-
-def _all_fold_dates(oos_predictions_csv: Path) -> set[str]:
-    preds = pd.read_csv(oos_predictions_csv)
-    return set(pd.to_datetime(preds["decision_ts"], utc=True).dt.strftime("%Y-%m-%d").tolist())
 
 
 def verify_oos_date_alignment(trials: list[dict]) -> list[str]:
@@ -666,8 +677,10 @@ def main() -> None:
     reference_dates = verify_oos_date_alignment(results)
     holdout_start_utc = results[0]["holdout_start_utc"]
     bench = build_benchmark_over_oos_dates(bars, SYMBOLS, reference_dates, holdout_start_utc)
+    if not r_a.get("economic_returns_csv"):
+        raise RuntimeError("Fail-closed: trial_a has no recorded economic_returns_csv output path")
     fold_reset_bench = build_fold_reset_benchmark(
-        bars, SYMBOLS, run_dir_a / "eval" / "walk_forward_oos_predictions.csv", reference_dates, holdout_start_utc
+        bars, SYMBOLS, Path(r_a["economic_returns_csv"]), reference_dates, holdout_start_utc
     )
     print(f"BENCHMARK_TYPE={bench['benchmark_type']}")
     print(f"BENCHMARK_EXACT_DATE_ALIGNMENT=PASS")
