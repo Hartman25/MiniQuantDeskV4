@@ -230,7 +230,7 @@ VERDICT=SHORT_WAVE_02_ALL_THREE_FAMILIES_REJECTED_NOT_ADVANCED_SHORT_VALUE_INCON
 WORKTREE=C:\Users\Zacha\Desktop\MiniQuantDeskV4-short-wave-02
 BRANCH=research-short-wave-02
 BASE_HEAD=e31a49143e16cc61bbf7459f1c569fc1ce6a4851
-FINAL_HEAD=<set at commit time, see COMMITS below>
+FINAL_HEAD=ff21bb9bce89a392a06aa9c06960a7b6a924c008
 
 PREDECLARATION_COMMIT=92ac16a639d355337c68d91e0ac4a4dc45d63e25
 
@@ -284,7 +284,7 @@ CURRENT_CLASSIFIER_SHORT_POLICY_INSUFFICIENT_FOR_DIRECT_SHORT_BOOK_STUDY=YES
 PRODUCTION_CODE_CHANGED=NO
 
 FILES_CHANGED=research-py/experiments/short_wave_02/PREDECLARED_WAVE.json, research-py/experiments/short_wave_02/run_wave.py, research-py/experiments/short_wave_02/test_short_wave_02.py, docs/research/SHORT_WAVE_02_SHORT_02_RESULT.md, docs/research/SHORT_WAVE_02_SHORT_03_RESULT.md, docs/research/SHORT_WAVE_02_SHORT_04_RESULT.md, docs/research/SHORT_WAVE_02_FAMILY_REPORT.md
-COMMITS=92ac16a6 (Patch A), 6b7a4313 (Patch B), 8ce0500e (Patch C), 204309a9 (Patch D), <Patch E commit, see below>
+COMMITS=92ac16a6 (Patch A), 6b7a4313 (Patch B), 8ce0500e (Patch C), 204309a9 (Patch D), ff21bb9b (Patch E)
 
 PRIMARY_PAPER_REPO_UNTOUCHED=YES
 PAPER_DB_MUTATED=NO
