@@ -95,8 +95,17 @@ Assert-True 'restic child process environment is narrow -- exactly the 5 documen
      $OffsiteText -match [regex]::Escape('AWS_ACCESS_KEY_ID     = $b2AccountId') -and `
      $OffsiteText -match [regex]::Escape('AWS_SECRET_ACCESS_KEY = $b2AccountKey') -and `
      -not ($OffsiteText -match [regex]::Escape('Import-LauncherEnvironmentFiles')))
-Assert-True 'restic invocation uses async output capture (BeginOutputReadLine/BeginErrorReadLine), never a blocking ReadToEnd' `
-    ($OffsiteText -match [regex]::Escape('$process.BeginOutputReadLine()') -and $OffsiteText -match [regex]::Escape('$finished = $process.WaitForExit($TimeoutSeconds * 1000)'))
+Assert-True 'restic invocation uses fully-asynchronous stdout/stderr capture (ReadToEndAsync), never a blocking ReadToEnd (D-R2-R3)' `
+    ($OffsiteText -match [regex]::Escape('$process.StandardOutput.ReadToEndAsync()') -and `
+     $OffsiteText -match [regex]::Escape('$process.StandardError.ReadToEndAsync()') -and `
+     $OffsiteText -match [regex]::Escape('$finished = $process.WaitForExit($TimeoutSeconds * 1000)') -and `
+     -not ($OffsiteText -match [regex]::Escape('.ReadToEnd()')))
+Assert-True 'restic invocation no longer depends on the Register-ObjectEvent/BeginOutputReadLine event-subscriber race (D-R2-R3)' `
+    (-not ($OffsiteText -match [regex]::Escape('Register-ObjectEvent')) -and -not ($OffsiteText -match [regex]::Escape('BeginOutputReadLine')))
+Assert-True 'ReadToEndAsync is started before WaitForExit is called, not after (D-R2-R3)' `
+    ($OffsiteText.IndexOf('$process.StandardOutput.ReadToEndAsync()') -lt $OffsiteText.IndexOf('$finished = $process.WaitForExit($TimeoutSeconds * 1000)'))
+Assert-True 'stdout/stderr stream drain after process exit is itself bounded, not assumed from WaitForExit alone (D-R2-R3)' `
+    ($OffsiteText -match [regex]::Escape('[System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), $drainTimeoutMs)') -and $OffsiteText -match [regex]::Escape('OUTPUT_CAPTURE_TIMEOUT'))
 Assert-True 'never touches Live (no -Mode Live / Live literal anywhere)' `
     (-not ($OffsiteText -match '(?i)-Mode\s+Live' -or $OffsiteText -match "(?i)'Live'"))
 Assert-True 'never calls a broker/order route or ops action_key' `

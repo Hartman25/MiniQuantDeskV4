@@ -137,10 +137,21 @@ function Get-AllowlistedLocalConfigValue {
 }
 
 # ---------------------------------------------------------------------------
-# Bounded restic invocation: same async-capture pattern as
-# Invoke-BoundedChildScript (Start-MiniQuantDesk.ps1) / Invoke-PaperLauncherProcess
-# (Watch-MiniQuantDeskPaperHealth.ps1) -- WaitForExit(timeout) alone governs
-# the child's wall-clock lifetime, never a blocking ReadToEnd beforehand.
+# D-R2-R3: bounded restic invocation using fully-asynchronous stdout/stderr
+# capture (Process.StandardOutput/StandardError.ReadToEndAsync). The prior
+# PowerShell event-subscriber capture mechanism reproducibly lost restic's
+# final --json summary line (containing snapshot_id) against real B2 2/2
+# times: the timed WaitForExit(ms) can return true before the last
+# event-subscriber callback has finished appending its line, and there is
+# no supported way to bound a wait on "every pending callback has drained"
+# the way a Task can be waited on.
+#
+# ReadToEndAsync is started immediately after Start() and BEFORE
+# WaitForExit -- starting it after would risk a classic redirected-I/O
+# deadlock if the child fills the OS pipe buffer before exiting. Its
+# completion is then bounded explicitly (never assumed from WaitForExit
+# alone), so the total child + drain lifetime stays bounded on every path:
+# normal exit, process timeout, and a drain that itself somehow stalls.
 # $ResticEnv supplies ONLY the narrow set of variables this call needs; nothing
 # else from this process's own environment is added on top of the normal
 # Windows process-environment inheritance baseline.
@@ -169,35 +180,56 @@ function Invoke-ResticCommand {
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
+    [void]$process.Start()
 
-    $stdoutBuilder = New-Object System.Text.StringBuilder
-    $stderrBuilder = New-Object System.Text.StringBuilder
-    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stdoutBuilder | Out-Null
-    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stderrBuilder | Out-Null
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
 
-    try {
-        [void]$process.Start()
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
-        $finished = $process.WaitForExit($TimeoutSeconds * 1000)
-        if (-not $finished) {
-            try { $process.Kill(); $process.WaitForExit(5000) | Out-Null } catch {}
-            return [pscustomobject]@{ ExitCode = 1; TimedOut = $true; Stdout = $stdoutBuilder.ToString(); Stderr = $stderrBuilder.ToString() }
+    $finished = $process.WaitForExit($TimeoutSeconds * 1000)
+    if (-not $finished) {
+        try { $process.Kill() } catch {}
+        try { $process.WaitForExit(5000) | Out-Null } catch {}
+        # Killing the child closes its pipe handles almost immediately, so a
+        # short additional bound (never unbounded) is enough to pick up
+        # whatever partial output is useful for diagnostics without risking
+        # the timeout path itself hanging.
+        $capturedStdout = ''
+        $capturedStderr = ''
+        if ([System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 2000)) {
+            $capturedStdout = $stdoutTask.Result
+            $capturedStderr = $stderrTask.Result
         }
-        # A fast-completing child (restic on a small repo can exit in well
-        # under a second) can make the timed WaitForExit(ms) return true
-        # before the async OutputDataReceived/ErrorDataReceived callbacks
-        # have finished flushing the last lines into the StringBuilders --
-        # a documented .NET race. The parameterless WaitForExit() below is
-        # the documented fix: called after the process has already exited,
-        # it blocks only long enough to guarantee the redirected streams
-        # are fully drained before they're read.
-        $process.WaitForExit() | Out-Null
-        return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; Stdout = $stdoutBuilder.ToString(); Stderr = $stderrBuilder.ToString() }
-    } finally {
-        Get-EventSubscriber | Where-Object { $_.SourceObject -eq $process } | Unregister-Event
+        return [pscustomobject]@{ ExitCode = 1; TimedOut = $true; CaptureFailed = $false; Stdout = $capturedStdout; Stderr = $capturedStderr }
     }
+
+    # The child has exited, but that alone does not prove ReadToEndAsync has
+    # observed EOF on both redirected streams yet -- bound that wait
+    # explicitly instead of trusting process exit to imply drained streams.
+    # A real drain failure/timeout here fails closed with an explicit
+    # output-capture error rather than silently returning a truncated
+    # Stdout that downstream JSON-summary parsing could misread as "no
+    # snapshot_id" when one was actually present.
+    $drainTimeoutMs = 30000
+    if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), $drainTimeoutMs)) {
+        return [pscustomobject]@{
+            ExitCode      = 1
+            TimedOut      = $false
+            CaptureFailed = $true
+            Stdout        = ''
+            Stderr        = "OUTPUT_CAPTURE_TIMEOUT: stdout/stderr stream drain did not complete within ${drainTimeoutMs}ms after process exit (actual process exit code $($process.ExitCode))."
+        }
+    }
+
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; CaptureFailed = $false; Stdout = $stdoutTask.Result; Stderr = $stderrTask.Result }
 }
+
+# =============================================================================
+# MAIN WORKFLOW -- guarded so tests can dot-source this file (loading every
+# function above, including the real Invoke-ResticCommand) without running a
+# real B2/restic workflow. Mirrors the same dot-source guard convention used
+# by Start-MiniQuantDesk.ps1 / Watch-MiniQuantDeskPaperHealth.ps1.
+# =============================================================================
+if ($MyInvocation.InvocationName -ne '.') {
 
 # =============================================================================
 # 1. restic installed?
@@ -622,3 +654,5 @@ if ($isRealB2Mode) {
 }
 Write-Ok "snapshot_id=$snapshotId"
 exit 0
+
+}
