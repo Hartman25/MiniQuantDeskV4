@@ -187,10 +187,15 @@ match to the strategy returns above.
 
 The direct, measurement-convention-matched comparator is the **fold-reset
 benchmark** (`build_fold_reset_benchmark`, independently reproduced from
-`run_01`'s existing `raw_bars.csv` and each trial's
-`walk_forward_oos_predictions.csv` — no trial was rerun): every fold's
-first actual OOS date is forced to a benchmark return of `0.0`, matching
-the strategy's own fold-start convention.
+`run_01`'s existing `raw_bars.csv` and Trial A's own
+`economic_returns.csv` — no trial was rerun): every fold's reset date
+(the minimum actual economic date belonging to that fold) is forced to a
+benchmark return of `0.0`, matching the strategy's own fold-start
+convention. `economic_returns.csv` is the exact fold/timestamp artifact
+underlying the economic measurement series and includes legitimate tail
+dates for which no forward-label prediction exists — unlike
+`walk_forward_oos_predictions.csv`, which is structurally incomplete
+authority for fold membership.
 
 | Metric | Value |
 |---|---|
