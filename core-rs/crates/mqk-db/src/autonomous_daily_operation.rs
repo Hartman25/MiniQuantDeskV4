@@ -1436,9 +1436,17 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 ///       visible, never silently released), AND
 ///     - zero unacked `oms_outbox` rows exist for that `run_id` (mirrors
 ///       `outbox_list_unacked_for_run`'s exact status set), AND
+///     - zero unapplied `oms_inbox` rows exist for that `run_id`
+///       (`applied_at_utc IS NULL` -- mirrors
+///       `inbox_load_unapplied_for_run`'s exact predicate; PAPER-SOAK-
+///       UNRESOLVED-BROKER-EVIDENCE-GATE-01: durably received but not yet
+///       applied broker evidence is crash-recovery replay evidence, exactly
+///       as load-bearing as an unacked outbox row -- a prior run must never
+///       lose lifecycle authority while it remains unresolved), AND
 ///     - the current global `sys_reconcile_status_state` is clean
-///       (`status = 'ok'` and every mismatch counter is zero; no row at
-///       all is never treated as clean).
+///       (`status = 'ok'`, every mismatch counter is zero, and
+///       `unmatched_broker_events = 0`; no row at all is never treated as
+///       clean).
 ///   A `controller_degraded`-repaired operation that reaches
 ///   `evidence_degraded` after `reconcile_durable_run_without_local_owner`
 ///   already proved these same facts (AUTONOMOUS-DAILY-CONTROLLER-
@@ -1501,12 +1509,18 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
                       where o.run_id = sys_autonomous_daily_operations.run_id
                         and o.status <> 'ACKED'
                     )
+                    and not exists (
+                      select 1 from oms_inbox i
+                      where i.run_id = sys_autonomous_daily_operations.run_id
+                        and i.applied_at_utc is null
+                    )
                     and exists (
                       select 1 from sys_reconcile_status_state rs
                       where rs.status = 'ok'
                         and rs.mismatched_positions = 0
                         and rs.mismatched_orders = 0
                         and rs.mismatched_fills = 0
+                        and rs.unmatched_broker_events = 0
                     )
                   )
                 )

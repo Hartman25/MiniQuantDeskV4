@@ -35,8 +35,10 @@
 //! | R08  | genuinely active local matching runtime -> 409 local_execution_loop_active, \
 //! |      | zero mutation (never races a runtime this process actually owns) |
 //! | R09  | mismatched local runtime (owns a DIFFERENT run) -> 409 local_execution_loop_active |
+//! | R10  | unapplied inbox row negative control via the real route (PAPER-SOAK-UNRESOLVED- \
+//! |      | BROKER-EVIDENCE-GATE-01) -> 409 unapplied_inbox, zero mutation |
 //!
-//! R01-R02 are pure in-process (no DB required). R03-R09 require
+//! R01-R02 are pure in-process (no DB required). R03-R10 require
 //! `MQK_DATABASE_URL` and run against an isolated disposable database via
 //! `mqk_db::run_isolated` (never the shared/Paper database) -- marked
 //! `#[ignore]`. Run with:
@@ -537,6 +539,58 @@ async fn r09_mismatched_local_run_also_refuses() {
         assert!(
             matches!(orphan_after.status, mqk_db::RunStatus::Running),
             "R09: a refused release must not mutate the orphaned run's status"
+        );
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// R10: unapplied inbox negative control via the real route
+// (PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn r10_unapplied_inbox_blocks_release_via_route() {
+    mqk_db::run_isolated("recover_orphan_r10", |pool| async move {
+        let run_id = run_id_for("mqk-daemon.orphan-repair-route.r10");
+        seed_run(&pool, run_id).await;
+        mqk_db::arm_run(&pool, run_id).await.expect("arm_run");
+        mqk_db::begin_run(&pool, run_id).await.expect("begin_run");
+        seed_clean_reconcile(&pool).await;
+        mqk_db::inbox_insert_deduped(
+            &pool,
+            run_id,
+            "orphan-repair-route-r10-msg",
+            serde_json::json!({"event_kind": "fill"}),
+        )
+        .await
+        .expect("inbox_insert_deduped");
+
+        let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            DeploymentMode::Paper,
+            BrokerKind::Paper,
+        ));
+        let router = build_router(st);
+
+        let (status, j) = post_action(
+            router,
+            serde_json::json!({ "action_key": "recover-orphaned-run" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "R10: body: {j}");
+        assert_eq!(
+            j["disposition"].as_str(),
+            Some("unapplied_inbox"),
+            "R10: body: {j}"
+        );
+
+        let after = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+        assert!(
+            matches!(after.status, mqk_db::RunStatus::Running),
+            "R10: a refused release must not mutate run status"
         );
     })
     .await;

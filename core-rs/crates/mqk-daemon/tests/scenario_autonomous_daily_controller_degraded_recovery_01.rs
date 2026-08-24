@@ -584,6 +584,146 @@ async fn t4b_degraded_with_stopped_run_and_dirty_reconcile_fails_closed() -> any
 }
 
 // ---------------------------------------------------------------------------
+// 4c. degraded + STOPPED + an unapplied inbox row -> fail closed
+//     (PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t4c_degraded_with_stopped_run_and_unapplied_inbox_fails_closed() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ctrl-deg-t4c-{}", unique_suffix());
+    let (plan, operation_id, run_id, now) = build_fixture(&pool, &adapter_id).await?;
+
+    mqk_db::arm_run(&pool, run_id).await?;
+    mqk_db::begin_run(&pool, run_id).await?;
+    mqk_db::stop_run(&pool, run_id).await?;
+
+    // Broker evidence durably received but not yet applied -- the same
+    // crash-recovery-replay shape `attempt_evidence_degraded_recovery`
+    // already gates on for its own recovery path.
+    mqk_db::inbox_insert_deduped(
+        &pool,
+        run_id,
+        &format!("test-unapplied-{}", unique_suffix()),
+        serde_json::json!({"event_kind": "fill"}),
+    )
+    .await?;
+
+    let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "unresolved_inbox_at_run_reconcile",
+                ..
+            }
+        ),
+        "an unapplied inbox row must fail closed rather than be presented as safely stopped; \
+         got {outcome:?}"
+    );
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_ne!(
+        after.state,
+        mqk_db::STATE_STOPPING,
+        "must never advance toward stopping while broker evidence remains unapplied"
+    );
+    assert!(
+        after.stopped_at_utc.is_none(),
+        "stopped_at_utc must never be fabricated while broker evidence remains unapplied"
+    );
+
+    let _ = sqlx::query("delete from oms_inbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 4d. degraded + STOPPED + unmatched_broker_events != 0 (otherwise clean) ->
+//     fail closed (PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t4d_degraded_with_stopped_run_and_unmatched_broker_events_fails_closed(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ctrl-deg-t4d-{}", unique_suffix());
+    let (plan, operation_id, run_id, now) = build_fixture(&pool, &adapter_id).await?;
+
+    mqk_db::arm_run(&pool, run_id).await?;
+    mqk_db::begin_run(&pool, run_id).await?;
+    mqk_db::stop_run(&pool, run_id).await?;
+
+    mqk_db::persist_reconcile_status_state(
+        &pool,
+        &mqk_db::PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(now),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 1,
+            note: Some("test: simulated unmatched broker event"),
+            updated_at_utc: now,
+        },
+    )
+    .await?;
+
+    let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "reconcile_dirty",
+                ..
+            }
+        ),
+        "unmatched_broker_events != 0 must fail closed even when status='ok' and every \
+         mismatch counter is zero; got {outcome:?}"
+    );
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_ne!(after.state, mqk_db::STATE_STOPPING);
+
+    mqk_db::persist_reconcile_status_state(
+        &pool,
+        &mqk_db::PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(now),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+            updated_at_utc: now,
+        },
+    )
+    .await?;
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // 5. repeated coordinator ticks after recovery -> idempotent, no duplicate
 //    transition/run
 // ---------------------------------------------------------------------------

@@ -2111,6 +2111,7 @@ fn bounded_static_reason(reason_code: &str) -> &'static str {
         "arm_state_read_failed" => "arm_state_read_failed",
         "controller_degraded_missing_run_id" => "controller_degraded_missing_run_id",
         "unresolved_outbox_at_run_reconcile" => "unresolved_outbox_at_run_reconcile",
+        "unresolved_inbox_at_run_reconcile" => "unresolved_inbox_at_run_reconcile",
         "reconcile_dirty" => "reconcile_dirty",
         "evidence_degraded_recovery_unresolved_outbox" => {
             "evidence_degraded_recovery_unresolved_outbox"
@@ -3265,6 +3266,7 @@ async fn attempt_evidence_degraded_recovery(
                 || r.mismatched_positions != 0
                 || r.mismatched_orders != 0
                 || r.mismatched_fills != 0
+                || r.unmatched_broker_events != 0
         }
         // No durable reconcile status at all is not evidence of agreement --
         // fail closed rather than assume clean.
@@ -3433,6 +3435,36 @@ async fn reconcile_durable_run_without_local_owner(
         );
     }
 
+    // PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01: a terminal run row and
+    // zero unacked outbox rows are not sufficient proof the run's broker
+    // evidence is fully resolved -- an unapplied `oms_inbox` row is durably
+    // received but not-yet-applied crash-recovery evidence (exactly the
+    // shape `attempt_evidence_degraded_recovery` already gates on for its
+    // own recovery path). Never presented as safely stopped while any such
+    // row remains.
+    let unapplied = mqk_db::inbox_load_unapplied_for_run(pool, expected_run_id)
+        .await
+        .context("reconcile_durable_run_without_local_owner: inbox_load_unapplied_for_run failed")?;
+    if !unapplied.is_empty() {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "unresolved_inbox_at_run_reconcile",
+            None,
+            now_utc,
+            "the durable run row is terminal, but it still has unapplied inbox rows; failing \
+             closed rather than presenting this operation as safely stopped",
+            target,
+        )
+        .await?;
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "unresolved_inbox_at_run_reconcile",
+                newly_applied,
+            },
+        );
+    }
+
     let reconcile_dirty = match mqk_db::load_reconcile_status_state(pool)
         .await
         .context("reconcile_durable_run_without_local_owner: load_reconcile_status_state failed")?
@@ -3442,6 +3474,7 @@ async fn reconcile_durable_run_without_local_owner(
                 || r.mismatched_positions != 0
                 || r.mismatched_orders != 0
                 || r.mismatched_fills != 0
+                || r.unmatched_broker_events != 0
         }
         // No durable reconcile status at all is not evidence of agreement --
         // fail closed rather than assume clean.

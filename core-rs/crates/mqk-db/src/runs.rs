@@ -963,6 +963,12 @@ pub enum StopRunIfEvidenceCleanOutcome {
     /// `ACKED` — an order may still be in flight to or from the broker with
     /// no local runtime left to resolve it. Zero mutation.
     UnacknowledgedOutbox { unacked_count: usize },
+    /// Refused: at least one `oms_inbox` row for this run has not been
+    /// applied (`applied_at_utc IS NULL`) — durably received broker
+    /// evidence that has not yet been replayed. Zero mutation.
+    ///
+    /// PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01.
+    UnappliedInbox { unapplied_count: usize },
     /// Refused: the global reconcile status is not clean (or has never been
     /// recorded), so local/broker truth is not currently known to agree.
     /// Zero mutation.
@@ -1009,6 +1015,19 @@ pub async fn stop_run_if_evidence_clean(
         });
     }
 
+    // PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01: an unapplied `oms_inbox`
+    // row is durably received but not-yet-applied crash-recovery evidence --
+    // exactly as load-bearing as an unacked outbox row. Checked before the
+    // CAS transition, never inferred.
+    let unapplied = crate::inbox::inbox_load_unapplied_for_run(pool, run_id)
+        .await
+        .context("stop_run_if_evidence_clean: inbox_load_unapplied_for_run failed")?;
+    if !unapplied.is_empty() {
+        return Ok(StopRunIfEvidenceCleanOutcome::UnappliedInbox {
+            unapplied_count: unapplied.len(),
+        });
+    }
+
     let reconcile_clean = match crate::reconcile_state::load_reconcile_status_state(pool)
         .await
         .context("stop_run_if_evidence_clean: load_reconcile_status_state failed")?
@@ -1018,6 +1037,7 @@ pub async fn stop_run_if_evidence_clean(
                 && r.mismatched_positions == 0
                 && r.mismatched_orders == 0
                 && r.mismatched_fills == 0
+                && r.unmatched_broker_events == 0
         }
         // No durable reconcile status at all is not evidence of agreement --
         // fail closed rather than assume clean.

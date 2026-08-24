@@ -1460,6 +1460,34 @@ pub(crate) async fn ops_action(
                     }),
                 )
                     .into_response(),
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::UnappliedInbox {
+                    unapplied_count,
+                }) => (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "unapplied_inbox".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "Run {run_id} has {unapplied_count} unapplied inbox row(s); broker \
+                             evidence has been durably received but not yet applied. Refusing \
+                             to present this run as stopped."
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response(),
                 Ok(mqk_db::StopRunIfEvidenceCleanOutcome::ReconcileDirty) => (
                     StatusCode::CONFLICT,
                     Json(OperatorActionResponse {

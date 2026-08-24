@@ -42,12 +42,17 @@
 //! | t09  | mutation control: reverting the outbox check (simulated by asserting the pre-fix \
 //! |      | shape would have wrongly reported Stopped) -- documented via t05's own RED/GREEN proof \
 //! |      | in its doc comment; t09 proves the GREEN (fixed) path end-to-end for a claimed (not \
-//! |      | just pending) unacked row, the other unacked terminal-adjacent state |
+//! |      | just pending) unacked row, the other unacked terminal-adjacent state
+//! | t10  | PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01: an unapplied oms_inbox row -> \
+//! |      | UnappliedInbox, run stays RUNNING |
+//! | t11  | PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01: unmatched_broker_events > 0 (status \
+//! |      | ok, every mismatch counter 0) -> ReconcileDirty, run stays RUNNING |
 
 use chrono::Utc;
 use mqk_db::{
-    arm_run, begin_run, halt_run, insert_run, outbox_enqueue, persist_reconcile_status_state,
-    stop_run, NewRun, PersistReconcileStatusState, RunStatus, StopRunIfEvidenceCleanOutcome,
+    arm_run, begin_run, halt_run, inbox_insert_deduped, insert_run, outbox_enqueue,
+    persist_reconcile_status_state, stop_run, NewRun, PersistReconcileStatusState, RunStatus,
+    StopRunIfEvidenceCleanOutcome,
 };
 use uuid::Uuid;
 
@@ -526,6 +531,90 @@ async fn t09_claimed_outbox_row_also_blocks_release() {
             StopRunIfEvidenceCleanOutcome::UnacknowledgedOutbox { unacked_count: 1 },
             "t09: a stranded CLAIMED row (never reached DISPATCHING/ACKED) must also block \
              release -- an order may still be in flight"
+        );
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// t10/t11: PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01 negative controls.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn t10_unapplied_inbox_blocks_release() {
+    mqk_db::run_isolated("stop_orphan_t10", |pool| async move {
+        let run_id = run_id_for("mqk-daemon.orphan-repair.t10");
+        seed_run(&pool, run_id).await;
+        arm_run(&pool, run_id).await.expect("arm_run");
+        begin_run(&pool, run_id).await.expect("begin_run");
+        seed_clean_reconcile(&pool).await;
+        inbox_insert_deduped(
+            &pool,
+            run_id,
+            "orphan-repair-t10-msg",
+            serde_json::json!({"event_kind": "fill"}),
+        )
+        .await
+        .expect("inbox_insert_deduped");
+
+        let outcome = mqk_db::stop_run_if_evidence_clean(&pool, run_id)
+            .await
+            .expect("stop_run_if_evidence_clean");
+        assert_eq!(
+            outcome,
+            StopRunIfEvidenceCleanOutcome::UnappliedInbox { unapplied_count: 1 },
+            "t10: an unapplied inbox row must block release"
+        );
+
+        let after = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+        assert!(
+            matches!(after.status, RunStatus::Running),
+            "t10: a refused release must not mutate run status"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn t11_unmatched_broker_events_blocks_release() {
+    mqk_db::run_isolated("stop_orphan_t11", |pool| async move {
+        let run_id = run_id_for("mqk-daemon.orphan-repair.t11");
+        seed_run(&pool, run_id).await;
+        arm_run(&pool, run_id).await.expect("arm_run");
+        begin_run(&pool, run_id).await.expect("begin_run");
+        persist_reconcile_status_state(
+            &pool,
+            &PersistReconcileStatusState {
+                status: "ok",
+                last_run_at_utc: Some(Utc::now()),
+                snapshot_watermark_ms: Some(1),
+                mismatched_positions: 0,
+                mismatched_orders: 0,
+                mismatched_fills: 0,
+                unmatched_broker_events: 1,
+                note: Some("test: simulated unmatched broker event"),
+                updated_at_utc: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist_reconcile_status_state unmatched_broker_events");
+
+        let outcome = mqk_db::stop_run_if_evidence_clean(&pool, run_id)
+            .await
+            .expect("stop_run_if_evidence_clean");
+        assert_eq!(
+            outcome,
+            StopRunIfEvidenceCleanOutcome::ReconcileDirty,
+            "t11: unmatched_broker_events > 0 must block release even when status='ok' and \
+             every mismatch counter is zero"
+        );
+
+        let after = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+        assert!(
+            matches!(after.status, RunStatus::Running),
+            "t11: a refused release must not mutate run status"
         );
     })
     .await;

@@ -850,6 +850,57 @@ async fn t9_dirty_reconcile_fails_closed() -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// 9b. unmatched_broker_events != 0 (status ok, every mismatch counter zero)
+//     -> fail closed (PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t9b_unmatched_broker_events_fails_closed() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ev-deg-t9b-{}", unique_suffix());
+    let (plan, operation_id, run_id, now) = build_fixture(&pool, &adapter_id).await?;
+
+    mqk_db::persist_reconcile_status_state(
+        &pool,
+        &mqk_db::PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(now),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 1,
+            note: Some("test: simulated unmatched broker event"),
+            updated_at_utc: now,
+        },
+    )
+    .await?;
+
+    let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "evidence_degraded_recovery_reconcile_dirty",
+                ..
+            }
+        ),
+        "unmatched_broker_events != 0 must fail closed even when status='ok' and every \
+         mismatch counter is zero; got {outcome:?}"
+    );
+
+    reset_reconcile_status_clean(&pool, now).await?;
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // 10. durably DISARMED arm state -> fail closed, never retried
 // ---------------------------------------------------------------------------
 
