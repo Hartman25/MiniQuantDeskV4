@@ -674,6 +674,7 @@ async fn reconcile_existing_operation_against_relevant_lookup(
     detail: &'static str,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
     if now_utc >= operation.effective_operation_close_utc
+        && !evidence_degraded_runtime_stop_already_recorded(&operation)
         && !matches!(
             operation.state.as_str(),
             STATE_STOPPING
@@ -1047,6 +1048,7 @@ async fn apply_coverage_blocker(
     }
 
     if now_utc >= operation.effective_operation_close_utc
+        && !evidence_degraded_runtime_stop_already_recorded(operation)
         && !matches!(
             operation.state.as_str(),
             STATE_STOPPING | STATE_STOP_RETRYING | STATE_MANUAL_INTERVENTION_REQUIRED
@@ -1055,7 +1057,11 @@ async fn apply_coverage_blocker(
         // Close priority: matching runtime stop/close authority always
         // retains priority over a fresh coverage blocker -- never strand a
         // runtime past close merely because coverage authority is missing
-        // or in conflict.
+        // or in conflict. An already-stopped evidence_degraded operation is
+        // exempted: its runtime-stop obligation is already durably recorded,
+        // so a fresh coverage-authority problem here falls through to this
+        // function's own evidence_degraded self-loop below instead of
+        // re-requesting stopping.
         return handle_session_close(state, pool, operation.clone(), now_utc).await;
     }
 
@@ -1173,6 +1179,7 @@ async fn handle_identity_conflict(
     }
 
     if now_utc >= existing.effective_operation_close_utc
+        && !evidence_degraded_runtime_stop_already_recorded(&existing)
         && !matches!(
             existing.state.as_str(),
             STATE_STOPPING
@@ -1897,6 +1904,25 @@ pub async fn apply_completed_bar_task_permanent_failure(
 // D2 — Per-state dispatch
 // ---------------------------------------------------------------------------
 
+/// AUTONOMOUS-DAILY-STOPPED-EVIDENCE-DEGRADED-CLOSE-PRIORITY-UNIFICATION-01:
+/// shared close-priority exemption predicate. `true` means only that this
+/// operation's autonomous-runtime-stop obligation has already been durably
+/// recorded (`state == evidence_degraded && stopped_at_utc.is_some()`) --
+/// nothing more. It is not proof of a clean outbox, a clean inbox, a clean
+/// reconcile, or any other recovery/finalization-safety predicate; those
+/// remain independently (and repeatedly) checked by their own authorities
+/// every tick. Every close-priority gate in this file (D2.17's ordinary
+/// dispatch, the resolution-failure/nontrading-day lookup-reconcile path, the
+/// coverage-authority-failure path, and the identity-conflict path) must
+/// treat this shape identically: never re-request `stopping` while it holds,
+/// and never treat it as sufficient to bypass any *other* fail-closed
+/// authority.
+fn evidence_degraded_runtime_stop_already_recorded(
+    operation: &AutonomousDailyOperationRecord,
+) -> bool {
+    operation.state.as_str() == mqk_db::STATE_EVIDENCE_DEGRADED && operation.stopped_at_utc.is_some()
+}
+
 pub async fn dispatch_by_state(
     state: &Arc<AppState>,
     pool: &PgPool,
@@ -1932,9 +1958,8 @@ pub async fn dispatch_by_state(
     // deliberately NOT exempted here: its runtime may still be genuinely
     // active and must still be stopped by `handle_session_close` at close,
     // exactly as before.
-    let evidence_degraded_already_stopped = operation.state.as_str()
-        == mqk_db::STATE_EVIDENCE_DEGRADED
-        && operation.stopped_at_utc.is_some();
+    let evidence_degraded_already_stopped =
+        evidence_degraded_runtime_stop_already_recorded(&operation);
     if now_utc >= plan.effective_operation_close_utc
         && !evidence_degraded_already_stopped
         && !matches!(

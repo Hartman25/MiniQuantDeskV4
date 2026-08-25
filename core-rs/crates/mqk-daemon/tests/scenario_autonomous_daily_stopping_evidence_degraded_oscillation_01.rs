@@ -39,7 +39,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use mqk_daemon::state::autonomous_daily_coordinator::{
-    dispatch_by_state, AutonomousDailyCoordinatorTickOutcome,
+    dispatch_by_state, tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
+    AutonomousDailyCoordinatorTickOutcome,
 };
 use mqk_daemon::state::{
     self, derive_assignment_identity, derive_autonomous_daily_operation_id,
@@ -384,6 +385,123 @@ async fn build_fixture(
     mqk_db::stop_run(pool, run_id).await?; // genuinely STOPPED, zero orders ever created
     seed_evidence_degraded_operation(pool, operation_id, run_id, now).await?;
     Ok((plan, operation_id, run_id, now))
+}
+
+/// AUTONOMOUS-DAILY-STOPPED-EVIDENCE-DEGRADED-CLOSE-PRIORITY-UNIFICATION-01:
+/// same fixture shape as [`build_fixture`], but the bound run is left
+/// `HALTED` rather than `STOPPED` -- the exact durable run status recorded in
+/// the August 24 incident (`runs.status = HALTED`, not `STOPPED`).
+/// `fetch_relevant_open_autonomous_daily_operation`'s own SQL only treats a
+/// stopped `evidence_degraded` operation as fully resolved (and therefore
+/// excluded from the "relevant" lookup) when its bound run is `STOPPED` --
+/// `HALTED` is not exempted, so this exact shape is the one that reaches
+/// `reconcile_existing_operation_against_relevant_lookup` /
+/// `handle_identity_conflict` through the real resolution-failure/nontrading-
+/// day/identity-conflict production seams. Coverage authority is
+/// deliberately left unbound (this fixture never calls
+/// `ensure_coverage_authority`), matching a real operation whose anchor
+/// binding never happened for whatever reason earlier in the day.
+async fn build_fixture_halted(
+    pool: &sqlx::PgPool,
+    adapter_id: &str,
+    symbol: &str,
+) -> anyhow::Result<(AutonomousDailySessionPlan, Uuid, Uuid, DateTime<Utc>)> {
+    reset_env();
+    set_resolvable_assignment_env(symbol);
+    let now = weekday_at(15, 0);
+
+    reset_reconcile_status_clean(pool, now).await?;
+    mqk_db::persist_arm_state_canonical(pool, mqk_db::ArmState::Armed, None).await?;
+
+    let (plan, assignment_identity, runtime_binding_identity, operation_id) =
+        resolve_identity_for_env(adapter_id, symbol, now);
+    seed_operation_row(
+        pool,
+        &plan,
+        operation_id,
+        adapter_id,
+        &assignment_identity,
+        &runtime_binding_identity,
+        now,
+    )
+    .await?;
+    let run_id = Uuid::new_v4();
+    mqk_db::insert_run(pool, &new_run(run_id, now)).await?;
+    mqk_db::arm_run(pool, run_id).await?;
+    mqk_db::begin_run(pool, run_id).await?;
+    mqk_db::halt_run(pool, run_id, now).await?; // HALTED, not STOPPED -- matches the 2026-08-24 incident
+    seed_evidence_degraded_operation(pool, operation_id, run_id, now).await?;
+    Ok((plan, operation_id, run_id, now))
+}
+
+/// Drive `count` real top-level [`tick_autonomous_daily_coordinator`] ticks,
+/// spaced 30s apart starting at `first_now`, asserting on every tick that the
+/// operation never reaches `stopping`/`stop_retrying`/`running`, never
+/// rebinds a fresh `run_id`, and that `state_version` converges (stops
+/// changing) by the third tick -- the exact bounded-oscillation invariant
+/// AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01 requires of
+/// every close-priority route, not only the ordinary `dispatch_by_state`
+/// path this file's `t1` already covers.
+async fn assert_route_never_reenters_stopping_and_converges(
+    pool: &sqlx::PgPool,
+    st: &Arc<AppState>,
+    operation_id: Uuid,
+    expected_run_id: Uuid,
+    first_now: DateTime<Utc>,
+    count: i64,
+    route_label: &str,
+) -> anyhow::Result<()> {
+    let mut last_state_version: Option<i64> = None;
+    for tick_index in 0..count {
+        let now = first_now + Duration::seconds(30 * tick_index);
+        let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+            state: st,
+            now_utc: now,
+        })
+        .await?;
+
+        let after = mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id)
+            .await?
+            .expect("row must exist after tick");
+
+        assert_ne!(
+            after.state,
+            mqk_db::STATE_STOPPING,
+            "[{route_label}] tick {tick_index}: must never be pushed back into stopping; \
+             outcome was {outcome:?}"
+        );
+        assert_ne!(
+            after.state,
+            mqk_db::STATE_STOP_RETRYING,
+            "[{route_label}] tick {tick_index}: must never reach stop_retrying either"
+        );
+        assert_ne!(
+            after.state,
+            mqk_db::STATE_RUNNING,
+            "[{route_label}] tick {tick_index}: a closed session window must never legally \
+             reach running"
+        );
+        assert_eq!(
+            after.run_id,
+            Some(expected_run_id),
+            "[{route_label}] tick {tick_index}: no fresh run may ever be created/bound"
+        );
+
+        if let Some(prev) = last_state_version {
+            assert!(
+                after.state_version >= prev,
+                "[{route_label}] tick {tick_index}: state_version must never move backward"
+            );
+            if tick_index >= 2 {
+                assert_eq!(
+                    after.state_version, prev,
+                    "[{route_label}] tick {tick_index}: must have converged by the third tick"
+                );
+            }
+        }
+        last_state_version = Some(after.state_version);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -763,5 +881,200 @@ async fn t4_mid_run_evidence_degraded_stopped_at_none_still_session_closes() -> 
     cleanup_operation(&pool, operation_id).await;
     let _ = mqk_db::halt_run(&pool, run_id, now).await;
     cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-STOPPED-EVIDENCE-DEGRADED-CLOSE-PRIORITY-UNIFICATION-01
+//
+// Tests 5-8 below prove reachability and repair for the three *other*
+// close-priority gates in this file that route into `handle_session_close`
+// -- none of which are `dispatch_by_state` and none of which were exercised
+// by t1-t4 above (which all call `dispatch_by_state` directly). Each test
+// drives the real top-level `tick_autonomous_daily_coordinator` production
+// entry point so the specific gate is reached exactly as a live daemon tick
+// would reach it, never by calling a private helper directly.
+// ---------------------------------------------------------------------------
+
+/// t5 -- RESOLUTION FAILURE ROUTE (`reconcile_existing_operation_against_
+/// relevant_lookup`, reached via `resolve_or_degrade_on_resolution_failure`).
+/// `reset_env()` makes `build_multi_symbol_runtime_config_from_env()` fail
+/// deterministically every tick, so the real top-level coordinator takes the
+/// resolution-failure branch and looks up this exact HALTED-run, stopped
+/// `evidence_degraded` operation as "relevant" (its run is HALTED, not
+/// STOPPED, so `fetch_relevant_open_autonomous_daily_operation`'s own SQL
+/// does not treat it as already resolved) -- reproducing the exact August 24
+/// incident shape end to end through production code.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t5_resolution_failure_route_never_reenters_stopping() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ev-deg-osc-t5-{}", unique_suffix());
+    let (plan, operation_id, run_id, _seed_now) =
+        build_fixture_halted(&pool, &adapter_id, "AAPL").await?;
+
+    let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
+
+    // Resolution failure: env no longer resolves to a valid assignment.
+    reset_env();
+
+    let tick0 = seeded.postclose_finalize_utc + Duration::seconds(1);
+    assert!(tick0 >= plan.effective_operation_close_utc);
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    assert_route_never_reenters_stopping_and_converges(
+        &pool,
+        &st,
+        operation_id,
+        run_id,
+        tick0,
+        5,
+        "R1_resolution_failure",
+    )
+    .await?;
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    reset_env();
+    Ok(())
+}
+
+/// t6 -- NONTRADING-DAY ROUTE (same `reconcile_existing_operation_against_
+/// relevant_lookup` helper, reached via the materially distinct
+/// `resolve_or_reconcile_on_nontrading_day` caller). No env change is
+/// needed: `now_utc` alone resolving to a weekend triggers the nontrading-day
+/// branch before any assignment/registry/runtime-context resolution is ever
+/// attempted.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t6_nontrading_day_route_never_reenters_stopping() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ev-deg-osc-t6-{}", unique_suffix());
+    let (_plan, operation_id, run_id, _seed_now) =
+        build_fixture_halted(&pool, &adapter_id, "AAPL").await?;
+
+    let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
+
+    // 2026-07-25 is the Saturday following the fixture's Monday 2026-07-20 --
+    // a nontrading day purely by calendar, independent of env/config state.
+    let saturday_tick0 = Utc.with_ymd_and_hms(2026, 7, 25, 15, 0, 0).unwrap();
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    assert_route_never_reenters_stopping_and_converges(
+        &pool,
+        &st,
+        operation_id,
+        run_id,
+        saturday_tick0,
+        5,
+        "R2_nontrading_day",
+    )
+    .await?;
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+/// t7 -- COVERAGE-AUTHORITY-FAILURE ROUTE (`apply_coverage_blocker`, reached
+/// via `ensure_coverage_authority`). This fixture never binds a coverage
+/// anchor for the operation (unlike a real `running` operation, which would
+/// have bound one at start) -- so a fresh top-level tick's own
+/// `ensure_coverage_authority` call genuinely finds `NotBound`, and
+/// `check_operation_pristine` genuinely reports `HasActivity` (the fixture's
+/// `run_id`/`started_at_utc` are set), reaching `apply_coverage_blocker` with
+/// `REASON_COVERAGE_AUTHORITY_MISSING_AFTER_ACTIVITY` through the exact real
+/// per-tick authority gate every coordinator tick runs -- never a forced or
+/// fabricated conflict.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t7_coverage_authority_failure_route_never_reenters_stopping() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ev-deg-osc-t7-{}", unique_suffix());
+    let (plan, operation_id, run_id, _seed_now) =
+        build_fixture_halted(&pool, &adapter_id, "AAPL").await?;
+
+    let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
+
+    let tick0 = seeded.postclose_finalize_utc + Duration::seconds(1);
+    assert!(tick0 >= plan.effective_operation_close_utc);
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    assert_route_never_reenters_stopping_and_converges(
+        &pool,
+        &st,
+        operation_id,
+        run_id,
+        tick0,
+        5,
+        "R3_coverage_authority_failure",
+    )
+    .await?;
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    reset_env();
+    Ok(())
+}
+
+/// t8 -- IDENTITY-CONFLICT ROUTE (`handle_identity_conflict`, reached from
+/// `create_or_recover`'s `IdentityConflict` arm). NOT one of the three gates
+/// named by the original incident report -- discovered during this repair's
+/// Phase 0 audit. An operator changing the resolvable assignment symbol
+/// while a stopped `evidence_degraded` operation from earlier in the day
+/// still occupies the `(market_date, deployment_mode, adapter_id)` slot
+/// produces a real `IdentityConflict` every subsequent tick (the freshly
+/// computed `assignment_identity` never again matches the existing row's
+/// immutable identity), reaching this gate's own close-priority check
+/// through the exact same production seam a real config change would use.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t8_identity_conflict_route_never_reenters_stopping() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("ev-deg-osc-t8-{}", unique_suffix());
+    let (plan, operation_id, run_id, _seed_now) =
+        build_fixture_halted(&pool, &adapter_id, "AAPL").await?;
+
+    let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
+
+    // Operator changes the resolvable symbol -- same market_date/deployment_
+    // mode/adapter_id slot, different assignment_identity every tick from
+    // here on.
+    set_resolvable_assignment_env("MSFT");
+
+    let tick0 = seeded.postclose_finalize_utc + Duration::seconds(1);
+    assert!(tick0 >= plan.effective_operation_close_utc);
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    assert_route_never_reenters_stopping_and_converges(
+        &pool,
+        &st,
+        operation_id,
+        run_id,
+        tick0,
+        5,
+        "R4_identity_conflict",
+    )
+    .await?;
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    reset_env();
     Ok(())
 }
