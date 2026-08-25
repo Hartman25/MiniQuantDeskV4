@@ -3020,6 +3020,244 @@ async fn relevant_open_lookup_running_row_with_stopped_run_but_unacked_outbox_st
 }
 
 // ---------------------------------------------------------------------------
+// PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01
+// PATCH F: DATA-READINESS-RUN-EVIDENCE-GATED-STATE-SCOPE-REPAIR-01
+// a511ab4c's run-evidence carve-out belongs ONLY to `running`/
+// `recovery_retrying`. It accidentally also narrowed REPAIR 2's generic
+// bound-run-without-stop-evidence fallback for every OTHER state --
+// `run.status = 'STOPPED'` is a distinct authority from
+// `operation.stopped_at_utc is not null`, and only the latter is REPAIR-2's
+// actual durable-stop-evidence contract. F1 proves the fallback is
+// unconditional again for `manual_intervention_required`; F5-F7 close the
+// coverage gap a511ab4c left for `recovery_retrying` (only `running` had a
+// direct positive/negative proof).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_manual_intervention_row_with_safely_terminal_run_but_no_operation_stop_evidence_remains_relevant(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+    let ts = session_bounds(market_date).0;
+
+    insert_run(&pool, &new_run_fixture(run_id, ts)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // run.status = STOPPED, zero unresolved economic evidence
+
+    let operation_id =
+        seed_operation_for_date(&pool, "relopen-manual-run-terminal", market_date).await;
+    let running = advance_to_running(&pool, operation_id, run_id, ts).await?;
+    let recovering = advance_one(&pool, &running, STATE_RECOVERY_RETRYING, ts).await?;
+    let degraded = advance_one(&pool, &recovering, STATE_MANUAL_INTERVENTION_REQUIRED, ts).await?;
+    // manual_intervention_required is reached here via the mid-run degrade
+    // path, not via record_stopped_at: operation.stopped_at_utc stays null
+    // even though the bound run itself is durably, safely STOPPED.
+    assert_eq!(degraded.run_id, Some(run_id));
+    assert!(degraded.stopped_at_utc.is_none());
+
+    let far_outside_window = ts + ChronoDuration::days(30);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-manual-run-terminal",
+        far_outside_window,
+    )
+    .await?;
+    assert_eq!(
+        found.map(|r| r.operation_id),
+        Some(operation_id),
+        "REPAIR 2's generic bound-run-without-stop-evidence fallback must remain unconditional \
+         for manual_intervention_required: run.status='STOPPED' is a distinct authority from \
+         operation.stopped_at_utc, and only the latter releases this clause. This assertion \
+         fails against a511ab4c, which over-broadened the run-evidence carve-out to every state."
+    );
+
+    // A second, independently relevant current row for the same adapter
+    // must make the lookup fail closed as ambiguous rather than silently
+    // pick one -- relevance being preserved does not mean it wins a race.
+    let second_date = market_date + ChronoDuration::days(1);
+    let second_run_id = Uuid::new_v4();
+    let second_id =
+        seed_operation_for_date(&pool, "relopen-manual-run-terminal", second_date).await;
+    let second_ts = session_bounds(second_date).0;
+    advance_to_running(&pool, second_id, second_run_id, second_ts).await?;
+
+    let ambiguous = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-manual-run-terminal",
+        second_ts,
+    )
+    .await;
+    assert!(
+        ambiguous.is_err(),
+        "two simultaneously relevant rows for the same adapter must fail closed as ambiguous; \
+         got {ambiguous:?}"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_operation(&pool, second_id).await;
+    cleanup_run(&pool, run_id).await;
+    cleanup_run(&pool, second_run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stale_recovery_retrying_row_with_safely_terminal_run_is_released(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let stale_date = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let stale_run_id = Uuid::new_v4();
+
+    let (stale_open, _, _, _) = session_bounds(stale_date);
+    insert_run(&pool, &new_run_fixture(stale_run_id, stale_open)).await?;
+    arm_run(&pool, stale_run_id).await?;
+    begin_run(&pool, stale_run_id).await?;
+    stop_run(&pool, stale_run_id).await?; // genuinely STOPPED, zero economic evidence
+
+    let stale_id =
+        seed_operation_for_date(&pool, "relopen-recovery-released", stale_date).await;
+    let running = advance_to_running(&pool, stale_id, stale_run_id, stale_open).await?;
+    advance_one(&pool, &running, STATE_RECOVERY_RETRYING, stale_open).await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-recovery-released", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-recovery-released",
+        current_ts,
+    )
+    .await?;
+    assert_eq!(
+        found.map(|r| r.operation_id),
+        Some(current_id),
+        "a stale `recovery_retrying` row whose bound run is durably, safely terminal must \
+         release, leaving today's operation unambiguously selectable"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, stale_run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_recovery_retrying_row_with_active_run_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let stale_date = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let stale_run_id = Uuid::new_v4();
+
+    let (stale_open, _, _, _) = session_bounds(stale_date);
+    insert_run(&pool, &new_run_fixture(stale_run_id, stale_open)).await?;
+    arm_run(&pool, stale_run_id).await?;
+    begin_run(&pool, stale_run_id).await?;
+    // Deliberately never calling `stop_run`: the bound run is still
+    // genuinely active (status='RUNNING').
+
+    let stale_id = seed_operation_for_date(&pool, "relopen-recovery-active", stale_date).await;
+    let running = advance_to_running(&pool, stale_id, stale_run_id, stale_open).await?;
+    advance_one(&pool, &running, STATE_RECOVERY_RETRYING, stale_open).await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-recovery-active", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-recovery-active",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a `recovery_retrying` row whose bound run is still genuinely active must still fail \
+         closed as ambiguous; got {result:?}"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, stale_run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_recovery_retrying_row_with_stopped_run_but_unacked_outbox_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let stale_date = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let stale_run_id = Uuid::new_v4();
+
+    let (stale_open, _, _, _) = session_bounds(stale_date);
+    insert_run(&pool, &new_run_fixture(stale_run_id, stale_open)).await?;
+    arm_run(&pool, stale_run_id).await?;
+    begin_run(&pool, stale_run_id).await?;
+    stop_run(&pool, stale_run_id).await?; // genuinely STOPPED
+
+    // A SENT-but-not-yet-ACKED order still associated with the now-stopped
+    // run -- must never be silently released.
+    sqlx::query(
+        "insert into oms_outbox (run_id, idempotency_key, order_json, status, created_at_utc, \
+         sent_at_utc) values ($1, $2, '{}'::jsonb, 'SENT', $3, $3)",
+    )
+    .bind(stale_run_id)
+    .bind(format!("test-unresolved-{}", unique_suffix()))
+    .bind(stale_open)
+    .execute(&pool)
+    .await?;
+
+    let stale_id = seed_operation_for_date(&pool, "relopen-recovery-outbox", stale_date).await;
+    let running = advance_to_running(&pool, stale_id, stale_run_id, stale_open).await?;
+    advance_one(&pool, &running, STATE_RECOVERY_RETRYING, stale_open).await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-recovery-outbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-recovery-outbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a `recovery_retrying` row whose stopped run still has an unacked outbox row must still \
+         fail closed as ambiguous; got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(stale_run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, stale_run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-
 // CONFIRMATION-01
 // REPAIR 4: fetch_autonomous_daily_operation_event_at_sequence

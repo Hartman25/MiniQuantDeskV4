@@ -1503,11 +1503,21 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 ///   old manual/blocked row that never bound a run (`run_id is null`) does
 ///   not gain relevance from this clause merely because it is recent. The
 ///   run-level evidence carve-out (DATA-READINESS-BAR-COVERAGE-AUTHORITY-01)
-///   is required here too: this clause is exactly what previously kept a
-///   crash-orphaned `running` row relevant forever even after its run was
-///   durably proven `STOPPED` with zero unresolved economic evidence --
-///   removing `running`/`recovery_retrying` from the unconditional list
-///   above is not sufficient on its own without this matching carve-out.
+///   applies HERE ONLY when `state` is `running`/`recovery_retrying` --
+///   this clause is exactly what previously kept a crash-orphaned `running`
+///   row relevant forever even after its run was durably proven `STOPPED`
+///   with zero unresolved economic evidence, so removing `running`/
+///   `recovery_retrying` from the unconditional list above is not
+///   sufficient on its own without this matching carve-out. For every
+///   OTHER state reaching this clause (e.g. `manual_intervention_required`),
+///   the original REPAIR-2 guarantee is preserved unmodified: a bound run
+///   without durable `stopped_at_utc` evidence stays relevant regardless of
+///   run-level safe-terminal proof, because `run.status = 'STOPPED'` is a
+///   distinct authority from `operation.stopped_at_utc is not null` and
+///   only the latter is REPAIR-2's actual durable-stop-evidence contract
+///   (PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01: a511ab4c
+///   over-broadened this carve-out to every state, not just the two it was
+///   meant for).
 ///
 /// Ordering is deterministic (`preopen_start_utc desc, operation_id asc`),
 /// but this function never silently picks a "most recent" row among
@@ -1583,7 +1593,10 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
             or ($12 >= preopen_start_utc and $12 <= postclose_finalize_utc)
             or (
               run_id is not null and stopped_at_utc is null
-              and not {RUN_SAFELY_TERMINAL}
+              and (
+                state not in ($6, $7)
+                or not {RUN_SAFELY_TERMINAL}
+              )
             )
           )
         order by preopen_start_utc desc, operation_id asc
