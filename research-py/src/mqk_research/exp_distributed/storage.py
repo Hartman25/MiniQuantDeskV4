@@ -27,6 +27,18 @@ HOLDOUT_LEDGER_SCHEMA_VERSION = "research_holdout_ledger_v1"
 _HOLDOUT_STATUS_RESERVED = "reserved"
 _HOLDOUT_STATUS_CONSUMED = "consumed"
 
+# RESEARCH-FACTOR-CONTRACT-AND-REGISTRY-01
+# Distinct contract from the hypothesis/trial/attempt tables above, sharing
+# the same SQLite authority. `research_factors` mirrors `research_trials`
+# (result-independent identity, immutable once created); each
+# `research_factor_evaluation_attempts` row mirrors `research_attempts`
+# (append-only, atomic per-factor attempt numbering). See
+# mqk_research.factors.contracts for the identity discipline and
+# mqk_research.factors.registry for the public entry points wrapping the
+# methods below.
+FACTOR_REGISTRY_SCHEMA_VERSION = "research_factor_registry_v1"
+_FACTOR_EVAL_TERMINAL_STATUSES = ("succeeded", "failed", "not_evaluable", "blocked")
+
 
 class ResearchResultStore:
     def __init__(self, db_path: Path) -> None:
@@ -173,6 +185,37 @@ class ResearchResultStore:
                     on research_judge_artifacts(judge_id);
                 create index if not exists idx_research_judge_artifacts_scope
                     on research_judge_artifacts(experiment_id, hypothesis_id);
+
+                create table if not exists research_factors (
+                    factor_id text primary key,
+                    family text not null,
+                    name text not null,
+                    protocol_version text not null,
+                    identity_json text not null,
+                    schema_version text not null
+                );
+                create index if not exists idx_research_factors_family
+                    on research_factors(family);
+
+                create table if not exists research_factor_evaluation_attempts (
+                    attempt_id text primary key,
+                    factor_id text not null,
+                    attempt_index integer not null,
+                    evaluation_id text,
+                    evaluation_identity_json text,
+                    status text not null,
+                    origin text,
+                    result_summary_json text,
+                    artifact_paths_json text,
+                    failure_reason text,
+                    metadata_json text,
+                    schema_version text not null,
+                    unique(factor_id, attempt_index)
+                );
+                create index if not exists idx_research_factor_eval_attempts_factor
+                    on research_factor_evaluation_attempts(factor_id);
+                create index if not exists idx_research_factor_eval_attempts_eval_id
+                    on research_factor_evaluation_attempts(evaluation_id);
                 """
             )
             connection.commit()
@@ -996,3 +1039,224 @@ class ResearchResultStore:
         consumer_json = record.pop("consumer_identity_json")
         record["consumer_identity"] = json.loads(consumer_json) if consumer_json else None
         return record
+
+    # ------------------------------------------------------------------
+    # RESEARCH-FACTOR-CONTRACT-AND-REGISTRY-01
+    #
+    # research_factors mirrors research_trials: result-independent identity,
+    # immutable once created, idempotent on exact re-registration, fail-closed
+    # on a factor_id reused with conflicting identity content.
+    # research_factor_evaluation_attempts mirrors research_attempts: append-
+    # only, atomic per-factor attempt numbering, terminal attempts are never
+    # reopened. Every attempted factor candidate is registerable regardless
+    # of outcome -- there is no winner-only registration path here.
+    # ------------------------------------------------------------------
+
+    def register_factor(
+        self,
+        *,
+        factor_id: str,
+        family: str,
+        name: str,
+        protocol_version: str,
+        identity: Dict[str, Any],
+    ) -> None:
+        """Idempotently register a factor. Fails closed if `factor_id` is
+        reused with conflicting identity content (hash collision / caller
+        bug)."""
+        identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "select family, name, protocol_version, identity_json from research_factors where factor_id=?",
+                (factor_id,),
+            ).fetchone()
+            if row is not None:
+                if tuple(row) != (family, name, protocol_version, identity_json):
+                    raise RuntimeError(
+                        f"factor_id collision with conflicting canonical identity: {factor_id!r}"
+                    )
+                return
+            connection.execute(
+                """
+                insert into research_factors (
+                    factor_id, family, name, protocol_version, identity_json, schema_version
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (factor_id, family, name, protocol_version, identity_json, FACTOR_REGISTRY_SCHEMA_VERSION),
+            )
+            connection.commit()
+
+    def get_factor(self, factor_id: str) -> Dict[str, Any]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "select * from research_factors where factor_id=?", (factor_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown factor_id: {factor_id}")
+        record = dict(row)
+        record["identity"] = json.loads(record.pop("identity_json"))
+        return record
+
+    def list_factors(self, *, family: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = "select * from research_factors where 1=1"
+        params: list[Any] = []
+        if family is not None:
+            query += " and family=?"
+            params.append(family)
+        query += " order by factor_id asc"
+        with closing(self._connect()) as connection:
+            rows = connection.execute(query, params).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            record["identity"] = json.loads(record.pop("identity_json"))
+            records.append(record)
+        return records
+
+    def begin_factor_evaluation_attempt(
+        self,
+        *,
+        factor_id: str,
+        evaluation_id: Optional[str] = None,
+        evaluation_identity: Optional[Dict[str, Any]] = None,
+        origin: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, int]:
+        """Atomically allocate the next attempt_index for `factor_id` and
+        insert a 'started' evaluation-attempt row. Fails closed if
+        `factor_id` was never registered -- an unknown factor can never
+        receive an authoritative evaluation."""
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                exists = connection.execute(
+                    "select 1 from research_factors where factor_id=?", (factor_id,)
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(f"unknown factor_id: {factor_id}")
+                row = connection.execute(
+                    "select coalesce(max(attempt_index), 0) + 1 from research_factor_evaluation_attempts "
+                    "where factor_id=?",
+                    (factor_id,),
+                ).fetchone()
+                attempt_index = int(row[0])
+                attempt_id = f"{factor_id}:fev{attempt_index:04d}"
+                connection.execute(
+                    """
+                    insert into research_factor_evaluation_attempts (
+                        attempt_id, factor_id, attempt_index, evaluation_id, evaluation_identity_json,
+                        status, origin, result_summary_json, artifact_paths_json, failure_reason,
+                        metadata_json, schema_version
+                    ) values (?, ?, ?, ?, ?, 'started', ?, null, null, null, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        factor_id,
+                        attempt_index,
+                        evaluation_id,
+                        json.dumps(evaluation_identity, sort_keys=True) if evaluation_identity is not None else None,
+                        origin,
+                        json.dumps(metadata or {}, sort_keys=True),
+                        FACTOR_REGISTRY_SCHEMA_VERSION,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return attempt_id, attempt_index
+
+    def finalize_factor_evaluation_attempt(
+        self,
+        attempt_id: str,
+        *,
+        status: str,
+        expected_factor_id: str,
+        expected_evaluation_id: str,
+        result_summary: Optional[Dict[str, Any]] = None,
+        artifact_paths: Optional[Dict[str, Any]] = None,
+        failure_reason: Optional[str] = None,
+    ) -> None:
+        """Transition a 'started' factor evaluation attempt to a terminal
+        status. Fails closed if the attempt is unknown or already terminal --
+        terminal attempts are never reopened or overwritten.
+
+        RESEARCH-FACTOR-REGISTRY-RESULT-BINDING-01: also fails closed unless
+        the supplied `expected_factor_id`/`expected_evaluation_id` (the
+        caller's FactorEvaluationResult identity) exactly match the durable
+        attempt row's own `factor_id`/`evaluation_id` -- selecting the row by
+        `attempt_id` alone does not prove the caller's result object was
+        actually produced for THIS attempt (e.g. a result for factor B could
+        otherwise be used to finalize an attempt opened for factor A). A
+        durable attempt with no recorded `evaluation_id` can never be proven
+        bound to anything, so it also fails closed rather than being treated
+        as a wildcard match."""
+        if status not in _FACTOR_EVAL_TERMINAL_STATUSES:
+            raise ValueError(f"invalid terminal factor evaluation status: {status!r}")
+        with closing(self._connect()) as connection:
+            connection.isolation_level = None
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "select status, factor_id, evaluation_id "
+                    "from research_factor_evaluation_attempts where attempt_id=?",
+                    (attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown attempt_id: {attempt_id}")
+                durable_status, durable_factor_id, durable_evaluation_id = row
+                if durable_status != "started":
+                    raise RuntimeError(
+                        f"factor evaluation attempt {attempt_id!r} is already terminal (status={durable_status!r}); "
+                        "terminal attempts cannot be reopened or refinalized"
+                    )
+                if durable_factor_id != expected_factor_id:
+                    raise ValueError(
+                        f"factor evaluation result is bound to factor_id {expected_factor_id!r} but "
+                        f"attempt {attempt_id!r} was opened for factor_id {durable_factor_id!r}"
+                    )
+                if durable_evaluation_id is None or durable_evaluation_id != expected_evaluation_id:
+                    raise ValueError(
+                        f"factor evaluation result is bound to evaluation_id {expected_evaluation_id!r} but "
+                        f"attempt {attempt_id!r} was opened for evaluation_id {durable_evaluation_id!r}"
+                    )
+                connection.execute(
+                    """
+                    update research_factor_evaluation_attempts
+                    set status=?, result_summary_json=?, artifact_paths_json=?, failure_reason=?
+                    where attempt_id=?
+                    """,
+                    (
+                        status,
+                        json.dumps(result_summary, sort_keys=True) if result_summary is not None else None,
+                        json.dumps(artifact_paths, sort_keys=True) if artifact_paths is not None else None,
+                        failure_reason,
+                        attempt_id,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def list_factor_evaluation_attempts(self, factor_id: str) -> List[Dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "select * from research_factor_evaluation_attempts where factor_id=? order by attempt_index asc",
+                (factor_id,),
+            ).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            evaluation_identity_json = record.pop("evaluation_identity_json")
+            record["evaluation_identity"] = json.loads(evaluation_identity_json) if evaluation_identity_json else None
+            result_summary_json = record.pop("result_summary_json")
+            record["result_summary"] = json.loads(result_summary_json) if result_summary_json else None
+            artifact_paths_json = record.pop("artifact_paths_json")
+            record["artifact_paths"] = json.loads(artifact_paths_json) if artifact_paths_json else None
+            metadata_json = record.pop("metadata_json")
+            record["metadata"] = json.loads(metadata_json) if metadata_json else None
+            records.append(record)
+        return records
