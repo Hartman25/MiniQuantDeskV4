@@ -2384,85 +2384,145 @@ another seam. The `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` ID names the
 investigation scope, not a proven root component. Root cause not yet
 diagnosed in this session.
 
-### AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01 — STATUS=OPEN
+### AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01 — STATUS=CLOSED
 
-*Updated by `LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER`, 2026-08-24
-(second pass, same day). See §29 below for the integration this equivalence
-audit was run against.*
+*Closed by `AUTONOMOUS-DAILY-STOPPED-EVIDENCE-DEGRADED-CLOSE-PRIORITY-
+UNIFICATION-01-CONTROLLER`, 2026-08-24 (third pass, same day), on temporary
+worktree `AppData/Local/Temp/MiniQuantDeskV4-oscillation-unification`,
+branch `ledger-oscillation-close-priority-01`, base
+`4248bdb4a499460de136864d07972a5c8cd2a059`. Supersedes the
+`LIKELY_SAME_FAMILY_BUT_NOT_PROVEN` / `OPEN` classification below this
+heading previously recorded by `LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-
+CONTROLLER`.*
 
-Observed truth (2026-08-24 forensic evidence, operation
-`40e97f92-e47b-5092-9b29-c82451477372`, run `1dd771f5-aeec-59f4-9243-fbd212768068`):
-- The terminal underlying autonomous daily run repeatedly oscillated between
-  `stopping` and `evidence_degraded` states — 371 transition rows total,
-  ~326 of them from this loop over ~6.5 hours, reason code
-  `unknown_incomplete_bar_coverage` on every `evidence_degraded` cycle and
-  detail text `"durable run already terminal at reconciliation time; no
-  local runtime to stop"` on every `stopping` cycle.
-- The underlying `runs` row (`1dd771f5-...`) was `HALTED` (kill-switch/
-  integrity halt), not a clean `STOPPED` transition; `stopped_at_utc` is
-  `NULL` on the run row even though the *operation* row's own
-  `stopped_at_utc` was set (2026-08-24 20:43:46 UTC) — the two are distinct
-  fields and only the operation's own `stopped_at_utc` gates the repair.
-- Source: `PAPER_SOAK_2026-08-24_CLOSEOUT_REVIEW/06_autonomous_operation_db_truth.txt`
-  and `07_run_lifecycle_db_truth.txt` under
-  `Documents/MiniQuantDeskV4-Archive/2026-08-24/patch-review-proof/`.
+Root cause, precisely stated: not a single dispatcher bug, but a **family of
+independently-implemented close-priority gates that each duplicated the same
+`now_utc >= effective_operation_close_utc` check without a shared exemption
+predicate**. `dispatch_by_state`'s D2.17 gate was repaired first (prior
+session) and proven against the exact 2026-08-24 forensic shape, but three
+sibling gates in the same file dispatch into the same
+`handle_session_close` target via independently-written close-priority
+checks, and none of the three inherited D2.17's exemption merely by having
+it exist elsewhere in the file.
 
-Equivalence audit result: **LIKELY_SAME_FAMILY_BUT_NOT_PROVEN** (not
-`EXACT_DEFECT_ALREADY_REPAIRED`) against the merged
-`paper-soak-session-1-repair` chain (§29). The exact August 24 dispatcher
-edge is conclusively identified and closed:
+**Phase 0 route inventory** (complete audit of every
+`now_utc >= *_close_utc` check in `autonomous_daily_coordinator.rs` that can
+route toward `handle_session_close`):
 
-- `dispatch_by_state`'s D2.17 close-priority gate
-  (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`,
-  `evidence_degraded_already_stopped` at the top of the function) now exempts
-  exactly this shape (`evidence_degraded` + operation `stopped_at_utc`
-  set) from being routed into `handle_session_close` ->
-  `reconcile_durable_run_without_local_owner`, whose literal detail string
-  (`"durable run already terminal at reconciliation time; no local runtime
-  to stop"`) matches the forensic evidence verbatim — confirming this was
-  the exact edge that fired on 2026-08-24.
-- A same-session negative control on the integrated tree proved this: with
-  `evidence_degraded_already_stopped` mutated to `false` (`&& false` short-
-  circuit prepended), `scenario_autonomous_daily_stopping_evidence_degraded_oscillation_01::t1`
-  RED-failed by reproducing the exact old transition (`outcome ==
-  RuntimeStopped`, `state == "stopping"`); the mutation was fully reverted
-  (`git diff` against HEAD confirmed empty) and GREEN re-confirmed all 4
-  tests passing.
+1. `dispatch_by_state` (line ~1938) — exempted by the prior session's fix;
+   unchanged by this patch except extracting its inline boolean into the new
+   shared `evidence_degraded_runtime_stop_already_recorded` helper (identical
+   behavior, confirmed by the full regression suite below).
+2. `reconcile_existing_operation_against_relevant_lookup` (line ~676) —
+   reached via `resolve_or_degrade_on_resolution_failure` (current-tick
+   calendar/assignment/registry/runtime-context resolution failure) and
+   `resolve_or_reconcile_on_nontrading_day` (materially distinct caller: a
+   weekend/holiday calendar result, no resolution failure involved). Was
+   **not exempted** — `evidence_degraded` absent from its own close-priority
+   allow-list.
+3. `apply_coverage_blocker` (line ~1049) — reached via `ensure_coverage_
+   authority`, which runs on **every** coordinator tick, strictly before
+   `dispatch_by_state`. Was **not exempted**.
+4. `handle_identity_conflict` (line ~1175) — reached from `create_or_
+   recover`'s `IdentityConflict` arm whenever the freshly-computed
+   `assignment_identity`/`runtime_binding_identity`/`session_plan_identity`
+   disagrees with the existing row occupying the same `(market_date,
+   deployment_mode, adapter_id)` slot (e.g. an operator changes the
+   resolvable strategy symbol while a stopped `evidence_degraded` operation
+   from earlier in the day still occupies the slot). Was **not exempted**.
+   **This route was not named by the original 2026-08-24 incident report or
+   by the prior session's audit** — it surfaced only from this session's
+   exhaustive Phase 0 search, confirming the mission's caution against
+   assuming exactly three gates.
 
-However, the same exemption was applied at only **one** of at least three
-close-priority gates in this file that route toward
-`handle_session_close`/`stopping` once `now_utc >=
-effective_operation_close_utc`:
+**Reachability proof** (all four DB-backed against disposable `mqk_test`,
+driving the real `tick_autonomous_daily_coordinator` top-level production
+entry point — never a private helper called directly):
 
-1. `dispatch_by_state` (line ~1938) — **exempted** (the fix).
-2. `reconcile_existing_operation_against_relevant_lookup` (line ~676) — used
-   only when current-tick calendar/assignment/registry/runtime-context
-   resolution fails, or on a nontrading-day reconciliation
-   (`resolve_or_degrade_on_resolution_failure`,
-   `resolve_or_reconcile_on_nontrading_day`) — **not exempted**;
-   `evidence_degraded` is absent from its own close-priority allow-list, so
-   an `evidence_degraded_already_stopped` operation hit by a resolution
-   failure past close would still be routed into `handle_session_close` ->
-   `stopping` on that tick.
-3. `apply_coverage_blocker`'s own close-priority check (line ~1049, inside
-   `ensure_coverage_authority`, which runs on **every** coordinator tick for
-   every state, strictly before `dispatch_by_state`) — **not exempted**
-   either; same missing `evidence_degraded` allow-list entry. In practice
-   this path is only reached when `check_coverage_authority` returns
-   anything other than `Compatible`, which a stable, already-anchored
-   operation (as August 24's was, 20 start attempts in) would not trigger —
-   this is why it did not fire on August 24 — but it is a live route for a
-   coverage-anchor conflict/unreadable/missing-after-activity case.
+- Route 2 (resolution-failure caller): `t5_resolution_failure_route_never_
+  reenters_stopping`. Fixture's bound run is `HALTED` (not `STOPPED`) —
+  reproducing the exact 2026-08-24 run-status shape — because `fetch_
+  relevant_open_autonomous_daily_operation`'s own SQL only treats a stopped
+  `evidence_degraded` operation as fully resolved (and excludes it from the
+  "relevant" lookup) when its bound run is `STOPPED`; `HALTED` is not
+  exempted, so the operation is found "relevant" and routed into this gate
+  exactly as the incident's operation was. `REACHABLE_DEFECT` confirmed by
+  RED proof below.
+- Route 2 (nontrading-day caller): `t6_nontrading_day_route_never_reenters_
+  stopping`, `now_utc` on a real weekend date, no env/config change needed.
+  `REACHABLE_DEFECT` confirmed.
+- Route 3 (coverage-authority failure): `t7_coverage_authority_failure_
+  route_never_reenters_stopping`. The fixture never binds a coverage anchor
+  (built via raw lifecycle transitions, not a real `running` start), so a
+  real tick's own `ensure_coverage_authority` genuinely finds `NotBound`, and
+  `check_operation_pristine` genuinely reports `HasActivity` (`run_id`/
+  `started_at_utc` are set) — no fabricated conflict was needed.
+  `REACHABLE_DEFECT` confirmed.
+- Route 4 (identity conflict): `t8_identity_conflict_route_never_reenters_
+  stopping`. Changing the resolvable assignment symbol after the fixture is
+  seeded produces a real `IdentityConflict` on every subsequent tick.
+  `REACHABLE_DEFECT` confirmed.
 
-Neither alternate route was exercised by the accepted repair's own test
-suite (`scenario_autonomous_daily_stopping_evidence_degraded_oscillation_01`
-only drives `dispatch_by_state` directly) and neither is proven safe or
-unsafe by this session — this mission is not authorized to diagnose or
-patch them (`LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER` scope:
-equivalence audit only, no new production behavior). A future session
-should determine whether either alternate gate is reachable for an
-`evidence_degraded_already_stopped` operation under realistic conditions
-and, if so, apply the same exemption there.
+**Production patch**: extracted the existing D2.17 predicate into a shared
+`evidence_degraded_runtime_stop_already_recorded(operation) -> bool`
+(`state == evidence_degraded && stopped_at_utc.is_some()`, nothing more —
+never treated as proof of clean outbox/inbox/reconcile) and added the same
+exemption to routes 2, 3, and 4's close-priority checks. Once each gate's
+close-priority check is bypassed, that function's own pre-existing
+`evidence_degraded` arm/self-loop (route 2's dedicated
+`handle_outcome_finalization` arm; routes 3 and 4's existing `evidence_
+degraded => evidence_degraded` self-loop target) already handles the shape
+correctly — no new finalization path was invented, exactly as the mission
+required.
+
+**RED/GREEN mutation proof**: routes 2, 3, and 4's three new exemption
+conditions were temporarily reverted (each `&& !evidence_degraded_runtime_
+stop_already_recorded(...)` removed) with a source comment marking the
+bypass; `t5`–`t8` all RED-failed reproducing the exact pre-patch transition
+(`outcome == RuntimeStopped`, `after.state == "stopping"`) while `t1`–`t4`
+(the unaffected `dispatch_by_state` route) continued to pass — proving the
+failures were specific to the reverted gates, not incidental. The bypass was
+then fully reverted via `git checkout` + re-applying the saved patch diff
+(`git diff` against the committed patch confirmed byte-identical), and
+`t1`–`t8` all GREEN-confirmed passing again.
+
+**Convergence proof**: `t1` and `t5`–`t8` each drive 5 repeated top-level
+ticks 30s apart past `postclose_finalize_utc`; `state_version` is asserted
+non-decreasing every tick and stable (unchanged) from the third tick onward
+for every route — no route re-enters an alternating `stopping <->
+evidence_degraded` loop.
+
+**Negative controls preserved** (unchanged, all still passing):
+- `t2` — an unacked outbox row on the fixture's run still fails closed
+  (this patch does not weaken the existing outbox/inbox/reconcile safety
+  checks; it only changes which path reaches `evidence_degraded`'s own arm).
+- `t3` — no route may schedule/attempt a fresh start inside `[effective_
+  operation_close_utc, postclose_finalize_utc]` (REPAIR-01, unaffected).
+- `t4` — a mid-run `evidence_degraded` row (`stopped_at_utc` still `None`)
+  is never exempted by any of the four gates; still routes into `handle_
+  session_close` and fails closed on the still-active run exactly as before.
+- `scenario_autonomous_daily_session_coordinator_01::j04` —
+  `handle_identity_conflict`'s close-priority gate still correctly reaches
+  canonical stop for a genuinely `running` (not evidence_degraded) identity
+  conflict at persisted close; the new exemption does not weaken this case.
+- `scenario_autonomous_daily_session_coordinator_01::l01`/`p01`/`p03` — the
+  resolution-failure and nontrading-day routes still correctly degrade/close
+  `running`/`stopping` operations at close; unaffected by the new exemption.
+
+**Focused tests** (disposable `mqk_test`, port 5434, reset via `DROP
+DATABASE` + `CREATE DATABASE` to clear a stale sqlx migration-checksum error
+before running — see `scripts/reset-mqk-testdb.ps1` for the documented
+equivalent):
+`scenario_autonomous_daily_stopping_evidence_degraded_oscillation_01` (8/8),
+`scenario_autonomous_daily_evidence_degraded_recovery_01` (13/13),
+`scenario_autonomous_daily_stale_evidence_degraded_finalization_01` (4/4),
+`scenario_autonomous_daily_controller_degraded_recovery_01` (8/8),
+`scenario_autonomous_daily_session_coordinator_01` (46/46, 3 filtered). All
+green. `cargo check -p mqk-daemon` clean; `git diff --check` clean.
+
+Production commit: `f37cd8c4` ("fix: unify stopped degraded close
+priority"), on `ledger-oscillation-close-priority-01`, NOT merged into
+`ledger-closure-integration-01`, NOT pushed — pending independent review.
 
 Still related but not proven identical to the previously-closed
 `PAPER-SOAK-SESSION-WATCH-01` stale-operation defect (see memory
@@ -2512,11 +2572,12 @@ decision/execution/strategy/pre-event-flatten regressions
 (`scenario_execution_flow_flow01`, `scenario_internal_strategy_decision`,
 `scenario_runtime_strategy_conflict_api_01`, `scenario_pre_event_flatten_01`,
 `scenario_strategy_decision_idempotency_01`). See §28's updated
-`AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01` entry above for
-the equivalence audit this integration was run against
-(`LIKELY_SAME_FAMILY_BUT_NOT_PROVEN` — kept `OPEN`).
+`AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01` entry above —
+originally recorded here as `LIKELY_SAME_FAMILY_BUT_NOT_PROVEN` / `OPEN`,
+subsequently `CLOSED` by `AUTONOMOUS-DAILY-STOPPED-EVIDENCE-DEGRADED-CLOSE-
+PRIORITY-UNIFICATION-01-CONTROLLER` the same day (third pass).
 `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` and `DAEMON-EXIT-20260824` are
-unchanged by this integration and remain `OPEN` /
+unchanged by that later session and remain `OPEN` /
 `UNKNOWN_NEEDS_PROOF` respectively.
 
 Review bundle:
