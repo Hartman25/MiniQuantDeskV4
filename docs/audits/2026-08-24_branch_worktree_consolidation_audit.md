@@ -194,13 +194,21 @@ was true at that earlier point in time.
   Environment at time of this run: `restic 0.19.1` installed,
   `docker 29.5.3` available, `mqk-test-postgres` container already up (no
   disposable dependency needed to be started).
-- **Classification: `ENVIRONMENT_PREREQUISITE_MISSING`** (not
-  `PRE_EXISTING_ACCEPTED_BRANCH_FAILURE`, not `INTEGRATION_REGRESSION`, not
-  `TEST_DEFECT`). The test's own contract (Section 3 docstring) confirms the
-  local-restic end-to-end proof is the functional acceptance gate, and real-B2
-  credentials are a separate, explicitly-deferred operational proof — the
-  prior "credentials" framing conflated the two. No code defect found; no
-  repair performed on the accepted branch.
+- `HISTORICAL_11_FAILURE_CAUSE=UNKNOWN_NEEDS_PROOF`.
+  `CURRENT_SOURCE_VALIDATION=PASS`. `CURRENT_INTEGRATION_VALIDATION=PASS`.
+  `CURRENT_INTEGRATION_REGRESSION=NO_EVIDENCE`. The test's own contract
+  (Section 3 docstring) confirms the local-restic end-to-end proof is the
+  functional acceptance gate, and real-B2 credentials are a separate,
+  explicitly-deferred operational proof — so the prior attribution of the 11
+  historical failures to missing real B2 credentials was incorrect, because
+  the committed test does not require real B2 credentials for its local
+  functional proof. However, the exact historical cause of the 11 prior
+  failures cannot be reconstructed from the evidence retained here: the
+  earlier failing transcript was not preserved in the independent review
+  bundle, and non-reproduction under current prerequisites (`restic 0.19.1`,
+  `docker 29.5.3`, `mqk-test-postgres` already running) does not prove which
+  prerequisite, if any, caused the historical failures. No current
+  integration regression found; no repair performed on the accepted branch.
 
 ### `research-direct-rank-policy-01` — contradiction resolved
 - A later interactive inventory in this mission's chain claimed this

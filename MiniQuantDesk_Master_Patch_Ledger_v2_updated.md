@@ -2374,8 +2374,14 @@ Observed truth (2026-08-24 forensic evidence):
 - Bar-coverage authority reported `latest_completed_bar_pending` /
   `unknown_incomplete_bar_coverage` despite the bars being complete on disk.
 
-This is a bar-coverage-authority defect: the readiness gate did not
-recognize complete, present bar data as complete. Root cause not yet
+This is a confirmed data-readiness/bar-coverage contradiction and an OPEN
+trading-path blocker. Complete qualifying-looking bar data was physically
+present while the autonomous operation credited zero bars and readiness
+reported incomplete coverage. The exact defective component/root cause is
+UNKNOWN_NEEDS_PROOF; do not yet attribute it specifically to bar-coverage
+authority, provider/timeframe eligibility, provenance, scheduler state, or
+another seam. The `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` ID names the
+investigation scope, not a proven root component. Root cause not yet
 diagnosed in this session.
 
 ### AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01 — STATUS=OPEN
