@@ -925,8 +925,8 @@ pub async fn submit_internal_strategy_decision(
 
     // Gate 7: enqueue to outbox (idempotent).
     let order_json = build_order_json(&decision);
-    match mqk_db::outbox_enqueue(db, active_run_id, &did, order_json).await {
-        Ok(true) => {
+    match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &did, order_json).await {
+        Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
             state.increment_day_signal_count();
             // MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol counterpart (cap #4),
@@ -936,7 +936,7 @@ pub async fn submit_internal_strategy_decision(
                 .await;
             outcome(true, "accepted", &did, &sid, Some(active_run_id), vec![])
         }
-        Ok(false) => outcome(
+        Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => outcome(
             false,
             "duplicate",
             &did,
@@ -944,6 +944,16 @@ pub async fn submit_internal_strategy_decision(
             Some(active_run_id),
             vec![format!(
                 "decision_id '{did}' already exists in outbox; no new row was created"
+            )],
+        ),
+        Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => outcome(
+            false,
+            "unavailable",
+            &did,
+            &sid,
+            Some(active_run_id),
+            vec![format!(
+                "internal decision refused: durable run status is '{actual_status}', not RUNNING"
             )],
         ),
         Err(err) => outcome(

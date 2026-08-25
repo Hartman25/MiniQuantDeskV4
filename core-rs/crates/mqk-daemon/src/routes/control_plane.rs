@@ -2073,8 +2073,10 @@ pub(crate) async fn ops_action(
                         ts_secs,
                         active_run_id,
                     );
-                match mqk_db::outbox_enqueue(db, active_run_id, &key, order_json).await {
-                    Ok(true) => {
+                match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &key, order_json)
+                    .await
+                {
+                    Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
                         info!(
                             run_id = %active_run_id,
                             symbol = %symbol,
@@ -2089,7 +2091,7 @@ pub(crate) async fn ops_action(
                             net_qty.abs()
                         ));
                     }
-                    Ok(false) => {
+                    Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {
                         info!(
                             run_id = %active_run_id,
                             symbol = %symbol,
@@ -2098,6 +2100,18 @@ pub(crate) async fn ops_action(
                         );
                         already_pending_symbols.push(symbol.clone());
                         warnings.push(format!("already_pending: symbol={symbol} key={key}"));
+                    }
+                    Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
+                        tracing::warn!(
+                            run_id = %active_run_id,
+                            symbol = %symbol,
+                            actual_status = %actual_status,
+                            "operator_flatten_close_run_not_running"
+                        );
+                        failed_symbols.push(symbol.clone());
+                        warnings.push(format!(
+                            "run_not_running: symbol={symbol} actual_status={actual_status}"
+                        ));
                     }
                     Err(err) => {
                         tracing::warn!(

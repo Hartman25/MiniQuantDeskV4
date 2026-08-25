@@ -104,5 +104,16 @@ name = "scenario_stop_run_if_evidence_clean_20260819"
 path = "tests/scenario_stop_run_if_evidence_clean_20260819.rs"
 required-features = ["testkit"]
 
+# PAPER-SOAK-OUTBOX-ENQUEUE-RUN-STATE-FENCE-01: outbox_enqueue_for_running_run
+# proof tests use mqk_db::run_isolated, which requires testkit.
+# Run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \
+#      cargo test -p mqk-db --features testkit \
+#      --test scenario_outbox_enqueue_run_state_fence_01 \
+#      -- --include-ignored --test-threads=1
+[[test]]
+name = "scenario_outbox_enqueue_run_state_fence_01"
+path = "tests/scenario_outbox_enqueue_run_state_fence_01.rs"
+required-features = ["testkit"]
+
 [dev-dependencies]
 tempfile = "3"

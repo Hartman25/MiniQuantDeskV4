@@ -945,9 +945,12 @@ pub(super) fn spawn_execution_loop(
                                     crate::pre_event_flatten::build_flatten_close_order_json(
                                         symbol, *net_qty, ts_secs, run_id,
                                     );
-                                match mqk_db::outbox_enqueue(pool, run_id, &key, order_json).await
+                                match mqk_db::outbox_enqueue_for_running_run(
+                                    pool, run_id, &key, order_json,
+                                )
+                                .await
                                 {
-                                    Ok(true) => {
+                                    Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
                                         tracing::warn!(
                                             run_id = %run_id,
                                             symbol = %symbol,
@@ -956,12 +959,22 @@ pub(super) fn spawn_execution_loop(
                                             "pre_event_flatten_close_enqueued"
                                         );
                                     }
-                                    Ok(false) => {
+                                    Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {
                                         tracing::debug!(
                                             run_id = %run_id,
                                             symbol = %symbol,
                                             idempotency_key = %key,
                                             "pre_event_flatten_close_already_pending"
+                                        );
+                                    }
+                                    Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning {
+                                        actual_status,
+                                    }) => {
+                                        tracing::debug!(
+                                            run_id = %run_id,
+                                            symbol = %symbol,
+                                            actual_status = %actual_status,
+                                            "pre_event_flatten_close_run_not_running"
                                         );
                                     }
                                     Err(err) => {

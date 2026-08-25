@@ -1253,8 +1253,15 @@ pub(crate) async fn strategy_signal(
 
     // Gate 7: enqueue to outbox (idempotent).
     let order_json = validated.order_json();
-    match mqk_db::outbox_enqueue(db, active_run_id, &validated.signal_id, order_json).await {
-        Ok(true) => {
+    match mqk_db::outbox_enqueue_for_running_run(
+        db,
+        active_run_id,
+        &validated.signal_id,
+        order_json,
+    )
+    .await
+    {
+        Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
             st.increment_day_signal_count();
             // JOUR-01: Write durable signal-admission audit event (best-effort, non-fatal).
@@ -1309,7 +1316,7 @@ pub(crate) async fn strategy_signal(
                 vec![],
             )
         }
-        Ok(false) => {
+        Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {
             let dup_note = format!(
                 "signal_id '{}' already exists; no new outbox row was created",
                 validated.signal_id
@@ -1322,6 +1329,22 @@ pub(crate) async fn strategy_signal(
                 validated.strategy_id,
                 Some(active_run_id),
                 vec![dup_note],
+            )
+        }
+        Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
+            refused_signal_response(
+                StatusCode::CONFLICT,
+                "gate_7_outbox",
+                "unavailable",
+                RefusedSignalArgs {
+                    signal_id: validated.signal_id,
+                    strategy_id: validated.strategy_id,
+                    symbol: validated.symbol,
+                    active_run_id: Some(active_run_id),
+                    blockers: vec![format!(
+                        "signal refused: durable run status is '{actual_status}', not RUNNING"
+                    )],
+                },
             )
         }
         Err(err) => refused_signal_response(
