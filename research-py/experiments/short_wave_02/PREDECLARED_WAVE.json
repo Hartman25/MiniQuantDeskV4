@@ -1,0 +1,117 @@
+{
+  "mission_id": "SHORT-RESEARCH-WAVE-02-CONTROLLER",
+  "base_head": "e31a49143e16cc61bbf7459f1c569fc1ce6a4851",
+  "worktree": "C:\\Users\\Zacha\\Desktop\\MiniQuantDeskV4-short-wave-02",
+  "branch": "research-short-wave-02",
+  "real_experiment_id": "SHORT-WAVE-02-REAL-CANDIDATES-V1",
+  "placebo_experiment_id": "SHORT-WAVE-02-DIAGNOSTIC-PLACEBOS-V1",
+  "fixed_universe": [
+    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLK", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU"
+  ],
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2024-01-01T00:00:00Z",
+    "asof": "2024-01-01"
+  },
+  "label": {
+    "horizon_bars": 10,
+    "ret_threshold": 0.0,
+    "definition": "fwd_ret = log(close[t+10]/close[t]); target = 1 iff fwd_ret > 0"
+  },
+  "walk_forward": {
+    "train_years": 3,
+    "test_months": 3,
+    "step_months": 3,
+    "holdout_months": 6,
+    "min_rows_per_fold": 300,
+    "purge_enabled": true,
+    "embargo_seconds": 0
+  },
+  "cost_model": {
+    "commission_bps_per_side": 10.0,
+    "slippage_bps_per_side": 0.0,
+    "note": "CONSERVATIVE RESEARCH COST ASSUMPTION, not actual Alpaca commission."
+  },
+  "execution_pricing": {
+    "pricing_model_id": "rust_conservative_bar_range_v1",
+    "slippage_bps": 5,
+    "volatility_mult_bps": 0
+  },
+  "weight_to_share": {
+    "equity_usd": 100000.0,
+    "max_gross_exposure": 1.0
+  },
+  "signal_policies": {
+    "long_only": {
+      "direction_policy": "long_only_v1",
+      "long_only": true,
+      "entry_threshold": 0.55
+    },
+    "long_short": {
+      "direction_policy": "long_short_threshold_v1",
+      "long_only": false,
+      "entry_threshold": 0.55,
+      "short_threshold": 0.45,
+      "max_gross_exposure": 1.0,
+      "borrow_model": "research_assumed_shortable_universe_v1"
+    }
+  },
+  "placebo_seed": 1234,
+  "hypotheses": {
+    "SHORT-02": {
+      "name": "pooled single-feature cross-sectional-momentum-rank classifier",
+      "feature_columns": ["ret_rank_20"],
+      "strategy_id": "pooled_single_feature_xs_momentum_rank_classifier_v1",
+      "hypothesis_id_long_only": "short02_xs_momentum_rank_long_only_v1",
+      "hypothesis_id_long_short": "short02_xs_momentum_rank_long_short_v1",
+      "hypothesis_id_placebo": "short02_xs_momentum_rank_placebo_v1",
+      "hypothesized_relation": "positive (higher rank -> higher P(fwd_ret>0)), sign not enforced"
+    },
+    "SHORT-03": {
+      "name": "pooled single-feature short-term-reversal classifier",
+      "feature_columns": ["ret_5"],
+      "strategy_id": "pooled_single_feature_short_term_reversal_classifier_v1",
+      "hypothesis_id_long_only": "short03_short_term_reversal_long_only_v1",
+      "hypothesis_id_long_short": "short03_short_term_reversal_long_short_v1",
+      "hypothesis_id_placebo": "short03_short_term_reversal_placebo_v1",
+      "hypothesized_relation": "negative, sign not enforced"
+    },
+    "SHORT-04": {
+      "name": "pooled single-feature gap-reversal/exhaustion classifier",
+      "feature_columns": ["gap_pct_1"],
+      "strategy_id": "pooled_single_feature_gap_reversal_classifier_v1",
+      "hypothesis_id_long_only": "short04_gap_reversal_long_only_v1",
+      "hypothesis_id_long_short": "short04_gap_reversal_long_short_v1",
+      "hypothesis_id_placebo": "short04_gap_reversal_placebo_v1",
+      "hypothesized_relation": "negative, sign not enforced"
+    }
+  },
+  "real_candidate_population": [
+    "short02_xs_momentum_rank_long_only_v1",
+    "short02_xs_momentum_rank_long_short_v1",
+    "short03_short_term_reversal_long_only_v1",
+    "short03_short_term_reversal_long_short_v1",
+    "short04_gap_reversal_long_only_v1",
+    "short04_gap_reversal_long_short_v1"
+  ],
+  "diagnostic_placebo_population": [
+    "short02_xs_momentum_rank_placebo_v1",
+    "short03_short_term_reversal_placebo_v1",
+    "short04_gap_reversal_placebo_v1"
+  ],
+  "prohibited_after_patch_a": [
+    "adaptive threshold/window/universe/horizon retuning based on observed results",
+    "mixing placebo trials into the real-candidate experiment id",
+    "changing later patches because an earlier hypothesis looked weak"
+  ],
+  "commit_sequence": [
+    "PATCH A: SHORT-WAVE-02-PREDECLARATION-AND-HARNESS-01",
+    "PATCH B: SHORT-02-XS-MOMENTUM-RANK-01",
+    "PATCH C: SHORT-03-SHORT-TERM-REVERSAL-01",
+    "PATCH D: SHORT-04-GAP-REVERSAL-01",
+    "PATCH E: SHORT-WAVE-02-FAMILY-JUDGE-AND-CLOSEOUT-01"
+  ]
+}
