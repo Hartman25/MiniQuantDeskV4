@@ -1513,6 +1513,28 @@ async fn f06_terminal_durable_run_without_local_owner_records_stopped_with_no_st
     let operation_id = Uuid::new_v4();
     let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
+    // `reconcile_durable_run_without_local_owner` now requires a durably
+    // clean global reconcile status before ever declaring an orphaned run
+    // stopped (b5e6c05e) -- `sys_reconcile_status_state` is a global
+    // singleton, so seed a known-clean baseline the same way every sibling
+    // test in this repair chain does, rather than relying on whatever a
+    // fresh test DB's default happens to be.
+    mqk_db::persist_reconcile_status_state(
+        &pool,
+        &mqk_db::PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(now),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+            updated_at_utc: now,
+        },
+    )
+    .await?;
+
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     mqk_db::insert_run(
         &pool,

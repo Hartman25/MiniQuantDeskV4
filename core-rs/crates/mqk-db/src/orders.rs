@@ -276,6 +276,126 @@ pub async fn outbox_enqueue(
     Ok(row.is_some())
 }
 
+/// Typed outcome of [`outbox_enqueue_for_running_run`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutboxEnqueueOutcome {
+    /// A new `PENDING` row was inserted.
+    Enqueued,
+    /// The idempotency key already existed; zero new row was created.
+    Duplicate,
+    /// Refused: the run is not durably `RUNNING`. Zero mutation. Distinct
+    /// from `Duplicate` -- callers must not conflate "already exists" with
+    /// "durable run no longer permits creation of economic intent".
+    RunNotRunning { actual_status: String },
+}
+
+/// PAPER-SOAK-OUTBOX-ENQUEUE-RUN-STATE-FENCE-01 -- production-fenced outbox
+/// enqueue.
+///
+/// # Why this exists
+///
+/// [`outbox_enqueue`] proves only that `run_id` exists as an FK target -- it
+/// has no notion of run status at all. Production callers (signal
+/// admission, manual order submit/cancel, operator flatten, pre-event
+/// flatten) already check a runtime status snapshot before calling it, but
+/// that check is only advisory: it runs in a separate transaction from the
+/// insert. [`crate::runs::stop_run_if_evidence_clean`]'s atomic orphan
+/// recovery locks the `runs` row, confirms clean evidence, transitions to
+/// `STOPPED`, and commits -- and a concurrent `outbox_enqueue` INSERT that
+/// was blocked on the same row's FK-parent lock resumes immediately after,
+/// unaware the run is no longer `RUNNING`, and still creates a `PENDING`
+/// row. That row is not claimable while `STOPPED`, but the lifecycle
+/// permits `STOPPED -> ARMED` rearm, so the stale intent can survive
+/// recovery and become future claimable work -- a durable economic-intent
+/// leak across a run boundary.
+///
+/// # Authority proof
+///
+/// Inside one transaction, this function:
+/// 1. Locks the run row (`SELECT ... FOR UPDATE`) -- the same serialization
+///    boundary [`crate::runs::stop_run_if_evidence_clean`] and
+///    [`outbox_claim_batch_for_run_with_lease_authority`] use, so this
+///    enqueue and a concurrent recovery/stop can never interleave.
+/// 2. Requires `runs.status = 'RUNNING'`.
+/// 3. Only then performs the ordinary idempotent `PENDING` insert (same
+///    `ON CONFLICT (idempotency_key) DO NOTHING` semantics as
+///    [`outbox_enqueue`]), still holding the run-row lock.
+///
+/// Whichever of {this function, `stop_run_if_evidence_clean`} reaches the
+/// `runs` row lock first runs to completion (commit or rollback) before the
+/// other's lock acquisition proceeds -- Postgres serializes both orderings
+/// deterministically:
+/// - **Recovery wins**: it commits `STOPPED`; this function then locks the
+///   row, observes `status != 'RUNNING'`, and refuses (`RunNotRunning`) --
+///   zero `PENDING` row is ever created.
+/// - **Enqueue wins**: it commits its `PENDING` row and releases the lock;
+///   recovery then locks the row, sees the outbox is no longer clean, and
+///   refuses -- the run stays `RUNNING`.
+///
+/// A higher-level `runtime_status == running` snapshot check by the caller
+/// (e.g. `AppState` status) is advisory only and does not close this race by
+/// itself -- it can go stale between the check and the DB write. This
+/// function is the durable enforcement point.
+pub async fn outbox_enqueue_for_running_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    idempotency_key: &str,
+    order_json: Value,
+) -> Result<OutboxEnqueueOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("outbox_enqueue_for_running_run: begin tx failed")?;
+
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("outbox_enqueue_for_running_run: run lock failed")?;
+
+    let Some(status) = status else {
+        tx.rollback().await.ok();
+        return Err(anyhow!(
+            "outbox_enqueue_for_running_run: run {run_id} not found"
+        ));
+    };
+
+    if status != "RUNNING" {
+        tx.rollback()
+            .await
+            .context("outbox_enqueue_for_running_run: rollback (not running) failed")?;
+        return Ok(OutboxEnqueueOutcome::RunNotRunning {
+            actual_status: status,
+        });
+    }
+
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        insert into oms_outbox (run_id, idempotency_key, order_json, status)
+        values ($1, $2, $3, 'PENDING')
+        on conflict (idempotency_key) do nothing
+        returning outbox_id
+        "#,
+    )
+    .bind(run_id)
+    .bind(idempotency_key)
+    .bind(order_json)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("outbox_enqueue_for_running_run: insert failed")?;
+
+    tx.commit()
+        .await
+        .context("outbox_enqueue_for_running_run: commit failed")?;
+
+    Ok(if row.is_some() {
+        OutboxEnqueueOutcome::Enqueued
+    } else {
+        OutboxEnqueueOutcome::Duplicate
+    })
+}
+
 /// Atomically claim up to `batch_size` PENDING outbox rows for exclusive dispatch.
 ///
 /// Uses `FOR UPDATE SKIP LOCKED` so concurrent dispatchers never claim the same row.
@@ -1104,7 +1224,10 @@ pub async fn outbox_reset_ambiguous_to_pending(
 ///
 /// NOTE: This does NOT talk to broker yet.
 /// It provides the minimal deterministic input required for a future reconcile step.
-pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<OutboxRow>> {
+pub async fn outbox_list_unacked_for_run(
+    pool: impl sqlx::PgExecutor<'_>,
+    run_id: Uuid,
+) -> Result<Vec<OutboxRow>> {
     let rows = sqlx::query(
         r#"
         select outbox_id, run_id, idempotency_key, order_json, status,

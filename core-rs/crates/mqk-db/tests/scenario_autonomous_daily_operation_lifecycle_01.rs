@@ -25,7 +25,11 @@ use mqk_db::{
     RefreshAutonomousDailyOperationBlockerOutcome, TransitionAutonomousDailyOperationArgs,
     ENV_DB_URL, STATE_AWAITING_OPEN, STATE_AWAITING_PREOPEN, STATE_CONTROLLER_DEGRADED,
     STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA, STATE_RECOVERY_RETRYING,
-    STATE_RUNNING, STATE_START_RETRYING, STATE_STOPPING,
+    STATE_RUNNING, STATE_START_RETRYING, STATE_STOPPING, STATE_STOP_RETRYING,
+};
+use mqk_db::{
+    arm_run, begin_run, insert_run, persist_reconcile_status_state, stop_run, NewRun,
+    PersistReconcileStatusState,
 };
 use uuid::Uuid;
 
@@ -61,6 +65,21 @@ fn session_bounds(
     let preopen = open - ChronoDuration::minutes(30);
     let postclose = close + ChronoDuration::minutes(15);
     (open, close, preopen, postclose)
+}
+
+fn unique_suffix() -> String {
+    Uuid::new_v4().to_string().replace('-', "")[..10].to_string()
+}
+
+async fn cleanup_run(pool: &sqlx::PgPool, run_id: Uuid) {
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
 }
 
 async fn cleanup_operation(pool: &sqlx::PgPool, operation_id: Uuid) {
@@ -1237,6 +1256,540 @@ async fn relevant_open_lookup_stale_manual_row_cannot_shadow_running_current_row
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-AMBIGUITY-SCOPING-01: a prior-
+// market-date `evidence_degraded` row that never obtained runtime/execution
+// authority must not durably shadow a later date's real operation -- but an
+// `evidence_degraded` row carrying genuine run/execution evidence, or one
+// from the *current* market date, must still block exactly as
+// conservatively as `manual_intervention_required` already does.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stale_no_run_evidence_degraded_row_cannot_shadow_running_current_row(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    // A stale historical row reaching evidence_degraded via the real
+    // production path for "session closed before any runtime ever started"
+    // (awaiting_preopen -> stopping -> evidence_degraded), with zero run
+    // evidence: no run_id, no started_at_utc, bars_dispatched = 0.
+    let stale_id = seed_operation_for_date(&pool, "relopen-ed-stale", yesterday).await;
+    let stale_ts = session_bounds(yesterday).0;
+    let stale_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stale_id)
+        .await?
+        .expect("row must exist");
+    let stale_row = advance_one(&pool, &stale_row, STATE_STOPPING, stale_ts).await?;
+    record_stopped_at(&pool, stale_id, stale_ts).await?;
+    let stale_row = advance_one(
+        &pool,
+        &stale_row,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        stale_ts,
+    )
+    .await?;
+    assert_eq!(stale_row.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    assert!(stale_row.run_id.is_none(), "fixture precondition: no run ever started");
+
+    // Today's current row: running.
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-stale", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-stale",
+        current_ts,
+    )
+    .await?
+    .expect("the running current row must be found");
+    assert_eq!(
+        found.operation_id, current_id,
+        "a stale no-run evidence_degraded row must never shadow the running current row"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_evidence_degraded_row_with_run_evidence_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    // A prior-day row that DID obtain a real run (the "mid-run degrade"
+    // shape: running -> evidence_degraded directly, never touching
+    // stopping) -- genuine unresolved execution evidence must still fail
+    // closed regardless of date, exactly like an unstopped bound run
+    // already does via the `run_id is not null and stopped_at_utc is null`
+    // clause.
+    let stale_id = seed_operation_for_date(&pool, "relopen-ed-active", yesterday).await;
+    let stale_ts = session_bounds(yesterday).0;
+    let stale_run_id = Uuid::new_v4();
+    let running = advance_to_running(&pool, stale_id, stale_run_id, stale_ts).await?;
+    let degraded = advance_one(
+        &pool,
+        &running,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        stale_ts,
+    )
+    .await?;
+    assert_eq!(degraded.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    assert!(degraded.run_id.is_some(), "fixture precondition: a real run was bound");
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-active", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-active",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "an evidence_degraded row with real run evidence must still fail closed as ambiguous, \
+         even from a prior date; got {result:?}"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_same_day_no_run_evidence_degraded_still_found() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    // A same-day evidence_degraded row with zero run evidence must still be
+    // found via the date-window clause -- this route's narrowing must never
+    // silently ignore evidence_degraded outright, only date-scope it the
+    // same way manual_intervention_required is already scoped.
+    let operation_id = seed_operation_for_date(&pool, "relopen-ed-sameday", today).await;
+    let ts = session_bounds(today).0;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let row = advance_one(&pool, &row, STATE_STOPPING, ts).await?;
+    record_stopped_at(&pool, operation_id, ts).await?;
+    let degraded = advance_one(&pool, &row, mqk_db::STATE_EVIDENCE_DEGRADED, ts).await?;
+    assert!(degraded.run_id.is_none(), "fixture precondition: no run ever started");
+
+    let inside_window = ts + ChronoDuration::hours(1);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-sameday",
+        inside_window,
+    )
+    .await?
+    .expect("a same-day evidence_degraded row must still be found while inside its own window");
+    assert_eq!(found.operation_id, operation_id);
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-EVIDENCE-DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01:
+// a bound run_id alone is not proof of unresolved economic authority --
+// only a genuinely terminal run with zero unresolved outbox/reconcile
+// evidence may be released from unconditional relevance. These three
+// tests exercise exactly the proof-based checks added to this query
+// (a real `runs` row, driven through insert_run/arm_run/begin_run/
+// stop_run -- never a raw UPDATE).
+// ---------------------------------------------------------------------------
+
+async fn reset_reconcile_status_clean(pool: &sqlx::PgPool, now: DateTime<Utc>) -> anyhow::Result<()> {
+    persist_reconcile_status_state(
+        pool,
+        &PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(now),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+            updated_at_utc: now,
+        },
+    )
+    .await
+}
+
+fn new_run_fixture(run_id: Uuid, now: DateTime<Utc>) -> NewRun {
+    NewRun {
+        run_id,
+        engine_id: "mqk-daemon".to_string(),
+        mode: "PAPER".to_string(),
+        started_at_utc: now,
+        git_hash: "TEST".to_string(),
+        config_hash: "TEST".to_string(),
+        config_json: serde_json::json!({}),
+        host_fingerprint: "test-host".to_string(),
+    }
+}
+
+/// Seed an evidence_degraded operation, from yesterday, bound to a real
+/// `runs` row -- reaching evidence_degraded via the real "mid-run degrade"
+/// path (`running -> evidence_degraded` directly) and then, separately,
+/// recording `stopped_at_utc` via `record_stopped_at` (mirroring
+/// `reconcile_durable_run_without_local_owner`'s own terminal-branch call)
+/// -- so the fixture matches exactly what AUTONOMOUS-DAILY-CONTROLLER-
+/// DEGRADED-RECOVERY-01 produces in production for a `controller_degraded`
+/// operation whose run turned out to be safely stopped.
+async fn seed_stopped_evidence_degraded_with_run(
+    pool: &sqlx::PgPool,
+    seed: &str,
+    market_date: NaiveDate,
+    run_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let (open, _close, _preopen, _postclose) = session_bounds(market_date);
+    let operation_id = seed_operation_for_date(pool, seed, market_date).await;
+    let running = advance_to_running(pool, operation_id, run_id, open).await?;
+    let degraded_args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: running.state.clone(),
+        expected_state_version: running.state_version,
+        new_state: mqk_db::STATE_EVIDENCE_DEGRADED.to_string(),
+        reason_code: Some("unknown_incomplete_bar_coverage".to_string()),
+        blocker_signature: None,
+        occurred_at_utc: open,
+        run_id: None,
+        bounded_detail: "test setup: -> evidence_degraded (unknown_incomplete_bar_coverage)"
+            .to_string(),
+    };
+    let degraded = match transition_autonomous_daily_operation(pool, &degraded_args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert_eq!(degraded.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    record_stopped_at(pool, operation_id, open).await?;
+    Ok(operation_id)
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_with_unacked_outbox_still_blocks() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // genuinely STOPPED
+
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-outbox", yesterday, run_id)
+            .await?;
+
+    // A SENT-but-not-yet-ACKED order still associated with the now-stopped
+    // run -- an order may still be in flight; this must never be silently
+    // released.
+    sqlx::query(
+        "insert into oms_outbox (run_id, idempotency_key, order_json, status, created_at_utc, \
+         sent_at_utc) values ($1, $2, '{}'::jsonb, 'SENT', $3, $3)",
+    )
+    .bind(run_id)
+    .bind(format!("test-unresolved-{}", unique_suffix()))
+    .bind(open)
+    .execute(&pool)
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-outbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-outbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopped run with an unacked outbox row must still fail closed as ambiguous; \
+         got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_with_dirty_reconcile_still_blocks() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-dirty", yesterday, run_id)
+            .await?;
+
+    persist_reconcile_status_state(
+        &pool,
+        &PersistReconcileStatusState {
+            status: "dirty",
+            last_run_at_utc: Some(open),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 1,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: Some("test: simulated position disagreement"),
+            updated_at_utc: open,
+        },
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-dirty", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-dirty",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopped run with a dirty global reconcile status must still fail closed as \
+         ambiguous; got {result:?}"
+    );
+
+    reset_reconcile_status_clean(&pool, current_ts).await?;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01: an unapplied `oms_inbox`
+// row (durably received broker evidence not yet applied) and a nonzero
+// `unmatched_broker_events` reconcile counter must both block release
+// exactly like an unacked outbox row / dirty reconcile status already do.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_with_unapplied_inbox_still_blocks() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // genuinely STOPPED
+
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-inbox", yesterday, run_id)
+            .await?;
+
+    // Broker evidence durably received but not yet applied -- exactly the
+    // crash-recovery-replay shape that must never be silently released.
+    mqk_db::inbox_insert_deduped(
+        &pool,
+        run_id,
+        &format!("test-unapplied-{}", unique_suffix()),
+        serde_json::json!({"event_kind": "fill"}),
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-inbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-inbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopped run with an unapplied inbox row must still fail closed as ambiguous; \
+         got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_inbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_with_unmatched_broker_events_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id = seed_stopped_evidence_degraded_with_run(
+        &pool,
+        "relopen-ed-unmatched",
+        yesterday,
+        run_id,
+    )
+    .await?;
+
+    // status="ok" and every mismatch counter is zero, but
+    // unmatched_broker_events is nonzero -- must still be treated as dirty.
+    persist_reconcile_status_state(
+        &pool,
+        &PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(open),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 1,
+            note: Some("test: simulated unmatched broker event"),
+            updated_at_utc: open,
+        },
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-unmatched", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-unmatched",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopped run with unmatched_broker_events != 0 must still fail closed as ambiguous; \
+         got {result:?}"
+    );
+
+    reset_reconcile_status_clean(&pool, current_ts).await?;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_zero_activity_clean_reconcile_is_released(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // genuinely STOPPED, zero orders ever created
+
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-released", yesterday, run_id)
+            .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-ed-released", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-ed-released",
+        current_ts,
+    )
+    .await?
+    .expect("the running current row must be found");
+    assert_eq!(
+        found.operation_id, current_id,
+        "a proven-terminal, zero-activity, clean-reconcile evidence_degraded row must be \
+         released and never shadow the current running operation"
+    );
+
+    // The stale row's own evidence classification must remain completely
+    // untouched -- this repair separates lifecycle authority from evidence
+    // truth, it never rewrites history.
+    let stale_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stale_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(stale_row.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+    assert_eq!(
+        stale_row.state_reason_code.as_deref(),
+        Some("unknown_incomplete_bar_coverage")
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn relevant_open_lookup_multiple_active_rows_fail_closed() -> anyhow::Result<()> {
@@ -1265,6 +1818,744 @@ async fn relevant_open_lookup_multiple_active_rows_fail_closed() -> anyhow::Resu
 
     cleanup_operation(&pool, id_a).await;
     cleanup_operation(&pool, id_b).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-STALE-STOPPING-RELEASE-01: `stopping` had no release path at
+// all -- unlike `evidence_degraded`, which AUTONOMOUS-DAILY-EVIDENCE-
+// DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01 already gave a proof-based
+// release clause. A run whose canonical stop path genuinely completed
+// (`stopped_at_utc` set via `record_autonomous_runtime_stopped`, the bound
+// `runs` row STOPPED, zero unacked outbox, clean global reconcile) but
+// whose CAS state transition never advanced past `stopping` -- exactly the
+// shape `stopping -> evidence_degraded -> stopping` reconciliation leaves
+// behind when its last-ever transition lands back on `stopping` -- stayed
+// unconditionally relevant forever, permanently shadowing every later
+// date's real operation from `fetch_relevant_open_autonomous_daily_operation`
+// and, in production, silently starving the autonomous completed-bar driver
+// of a resolvable "current operation" on every subsequent day.
+// ---------------------------------------------------------------------------
+
+/// Seed a `stopping` operation, from `market_date`, bound to a real `runs`
+/// row that is genuinely `STOPPED`, with `stopped_at_utc` recorded via the
+/// same canonical recorder production uses on the
+/// `reconcile_durable_run_without_local_owner` terminal branch
+/// (`record_autonomous_runtime_stopped`).
+async fn seed_stopped_stopping_with_run(
+    pool: &sqlx::PgPool,
+    seed: &str,
+    market_date: NaiveDate,
+    run_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let (open, _close, _preopen, _postclose) = session_bounds(market_date);
+    let operation_id = seed_operation_for_date(pool, seed, market_date).await;
+    let running = advance_to_running(pool, operation_id, run_id, open).await?;
+    let stopping = advance_one(pool, &running, STATE_STOPPING, open).await?;
+    assert_eq!(stopping.state, STATE_STOPPING);
+    mqk_db::record_autonomous_runtime_stopped(pool, operation_id, open).await?;
+    Ok(operation_id)
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_zero_activity_clean_reconcile_stopping_is_released(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // genuinely STOPPED, zero orders ever created
+
+    let stale_id =
+        seed_stopped_stopping_with_run(&pool, "relopen-stopping-released", yesterday, run_id)
+            .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stopping-released", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    // RED before the repair: this call returns `Err` ("2 equally
+    // authoritative active operations found"), reproducing the real
+    // Tuesday-stopping-blocks-Wednesday production defect. GREEN after the
+    // repair: the stale stopping row is released and only the current
+    // running operation is found.
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stopping-released",
+        current_ts,
+    )
+    .await?
+    .expect(
+        "a proven-terminal, zero-activity, clean-reconcile stopping row must be released and \
+         never shadow the current running operation",
+    );
+    assert_eq!(
+        found.operation_id, current_id,
+        "the stale stopping row must not shadow the current running operation"
+    );
+
+    // The stale row's own state must remain completely untouched -- this
+    // repair separates lifecycle authority from evidence truth, it never
+    // rewrites history.
+    let stale_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stale_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(stale_row.state, STATE_STOPPING);
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopping_row_with_unacked_outbox_still_blocks() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id =
+        seed_stopped_stopping_with_run(&pool, "relopen-stopping-outbox", yesterday, run_id)
+            .await?;
+
+    // A SENT-but-not-yet-ACKED order still associated with the now-stopped
+    // run -- an order may still be in flight; this must never be silently
+    // released, exactly like the existing evidence_degraded proof.
+    sqlx::query(
+        "insert into oms_outbox (run_id, idempotency_key, order_json, status, created_at_utc, \
+         sent_at_utc) values ($1, $2, '{}'::jsonb, 'SENT', $3, $3)",
+    )
+    .bind(run_id)
+    .bind(format!("test-unresolved-{}", unique_suffix()))
+    .bind(open)
+    .execute(&pool)
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stopping-outbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stopping-outbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopping row whose run has an unacked outbox row must still fail closed as \
+         ambiguous; got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopping_row_with_dirty_reconcile_still_blocks() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id =
+        seed_stopped_stopping_with_run(&pool, "relopen-stopping-dirty", yesterday, run_id).await?;
+
+    persist_reconcile_status_state(
+        &pool,
+        &PersistReconcileStatusState {
+            status: "dirty",
+            last_run_at_utc: Some(open),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 1,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: Some("test: simulated position disagreement"),
+            updated_at_utc: open,
+        },
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stopping-dirty", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stopping-dirty",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopping row whose run stopped with a dirty global reconcile status must still fail \
+         closed as ambiguous; got {result:?}"
+    );
+
+    reset_reconcile_status_clean(&pool, current_ts).await?;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01: `stopping` shares the exact
+// evidence-gated release clause -- an unapplied inbox row must block it too.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopping_row_with_unapplied_inbox_still_blocks() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id =
+        seed_stopped_stopping_with_run(&pool, "relopen-stopping-inbox", yesterday, run_id).await?;
+
+    mqk_db::inbox_insert_deduped(
+        &pool,
+        run_id,
+        &format!("test-unapplied-{}", unique_suffix()),
+        serde_json::json!({"event_kind": "fill"}),
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stopping-inbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stopping-inbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stopping row whose run stopped with an unapplied inbox row must still fail closed \
+         as ambiguous; got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_inbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_same_day_stopping_with_stopped_run_still_found() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+    let (open, _, _, _) = session_bounds(today);
+
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let operation_id =
+        seed_stopped_stopping_with_run(&pool, "relopen-stopping-sameday", today, run_id).await?;
+
+    // Same-day stopping row, even with fully proven-safe release evidence,
+    // must still be found while `now_utc` falls inside its own persisted
+    // window -- release only ever applies once the operation's own market
+    // date has passed, exactly mirroring evidence_degraded's existing
+    // same-day protection. This is the direct proof that no
+    // active/running/stopping operation still owning today's runtime/OMS
+    // truth is ever silently ignored by this repair.
+    let inside_window = open + ChronoDuration::hours(1);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stopping-sameday",
+        inside_window,
+    )
+    .await?
+    .expect("a same-day stopping row must still be found while inside its own window");
+    assert_eq!(found.operation_id, operation_id);
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-STALE-STOP-STATE-RELEASE-REPAIR-01: `stop_retrying` had the
+// identical unconditional-relevance gap `stopping` had before
+// PAPER-SOAK-STALE-STOPPING-RELEASE-01 closed it. A durable
+// `state = stop_retrying, stopped_at_utc != null` row is a legal shape --
+// a stop-retry attempt may successfully stop the bound runtime and durably
+// record `stopped_at_utc` via `record_autonomous_runtime_stopped` while the
+// CAS state transition never advances past `stop_retrying` (process/session
+// end before the next finalization tick). Left unconditionally relevant,
+// that stale row can collide with a newer valid operation and reproduce the
+// exact same "2 equally authoritative active operations found" permanent
+// fail-closed wedge that `stopping` reproduced.
+// ---------------------------------------------------------------------------
+
+/// Seed a `stop_retrying` operation, from `market_date`, bound to a real
+/// `runs` row, reached via the real legal CAS chain
+/// `running -> stopping -> stop_retrying`, with `stopped_at_utc` recorded
+/// via the same canonical recorder production uses
+/// (`record_autonomous_runtime_stopped`).
+async fn seed_stopped_stop_retrying_with_run(
+    pool: &sqlx::PgPool,
+    seed: &str,
+    market_date: NaiveDate,
+    run_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let (open, _close, _preopen, _postclose) = session_bounds(market_date);
+    let operation_id = seed_operation_for_date(pool, seed, market_date).await;
+    let running = advance_to_running(pool, operation_id, run_id, open).await?;
+    let stopping = advance_one(pool, &running, STATE_STOPPING, open).await?;
+    assert_eq!(stopping.state, STATE_STOPPING);
+    let stop_retrying = advance_one(pool, &stopping, STATE_STOP_RETRYING, open).await?;
+    assert_eq!(stop_retrying.state, STATE_STOP_RETRYING);
+    mqk_db::record_autonomous_runtime_stopped(pool, operation_id, open).await?;
+    Ok(operation_id)
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stopped_run_zero_activity_clean_reconcile_stop_retrying_is_released(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // genuinely STOPPED, zero orders ever created
+
+    let stale_id = seed_stopped_stop_retrying_with_run(
+        &pool,
+        "relopen-stop-retrying-released",
+        yesterday,
+        run_id,
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stop-retrying-released", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    // RED before the repair: this call returns `Err` ("2 equally
+    // authoritative active operations found"), reproducing the
+    // stop_retrying analogue of the stopping production defect. GREEN
+    // after the repair: the stale stop_retrying row is released and only
+    // the current running operation is found.
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stop-retrying-released",
+        current_ts,
+    )
+    .await?
+    .expect(
+        "a proven-terminal, zero-activity, clean-reconcile stop_retrying row must be released \
+         and never shadow the current running operation",
+    );
+    assert_eq!(
+        found.operation_id, current_id,
+        "the stale stop_retrying row must not shadow the current running operation"
+    );
+
+    // The stale row's own state must remain completely untouched -- this
+    // repair separates lifecycle authority from evidence truth, it never
+    // rewrites history.
+    let stale_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stale_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(stale_row.state, STATE_STOP_RETRYING);
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stop_retrying_row_with_unacked_outbox_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id = seed_stopped_stop_retrying_with_run(
+        &pool,
+        "relopen-stop-retrying-outbox",
+        yesterday,
+        run_id,
+    )
+    .await?;
+
+    // A SENT-but-not-yet-ACKED order still associated with the now-stopped
+    // run -- an order may still be in flight; this must never be silently
+    // released, exactly like the existing stopping/evidence_degraded proof.
+    sqlx::query(
+        "insert into oms_outbox (run_id, idempotency_key, order_json, status, created_at_utc, \
+         sent_at_utc) values ($1, $2, '{}'::jsonb, 'SENT', $3, $3)",
+    )
+    .bind(run_id)
+    .bind(format!("test-unresolved-{}", unique_suffix()))
+    .bind(open)
+    .execute(&pool)
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stop-retrying-outbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stop-retrying-outbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stop_retrying row whose run has an unacked outbox row must still fail closed as \
+         ambiguous; got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stop_retrying_row_with_dirty_reconcile_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id =
+        seed_stopped_stop_retrying_with_run(&pool, "relopen-stop-retrying-dirty", yesterday, run_id)
+            .await?;
+
+    persist_reconcile_status_state(
+        &pool,
+        &PersistReconcileStatusState {
+            status: "dirty",
+            last_run_at_utc: Some(open),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 1,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: Some("test: simulated position disagreement"),
+            updated_at_utc: open,
+        },
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stop-retrying-dirty", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stop-retrying-dirty",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stop_retrying row whose run stopped with a dirty global reconcile status must still \
+         fail closed as ambiguous; got {result:?}"
+    );
+
+    reset_reconcile_status_clean(&pool, current_ts).await?;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// PAPER-SOAK-UNRESOLVED-BROKER-EVIDENCE-GATE-01: `stop_retrying` shares the
+// exact evidence-gated release clause -- an unapplied inbox row must block
+// it too.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stop_retrying_row_with_unapplied_inbox_still_blocks(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+
+    let (open, _, _, _) = session_bounds(yesterday);
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let stale_id = seed_stopped_stop_retrying_with_run(
+        &pool,
+        "relopen-stop-retrying-inbox",
+        yesterday,
+        run_id,
+    )
+    .await?;
+
+    mqk_db::inbox_insert_deduped(
+        &pool,
+        run_id,
+        &format!("test-unapplied-{}", unique_suffix()),
+        serde_json::json!({"event_kind": "fill"}),
+    )
+    .await?;
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stop-retrying-inbox", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stop-retrying-inbox",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stop_retrying row whose run stopped with an unapplied inbox row must still fail \
+         closed as ambiguous; got {result:?}"
+    );
+
+    let _ = sqlx::query("delete from oms_inbox where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_same_day_stop_retrying_with_stopped_run_still_found(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+    let (open, _, _, _) = session_bounds(today);
+
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?;
+
+    let operation_id = seed_stopped_stop_retrying_with_run(
+        &pool,
+        "relopen-stop-retrying-sameday",
+        today,
+        run_id,
+    )
+    .await?;
+
+    // Same-day stop_retrying row, even with fully proven-safe release
+    // evidence, must still be found while `now_utc` falls inside its own
+    // persisted window -- release only ever applies once the operation's
+    // own market date has passed, exactly mirroring stopping's/
+    // evidence_degraded's existing same-day protection.
+    let inside_window = open + ChronoDuration::hours(1);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stop-retrying-sameday",
+        inside_window,
+    )
+    .await?
+    .expect("a same-day stop_retrying row must still be found while inside its own window");
+    assert_eq!(found.operation_id, operation_id);
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stop_retrying_row_with_stopped_at_utc_null_still_relevant(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+    let (open, _, _, _) = session_bounds(yesterday);
+
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?;
+    stop_run(&pool, run_id).await?; // run is genuinely STOPPED ...
+
+    // ... but the operation row never gets `stopped_at_utc` recorded --
+    // deliberately skip `record_autonomous_runtime_stopped`. Proves the
+    // release predicate's first, mandatory conjunct (`stopped_at_utc is not
+    // null`) alone gates release, independent of the bound run's own state.
+    let stale_id = seed_operation_for_date(&pool, "relopen-stop-retrying-null", yesterday).await;
+    let running = advance_to_running(&pool, stale_id, run_id, open).await?;
+    let stopping = advance_one(&pool, &running, STATE_STOPPING, open).await?;
+    let stop_retrying = advance_one(&pool, &stopping, STATE_STOP_RETRYING, open).await?;
+    assert_eq!(stop_retrying.state, STATE_STOP_RETRYING);
+
+    let current_id = seed_operation_for_date(&pool, "relopen-stop-retrying-null", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stop-retrying-null",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stop_retrying row with stopped_at_utc still null must remain unconditionally \
+         relevant and fail closed against the current running operation; got {result:?}"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stop_retrying_row_with_non_stopped_run_still_relevant(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    reset_reconcile_status_clean(&pool, Utc::now()).await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let run_id = Uuid::new_v4();
+    let (open, _, _, _) = session_bounds(yesterday);
+
+    insert_run(&pool, &new_run_fixture(run_id, open)).await?;
+    arm_run(&pool, run_id).await?;
+    begin_run(&pool, run_id).await?; // run stays RUNNING -- never durably STOPPED
+
+    let stale_id =
+        seed_stopped_stop_retrying_with_run(&pool, "relopen-stop-retrying-nonstopped", yesterday, run_id)
+            .await?;
+
+    let current_id =
+        seed_operation_for_date(&pool, "relopen-stop-retrying-nonstopped", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stop-retrying-nonstopped",
+        current_ts,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a stop_retrying row whose bound run is not durably STOPPED must remain relevant and \
+         fail closed against the current running operation; got {result:?}"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    cleanup_run(&pool, run_id).await;
     Ok(())
 }
 

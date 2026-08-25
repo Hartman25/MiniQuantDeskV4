@@ -265,7 +265,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use autonomous_daily_operations::{autonomous_daily_operation, autonomous_daily_operations};
-    use autonomous_daily_operator::autonomous_daily_operation_retry;
+    use autonomous_daily_operator::{
+        autonomous_daily_operation_finalize_stale, autonomous_daily_operation_retry,
+    };
     use autonomous_paper_status::autonomous_paper_status;
     use backtests::{
         backtest_economics_suggestion, backtest_job_status, backtest_job_submit, backtest_jobs_list,
@@ -905,6 +907,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/autonomous/daily-operation/retry",
             post(autonomous_daily_operation_retry),
+        )
+        // AUTONOMOUS-DAILY-STALE-EVIDENCE-DEGRADED-FINALIZATION-01: narrow,
+        // explicit operator finalization of a PRIOR-DAY operation stuck in
+        // `evidence_degraded` with `stopped_at_utc` already set, whose own
+        // coordinator tick can never reach it once another day's operation
+        // makes it "ambiguous" which operation is relevant. Calls the exact
+        // same finalization codepath ordinary ticks use. Never starts the
+        // runtime, never arms, never clears halt/kill-switch/reconcile
+        // authority, never submits orders, and is structurally refused
+        // unless the target operation's own session window has already
+        // closed (never today's live operation).
+        .route(
+            "/api/v1/autonomous/daily-operation/finalize-stale",
+            post(autonomous_daily_operation_finalize_stale),
         )
         .merge(control::router())
         .layer(axum::middleware::from_fn_with_state(

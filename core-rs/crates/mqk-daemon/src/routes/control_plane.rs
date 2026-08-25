@@ -1218,6 +1218,399 @@ pub(crate) async fn ops_action(
             }
         }
 
+        // PAPER-SOAK-REPAIR-20260819-ORPHANED-RUN-RECOVERY-01: safely stop a
+        // durable ARMED/RUNNING run left behind by a crashed/rebooted daemon
+        // process (no local runtime owner), but only when the same
+        // unacked-outbox/reconcile evidence the autonomous coordinator itself
+        // already trusts for this exact question is clean.
+        //
+        // Gate sequence (fail-closed):
+        //   1. DB required.
+        //   2. `fetch_active_run_for_engine` must find an ARMED/RUNNING run
+        //      for this engine+mode — nothing to recover otherwise.
+        //   3. This daemon process must not currently own ANY local
+        //      execution-loop run — this action is for the cold,
+        //      no-local-runtime-at-all case only; a live daemon with its own
+        //      active run must use stop-system, never this shortcut.
+        //   4. `stop_run_if_evidence_clean` — atomically (single transaction,
+        //      `runs` row locked FIRST via `SELECT ... FOR UPDATE`): no
+        //      active runtime lease, zero unacked outbox rows, zero
+        //      unapplied inbox rows, and a clean global reconcile status, or
+        //      refuse with zero mutation. The local-ownership check in step
+        //      3 is only process-local evidence; the lease check inside
+        //      `stop_run_if_evidence_clean` independently proves no other
+        //      (possibly stale/partitioned) runtime process could still
+        //      claim/dispatch for this run before committing STOPPED
+        //      (PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01).
+        //
+        // Never touches `sys_autonomous_daily_operations` — the existing
+        // coordinator (`reconcile_durable_run_without_local_owner`, reached
+        // from `handle_running`/`handle_session_close`/the
+        // `controller_degraded` tick arm) already re-derives the operation's
+        // own legal next state from the run's durable status on its very
+        // next tick once this action lands.
+        "recover-orphaned-run" => {
+            let env_label = st.deployment_mode().as_api_label().to_string();
+
+            // PAPER-SOAK-ORPHAN-RECOVERY-PAPER-SCOPE-01: paper-only, gated
+            // first, before any DB lookup/mutation -- mirrors the
+            // flatten-paper-positions Paper-only convention (Gate 1 there).
+            if !matches!(st.deployment_mode(), DeploymentMode::Paper) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "not_paper_mode".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "recover-orphaned-run is paper-only; current mode is '{}'",
+                            env_label
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            let Some(db) = st.db.as_ref() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "db_unavailable".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec!["recover-orphaned-run requires a DB connection"
+                            .to_string()],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            let _op = st.lifecycle_guard().await;
+
+            let active = match mqk_db::fetch_active_run_for_engine(
+                db,
+                DAEMON_ENGINE_ID,
+                st.deployment_mode().as_db_mode(),
+            )
+            .await
+            {
+                Ok(Some(run)) => run,
+                Ok(None) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(OperatorActionResponse {
+                            requested_action: "recover-orphaned-run".to_string(),
+                            accepted: false,
+                            disposition: "no_active_run".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![
+                                "No ARMED/RUNNING run found for this engine and mode; nothing \
+                                 to recover."
+                                    .to_string(),
+                            ],
+                            warnings: vec![],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                            captured_baseline: None,
+                        }),
+                    )
+                        .into_response();
+                }
+                Err(err) => {
+                    return runtime_error_response(RuntimeLifecycleError::internal(
+                        "recover_orphaned_run active-run lookup failed",
+                        err,
+                    ))
+                }
+            };
+
+            let run_id = active.run_id;
+
+            if st.locally_owned_run_id().await.is_some() {
+                info!(
+                    run_id = %run_id,
+                    "ops/action recover-orphaned-run refused: this daemon owns a local \
+                     execution-loop run"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "local_execution_loop_active".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![
+                            "runtime.recover_orphaned_run.local_execution_loop_active: this \
+                             daemon process currently owns a local execution-loop run; \
+                             recover-orphaned-run is only for the cold, no-local-runtime case. \
+                             Use stop-system to stop a run this process actually owns."
+                                .to_string(),
+                        ],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            match mqk_db::stop_run_if_evidence_clean(db, run_id, Utc::now()).await {
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::Stopped) => {
+                    info!(run_id = %run_id, "ops/action recover-orphaned-run: stopped");
+                    let audit_uuid = write_operator_audit_event(
+                        &st,
+                        Some(run_id),
+                        "run.recover_orphaned",
+                        "STOPPED",
+                    )
+                    .await
+                    .ok()
+                    .flatten();
+                    let _ = st.bus.send(BusMsg::LogLine {
+                        level: "INFO".to_string(),
+                        msg: format!(
+                            "ops/action: orphaned run {run_id} stopped (zero unacked outbox, \
+                             clean reconcile); the autonomous coordinator will reconcile its \
+                             own daily operation on its next tick"
+                        ),
+                    });
+                    let mut durable_targets = vec!["runs".to_string()];
+                    if audit_uuid.is_some() {
+                        durable_targets.push("audit_events".to_string());
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(OperatorActionResponse {
+                            requested_action: "recover-orphaned-run".to_string(),
+                            accepted: true,
+                            disposition: "orphaned_run_stopped".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![],
+                            warnings: vec![
+                                "Orphaned run stopped. The autonomous daily coordinator will \
+                                 reconcile its bound daily operation to a legal next state on \
+                                 its own next tick; no further manual action against \
+                                 sys_autonomous_daily_operations is required."
+                                    .to_string(),
+                            ],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: true,
+                                durable_targets,
+                                audit_event_id: audit_uuid.map(|id| id.to_string()),
+                            },
+                            pending_restart_intent: None,
+                            captured_baseline: None,
+                        }),
+                    )
+                        .into_response()
+                }
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::NotActive { actual_status }) => (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "run_not_active".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "Run {run_id} is in state '{actual_status}', not ARMED/RUNNING; a \
+                             concurrent transition already resolved it."
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response(),
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::ActiveRuntimeLease {
+                    holder_id,
+                    epoch,
+                    lease_expires_at,
+                }) => {
+                    // PAPER-SOAK-ORPHAN-RECOVERY-ATOMIC-FENCE-01: an
+                    // unexpired runtime leader lease is durable evidence a
+                    // runtime process (possibly stale/partitioned, not
+                    // necessarily this daemon) may still hold claim/dispatch
+                    // authority over this run -- "no local owner" on this
+                    // process is only process-local evidence. Zero mutation:
+                    // runs.status and the lease row are untouched.
+                    info!(
+                        run_id = %run_id,
+                        holder_id = %holder_id,
+                        epoch,
+                        lease_expires_at = %lease_expires_at.to_rfc3339(),
+                        "ops/action recover-orphaned-run refused: active runtime lease"
+                    );
+                    (
+                        StatusCode::CONFLICT,
+                        Json(OperatorActionResponse {
+                            requested_action: "recover-orphaned-run".to_string(),
+                            accepted: false,
+                            disposition: "active_runtime_lease".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![format!(
+                                "runtime.recover_orphaned_run.active_runtime_lease: run \
+                                 {run_id} still has an unexpired runtime leader lease \
+                                 (holder={holder_id}, epoch={epoch}, expires_at={}); a \
+                                 runtime process may still be able to claim/dispatch for it. \
+                                 Wait for it to release the lease (normal shutdown) or for the \
+                                 lease to expire (crashed process), then retry \
+                                 recover-orphaned-run.",
+                                lease_expires_at.to_rfc3339(),
+                            )],
+                            warnings: vec![],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                            captured_baseline: None,
+                        }),
+                    )
+                        .into_response()
+                }
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::UnacknowledgedOutbox {
+                    unacked_count,
+                }) => (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "unacknowledged_outbox".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "Run {run_id} has {unacked_count} unacked outbox row(s); an order \
+                             may still be in flight to or from the broker with no local runtime \
+                             left to resolve it. Refusing to present this run as stopped."
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response(),
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::UnappliedInbox {
+                    unapplied_count,
+                }) => (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "unapplied_inbox".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "Run {run_id} has {unapplied_count} unapplied inbox row(s); broker \
+                             evidence has been durably received but not yet applied. Refusing \
+                             to present this run as stopped."
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response(),
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::ReconcileDirty) => (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "recover-orphaned-run".to_string(),
+                        accepted: false,
+                        disposition: "reconcile_dirty".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "Run {run_id} is otherwise eligible, but the global broker/local \
+                             reconcile status is not currently clean (or has never been \
+                             recorded); refusing to present this run as safely stopped."
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response(),
+                Err(err) => runtime_error_response(RuntimeLifecycleError::internal(
+                    "stop_run_if_evidence_clean failed",
+                    err,
+                )),
+            }
+        }
+
         // OBS-SESSION-DISCORD-01: Operator test of Discord webhook delivery.
         //
         // Fires a clearly-labelled "[TEST]" notification to the configured webhook.
@@ -1680,8 +2073,10 @@ pub(crate) async fn ops_action(
                         ts_secs,
                         active_run_id,
                     );
-                match mqk_db::outbox_enqueue(db, active_run_id, &key, order_json).await {
-                    Ok(true) => {
+                match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &key, order_json)
+                    .await
+                {
+                    Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
                         info!(
                             run_id = %active_run_id,
                             symbol = %symbol,
@@ -1696,7 +2091,7 @@ pub(crate) async fn ops_action(
                             net_qty.abs()
                         ));
                     }
-                    Ok(false) => {
+                    Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {
                         info!(
                             run_id = %active_run_id,
                             symbol = %symbol,
@@ -1705,6 +2100,18 @@ pub(crate) async fn ops_action(
                         );
                         already_pending_symbols.push(symbol.clone());
                         warnings.push(format!("already_pending: symbol={symbol} key={key}"));
+                    }
+                    Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
+                        tracing::warn!(
+                            run_id = %active_run_id,
+                            symbol = %symbol,
+                            actual_status = %actual_status,
+                            "operator_flatten_close_run_not_running"
+                        );
+                        failed_symbols.push(symbol.clone());
+                        warnings.push(format!(
+                            "run_not_running: symbol={symbol} actual_status={actual_status}"
+                        ));
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -2141,7 +2548,7 @@ pub(crate) async fn ops_action(
                     "Unknown action_key '{}'; accepted keys: arm-execution, arm-strategy, \
                      disarm-execution, disarm-strategy, start-system, stop-system, kill-switch, \
                      request-mode-change, cancel-mode-transition, clear-halted-run, \
-                     test-discord-alert, flatten-paper-positions, \
+                     recover-orphaned-run, test-discord-alert, flatten-paper-positions, \
                      capture-account-equity-baseline",
                     body.action_key
                 )],
@@ -2203,6 +2610,33 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             .flatten()
             .map(|r| matches!(r.status, mqk_db::RunStatus::Halted))
             .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // PAPER-SOAK-REPAIR-20260819-ORPHANED-RUN-RECOVERY-01: check for a
+    // durable ARMED/RUNNING run with no local owner so the
+    // recover-orphaned-run catalog entry reflects real availability. Same
+    // pattern as has_halted_run above.
+    //
+    // PAPER-SOAK-ORPHAN-RECOVERY-PAPER-SCOPE-01: this action is paper-only
+    // (see the route handler's Paper-mode gate above) -- the query itself is
+    // skipped entirely for non-Paper mode so a Live run is never read merely
+    // to decide catalog availability.
+    let has_orphaned_active_run = if matches!(st.deployment_mode(), DeploymentMode::Paper) {
+        if let Some(db) = st.db.as_ref() {
+            let active = mqk_db::fetch_active_run_for_engine(
+                db,
+                DAEMON_ENGINE_ID,
+                st.deployment_mode().as_db_mode(),
+            )
+            .await
+            .ok()
+            .flatten();
+            active.is_some() && st.locally_owned_run_id().await.is_none()
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -2376,6 +2810,38 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
                     Some("Backend unavailable; cannot query for halted run state.".to_string())
                 } else {
                     Some("No halted run found; nothing to clear.".to_string())
+                }
+            } else {
+                None
+            },
+        },
+        // PAPER-SOAK-REPAIR-20260819-ORPHANED-RUN-RECOVERY-01: operator path
+        // to safely stop a crash/reboot-orphaned ARMED/RUNNING run (no local
+        // owner) without manual DB surgery, gated on zero unacked outbox and
+        // a clean reconcile status.
+        ActionCatalogEntry {
+            action_key: "recover-orphaned-run".to_string(),
+            label: "Recover Orphaned Run".to_string(),
+            level: 3,
+            description: "Stop a durable ARMED/RUNNING run left behind by a crashed or \
+                           rebooted daemon process, but only when it has zero unacked \
+                           outbox rows and a clean global reconcile status. Refuses if \
+                           this daemon currently owns a local execution-loop run."
+                .to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: stop orphaned run and allow fresh start".to_string(),
+            enabled: has_orphaned_active_run,
+            disabled_reason: if !matches!(st.deployment_mode(), DeploymentMode::Paper) {
+                Some("recover-orphaned-run is paper-only".to_string())
+            } else if !has_orphaned_active_run {
+                if st.db.is_none() {
+                    Some("Backend unavailable; cannot query for an orphaned active run."
+                        .to_string())
+                } else {
+                    Some(
+                        "No ARMED/RUNNING run without a local owner found; nothing to recover."
+                            .to_string(),
+                    )
                 }
             } else {
                 None

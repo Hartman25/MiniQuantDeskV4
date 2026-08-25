@@ -263,9 +263,15 @@ pub(crate) async fn execution_order_submit(
     }
 
     let order_json = validated.order_json();
-    match mqk_db::outbox_enqueue(db, active_run_id, &validated.client_request_id, order_json).await
+    match mqk_db::outbox_enqueue_for_running_run(
+        db,
+        active_run_id,
+        &validated.client_request_id,
+        order_json,
+    )
+    .await
     {
-        Ok(true) => manual_order_submit_response(
+        Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => manual_order_submit_response(
             StatusCode::OK,
             true,
             "enqueued",
@@ -273,7 +279,7 @@ pub(crate) async fn execution_order_submit(
             Some(active_run_id),
             vec![],
         ),
-        Ok(false) => {
+        Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {
             let mut blockers = vec![format!(
                 "client_request_id '{}' already exists; no new outbox row was created",
                 validated.client_request_id
@@ -295,6 +301,18 @@ pub(crate) async fn execution_order_submit(
                 validated.client_request_id,
                 Some(active_run_id),
                 blockers,
+            )
+        }
+        Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
+            manual_order_submit_response(
+                StatusCode::CONFLICT,
+                false,
+                "unavailable",
+                validated.client_request_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order submit refused: durable run status is '{actual_status}', not RUNNING"
+                )],
             )
         }
         Err(err) => manual_order_submit_response(
@@ -552,8 +570,10 @@ pub(crate) async fn execution_order_cancel(
         "target_order_id": order_id.clone(),
     });
 
-    match mqk_db::outbox_enqueue(db, active_run_id, &cancel_request_id, cancel_json).await {
-        Ok(true) => manual_order_cancel_response(
+    match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &cancel_request_id, cancel_json)
+        .await
+    {
+        Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => manual_order_cancel_response(
             StatusCode::OK,
             true,
             "enqueued",
@@ -561,7 +581,19 @@ pub(crate) async fn execution_order_cancel(
             Some(active_run_id),
             vec![],
         ),
-        Ok(false) => match mqk_db::outbox_fetch_by_idempotency_key(db, &cancel_request_id).await {
+        Ok(mqk_db::OutboxEnqueueOutcome::RunNotRunning { actual_status }) => {
+            manual_order_cancel_response(
+                StatusCode::CONFLICT,
+                false,
+                "unavailable",
+                order_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order cancel refused: durable run status is '{actual_status}', not RUNNING"
+                )],
+            )
+        }
+        Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => match mqk_db::outbox_fetch_by_idempotency_key(db, &cancel_request_id).await {
             Ok(Some(existing)) => {
                 let Some(existing_target_order_id) = existing
                     .order_json

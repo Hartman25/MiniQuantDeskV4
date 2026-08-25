@@ -322,7 +322,10 @@ pub async fn inbox_mark_applied(
 /// successfully applying each row, call `inbox_mark_applied`.
 ///
 /// Uses the partial index `idx_inbox_run_unapplied` for efficiency.
-pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<InboxRow>> {
+pub async fn inbox_load_unapplied_for_run(
+    pool: impl sqlx::PgExecutor<'_>,
+    run_id: Uuid,
+) -> Result<Vec<InboxRow>> {
     let rows = sqlx::query(
         r#"
         select inbox_id, run_id, broker_message_id, broker_fill_id,
