@@ -2366,12 +2366,18 @@ fixed in this session** — recording only, per mission scope. See
 `docs/audits/2026-08-24_branch_worktree_consolidation_audit.md` for the
 accompanying branch/worktree inventory from the same controller.*
 
-### DATA-READINESS-BAR-COVERAGE-AUTHORITY-01 — STATUS=CLOSED
+### DATA-READINESS-BAR-COVERAGE-AUTHORITY-01 — STATUS=LOCALLY COMPLETE — PENDING INDEPENDENT REVIEW
 
-*Closed by `PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER`, 2026-08-25, on
-temporary worktree `AppData/Local/Temp/MiniQuantDeskV4-paper-backend-wave-01`,
-branch `ledger-paper-backend-wave-01`, base `dc398721` (identical to the
-primary repo's accepted HEAD at wave start).*
+*Investigated and repaired by `PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-
+CONTROLLER`, 2026-08-25, on temporary worktree `AppData/Local/Temp/
+MiniQuantDeskV4-paper-backend-wave-01`, branch `ledger-paper-backend-
+wave-01`, base `dc398721` (identical to the primary repo's accepted HEAD at
+wave start). Independent review of that controller's own first production
+commit (`a511ab4c`) found one scope regression, corrected below by
+`PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01`. Per
+`audit_repo_truth_rules.md`, this remains `LOCALLY COMPLETE — PENDING
+INDEPENDENT REVIEW`, not `CLOSED`, until an independent reviewer accepts
+the repair below.*
 
 Observed truth (2026-08-24 forensic evidence, unchanged from the original
 recording below): 284 complete AAPL 5m Alpaca bars existed in storage;
@@ -2478,7 +2484,90 @@ driver_01::readiness_22_30_not_ready_blocks_regardless_of_reason` and
 warnings. `git diff --check` clean.
 
 Production commit: `a511ab4c` ("fix: release crash-orphaned running/
-recovery_retrying operations by run evidence"), on
+recovery_retrying operations by run evidence") — original implementation,
+independently reviewed below.
+
+#### Independent review finding and repair — `PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01`
+
+Independent review found `a511ab4c`'s run-evidence-gated carve-out had
+accidentally over-broadened REPAIR-2's generic bound-run-without-stop-
+evidence fallback clause (`run_id is not null and stopped_at_utc is null`)
+to *every* lifecycle state reaching it, not just the `running`/
+`recovery_retrying` pair the patch was scoped to. Concretely: a
+`manual_intervention_required` row whose bound `run.status` happened to be
+durably `'STOPPED'` (a distinct authority from
+`operation.stopped_at_utc is not null` — REPAIR-2's actual durable-stop-
+evidence contract) could silently lose relevance despite the operation
+itself never recording durable stop completion. `run.status = 'STOPPED'`
+and `operation.stopped_at_utc is not null` must never be conflated.
+
+**Repair** (`core-rs/crates/mqk-db/src/autonomous_daily_operation.rs`,
+`fetch_relevant_open_autonomous_daily_operation`): the fallback clause now
+reads `run_id is not null and stopped_at_utc is null and (state not in
+(running, recovery_retrying) or not RUN_SAFELY_TERMINAL)` — the
+run-evidence carve-out applies only to the two states it was designed for;
+every other state keeps the exact pre-`a511ab4c` REPAIR-2 guarantee
+unconditionally.
+
+**RED/GREEN proof**: `relevant_open_lookup_manual_intervention_row_with_
+safely_terminal_run_but_no_operation_stop_evidence_remains_relevant`
+(new) fails against `a511ab4c` (`left: None, right:
+Some(operation_id)`), reproducing the over-broadening exactly; passes
+after the repair. A second-relevant-row control in the same test proves
+the lookup still fails closed as ambiguous when two rows are genuinely
+relevant simultaneously. Three new tests
+(`relevant_open_lookup_stale_recovery_retrying_row_with_safely_terminal_
+run_is_released`, `relevant_open_lookup_recovery_retrying_row_with_
+active_run_still_blocks`, `relevant_open_lookup_recovery_retrying_row_
+with_stopped_run_but_unacked_outbox_still_blocks`) close a coverage gap
+`a511ab4c` itself left: it directly proved its new evidence-gated clause
+only for `running`, never for its sibling `recovery_retrying`, even though
+both share the identical query clause. All 63/63
+`scenario_autonomous_daily_operation_lifecycle_01` tests pass.
+
+**Integrated data-path closure proof** (new,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_phase_d_
+integration_01.rs`): two tests combine a crash-orphaned prior-day `running`
+operation (bound run durably `STOPPED`, zero unresolved outbox/inbox
+evidence, clean reconcile, outside its own window — seeded directly via
+`mqk_db::insert_run`/`arm_run`/`begin_run`/`stop_run` and the same
+transition-CAS chain the mqk-db fixtures use) with the real, unmodified
+production chain `phase_d_full_day_lifecycle` already exercises
+(`tick_autonomous_daily_coordinator` -> `tick_autonomous_completed_bar_
+driver_from_state`), for the exact same `(deployment_mode="PAPER",
+adapter_id="alpaca")` slot family the production lookup filters on
+(reuses this file's existing synthetic-symbol/mock-Alpaca-server fixture
+rather than a real network call, per this file's own "no real provider,
+broker, or network call" module contract — the invariant under proof,
+`fetch_relevant_open_autonomous_daily_operation`'s adapter/deployment-mode
+scoping, never reads symbol identity at all):
+- `phase_d_integrated_stale_running_row_releases_and_bar_chain_completes`:
+  the stale row does not create authority ambiguity; today's operation is
+  selected; `bars_observed` increments exactly once and `bars_dispatched`
+  increments exactly once for the dispatched bar; exactly one strategy
+  evaluation is recorded; a repeated tick is idempotent (zero duplication
+  of any of the three counters).
+- `phase_d_integrated_stale_running_row_with_active_run_fails_closed`
+  (integrated negative control): mutating only the stale row so its bound
+  run stays genuinely active (never calling `stop_run`) reproduces the
+  original defect's exact symptom — the coordinator still reaches
+  `running` for today's operation, but the completed-bar driver's
+  authority lookup fails closed with an ambiguity error at both the
+  preopen and running-dispatch stages; zero bars are dispatched
+  (`sum(bars_dispatched)` across the adapter slot stays `0`) and zero
+  strategy evaluations occur, proving the positive proof above is actually
+  exercising the new evidence-gated release rather than a fixture that
+  always succeeds.
+
+All 10/10 `scenario_autonomous_daily_phase_d_integration_01` tests pass
+(including the pre-existing, unmodified `phase_d_full_day_lifecycle`), and
+all 49/49 `scenario_autonomous_completed_bar_task_01` +
+`scenario_autonomous_completed_bar_driver_01` tests pass unchanged.
+`cargo check -p mqk-db` and `cargo check -p mqk-daemon` both clean, zero
+warnings. `git diff --check` clean.
+
+Production/test commit: `5346f90a2233b8cdf8ed1ff5f82f2aea974421d4` ("fix:
+scope stale running release to active states"), on
 `ledger-paper-backend-wave-01`, NOT merged into
 `ledger-closure-integration-01`, NOT pushed — pending independent review.
 
@@ -2688,6 +2777,53 @@ unattended exit recurs, capture the daemon's stdout/stderr log and any WER
 crash dump into the forensic archive immediately, before any consolidation/
 cleanup pass can prune it.
 
+**Source-path audit — completed by `PAPER-BACKEND-LEDGER-WAVE-01-
+INDEPENDENT-REVIEW-REPAIR-01` (PATCH G), 2026-08-25.** The exhaustive
+source-level audit the prior wave explicitly left unfinished is now
+complete: every candidate exit path the controlling mission named
+(`process::exit`, panic propagation from long-lived supervisor tasks,
+`JoinHandle` error propagation, `main`-returning fatal errors, shutdown
+signal/`select` branches, task supervisor exhaustion, launcher `Stop-
+Process`/`taskkill`/ownership cleanup, scheduled-task `ExecutionTimeLimit`/
+timeout/end-boundary behavior) was searched in `core-rs/**/*.rs` and
+`scripts/windows/*.ps1` and classified against the preserved forensic
+evidence above. Summary: `process::exit`/`process::abort` calls,
+background-task panic propagation, and `JoinHandle` propagation into
+`main()` are all `DISPROVEN` by source (zero occurrences; the workspace
+uses the Rust-default `panic = "unwind"`, so a background-task panic
+becomes a `JoinError`, never a process exit, confirmed by the existing
+`k01`/`k03`/`k05` completed-bar-task supervisor tests). The launcher/
+watchdog scripts are `DISPROVEN` as a cause — `Start-DaemonIfNeeded`
+(`Launch-VeritasLedger.ps1`) only ever reuses or refuses against an
+existing identity-verified daemon, never kills one; every `Stop-Process`/
+`Kill()` call in `scripts/windows/*.ps1` targets only a process the same
+script invocation itself just spawned. Two mechanisms remain genuinely
+`POSSIBLE_BUT_UNPROVEN`, consistent with every piece of preserved
+evidence but with no independent proof tying either to this specific
+timestamp: (1) `main()` (`mqk-daemon/src/main.rs`) returning `Err` from
+its one live `axum::serve(...).context("server crashed")?` call exits the
+process silently via the Rust runtime's own `Termination` handling — no
+panic, no WER entry, matching the evidence exactly; (2) `main.rs` only
+registers `tokio::signal::ctrl_c()` (`CTRL_C_EVENT`), never `ctrl_close`/
+`ctrl_logoff`/`ctrl_shutdown` — an unhandled Windows session/console-close
+event would silently bypass graceful shutdown entirely. One mechanism
+initially suspected as a strong candidate — the `MiniQuantDesk-Paper-
+Preopen-Startup` / health-watchdog scheduled tasks' `ExecutionTimeLimit
+= 1 hour` with `WakeToRun` (a previously-proven-dangerous pattern on this
+exact system, per `Start-MiniQuantDesk.ps1`'s own 2026-08-13 incident
+comment) — is classified `NOT_APPLICABLE to this specific window`: both
+tasks fire at fixed early-morning **local** clock times, and converting
+the preserved UTC sleep/wake evidence to this repository's own git-author
+timezone convention (`-1000`, Hawaii Standard Time) places the actual
+sleep/wake event in the early afternoon/evening local time, roughly ten
+hours away from either task's execution window. Full findings, evidence
+citations, and the complete classification table are in this wave's
+review bundle (`07_daemon_exit_complete_source_audit.md`). No deterministic
+causal proof was found for any candidate; **no production or script code
+was changed by this audit**, per the controlling mission's explicit
+prohibition on patching an unproven root cause. `DAEMON-EXIT-20260824`
+remains `UNKNOWN_NEEDS_PROOF`.
+
 ---
 
 ## 29. Paper Soak Repair Chain Integration
@@ -2748,18 +2884,21 @@ branch `ledger-paper-backend-wave-01`, base `dc398721` (the primary repo's
 accepted `ledger-closure-integration-01` HEAD, verified matching
 `origin/ledger-closure-integration-01` and unchanged throughout this wave).*
 
-- `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01`: `OPEN` -> `CLOSED`. Root cause
-  found and repaired (crash-orphaned `running`/`recovery_retrying`
-  operations had no evidence-gated release path, unlike the three sibling
-  states already fixed by the integrated paper-repair and oscillation-
-  closure chains); see §28's updated entry above for the full proof. One
-  production commit (`a511ab4c`).
+- `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01`: `OPEN` -> `LOCALLY COMPLETE
+  — PENDING INDEPENDENT REVIEW`. Root cause found and repaired
+  (crash-orphaned `running`/`recovery_retrying` operations had no
+  evidence-gated release path, unlike the three sibling states already
+  fixed by the integrated paper-repair and oscillation-closure chains);
+  see §28's updated entry above for the full proof. One production commit
+  (`a511ab4c`) — see §31 below for the independent-review repair that
+  followed on the same branch.
 - `DAEMON-EXIT-20260824`: remains `UNKNOWN_NEEDS_PROOF`. One new forensic
   finding added (a precise Windows Modern Standby sleep/wake window
   matching the daemon's tick-loop transition gap almost to the second,
   immediately preceding its disappearance); no production patch, per the
   controlling mission's explicit prohibition on patching an ambiguous root
-  cause. See §28's updated entry above.
+  cause. See §28's updated entry above; see §31 below for the completed
+  source-path audit that followed on the same branch.
 - No other Paper/backend ledger lines were found provably stale enough to
   correct in this same commit; the wave's scope was confined to the two
   named investigations per the controlling mission.
@@ -2778,4 +2917,43 @@ preserved for independent review.
 
 ---
 
-*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24), updated by PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER (2026-08-25).*
+## 31. Paper Backend Ledger Closure Wave — Independent Review Repair
+
+*Added by `PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01`,
+2026-08-25, same worktree/branch as §30
+(`AppData/Local/Temp/MiniQuantDeskV4-paper-backend-wave-01`,
+`ledger-paper-backend-wave-01`), continuing from §30's HEAD
+(`42ae95b4`). Repairs the `PARTIAL — REPAIR REQUIRED` finding an
+independent review returned against §30's own commits, without rebasing,
+amending, or squashing either of them.*
+
+- `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01`: `LOCALLY COMPLETE — PENDING
+  INDEPENDENT REVIEW` (unchanged label; the underlying fix is now
+  independently-review-repaired). Independent review found `a511ab4c`'s
+  run-evidence carve-out had over-broadened REPAIR-2's generic fallback
+  clause to every state instead of only `running`/`recovery_retrying`;
+  corrected by production/test commit `5346f90a2233b8cdf8ed1ff5f82f2aea
+  974421d4` (PATCH F). Full finding, RED/GREEN proof, coverage-gap
+  closure, and the new integrated stale-row -> bar -> observation ->
+  dispatch -> evaluation proof are recorded in §28's updated entry above.
+  Still `PENDING INDEPENDENT REVIEW` — this wave does not self-accept.
+- `DAEMON-EXIT-20260824`: remains `UNKNOWN_NEEDS_PROOF`. PATCH G completed
+  the exhaustive source-path audit §30 explicitly left unfinished (every
+  category the controlling mission named, searched and classified against
+  the preserved forensic evidence); no deterministic causal proof was
+  found for any candidate, so no production or script code was changed.
+  Full classification table in §28's updated entry above and in the review
+  bundle's `07_daemon_exit_complete_source_audit.md`.
+- No other ledger line was touched by this repair; scope was confined to
+  the two items the independent review named.
+
+Zero DB mutation, zero Paper session started, zero order submitted, zero
+Live routing touched; `smoke_logs/`/`.env.local` not modified;
+`git reset`/`git stash`/`git clean`/force-push not used; not pushed.
+
+Review bundle: `PAPER_BACKEND_LEDGER_CLOSURE_WAVE_01_REPAIR_REVIEW.zip`.
+Temp wave worktree preserved for independent review.
+
+---
+
+*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24), updated by PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER (2026-08-25), updated by PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01 (2026-08-25).*
