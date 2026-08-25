@@ -107,17 +107,34 @@ export async function postJson<T>(
         body: JSON.stringify(body),
       });
 
+      const contentType = response.headers.get("content-type") ?? "";
+
       if (!response.ok) {
+        // Preserve the daemon's structured error body (e.g. operator-action
+        // blockers/disposition on a 409) instead of collapsing every non-2xx
+        // response to a bare "HTTP <status>" string. Only attempt to parse
+        // when the response actually declares JSON, and never let a
+        // malformed/truncated body throw past this boundary -- a parse
+        // failure here still yields a truthful failure result, just without
+        // a structured body.
+        let errorData: T | undefined;
+        if (contentType.includes("application/json")) {
+          try {
+            errorData = (await response.json()) as T;
+          } catch {
+            errorData = undefined;
+          }
+        }
         lastFailure = {
           ok: false,
           endpoint: path,
           status: response.status,
+          data: errorData,
           error: `HTTP ${response.status}`,
         };
         continue;
       }
 
-      const contentType = response.headers.get("content-type") ?? "";
       const data = contentType.includes("application/json") ? ((await response.json()) as T) : undefined;
 
       return {

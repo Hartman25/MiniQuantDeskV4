@@ -1,0 +1,11 @@
+{
+  "_comment": "OPS-CLOUD-FAILOVER-PAPER-SCAFFOLD-01 example config. SCAFFOLD ONLY -- copy to config.local.json (gitignored, never commit a real one with real values) if/when a future OPS-CLOUD-FAILOVER-PAPER-01 program needs it. enabled MUST default false. No credentials belong in this file, ever.",
+  "enabled": false,
+  "provider": "",
+  "standby_endpoint": "",
+  "node_id": "",
+  "expected_git_sha": "",
+  "lease_backend": "",
+  "deployment_mode": "paper",
+  "live_capability_requested": false
+}

@@ -32,6 +32,7 @@ interface DaemonOperatorActionResponse {
   requested_action: string;
   accepted: boolean;
   disposition: string;
+  blockers?: string[];
   warnings?: string[];
   environment?: SystemStatus["environment"];
   audit?: {
@@ -47,13 +48,19 @@ function mapLegacyOperatorActionResponse(
   actionKey: string,
   response: EndpointPostResult<unknown>,
 ): OperatorActionReceipt | null {
-  if (!response.ok) return null;
-
   const payload = response.data as
     | Partial<OperatorActionReceipt & LegacyDaemonStatusSnapshot & LegacyIntegrityResponse>
     | DaemonOperatorActionResponse
     | undefined;
+
   if (!payload || typeof payload !== "object") {
+    if (!response.ok) {
+      // No parseable JSON body on a failed response (network error, non-JSON
+      // error page, or empty body). Let the caller's
+      // failedOperatorActionReceipt report a truthful failure -- never
+      // reinterpret a bodyless/malformed failure as success.
+      return null;
+    }
     return {
       ok: true,
       action_key: actionKey,
@@ -69,24 +76,24 @@ function mapLegacyOperatorActionResponse(
   if ("requested_action" in payload || "disposition" in payload) {
     const operatorPayload = payload as DaemonOperatorActionResponse;
     return {
-      ok: operatorPayload.accepted ?? true,
+      ok: operatorPayload.accepted ?? response.ok,
       action_key: operatorPayload.requested_action ?? actionKey,
       environment: operatorPayload.environment ?? "paper",
       live_routing_enabled: false,
-      result_state: operatorPayload.disposition ?? "accepted",
+      result_state: operatorPayload.disposition ?? (response.ok ? "accepted" : "refused"),
       warnings: operatorPayload.warnings ?? [],
       audit_reference: operatorPayload.audit?.audit_event_id ?? null,
-      blocking_failures: [],
+      blocking_failures: operatorPayload.blockers ?? [],
     };
   }
 
   if ("action_key" in payload || "result_state" in payload) {
     return {
-      ok: payload.ok ?? true,
+      ok: payload.ok ?? response.ok,
       action_key: payload.action_key ?? actionKey,
       environment: payload.environment ?? "paper",
       live_routing_enabled: payload.live_routing_enabled ?? false,
-      result_state: payload.result_state ?? "accepted",
+      result_state: payload.result_state ?? (response.ok ? "accepted" : "refused"),
       warnings: payload.warnings ?? [],
       audit_reference: payload.audit_reference ?? null,
       blocking_failures: payload.blocking_failures ?? [],
@@ -94,6 +101,7 @@ function mapLegacyOperatorActionResponse(
   }
 
   if ("armed" in payload || "active_run_id" in payload || "state" in payload) {
+    if (!response.ok) return null;
     return {
       ok: true,
       action_key: actionKey,
@@ -106,6 +114,10 @@ function mapLegacyOperatorActionResponse(
     };
   }
 
+  // Unrecognized-but-parseable JSON shape: never fabricate a blocker/
+  // disposition from a structure we don't understand. Let the caller's
+  // failedOperatorActionReceipt (on failure) or the raw success path handle
+  // it generically.
   return null;
 }
 
@@ -130,6 +142,11 @@ function failedOperatorActionReceipt(
     blockingFailures.push("Daemon refused operator action at the gate.");
   } else if (failure.status === 404) {
     blockingFailures.push(`Operator action endpoint missing for ${actionKey}.`);
+  } else if (failure.status === 409) {
+    resultState = "refused";
+    blockingFailures.push(
+      `Daemon refused operator action for ${actionKey} (409) with no recognizable blocker payload.`,
+    );
   } else if (failure.error) {
     blockingFailures.push(`Operator action failed: ${failure.error}`);
   } else {
