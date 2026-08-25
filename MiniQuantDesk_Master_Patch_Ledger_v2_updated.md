@@ -2366,23 +2366,121 @@ fixed in this session** — recording only, per mission scope. See
 `docs/audits/2026-08-24_branch_worktree_consolidation_audit.md` for the
 accompanying branch/worktree inventory from the same controller.*
 
-### DATA-READINESS-BAR-COVERAGE-AUTHORITY-01 — STATUS=OPEN
+### DATA-READINESS-BAR-COVERAGE-AUTHORITY-01 — STATUS=CLOSED
 
-Observed truth (2026-08-24 forensic evidence):
-- 284 complete AAPL 5m Alpaca bars existed in storage.
-- `bars_observed=0`, `bars_dispatched=0`, `strategy_evaluation_count=0`.
-- Bar-coverage authority reported `latest_completed_bar_pending` /
-  `unknown_incomplete_bar_coverage` despite the bars being complete on disk.
+*Closed by `PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER`, 2026-08-25, on
+temporary worktree `AppData/Local/Temp/MiniQuantDeskV4-paper-backend-wave-01`,
+branch `ledger-paper-backend-wave-01`, base `dc398721` (identical to the
+primary repo's accepted HEAD at wave start).*
 
-This is a confirmed data-readiness/bar-coverage contradiction and an OPEN
-trading-path blocker. Complete qualifying-looking bar data was physically
-present while the autonomous operation credited zero bars and readiness
-reported incomplete coverage. The exact defective component/root cause is
-UNKNOWN_NEEDS_PROOF; do not yet attribute it specifically to bar-coverage
-authority, provider/timeframe eligibility, provenance, scheduler state, or
-another seam. The `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` ID names the
-investigation scope, not a proven root component. Root cause not yet
-diagnosed in this session.
+Observed truth (2026-08-24 forensic evidence, unchanged from the original
+recording below): 284 complete AAPL 5m Alpaca bars existed in storage;
+`bars_observed=0`, `bars_dispatched=0`, `strategy_evaluation_count=0`; bar
+coverage authority reported `latest_completed_bar_pending` /
+`unknown_incomplete_bar_coverage` despite complete bars on disk.
+
+**Root cause, precisely stated (not bar-coverage/eligibility/provenance —
+the readiness gate itself worked correctly on 2026-08-24, confirmed by
+`market_open/phase3_running_transition.json`'s clean `preflight_blocked ->
+running` self-recovery once real bars caught up):**
+`fetch_relevant_open_autonomous_daily_operation` (`core-rs/crates/mqk-db/
+src/autonomous_daily_operation.rs`) failed closed every tick with
+`"4 equally authoritative active operations found"` because three prior-day
+`sys_autonomous_daily_operations` rows (2026-08-17 `evidence_degraded`,
+2026-08-18 `stopping`, 2026-08-19 `running`) had never reached a terminal
+state and stayed unconditionally relevant alongside 2026-08-24's own fresh
+row — so the completed-bar driver task could never determine which
+operation owned lifecycle authority, and every bar tick failed before a
+single bar could be credited (`diagnostics/CONFIRMED_BLOCKER_strategy_
+invocation_stale_operations.json`).
+
+Two of the three conflicting states (`stopping`, `evidence_degraded`, plus
+`stop_retrying`) were already given an evidence-gated release clause by the
+already-integrated `paper-soak-session-1-repair` chain (§29) and the
+`AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01` close-priority
+fix (above) — proven by 27/27 `relevant_open_lookup_*` tests passing clean
+against `dc398721` at the start of this wave, before any new production
+change. The third state, `running` (and its sibling `recovery_retrying`,
+reached via the identical code path), had **no release clause at all** —
+unconditionally relevant forever, identical to the pre-repair shape of the
+other three states.
+
+**This was not merely a historical 2026-08-24 artifact — it was live and
+reproducible in the current Paper DB at wave start**, verified read-only
+(zero mutation) against `mqk-paper-postgres`: operation `9cf72cd5`
+(`market_date=2026-08-19`, `state=running`, `run_id=254e89c3`) had its bound
+run durably `status='STOPPED'` with zero unacked `oms_outbox` rows, zero
+unapplied `oms_inbox` rows, and a clean `sys_reconcile_status_state` since
+`2026-08-24T12:03:46Z` — i.e. proven safe to release by the exact evidence
+standard already coded for the other three states — yet remained
+unconditionally relevant, one tick away from reproducing the identical
+`"N equally authoritative operations"` fail-closed block on the very next
+Paper session (2026-08-24's own operation, `40e97f92`, is independently and
+correctly still blocking on a genuine `HALTED` run needing operator
+attention — a second, unrelated, correctly-fail-closed row that would have
+collided with `9cf72cd5` the moment both were evaluated together).
+
+**Production patch**: extended the existing run-level safe-terminal evidence
+proof (`runs.status = 'STOPPED'`, zero unacked outbox, zero unapplied inbox,
+clean global reconcile) to gate `running`/`recovery_retrying`'s previously-
+unconditional relevance, and to the REPAIR-2 bound-run-without-stop-evidence
+fallback clause (which independently kept the same row relevant regardless
+of state). `controller_degraded` is unchanged and remains unconditionally
+relevant (a control-plane/process problem with no run-level evidence to
+gate on).
+
+**RED/GREEN proof**: `relevant_open_lookup_stale_running_row_with_safely_
+terminal_run_is_released` fails against the pre-patch query with the exact
+production error string (`"2 equally authoritative active operations
+found"`), reproducing the live defect deterministically; GREEN after the
+fix. Negative controls added: `relevant_open_lookup_running_row_with_
+active_run_still_blocks` (a genuinely still-active run must never release)
+and `relevant_open_lookup_running_row_with_stopped_run_but_unacked_outbox_
+still_blocks` (a stopped run with unresolved economic evidence must never
+release). All 59/59 `scenario_autonomous_daily_operation_lifecycle_01`
+tests pass (disposable `mqk_test`, port 5434, single-threaded to avoid the
+shared `sys_reconcile_status_state` singleton race across parallel tests in
+the same file — a pre-existing test-isolation property of that table, not a
+production defect).
+
+**Read-only re-verification against the live Paper DB after the fix**
+(query logic manually re-evaluated against current row state, zero
+mutation): with `running`/`recovery_retrying` evidence-gated, `9cf72cd5`
+(2026-08-19) now correctly releases; `6aaa0349` (2026-08-18, `stopping`) and
+`6e4606e8` (2026-08-17, `evidence_degraded`) already released cleanly
+before this patch; `40e97f92` (2026-08-24) correctly remains the sole
+relevant row, `HALTED`, requiring operator manual intervention — not a code
+defect. **Operational follow-up for the operator (not a code patch):**
+`40e97f92`'s `HALTED` run still needs an explicit operator decision before
+the next Paper session's coordinator can create a fresh day's operation;
+this is intentional fail-closed behavior per `broker_rules.md`/`CLAUDE.md`
+§4, not something this wave is authorized to clear.
+
+**Closure bar met**: durable valid complete bar -> readiness eligibility ->
+runtime observation -> dispatch -> strategy evaluation, proven by the
+pre-existing, unmodified `mqk-daemon`
+`m01_task_level_prepare_to_running_exactly_once` end-to-end test (real
+seeded `md_bars`, mock Alpaca server, real coordinator/driver/task code,
+zero shadow implementation): bar observed exactly once, dispatched exactly
+once, strategy evaluated exactly once, idempotent repeat, zero side
+effects. Negative controls `readiness_22_30_not_ready_blocks_regardless_
+of_reason` and `observation_34_db_evidence_failure_prevents_dispatch`
+(pre-existing, unmodified) confirm an invalid/not-ready bar still fails
+closed. All pass unchanged against this wave's fix.
+
+Focused tests: `scenario_autonomous_daily_operation_lifecycle_01` (59/59),
+`scenario_autonomous_completed_bar_task_01::m01_task_level_prepare_to_
+running_exactly_once` and `::f01_no_relevant_operation_creates_nothing_
+zero_db_writes_to_operations_table`, `scenario_autonomous_completed_bar_
+driver_01::readiness_22_30_not_ready_blocks_regardless_of_reason` and
+`::observation_34_db_evidence_failure_prevents_dispatch`. All green.
+`cargo check -p mqk-db` and `cargo check -p mqk-daemon` both clean, zero
+warnings. `git diff --check` clean.
+
+Production commit: `a511ab4c` ("fix: release crash-orphaned running/
+recovery_retrying operations by run evidence"), on
+`ledger-paper-backend-wave-01`, NOT merged into
+`ledger-closure-integration-01`, NOT pushed — pending independent review.
 
 ### AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01 — STATUS=CLOSED
 
@@ -2532,11 +2630,63 @@ without independent proof.
 
 ### DAEMON-EXIT-20260824 — STATUS=UNKNOWN_NEEDS_PROOF
 
-Observed: the daemon process disappeared without this closeout mission (or
-its immediate predecessor) issuing a kill. **No causal link to the
-stopping/evidence_degraded oscillation above is asserted** — the two are
-recorded as separate open items pending independent proof of any
-relationship.
+*Investigated (not closed) by `PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-
+CONTROLLER`, 2026-08-25. Adds one new, precisely-timestamped forensic
+finding below; does not change the status, per the mission's own closure
+bar (exact cause or a deterministic, reproduced source path required —
+neither is met).*
+
+Observed: the daemon process (`mqk-daemon.exe`, PID 40184) disappeared
+without this closeout mission (or its immediate predecessor) issuing a
+kill; confirmed absent by direct process enumeration immediately before any
+termination action would have been attempted (`patch-review-proof/
+PAPER_SOAK_2026-08-24_CLOSEOUT_REVIEW/14_processes_post_shutdown.txt`).
+
+**New finding (LIKELY, not CONFIRMED): the host machine entered Windows
+Modern Standby (sleep) for the exact window immediately preceding the
+daemon's disappearance.** Windows `Microsoft-Windows-Power-Troubleshooter`
+(Application event log) and `Microsoft-Windows-Kernel-General` (system time
+change) both record: Sleep Time `2026-08-24T22:50:09.036075200Z`, Wake Time
+`2026-08-25T03:12:24.388810800Z` (a 4h22m gap). Cross-referencing this
+against `sys_autonomous_daily_operation_events` for operation `40e97f92`
+(read-only, `mqk-paper-postgres`) shows the daemon's own stopping/
+evidence_degraded oscillation loop has a transition-timestamp gap of
+**exactly the same window**: transition #262 at `2026-08-24 22:50:24.989Z`,
+then transition #263 at `2026-08-25 03:12:35.006Z` (11 seconds after OS
+wake) — i.e. the daemon's tick loop was itself suspended for the full sleep
+duration and resumed normally immediately on wake. The daemon then
+continued ticking for almost exactly two more minutes (through transition
+#511 at `2026-08-25 03:14:34.317Z`) before going silent; no further DB
+writes, and the process was independently confirmed gone by the time of the
+closeout mission's process check shortly afterward.
+
+This is a precise temporal correlation, not a source-level proof: no daemon
+stdout/stderr log or crash dump survives from the actual exit window (the
+`exports\launcher\daemon_20260824_020338.stdout.log` file referenced by
+`diagnostics/CONFIRMED_BLOCKER_strategy_invocation_stale_operations.json`
+is not present in `smoke_logs/` or the forensic archive — likely rotated or
+never retained past the consolidation cleanup pass); no Windows Application
+Error / Windows Error Reporting event for `mqk-daemon.exe` exists in the
+Application log for 2026-08-24 (checked, zero matches), which argues
+against a hard OS-level fault (segfault/access violation) and toward either
+a clean self-exit shortly after resume (e.g. an unhandled error from a
+DB/WS connection that failed to survive the suspend/resume transition) or
+an OS-level termination that does not itself produce an Application Error
+record (e.g. Modern Standby connectivity-standby process management). No
+production patch is justified without the exact mechanism — implementing
+one now would be guessing, which the controlling mission explicitly
+forbids. **No causal link to the stopping/evidence_degraded oscillation
+above is asserted** beyond the fact that oscillation was the loop actively
+ticking through the sleep/wake boundary; the two remain separate open items.
+
+**Recommended next steps for a future session (not performed by this
+wave):** (a) confirm whether Windows Event Viewer / WER retains anything
+past its default retention for this window on this machine; (b) consider an
+operational mitigation (disable sleep/Modern Standby on this host during
+active Paper sessions) independent of any code change; (c) if a future
+unattended exit recurs, capture the daemon's stdout/stderr log and any WER
+crash dump into the forensic archive immediately, before any consolidation/
+cleanup pass can prune it.
 
 ---
 
@@ -2576,9 +2726,11 @@ decision/execution/strategy/pre-event-flatten regressions
 originally recorded here as `LIKELY_SAME_FAMILY_BUT_NOT_PROVEN` / `OPEN`,
 subsequently `CLOSED` by `AUTONOMOUS-DAILY-STOPPED-EVIDENCE-DEGRADED-CLOSE-
 PRIORITY-UNIFICATION-01-CONTROLLER` the same day (third pass).
-`DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` and `DAEMON-EXIT-20260824` are
-unchanged by that later session and remain `OPEN` /
-`UNKNOWN_NEEDS_PROOF` respectively.
+`DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` and `DAEMON-EXIT-20260824` were
+unchanged by that later session and remained `OPEN` / `UNKNOWN_NEEDS_PROOF`
+respectively at that time; see §30 below (`PAPER-BACKEND-LEDGER-CLOSURE-
+WAVE-01-CONTROLLER`, 2026-08-25) for the subsequent closure of the former
+and continued investigation of the latter.
 
 Review bundle:
 `Documents/MiniQuantDeskV4-Archive/2026-08-24/paper-repair-integration-review/PAPER_SOAK_REPAIR_INTEGRATION_REVIEW.zip`.
@@ -2588,4 +2740,42 @@ independent review.
 
 ---
 
-*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24).*
+## 30. Paper Backend Ledger Closure Wave (Data Readiness + Daemon Exit)
+
+*Added by `PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER`, 2026-08-25, on
+temporary worktree `AppData/Local/Temp/MiniQuantDeskV4-paper-backend-wave-01`,
+branch `ledger-paper-backend-wave-01`, base `dc398721` (the primary repo's
+accepted `ledger-closure-integration-01` HEAD, verified matching
+`origin/ledger-closure-integration-01` and unchanged throughout this wave).*
+
+- `DATA-READINESS-BAR-COVERAGE-AUTHORITY-01`: `OPEN` -> `CLOSED`. Root cause
+  found and repaired (crash-orphaned `running`/`recovery_retrying`
+  operations had no evidence-gated release path, unlike the three sibling
+  states already fixed by the integrated paper-repair and oscillation-
+  closure chains); see §28's updated entry above for the full proof. One
+  production commit (`a511ab4c`).
+- `DAEMON-EXIT-20260824`: remains `UNKNOWN_NEEDS_PROOF`. One new forensic
+  finding added (a precise Windows Modern Standby sleep/wake window
+  matching the daemon's tick-loop transition gap almost to the second,
+  immediately preceding its disappearance); no production patch, per the
+  controlling mission's explicit prohibition on patching an ambiguous root
+  cause. See §28's updated entry above.
+- No other Paper/backend ledger lines were found provably stale enough to
+  correct in this same commit; the wave's scope was confined to the two
+  named investigations per the controlling mission.
+
+Both investigations were conducted read-only against the live
+`mqk-paper-postgres` database (zero mutation — verified via `git status`-
+equivalent DB state comparison before/after) and read-only against Windows
+Event Viewer. No Paper session was started, no order was submitted, no
+Live routing was touched, and `smoke_logs/`/`.env.local` were not modified.
+
+Review bundle: `Documents/MiniQuantDeskV4-Archive/2026-08-24/
+paper-backend-ledger-wave-01-review/
+PAPER_BACKEND_LEDGER_CLOSURE_WAVE_01_REVIEW.zip`. Not pushed. Temp wave
+worktree (`AppData/Local/Temp/MiniQuantDeskV4-paper-backend-wave-01`)
+preserved for independent review.
+
+---
+
+*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24), updated by PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER (2026-08-25).*
