@@ -127,3 +127,67 @@ This applies to: `paper-soak-20260818`, `paper-soak-repair-20260819`,
 created in Patch C) is **not** a cleanup candidate — it is the active work
 product of this mission and remains until independently reviewed and
 disposed of by the operator.
+
+## Patch F corrections — 2026-08-24 (LEDGER-CLOSURE-CONSOLIDATION-REPAIR-02)
+
+Superseding corrections from a later mission on the same date. See
+`docs/audits/2026-08-24_branch_worktree_consolidation_audit.md` Section 4
+for the evidence behind each entry below. No worktree, branch, or file is
+deleted by this correction — buckets only.
+
+Moved from `MUST_PRESERVE` to `SAFE_AFTER_BRANCH_MERGED`:
+
+- `research-v2-factor-wave` branch + `MiniQuantDeskV4-research-v2` worktree
+  — merged into `ledger-closure-integration-01` (merge commit `254902a3`),
+  146 focused tests pass. Safe to delete only after
+  `ledger-closure-integration-01` itself is accepted and merged/pushed to
+  `main` — not before.
+- `gui-backtest-workbench` branch + `MiniQuantDeskV4-gui-backtest` worktree
+  — merged into `ledger-closure-integration-01` (merge commit `0df36eb0`),
+  300 focused tests + `tsc` + `cargo check -p mqk-gui` pass. Same
+  not-before-acceptance condition.
+
+Moved from `MUST_PRESERVE` to `SAFE_TO_DELETE_NOW` (re-verify ancestry
+immediately before deleting, per existing convention above):
+
+- `research-factor-v2` branch + `MiniQuantDeskV4-research-factor` worktree
+  — re-verified still byte-identical to `origin/main` (`edcda740`).
+
+Reclassified within `MUST_PRESERVE` (no bucket change, evidence updated):
+
+- `research-direct-rank-policy-01` branch + `MiniQuantDeskV4-direct-rank-policy`
+  worktree — an interim claim that this worktree was empty/clean at
+  `f0113f68` is **false**; it holds 5 unique committed commits (2984 lines)
+  predeclaring SHORT wave 03. Remains `UNFINISHED_PRESERVE`, unchanged
+  disposition, corrected evidence only.
+- `paper-soak-session-1-repair` branch + `MiniQuantDeskV4-soak-repair`
+  worktree — remains `UNFINISHED_PRESERVE`, still blocked on
+  `PAPER-SOAK-OUTBOX-ENQUEUE-RUN-STATE-FENCE-01`. Do not merge.
+- `review/ai-ml-local-lab-foundation-01` (remote) / `ai/ml-local-lab-foundation-01`
+  branch + `MiniQuantDeskV4-ai-lab` worktree — reclassified
+  `ARCHIVE_DONOR_DO_NOT_MERGE` per explicit operator decision (was
+  `UNKNOWN_NEEDS_PROOF`). Not deleted; future cleanup should bundle/archive
+  before removing refs.
+
+Moved from `MUST_PRESERVE` to `SAFE_AFTER_UNIQUE_COMMIT_AUDIT` (audit now
+complete — see Section 4 of the branch/worktree audit for the diff proof):
+
+- `codex/audit-last-two-patches-and-fix-stuck-state` (remote-only) —
+  reclassified `SUPERSEDED_SAFE_TO_ARCHIVE_DELETE`. Its one unique commit's
+  fix (`inject_running_loop_for_test` shutdown-hang) is already present
+  verbatim in integration HEAD, which has evolved further since. No unique
+  behavior remains.
+
+New: detached-HEAD worktree disposition (previously one blanket
+`MUST_PRESERVE` line; now split — see audit Section 4 table):
+
+- `SAFE_TO_REMOVE_AFTER_CONSOLIDATION_ACCEPTANCE`: `MiniQuantDeskV4-autofresh`,
+  `-data`, `-mcp`, `-retry` (clean, HEAD ancestor of both `origin/main` and
+  integration HEAD).
+- Remains `MUST_PRESERVE`: `MiniQuantDeskV4-integration`, `-ops` (untracked
+  `.playwright-mcp/` / `smoke_logs/` residue needs review/archival first,
+  even though the commit itself is a fully-subsumed ancestor).
+
+`smoke_logs/` wherever it appears (primary repo and any worktree, tracked
+or untracked) remains `PROTECTED_NEVER_CLEAN` — never delete/reset/clean,
+including as part of any future detached-worktree removal above.

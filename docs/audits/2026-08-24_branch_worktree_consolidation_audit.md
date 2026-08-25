@@ -155,3 +155,106 @@ this controller:
 `research-v2-factor-wave` is explicitly **not** merged in this controller —
 its "already in main" premise did not hold and it requires a separate
 operator decision.
+
+## 4. Patch F corrections — 2026-08-24 (LEDGER-CLOSURE-CONSOLIDATION-REPAIR-02)
+
+This controller (a later mission on the same date) merged the two branches
+the prior audit above left as `UNKNOWN_NEEDS_PROOF`, resolved the resilience
+validation ambiguity, and closed the `EMPTY_INTERRUPTED_WORKTREE` /
+`STALE_REQUIRES_UNIQUE_COMMIT_AUDIT` items named in its mission. Superseding
+corrections only — Section 1–3 above stand as the historical record of what
+was true at that earlier point in time.
+
+### `research-v2-factor-wave` — 0d6bf957
+- **Corrected classification: `MERGED_ACCEPTED`.** Verified
+  `origin/research-v2-factor-wave` == `0d6bf957d47311708feadf8a1c870abd1ef6fa89`
+  exactly; merge-base with integration HEAD = `origin/main`. Merged with
+  `git merge --no-ff` (merge commit `254902a3`), zero conflicts. Focused
+  suite (`test_factor_contract_identity/diagnostics/exposure/fdr/
+  null_controls/registry/universe.py` + `test_exp_distributed.py`, the
+  direct test for the modified `exp_distributed/storage.py`): **146 passed**.
+
+### `gui-backtest-workbench` — 15aef54b
+- **Corrected classification: `MERGED_ACCEPTED`.** Verified
+  `origin/gui-backtest-workbench` == `15aef54b43b93436f563e7eb980cb2e3455398df`
+  exactly; merge-base with integration HEAD (post Factor-V2 merge) =
+  `origin/main`. Merged with `git merge --no-ff` (merge commit `0df36eb0`),
+  zero conflicts. `npm ci` + focused test run (`backtests/__tests__/
+  {parsers,api,pathHelpers}.test.ts`): **300 passed**. `tsc --noEmit`: clean.
+  `cargo check -p mqk-gui` (Tauri Rust seam, `lib.rs` was touched by this
+  branch): clean.
+
+### `pre-soak-resilience-wave-01` resilience-test ambiguity — resolved
+- Prior controller's report of `test_offsite_b2_workflow.ps1` "11 failures"
+  attributed to missing real B2 credentials is **not reproduced**. Ran the
+  full transcript under Windows PowerShell 5.1 against both the original
+  worktree (`MiniQuantDeskV4-pre-soak-resilience`) and the integration
+  worktree (`ledger-closure-integration-01`, post-merge): **identical
+  result on both — "All proofs held. 0 violations." exit 0.**
+  Environment at time of this run: `restic 0.19.1` installed,
+  `docker 29.5.3` available, `mqk-test-postgres` container already up (no
+  disposable dependency needed to be started).
+- **Classification: `ENVIRONMENT_PREREQUISITE_MISSING`** (not
+  `PRE_EXISTING_ACCEPTED_BRANCH_FAILURE`, not `INTEGRATION_REGRESSION`, not
+  `TEST_DEFECT`). The test's own contract (Section 3 docstring) confirms the
+  local-restic end-to-end proof is the functional acceptance gate, and real-B2
+  credentials are a separate, explicitly-deferred operational proof — the
+  prior "credentials" framing conflated the two. No code defect found; no
+  repair performed on the accepted branch.
+
+### `research-direct-rank-policy-01` — contradiction resolved
+- A later interactive inventory in this mission's chain claimed this
+  worktree was "completely clean" at `f0113f68` (== `research-short-wave-02`
+  tip, i.e. empty/interrupted). **That claim is false.** Re-verified
+  directly: `HEAD` = `46aa8ecbe5a23ab503cb26f6492dcccab6c49979`, branch
+  `research-direct-rank-policy-01`, working tree clean (no untracked files),
+  **5 unique committed commits** on top of `f0113f68`
+  (`93a6e76a`..`46aa8ecb`: dynamic cross-sectional rank policy, trial-identity
+  binding, broad-universe snapshot identity, and a predeclared SHORT wave 03),
+  **2984 lines of tracked diff** across 10 files.
+- **Classification: `UNFINISHED_PRESERVE`** (unchanged from the prior
+  audit's Section 1 entry — the interim "clean" claim was incorrect and is
+  superseded by this direct verification).
+
+### AI/ML lab — `ai/ml-local-lab-foundation-01` / `review/ai-ml-local-lab-foundation-01`
+- **Corrected classification: `ARCHIVE_DONOR_DO_NOT_MERGE`** (was
+  `UNKNOWN_NEEDS_PROOF`). Per explicit prior operator decision (mission
+  instruction, not re-derived here): historical donor/reference material
+  only, not to be merged into current development. Not deleted — future
+  cleanup should bundle/archive before removing refs.
+
+### `codex/audit-last-two-patches-and-fix-stuck-state` — 3079a10e
+- **Corrected classification: `SUPERSEDED_SAFE_TO_ARCHIVE_DELETE`** (was
+  `STALE_REQUIRES_UNIQUE_COMMIT_AUDIT`). Its single unique commit ("Fix
+  daemon cancel proof test shutdown hang") changes
+  `core-rs/crates/mqk-daemon/src/state.rs`'s `inject_running_loop_for_test`
+  from an unconditional 24h sleep to a `tokio::select!` that also races a
+  `stop_rx.changed()` signal. Diffed against integration HEAD
+  (`core-rs/crates/mqk-daemon/src/state.rs:5205-5218`): **the identical
+  `tokio::select!`-with-`stop_rx.changed()` shape is already present**, and
+  integration has since evolved further (an added
+  `leadership_release_outcome: None` field on both arms that the codex
+  branch predates). The shutdown-hang behavior this commit fixed is fully
+  superseded by current integration semantics; no unique behavior remains
+  to review.
+
+### Detached-HEAD worktrees — re-classified individually
+The prior audit grouped all six under one `MUST_PRESERVE` line. Re-verified
+each independently against both `origin/main` and integration HEAD
+(`0df36eb0`):
+
+| Worktree | HEAD | Tracked | Untracked | Ancestor of origin/main | Ancestor of integration HEAD | Classification |
+|---|---|---|---|---|---|---|
+| `-autofresh` | `e63a3170` | clean | none | YES | YES | `SAFE_TO_REMOVE_AFTER_CONSOLIDATION_ACCEPTANCE` |
+| `-data` | `e63a3170` | clean | none | YES | YES | `SAFE_TO_REMOVE_AFTER_CONSOLIDATION_ACCEPTANCE` |
+| `-mcp` | `38f074a9` | clean | none | YES | YES | `SAFE_TO_REMOVE_AFTER_CONSOLIDATION_ACCEPTANCE` |
+| `-retry` | `e63a3170` | clean | none | YES | YES | `SAFE_TO_REMOVE_AFTER_CONSOLIDATION_ACCEPTANCE` |
+| `-integration` | `e63a3170` | clean | `.playwright-mcp/`, `smoke_logs/` | YES | YES | `PRESERVED_WORKTREES` — untracked residue needs review/archival before removal |
+| `-ops` | `e63a3170` | clean | `smoke_logs/` | YES | YES | `PRESERVED_WORKTREES` — untracked residue needs review/archival before removal |
+
+### `research-factor-v2` (local branch + `MiniQuantDeskV4-research-factor` worktree)
+- Re-verified per the prior audit's caveat: `HEAD` = `edcda740` still
+  exactly equals `origin/main` (main has not advanced past this since the
+  prior audit — Patch A of this mission restored primary `main` to
+  `origin/main` exactly). Zero unique commits.
+- **Classification: `SAFE_TO_REMOVE_AFTER_CONSOLIDATION_ACCEPTANCE`.**
