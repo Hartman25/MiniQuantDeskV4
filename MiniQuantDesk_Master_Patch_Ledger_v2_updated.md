@@ -2386,16 +2386,89 @@ diagnosed in this session.
 
 ### AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01 — STATUS=OPEN
 
-Observed truth (2026-08-24 forensic evidence):
-- The terminal underlying autonomous daily run repeatedly oscillated between
-  `stopping` and `evidence_degraded` states — hundreds of transition rows.
-- The daily operation failed to settle into a terminal state.
+*Updated by `LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER`, 2026-08-24
+(second pass, same day). See §29 below for the integration this equivalence
+audit was run against.*
 
-Root cause not yet diagnosed in this session. Related but not proven
-identical to the previously-closed `PAPER-SOAK-SESSION-WATCH-01`
-stale-operation defect (see memory `project_paper_soak_session_watch_01_stale_operation_defect.md`
-in the operator's persistent notes) — do not assume identity between the
-two without independent proof.
+Observed truth (2026-08-24 forensic evidence, operation
+`40e97f92-e47b-5092-9b29-c82451477372`, run `1dd771f5-aeec-59f4-9243-fbd212768068`):
+- The terminal underlying autonomous daily run repeatedly oscillated between
+  `stopping` and `evidence_degraded` states — 371 transition rows total,
+  ~326 of them from this loop over ~6.5 hours, reason code
+  `unknown_incomplete_bar_coverage` on every `evidence_degraded` cycle and
+  detail text `"durable run already terminal at reconciliation time; no
+  local runtime to stop"` on every `stopping` cycle.
+- The underlying `runs` row (`1dd771f5-...`) was `HALTED` (kill-switch/
+  integrity halt), not a clean `STOPPED` transition; `stopped_at_utc` is
+  `NULL` on the run row even though the *operation* row's own
+  `stopped_at_utc` was set (2026-08-24 20:43:46 UTC) — the two are distinct
+  fields and only the operation's own `stopped_at_utc` gates the repair.
+- Source: `PAPER_SOAK_2026-08-24_CLOSEOUT_REVIEW/06_autonomous_operation_db_truth.txt`
+  and `07_run_lifecycle_db_truth.txt` under
+  `Documents/MiniQuantDeskV4-Archive/2026-08-24/patch-review-proof/`.
+
+Equivalence audit result: **LIKELY_SAME_FAMILY_BUT_NOT_PROVEN** (not
+`EXACT_DEFECT_ALREADY_REPAIRED`) against the merged
+`paper-soak-session-1-repair` chain (§29). The exact August 24 dispatcher
+edge is conclusively identified and closed:
+
+- `dispatch_by_state`'s D2.17 close-priority gate
+  (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`,
+  `evidence_degraded_already_stopped` at the top of the function) now exempts
+  exactly this shape (`evidence_degraded` + operation `stopped_at_utc`
+  set) from being routed into `handle_session_close` ->
+  `reconcile_durable_run_without_local_owner`, whose literal detail string
+  (`"durable run already terminal at reconciliation time; no local runtime
+  to stop"`) matches the forensic evidence verbatim — confirming this was
+  the exact edge that fired on 2026-08-24.
+- A same-session negative control on the integrated tree proved this: with
+  `evidence_degraded_already_stopped` mutated to `false` (`&& false` short-
+  circuit prepended), `scenario_autonomous_daily_stopping_evidence_degraded_oscillation_01::t1`
+  RED-failed by reproducing the exact old transition (`outcome ==
+  RuntimeStopped`, `state == "stopping"`); the mutation was fully reverted
+  (`git diff` against HEAD confirmed empty) and GREEN re-confirmed all 4
+  tests passing.
+
+However, the same exemption was applied at only **one** of at least three
+close-priority gates in this file that route toward
+`handle_session_close`/`stopping` once `now_utc >=
+effective_operation_close_utc`:
+
+1. `dispatch_by_state` (line ~1938) — **exempted** (the fix).
+2. `reconcile_existing_operation_against_relevant_lookup` (line ~676) — used
+   only when current-tick calendar/assignment/registry/runtime-context
+   resolution fails, or on a nontrading-day reconciliation
+   (`resolve_or_degrade_on_resolution_failure`,
+   `resolve_or_reconcile_on_nontrading_day`) — **not exempted**;
+   `evidence_degraded` is absent from its own close-priority allow-list, so
+   an `evidence_degraded_already_stopped` operation hit by a resolution
+   failure past close would still be routed into `handle_session_close` ->
+   `stopping` on that tick.
+3. `apply_coverage_blocker`'s own close-priority check (line ~1049, inside
+   `ensure_coverage_authority`, which runs on **every** coordinator tick for
+   every state, strictly before `dispatch_by_state`) — **not exempted**
+   either; same missing `evidence_degraded` allow-list entry. In practice
+   this path is only reached when `check_coverage_authority` returns
+   anything other than `Compatible`, which a stable, already-anchored
+   operation (as August 24's was, 20 start attempts in) would not trigger —
+   this is why it did not fire on August 24 — but it is a live route for a
+   coverage-anchor conflict/unreadable/missing-after-activity case.
+
+Neither alternate route was exercised by the accepted repair's own test
+suite (`scenario_autonomous_daily_stopping_evidence_degraded_oscillation_01`
+only drives `dispatch_by_state` directly) and neither is proven safe or
+unsafe by this session — this mission is not authorized to diagnose or
+patch them (`LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER` scope:
+equivalence audit only, no new production behavior). A future session
+should determine whether either alternate gate is reachable for an
+`evidence_degraded_already_stopped` operation under realistic conditions
+and, if so, apply the same exemption there.
+
+Still related but not proven identical to the previously-closed
+`PAPER-SOAK-SESSION-WATCH-01` stale-operation defect (see memory
+`project_paper_soak_session_watch_01_stale_operation_defect.md` in the
+operator's persistent notes) — do not assume identity between the two
+without independent proof.
 
 ### DAEMON-EXIT-20260824 — STATUS=UNKNOWN_NEEDS_PROOF
 
@@ -2407,4 +2480,51 @@ relationship.
 
 ---
 
-*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24).*
+## 29. Paper Soak Repair Chain Integration
+
+*Added by `LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER`, 2026-08-24
+(same day, second pass after §28's consolidation).*
+
+`paper-soak-session-1-repair` = INDEPENDENTLY ACCEPTED — PUSHED — INTEGRATED
+LOCALLY into `ledger-closure-integration-01` (not pushed; awaiting
+independent review).
+
+- Repair tip: `8dd9ba3ff1f9f0082db370bb5a6e66930ef2fb7b` ("fix: fence outbox
+  enqueue on running run").
+- Pre-merge spine HEAD: `828af6ed09303bb5ed7f51585a0a2f9676eef414`.
+- Merge commit: `4d7aafca4a6a0a3c39e8b704fe2979eab5f2125e` (`--no-ff`, two
+  parents, clean — zero conflicts; merge-base with the repair branch was
+  `edcda740b2f05fbe8a2657f2301b8ea373efb4b6`, i.e. both branches shared the
+  same frozen `main` ancestor).
+- Files touched: confined to `core-rs/crates/mqk-db/` and
+  `core-rs/crates/mqk-daemon/` (decision/execution/strategy routes,
+  control_plane, autonomous_daily_coordinator, runs/orders/inbox/
+  reconcile_state) plus new/extended scenario test files in both crates. No
+  Research/GUI/resilience file was touched.
+- Paper repair known deterministic defects: NONE found this session.
+
+Combined acceptance boundary (disposable `mqk_test` DB on port 5434, reset
+via `scripts/reset-mqk-testdb.ps1` to clear a stale sqlx migration-checksum
+error before running): `cargo check -p mqk-db` and `cargo check -p
+mqk-daemon` both clean; every scenario/prover test file named in the
+controlling mission passed with zero failures, plus the direct
+decision/execution/strategy/pre-event-flatten regressions
+(`scenario_execution_flow_flow01`, `scenario_internal_strategy_decision`,
+`scenario_runtime_strategy_conflict_api_01`, `scenario_pre_event_flatten_01`,
+`scenario_strategy_decision_idempotency_01`). See §28's updated
+`AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01` entry above for
+the equivalence audit this integration was run against
+(`LIKELY_SAME_FAMILY_BUT_NOT_PROVEN` — kept `OPEN`).
+`DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` and `DAEMON-EXIT-20260824` are
+unchanged by this integration and remain `OPEN` /
+`UNKNOWN_NEEDS_PROOF` respectively.
+
+Review bundle:
+`Documents/MiniQuantDeskV4-Archive/2026-08-24/paper-repair-integration-review/PAPER_SOAK_REPAIR_INTEGRATION_REVIEW.zip`.
+Not pushed. Temp repair worktree
+(`AppData/Local/Temp/MiniQuantDeskV4-paper-repair-final`) preserved for
+independent review.
+
+---
+
+*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24).*
