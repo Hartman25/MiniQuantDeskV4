@@ -2358,4 +2358,47 @@ This chain is separate from, and does not gate, the currently-running **supervis
 
 ---
 
-*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17).*
+## 28. Post-Soak Blockers Recorded During Ledger-Closure Consolidation
+
+*Added by `LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER`, 2026-08-24. Recorded from
+preserved 2026-08-24 forensic evidence per the controlling mission. **Not
+fixed in this session** — recording only, per mission scope. See
+`docs/audits/2026-08-24_branch_worktree_consolidation_audit.md` for the
+accompanying branch/worktree inventory from the same controller.*
+
+### DATA-READINESS-BAR-COVERAGE-AUTHORITY-01 — STATUS=OPEN
+
+Observed truth (2026-08-24 forensic evidence):
+- 284 complete AAPL 5m Alpaca bars existed in storage.
+- `bars_observed=0`, `bars_dispatched=0`, `strategy_evaluation_count=0`.
+- Bar-coverage authority reported `latest_completed_bar_pending` /
+  `unknown_incomplete_bar_coverage` despite the bars being complete on disk.
+
+This is a bar-coverage-authority defect: the readiness gate did not
+recognize complete, present bar data as complete. Root cause not yet
+diagnosed in this session.
+
+### AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01 — STATUS=OPEN
+
+Observed truth (2026-08-24 forensic evidence):
+- The terminal underlying autonomous daily run repeatedly oscillated between
+  `stopping` and `evidence_degraded` states — hundreds of transition rows.
+- The daily operation failed to settle into a terminal state.
+
+Root cause not yet diagnosed in this session. Related but not proven
+identical to the previously-closed `PAPER-SOAK-SESSION-WATCH-01`
+stale-operation defect (see memory `project_paper_soak_session_watch_01_stale_operation_defect.md`
+in the operator's persistent notes) — do not assume identity between the
+two without independent proof.
+
+### DAEMON-EXIT-20260824 — STATUS=UNKNOWN_NEEDS_PROOF
+
+Observed: the daemon process disappeared without this closeout mission (or
+its immediate predecessor) issuing a kill. **No causal link to the
+stopping/evidence_degraded oscillation above is asserted** — the two are
+recorded as separate open items pending independent proof of any
+relationship.
+
+---
+
+*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24).*
