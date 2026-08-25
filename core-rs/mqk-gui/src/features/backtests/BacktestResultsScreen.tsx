@@ -5,15 +5,18 @@ import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import {
   classifyAlpha,
+  computeDrawdownSeries,
   describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
   describeNoTradeActivity,
   DISCORD_WORKFLOWS,
   EVIDENCE_REVIEW_SCHEMA_VERSION,
+  extractComparisonSnapshot,
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
   manifestTimeframeLabel,
+  minMax,
   timeframeLabelFromSecs,
   PAPER_READINESS_SCHEMA_VERSION,
   PAPER_READINESS_STATUS_BLOCKED,
@@ -37,12 +40,19 @@ import {
 import {
   buildBacktestEconomicsRequest,
   buildActiveJob,
+  buildSessionJobRow,
   extractArtifactDir,
   getBacktestEconomicsSuggestion,
   getBacktestJob,
+  getBacktestJobs,
   isTerminalJobStatus,
   normalizeJobStatus,
+  parseStrictInteger,
+  parseStrictIntegerOrNull,
+  resolveComparisonSideJob,
+  sessionJobIdStillPresent,
   submitBacktestJob,
+  validateMdBarsDateRange,
 } from "./api.ts";
 import {
   classifyArtifactPathInput,
@@ -70,10 +80,12 @@ import type {
   PaperReadinessParseResult,
   ParsedCsvResult,
   PremarketRevalidationParseResult,
+  SessionJobRow,
   StrategyFitGateFlags,
   StrategyFitParseResult,
   WatchlistPromotionParseResult,
 } from "./types.ts";
+import type { ComparisonSnapshot } from "./parsers.ts";
 
 // ---------------------------------------------------------------------------
 // Artifact loading
@@ -430,14 +442,10 @@ function OperatorReviewSection({ bundle }: { bundle: ArtifactBundle }) {
   );
 }
 
-function MetricsSection({ m }: { m: BacktestMetrics }) {
+function PerformanceMetricsSection({ m }: { m: BacktestMetrics }) {
   const returnTone =
     m.total_return_micros > 0 ? "good" : m.total_return_micros < 0 ? "bad" : "neutral";
   const ddTone = m.max_drawdown_pct > 10 ? "bad" : m.max_drawdown_pct > 3 ? "warn" : "neutral";
-  const haltTone = m.halted ? "bad" : "neutral";
-  const economics = m.economics ?? null;
-  const economicsValue = (value: number | null | undefined): string =>
-    value == null || Number.isNaN(value) ? "not reported" : String(value);
 
   return (
     <>
@@ -513,6 +521,101 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
         />
       </div>
 
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Avg win"
+          value={formatMicrosAsDollars(m.average_win_micros)}
+          detail="Mean profit of winning trades"
+          tone="neutral"
+        />
+        <StatCard
+          title="Avg loss"
+          value={formatMicrosAsDollars(m.average_loss_micros)}
+          detail="Mean loss of losing trades"
+          tone="neutral"
+        />
+        <StatCard
+          title="Best trade"
+          value={formatMicrosAsDollars(m.best_trade_micros)}
+          tone="neutral"
+        />
+        <StatCard
+          title="Worst trade"
+          value={formatMicrosAsDollars(m.worst_trade_micros)}
+          tone="neutral"
+        />
+        <StatCard
+          title="HWM equity"
+          value={formatMicrosAsDollars(m.equity_high_water_mark_micros)}
+          detail="High-water mark — drawdown baseline"
+          tone="neutral"
+        />
+      </div>
+    </>
+  );
+}
+
+function DrawdownSection({ result }: { result: FileResult<ParsedCsvResult<EquityCurveRow>> }) {
+  if (result.kind !== "ok") return null;
+  const { rows } = result.data;
+  if (rows.length === 0) return null;
+
+  const series = computeDrawdownSeries(rows);
+  const maxDd = minMax(series.map((p) => p.drawdown_pct)).max;
+
+  const width = 600;
+  const height = 60;
+  const points = series
+    .map((p, i) => {
+      const x = series.length === 1 ? width / 2 : (i / (series.length - 1)) * width;
+      const y = maxDd > 0 ? (p.drawdown_pct / maxDd) * height : 0;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <Panel
+      title="Drawdown"
+      subtitle="Derived from equity_curve.csv (display only) — not a substitute for metrics.json's authoritative max_drawdown."
+    >
+      <div className="bt-equity-meta">
+        <span>
+          <span className="eyebrow">peak-to-trough max</span> {maxDd.toFixed(2)}%
+        </span>
+        <span>
+          <span className="eyebrow">points</span> {series.length}
+        </span>
+      </div>
+      {maxDd === 0 ? (
+        <div className="empty-state">No drawdown in this run — equity never fell below its running peak.</div>
+      ) : (
+        <svg
+          className="bt-equity-svg"
+          viewBox={`0 0 ${width} ${height}`}
+          preserveAspectRatio="none"
+          aria-label="Drawdown from running peak"
+        >
+          <polyline
+            points={points}
+            fill="none"
+            stroke="var(--critical)"
+            strokeWidth="1.5"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      )}
+    </Panel>
+  );
+}
+
+function ExecutionCostsSection({ m }: { m: BacktestMetrics }) {
+  const haltTone = m.halted ? "bad" : "neutral";
+  const economics = m.economics ?? null;
+  const economicsValue = (value: number | null | undefined): string =>
+    value == null || Number.isNaN(value) ? "not reported" : String(value);
+
+  return (
+    <>
       <Panel
         title="Instrument economics"
         subtitle="Backtest economics metadata from metrics.json."
@@ -577,26 +680,6 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
           <div>
             <span>Gross loss</span>
             <strong>{formatMicrosAsDollars(m.gross_loss_micros)}</strong>
-          </div>
-          <div>
-            <span>Avg win</span>
-            <strong>{formatMicrosAsDollars(m.average_win_micros)}</strong>
-          </div>
-          <div>
-            <span>Avg loss</span>
-            <strong>{formatMicrosAsDollars(m.average_loss_micros)}</strong>
-          </div>
-          <div>
-            <span>Best trade</span>
-            <strong>{formatMicrosAsDollars(m.best_trade_micros)}</strong>
-          </div>
-          <div>
-            <span>Worst trade</span>
-            <strong>{formatMicrosAsDollars(m.worst_trade_micros)}</strong>
-          </div>
-          <div>
-            <span>HWM equity</span>
-            <strong>{formatMicrosAsDollars(m.equity_high_water_mark_micros)}</strong>
           </div>
           <div>
             <span>Symbols</span>
@@ -1726,8 +1809,7 @@ function EquityCurveContent({ data }: { data: ParsedCsvResult<EquityCurveRow> })
   }
 
   const equities = rows.map((r) => r.equity);
-  const minEq = Math.min(...equities);
-  const maxEq = Math.max(...equities);
+  const { min: minEq, max: maxEq } = minMax(equities);
   const range = maxEq - minEq;
   const flat = range === 0;
 
@@ -1947,21 +2029,31 @@ function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: 
         </div>
       )}
 
-      <div className="bt-group-heading">Operator review</div>
+      <div className="bt-group-heading">Overview</div>
       <OperatorReviewSection bundle={bundle} />
 
-      <div className="bt-group-heading">Run identity &amp; performance</div>
+      <div className="bt-group-heading">Provenance</div>
       <FileStatusNote label="manifest.json" result={bundle.manifest} />
       {bundle.manifest.kind === "ok" && (
         <ManifestSection manifest={bundle.manifest.data} />
       )}
 
+      <div className="bt-group-heading">Performance</div>
       <FileStatusNote label="metrics.json" result={bundle.metrics} />
       {bundle.metrics.kind === "ok" && (
-        <MetricsSection m={bundle.metrics.data} />
+        <PerformanceMetricsSection m={bundle.metrics.data} />
       )}
+      <EquityCurveSection result={bundle.equityCurve} />
+      <DrawdownSection result={bundle.equityCurve} />
 
-      <div className="bt-group-heading">Research &amp; promotion gates</div>
+      <div className="bt-group-heading">Execution &amp; costs</div>
+      {bundle.metrics.kind === "ok" && (
+        <ExecutionCostsSection m={bundle.metrics.data} />
+      )}
+      <OrdersSection result={bundle.orders} />
+      <FillsSection result={bundle.fills} />
+
+      <div className="bt-group-heading">Research &amp; promotion evidence</div>
       <StrategyFitPanel result={bundle.strategyFit} />
       <PaperReadinessPanel result={bundle.paperReadiness} />
       <WatchlistPromotionPanel result={bundle.watchlistPromotion} />
@@ -1970,11 +2062,6 @@ function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: 
 
       <div className="bt-group-heading">Observability reference</div>
       <DiscordWorkflowsPanel />
-
-      <div className="bt-group-heading">Execution detail</div>
-      <EquityCurveSection result={bundle.equityCurve} />
-      <OrdersSection result={bundle.orders} />
-      <FillsSection result={bundle.fills} />
     </>
   );
 }
@@ -1992,6 +2079,226 @@ function JobStatusBadge({ status }: { status: BacktestJobStatusKind }) {
 
   return (
     <span className={`bt-job-status-badge status-${status}`}>{label}</span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-JOB-LIST-AND-SELECTION-01: current daemon-session job panel
+// ---------------------------------------------------------------------------
+
+function formatSessionJobDuration(row: SessionJobRow): string {
+  if (!row.startedAt) return "—";
+  const end = row.completedAt ?? new Date().toISOString();
+  const startMs = Date.parse(row.startedAt);
+  const endMs = Date.parse(end);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) return "—";
+  const secs = Math.round((endMs - startMs) / 1000);
+  return `${secs}s`;
+}
+
+function SessionJobsPanel({
+  jobs,
+  loading,
+  error,
+  selectedJobId,
+  onRefresh,
+  onSelect,
+}: {
+  jobs: SessionJobRow[];
+  loading: boolean;
+  error: string | null;
+  selectedJobId: string | null;
+  onRefresh: () => void;
+  onSelect: (job: SessionJobRow) => void;
+}) {
+  return (
+    <Panel
+      title="Current daemon session — job history"
+      subtitle="Jobs known to this running daemon process. Process-lifetime / in-memory only — not durable history. Restarting the daemon clears this list."
+    >
+      <div className="bt-path-row" style={{ marginBottom: 8 }}>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onRefresh}
+          disabled={loading}
+        >
+          {loading ? "Refreshing…" : "Refresh job list"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+          <strong>Job list unavailable:</strong> {error}
+        </div>
+      )}
+
+      {!error && jobs.length === 0 && !loading && (
+        <div className="empty-state">No jobs in this daemon session yet.</div>
+      )}
+
+      {jobs.length > 0 && (
+        <DataTable
+          rows={jobs}
+          rowKey={(row) => row.jobId}
+          columns={[
+            {
+              key: "status",
+              title: "Status",
+              render: (row) => <JobStatusBadge status={row.status} />,
+            },
+            { key: "strategy", title: "Strategy", render: (row) => row.strategy },
+            { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+            { key: "created", title: "Created", render: (row) => formatDateTime(row.createdAt) },
+            { key: "duration", title: "Duration", render: (row) => formatSessionJobDuration(row) },
+            {
+              key: "action",
+              title: "",
+              render: (row) => (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => onSelect(row)}
+                  disabled={selectedJobId === row.jobId}
+                >
+                  {selectedJobId === row.jobId ? "Selected" : "Select"}
+                </button>
+              ),
+            },
+          ]}
+        />
+      )}
+    </Panel>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-RUN-COMPARISON-01: side-by-side comparison of two completed
+// runs. Display-only — no winner badge, no statistical claim, no promotion
+// action. Reuses the same completed-session-job selection + fencing pattern
+// as Workflow C (SessionJobsPanel / handleSelectSessionJob).
+// ---------------------------------------------------------------------------
+
+interface ComparisonRow {
+  label: string;
+  a: string;
+  b: string;
+}
+
+function buildComparisonRows(a: ComparisonSnapshot | null, b: ComparisonSnapshot | null): ComparisonRow[] {
+  const pct = (v: number | null) => (v == null ? "—" : `${v.toFixed(2)}%`);
+  const num = (v: number | null, digits = 2) => (v == null ? "—" : v.toFixed(digits));
+  const usd = (v: number | null) => formatMicrosAsDollars(v);
+
+  return [
+    { label: "Strategy", a: a?.strategy ?? "—", b: b?.strategy ?? "—" },
+    { label: "Symbol(s)", a: a?.symbols ?? "—", b: b?.symbols ?? "—" },
+    { label: "Timeframe", a: a?.timeframe ?? "—", b: b?.timeframe ?? "—" },
+    { label: "Data range", a: a?.dataRange ?? "—", b: b?.dataRange ?? "—" },
+    { label: "Total return", a: a ? pct(a.totalReturnPct) : "—", b: b ? pct(b.totalReturnPct) : "—" },
+    { label: "Alpha vs buy & hold", a: a ? pct(a.alphaPct) : "—", b: b ? pct(b.alphaPct) : "—" },
+    { label: "Max drawdown", a: a ? pct(a.maxDrawdownPct) : "—", b: b ? pct(b.maxDrawdownPct) : "—" },
+    { label: "Sharpe ratio", a: a ? num(a.sharpeRatio, 3) : "—", b: b ? num(b.sharpeRatio, 3) : "—" },
+    { label: "Sortino ratio", a: a ? num(a.sortinoRatio, 3) : "—", b: b ? num(b.sortinoRatio, 3) : "—" },
+    { label: "Trade count", a: a ? String(a.tradeCount) : "—", b: b ? String(b.tradeCount) : "—" },
+    { label: "Win rate", a: a ? pct(a.winRatePct) : "—", b: b ? pct(b.winRatePct) : "—" },
+    { label: "Profit factor", a: a ? num(a.profitFactor) : "—", b: b ? num(b.profitFactor) : "—" },
+    { label: "Expectancy", a: a ? usd(a.expectancyMicros) : "—", b: b ? usd(b.expectancyMicros) : "—" },
+    { label: "Commissions", a: a ? usd(a.commissionMicros) : "—", b: b ? usd(b.commissionMicros) : "—" },
+  ];
+}
+
+function ComparisonPanel({
+  jobs,
+  jobAId,
+  jobBId,
+  onSelectA,
+  onSelectB,
+  loadingA,
+  loadingB,
+  errorA,
+  errorB,
+  snapshotA,
+  snapshotB,
+}: {
+  jobs: SessionJobRow[];
+  jobAId: string;
+  jobBId: string;
+  onSelectA: (jobId: string) => void;
+  onSelectB: (jobId: string) => void;
+  loadingA: boolean;
+  loadingB: boolean;
+  errorA: string | null;
+  errorB: string | null;
+  snapshotA: ComparisonSnapshot | null;
+  snapshotB: ComparisonSnapshot | null;
+}) {
+  const eligible = jobs.filter((j) => j.status === "completed" && j.artifactDir);
+
+  return (
+    <Panel
+      title="Compare two completed runs"
+      subtitle="Side-by-side authoritative metrics from two completed session jobs. Display comparison only — no winner is declared and nothing here changes Research/Promotion status."
+    >
+      {eligible.length < 2 && (
+        <div className="empty-state">
+          Need at least two completed jobs with artifacts in the current session to compare.
+        </div>
+      )}
+
+      {eligible.length >= 2 && (
+        <div className="bt-job-form-grid">
+          <div className="bt-job-field">
+            <label htmlFor="bt-compare-a">Run A</label>
+            <select id="bt-compare-a" value={jobAId} onChange={(e) => onSelectA(e.target.value)}>
+              <option value="">— select —</option>
+              {eligible.map((j) => (
+                <option key={j.jobId} value={j.jobId}>
+                  {j.jobId.slice(0, 8)}… — {j.strategy}/{j.symbol}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-compare-b">Run B</label>
+            <select id="bt-compare-b" value={jobBId} onChange={(e) => onSelectB(e.target.value)}>
+              <option value="">— select —</option>
+              {eligible.map((j) => (
+                <option key={j.jobId} value={j.jobId}>
+                  {j.jobId.slice(0, 8)}… — {j.strategy}/{j.symbol}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+
+      {(loadingA || loadingB) && <div className="empty-state">Loading comparison artifacts…</div>}
+      {errorA && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+          <strong>Run A load failed:</strong> {errorA}
+        </div>
+      )}
+      {errorB && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+          <strong>Run B load failed:</strong> {errorB}
+        </div>
+      )}
+
+      {(snapshotA || snapshotB) && !loadingA && !loadingB && (
+        <div style={{ marginTop: 12 }}>
+          <DataTable
+            rows={buildComparisonRows(snapshotA, snapshotB)}
+            rowKey={(row) => row.label}
+            columns={[
+              { key: "metric", title: "Metric", render: (row) => row.label },
+              { key: "a", title: "Run A", render: (row) => row.a },
+              { key: "b", title: "Run B", render: (row) => row.b },
+            ]}
+          />
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -2092,6 +2399,209 @@ export function BacktestResultsScreen() {
   const [economicsSuggestionLoading, setEconomicsSuggestionLoading] = useState(false);
   const [economicsSuggestion, setEconomicsSuggestion] = useState<BacktestEconomicsSuggestionResponse | null>(null);
   const [economicsSuggestionError, setEconomicsSuggestionError] = useState<string | null>(null);
+
+  // --- Workflow C: current daemon-session job list + selection ---
+  const [sessionJobs, setSessionJobs] = useState<SessionJobRow[]>([]);
+  const [sessionJobsLoading, setSessionJobsLoading] = useState(false);
+  const [sessionJobsError, setSessionJobsError] = useState<string | null>(null);
+  const [selectedSessionJob, setSelectedSessionJob] = useState<SessionJobRow | null>(null);
+  const [selectedSessionJobBundle, setSelectedSessionJobBundle] = useState<ArtifactBundle | null>(null);
+  const [selectedSessionJobBundleLoading, setSelectedSessionJobBundleLoading] = useState(false);
+  const [selectedSessionJobBundleError, setSelectedSessionJobBundleError] = useState<string | null>(null);
+
+  // Fences stale async artifact loads: bumped on every selection, so a slow
+  // load for a previously-selected job can never overwrite a later selection
+  // (rapid A -> B switching must always end up showing B, not a delayed A).
+  const selectionGenerationRef = useRef(0);
+
+  // Latest-value ref (kept fresh every render, not inside an effect) so
+  // fetchSessionJobs can read the current selection without depending on it —
+  // depending on it would recreate the callback and re-fire the mount effect
+  // below on every selection change, causing spurious refetches. The
+  // compareA/B equivalents are declared below, alongside their state.
+  const selectedSessionJobRef = useRef<SessionJobRow | null>(null);
+  selectedSessionJobRef.current = selectedSessionJob;
+
+  const fetchSessionJobs = useCallback(async () => {
+    setSessionJobsLoading(true);
+    setSessionJobsError(null);
+    const result = await getBacktestJobs();
+    setSessionJobsLoading(false);
+
+    if (!result.ok || !result.data) {
+      setSessionJobsError(result.error ?? "Job list fetch failed.");
+      // Fail-closed: a failed refresh must never leave the prior fetch's rows
+      // presented as current authoritative daemon-session truth.
+      setSessionJobs([]);
+      ++selectionGenerationRef.current;
+      setSelectedSessionJob(null);
+      setSelectedSessionJobBundle(null);
+      setSelectedSessionJobBundleError(null);
+      setSelectedSessionJobBundleLoading(false);
+      ++compareAGenerationRef.current;
+      ++compareBGenerationRef.current;
+      setCompareAJobId("");
+      setCompareBJobId("");
+      setCompareASnapshot(null);
+      setCompareBSnapshot(null);
+      setCompareAError(null);
+      setCompareBError(null);
+      setCompareALoading(false);
+      setCompareBLoading(false);
+      return;
+    }
+
+    const newJobs = result.data.jobs.map(buildSessionJobRow);
+    setSessionJobs(newJobs);
+
+    // GUI-BACKTEST-JOB-LIST-AUTHORITY-REPAIR-01: a job selected from an older
+    // daemon session (e.g. before a daemon restart) may no longer exist in
+    // this freshly fetched current-session list. Clear it and fence any
+    // in-flight artifact read for it so a slow resolution cannot restore it.
+    if (selectedSessionJobRef.current && !sessionJobIdStillPresent(selectedSessionJobRef.current.jobId, newJobs)) {
+      ++selectionGenerationRef.current;
+      setSelectedSessionJob(null);
+      setSelectedSessionJobBundle(null);
+      setSelectedSessionJobBundleError(null);
+      setSelectedSessionJobBundleLoading(false);
+    }
+
+    if (compareAJobIdRef.current && !sessionJobIdStillPresent(compareAJobIdRef.current, newJobs)) {
+      ++compareAGenerationRef.current;
+      setCompareAJobId("");
+      setCompareASnapshot(null);
+      setCompareAError(null);
+      setCompareALoading(false);
+    }
+
+    if (compareBJobIdRef.current && !sessionJobIdStillPresent(compareBJobIdRef.current, newJobs)) {
+      ++compareBGenerationRef.current;
+      setCompareBJobId("");
+      setCompareBSnapshot(null);
+      setCompareBError(null);
+      setCompareBLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchSessionJobs();
+  }, [fetchSessionJobs]);
+
+  const handleSelectSessionJob = useCallback((row: SessionJobRow) => {
+    const generation = ++selectionGenerationRef.current;
+    setSelectedSessionJob(row);
+    setSelectedSessionJobBundle(null);
+    setSelectedSessionJobBundleError(null);
+    setSelectedSessionJobBundleLoading(false);
+
+    // Only a completed job with a real artifact_dir has anything to load.
+    // queued/running/failed/unknown all render from `row` alone below —
+    // never fabricate a bundle for a non-completed or pathless job.
+    if (row.status !== "completed" || !row.artifactDir) return;
+
+    setSelectedSessionJobBundleLoading(true);
+    loadBundle(row.artifactDir)
+      .then((b) => {
+        if (selectionGenerationRef.current !== generation) return; // superseded by a later selection
+        setSelectedSessionJobBundle(b);
+        setSelectedSessionJobBundleLoading(false);
+      })
+      .catch((e) => {
+        if (selectionGenerationRef.current !== generation) return;
+        setSelectedSessionJobBundleError(String(e));
+        setSelectedSessionJobBundleLoading(false);
+      });
+  }, []);
+
+  // --- Workflow D (optional): compare two completed session jobs ---
+  const [compareAJobId, setCompareAJobId] = useState("");
+  const [compareBJobId, setCompareBJobId] = useState("");
+  const [compareASnapshot, setCompareASnapshot] = useState<ComparisonSnapshot | null>(null);
+  const [compareBSnapshot, setCompareBSnapshot] = useState<ComparisonSnapshot | null>(null);
+  const [compareALoading, setCompareALoading] = useState(false);
+  const [compareBLoading, setCompareBLoading] = useState(false);
+  const [compareAError, setCompareAError] = useState<string | null>(null);
+  const [compareBError, setCompareBError] = useState<string | null>(null);
+  const compareAGenerationRef = useRef(0);
+  const compareBGenerationRef = useRef(0);
+
+  // Latest-value refs read by fetchSessionJobs above — see its comment on
+  // selectedSessionJobRef for why these are refs rather than useCallback deps.
+  const compareAJobIdRef = useRef("");
+  compareAJobIdRef.current = compareAJobId;
+  const compareBJobIdRef = useRef("");
+  compareBJobIdRef.current = compareBJobId;
+
+  const loadComparisonSide = useCallback(
+    (
+      jobId: string,
+      generationRef: React.MutableRefObject<number>,
+      setLoading: (v: boolean) => void,
+      setError: (v: string | null) => void,
+      setSnapshot: (v: ComparisonSnapshot | null) => void,
+    ) => {
+      const generation = ++generationRef.current;
+      setSnapshot(null);
+      setError(null);
+      // Every selection transition owns a complete loading-state transition:
+      // establish loading=false as the baseline for every outcome, then only
+      // flip to true once resolution confirms there is something to load.
+      // GUI-BACKTEST-COMPARISON-LOADING-FENCE-01: previously the "no_job"
+      // outcome (e.g. clearing the selection back to the blank option while a
+      // prior load was pending) fell through without ever calling
+      // setLoading(false), leaving that side stuck in "Loading…" forever.
+      setLoading(false);
+
+      const resolution = resolveComparisonSideJob(jobId, sessionJobs);
+      switch (resolution.kind) {
+        case "no_job":
+          return;
+        case "not_completed":
+          setError(`Selected job is ${resolution.status}, not completed — nothing to compare yet.`);
+          return;
+        case "missing_artifact":
+          setError("Selected job completed without an artifact_dir — nothing to load.");
+          return;
+        case "ready":
+          break;
+      }
+
+      setLoading(true);
+      loadBundle(resolution.artifactDir)
+        .then((b) => {
+          if (generationRef.current !== generation) return;
+          setLoading(false);
+          const snap = extractComparisonSnapshot(b);
+          if (!snap) {
+            setError("metrics.json unavailable for this run — cannot compare.");
+            return;
+          }
+          setSnapshot(snap);
+        })
+        .catch((e) => {
+          if (generationRef.current !== generation) return;
+          setLoading(false);
+          setError(String(e));
+        });
+    },
+    [sessionJobs],
+  );
+
+  const handleSelectCompareA = useCallback(
+    (jobId: string) => {
+      setCompareAJobId(jobId);
+      loadComparisonSide(jobId, compareAGenerationRef, setCompareALoading, setCompareAError, setCompareASnapshot);
+    },
+    [loadComparisonSide],
+  );
+
+  const handleSelectCompareB = useCallback(
+    (jobId: string) => {
+      setCompareBJobId(jobId);
+      loadComparisonSide(jobId, compareBGenerationRef, setCompareBLoading, setCompareBError, setCompareBSnapshot);
+    },
+    [loadComparisonSide],
+  );
 
   // Polling: fire when a non-terminal job is active. Bounded cadence: 2s.
   // Cancellation token prevents state updates after unmount or job change.
@@ -2196,19 +2706,30 @@ export function BacktestResultsScreen() {
   }, [symbol]);
 
   const handleSubmitJob = useCallback(async () => {
-    const tf = parseInt(timeframeSecs, 10);
-    const cash = parseInt(initialCashMicros, 10);
-    const staleThresholdRaw = integrityStaleThresholdTicks.trim();
-    const staleThreshold = staleThresholdRaw ? parseInt(staleThresholdRaw, 10) : null;
-
     if (!strategy.trim()) { setJobSubmitError("strategy is required."); return; }
     if (!symbol.trim()) { setJobSubmitError("symbol is required."); return; }
-    if (Number.isNaN(tf) || tf <= 0) { setJobSubmitError("timeframe_secs must be a positive integer."); return; }
-    if (Number.isNaN(cash) || cash <= 0) { setJobSubmitError("initial_cash_micros must be a positive integer."); return; }
-    if (staleThreshold !== null && (Number.isNaN(staleThreshold) || staleThreshold <= 0)) {
-      setJobSubmitError("Integrity stale threshold must be a positive integer (or leave blank for auto).");
-      return;
+
+    const tfResult = parseStrictInteger(timeframeSecs, "timeframe_secs");
+    if (!tfResult.ok) { setJobSubmitError(tfResult.error); return; }
+    if (tfResult.value <= 0) { setJobSubmitError("timeframe_secs must be a positive integer."); return; }
+    const tf = tfResult.value;
+
+    const cashResult = parseStrictInteger(initialCashMicros, "initial_cash_micros");
+    if (!cashResult.ok) { setJobSubmitError(cashResult.error); return; }
+    if (cashResult.value <= 0) { setJobSubmitError("initial_cash_micros must be a positive integer."); return; }
+    const cash = cashResult.value;
+
+    const staleThresholdRaw = integrityStaleThresholdTicks.trim();
+    let staleThreshold: number | null = null;
+    if (staleThresholdRaw) {
+      const staleThresholdResult = parseStrictInteger(staleThresholdRaw, "integrity_stale_threshold_ticks");
+      if (!staleThresholdResult.ok || staleThresholdResult.value <= 0) {
+        setJobSubmitError("Integrity stale threshold must be a positive integer (or leave blank for auto).");
+        return;
+      }
+      staleThreshold = staleThresholdResult.value;
     }
+
     const economicsResult = buildBacktestEconomicsRequest({
       contractMultiplier,
       initialMarginMicros,
@@ -2242,8 +2763,8 @@ export function BacktestResultsScreen() {
         setJobSubmitError("Could not derive a database timeframe label from timeframe_secs.");
         return;
       }
-      if (!startDate.trim()) { setJobSubmitError("Start is required for the database source."); return; }
-      if (!endDate.trim()) { setJobSubmitError("End is required for the database source."); return; }
+      const dateRangeResult = validateMdBarsDateRange(startDate, endDate);
+      if (!dateRangeResult.ok) { setJobSubmitError(dateRangeResult.error); return; }
       request = {
         source: "md_bars",
         strategy: strategy.trim(),
@@ -2461,7 +2982,7 @@ export function BacktestResultsScreen() {
               <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
                 <div className="bt-field-hint" style={{ fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
                   Inclusive query range, bounded by bar end-timestamp. The database timeframe
-                  string (e.g. <code>{timeframeLabelFromSecs(parseInt(timeframeSecs, 10)) ?? "1D"}</code>)
+                  string (e.g. <code>{timeframeLabelFromSecs(parseStrictIntegerOrNull(timeframeSecs)) ?? "1D"}</code>)
                   is derived from the Timeframe selector below — no separate field needed.
                   If the database has no matching bars, the job fails with a clear no-data error
                   — results are never fabricated.
@@ -2635,13 +3156,13 @@ export function BacktestResultsScreen() {
               spellCheck={false}
               autoComplete="off"
               placeholder={
-                parseInt(timeframeSecs, 10) >= 86400
+                (parseStrictIntegerOrNull(timeframeSecs) ?? 0) >= 86400
                   ? "auto → 172800 (daily default)"
                   : "auto → 120 (intraday default)"
               }
             />
             <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
-              {parseInt(timeframeSecs, 10) >= 86400
+              {(parseStrictIntegerOrNull(timeframeSecs) ?? 0) >= 86400
                 ? <>
                     <strong>Daily bars detected.</strong>{" "}
                     Leave blank to use the safe default of <strong>172800</strong> (2 days).
@@ -2747,6 +3268,121 @@ export function BacktestResultsScreen() {
       )}
 
       {jobBundle && <ArtifactDisplay bundle={jobBundle} source="Loaded results — Workflow B (submitted job)" />}
+
+      <hr className="bt-section-divider" />
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Workflow C — Current daemon session job history / selection          */}
+      {/* ------------------------------------------------------------------ */}
+
+      <div className="bt-workflow-heading">
+        <span className="bt-workflow-tag">Workflow C · Current session jobs</span>
+        <span className="bt-workflow-caption">
+          Every job this daemon process knows about — queued, running, completed, or failed.
+          Select any completed job to reopen its real artifact results.
+        </span>
+      </div>
+
+      <SessionJobsPanel
+        jobs={sessionJobs}
+        loading={sessionJobsLoading}
+        error={sessionJobsError}
+        selectedJobId={selectedSessionJob?.jobId ?? null}
+        onRefresh={() => void fetchSessionJobs()}
+        onSelect={handleSelectSessionJob}
+      />
+
+      {selectedSessionJob && (
+        <Panel
+          title="Selected session job"
+          subtitle="Status reported directly by the daemon for the selected job."
+        >
+          <div className="bt-job-status-row">
+            <JobStatusBadge status={selectedSessionJob.status} />
+            <span className="bt-job-meta" title={selectedSessionJob.jobId}>
+              job {selectedSessionJob.jobId.slice(0, 8)}…
+            </span>
+            <span className="bt-job-meta">
+              {selectedSessionJob.strategy} / {selectedSessionJob.symbol}
+            </span>
+          </div>
+
+          {selectedSessionJob.status === "unknown" && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 4 }}>
+              <strong>Unrecognized job status.</strong> The daemon reported a status this GUI does
+              not recognize — never treated as completed or successful. Refresh and verify daemon
+              version.
+            </div>
+          )}
+
+          {(selectedSessionJob.status === "queued" || selectedSessionJob.status === "running") && (
+            <div className="unavailable-notice" style={{ marginTop: 4 }}>
+              Job is still {selectedSessionJob.status}. Refresh the job list above to check for
+              completion — this panel does not poll automatically.
+            </div>
+          )}
+
+          {selectedSessionJob.status === "failed" && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 4 }}>
+              <strong>Job failed:</strong> {selectedSessionJob.error ?? "No error message reported."}
+            </div>
+          )}
+
+          {selectedSessionJob.status === "completed" && !selectedSessionJob.artifactDir && (
+            <div className="unavailable-notice" style={{ marginTop: 4 }}>
+              <strong>Completed without artifact path.</strong> Job completed but the daemon
+              reported no artifact_dir. Results cannot be loaded from this panel.
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {selectedSessionJobBundleLoading && (
+        <div className="empty-state" style={{ padding: "16px 0" }}>
+          Loading selected job's artifact results…
+        </div>
+      )}
+
+      {selectedSessionJobBundleError && (
+        <div className="unavailable-notice unavailable-critical" style={{ margin: "8px 0" }}>
+          <strong>Selected job's artifact load failed:</strong> {selectedSessionJobBundleError}
+        </div>
+      )}
+
+      {selectedSessionJobBundle && (
+        <ArtifactDisplay
+          bundle={selectedSessionJobBundle}
+          source="Loaded results — Workflow C (current session job selection)"
+        />
+      )}
+
+      <hr className="bt-section-divider" />
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Workflow D (optional) — Compare two completed session jobs           */}
+      {/* ------------------------------------------------------------------ */}
+
+      <div className="bt-workflow-heading">
+        <span className="bt-workflow-tag">Workflow D · Compare runs (optional)</span>
+        <span className="bt-workflow-caption">
+          Pick two completed jobs from the current session and view their authoritative metrics
+          side by side. No winner is declared and this never changes Research/Promotion status.
+        </span>
+      </div>
+
+      <ComparisonPanel
+        jobs={sessionJobs}
+        jobAId={compareAJobId}
+        jobBId={compareBJobId}
+        onSelectA={handleSelectCompareA}
+        onSelectB={handleSelectCompareB}
+        loadingA={compareALoading}
+        loadingB={compareBLoading}
+        errorA={compareAError}
+        errorB={compareBError}
+        snapshotA={compareASnapshot}
+        snapshotB={compareBSnapshot}
+      />
     </div>
   );
 }

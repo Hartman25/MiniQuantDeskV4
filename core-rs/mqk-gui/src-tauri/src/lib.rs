@@ -64,6 +64,78 @@ fn get_desktop_bootstrap(app: tauri::AppHandle) -> DesktopBootstrapPayload {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-WORKBENCH-OPERATOR-PROOF-01: read_artifact_file is a native
+// Tauri command — Playwright browser automation cannot invoke it (no browser
+// runtime carries a Tauri IPC bridge). read_artifact_file takes no AppHandle
+// and does pure filesystem I/O, so it is directly callable from a plain
+// `cargo test` without spinning up a Tauri app — this is the closest
+// available proof of the real desktop artifact-read path (allowlist
+// enforcement, missing-file -> None, found-file -> Some(content)).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mqk_gui_read_artifact_test_{}_{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    #[test]
+    fn read_artifact_file_returns_content_for_an_allowed_existing_file() {
+        let dir = temp_test_dir("ok");
+        let path = dir.join("metrics.json");
+        std::fs::write(&path, "{\"ok\":true}").unwrap();
+
+        let result = read_artifact_file(dir.to_string_lossy().to_string(), "metrics.json".to_string());
+        assert_eq!(result, Ok(Some("{\"ok\":true}".to_string())));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_artifact_file_returns_none_for_a_missing_allowed_file() {
+        let dir = temp_test_dir("missing");
+
+        let result = read_artifact_file(dir.to_string_lossy().to_string(), "manifest.json".to_string());
+        assert_eq!(result, Ok(None), "missing file must be Ok(None), never an Err");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_artifact_file_rejects_a_filename_outside_the_allowlist() {
+        let result = read_artifact_file("C:\\anything".to_string(), "secrets.env".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a permitted artifact filename"));
+    }
+
+    #[test]
+    fn read_artifact_file_rejects_a_path_traversal_style_filename() {
+        // "../secrets.json" is not a bare allowlisted filename string, so it
+        // is rejected by the allowlist check before any join/read happens.
+        let result = read_artifact_file("C:\\anything".to_string(), "../secrets.json".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_artifact_file_reports_a_real_io_error_distinctly_from_missing() {
+        // Reading a directory as if it were a file fails with an error kind
+        // other than NotFound and must surface as Err, not be coerced to
+        // Ok(None) the way a genuinely missing file is.
+        let dir = temp_test_dir("ioerr");
+        let subdir_as_file = dir.join("manifest.json");
+        std::fs::create_dir_all(&subdir_as_file).unwrap();
+
+        let result = read_artifact_file(dir.to_string_lossy().to_string(), "manifest.json".to_string());
+        assert!(result.is_err(), "a real I/O error must not be silently treated as a missing file");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

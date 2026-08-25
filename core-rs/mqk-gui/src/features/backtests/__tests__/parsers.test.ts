@@ -14,7 +14,10 @@ import {
   formatNullablePercent,
   instrumentRegistryV2SourceStatusLabel,
   manifestTimeframeLabel,
+  computeDrawdownSeries,
+  extractComparisonSnapshot,
   microsToUsd,
+  minMax,
   parseCsvRows,
   parseEquityCurve,
   parseEvidenceReview,
@@ -29,6 +32,7 @@ import {
   timeframeLabelFromSecs,
 } from "../parsers.ts";
 import type {
+  ArtifactBundle,
   BacktestEconomicsSuggestionResponse,
   BacktestMetrics,
   InstrumentRegistryV2SourceStatusResponse,
@@ -212,6 +216,227 @@ test("parseEquityCurve returns empty for header-only CSV", () => {
 test("parseEquityCurve returns empty for completely empty CSV", () => {
   const { rows } = parseEquityCurve("");
   assert.equal(rows.length, 0);
+});
+
+// --- GUI-BACKTEST-EQUITY-DISPLAY-ROBUSTNESS-01: parseEquityCurve non-finite/blank rows ---
+
+test("EQ-01: a blank equity field is malformed, not coerced to 0", () => {
+  const csv = "ts_utc,equity\n60,\n120,100500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 1, "Number('') === 0 must not silently pass as a valid equity row");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].equity, 100_500_000_000);
+});
+
+test("EQ-02: an 'Infinity' equity field is malformed, not accepted", () => {
+  const csv = "ts_utc,equity\n60,Infinity\n120,100500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 1);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].equity, 100_500_000_000);
+});
+
+test("EQ-03: a '-Infinity' equity field is malformed, not accepted", () => {
+  const csv = "ts_utc,equity\n60,-Infinity\n120,100500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 1);
+  assert.equal(rows.length, 1);
+});
+
+test("EQ-04: an ordinary finite negative equity value is kept, not treated as malformed", () => {
+  const csv = "ts_utc,equity\n60,-500000000";
+  const { rows, malformed } = parseEquityCurve(csv);
+  assert.equal(malformed, 0);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].equity, -500_000_000);
+});
+
+// --- GUI-BACKTEST-EQUITY-DISPLAY-ROBUSTNESS-01: minMax (no Math.min/max spread) ---
+
+test("MINMAX-01: computes correct min/max for a small array", () => {
+  assert.deepEqual(minMax([3, 1, 4, 1, 5, 9, 2, 6]), { min: 1, max: 9 });
+});
+
+test("MINMAX-02: handles a single-element array", () => {
+  assert.deepEqual(minMax([42]), { min: 42, max: 42 });
+});
+
+test("MINMAX-03: handles negative values", () => {
+  assert.deepEqual(minMax([-5, -1, -10, -3]), { min: -10, max: -1 });
+});
+
+test("MINMAX-04: does not throw a RangeError on a 200,000-element array (Math.min(...arr) would)", () => {
+  const values = Array.from({ length: 200_000 }, (_, i) => i);
+  const result = minMax(values);
+  assert.equal(result.min, 0);
+  assert.equal(result.max, 199_999);
+});
+
+test("MINMAX-05: a 200,000-point parsed equity curve computes min/max without a RangeError", () => {
+  const lines = ["ts_utc,equity"];
+  for (let i = 0; i < 200_000; i++) {
+    lines.push(`${i},${100_000_000_000 + i}`);
+  }
+  const { rows, malformed } = parseEquityCurve(lines.join("\n"));
+  assert.equal(malformed, 0);
+  assert.equal(rows.length, 200_000);
+  const { min, max } = minMax(rows.map((r) => r.equity));
+  assert.equal(min, 100_000_000_000);
+  assert.equal(max, 100_000_000_000 + 199_999);
+});
+
+// --- computeDrawdownSeries (GUI-BACKTEST-RESULT-ANALYSIS-01) ---
+
+test("computeDrawdownSeries returns empty series for empty input", () => {
+  assert.deepEqual(computeDrawdownSeries([]), []);
+});
+
+test("computeDrawdownSeries reports 0% drawdown for a single point (peak == equity)", () => {
+  const series = computeDrawdownSeries([{ ts_utc: "t0", equity: 100 }]);
+  assert.equal(series.length, 1);
+  assert.equal(series[0].peak, 100);
+  assert.equal(series[0].drawdown_pct, 0);
+});
+
+test("computeDrawdownSeries tracks a running peak and reports correct trough drawdown", () => {
+  const series = computeDrawdownSeries([
+    { ts_utc: "t0", equity: 100 },
+    { ts_utc: "t1", equity: 120 },
+    { ts_utc: "t2", equity: 90 },
+    { ts_utc: "t3", equity: 110 },
+  ]);
+  assert.deepEqual(series.map((p) => p.peak), [100, 120, 120, 120]);
+  assert.equal(series[2].drawdown_pct, 25, "(120-90)/120 * 100 = 25%");
+  assert.equal(series[3].drawdown_pct, (120 - 110) / 120 * 100);
+});
+
+test("computeDrawdownSeries never overwrites/recomputes below-zero baselines with a fabricated percentage", () => {
+  // Non-positive running peak: 0% rather than a divide-by-non-positive result.
+  const series = computeDrawdownSeries([
+    { ts_utc: "t0", equity: -50 },
+    { ts_utc: "t1", equity: -20 },
+  ]);
+  assert.equal(series[0].drawdown_pct, 0);
+  assert.equal(series[1].drawdown_pct, 0, "peak is still <= 0, so drawdown_pct stays 0 rather than fabricated");
+});
+
+test("computeDrawdownSeries is monotonically non-decreasing peak across a rising curve", () => {
+  const rows = [10, 20, 30, 40, 50].map((equity, i) => ({ ts_utc: `t${i}`, equity }));
+  const series = computeDrawdownSeries(rows);
+  for (const p of series) {
+    assert.equal(p.drawdown_pct, 0, "a strictly rising curve has zero drawdown at every point");
+  }
+});
+
+// --- extractComparisonSnapshot (GUI-BACKTEST-RUN-COMPARISON-01) ---
+
+function baseBundle(overrides: Partial<ArtifactBundle> = {}): ArtifactBundle {
+  return {
+    manifest: { kind: "missing" },
+    metrics: { kind: "ok", data: baseMetrics() },
+    equityCurve: { kind: "ok", data: { rows: [], malformed: 0 } },
+    orders: { kind: "missing" },
+    fills: { kind: "missing" },
+    strategyFit: { kind: "missing" },
+    paperReadiness: { kind: "missing" },
+    watchlistPromotion: { kind: "missing" },
+    premarketRevalidation: { kind: "missing" },
+    evidenceReview: { kind: "missing" },
+    ...overrides,
+  };
+}
+
+test("extractComparisonSnapshot returns null when metrics.json is unavailable", () => {
+  const bundle = baseBundle({ metrics: { kind: "missing" } });
+  assert.equal(extractComparisonSnapshot(bundle), null);
+});
+
+test("extractComparisonSnapshot maps core metrics fields", () => {
+  const bundle = baseBundle({
+    metrics: {
+      kind: "ok",
+      data: baseMetrics({
+        total_return_pct: 12.5,
+        max_drawdown_pct: 4.2,
+        sharpe_ratio: 1.1,
+        sortino_ratio: 1.4,
+        trade_count: 7,
+        win_rate_pct: 57.1,
+        profit_factor: 1.8,
+        expectancy_micros: 5_000_000,
+        total_commission_micros: 1_200_000,
+      }),
+    },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.ok(snap);
+  assert.equal(snap!.totalReturnPct, 12.5);
+  assert.equal(snap!.maxDrawdownPct, 4.2);
+  assert.equal(snap!.sharpeRatio, 1.1);
+  assert.equal(snap!.sortinoRatio, 1.4);
+  assert.equal(snap!.tradeCount, 7);
+  assert.equal(snap!.winRatePct, 57.1);
+  assert.equal(snap!.profitFactor, 1.8);
+  assert.equal(snap!.expectancyMicros, 5_000_000);
+  assert.equal(snap!.commissionMicros, 1_200_000);
+});
+
+test("extractComparisonSnapshot falls back to metrics.strategy_name when manifest is unavailable", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "missing" },
+    metrics: { kind: "ok", data: baseMetrics({ strategy_name: "mean_reversion" }) },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.strategy, "mean_reversion");
+});
+
+test("extractComparisonSnapshot reports null alpha when metrics carries no benchmark", () => {
+  const bundle = baseBundle();
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.alphaPct, null, "no benchmark means alpha is genuinely unavailable, not zero");
+});
+
+test("extractComparisonSnapshot reports alpha from metrics.benchmark when present", () => {
+  const bundle = baseBundle({
+    metrics: {
+      kind: "ok",
+      data: baseMetrics({
+        benchmark: {
+          first_bar_open_micros: 100_000_000,
+          last_bar_close_micros: 110_000_000,
+          buy_and_hold_return_pct: 10,
+          strategy_total_return_pct: 15,
+          alpha_pct: 5,
+          assumption: "test",
+        },
+      }),
+    },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.alphaPct, 5);
+});
+
+test("extractComparisonSnapshot reports 'not reported' data range when equity curve is empty", () => {
+  const bundle = baseBundle();
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.dataRange, "not reported");
+});
+
+test("extractComparisonSnapshot derives data range from the equity curve's first/last rows", () => {
+  const bundle = baseBundle({
+    equityCurve: {
+      kind: "ok",
+      data: {
+        rows: [
+          { ts_utc: "2026-06-01T00:00:00Z", equity: 100 },
+          { ts_utc: "2026-06-20T00:00:00Z", equity: 110 },
+        ],
+        malformed: 0,
+      },
+    },
+  });
+  const snap = extractComparisonSnapshot(bundle);
+  assert.equal(snap!.dataRange, "2026-06-01T00:00:00Z -> 2026-06-20T00:00:00Z");
 });
 
 // --- parseOrders ---

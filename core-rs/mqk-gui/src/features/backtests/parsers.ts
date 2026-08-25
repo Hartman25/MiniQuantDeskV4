@@ -1,4 +1,5 @@
 import type {
+  ArtifactBundle,
   BacktestEconomicsSuggestionResponse,
   BacktestManifest,
   BacktestMetrics,
@@ -66,19 +67,73 @@ export function parseCsvRows(csv: string): { headers: string[]; rows: Record<str
   return { headers, rows };
 }
 
+/**
+ * GUI-BACKTEST-EQUITY-DISPLAY-ROBUSTNESS-01: a row is valid only if `equity`
+ * is present, non-blank, and Number.isFinite once converted — Number("")===0
+ * and Number("Infinity")===Infinity would otherwise pass a bare isNaN check
+ * and later corrupt min/max/drawdown geometry with 0/Infinity instead of a
+ * truthfully skipped malformed row.
+ */
 export function parseEquityCurve(csv: string): ParsedCsvResult<EquityCurveRow> {
   const { rows } = parseCsvRows(csv);
   let malformed = 0;
   const parsed: EquityCurveRow[] = [];
   for (const r of rows) {
+    if (!Object.prototype.hasOwnProperty.call(r, "equity") || r.equity.trim() === "") {
+      malformed++;
+      continue;
+    }
     const equity = Number(r.equity);
-    if (!Object.prototype.hasOwnProperty.call(r, "equity") || Number.isNaN(equity)) {
+    if (!Number.isFinite(equity)) {
       malformed++;
       continue;
     }
     parsed.push({ ts_utc: r.ts_utc ?? "", equity });
   }
   return { rows: parsed, malformed };
+}
+
+/**
+ * O(n) min/max over a finite-number array. Never spreads into Math.min/max —
+ * `Math.max(...values)` overflows the JS call stack (RangeError) once
+ * `values` reaches tens of thousands of entries, which a long intraday
+ * backtest's equity curve realistically can.
+ */
+export function minMax(values: number[]): { min: number; max: number } {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return { min, max };
+}
+
+export interface DrawdownPoint {
+  ts_utc: string;
+  equity: number;
+  peak: number;
+  drawdown_pct: number;
+}
+
+/**
+ * GUI-BACKTEST-RESULT-ANALYSIS-01: derives a running peak-to-trough drawdown
+ * series from an equity curve for display only. Never overwrites
+ * metrics.json's authoritative max_drawdown_pct/max_drawdown_micros — this is
+ * a client-derived visualization, not a second source of truth. Pure and
+ * total: empty input yields an empty series; a non-positive running peak
+ * yields 0% (no division by a non-positive baseline) rather than a
+ * fabricated or negative percentage.
+ */
+export function computeDrawdownSeries(rows: EquityCurveRow[]): DrawdownPoint[] {
+  let peak = -Infinity;
+  const out: DrawdownPoint[] = [];
+  for (const r of rows) {
+    if (r.equity > peak) peak = r.equity;
+    const drawdown_pct = peak > 0 ? ((peak - r.equity) / peak) * 100 : 0;
+    out.push({ ts_utc: r.ts_utc, equity: r.equity, peak, drawdown_pct });
+  }
+  return out;
 }
 
 export function parseOrders(csv: string): ParsedCsvResult<OrderRow> {
@@ -196,6 +251,61 @@ export function manifestTimeframeLabel(
 ): string | null {
   if (typeof timeframe === "string" && timeframe.trim() !== "") return timeframe.trim();
   return timeframeLabelFromSecs(timeframeSecs);
+}
+
+// ---------------------------------------------------------------------------
+// GUI-BACKTEST-RUN-COMPARISON-01: side-by-side comparison snapshot
+// ---------------------------------------------------------------------------
+
+export interface ComparisonSnapshot {
+  strategy: string;
+  symbols: string;
+  timeframe: string;
+  dataRange: string;
+  totalReturnPct: number;
+  alphaPct: number | null;
+  maxDrawdownPct: number;
+  sharpeRatio: number | null;
+  sortinoRatio: number | null;
+  tradeCount: number;
+  winRatePct: number | null;
+  profitFactor: number | null;
+  expectancyMicros: number | null;
+  commissionMicros: number;
+}
+
+/**
+ * Extracts already-authoritative metrics/manifest values into a flat
+ * comparison snapshot. Pure display mapping only — never recomputes or
+ * derives a "winner"; a null field means the source artifact did not report
+ * that value, rendered as such by the caller.
+ */
+export function extractComparisonSnapshot(bundle: ArtifactBundle): ComparisonSnapshot | null {
+  if (bundle.metrics.kind !== "ok") return null;
+  const m = bundle.metrics.data;
+  const manifest = bundle.manifest.kind === "ok" ? bundle.manifest.data : null;
+  const equityRows = bundle.equityCurve.kind === "ok" ? bundle.equityCurve.data.rows : [];
+  const dataRange =
+    equityRows.length > 0
+      ? `${equityRows[0].ts_utc || "—"} -> ${equityRows[equityRows.length - 1].ts_utc || "—"}`
+      : "not reported";
+
+  return {
+    strategy: manifest?.strategy_name ?? m.strategy_name,
+    symbols: m.symbols.length > 0 ? m.symbols.join(", ") : "not reported",
+    timeframe: manifestTimeframeLabel(manifest?.timeframe, manifest?.timeframe_secs) ?? "not reported",
+    dataRange,
+    totalReturnPct: m.total_return_pct,
+    alphaPct: m.benchmark?.alpha_pct ?? null,
+    maxDrawdownPct: m.max_drawdown_pct,
+    sharpeRatio: m.sharpe_ratio,
+    sortinoRatio: m.sortino_ratio,
+    tradeCount: m.trade_count,
+    winRatePct: m.win_rate_pct,
+    profitFactor: m.profit_factor,
+    expectancyMicros: m.expectancy_micros,
+    commissionMicros: m.total_commission_micros,
+  };
 }
 
 // ---------------------------------------------------------------------------
