@@ -1383,11 +1383,32 @@ pub async fn fetch_autonomous_daily_operation_event_at_sequence(
 /// "2 equally authoritative active operations found" forever. `stop_retrying`
 /// now shares the same evidence-gated clause as `stopping` and
 /// `evidence_degraded`.
-pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 3] = [
-    STATE_RUNNING,
-    STATE_RECOVERY_RETRYING,
-    STATE_CONTROLLER_DEGRADED,
-];
+/// DATA-READINESS-BAR-COVERAGE-AUTHORITY-01: `running` and
+/// `recovery_retrying` do NOT appear in this list. Both used to be
+/// unconditionally relevant here, identical to `controller_degraded` --
+/// but unlike `controller_degraded` (a control-plane/process problem with
+/// no run-level evidence to check), a `running`/`recovery_retrying` row
+/// always carries a `run_id`, so its bound run's own durable evidence
+/// (`runs.status`, outbox/inbox/reconcile) can prove it safely terminal.
+/// Leaving them unconditional meant a crash-orphaned `running` row whose
+/// run had already been proven durably `STOPPED` with zero unresolved
+/// economic evidence stayed relevant *forever*, because its only healing
+/// path (`handle_running`'s dispatch-time self-heal) itself requires this
+/// exact lookup to first resolve to that one row alone -- impossible once
+/// any second stale row (of any kind) coexists. This is exactly the same
+/// shape of permanent-deadlock defect already fixed here for `stopping`/
+/// `stop_retrying`/`evidence_degraded`; `running`/`recovery_retrying` now
+/// share the identical run-evidence-gated clause in the query below
+/// instead of appearing in this unconditional list. `controller_degraded`
+/// is unaffected and remains unconditionally relevant.
+pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 1] = [STATE_CONTROLLER_DEGRADED];
+
+/// `running` and `recovery_retrying`: gated on the same run-level
+/// safe-terminal evidence used by [`RELEVANT_ACTIVE_LIFECYCLE_STATES`]'s
+/// sibling evidence-gated clause -- see the doc comment above and
+/// [`fetch_relevant_open_autonomous_daily_operation`], whose query binds
+/// this exact array so the two can never silently drift apart.
+pub const RUN_EVIDENCE_GATED_ACTIVE_STATES: [&str; 2] = [STATE_RUNNING, STATE_RECOVERY_RETRYING];
 
 /// Bounded row cap for [`fetch_relevant_open_autonomous_daily_operation`].
 /// Generous relative to the at-most-one-row-per-market-date invariant this
@@ -1403,8 +1424,20 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 ///
 /// A row is relevant when it is not terminal (`completed*` excluded) and
 /// any of:
-/// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active
-///   or recovering lifecycle in progress), or
+/// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (a
+///   control-plane/process problem with no run-level evidence to check --
+///   always relevant), or
+/// - its `state` is one of [`RUN_EVIDENCE_GATED_ACTIVE_STATES`] (`running`
+///   or `recovery_retrying`) AND its bound run is NOT proven safely
+///   terminal by the same run-level evidence proof the next bullet uses
+///   (DATA-READINESS-BAR-COVERAGE-AUTHORITY-01: these states always carry
+///   a `run_id`, so a crash-orphaned row whose run has already, durably
+///   proven safely terminal -- `runs.status = 'STOPPED'`, zero unacked
+///   outbox, zero unapplied inbox, clean global reconcile -- must not
+///   stay unconditionally relevant forever; its only other healing path,
+///   `handle_running`'s dispatch-time self-heal, itself requires this
+///   exact lookup to resolve to that one row alone first, which a second
+///   coexisting stale row of any kind makes permanently impossible), or
 /// - its `state` is `stopping`, `stop_retrying`, or `evidence_degraded` AND
 ///   it is NOT proven safe to release from unconditional relevance --
 ///   AUTONOMOUS-DAILY-EVIDENCE-DEGRADED-LIFECYCLE-AUTHORITY-SEPARATION-01,
@@ -1461,13 +1494,20 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 /// - `now_utc` falls within its persisted
 ///   `preopen_start_utc ..= postclose_finalize_utc` window, or
 /// - it durably bound a run (`run_id is not null`) that has no durable
-///   stopped evidence yet (`stopped_at_utc is null`) -- REPAIR 2
+///   stopped evidence yet (`stopped_at_utc is null`) AND is not proven
+///   safely terminal by the same run-level evidence proof -- REPAIR 2
 ///   (NONTRADING-RECOVERY-AND-RUNNING-CONFIRMATION-01): a bound run without
 ///   durable stop evidence remains relevant regardless of its current
 ///   lifecycle state or whether `now_utc` still falls inside its persisted
 ///   window, so it can never silently disappear from lifecycle control. An
 ///   old manual/blocked row that never bound a run (`run_id is null`) does
-///   not gain relevance from this clause merely because it is recent.
+///   not gain relevance from this clause merely because it is recent. The
+///   run-level evidence carve-out (DATA-READINESS-BAR-COVERAGE-AUTHORITY-01)
+///   is required here too: this clause is exactly what previously kept a
+///   crash-orphaned `running` row relevant forever even after its run was
+///   durably proven `STOPPED` with zero unresolved economic evidence --
+///   removing `running`/`recovery_retrying` from the unconditional list
+///   above is not sufficient on its own without this matching carve-out.
 ///
 /// Ordering is deterministic (`preopen_start_utc desc, operation_id asc`),
 /// but this function never silently picks a "most recent" row among
@@ -1483,6 +1523,40 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
     adapter_id: &str,
     now_utc: DateTime<Utc>,
 ) -> Result<Option<AutonomousDailyOperationRecord>> {
+    // DATA-READINESS-BAR-COVERAGE-AUTHORITY-01: shared run-level safe-
+    // terminal proof, reused by the `running`/`recovery_retrying` clause,
+    // the `stopping`/`stop_retrying`/`evidence_degraded` clause, and the
+    // REPAIR-2 bound-run-without-stop-evidence fallback below. Identical to
+    // the evidence standard `handle_running`'s own self-heal already proves
+    // when it gets a dispatch tick -- this makes that same proof available
+    // at the lookup layer so it never depends on winning a race for a solo
+    // tick first.
+    const RUN_SAFELY_TERMINAL: &str = r#"(
+        run_id is not null
+        and exists (
+          select 1 from runs r
+          where r.run_id = sys_autonomous_daily_operations.run_id
+            and r.status = 'STOPPED'
+        )
+        and not exists (
+          select 1 from oms_outbox o
+          where o.run_id = sys_autonomous_daily_operations.run_id
+            and o.status <> 'ACKED'
+        )
+        and not exists (
+          select 1 from oms_inbox i
+          where i.run_id = sys_autonomous_daily_operations.run_id
+            and i.applied_at_utc is null
+        )
+        and exists (
+          select 1 from sys_reconcile_status_state rs
+          where rs.status = 'ok'
+            and rs.mismatched_positions = 0
+            and rs.mismatched_orders = 0
+            and rs.mismatched_fills = 0
+            and rs.unmatched_broker_events = 0
+        )
+      )"#;
     let rows = sqlx::query(&format!(
         r#"
         select {OPERATION_COLUMNS}
@@ -1491,43 +1565,26 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
           and adapter_id = $2
           and state not in ($3, $4, $5)
           and (
-            state in ($6, $7, $10)
+            state = $10
+            or (
+              state in ($6, $7)
+              and not {RUN_SAFELY_TERMINAL}
+            )
             or (
               state in ($8, $9, $11)
               and not (
                 stopped_at_utc is not null
                 and (
                   run_id is null
-                  or (
-                    exists (
-                      select 1 from runs r
-                      where r.run_id = sys_autonomous_daily_operations.run_id
-                        and r.status = 'STOPPED'
-                    )
-                    and not exists (
-                      select 1 from oms_outbox o
-                      where o.run_id = sys_autonomous_daily_operations.run_id
-                        and o.status <> 'ACKED'
-                    )
-                    and not exists (
-                      select 1 from oms_inbox i
-                      where i.run_id = sys_autonomous_daily_operations.run_id
-                        and i.applied_at_utc is null
-                    )
-                    and exists (
-                      select 1 from sys_reconcile_status_state rs
-                      where rs.status = 'ok'
-                        and rs.mismatched_positions = 0
-                        and rs.mismatched_orders = 0
-                        and rs.mismatched_fills = 0
-                        and rs.unmatched_broker_events = 0
-                    )
-                  )
+                  or {RUN_SAFELY_TERMINAL}
                 )
               )
             )
             or ($12 >= preopen_start_utc and $12 <= postclose_finalize_utc)
-            or (run_id is not null and stopped_at_utc is null)
+            or (
+              run_id is not null and stopped_at_utc is null
+              and not {RUN_SAFELY_TERMINAL}
+            )
           )
         order by preopen_start_utc desc, operation_id asc
         limit $13
@@ -1538,11 +1595,11 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
     .bind(STATE_COMPLETED)
     .bind(STATE_COMPLETED_NO_TRADE)
     .bind(STATE_COMPLETED_WITH_ACTIVITY)
-    .bind(STATE_RUNNING)
-    .bind(STATE_RECOVERY_RETRYING)
+    .bind(RUN_EVIDENCE_GATED_ACTIVE_STATES[0])
+    .bind(RUN_EVIDENCE_GATED_ACTIVE_STATES[1])
     .bind(STATE_STOPPING)
     .bind(STATE_STOP_RETRYING)
-    .bind(STATE_CONTROLLER_DEGRADED)
+    .bind(RELEVANT_ACTIVE_LIFECYCLE_STATES[0])
     .bind(STATE_EVIDENCE_DEGRADED)
     .bind(now_utc)
     .bind(RELEVANT_OPERATION_LOOKUP_LIMIT)
