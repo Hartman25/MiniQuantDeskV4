@@ -524,6 +524,82 @@ def test_rank_side_count_non_positive_rejected() -> None:
         ).normalized()
 
 
+def test_rank_side_count_valid_integers_accepted() -> None:
+    """R2 (DIRECT-RANK-SIDE-COUNT-STRICT-INTEGER-01): plain positive ints,
+    and floats that are exactly integral (the only numeric shape JSON
+    config can use to represent an int, e.g. `2.0`), are accepted and
+    normalize to the same int K."""
+    for value in (2, 2.0):
+        spec = SignalPolicySpec(
+            direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+            long_only=True, rank_side_count=value,
+        ).normalized()
+        assert spec.rank_side_count == 2
+        assert isinstance(spec.rank_side_count, int)
+    spec1 = SignalPolicySpec(
+        direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        long_only=True, rank_side_count=1,
+    ).normalized()
+    assert spec1.rank_side_count == 1
+
+
+def test_rank_side_count_valid_k_identity_unchanged() -> None:
+    """R2: an existing valid integer K's registered identity fragment is
+    byte-for-byte unchanged by the strict-integer repair -- the semantic
+    value (int 2) is what identity reads, not the exact literal type used
+    to construct it (2 vs 2.0 are the same K, JSON cannot tell them apart)."""
+    spec_int = SignalPolicySpec(
+        direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        long_only=True, rank_side_count=2,
+    ).normalized()
+    spec_float = SignalPolicySpec(
+        direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        long_only=True, rank_side_count=2.0,
+    ).normalized()
+    identity_int = economic_protocol_identity(_diagnostic_spec(spec_int).normalized())
+    identity_float = economic_protocol_identity(_diagnostic_spec(spec_float).normalized())
+    assert identity_int == identity_float
+    assert identity_int["signal_policy"]["rank_side_count"] == 2
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [0, -1, 2.5, 1.1, True, False, float("nan"), float("inf"), float("-inf"), "2", None, "2.5"],
+    ids=["zero", "neg_one", "two_point_five", "one_point_one", "bool_true", "bool_false",
+         "nan", "inf", "neg_inf", "str_two", "none", "str_two_point_five"],
+)
+def test_rank_side_count_malformed_values_rejected(bad_value) -> None:
+    """R2: every malformed candidate is REJECTED outright -- never silently
+    canonicalized/truncated into a different, valid K. `bad_value=None` is
+    covered by the pre-existing dedicated "requires rank_side_count" check
+    (REQUIRED TEST distinct message); every other value is a genuinely
+    constructible-but-invalid K rejected by the new strict-integer
+    contract."""
+    kwargs: Dict[str, Any] = dict(
+        direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        long_only=True, rank_side_count=bad_value,
+    )
+    with pytest.raises(ValueError):
+        SignalPolicySpec(**kwargs).normalized()
+
+
+def test_rank_side_count_fractional_cannot_alias_valid_integer_identity() -> None:
+    """R2: 2.5 must be REJECTED, not silently truncated to K=2 -- a
+    malformed 2.5 candidate can never be constructed at all, so it is
+    structurally impossible for it to alias K=2's registered identity."""
+    with pytest.raises(ValueError, match="integral"):
+        SignalPolicySpec(
+            direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+            long_only=True, rank_side_count=2.5,
+        ).normalized()
+    # The valid neighbor K=2 remains constructible and unaffected.
+    ok = SignalPolicySpec(
+        direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        long_only=True, rank_side_count=2,
+    ).normalized()
+    assert ok.rank_side_count == 2
+
+
 def test_wrong_long_only_flag_rejected() -> None:
     """REQUIRED TEST 14."""
     with pytest.raises(ValueError, match="requires long_only"):

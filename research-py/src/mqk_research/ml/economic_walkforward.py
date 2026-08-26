@@ -173,6 +173,34 @@ KNOWN_BORROW_MODEL_IDS = frozenset({BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIV
 # ---------------------------------------------------------------------------
 
 
+def _require_positive_integral_rank_side_count(value: Any) -> int:
+    """DIRECT-RANK-SIDE-COUNT-STRICT-INTEGER-01: `rank_side_count` (K) must
+    be an actual positive integral value -- `int(value)` alone silently
+    truncates a malformed semantic input like 2.5 down to 2, letting an
+    invalid candidate alias a genuinely different, valid K's identity.
+    Accepts a plain Python `int` unconditionally (`bool` excluded -- it is
+    an `int` subtype in Python but is never a semantically valid K), or a
+    `float` only when it is finite AND exactly integral (JSON config --
+    e.g. PREDECLARED_WAVE.json, the real construction path via
+    run_wave.py -- cannot distinguish `5` from `5.0`, but can represent a
+    malformed `2.5`, `NaN`, or `Infinity`). Any other type (str, None,
+    etc.) is rejected outright rather than coerced."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"rank_side_count must be a positive integer, got {value!r} of type "
+            f"{type(value).__name__}"
+        )
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            raise ValueError(f"rank_side_count must be a finite positive integer, got {value!r}")
+        if not value.is_integer():
+            raise ValueError(f"rank_side_count must be an integral value, got {value!r}")
+    rank_side_count = int(value)
+    if rank_side_count <= 0:
+        raise ValueError("rank_side_count must be a positive integer")
+    return rank_side_count
+
+
 @dataclass(frozen=True)
 class SignalPolicySpec:
     """Explicit, versioned signal-to-position policy.
@@ -360,9 +388,7 @@ class SignalPolicySpec:
                 raise ValueError(f"{self.direction_policy} direction_policy does not accept short_threshold")
             if self.rank_side_count is None:
                 raise ValueError(f"{self.direction_policy} direction_policy requires rank_side_count")
-            rank_side_count = int(self.rank_side_count)
-            if rank_side_count <= 0:
-                raise ValueError("rank_side_count must be a positive integer")
+            rank_side_count = _require_positive_integral_rank_side_count(self.rank_side_count)
             if is_rank_long_short:
                 borrow_model = self.borrow_model or BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1
                 if borrow_model not in KNOWN_BORROW_MODEL_IDS:
