@@ -68,8 +68,13 @@ from pathlib import Path
 from typing import Any
 
 WAVE03_WORKTREE_SRC = Path(__file__).resolve().parents[2] / "src"
-assert WAVE03_WORKTREE_SRC.name == "src" and "direct-rank-policy" in str(WAVE03_WORKTREE_SRC), (
-    f"refusing to run: expected the isolated direct-rank-policy worktree's own src/, got {WAVE03_WORKTREE_SRC}"
+# RESEARCH-DIRECT-RANK-AND-LEDGER-CLOSURE-WAVE-01: this driver was ported from
+# the retained research-direct-rank-policy-01 branch's isolated worktree
+# ("...-direct-rank-policy") onto the ledger-research-rank-wave-01 worktree;
+# the guard marker moves with it so it still fails closed on an unexpected
+# checkout instead of silently importing the wrong src/.
+assert WAVE03_WORKTREE_SRC.name == "src" and "research-rank-wave-01" in str(WAVE03_WORKTREE_SRC), (
+    f"refusing to run: expected the isolated research-rank-wave-01 worktree's own src/, got {WAVE03_WORKTREE_SRC}"
 )
 sys.path.insert(0, str(WAVE03_WORKTREE_SRC))
 
