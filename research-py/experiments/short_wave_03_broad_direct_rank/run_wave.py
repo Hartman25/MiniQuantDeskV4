@@ -67,16 +67,48 @@ import sys
 from pathlib import Path
 from typing import Any
 
-WAVE03_WORKTREE_SRC = Path(__file__).resolve().parents[2] / "src"
-# RESEARCH-DIRECT-RANK-AND-LEDGER-CLOSURE-WAVE-01: this driver was ported from
-# the retained research-direct-rank-policy-01 branch's isolated worktree
-# ("...-direct-rank-policy") onto the ledger-research-rank-wave-01 worktree;
-# the guard marker moves with it so it still fails closed on an unexpected
-# checkout instead of silently importing the wrong src/.
-assert WAVE03_WORKTREE_SRC.name == "src" and "research-rank-wave-01" in str(WAVE03_WORKTREE_SRC), (
-    f"refusing to run: expected the isolated research-rank-wave-01 worktree's own src/, got {WAVE03_WORKTREE_SRC}"
-)
-sys.path.insert(0, str(WAVE03_WORKTREE_SRC))
+
+def resolve_wave03_checkout_local_src(experiment_file: Path) -> Path:
+    """R3 (WAVE03-CHECKOUT-LOCAL-SOURCE-GUARD-01): fail-closed local-source
+    safety must not depend on the checkout/worktree DIRECTORY NAME -- a
+    temporary worktree's basename (e.g. "research-rank-wave-01") is not
+    research authority, and hardcoding it made this guard pass only from
+    that one specific worktree, failing closed (wrongly) once the same
+    committed code ran from an ordinary checkout named anything else.
+
+    This driver must import mqk_research from the SAME CHECKOUT that
+    contains `experiment_file` (this module), whatever that checkout
+    happens to be named: resolve the sibling checkout-local
+    `research-py/src` from the file path, verify the required local
+    package structure actually exists there, and return that exact
+    resolved path (never the file's parent basename) for the caller to
+    place first on sys.path. Raises RuntimeError -- never silently falls
+    back to any other src/ -- if the sibling structure is missing/wrong."""
+    local_src = Path(experiment_file).resolve().parents[2] / "src"
+    pkg_init = local_src / "mqk_research" / "__init__.py"
+    if local_src.name != "src" or not pkg_init.is_file():
+        raise RuntimeError(
+            "refusing to run: expected a checkout-local research-py/src/mqk_research package "
+            f"sibling to {experiment_file}, got {local_src}"
+        )
+    return local_src
+
+
+WAVE03_LOCAL_SRC = resolve_wave03_checkout_local_src(Path(__file__))
+sys.path.insert(0, str(WAVE03_LOCAL_SRC))
+
+import mqk_research as _wave03_local_mqk_research_check
+
+# Defense-in-depth: verify the mqk_research actually imported (module
+# resolution order can be shadowed by an installed package elsewhere on
+# sys.path) resolves underneath THIS SAME checkout-local src/, not merely
+# that inserting it succeeded.
+_wave03_resolved_mqk_research = Path(_wave03_local_mqk_research_check.__file__).resolve()
+if not _wave03_resolved_mqk_research.is_relative_to(WAVE03_LOCAL_SRC):
+    raise RuntimeError(
+        "refusing to run: imported mqk_research did not resolve underneath the checkout-local "
+        f"src/ ({WAVE03_LOCAL_SRC}); got {_wave03_resolved_mqk_research}"
+    )
 
 import numpy as np
 import pandas as pd
