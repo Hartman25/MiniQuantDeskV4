@@ -231,16 +231,22 @@ def test_rank_only_within_exact_timestamp() -> None:
 
 
 def test_stale_prior_timestamp_score_never_carried_forward() -> None:
-    """REQUIRED TESTS 6/7 (mission "DYNAMIC MEMBERSHIP TEST"): at T1 the
-    scored set is {F,A,B,C,D,E} (F highest, selected top-2 with A); at T2 F
-    is entirely ABSENT and G newly appears with a LOW score. The correct
-    T2 selection is {A,B} -- if F's stale T1 score of 0.95 were incorrectly
-    still considered "in the running" at T2, F (not B) would remain
-    selected. A missing T2 row for F is not an engine error (dynamic
-    membership is allowed); F's own direction_state simply carries forward
-    UNCHANGED (no new pending event for F at T2) because it was never
-    re-evaluated -- it was correctly excluded from T2's ranking input
-    entirely, not silently kept as a rank candidate."""
+    """REQUIRED TESTS 6/7 (mission "DYNAMIC MEMBERSHIP TEST") + R1-A
+    (DIRECT-RANK-DYNAMIC-MEMBERSHIP-POSITION-CLOSURE-01, "LONG-ONLY
+    DROPOUT"): at T1 the scored set is {F,A,B,C,D,E} (F highest, selected
+    top-2 with A); at T2 F is entirely ABSENT and G newly appears with a LOW
+    score. The correct T2 selection is {A,B} -- if F's stale T1 score of
+    0.95 were incorrectly still considered "in the running" at T2, F (not B)
+    would remain selected. A missing T2 row for F is not an engine error
+    (dynamic membership is allowed) and F's stale score never re-enters
+    T2's ranking input -- but F's ECONOMIC POSITION must not merely be
+    excluded from ranking, it must be explicitly FLATTENED: every valid
+    decision frame defines the COMPLETE desired direction state, so a
+    symbol absent from the current rankable set desires flat (0), exactly
+    like a scored-but-unselected symbol. The pre-R1 implementation looped
+    only `new_direction.items()` (T2's scored symbols) and so silently
+    preserved F's stale +0.5 direction_state forever -- this test's T2
+    assertion on F is the regression proof for that fix."""
     t1, t2 = _ts("2021-01-01"), _ts("2021-01-02")
     oos_fold = _direct_oos_fold(
         [
@@ -254,18 +260,185 @@ def test_stale_prior_timestamp_score_never_carried_forward() -> None:
     events = _build_rank_pending_events(oos_fold, symbols, _rank_long_only(2, max_gross=1.0))
 
     # T1: F, A selected (top-2 of F=.95,A=.90,...).
-    assert [(ts_, w) for ts_, w, _ in events["F"]] == [(pd.Timestamp(t1), pytest.approx(0.5))]
     assert [ts_ for ts_, w, _ in events["A"]] == [pd.Timestamp(t1)]
 
     # T2: correct ranking of {A,B,C,D,E,G} ONLY selects A,B -- G (0.30) is
-    # too low, and F is not part of T2's frame at all (no event for F at T2,
-    # proving it was excluded from ranking, not silently re-selected).
-    assert [ts_ for ts_, w, _ in events["F"]] == [pd.Timestamp(t1)]  # no T2 event for F
+    # too low. F is absent from T2's scored rows, but MUST receive an
+    # explicit zero (flatten) event at T2 -- absence from the rankable set
+    # is not a reason to keep a stale nonzero position.
+    assert [(ts_, w) for ts_, w, _ in events["F"]] == [
+        (pd.Timestamp(t1), pytest.approx(0.5)),
+        (pd.Timestamp(t2), pytest.approx(0.0)),
+    ]
     assert [ts_ for ts_, w, _ in events["G"]] == []  # G scored too low, never selected
     b_events = {ts_: w for ts_, w, _ in events["B"]}
     assert b_events[pd.Timestamp(t2)] == pytest.approx(0.5)  # B newly selected at T2
     # A stays selected across T1->T2 (no direction change -> no new event).
     assert [ts_ for ts_, w, _ in events["A"]] == [pd.Timestamp(t1)]
+
+
+# ---------------------------------------------------------------------------
+# R1 (DIRECT-RANK-DYNAMIC-MEMBERSHIP-POSITION-CLOSURE-01): a symbol absent
+# from the current rankable cross-section must be explicitly flattened, not
+# left silently holding its prior direction_state. R1-A is the fixed
+# test_stale_prior_timestamp_score_never_carried_forward above; R1-B..R1-F
+# follow.
+# ---------------------------------------------------------------------------
+
+
+def test_r1b_end_to_end_economic_position_after_dropout(tmp_path: Path) -> None:
+    """R1-B END-TO-END ECONOMIC POSITION: drives the real economic
+    walkforward/execution path (not the pure builder) across a dropout.
+    T1 (day0): F=.95,A=.90,B=.85,C=.70,D=.60,E=.50, K=2 -> F,A selected.
+    T2 (day2): A=.90,B=.85,C=.70,D=.60,E=.50,G=.30, F ABSENT -> A,B selected.
+    Proves actual executed holdings after T2's execution bar correspond to
+    exactly {A,B}, not stale {F,A} -- F's own bars continue for the whole
+    fold (as they must, to price its flatten trade and because
+    close_frame's symbol universe spans every symbol ever scored in the
+    fold), but F must never again carry a nonzero executed weight once its
+    flatten event has had a chance to execute."""
+    days = pd.date_range("2021-01-01", periods=5, freq="D", tz="UTC")
+    symbols_all = ["A", "B", "C", "D", "E", "F", "G"]
+    bars_rows = [_bar_row(s, d, 100.0) for s in symbols_all for d in days]
+    oos_rows = (
+        [_oos_row(1, s, days[0], score) for s, score in
+         [("F", 0.95), ("A", 0.90), ("B", 0.85), ("C", 0.70), ("D", 0.60), ("E", 0.50)]]
+        + [_oos_row(1, s, days[2], score) for s, score in
+           [("A", 0.90), ("B", 0.85), ("C", 0.70), ("D", 0.60), ("E", 0.50), ("G", 0.30)]]
+    )
+    folds = [_single_fold("2021-01-01", "2021-01-06")]
+    bars_path = _write_fixture(tmp_path, folds=folds, oos_rows=oos_rows, bars_rows=bars_rows)
+
+    spec = _diagnostic_spec(_rank_long_only(2, max_gross=1.0), weight_to_share=WeightToShareSpec(equity_usd=10_000.0))
+    out = json.loads(
+        run_economic_walkforward(tmp_path, bars_csv=bars_path, spec=spec).read_text(encoding="utf-8")
+    )
+    evidence = out["folds"][0]["weight_to_share_evidence"]
+
+    # T2's flatten (F) and buy (B) signals are issued at day2 (idx2) and
+    # execute at day3 (idx3) -- one bar later, per the causal same-bar-
+    # cannot-execute contract already proven by REQUIRED TESTS 20/21.
+    assert evidence["F"][3]["side"] == "sell"
+    assert evidence["F"][3]["target_qty"] == 0  # F flattened, not held stale
+    assert evidence["B"][3]["side"] == "buy"
+    assert evidence["B"][3]["target_qty"] == 50  # B newly holds its exact K-share
+
+    # After T2's execution bar, A remains held (never dropped) and F is
+    # exactly flat -- selected names are exactly the current top-K {A,B}.
+    assert evidence["A"][3]["target_qty"] == 50
+    assert evidence["F"][3]["target_qty"] == 0
+    for s in ("C", "D", "E", "G"):
+        assert evidence[s][3]["target_qty"] == 0  # never selected
+
+    returns_csv = pd.read_csv(tmp_path / "eval" / "economic_returns.csv")
+    assert returns_csv["gross_exposure"].max() <= 1.0 + 1e-6  # max_gross_exposure preserved
+
+
+def test_r1c_long_short_dropout_flattens_both_sides() -> None:
+    """R1-C LONG/SHORT DROPOUT: at T1 A is the sole selected long and F the
+    sole selected short (K=1); at T2 both A and F disappear from the
+    rankable set while D/E newly take the long/short slots. Required: both
+    the dropped long AND the dropped short flatten to 0, and the new
+    top/bottom members take their intended side."""
+    t1, t2 = _ts("2021-01-01"), _ts("2021-01-02")
+    oos_fold = _direct_oos_fold(
+        [
+            _oos_row(1, "A", t1, 0.95), _oos_row(1, "B", t1, 0.80),
+            _oos_row(1, "C", t1, 0.20), _oos_row(1, "F", t1, 0.05),
+            _oos_row(1, "B", t2, 0.60), _oos_row(1, "C", t2, 0.40),
+            _oos_row(1, "D", t2, 0.90), _oos_row(1, "E", t2, 0.05),
+        ]
+    )
+    symbols = ["A", "B", "C", "D", "E", "F"]
+    events = _build_rank_pending_events(oos_fold, symbols, _rank_long_short(1, max_gross=1.0))
+
+    assert [(ts_, pytest.approx(w)) for ts_, w, _ in events["A"]] == [
+        (pd.Timestamp(t1), pytest.approx(0.5)), (pd.Timestamp(t2), pytest.approx(0.0)),
+    ]
+    assert [(ts_, pytest.approx(w)) for ts_, w, _ in events["F"]] == [
+        (pd.Timestamp(t1), pytest.approx(-0.5)), (pd.Timestamp(t2), pytest.approx(0.0)),
+    ]
+    assert [(ts_, w) for ts_, w, _ in events["D"]] == [(pd.Timestamp(t2), pytest.approx(0.5))]
+    assert [(ts_, w) for ts_, w, _ in events["E"]] == [(pd.Timestamp(t2), pytest.approx(-0.5))]
+    assert events["B"] == []  # never in the top/bottom-1 at either frame
+    assert events["C"] == []
+
+
+def test_r1d_partial_universe_ranks_and_flattens_dropped() -> None:
+    """R1-D PARTIAL UNIVERSE: T2's rankable cross-section (4 names) is
+    smaller than T1's (6 names) but still >= K=2 -- ranking must succeed on
+    the smaller current frame, flatten the two names that dropped out
+    (F, E), and select exactly the current top-2 (A, B)."""
+    t1, t2 = _ts("2021-01-01"), _ts("2021-01-02")
+    oos_fold = _direct_oos_fold(
+        [
+            _oos_row(1, "F", t1, 0.95), _oos_row(1, "A", t1, 0.90), _oos_row(1, "B", t1, 0.85),
+            _oos_row(1, "C", t1, 0.70), _oos_row(1, "D", t1, 0.60), _oos_row(1, "E", t1, 0.50),
+            _oos_row(1, "A", t2, 0.90), _oos_row(1, "B", t2, 0.85),
+            _oos_row(1, "C", t2, 0.70), _oos_row(1, "D", t2, 0.60),
+        ]
+    )
+    symbols = ["A", "B", "C", "D", "E", "F"]
+    events = _build_rank_pending_events(oos_fold, symbols, _rank_long_only(2, max_gross=1.0))
+
+    assert [(ts_, w) for ts_, w, _ in events["F"]] == [
+        (pd.Timestamp(t1), pytest.approx(0.5)), (pd.Timestamp(t2), pytest.approx(0.0)),
+    ]
+    b_events = {ts_: w for ts_, w, _ in events["B"]}
+    assert b_events[pd.Timestamp(t2)] == pytest.approx(0.5)
+    assert [ts_ for ts_, w, _ in events["A"]] == [pd.Timestamp(t1)]  # unchanged, stays selected
+    assert events["E"] == []  # never selected at either frame
+    assert events["C"] == [] and events["D"] == []
+
+
+def test_r1e_insufficient_current_frame_fails_closed() -> None:
+    """R1-E INSUFFICIENT CURRENT FRAME: T1 has enough names, but T2's
+    cross-section drops below rank_side_count -- must fail closed exactly
+    as an ordinary undersized frame would (REQUIRED TEST 9), never silently
+    fall back to retaining T1's stale selection as a substitute decision."""
+    t1, t2 = _ts("2021-01-01"), _ts("2021-01-02")
+    oos_fold = _direct_oos_fold(
+        [
+            _oos_row(1, "A", t1, 0.90), _oos_row(1, "B", t1, 0.80), _oos_row(1, "C", t1, 0.50),
+            _oos_row(1, "A", t2, 0.90),
+        ]
+    )
+    symbols = ["A", "B", "C"]
+    with pytest.raises(RuntimeError, match="at least"):
+        _build_rank_pending_events(oos_fold, symbols, _rank_long_only(2, max_gross=1.0))
+
+
+def test_r1f_removed_held_symbol_score_neither_ranks_nor_stays_selected() -> None:
+    """R1-F NO STALE SCORE / NO STALE POSITION (mutation-style proof):
+    remove an already-held symbol's (F) T2 ml_score entirely. Required,
+    both must hold: (1) F's T1 score of 0.95 never participates in T2's
+    ranking decision -- structurally guaranteed since
+    _resolve_rank_direction_for_frame only ever receives the exact rows
+    scored at T2 (proven by G, scored .30 at T2, correctly losing to A/B
+    despite F's absent-but-higher stale score); and (2) F's T1 position
+    does not remain selected at T2 -- the pre-R1 implementation FAILS this
+    exact assertion (it emits no T2 event for F at all, so F's
+    direction_state silently stays +0.5 forever)."""
+    t1, t2 = _ts("2021-01-01"), _ts("2021-01-02")
+    oos_fold = _direct_oos_fold(
+        [
+            _oos_row(1, "F", t1, 0.95), _oos_row(1, "A", t1, 0.90), _oos_row(1, "B", t1, 0.85),
+            _oos_row(1, "C", t1, 0.70),
+            # F's T2 row is entirely removed here.
+            _oos_row(1, "A", t2, 0.90), _oos_row(1, "B", t2, 0.85),
+            _oos_row(1, "C", t2, 0.70), _oos_row(1, "G", t2, 0.30),
+        ]
+    )
+    symbols = ["A", "B", "C", "F", "G"]
+    events = _build_rank_pending_events(oos_fold, symbols, _rank_long_only(2, max_gross=1.0))
+
+    # (1) F's stale score cannot outrank G's genuine T2 score of .30 -- G is
+    # correctly excluded (top-2 of A=.90,B=.85,C=.70,G=.30 is A,B).
+    assert events["G"] == []
+    # (2) F's T1 position is explicitly flattened at T2, not silently kept.
+    assert [(ts_, w) for ts_, w, _ in events["F"]] == [
+        (pd.Timestamp(t1), pytest.approx(0.5)), (pd.Timestamp(t2), pytest.approx(0.0)),
+    ]
 
 
 # ---------------------------------------------------------------------------

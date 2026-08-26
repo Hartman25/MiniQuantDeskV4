@@ -1067,10 +1067,19 @@ def _build_rank_pending_events(
         scores = {str(sym): float(score) for sym, score in zip(group["symbol"], group["ml_score"])}
         new_direction = _resolve_rank_direction_for_frame(scores, rank_side_count, long_only)
         signal_ts = pd.Timestamp(ts)
-        for s, direction in new_direction.items():
-            if s not in pending_events:
-                pending_events[s] = []
-                direction_state[s] = 0
+        # R1 (DIRECT-RANK-DYNAMIC-MEMBERSHIP-POSITION-CLOSURE-01): a valid
+        # decision frame defines the COMPLETE desired direction state --
+        # every symbol tracked from a prior frame, not only the symbols
+        # actually scored now. A symbol absent from this frame's rankable
+        # set (`new_direction`) desires flat (0), exactly like a scored
+        # symbol that fell outside the selected top/bottom-K -- iterating
+        # only `new_direction.items()` would silently preserve a stale
+        # prior selection for anyone missing a current score. `symbols` is
+        # the full per-fold symbol set both `direction_state` and
+        # `pending_events` were initialized over, so every entry here is
+        # already a valid key.
+        for s in symbols:
+            direction = new_direction.get(s, 0)
             if direction_state[s] == direction:
                 continue
             direction_state[s] = direction
