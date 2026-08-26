@@ -2293,6 +2293,115 @@ not modified by this repair wave.
 
 ---
 
+## 1L-2. RESEARCH-DIRECT-RANK-WAVE-01-INTEGRATION-01 (2026-08-25)
+
+Mission `RESEARCH-DIRECT-RANK-WAVE-01-INTEGRATION-01-CONTROLLER` merged the
+independently accepted, pushed-verified `ledger-research-rank-wave-01`
+(source HEAD `de69ab11b14e3355e18a7cdfe752685174fef488`) into the
+authoritative integration spine `ledger-closure-integration-01` (start HEAD
+`d1b6f0447afe996b4cf544bd5a314a469b70e613`).
+
+**Source wave:** `ledger-research-rank-wave-01` @ `de69ab11`.
+
+**Integration merge:** `f2ea8287abcc0af85df550b8cb21fb2df0f3a4e1` (`--no-ff`,
+parents `d1b6f044` + `de69ab11`, clean — no conflicts). Topology was
+verified before merging: `git merge-base origin/ledger-closure-integration-01
+origin/ledger-research-rank-wave-01` returned `d1b6f044` exactly; the
+commit range contained exactly the expected 11 commits and the file diff
+touched exactly the expected 12 paths under `research-py/` and
+`docs/research/` — no unexpected commit or file.
+
+**Independent acceptance.** ChatGPT independently reviewed the original wave
+review bundle, the independent-review defect findings (Section 1L-1), the
+R1/R2/R3 repair bundle, the actual production/test diffs, the RED/GREEN
+controls, the 1740-pass Research acceptance suite, and the nonmatching-
+checkout portability proof, and accepted the following repair commits:
+
+| Commit | Content |
+|---|---|
+| `2e2e7a9f` | flatten symbols leaving direct-rank cross section |
+| `399d7acc` | require integral direct-rank side count |
+| `1c5e4502` | make wave03 source guard checkout-local |
+| `de69ab11` | docs record of repair state |
+
+**Integrated acceptance suite (run from the permanent checkout
+`C:\Users\Zacha\Desktop\MiniQuantDeskV4\research-py`, which contains neither
+`research-rank-wave-01` nor `direct-rank-policy` in its path — itself a
+second, independent portability proof beyond Section 1L-1's temporary
+detached-HEAD worktree):**
+
+- Focused suite (`test_direct_rank_economic_policy.py`,
+  `test_direct_rank_registered_identity.py`, `test_universe_snapshot.py`,
+  `test_wave03_checkout_local_source_guard.py`, `test_predeclaration.py`):
+  **98 passed.**
+- Full `research-py` suite: **1740 passed, 7 skipped** (12 subtests passed
+  within that count) — matches the mission's expected baseline exactly.
+
+**Load-bearing invariants re-proven in the integrated tree** (test names,
+all green above): dropped-long flattens
+(`test_r1b_end_to_end_economic_position_after_dropout`,
+`test_r1f_removed_held_symbol_score_neither_ranks_nor_stays_selected`);
+dropped-short flattens (`test_r1c_long_short_dropout_flattens_both_sides`);
+current top-K exact (`test_rank_long_only_top_k_exact_weights`,
+`test_rank_long_short_top_bottom_k_exact_weights`); partial universe
+(`test_r1d_partial_universe_ranks_and_flattens_dropped`); insufficient
+current universe fails closed
+(`test_r1e_insufficient_current_frame_fails_closed`,
+`test_insufficient_names_fails_closed`); strict K — fractional, boolean, and
+non-positive values rejected while valid K identity is unchanged
+(`test_rank_side_count_malformed_values_rejected`,
+`test_rank_side_count_fractional_cannot_alias_valid_integer_identity`,
+`test_wrong_long_only_flag_rejected`,
+`test_rank_side_count_valid_k_identity_unchanged`); checkout-local source
+guard collects and passes from this directory-name-independent permanent
+checkout (`test_resolver_semantics_independent_of_checkout_basename`, plus
+the full suite run itself); universe identity is membership-sensitive and
+order-insensitive (`test_adding_enabled_equity_changes_universe_id`,
+`test_removing_enabled_equity_changes_universe_id`,
+`test_toggling_enabled_changes_universe_id`,
+`test_symbol_order_does_not_change_universe_id`); policy identity is
+sensitive to rank side count / gross / policy family / borrow model
+(`test_rank_side_count_change_distinct_trial_id`,
+`test_max_gross_exposure_change_alters_rank_identity`,
+`test_rank_policy_distinct_from_threshold_policy_identity`,
+`test_borrow_model_semantic_difference_cannot_silently_alias`); trial
+contracts — retry does not manufacture a new trial and result fields are
+excluded from candidate identity
+(`test_retry_of_identical_rank_candidate_remains_same_trial`,
+`test_result_fields_absent_from_candidate_identity`).
+
+**Holdout.** No trial in `SHORT-WAVE-03` has been executed by this
+integration; the predeclaration continues to record `holdout_months = 6`
+(`test_holdout_months_is_6`) and final holdout remains unconsumed.
+
+**Economics.** Cost-aware and execution-aware machinery remains in the
+active path (`test_actual_gross_never_exceeds_max_gross_exposure`,
+`test_signal_cannot_execute_on_its_own_bar_and_executes_next_bar`); `fwd_ret`
+remains label-only, not executable P&L — unchanged by this wave.
+
+**Production/test edits during this integration mission: NONE.** This
+mission performed only the merge and this docs-only acceptance record; no
+production or test code was authored or modified.
+
+**Status: `CLOSED — INDEPENDENTLY ACCEPTED`.** Merged into
+`ledger-closure-integration-01` at `f2ea8287`. Not pushed to `origin` (per
+mission scope). `ledger-research-rank-wave-01` was not deleted.
+
+**Direct-Rank closure does not mean:** all Research is complete; promotion
+is complete; `SHORT-WAVE-03` has executed; corporate-action evidence exists;
+final holdout has been consumed; Paper has validated the strategy; or alpha
+exists. Outstanding Research→Promotion blockers are unchanged by this
+integration, per Section 1L's own accounting (unaltered here): the
+production promotion-route gaps under `PROMOTION-BACKTEST-EVIDENCE-SEAM-01`
+(master ledger row 14/§24) remain `OPEN` exactly as the ledger already
+states, and the DATA TRUTH / corporate-action-evidence-source gap underlying
+`BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01` (Section 1B/1C, not yet scoped)
+still governs whether a REAL, non-synthetic run of
+`SHORT-WAVE-03-BROAD-DIRECT-RANK` can execute at all. Neither status changed
+because Direct-Rank was accepted.
+
+---
+
 ## 2. Baseline
 
 ```
