@@ -2209,6 +2209,90 @@ temporary worktree pending independent review.
 
 ---
 
+## 1L-1. RESEARCH-DIRECT-RANK-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01 (2026-08-25)
+
+Independent review of Section 1L's wave (still on `ledger-research-rank-wave-01`,
+same worktree, HEAD advanced from `2350c547` by the three repair commits
+below) found **three deterministic defects**, none previously identified in
+Section 1L above. Per this document's own honesty rule (Section 0), Section
+1L's original claims are left UNCHANGED as a historical record of what was
+believed at that checkpoint — this section records what was actually wrong
+and how it was repaired.
+
+**Defect 1 — stale economic position on dynamic-membership dropout.**
+`_build_rank_pending_events` looped only `new_direction.items()` (the
+symbols actually scored at the current decision frame). A symbol selected
+at a prior frame but absent from the current frame's rankable set kept its
+stale nonzero `direction_state` and was never flattened — the module's own
+`test_stale_prior_timestamp_score_never_carried_forward` (Section 1L,
+`test_direct_rank_economic_policy.py`, one of the "24 passed") had in fact
+encoded this bug as correct behavior: it asserted the dropped symbol
+received *no* event at the frame it disappeared, rather than an explicit
+zero. Section 1L's "1720 passed" acceptance run did not catch this because
+every existing fixture only ever added or reshuffled scores across frames,
+never dropped an already-selected symbol's score entirely.
+
+**Defect 2 — worktree-name-bound source guard.** Section 1L's own new
+repair commit `599335cc` ("New repair... hardcoded the retained branch's
+original isolated worktree name... updated the expected marker to this
+wave's worktree... so the ported driver still imports **and still fails
+closed on an unexpected checkout**") was itself wrong on the bolded claim:
+it replaced one hardcoded worktree-name substring
+(`...-direct-rank-policy`) with another (`research-rank-wave-01`), so
+`test_predeclaration.py` passed only from that one specific temporary
+worktree and would fail collection (not "fail closed" — an
+`AssertionError` at import time, indistinguishable from a genuine local-
+source problem) from any other checkout, including the permanent repo at
+`C:\Users\Zacha\Desktop\MiniQuantDeskV4`. The checkout directory name was
+never research authority.
+
+**Defect 3 — `rank_side_count` silently coerced through `int(...)`.**
+`SignalPolicySpec.normalized()` computed `rank_side_count =
+int(self.rank_side_count)` directly, silently truncating a malformed
+semantic value such as `2.5` down to a valid `K=2` instead of rejecting it
+outright — violating the declared positive-integer/fail-closed contract
+also documented in Section 1L (Patch A's "fail-closed... rejection"
+list did not include this case).
+
+**Repair commits (new commits on `ledger-research-rank-wave-01`, no
+amend/squash/rebase):**
+
+| Commit | Content |
+|---|---|
+| `2e2e7a9f` | R1 — `_build_rank_pending_events` now iterates the full per-fold `symbols` universe every decision frame, defaulting a symbol's desired direction to 0 when absent from the current frame's rankable set, so every valid frame defines a COMPLETE desired direction state. Fixed the pre-existing mis-encoded test and added `test_r1b`..`test_r1f` (end-to-end economic-position proof, long/short dropout, partial-universe, insufficient-frame fail-closed, mutation-style no-stale-score/no-stale-position proof). |
+| `399d7acc` | R2 — added `_require_positive_integral_rank_side_count`: accepts a plain `int` (bool excluded) or a `float` only when finite and exactly integral; rejects `0`, negative values, non-integral floats, `NaN`/`inf`, `bool`, and non-numeric values outright. A rejected candidate can never be constructed, so it cannot alias a valid K's registered identity. |
+| `1c5e4502` | R3 — replaced the hardcoded worktree-name assertion with `resolve_wave03_checkout_local_src()`: resolves the sibling checkout-local `research-py/src` from `__file__`, verifies the real `mqk_research` package structure exists there (never a directory-name substring check), and verifies the imported `mqk_research` module resolves underneath that same checkout-local `src/`. `PREDECLARED_WAVE.json`'s historical worktree/branch fields were left untouched (historical predeclaration metadata, not relocation tracking). |
+
+**Negative-control / RED-GREEN proof.** R1's fix was verified against the
+pre-patch loop body by temporarily reverting only the loop (via direct file
+edit, not `git stash`) and re-running `test_direct_rank_economic_policy.py`:
+5 tests failed (`test_stale_prior_timestamp_score_never_carried_forward`,
+`test_r1b_end_to_end_economic_position_after_dropout`,
+`test_r1c_long_short_dropout_flattens_both_sides`,
+`test_r1d_partial_universe_ranks_and_flattens_dropped`,
+`test_r1f_removed_held_symbol_score_neither_ranks_nor_stays_selected`) —
+all 5 pass after restoring the fix. R3's fix was verified the same way
+against the pre-patch hardcoded-substring check: 6 of 8
+`test_wave03_checkout_local_source_guard.py` tests failed, all 6 pass after
+restoring the fix.
+
+**Load-bearing acceptance negative control (Defect 2's actual disproof).**
+A second, detached-HEAD git worktree was created at
+`C:/Users/Zacha/AppData/Local/Temp/mqk-portability-check-checkout` (a
+basename containing neither `research-rank-wave-01` nor
+`direct-rank-policy`) pointed at this wave's HEAD after the R3 commit;
+`experiments/short_wave_03_broad_direct_rank/` collected and passed all 29
+tests there. This is the direct, real-checkout disproof of Defect 2 — not
+merely the synthetic-directory unit tests in
+`test_wave03_checkout_local_source_guard.py`.
+
+**Status: `LOCALLY COMPLETE — PENDING INDEPENDENT REVIEW`.** Not
+self-accepted. Not merged into `ledger-closure-integration-01`. Not
+pushed. The permanent repo at `C:\Users\Zacha\Desktop\MiniQuantDeskV4` was
+not modified by this repair wave.
+
+---
+
 ## 2. Baseline
 
 ```
