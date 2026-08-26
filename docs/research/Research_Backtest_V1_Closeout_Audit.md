@@ -2401,10 +2401,17 @@ later chain (`CLOSED_LOCAL — PENDING INDEPENDENT REVIEW`, commit
 `e56f94fb`), and the chain's own terminal gate,
 `RESEARCH_BACKTEST_V1_COMPLETE`, is currently **`LOCALLY COMPLETE —
 PENDING INDEPENDENT REVIEW`** (`FINAL-P9-AUTHORITY-BINDING-REPAIR-01`,
-commit `06417bdc`, 2026-08-22). Neither of those is independently accepted
-or pushed yet, so the correct next action on that chain is independent
-review/reconciliation, not reimplementation of already locally-complete
-promotion work. Separately, `BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`
+commit `06417bdc`, 2026-08-22). Neither of those is independently accepted, but "not independently accepted"
+is not the same fact as "not pushed": both implementation commits are
+already present on `origin/main` (`e56f94fb` and `06417bdc` are each an
+ancestor of current `origin/main` at `edcda740`), so their local-status
+labels above (`CLOSED_LOCAL — PENDING INDEPENDENT REVIEW` and `LOCALLY
+COMPLETE — PENDING INDEPENDENT REVIEW`) describe review/acceptance state,
+not push state. Direct-Rank's acceptance does not independently accept that
+separate chain merely because it happens to already be pushed. The correct
+next action on that chain is therefore independent review/reconciliation of
+the already-pushed Research/Promotion closure chain, not reimplementation of
+already locally-complete promotion work. Separately, `BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`
 (Section 1B/1C) is not currently tracked in the master ledger as a
 load-bearing `RESEARCH_BACKTEST_V1_COMPLETE` blocker; this document does
 not assert its status from historical Section 1B/1C wording alone, and a
