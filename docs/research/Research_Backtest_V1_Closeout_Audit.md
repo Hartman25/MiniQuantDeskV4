@@ -2390,15 +2390,27 @@ mission scope). `ledger-research-rank-wave-01` was not deleted.
 **Direct-Rank closure does not mean:** all Research is complete; promotion
 is complete; `SHORT-WAVE-03` has executed; corporate-action evidence exists;
 final holdout has been consumed; Paper has validated the strategy; or alpha
-exists. Outstanding Research→Promotion blockers are unchanged by this
-integration, per Section 1L's own accounting (unaltered here): the
-production promotion-route gaps under `PROMOTION-BACKTEST-EVIDENCE-SEAM-01`
-(master ledger row 14/§24) remain `OPEN` exactly as the ledger already
-states, and the DATA TRUTH / corporate-action-evidence-source gap underlying
-`BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01` (Section 1B/1C, not yet scoped)
-still governs whether a REAL, non-synthetic run of
-`SHORT-WAVE-03-BROAD-DIRECT-RANK` can execute at all. Neither status changed
-because Direct-Rank was accepted.
+exists. Direct-Rank's independent acceptance is scoped to the Direct-Rank
+policy wave itself — it does not close, and does not independently accept,
+the separate, later Research→Promotion closure chain (`BKT-PROMOTION-
+ARTIFACT-AUTHORITY-01` through P10, Section 1F above). Per the master
+ledger (`MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`, the authoritative
+source for current status, not this addendum): `PROMOTION-BACKTEST-
+EVIDENCE-SEAM-01` is **not** currently `OPEN` — it was closed within that
+later chain (`CLOSED_LOCAL — PENDING INDEPENDENT REVIEW`, commit
+`e56f94fb`), and the chain's own terminal gate,
+`RESEARCH_BACKTEST_V1_COMPLETE`, is currently **`LOCALLY COMPLETE —
+PENDING INDEPENDENT REVIEW`** (`FINAL-P9-AUTHORITY-BINDING-REPAIR-01`,
+commit `06417bdc`, 2026-08-22). Neither of those is independently accepted
+or pushed yet, so the correct next action on that chain is independent
+review/reconciliation, not reimplementation of already locally-complete
+promotion work. Separately, `BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`
+(Section 1B/1C) is not currently tracked in the master ledger as a
+load-bearing `RESEARCH_BACKTEST_V1_COMPLETE` blocker; this document does
+not assert its status from historical Section 1B/1C wording alone, and a
+future session should confirm its current status directly against the
+master ledger before relying on it. Neither status changed because
+Direct-Rank was accepted.
 
 ---
 
