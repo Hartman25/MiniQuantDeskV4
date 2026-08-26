@@ -2956,4 +2956,86 @@ Temp wave worktree preserved for independent review.
 
 ---
 
-*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24), updated by PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER (2026-08-25), updated by PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01 (2026-08-25).*
+## 32. Paper Backend Wave Integration Test Closure Repair
+
+*Added by `PAPER-BACKEND-WAVE-01-INTEGRATION-TEST-CLOSURE-REPAIR-01`,
+2026-08-25, primary repo `C:\Users\Zacha\Desktop\MiniQuantDeskV4`, branch
+`ledger-closure-integration-01`, starting HEAD `020d98e9` (the merge §30/§31
+integrated: `merge: integrate accepted paper backend ledger wave`, parents
+`dc398721` + `9cb49a56`).*
+
+Resolves the one acceptance failure inherited into `020d98e9`:
+`scenario_autonomous_daily_outcome_coordinator_integration_01::
+ci_11_12_evidence_degraded_warning_dedup`, expected `evidence_degraded`,
+actual `manual_intervention_required`. Reproduced identically at pre-wave
+`dc398721` and post-wave `020d98e9` — confirmed **not** introduced by
+`PAPER-BACKEND-WAVE-01` (§30/§31 above).
+
+**Root cause (STALE_TEST_FIXTURE, confirmed by isolated execution against a
+disposable `mqk_test`, not by static reading alone):** the failure is on the
+test's *second* (replay) tick, not the first — the first tick's
+`evidence_degraded` / `unknown_incomplete_bar_coverage` classification
+already passed. `dispatch_by_state`'s `STATE_EVIDENCE_DEGRADED` arm
+(`autonomous_daily_coordinator.rs`) routes a stopped operation through
+`attempt_evidence_degraded_recovery` before ever reaching E2B's
+finalization/replay path. That gate is scoped to exactly the reason code
+this fixture uses (`unknown_incomplete_bar_coverage` — the one closed
+`unknown_*` reason accepted as recovery-eligible by `cd3a5bab`, "paper:
+recover evidence degraded operation after transient blocker clears",
+2026-08-18, i.e. `AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-
+OSCILLATION-01`'s lineage — an ancestor of the designated pre-wave baseline
+`4248bdb4`, unmodified since). Because the fixture's replay tick fired
+before `effective_operation_close_utc`, and never seeded a
+`sys_reconcile_status` row, the recovery attempt fails closed to
+`evidence_degraded_recovery_reconcile_dirty` / `manual_intervention_
+required` instead of exercising the dedup path the test targets. This is a
+different mechanism than the mission's initial E2A-coverage-authority-
+ordering hypothesis, which was checked and does **not** apply here (the
+existing `e02_prior_activity_running_missing_authority_reaches_evidence_
+degraded` negative control in `scenario_autonomous_daily_coverage_anchor_
+and_run_lineage_01.rs` already proves E2A's `NotBound`+`HasActivity`
+ordering correctly, unaffected, re-run clean).
+
+`F37_CAUSALITY=DISPROVEN`: the recovery-attempt gate predates `f37cd8c4`
+("fix: unify stopped degraded close priority") by six commits and is an
+ancestor of the pre-f37 baseline `4248bdb4`; no commit between `cd3a5bab`
+and `020d98e9` touched the reason-code gate (`git log -S` on the gate's
+literal, verified empty for every intervening commit touching this file).
+
+**Fix (test-only, one file):** move `ci_11_12`'s replay tick to
+`plan.effective_operation_close_utc + 1s`, so it lands past the recovery
+gate's own close boundary and exercises E2B's finalization/replay path —
+matching the test's original dedup intent without reopening or amending the
+accepted `cd3a5bab` recovery contract. Commit `dc9655fa`, `test: repair
+evidence degraded warning fixture`. No production file changed.
+
+Acceptance, disposable `mqk_test` (port 5434), `--test-threads=1`:
+`scenario_autonomous_daily_outcome_coordinator_integration_01` 15/15 green;
+`scenario_autonomous_daily_operation_lifecycle_01` (mqk-db) 63/63,
+`scenario_autonomous_daily_phase_d_integration_01` 10/10,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_autonomous_completed_bar_task_01` 2/2,
+`scenario_autonomous_daily_coordinator_policy_01` 35/35,
+`scenario_autonomous_daily_session_coordinator_01` 46/46 — zero failures.
+`cargo check -p mqk-db` / `-p mqk-daemon` clean; `git diff --check` clean.
+
+**`DATA-READINESS-BAR-COVERAGE-AUTHORITY-01` status is unchanged by this
+repair** — still `LOCALLY COMPLETE — PENDING INDEPENDENT REVIEW` (§28/§30/
+§31); this inherited `ci_11_12` fixture defect was never part of that
+patch's 2026-08-24 root cause and is not evidence for or against it.
+`AUTONOMOUS-DAILY-STOPPING-EVIDENCE-DEGRADED-OSCILLATION-01` remains
+`CLOSED` (§28). `DAEMON-EXIT-20260824` remains `UNKNOWN_NEEDS_PROOF` (§28/
+§31) — untouched by this repair.
+
+Zero DB mutation beyond the disposable `mqk_test` database used for the
+required test runs; zero Paper session started; zero order submitted; zero
+Live routing touched; `smoke_logs/`/`.env.local` not modified; `git reset`/
+`git stash`/`git clean`/rebase/force-push not used; not pushed.
+
+Review bundle:
+`Documents/MiniQuantDeskV4-Archive/2026-08-24/paper-backend-wave-01-
+integration-review/PAPER_BACKEND_WAVE_01_INTEGRATION_REPAIR_REVIEW.zip`.
+
+---
+
+*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24), updated by PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER (2026-08-25), updated by PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01 (2026-08-25), updated by PAPER-BACKEND-WAVE-01-INTEGRATION-TEST-CLOSURE-REPAIR-01 (2026-08-25).*
