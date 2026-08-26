@@ -121,9 +121,40 @@ CAPACITY_POLICY_ID = "reduce_first_defer_increase_batch_v1"
 # silently reinterpreted as) a long/short one. See SignalPolicySpec.
 SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1 = "long_only_v1"
 SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1 = "long_short_threshold_v1"
+
+# DIRECT-SIGNED-RANK-RESEARCH-POLICY-01: two mutually-exclusive, versioned
+# CROSS-SECTIONAL RANK direction policies. Unlike the threshold policies
+# above (per-symbol, memoryless, independent of any other symbol's score),
+# these rank the persisted OOS `ml_score` -- never target/fwd_ret, never a
+# raw feature value -- across every symbol scored at the SAME exact decision
+# timestamp, and assign the top/bottom `rank_side_count` names long/short.
+# See SignalPolicySpec docstring and _build_rank_pending_events for the full
+# semantics. `long_only_v1`/`long_short_threshold_v1` remain completely
+# frozen and untouched by this addition.
+SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1 = "cross_sectional_rank_long_only_v1"
+SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1 = "cross_sectional_rank_long_short_v1"
+
 KNOWN_SIGNAL_DIRECTION_POLICY_IDS = frozenset(
-    {SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1, SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1}
+    {
+        SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1,
+        SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1,
+        SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1,
+    }
 )
+RANK_DIRECTION_POLICY_IDS = frozenset(
+    {
+        SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1,
+    }
+)
+
+# The single, fixed (non-configurable) rank policy sizing/tie identity --
+# see SignalPolicySpec docstring "SIZING ID" / "TIE POLICY". Distinct from
+# legacy `sizing="equal_weight_active"` so a rank trial's identity can never
+# collide with a threshold-policy trial's.
+SIGNAL_SIZING_EQUAL_WEIGHT_RANK_SELECTED_V1 = "equal_weight_rank_selected_v1"
+RANK_TIE_POLICY_ID = "fail_closed_boundary_ties_v1"
 
 # Research/Backtest-only scope declaration (mission Section 5F): this
 # economic evaluator has no point-in-time borrow/shortability history for
@@ -140,6 +171,34 @@ KNOWN_BORROW_MODEL_IDS = frozenset({BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIV
 # ---------------------------------------------------------------------------
 # Specs
 # ---------------------------------------------------------------------------
+
+
+def _require_positive_integral_rank_side_count(value: Any) -> int:
+    """DIRECT-RANK-SIDE-COUNT-STRICT-INTEGER-01: `rank_side_count` (K) must
+    be an actual positive integral value -- `int(value)` alone silently
+    truncates a malformed semantic input like 2.5 down to 2, letting an
+    invalid candidate alias a genuinely different, valid K's identity.
+    Accepts a plain Python `int` unconditionally (`bool` excluded -- it is
+    an `int` subtype in Python but is never a semantically valid K), or a
+    `float` only when it is finite AND exactly integral (JSON config --
+    e.g. PREDECLARED_WAVE.json, the real construction path via
+    run_wave.py -- cannot distinguish `5` from `5.0`, but can represent a
+    malformed `2.5`, `NaN`, or `Infinity`). Any other type (str, None,
+    etc.) is rejected outright rather than coerced."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"rank_side_count must be a positive integer, got {value!r} of type "
+            f"{type(value).__name__}"
+        )
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            raise ValueError(f"rank_side_count must be a finite positive integer, got {value!r}")
+        if not value.is_integer():
+            raise ValueError(f"rank_side_count must be an integral value, got {value!r}")
+    rank_side_count = int(value)
+    if rank_side_count <= 0:
+        raise ValueError("rank_side_count must be a positive integer")
+    return rank_side_count
 
 
 @dataclass(frozen=True)
@@ -211,7 +270,32 @@ class SignalPolicySpec:
     long<->short sign flip at equal magnitude consumes no additional
     capacity and executes unconditionally; an exact generalization that is
     bit-for-bit identical to the prior long-only-only comparison whenever
-    weights are non-negative."""
+    weights are non-negative.
+
+    DIRECT-SIGNED-RANK-RESEARCH-POLICY-01: `cross_sectional_rank_long_only_v1`
+    / `cross_sectional_rank_long_short_v1` select a THIRD, mutually-exclusive
+    family -- see module docstring and _build_rank_pending_events. These
+    require `rank_side_count` (a positive int, K) and reject/canonicalize
+    every field that would be economically meaningless for a rank policy so
+    it can never manufacture a spurious distinct trial identity:
+
+    - `entry_threshold` MUST be exactly 0.5 (the field's own canonical
+      default) -- rank policies have no probability threshold, so the
+      safest implementation rejects any other value outright rather than
+      silently canonicalizing it (mission "THRESHOLD FIELD SEMANTICS").
+    - `short_threshold` MUST be None (rejected outright, mirrors above).
+    - `long_only` MUST match the direction policy exactly
+      (`cross_sectional_rank_long_only_v1` -> True,
+      `cross_sectional_rank_long_short_v1` -> False) -- fail closed on
+      mismatch.
+    - `borrow_model` MUST be None for the long-only rank policy (there is
+      never a short leg) and defaults to/requires the same Research-only
+      BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1 as
+      `long_short_threshold_v1` for the long/short rank policy.
+    - `sizing` is forced to SIGNAL_SIZING_EQUAL_WEIGHT_RANK_SELECTED_V1
+      (the field carries no other meaningful choice under a rank policy --
+      see module "SIZING ID").
+    """
 
     entry_threshold: float = 0.5
     long_only: bool = True
@@ -222,6 +306,12 @@ class SignalPolicySpec:
     max_gross_exposure: float = 1.0
     fold_end_policy: str = "force_flat_last_bar"
     capacity_policy: str = CAPACITY_POLICY_ID
+    # DIRECT-SIGNED-RANK-RESEARCH-POLICY-01: the sole new semantic parameter
+    # (mission "RANK POLICY PARAMETERS") -- K, the number of names selected
+    # per side. Required (and validated positive) for the two rank
+    # direction policies; must be None for long_only_v1/
+    # long_short_threshold_v1 (fail closed on mismatch either way).
+    rank_side_count: Optional[int] = None
     schema_version: str = "economic_signal_policy_v1"
 
     def normalized(self) -> "SignalPolicySpec":
@@ -233,6 +323,8 @@ class SignalPolicySpec:
 
         short_threshold: Optional[float]
         borrow_model: Optional[str]
+        sizing: str
+        rank_side_count: Optional[int]
         if self.direction_policy == SIGNAL_DIRECTION_POLICY_LONG_ONLY_V1:
             if not self.long_only:
                 raise ValueError(
@@ -242,9 +334,15 @@ class SignalPolicySpec:
                 raise ValueError("long_only_v1 direction_policy does not accept short_threshold")
             if self.borrow_model is not None:
                 raise ValueError("long_only_v1 direction_policy does not accept borrow_model")
+            if self.rank_side_count is not None:
+                raise ValueError("long_only_v1 direction_policy does not accept rank_side_count")
+            if self.sizing != "equal_weight_active":
+                raise ValueError("economic_walk_forward_v1 supports only sizing='equal_weight_active'")
             short_threshold = None
             borrow_model = None
-        else:
+            sizing = self.sizing
+            rank_side_count = None
+        elif self.direction_policy == SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1:
             if self.long_only:
                 raise ValueError(
                     "long_short_threshold_v1 direction_policy requires long_only=False"
@@ -260,9 +358,51 @@ class SignalPolicySpec:
             borrow_model = self.borrow_model or BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1
             if borrow_model not in KNOWN_BORROW_MODEL_IDS:
                 raise ValueError(f"unsupported borrow_model: {borrow_model!r}")
+            if self.rank_side_count is not None:
+                raise ValueError("long_short_threshold_v1 direction_policy does not accept rank_side_count")
+            if self.sizing != "equal_weight_active":
+                raise ValueError("economic_walk_forward_v1 supports only sizing='equal_weight_active'")
+            sizing = self.sizing
+            rank_side_count = None
+        else:
+            # DIRECT-SIGNED-RANK-RESEARCH-POLICY-01: the two cross-sectional
+            # rank direction policies (see SignalPolicySpec docstring
+            # "RANK POLICY PARAMETERS"/"THRESHOLD FIELD SEMANTICS").
+            assert self.direction_policy in RANK_DIRECTION_POLICY_IDS
+            is_rank_long_short = (
+                self.direction_policy == SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1
+            )
+            expected_long_only = not is_rank_long_short
+            if self.long_only != expected_long_only:
+                raise ValueError(
+                    f"{self.direction_policy} direction_policy requires long_only={expected_long_only}"
+                )
+            if entry_threshold != 0.5:
+                raise ValueError(
+                    f"{self.direction_policy} direction_policy has no meaningful probability "
+                    "threshold and requires entry_threshold=0.5 exactly (rank policies rank "
+                    "ml_score cross-sectionally; a threshold cannot be used to manufacture a "
+                    "distinct trial identity)"
+                )
+            if self.short_threshold is not None:
+                raise ValueError(f"{self.direction_policy} direction_policy does not accept short_threshold")
+            if self.rank_side_count is None:
+                raise ValueError(f"{self.direction_policy} direction_policy requires rank_side_count")
+            rank_side_count = _require_positive_integral_rank_side_count(self.rank_side_count)
+            if is_rank_long_short:
+                borrow_model = self.borrow_model or BORROW_MODEL_RESEARCH_ASSUMED_SHORTABLE_UNIVERSE_V1
+                if borrow_model not in KNOWN_BORROW_MODEL_IDS:
+                    raise ValueError(f"unsupported borrow_model: {borrow_model!r}")
+            else:
+                if self.borrow_model is not None:
+                    raise ValueError(
+                        f"{self.direction_policy} direction_policy does not accept borrow_model "
+                        "(there is no short leg)"
+                    )
+                borrow_model = None
+            short_threshold = None
+            sizing = SIGNAL_SIZING_EQUAL_WEIGHT_RANK_SELECTED_V1
 
-        if self.sizing != "equal_weight_active":
-            raise ValueError("economic_walk_forward_v1 supports only sizing='equal_weight_active'")
         if float(self.max_gross_exposure) <= 0.0:
             raise ValueError("max_gross_exposure must be > 0")
         if self.fold_end_policy != "force_flat_last_bar":
@@ -276,12 +416,22 @@ class SignalPolicySpec:
             entry_threshold=entry_threshold,
             short_threshold=short_threshold,
             borrow_model=borrow_model,
+            sizing=sizing,
+            rank_side_count=rank_side_count,
             max_gross_exposure=float(self.max_gross_exposure),
         )
 
     @property
     def is_long_short(self) -> bool:
         return self.direction_policy == SIGNAL_DIRECTION_POLICY_LONG_SHORT_THRESHOLD_V1
+
+    @property
+    def is_rank(self) -> bool:
+        return self.direction_policy in RANK_DIRECTION_POLICY_IDS
+
+    @property
+    def is_rank_long_short(self) -> bool:
+        return self.direction_policy == SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1
 
 
 @dataclass(frozen=True)
@@ -409,6 +559,32 @@ def economic_protocol_identity(spec: EconomicWalkForwardSpec) -> Dict[str, Any]:
                     "borrow_model": spec.signal_policy.borrow_model,
                 }
                 if spec.signal_policy.is_long_short
+                else {}
+            ),
+            # DIRECT-SIGNED-RANK-RESEARCH-POLICY-01: ADDITIVE ONLY under a
+            # rank direction policy, same absence-not-None-value rationale as
+            # the long/short block above -- a legacy long_only_v1/
+            # long_short_threshold_v1 candidate's identity is completely
+            # unaffected by this addition. `rank_side_count`/`borrow_model`/
+            # `tie_policy` are all identity-bearing here per mission
+            # ("IDENTITY-BEARING FIELDS"): two rank candidates that differ
+            # only by rank_side_count, or a long-only vs long/short rank
+            # candidate, or a borrow-model change, must never share a
+            # trial_id. `tie_policy` is not a configurable field (V1 has
+            # exactly one, fixed, fail-closed tie policy -- see module
+            # docstring "TIE POLICY") but is still included explicitly for
+            # audit clarity, per mission "if it is represented as a
+            # configurable field, it MUST be identity-bearing" -- included
+            # here unconditionally as the current fixed constant so a future
+            # V2 tie policy would visibly change identity too.
+            **(
+                {
+                    "direction_policy": spec.signal_policy.direction_policy,
+                    "rank_side_count": spec.signal_policy.rank_side_count,
+                    "borrow_model": spec.signal_policy.borrow_model,
+                    "tie_policy": RANK_TIE_POLICY_ID,
+                }
+                if spec.signal_policy.is_rank
                 else {}
             ),
         },
@@ -749,6 +925,193 @@ def _build_pending_events(
                     target_qty = weight_to_target_qty(weight=new_weight, price=signal_price, spec=wts_spec)
                 pending_events[s].append((signal_ts, new_weight, target_qty))
                 last_issued_weight[s] = new_weight
+
+    return pending_events
+
+
+_RANK_SCORE_TIE_TOL = 1e-9
+
+
+def _signal_time_target_qty(
+    s: str,
+    signal_ts: pd.Timestamp,
+    new_weight: float,
+    close_frame: Optional[pd.DataFrame],
+    wts_spec: Optional[WeightToShareSpec],
+) -> Optional[int]:
+    """Shared signal-time qty/price contract (P7B-REPAIR-01 -- see
+    _build_pending_events's own inline use of this exact contract), reused
+    verbatim by _build_rank_pending_events: `target_qty` is fixed ONCE, here,
+    from THIS symbol's own close AT `signal_ts` -- never recomputed from a
+    later execution-time bar. A weight of exactly 0.0 always yields
+    target_qty=0 without requiring a price; a missing/NaN close for a
+    nonzero weight fails closed via weight_to_target_qty's own contract."""
+    if wts_spec is None:
+        return None
+    signal_price: Optional[float] = None
+    if close_frame is not None and signal_ts in close_frame.index:
+        raw = close_frame.at[signal_ts, s]
+        signal_price = float(raw) if pd.notna(raw) else None
+    return weight_to_target_qty(weight=new_weight, price=signal_price, spec=wts_spec)
+
+
+def _resolve_rank_direction_for_frame(
+    scores: Dict[str, float], rank_side_count: int, long_only: bool
+) -> Dict[str, int]:
+    """DIRECT-RANK-AND-BROAD-UNIVERSE-RESEARCH-01: pure, deterministic
+    cross-sectional rank resolution for ONE decision frame's rankable score
+    set. `scores` is exactly whatever symbols were actually scored at this
+    ONE exact decision timestamp (see _build_rank_pending_events's "DYNAMIC
+    CROSS-SECTION V1" docstring) -- membership is free to differ from any
+    other timestamp's; this function has no notion of a fold-wide universe
+    and never sees a stale/missing entry (the caller only ever passes what
+    was truthfully scored at T).
+
+    Fails closed (RuntimeError) if:
+      - the cross-section is too small for `rank_side_count` (long-only
+        requires `len(scores) >= rank_side_count`; long/short requires
+        `len(scores) >= 2*rank_side_count`);
+      - the long boundary (Kth-highest score) ties the next score outside
+        the long-selected set;
+      - the short boundary (Kth-lowest score) ties the next score outside
+        the short-selected set (long/short only);
+      - the selected long/short sets overlap (defense-in-depth -- the size
+        gate above already makes this unreachable through this function's
+        own call path, but this is independently asserted here since this
+        is the actual selection primitive under direct unit test).
+
+    RANK_TIE_POLICY_ID = fail_closed_boundary_ties_v1 (mission "TIE
+    POLICY"). Sort key is `ml_score` only -- `scores`' dict iteration/
+    insertion order never participates, so CSV/caller row-order permutation
+    can never change the result."""
+    n = len(scores)
+    if long_only:
+        if n < rank_side_count:
+            raise RuntimeError(
+                "Fail-closed: cross-sectional rank long-only requires at least "
+                f"rank_side_count={rank_side_count} rankable symbols at this decision "
+                f"timestamp, got {n}"
+            )
+    else:
+        if n < 2 * rank_side_count:
+            raise RuntimeError(
+                "Fail-closed: cross-sectional rank long/short requires at least "
+                f"2*rank_side_count={2 * rank_side_count} rankable symbols at this decision "
+                f"timestamp, got {n}"
+            )
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    direction: Dict[str, int] = {s: 0 for s in scores}
+
+    top = ranked[:rank_side_count]
+    long_set = {sym for sym, _ in top}
+    if rank_side_count < n:
+        boundary_score = ranked[rank_side_count - 1][1]
+        outside_score = ranked[rank_side_count][1]
+        if abs(boundary_score - outside_score) <= _RANK_SCORE_TIE_TOL:
+            raise RuntimeError(
+                "Fail-closed: cross-sectional rank long boundary tie at "
+                f"rank_side_count={rank_side_count} (score={boundary_score!r})"
+            )
+    for sym in long_set:
+        direction[sym] = 1
+
+    if not long_only:
+        boundary_idx = n - rank_side_count
+        bottom = ranked[boundary_idx:]
+        short_set = {sym for sym, _ in bottom}
+        if boundary_idx > 0:
+            boundary_score = ranked[boundary_idx][1]
+            outside_score = ranked[boundary_idx - 1][1]
+            if abs(boundary_score - outside_score) <= _RANK_SCORE_TIE_TOL:
+                raise RuntimeError(
+                    "Fail-closed: cross-sectional rank short boundary tie at "
+                    f"rank_side_count={rank_side_count} (score={boundary_score!r})"
+                )
+        if long_set & short_set:
+            raise RuntimeError("Fail-closed: cross-sectional rank long/short selected sets overlap")
+        for sym in short_set:
+            direction[sym] = -1
+
+    return direction
+
+
+def _build_rank_pending_events(
+    oos_fold: pd.DataFrame,
+    symbols: List[str],
+    signal_policy: SignalPolicySpec,
+    *,
+    close_frame: Optional[pd.DataFrame] = None,
+    wts_spec: Optional[WeightToShareSpec] = None,
+) -> Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]]:
+    """DIRECT-RANK-AND-BROAD-UNIVERSE-RESEARCH-01 counterpart to
+    _build_pending_events for the two cross-sectional rank direction
+    policies (see SignalPolicySpec docstring). Deliberately does NOT touch
+    or reuse _build_pending_events's own per-symbol threshold/carry-forward
+    loop -- only the signal-time qty/price contract
+    (_signal_time_target_qty) and the downstream causal execution engine
+    (_simulate_fold_execution, via _simulate_fold) are shared, so legacy
+    long_only_v1/long_short_threshold_v1 behavior is provably unaffected by
+    this addition (zero-diff on _build_pending_events itself).
+
+    DYNAMIC CROSS-SECTION V1 (mission): unlike a fixed-universe design,
+    EVERY decision timestamp is resolved INDEPENDENTLY from exactly the OOS
+    rows scored at that exact instant -- ranking never reads any other
+    timestamp's rows. A symbol's rankable membership is free to differ from
+    one timestamp to the next (e.g. a name gaining walk-forward eligibility
+    partway through a fold, or a newly-covered symbol appearing) -- a
+    missing symbol at some frame is NOT an error and NEVER triggers
+    carrying forward a stale prior score or fabricating a value for it; only
+    a genuine DUPLICATE (symbol, decision_ts) row, or a cross-section too
+    small for the configured `rank_side_count`, fails closed (see
+    _resolve_rank_direction_for_frame).
+
+    Weight magnitude here is FIXED by rank_side_count (max_gross_exposure/K
+    long-only, max_gross_exposure/(2K) long/short) -- unlike
+    _build_pending_events's all-currently-active rebalance-on-any-change
+    trigger, it never depends on how many symbols are currently selected
+    (that count is fixed by construction whenever selection succeeds), so a
+    pending event is only emitted for a symbol whose own top/bottom-K
+    membership actually changed at this frame."""
+    assert signal_policy.rank_side_count is not None
+    rank_side_count = int(signal_policy.rank_side_count)
+    long_only = bool(signal_policy.long_only)
+    max_gross = float(signal_policy.max_gross_exposure)
+    weight_each = max_gross / float(rank_side_count if long_only else 2 * rank_side_count)
+
+    dup_mask = oos_fold.duplicated(subset=["decision_ts", "symbol"], keep=False)
+    if dup_mask.any():
+        raise RuntimeError(
+            "Fail-closed: duplicate (decision_ts,symbol) row in OOS predictions for a "
+            "cross-sectional rank decision frame"
+        )
+
+    direction_state: Dict[str, int] = {s: 0 for s in symbols}
+    pending_events: Dict[str, List[Tuple[pd.Timestamp, float, Optional[int]]]] = {s: [] for s in symbols}
+
+    for ts, group in oos_fold.groupby("decision_ts", sort=True):
+        scores = {str(sym): float(score) for sym, score in zip(group["symbol"], group["ml_score"])}
+        new_direction = _resolve_rank_direction_for_frame(scores, rank_side_count, long_only)
+        signal_ts = pd.Timestamp(ts)
+        # R1 (DIRECT-RANK-DYNAMIC-MEMBERSHIP-POSITION-CLOSURE-01): a valid
+        # decision frame defines the COMPLETE desired direction state --
+        # every symbol tracked from a prior frame, not only the symbols
+        # actually scored now. A symbol absent from this frame's rankable
+        # set (`new_direction`) desires flat (0), exactly like a scored
+        # symbol that fell outside the selected top/bottom-K -- iterating
+        # only `new_direction.items()` would silently preserve a stale
+        # prior selection for anyone missing a current score. `symbols` is
+        # the full per-fold symbol set both `direction_state` and
+        # `pending_events` were initialized over, so every entry here is
+        # already a valid key.
+        for s in symbols:
+            direction = new_direction.get(s, 0)
+            if direction_state[s] == direction:
+                continue
+            direction_state[s] = direction
+            new_weight = weight_each * direction
+            target_qty = _signal_time_target_qty(s, signal_ts, new_weight, close_frame, wts_spec)
+            pending_events[s].append((signal_ts, new_weight, target_qty))
 
     return pending_events
 
@@ -1820,10 +2183,16 @@ def run_economic_walkforward(
                 bars, symbols, boundaries["test_start"], boundaries["test_end"]
             )
         wts_spec_for_signal_pricing = spec.weight_to_share.normalized() if spec.weight_to_share is not None else None
-        pending_events = _build_pending_events(
-            oos_fold, symbols, spec.signal_policy,
-            close_frame=close_frame, wts_spec=wts_spec_for_signal_pricing,
-        )
+        if spec.signal_policy.is_rank:
+            pending_events = _build_rank_pending_events(
+                oos_fold, symbols, spec.signal_policy,
+                close_frame=close_frame, wts_spec=wts_spec_for_signal_pricing,
+            )
+        else:
+            pending_events = _build_pending_events(
+                oos_fold, symbols, spec.signal_policy,
+                close_frame=close_frame, wts_spec=wts_spec_for_signal_pricing,
+            )
         fold_df, fold_summary = _simulate_fold(
             fold_no, boundaries, close_frame, pending_events, spec,
             high_frame=high_frame, low_frame=low_frame,

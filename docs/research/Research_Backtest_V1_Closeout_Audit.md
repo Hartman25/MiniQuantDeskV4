@@ -2113,6 +2113,186 @@ supplies) before treating the production route itself as proven.
 
 ---
 
+## 1L. RESEARCH-DIRECT-RANK-AND-LEDGER-CLOSURE-WAVE-01 ADDENDUM (2026-08-25)
+
+Mission `RESEARCH-DIRECT-RANK-AND-LEDGER-CLOSURE-WAVE-01-CONTROLLER` audited
+the retained, unmerged `research-direct-rank-policy-01` branch (local tip
+`46aa8ecbe5a23ab503cb26f6492dcccab6c49979`, matching the tip the mission
+recorded as expected) and ported its coherent core onto the current
+integration spine (`ledger-closure-integration-01` @
+`d1b6f0447afe996b4cf544bd5a314a469b70e613`) in an isolated worktree/branch
+(`ledger-research-rank-wave-01`, `C:\Users\Zacha\AppData\Local\Temp\MiniQuantDeskV4-research-rank-wave-01`).
+Per this document's own precedence rule (Section 0 of the master ledger):
+**the master ledger and committed repo state remain authoritative; this
+addendum records this wave's facts for historical continuity only.**
+
+**Source branch topology.** `research-direct-rank-policy-01` diverged from
+the integration spine at `f0113f68ded39d5a034c9b1278f9116829bff12a`
+(2026-08-23), 5 unique commits ahead of that point; the spine had since
+advanced 73 further commits (GUI backtest workbench, factor-discovery/FDR
+work) with **zero overlap** on the files the retained branch touches
+(`economic_walkforward.py`, `bars_provenance.py` were untouched on the spine
+across that span) — all 5 commits cherry-picked with no conflicts.
+
+**Commits ported, in order (all local to the wave branch, unpushed):**
+
+| Original commit | New wave commit | Content |
+|---|---|---|
+| `93a6e76a` | `bb4c2981` | Core `cross_sectional_rank_long_only_v1` / `cross_sectional_rank_long_short_v1` direction policies + identity wiring into `economic_protocol_identity`, additive-only (zero diff on legacy `_build_pending_events`) |
+| `830068ed` | `8c9ff09e` | Registered-identity closure tests (tests-only) proving the Patch-A wiring end-to-end through `build_economic_trial_identity` |
+| `97053287` | `230704a1` | Docs-only current-truth audit of the broad Research universe (88/88 enabled equities — re-verified still accurate against committed `config/instruments/equities.json` at wave time) |
+| `3773821e` | `744608c2` | `mqk_research.universe.snapshot` — a narrow, content-identity universe-seed seam, distinct from and non-conflicting with the existing `mqk_research.universe.build` rank/filter module; never wired into the production Rust registry |
+| `46aa8ecbe` | `90f9c7be` | `SHORT-WAVE-03-BROAD-DIRECT-RANK` predeclaration (config + stub driver + predeclaration tests); real execution stages remain `NotImplementedError`, hard-gated behind a literal `--execute` argv flag; no data fetched, no trials run, no holdout consumed |
+| — | `599335cc` | **New repair**, not in the retained branch: `run_wave.py`'s module-load worktree guard hardcoded the retained branch's original isolated worktree name (`...-direct-rank-policy`); updated the expected marker to this wave's worktree (`research-rank-wave-01`) so the ported driver still imports and still fails closed on an unexpected checkout |
+
+No commit was rejected, obsoleted, or reworked beyond the one-line guard
+repair above — all 5 retained commits were independently coherent,
+already fail-closed/deterministic, and required no semantic changes to
+land on the current spine.
+
+**Why PATCH_C / PATCH_D were not separate commits.** The retained Patch A
+commit (`93a6e76a`/`bb4c2981`) already includes, in one coherent invariant:
+both `long_only` and `long_short` rank directions; fail-closed duplicate
+`(decision_ts, symbol)` detection; fail-closed undersized-cross-section
+rejection; fail-closed boundary-tie rejection (`fail_closed_boundary_ties_v1`);
+and deterministic score-only sort ordering (row/dict iteration order proven
+irrelevant by `test_row_permutation_does_not_change_rank_result` /
+`test_prediction_csv_row_order_does_not_change_economic_behavior`). The
+mission's target-contract items for determinism, missing-data fail-closure,
+and bidirectional rank policy are therefore satisfied within Patch A itself
+— no additional PATCH_C or PATCH_D commit was needed or fabricated.
+`PATCH_E` (additional related ledger gap) was evaluated and found
+**NOT_REQUIRED**: the one candidate Research/Backtest ledger gap found
+during Phase 0 discovery, `PROMOTION-BACKTEST-EVIDENCE-SEAM-01` /
+production promotion wiring (master ledger row 14, "Strategy Research /
+Promotion"), is `OPEN` with independent-review-documented material gaps
+(cross-candidate authority, parallel/partial promotion policy, missing
+durable research lineage) spanning the `mqk-promotion` Rust crate — not a
+narrow, deterministic gap sharing this wave's Python test/acceptance
+subsystem, so it was correctly left untouched rather than pulled in.
+
+**Focused tests (per patch, all green):**
+
+| Commit | Test file | Result |
+|---|---|---|
+| `bb4c2981` | `test_direct_rank_economic_policy.py` | 24 passed |
+| `bb4c2981` (regression) | `test_long_short_economic_policy.py` + `test_economic_walkforward.py` | 88 passed (proves zero-diff claim on legacy paths) |
+| `8c9ff09e` | `test_direct_rank_registered_identity.py` | 11 passed |
+| `744608c2` | `test_universe_snapshot.py` | 14 passed |
+| `90f9c7be` + `599335cc` | `experiments/short_wave_03_broad_direct_rank/test_predeclaration.py` | 21 passed (failed collection before the guard repair; passing after) |
+
+**Combined acceptance boundary:** full `research-py` suite run once at the
+end of the wave — **1720 passed, 7 skipped (pre-existing), 0 failed** in
+136.35s. `mqk-backtest` (Rust) was not touched by any commit in this wave,
+so no Rust check was required or run. `git diff --check` against
+`d1b6f0447afe996b4cf544bd5a314a469b70e613..HEAD` is clean. All 10 changed
+files are confined to `research-py/` and `docs/research/`; no GUI, Paper,
+broker, or `mqk-db` file was touched.
+
+**Status vocabulary for this wave's commits:** `LOCALLY COMPLETE — PENDING
+INDEPENDENT REVIEW` (committed code + tests, passing at local HEAD on the
+wave branch; not yet independently reviewed; not merged; not pushed).
+
+**Remaining Research→Promotion blockers, unaffected by this wave:** the
+DATA TRUTH / corporate-action-evidence-source gap (Section 1B/1C,
+`BKT-CORPORATE-ACTION-EVIDENCE-SOURCE-01`, not yet scoped) still governs
+whether a REAL, non-synthetic run of `SHORT-WAVE-03-BROAD-DIRECT-RANK` can
+execute at all; and the production promotion-route gaps under
+`PROMOTION-BACKTEST-EVIDENCE-SEAM-01` (master ledger row 14/§24) remain
+`OPEN` exactly as the ledger already states. Final holdout was not touched
+by this wave — no trial in `SHORT-WAVE-03` has been executed.
+
+**Not pushed. Not merged into `ledger-closure-integration-01`.** The
+permanent repo at `C:\Users\Zacha\Desktop\MiniQuantDeskV4` was not modified
+by this wave; all work lives on `ledger-research-rank-wave-01` in the
+temporary worktree pending independent review.
+
+---
+
+## 1L-1. RESEARCH-DIRECT-RANK-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01 (2026-08-25)
+
+Independent review of Section 1L's wave (still on `ledger-research-rank-wave-01`,
+same worktree, HEAD advanced from `2350c547` by the three repair commits
+below) found **three deterministic defects**, none previously identified in
+Section 1L above. Per this document's own honesty rule (Section 0), Section
+1L's original claims are left UNCHANGED as a historical record of what was
+believed at that checkpoint — this section records what was actually wrong
+and how it was repaired.
+
+**Defect 1 — stale economic position on dynamic-membership dropout.**
+`_build_rank_pending_events` looped only `new_direction.items()` (the
+symbols actually scored at the current decision frame). A symbol selected
+at a prior frame but absent from the current frame's rankable set kept its
+stale nonzero `direction_state` and was never flattened — the module's own
+`test_stale_prior_timestamp_score_never_carried_forward` (Section 1L,
+`test_direct_rank_economic_policy.py`, one of the "24 passed") had in fact
+encoded this bug as correct behavior: it asserted the dropped symbol
+received *no* event at the frame it disappeared, rather than an explicit
+zero. Section 1L's "1720 passed" acceptance run did not catch this because
+every existing fixture only ever added or reshuffled scores across frames,
+never dropped an already-selected symbol's score entirely.
+
+**Defect 2 — worktree-name-bound source guard.** Section 1L's own new
+repair commit `599335cc` ("New repair... hardcoded the retained branch's
+original isolated worktree name... updated the expected marker to this
+wave's worktree... so the ported driver still imports **and still fails
+closed on an unexpected checkout**") was itself wrong on the bolded claim:
+it replaced one hardcoded worktree-name substring
+(`...-direct-rank-policy`) with another (`research-rank-wave-01`), so
+`test_predeclaration.py` passed only from that one specific temporary
+worktree and would fail collection (not "fail closed" — an
+`AssertionError` at import time, indistinguishable from a genuine local-
+source problem) from any other checkout, including the permanent repo at
+`C:\Users\Zacha\Desktop\MiniQuantDeskV4`. The checkout directory name was
+never research authority.
+
+**Defect 3 — `rank_side_count` silently coerced through `int(...)`.**
+`SignalPolicySpec.normalized()` computed `rank_side_count =
+int(self.rank_side_count)` directly, silently truncating a malformed
+semantic value such as `2.5` down to a valid `K=2` instead of rejecting it
+outright — violating the declared positive-integer/fail-closed contract
+also documented in Section 1L (Patch A's "fail-closed... rejection"
+list did not include this case).
+
+**Repair commits (new commits on `ledger-research-rank-wave-01`, no
+amend/squash/rebase):**
+
+| Commit | Content |
+|---|---|
+| `2e2e7a9f` | R1 — `_build_rank_pending_events` now iterates the full per-fold `symbols` universe every decision frame, defaulting a symbol's desired direction to 0 when absent from the current frame's rankable set, so every valid frame defines a COMPLETE desired direction state. Fixed the pre-existing mis-encoded test and added `test_r1b`..`test_r1f` (end-to-end economic-position proof, long/short dropout, partial-universe, insufficient-frame fail-closed, mutation-style no-stale-score/no-stale-position proof). |
+| `399d7acc` | R2 — added `_require_positive_integral_rank_side_count`: accepts a plain `int` (bool excluded) or a `float` only when finite and exactly integral; rejects `0`, negative values, non-integral floats, `NaN`/`inf`, `bool`, and non-numeric values outright. A rejected candidate can never be constructed, so it cannot alias a valid K's registered identity. |
+| `1c5e4502` | R3 — replaced the hardcoded worktree-name assertion with `resolve_wave03_checkout_local_src()`: resolves the sibling checkout-local `research-py/src` from `__file__`, verifies the real `mqk_research` package structure exists there (never a directory-name substring check), and verifies the imported `mqk_research` module resolves underneath that same checkout-local `src/`. `PREDECLARED_WAVE.json`'s historical worktree/branch fields were left untouched (historical predeclaration metadata, not relocation tracking). |
+
+**Negative-control / RED-GREEN proof.** R1's fix was verified against the
+pre-patch loop body by temporarily reverting only the loop (via direct file
+edit, not `git stash`) and re-running `test_direct_rank_economic_policy.py`:
+5 tests failed (`test_stale_prior_timestamp_score_never_carried_forward`,
+`test_r1b_end_to_end_economic_position_after_dropout`,
+`test_r1c_long_short_dropout_flattens_both_sides`,
+`test_r1d_partial_universe_ranks_and_flattens_dropped`,
+`test_r1f_removed_held_symbol_score_neither_ranks_nor_stays_selected`) —
+all 5 pass after restoring the fix. R3's fix was verified the same way
+against the pre-patch hardcoded-substring check: 6 of 8
+`test_wave03_checkout_local_source_guard.py` tests failed, all 6 pass after
+restoring the fix.
+
+**Load-bearing acceptance negative control (Defect 2's actual disproof).**
+A second, detached-HEAD git worktree was created at
+`C:/Users/Zacha/AppData/Local/Temp/mqk-portability-check-checkout` (a
+basename containing neither `research-rank-wave-01` nor
+`direct-rank-policy`) pointed at this wave's HEAD after the R3 commit;
+`experiments/short_wave_03_broad_direct_rank/` collected and passed all 29
+tests there. This is the direct, real-checkout disproof of Defect 2 — not
+merely the synthetic-directory unit tests in
+`test_wave03_checkout_local_source_guard.py`.
+
+**Status: `LOCALLY COMPLETE — PENDING INDEPENDENT REVIEW`.** Not
+self-accepted. Not merged into `ledger-closure-integration-01`. Not
+pushed. The permanent repo at `C:\Users\Zacha\Desktop\MiniQuantDeskV4` was
+not modified by this repair wave.
+
+---
+
 ## 2. Baseline
 
 ```
