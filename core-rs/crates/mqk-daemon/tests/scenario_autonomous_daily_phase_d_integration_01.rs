@@ -2389,6 +2389,567 @@ async fn phase_d_full_day_lifecycle() {
 }
 
 // ---------------------------------------------------------------------------
+// PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01
+// PATCH F: integrated data-path closure proof, combining both halves of the
+// actual 2026-08-24 production defect through the real production seam:
+//
+//   1. a prior-day stale `running` operation for this exact adapter slot,
+//      crash-orphaned exactly like production (bound run durably STOPPED,
+//      zero unresolved economic evidence, outside its own window), and
+//   2. today's current, authoritative Paper/Alpaca operation, driven through
+//      the real `tick_autonomous_daily_coordinator` ->
+//      `tick_autonomous_completed_bar_driver_from_state` production chain
+//      `phase_d_full_day_lifecycle` above already exercises.
+//
+// Reuses this file's established ZZPHASED01/"zz_phased_provider"/"alpaca"
+// synthetic fixture rather than a real network call to Alpaca for "AAPL" --
+// this module's own doc header guarantees "No real provider, broker, or
+// network call is made anywhere in this file", and the invariant under
+// proof (`fetch_relevant_open_autonomous_daily_operation`'s adapter_id/
+// deployment_mode-scoped authority selection) never reads symbol identity at
+// all, so the real bound "alpaca"/"paper" adapter slot this fixture already
+// drives end-to-end is the real production seam, not a shadow pipeline built
+// around it.
+// ---------------------------------------------------------------------------
+
+/// Seed one crash-orphaned prior-day `running` operation, bound to a real
+/// `runs` row, for the exact same `(deployment_mode="paper", adapter_id=
+/// PD_ADAPTER_ID)` slot family `phase_d_full_day_lifecycle` drives -- the
+/// only two axes `fetch_relevant_open_autonomous_daily_operation` filters
+/// on, so this stale row is visible to every real production lookup this
+/// fixture's "today" operation also goes through. `run_safely_terminal`
+/// selects the GREEN (durably-STOPPED, zero unresolved evidence, must
+/// release) vs RED (still-active-run, must keep blocking) shape.
+async fn pd_seed_stale_running_row(
+    pool: &sqlx::PgPool,
+    stale_market_date: chrono::NaiveDate,
+    stale_open: DateTime<Utc>,
+    run_safely_terminal: bool,
+) -> (Uuid, Uuid) {
+    let stale_close = stale_open + chrono::Duration::hours(6) + chrono::Duration::minutes(30);
+    let stale_preopen = stale_open - chrono::Duration::minutes(30);
+    let stale_postclose = stale_close + chrono::Duration::minutes(15);
+    let previous_trading_date = stale_market_date - chrono::Duration::days(3);
+
+    let run_id = Uuid::new_v4();
+    mqk_db::insert_run(
+        pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: stale_open,
+            git_hash: "TEST".to_string(),
+            config_hash: "TEST".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-host".to_string(),
+        },
+    )
+    .await
+    .expect("PD stale: insert_run failed");
+    mqk_db::arm_run(pool, run_id)
+        .await
+        .expect("PD stale: arm_run failed");
+    mqk_db::begin_run(pool, run_id)
+        .await
+        .expect("PD stale: begin_run failed");
+    if run_safely_terminal {
+        mqk_db::stop_run(pool, run_id)
+            .await
+            .expect("PD stale: stop_run failed");
+    }
+    // RED shape deliberately never calls `stop_run`: the bound run stays
+    // genuinely active (status='RUNNING'), which must never be silently
+    // released.
+
+    let operation_id = Uuid::new_v4();
+    let create_args = mqk_db::CreateAutonomousDailyOperationArgs {
+        operation_id,
+        market_date: stale_market_date,
+        // Must match `state.deployment_mode().as_db_mode()` exactly
+        // ("PAPER", not "paper") -- `fetch_relevant_open_autonomous_daily_
+        // operation` filters on this literal value, and a mismatch here
+        // would silently make the stale row invisible to every real
+        // production lookup instead of genuinely exercising release logic.
+        deployment_mode: "PAPER".to_string(),
+        adapter_id: PD_ADAPTER_ID.to_string(),
+        session_plan_identity: format!("phase-d-stale|{stale_market_date}"),
+        assignment_identity: "phase-d-stale-assignment".to_string(),
+        runtime_binding_identity: "phase-d-stale-binding".to_string(),
+        calendar_source: "nyse_weekdays_heuristic".to_string(),
+        calendar_coverage_state: "active".to_string(),
+        schedule_source: "nyse_weekdays_heuristic".to_string(),
+        effective_operation_open_utc: stale_open,
+        effective_operation_close_utc: stale_close,
+        exchange_session_open_utc: stale_open,
+        exchange_session_close_utc: stale_close,
+        exchange_is_early_close: false,
+        previous_trading_date,
+        preopen_start_utc: stale_preopen,
+        postclose_finalize_utc: stale_postclose,
+        initial_state: mqk_db::STATE_AWAITING_PREOPEN.to_string(),
+        data_refresh_state: "not_started".to_string(),
+        occurred_at_utc: stale_preopen,
+        bounded_detail: "phase-d integration: stale-row fixture".to_string(),
+        stop_attempt_count: 0,
+    };
+    let row = match mqk_db::create_or_recover_autonomous_daily_operation(pool, &create_args)
+        .await
+        .expect("PD stale: create failed")
+    {
+        mqk_db::CreateOrRecoverAutonomousDailyOperationOutcome::Created(r) => r,
+        other => panic!("PD stale: expected Created, got {other:?}"),
+    };
+
+    async fn advance(
+        pool: &sqlx::PgPool,
+        row: mqk_db::AutonomousDailyOperationRecord,
+        new_state: &str,
+        ts: DateTime<Utc>,
+        run_id: Option<Uuid>,
+    ) -> mqk_db::AutonomousDailyOperationRecord {
+        let args = mqk_db::TransitionAutonomousDailyOperationArgs {
+            operation_id: row.operation_id,
+            expected_state: row.state.clone(),
+            expected_state_version: row.state_version,
+            new_state: new_state.to_string(),
+            reason_code: None,
+            blocker_signature: None,
+            occurred_at_utc: ts,
+            run_id,
+            bounded_detail: format!("phase-d integration stale fixture: -> {new_state}"),
+        };
+        match mqk_db::transition_autonomous_daily_operation(pool, &args)
+            .await
+            .expect("PD stale: transition failed")
+        {
+            mqk_db::AutonomousDailyTransitionOutcome::Applied(r) => r,
+            other => panic!("PD stale: expected Applied -> {new_state}, got {other:?}"),
+        }
+    }
+
+    let row = advance(pool, row, mqk_db::STATE_PREPARING_DATA, stale_open, None).await;
+    let row = advance(pool, row, mqk_db::STATE_AWAITING_OPEN, stale_open, None).await;
+    let row = advance(pool, row, mqk_db::STATE_START_RETRYING, stale_open, None).await;
+    let row = advance(pool, row, mqk_db::STATE_RUNNING, stale_open, Some(run_id)).await;
+    // Crash-orphan shape: the row never leaves `running` even though (in the
+    // GREEN shape) its bound run has already, durably terminated -- exactly
+    // the live production shape a511ab4c/Patch F addresses.
+    assert_eq!(row.state, mqk_db::STATE_RUNNING);
+    assert_eq!(row.run_id, Some(run_id));
+
+    (operation_id, run_id)
+}
+
+async fn pd_seed_clean_reconcile(pool: &sqlx::PgPool) {
+    let now = Utc::now();
+    mqk_db::persist_reconcile_status_state(
+        pool,
+        &mqk_db::PersistReconcileStatusState {
+            status: "ok",
+            last_run_at_utc: Some(now),
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+            updated_at_utc: now,
+        },
+    )
+    .await
+    .expect("PD: clean reconcile seed failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn phase_d_integrated_stale_running_row_releases_and_bar_chain_completes() {
+    let (st, pool) = pd_daemon_state().await;
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+        .await
+        .expect("PD integrated: persist ARMED failed");
+    pd_seed_clean_reconcile(&pool).await;
+
+    let market_date = chrono::NaiveDate::from_ymd_opt(2024, 4, 15).unwrap();
+    let stale_market_date = chrono::NaiveDate::from_ymd_opt(2024, 4, 10).unwrap();
+    let stale_open = Utc.with_ymd_and_hms(2024, 4, 10, 13, 30, 0).unwrap();
+    let (stale_operation_id, _stale_run_id) =
+        pd_seed_stale_running_row(&pool, stale_market_date, stale_open, true).await;
+
+    let timing = AutonomousDailyPlanTiming::production_default();
+    let plan = match resolve_autonomous_daily_session_plan_from_env(pd_now(), &timing) {
+        AutonomousDailySessionPlanResolution::Applicable(plan) => plan,
+        other => panic!("PD integrated: expected an applicable session plan, got {other:?}"),
+    };
+    let preopen_now = plan.preopen_start_utc + chrono::Duration::minutes(1);
+    let preopen_expected_bars = pd_preopen_expected_bar_window(preopen_now);
+    let preopen_expected_ts = *preopen_expected_bars
+        .last()
+        .expect("non-empty preopen window");
+    let expected_bars = pd_expected_bar_window();
+    let last_expected_ts = *expected_bars.last().expect("non-empty window");
+    pd_seed_bars(&pool, &preopen_expected_bars).await;
+
+    let preopen_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: &st,
+        now_utc: preopen_now,
+    })
+    .await
+    .expect("PD integrated: preopen tick must not error despite the stale row's existence");
+    assert!(
+        !matches!(
+            preopen_outcome,
+            AutonomousDailyCoordinatorTickOutcome::Started { .. }
+        ),
+        "PD integrated: preopen must never itself reach a real start"
+    );
+
+    let preopen_operation = mqk_db::fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        market_date,
+        "PAPER",
+        PD_ADAPTER_ID,
+    )
+    .await
+    .expect("PD integrated: fetch preopen operation failed")
+    .expect("PD integrated: today's operation row must exist after preopen tick");
+    assert_ne!(preopen_operation.operation_id, stale_operation_id);
+
+    // The real production completed-bar adapter, ticked at the real preopen
+    // instant, must resolve to TODAY's operation without an authority
+    // ambiguity error -- the stale row's own run has already, durably
+    // proven safely terminal (Patch F) -- and durably observe the exact
+    // expected preopen bar.
+    let preopen_driver_tick = tick_autonomous_completed_bar_driver_from_state(&st, preopen_now)
+        .await
+        .expect(
+            "PD integrated: preopen driver tick must not error -- the stale row must not create \
+             authority ambiguity",
+        );
+    assert_eq!(
+        preopen_driver_tick,
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
+            operation_id: preopen_operation.operation_id,
+            mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
+            outcome: AutonomousCompletedBarDriverOutcome::BarObserved {
+                bar_end_ts: preopen_expected_ts
+            },
+        },
+        "PD integrated: preopen driver must select today's operation and observe the exact \
+         expected bar, got {preopen_driver_tick:?}"
+    );
+
+    pd_seed_bars(&pool, &expected_bars).await;
+    let mut run_id_1: Option<Uuid> = None;
+    for _ in 0..5 {
+        let start_outcome =
+            tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+                state: &st,
+                now_utc: pd_now(),
+            })
+            .await
+            .expect("PD integrated: start tick must not error");
+        match start_outcome {
+            AutonomousDailyCoordinatorTickOutcome::Started { run_id } => {
+                run_id_1 = Some(run_id);
+                break;
+            }
+            AutonomousDailyCoordinatorTickOutcome::AwaitingOpen
+            | AutonomousDailyCoordinatorTickOutcome::PreparingData
+            | AutonomousDailyCoordinatorTickOutcome::RetryNotDue => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            other => {
+                panic!("PD integrated: unexpected outcome advancing toward Started: {other:?}")
+            }
+        }
+    }
+    let run_id_1 =
+        run_id_1.expect("PD integrated: coordinator must reach Started within the bounded poll");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let running_operation = mqk_db::fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        market_date,
+        "PAPER",
+        PD_ADAPTER_ID,
+    )
+    .await
+    .expect("PD integrated: fetch running operation failed")
+    .expect("PD integrated: operation row must exist after Started");
+    assert_eq!(running_operation.state, mqk_db::STATE_RUNNING);
+    assert_eq!(running_operation.run_id, Some(run_id_1));
+
+    let pre_dispatch_row =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, running_operation.operation_id)
+            .await
+            .expect("fetch ok")
+            .expect("row exists");
+    let bars_observed_before = pre_dispatch_row.bars_observed;
+    let bars_dispatched_before = pre_dispatch_row.bars_dispatched;
+
+    let dispatch_tick_now = pd_now() + chrono::Duration::seconds(5);
+    let dispatch_outcome = tick_autonomous_completed_bar_driver_from_state(&st, dispatch_tick_now)
+        .await
+        .expect(
+            "PD integrated: dispatch tick must not error -- the stale row must not block bar \
+             dispatch",
+        );
+    let dispatched_bar_ts = match dispatch_outcome {
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
+            operation_id,
+            mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+            outcome: AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts },
+        } => {
+            assert_eq!(operation_id, running_operation.operation_id);
+            bar_end_ts
+        }
+        other => {
+            panic!("PD integrated: expected RunningDispatch/DispatchCompleted, got {other:?}")
+        }
+    };
+    assert_eq!(dispatched_bar_ts, last_expected_ts);
+
+    let post_dispatch_row =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, running_operation.operation_id)
+            .await
+            .expect("fetch ok")
+            .expect("row exists");
+    assert_eq!(
+        post_dispatch_row.bars_observed,
+        bars_observed_before + 1,
+        "bars_observed increments exactly once for the dispatched bar"
+    );
+    assert_eq!(
+        post_dispatch_row.bars_dispatched,
+        bars_dispatched_before + 1,
+        "bars_dispatched increments exactly once"
+    );
+
+    let evals_after_one_dispatch: i64 =
+        sqlx::query_scalar("select count(*) from strategy_signal_evaluations where run_id = $1")
+            .bind(run_id_1)
+            .fetch_one(&pool)
+            .await
+            .expect("count ok");
+    assert_eq!(
+        evals_after_one_dispatch, 1,
+        "PD integrated: exactly one canonical strategy evaluation through the real production \
+         chain despite the stale row"
+    );
+
+    // Idempotent repeat: a second tick at the same effective state must not
+    // duplicate any counter.
+    let repeat_outcome = tick_autonomous_completed_bar_driver_from_state(
+        &st,
+        dispatch_tick_now + chrono::Duration::seconds(1),
+    )
+    .await
+    .expect("PD integrated: repeat dispatch tick must not error");
+    assert!(
+        matches!(
+            repeat_outcome,
+            AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
+                outcome: AutonomousCompletedBarDriverOutcome::AlreadyDispatched { .. },
+                ..
+            }
+        ),
+        "PD integrated: repeat tick must be AlreadyDispatched, got {repeat_outcome:?}"
+    );
+    let evals_after_repeat: i64 =
+        sqlx::query_scalar("select count(*) from strategy_signal_evaluations where run_id = $1")
+            .bind(run_id_1)
+            .fetch_one(&pool)
+            .await
+            .expect("count ok");
+    assert_eq!(
+        evals_after_repeat, 1,
+        "PD integrated: repeated tick must never duplicate the strategy evaluation count"
+    );
+    let post_repeat_row =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, running_operation.operation_id)
+            .await
+            .expect("fetch ok")
+            .expect("row exists");
+    assert_eq!(
+        post_repeat_row.bars_observed,
+        bars_observed_before + 1,
+        "PD integrated: repeated tick must never duplicate bars_observed"
+    );
+    assert_eq!(
+        post_repeat_row.bars_dispatched,
+        bars_dispatched_before + 1,
+        "PD integrated: repeated tick must never duplicate bars_dispatched"
+    );
+
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
+    st.stop_for_shutdown().await;
+    cleanup_adapter_slot(&pool, PD_ADAPTER_ID).await;
+}
+
+/// INTEGRATED NEGATIVE CONTROL: identical to
+/// `phase_d_integrated_stale_running_row_releases_and_bar_chain_completes`
+/// except the stale row's bound run is mutated to remain genuinely active
+/// (`run_safely_terminal = false`, mirroring "run remains RUNNING" from the
+/// mission spec) -- proving the positive proof above is actually exercising
+/// the new evidence-gated release, not merely a fixture that always
+/// succeeds regardless of the stale row's shape. With the stale row's run
+/// still active, it stays relevant right alongside today's own row, so the
+/// real production completed-bar adapter's authority lookup must fail
+/// closed with an ambiguity error at both the preopen and running-dispatch
+/// stages, and zero bar is ever dispatched or evaluated -- exactly the
+/// symptom the original 2026-08-24 defect produced in production.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn phase_d_integrated_stale_running_row_with_active_run_fails_closed() {
+    let (st, pool) = pd_daemon_state().await;
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+        .await
+        .expect("PD negative: persist ARMED failed");
+    pd_seed_clean_reconcile(&pool).await;
+
+    let stale_market_date = chrono::NaiveDate::from_ymd_opt(2024, 4, 10).unwrap();
+    let stale_open = Utc.with_ymd_and_hms(2024, 4, 10, 13, 30, 0).unwrap();
+    // The only mutation relative to the positive proof: the stale row's
+    // bound run is never stopped, so it is never safely terminal.
+    let (_stale_operation_id, _stale_run_id) =
+        pd_seed_stale_running_row(&pool, stale_market_date, stale_open, false).await;
+
+    let timing = AutonomousDailyPlanTiming::production_default();
+    let plan = match resolve_autonomous_daily_session_plan_from_env(pd_now(), &timing) {
+        AutonomousDailySessionPlanResolution::Applicable(plan) => plan,
+        other => panic!("PD negative: expected an applicable session plan, got {other:?}"),
+    };
+    let preopen_now = plan.preopen_start_utc + chrono::Duration::minutes(1);
+    let preopen_expected_bars = pd_preopen_expected_bar_window(preopen_now);
+    let expected_bars = pd_expected_bar_window();
+    pd_seed_bars(&pool, &preopen_expected_bars).await;
+
+    // The coordinator's own top-level create/advance path is keyed by a
+    // deterministic operation_id (never the ambiguity-prone relevant-row
+    // lookup), so it still succeeds and creates today's row even with the
+    // stale row present -- exactly as it did in the real 2026-08-24
+    // incident, where the coordinator reached `running` normally.
+    let preopen_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: &st,
+        now_utc: preopen_now,
+    })
+    .await
+    .expect("PD negative: preopen coordinator tick must not error");
+    assert!(!matches!(
+        preopen_outcome,
+        AutonomousDailyCoordinatorTickOutcome::Started { .. }
+    ));
+
+    // The real production completed-bar adapter's authority lookup must
+    // fail closed: both the stale row (active run) and today's row (inside
+    // its own preopen window) are simultaneously relevant.
+    let preopen_driver_result = tick_autonomous_completed_bar_driver_from_state(&st, preopen_now).await;
+    assert!(
+        preopen_driver_result.is_err(),
+        "PD negative: preopen driver tick must fail closed as ambiguous while the stale row's \
+         run is still genuinely active; got {preopen_driver_result:?}"
+    );
+
+    pd_seed_bars(&pool, &expected_bars).await;
+    // Unlike the positive proof, the coordinator itself never reaches
+    // `Started`: its own reconcile machinery independently discovers the
+    // stale row's genuinely active, foreign run via the same ambiguous
+    // authority lookup and refuses to proceed -- an even stronger fail-
+    // closed outcome than the driver-level error alone, and exactly the
+    // production symptom (coordinator advances toward running while the
+    // bar-dispatch chain can never resolve authority). Poll a bounded
+    // number of ticks and require the terminal outcome to be a blocked one,
+    // never `Started`.
+    let mut reached_started = false;
+    let mut last_outcome = None;
+    for _ in 0..5 {
+        let start_outcome =
+            tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+                state: &st,
+                now_utc: pd_now(),
+            })
+            .await
+            .expect("PD negative: start tick must not error");
+        match &start_outcome {
+            AutonomousDailyCoordinatorTickOutcome::Started { .. } => {
+                reached_started = true;
+                last_outcome = Some(start_outcome);
+                break;
+            }
+            AutonomousDailyCoordinatorTickOutcome::AwaitingOpen
+            | AutonomousDailyCoordinatorTickOutcome::PreparingData
+            | AutonomousDailyCoordinatorTickOutcome::RetryNotDue => {
+                last_outcome = Some(start_outcome);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+            _ => {
+                last_outcome = Some(start_outcome);
+                break;
+            }
+        }
+    }
+    assert!(
+        !reached_started,
+        "PD negative: the coordinator must never reach Started while the stale row's run is \
+         still genuinely active and creates authority ambiguity; got {last_outcome:?}"
+    );
+
+    // Exactly the reported production symptom: no bar is ever dispatched
+    // and no strategy evaluation ever occurs for this adapter slot while
+    // the authority lookup fails closed.
+    let dispatch_tick_now = pd_now() + chrono::Duration::seconds(5);
+    let dispatch_result = tick_autonomous_completed_bar_driver_from_state(&st, dispatch_tick_now).await;
+    assert!(
+        dispatch_result.is_err(),
+        "PD negative: dispatch driver tick must fail closed as ambiguous while the stale row's \
+         run is still genuinely active; got {dispatch_result:?}"
+    );
+
+    let bars_dispatched_total: i64 = sqlx::query_scalar(
+        "select coalesce(sum(bars_dispatched), 0)::bigint from sys_autonomous_daily_operations \
+         where adapter_id = $1",
+    )
+    .bind(PD_ADAPTER_ID)
+    .fetch_one(&pool)
+    .await
+    .expect("count ok");
+    assert_eq!(
+        bars_dispatched_total, 0,
+        "PD negative: zero bar dispatch across the entire adapter slot while the authority \
+         lookup fails closed"
+    );
+
+    let evals: i64 = sqlx::query_scalar(
+        "select count(*) from strategy_signal_evaluations where symbol = $1",
+    )
+    .bind(PD_SYMBOL)
+    .fetch_one(&pool)
+    .await
+    .expect("count ok");
+    assert_eq!(
+        evals, 0,
+        "PD negative: zero strategy evaluation while the authority lookup fails closed"
+    );
+
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
+    st.stop_for_shutdown().await;
+    cleanup_adapter_slot(&pool, PD_ADAPTER_ID).await;
+}
+
+// ---------------------------------------------------------------------------
 // D4 — spawn wiring proof: exactly one production adapter, driven by the
 // real spawn seam, never the legacy ticker (main.rs itself is proven by
 // scenario_autonomous_completed_bar_task_01.rs's i01/i02/i03; this proves
