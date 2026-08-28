@@ -15,6 +15,24 @@
 //!    never trusted from the request).
 //! 4. Prove current-state and history readback (`GET .../check`,
 //!    `GET .../history`) after every transition.
+//! 4b. RESEARCH-PROMOTION-DURABLE-LINEAGE-HTTP-PROOF-01: immediately after
+//!     the evidence-requiring `shadow_approved` transition, read the
+//!     durably persisted row back from Postgres by its exact
+//!     `transition_id` and prove exact identity/value agreement (never
+//!     merely non-null) against Research/Backtest/robustness authority
+//!     independently re-derived from the same real fixture files via the
+//!     same production functions the route itself calls: the full V3
+//!     lineage (`research_trial_id`, `research_economic_eval_id`,
+//!     `research_deflated_sharpe_ratio`,
+//!     `research_probability_backtest_overfitting`, `backtest_run_id`,
+//!     `research_judge_artifact_sha256`, `stress_protocol_version`,
+//!     `stress_artifact_sha256`, `robustness_protocol_version`,
+//!     `finalized_robustness_artifact_sha256`,
+//!     `promotion_policy_fingerprint`) plus the scanner/review evidence
+//!     binding (`evidence_transition_id`, `evidence_fingerprint`,
+//!     `evidence_fingerprint_v2`) — with a negative control proving these
+//!     assertions actually discriminate a different real Research trial's
+//!     identity, not merely a shared default/None.
 //! 5. Prove no paper outbox row can be created before `active_paper`.
 //! 6. Prove exactly one synthetic outbox row is created once
 //!    `active_paper` is reached and every other existing gate
@@ -53,8 +71,10 @@ use mqk_backtest::{
 };
 use mqk_daemon::{
     decision::{submit_internal_strategy_decision, InternalStrategyDecision},
+    promotion_evidence_validation::{compute_evidence_fingerprint_v2, validate_paper_candidate_evidence},
     routes, state,
 };
+use sqlx::Row;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -666,6 +686,217 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     );
     assert_eq!(json["disposition"], "transitioned");
     println!("[closure-proof] step 1: no-state -> shadow_approved: {json}");
+
+    // --- RESEARCH-PROMOTION-DURABLE-LINEAGE-HTTP-PROOF-01: immediately
+    // after the REAL evidence-requiring HTTP transition above succeeds,
+    // read the durable row it wrote back from Postgres and prove it binds
+    // the EXACT Research/Backtest/robustness authority that authorized the
+    // decision -- never merely that the lineage columns are non-null. Every
+    // expected value below is independently re-derived from the SAME real
+    // fixture files/pipeline and HTTP request this test already built,
+    // via the SAME production functions the route itself calls -- never a
+    // manufactured constant. -------------------------------------------
+    let transition_id_1 = Uuid::parse_str(
+        json["transition_id"]
+            .as_str()
+            .expect("shadow_approved response must carry a transition_id"),
+    )
+    .expect("transition_id must be a valid UUID");
+
+    // Independently re-derive the exact verified Research OOS evidence via
+    // the same `mqk_promotion::verify_promotion_oos_evidence` the route
+    // calls through `research_evidence_gate`, reading the SAME real
+    // artifact bytes this test's own fixture already produced.
+    let econ_json =
+        std::fs::read_to_string(research.evidence_dir.join("economic_walk_forward.json"))
+            .expect("read economic_walk_forward.json");
+    let daily_csv = std::fs::read(research.evidence_dir.join("economic_daily_returns.csv"))
+        .expect("read economic_daily_returns.csv");
+    let judge_json = std::fs::read_to_string(&research.judge_path).expect("read judge json");
+    let verified_oos = mqk_promotion::verify_promotion_oos_evidence(
+        &research.registry_db_path,
+        &research.trial_id,
+        &econ_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .expect("independent re-verification of Research OOS evidence must succeed");
+
+    // Independently re-derive the exact Backtest evidence bundle via the
+    // same `mqk_promotion::resolve_backtest_evidence` the route calls
+    // through `backtest_evidence_gate`, against the SAME
+    // `MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT` this test configured.
+    let verified_backtest = mqk_promotion::resolve_backtest_evidence(&root, backtest_run_id)
+        .expect("independent re-resolution of Backtest evidence must succeed");
+
+    // Independently re-derive the exact promotion-policy fingerprint from
+    // the SAME MQK_PROMOTION_*/MQK_RESEARCH_MIN_*/MQK_RESEARCH_MAX_*
+    // thresholds this test set at the top of this function.
+    let expected_policy_fingerprint = mqk_promotion::PromotionConfig {
+        min_sharpe: 0.0,
+        max_mdd: 1.0,
+        min_cagr: 0.0,
+        min_profit_factor: 0.0,
+        min_profitable_months_pct: 0.0,
+        min_deflated_sharpe_ratio: 0.0,
+        max_probability_backtest_overfitting: 1.0,
+    }
+    .deterministic_fingerprint();
+
+    // Independently re-derive the exact legacy + v2 scanner/review evidence
+    // fingerprints via the SAME `validate_paper_candidate_evidence`/
+    // `compute_evidence_fingerprint_v2` the route calls for Gate 4.
+    let validated_review_evidence = validate_paper_candidate_evidence(
+        &st,
+        review_dir.to_str().unwrap(),
+        &strategy_id,
+        &symbol,
+        TIMEFRAME_SECS,
+    )
+    .expect("independent re-validation of review-artifact evidence must succeed");
+    let expected_evidence_fingerprint_v2 = compute_evidence_fingerprint_v2(
+        &validated_review_evidence.review_id,
+        &validated_review_evidence.scanner_scan_id,
+        &validated_review_evidence.git_hash,
+        &strategy_id,
+        &symbol,
+        TIMEFRAME_SECS,
+        &validated_review_evidence.review_state,
+        validated_review_evidence.scanner_score_token.as_deref(),
+        validated_review_evidence.scanner_rank,
+        &validated_review_evidence.reason_codes,
+        &validated_review_evidence.blockers,
+        &validated_review_evidence.warnings,
+    );
+
+    // Read the REAL row Gate 5 durably persisted, by the EXACT
+    // transition_id the HTTP response returned -- Postgres itself, not any
+    // route/cache readback.
+    let row1 = sqlx::query(
+        r#"
+        select evidence_transition_id, evidence_fingerprint, evidence_fingerprint_v2,
+               research_trial_id, research_economic_eval_id,
+               research_deflated_sharpe_ratio, research_probability_backtest_overfitting,
+               backtest_run_id, research_judge_artifact_sha256, stress_protocol_version,
+               stress_artifact_sha256, robustness_protocol_version,
+               finalized_robustness_artifact_sha256, promotion_policy_fingerprint
+        from sys_strategy_promotion_transitions
+        where transition_id = $1
+        "#,
+    )
+    .bind(transition_id_1)
+    .fetch_one(&pool)
+    .await
+    .expect("readback of the durably persisted evidence-bearing transition row");
+
+    let db_evidence_transition_id: Option<Uuid> = row1.try_get("evidence_transition_id").unwrap();
+    let db_evidence_fingerprint: Option<String> = row1.try_get("evidence_fingerprint").unwrap();
+    let db_evidence_fingerprint_v2: Option<String> =
+        row1.try_get("evidence_fingerprint_v2").unwrap();
+    let db_research_trial_id: Option<String> = row1.try_get("research_trial_id").unwrap();
+    let db_research_economic_eval_id: Option<String> =
+        row1.try_get("research_economic_eval_id").unwrap();
+    let db_dsr: Option<f64> = row1.try_get("research_deflated_sharpe_ratio").unwrap();
+    let db_pbo: Option<f64> = row1
+        .try_get("research_probability_backtest_overfitting")
+        .unwrap();
+    let db_backtest_run_id: Option<Uuid> = row1.try_get("backtest_run_id").unwrap();
+    let db_judge_sha256: Option<String> = row1.try_get("research_judge_artifact_sha256").unwrap();
+    let db_stress_protocol: Option<String> = row1.try_get("stress_protocol_version").unwrap();
+    let db_stress_sha256: Option<String> = row1.try_get("stress_artifact_sha256").unwrap();
+    let db_robustness_protocol: Option<String> =
+        row1.try_get("robustness_protocol_version").unwrap();
+    let db_robustness_sha256: Option<String> =
+        row1.try_get("finalized_robustness_artifact_sha256").unwrap();
+    let db_policy_fingerprint: Option<String> =
+        row1.try_get("promotion_policy_fingerprint").unwrap();
+
+    // ---- Exact identity/value proof (never merely "is present") ----
+    assert_eq!(
+        db_evidence_transition_id,
+        Some(transition_id_1),
+        "evidence_transition_id must prove this evidence-bearing transition is its own \
+         evidence root"
+    );
+    assert_eq!(
+        db_evidence_fingerprint.as_deref(),
+        Some(validated_review_evidence.fingerprint.as_str())
+    );
+    assert_eq!(
+        db_evidence_fingerprint_v2.as_deref(),
+        Some(expected_evidence_fingerprint_v2.as_str())
+    );
+    assert_eq!(db_research_trial_id.as_deref(), Some(verified_oos.trial_id()));
+    assert_eq!(
+        db_research_economic_eval_id.as_deref(),
+        Some(verified_oos.economic_eval_id())
+    );
+    assert_eq!(db_dsr, Some(verified_oos.deflated_sharpe_ratio()));
+    assert_eq!(
+        db_pbo,
+        Some(verified_oos.probability_of_backtest_overfitting())
+    );
+    assert_eq!(db_backtest_run_id, Some(backtest_run_id));
+    assert_eq!(
+        db_judge_sha256.as_deref(),
+        Some(verified_oos.judge_artifact_sha256())
+    );
+    assert_eq!(
+        db_stress_protocol.as_deref(),
+        Some(verified_backtest.stress_suite.protocol_version.as_str())
+    );
+    assert_eq!(
+        db_stress_sha256.as_deref(),
+        Some(verified_backtest.stress_artifact_sha256.as_str())
+    );
+    assert_eq!(
+        db_robustness_protocol.as_deref(),
+        Some(verified_backtest.robustness_evidence.protocol_version.as_str())
+    );
+    assert_eq!(
+        db_robustness_sha256.as_deref(),
+        Some(verified_backtest.finalized_robustness_artifact_sha256.as_str())
+    );
+    assert_eq!(
+        db_policy_fingerprint.as_deref(),
+        Some(expected_policy_fingerprint.as_str())
+    );
+    println!(
+        "[closure-proof] Postgres lineage readback proven exact for transition_id={transition_id_1}"
+    );
+
+    // ---- NEGATIVE CONTROL: research_trials[1] is a SECOND, genuinely
+    // different real trial from the SAME real production pipeline run
+    // (same judge/comparison population, different --entry-thresholds
+    // value) -- not a manufactured constant. If the server had bound the
+    // wrong trial's identity to this transition (a cross-trial lineage
+    // bug), the persisted research_trial_id/research_economic_eval_id
+    // would equal trial B's, not trial A's, and these assertions would
+    // fail -- proving the positive assertions above are load-bearing, not
+    // vacuously true from a shared None/default value (CLAUDE.md #14).
+    let research_b = &research_trials[1];
+    assert_ne!(
+        research.trial_id, research_b.trial_id,
+        "fixture precondition: the two real trials must have distinct trial_ids"
+    );
+    assert_ne!(
+        db_research_trial_id.as_deref(),
+        Some(research_b.trial_id.as_str()),
+        "NEGATIVE CONTROL FAILED: persisted research_trial_id equals a DIFFERENT real trial's \
+         id -- the server bound the wrong trial's identity to this transition"
+    );
+    assert_ne!(
+        db_research_economic_eval_id.as_deref(),
+        Some(research_b.economic_eval_id.as_str()),
+        "NEGATIVE CONTROL FAILED: persisted research_economic_eval_id equals a DIFFERENT real \
+         trial's economic_eval_id -- the server bound the wrong trial's identity to this \
+         transition"
+    );
+    println!(
+        "[closure-proof] negative control confirmed: persisted lineage does not match a \
+         different real trial's identity (research_trials[1].trial_id={})",
+        research_b.trial_id
+    );
 
     // Readback: current state + history after step 1.
     let check_uri = format!(

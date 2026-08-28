@@ -36,10 +36,23 @@
 //!   - `mqk-daemon/tests/scenario_strategy_promotion_closure_proof_01f.rs`
 //!     -- `closure_proof_full_lifecycle_through_real_routes`: the complete
 //!     no-state -> shadow_approved -> paper_approved -> active_paper ->
-//!     demoted lifecycle through the same real route/DB, reading Postgres
-//!     back after the evidence-requiring transition to confirm the
-//!     persisted lineage (`evidence_transition_id`, `evidence_fingerprint`)
-//!     identifies the exact evidence judged.
+//!     demoted lifecycle through the same real route/DB.
+//!     RESEARCH-PROMOTION-DURABLE-LINEAGE-HTTP-PROOF-01: immediately after
+//!     the evidence-requiring `shadow_approved` transition, it reads
+//!     Postgres back by the exact `transition_id` the HTTP response
+//!     returned and proves EXACT identity/value agreement (never merely
+//!     non-null) for the complete V3 lineage (`research_trial_id`,
+//!     `research_economic_eval_id`, `research_deflated_sharpe_ratio`,
+//!     `research_probability_backtest_overfitting`, `backtest_run_id`,
+//!     `research_judge_artifact_sha256`, `stress_protocol_version`,
+//!     `stress_artifact_sha256`, `robustness_protocol_version`,
+//!     `finalized_robustness_artifact_sha256`,
+//!     `promotion_policy_fingerprint`) and the scanner/review evidence
+//!     binding (`evidence_transition_id`, `evidence_fingerprint`,
+//!     `evidence_fingerprint_v2`), each re-derived independently from the
+//!     same real fixture files via the same production functions the route
+//!     itself calls, with a negative control against a second real
+//!     Research trial's identity.
 //!
 //! Both landed in commit `37649200` ("promotion: prove canonical postgres
 //! transition end to end", PRODUCTION-PROMOTION-DB-E2E-01), which also
