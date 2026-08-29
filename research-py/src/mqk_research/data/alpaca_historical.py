@@ -405,56 +405,121 @@ CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW = "requires_fail_closed_review"
 CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG = "no_adjustment_required_for_requested_leg"
 CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY = "verified_same_security_continuity"
 
-_MERGER_TYPES: FrozenSet[str] = frozenset({"cash_merger", "stock_merger", "stock_and_cash_merger"})
+# BKT-RESEARCH-CA-POLICY-SINGLE-SOURCE-OF-TRUTH-01: the SOLE authoritative
+# representation of the merger-acquirer automated resolution rule. Patch F
+# (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01-REPAIR-01) hashed a SEPARATE,
+# manually-typed description of this rule's values into
+# _canonical_ca_resolution_policy_spec while classify_corporate_action_
+# resolution/_event_group_key independently hard-coded their own literals
+# ("acquirer", "acquiree", ("provider_event_id", "action_type")) -- an edit
+# to one copy (e.g. flipping which role is required) could silently change
+# production CA admission behavior while leaving the hashed spec, the policy
+# fingerprint, and the trusted V2 policy id completely unchanged. Both
+# classify_corporate_action_resolution/_event_group_key AND
+# _canonical_ca_resolution_policy_spec now read every decision-bearing value
+# from THIS ONE object -- referenced as a bare module global (never a
+# function-default parameter, which Python binds once at def-time) so a test
+# monkeypatching MERGER_ACQUIRER_RULE is observed by both consumers.
+#
+# This does NOT detect an arbitrary rewrite of classify_corporate_action_
+# resolution's control flow (e.g. an edit that stops reading this object
+# altogether) -- no purely data-driven fingerprint can prove that. What it
+# DOES guarantee: as long as the classifier consumes these fields (which the
+# required negative controls below prove for every field), changing any one
+# of them changes BOTH the classifier's actual admission behavior AND
+# resolution_policy_fingerprint identically, because there is only one place
+# the value is written down.
+@dataclass(frozen=True)
+class MergerAcquirerRule:
+    action_types: FrozenSet[str]
+    required_role: str
+    terminal_conflict_role: str
+    same_event_grouping_identity: Tuple[str, ...]
+    reject_same_symbol_terminal_conflict: bool
 
-# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01, bumped by -REPAIR-01 F2: bumped
-# whenever classify_corporate_action_resolution's actual decision logic
-# changes (which raw fields resolve which category) -- the discipline
-# mirrors CA_DISCOVERY_PROTOCOL_V2's existing versioning pattern in this
-# module. Part of resolution_policy_fingerprint (as policy_spec_version, see
-# _canonical_ca_resolution_policy_spec), so a future logic change is
-# reflected in official research source identity even if this constant is
-# NOT bumped in the same patch (the reviewed-resolution registry's own
-# resolution_ids still change identity independently, and the spec below now
-# also encodes the automated rules' actual semantics -- not just this
-# version label -- so a semantics change that forgets to bump this constant
-# still changes the fingerprint) -- but bumping it IS the correct thing to
-# do whenever the merger/name-change contracts themselves change, exactly
-# like EXTRACTOR_ID. REPAIR-01: bumped v1 -> v2 because this patch changed
-# ca_reviewed_resolutions' own fingerprint/resolution_id content-addressing
-# contract (RESOLUTION_SCHEMA_VERSION reviewed_ca_resolution_v1 -> v2).
-CA_RESOLUTION_POLICY_VERSION = "role_aware_reviewed_registry_v2"
+
+# BKT-RESEARCH-CA-POLICY-SINGLE-SOURCE-OF-TRUTH-01: the SOLE authoritative
+# representation of the name-change automated resolution rule -- same
+# rationale as MergerAcquirerRule above.
+@dataclass(frozen=True)
+class NameChangeRule:
+    action_type: str
+    allowed_roles: FrozenSet[str]
+    require_old_cusip_populated: bool
+    require_new_cusip_populated: bool
+    require_cusip_equality: bool
+
+
+MERGER_ACQUIRER_RULE = MergerAcquirerRule(
+    action_types=frozenset({"cash_merger", "stock_merger", "stock_and_cash_merger"}),
+    required_role="acquirer",
+    terminal_conflict_role="acquiree",
+    same_event_grouping_identity=("provider_event_id", "action_type"),
+    reject_same_symbol_terminal_conflict=True,
+)
+
+NAME_CHANGE_RULE = NameChangeRule(
+    action_type="name_change",
+    allowed_roles=frozenset({"old_symbol", "new_symbol"}),
+    require_old_cusip_populated=True,
+    require_new_cusip_populated=True,
+    require_cusip_equality=True,
+)
+
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01, bumped by -REPAIR-01 F2 and again
+# by -SINGLE-SOURCE-OF-TRUTH-01: bumped whenever classify_corporate_action_
+# resolution's actual decision logic changes (which raw fields resolve which
+# category) -- the discipline mirrors CA_DISCOVERY_PROTOCOL_V2's existing
+# versioning pattern in this module. Part of resolution_policy_fingerprint
+# (as policy_spec_version, see _canonical_ca_resolution_policy_spec), so a
+# future logic change is reflected in official research source identity even
+# if this constant is NOT bumped in the same patch (the reviewed-resolution
+# registry's own resolution_ids still change identity independently, and the
+# spec below now single-sources the automated rules' actual field values --
+# not just this version label -- so a rule-value change that forgets to bump
+# this constant still changes the fingerprint) -- but bumping it IS the
+# correct thing to do whenever the merger/name-change contracts themselves
+# change, exactly like EXTRACTOR_ID. SINGLE-SOURCE-OF-TRUTH-01: bumped v2 ->
+# v3 because this patch changed the canonical policy spec's own shape
+# (added terminal_conflict_role, renamed require_old_cusip_equals_new_cusip
+# -> require_cusip_equality, renamed reject_when_same_matched_symbol_also_
+# acquiree_sibling -> reject_same_symbol_terminal_conflict).
+CA_RESOLUTION_POLICY_VERSION = "role_aware_reviewed_registry_v3"
 
 
 def _canonical_ca_resolution_policy_spec(
     *, reviewed_resolutions: Sequence[Dict[str, Any]] = REVIEWED_CA_RESOLUTIONS
 ) -> Dict[str, Any]:
     """The full canonical CA RESOLUTION POLICY SPEC (BKT-RESEARCH-CA-
-    AUTHORITY-IDENTITY-V2-01-REPAIR-01 F2): explicitly describes
-    classify_corporate_action_resolution's actual automated-rule semantics
-    -- not merely a version label -- plus the exact provider-adjusted type
-    set and the reviewed registry actually in force. Every reviewed-
-    resolution record is independently re-verified (require_verified_
-    reviewed_resolution) before its resolution_id is trusted to contribute
-    to this spec: a stale/tampered reviewed-resolution record must fail
-    closed here too, not just at lookup time, so a corrupted registry entry
-    can never silently mint a policy identity that includes it."""
+    AUTHORITY-IDENTITY-V2-01-REPAIR-01 F2, repaired by -SINGLE-SOURCE-OF-
+    TRUTH-01): serializes the SAME MergerAcquirerRule/NameChangeRule objects
+    classify_corporate_action_resolution/_event_group_key actually consume
+    (see the module comment above MergerAcquirerRule) -- not a second,
+    independently-typed description of their values -- plus the exact
+    provider-adjusted type set and the reviewed registry actually in force.
+    Every reviewed-resolution record is independently re-verified (require_
+    verified_reviewed_resolution) before its resolution_id is trusted to
+    contribute to this spec: a stale/tampered reviewed-resolution record
+    must fail closed here too, not just at lookup time, so a corrupted
+    registry entry can never silently mint a policy identity that includes
+    it."""
     for record in reviewed_resolutions:
         require_verified_reviewed_resolution(record)
     return {
         "policy_spec_version": CA_RESOLUTION_POLICY_VERSION,
         "merger_acquirer_rule": {
-            "action_types": sorted(_MERGER_TYPES),
-            "required_role": "acquirer",
-            "same_event_grouping_identity": ["provider_event_id", "action_type"],
-            "reject_when_same_matched_symbol_also_acquiree_sibling": True,
+            "action_types": sorted(MERGER_ACQUIRER_RULE.action_types),
+            "required_role": MERGER_ACQUIRER_RULE.required_role,
+            "terminal_conflict_role": MERGER_ACQUIRER_RULE.terminal_conflict_role,
+            "same_event_grouping_identity": list(MERGER_ACQUIRER_RULE.same_event_grouping_identity),
+            "reject_same_symbol_terminal_conflict": MERGER_ACQUIRER_RULE.reject_same_symbol_terminal_conflict,
         },
         "name_change_rule": {
-            "action_type": "name_change",
-            "allowed_roles": sorted(("old_symbol", "new_symbol")),
-            "require_old_cusip_populated": True,
-            "require_new_cusip_populated": True,
-            "require_old_cusip_equals_new_cusip": True,
+            "action_type": NAME_CHANGE_RULE.action_type,
+            "allowed_roles": sorted(NAME_CHANGE_RULE.allowed_roles),
+            "require_old_cusip_populated": NAME_CHANGE_RULE.require_old_cusip_populated,
+            "require_new_cusip_populated": NAME_CHANGE_RULE.require_new_cusip_populated,
+            "require_cusip_equality": NAME_CHANGE_RULE.require_cusip_equality,
         },
         "provider_adjusted_covered_types": sorted(_COVERED_BY_ADJUSTMENT_ALL),
         "reviewed_registry_resolution_ids": sorted(r["resolution_id"] for r in reviewed_resolutions),
@@ -466,20 +531,23 @@ def resolution_policy_fingerprint(
 ) -> str:
     """Content-derived fingerprint of the CORPORATE-ACTION RESOLUTION POLICY
     as a whole (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01, repaired by
-    -REPAIR-01 F2): hashes the full canonical policy spec (see
-    _canonical_ca_resolution_policy_spec) -- the policy VERSION, the
-    automated merger-acquirer and name-change rules' actual semantics, the
-    exact provider-adjusted type set, and every reviewed-resolution record
-    actually in force identified by ITS OWN content-addressed resolution_id
-    (so adding, removing, or editing a reviewed-resolution record changes
-    this fingerprint even if no Python logic changes at all). Threaded into
-    build_source_attestation as ca_resolution_policy_id -- see that
-    function and bars_provenance.canonical_source_attestation_content --
-    so two extractions with byte-identical bars and byte-identical raw
-    corporate-action evidence, but governed by a DIFFERENT resolution
-    policy, never share a source_attestation_id. Fails closed (via
-    require_verified_reviewed_resolution) if any reviewed-resolution record
-    is itself stale/tampered."""
+    -REPAIR-01 F2 and -SINGLE-SOURCE-OF-TRUTH-01): hashes the full canonical
+    policy spec (see _canonical_ca_resolution_policy_spec) -- the policy
+    VERSION, the automated merger-acquirer and name-change rules' ACTUAL
+    field values (the same MergerAcquirerRule/NameChangeRule objects the
+    classifier itself consumes -- see the module comment above
+    MergerAcquirerRule for exactly what guarantee this does and does not
+    provide), the exact provider-adjusted type set, and every reviewed-
+    resolution record actually in force identified by ITS OWN content-
+    addressed resolution_id (so adding, removing, or editing a reviewed-
+    resolution record changes this fingerprint even if no Python logic
+    changes at all). Threaded into build_source_attestation as ca_resolution_
+    policy_id -- see that function and bars_provenance.canonical_source_
+    attestation_content -- so two extractions with byte-identical bars and
+    byte-identical raw corporate-action evidence, but governed by a
+    DIFFERENT resolution policy, never share a source_attestation_id. Fails
+    closed (via require_verified_reviewed_resolution) if any reviewed-
+    resolution record is itself stale/tampered."""
     return sha256_json(_canonical_ca_resolution_policy_spec(reviewed_resolutions=reviewed_resolutions))
 
 
@@ -981,11 +1049,16 @@ def _filter_entries_intersecting_range(
     return sorted(hits, key=lambda e: (e["symbol"], e["action_type"], e["effective_start_ts"]))
 
 
-def _event_group_key(leg: Dict[str, Any]) -> Tuple[Any, str]:
+def _event_group_key(leg: Dict[str, Any]) -> Tuple[str, ...]:
     """Group key identifying legs that came from the SAME raw provider
-    event -- provider_event_id alone is not guaranteed globally unique
-    across different action types, so action_type is included."""
-    return (leg.get("provider_event_id"), str(leg.get("action_type")))
+    event -- reads MERGER_ACQUIRER_RULE.same_event_grouping_identity (a bare
+    module global, see the comment above MergerAcquirerRule) rather than a
+    second hard-coded copy of the field list, so a test mutating the
+    authoritative grouping fields observes a changed grouping result here,
+    not just a changed policy fingerprint. provider_event_id alone is not
+    guaranteed globally unique across different action types, so the
+    default grouping identity also includes action_type."""
+    return tuple(str(leg.get(field)) for field in MERGER_ACQUIRER_RULE.same_event_grouping_identity)
 
 
 def classify_corporate_action_resolution(
@@ -1031,18 +1104,28 @@ def classify_corporate_action_resolution(
     matched_symbol = leg.get("matched_symbol")
     resolution = CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
 
-    if action_type in _MERGER_TYPES and role == "acquirer":
-        same_symbol_terminal_conflict = any(
-            sib.get("matched_role") == "acquiree" and sib.get("matched_symbol") == matched_symbol
+    # BKT-RESEARCH-CA-POLICY-SINGLE-SOURCE-OF-TRUTH-01: every decision-
+    # bearing literal below is read from MERGER_ACQUIRER_RULE/NAME_CHANGE_
+    # RULE (bare module globals, see the comment above MergerAcquirerRule) --
+    # never a locally hard-coded copy -- so these are the SAME values
+    # _canonical_ca_resolution_policy_spec hashes into resolution_policy_
+    # fingerprint.
+    if action_type in MERGER_ACQUIRER_RULE.action_types and role == MERGER_ACQUIRER_RULE.required_role:
+        same_symbol_terminal_conflict = MERGER_ACQUIRER_RULE.reject_same_symbol_terminal_conflict and any(
+            sib.get("matched_role") == MERGER_ACQUIRER_RULE.terminal_conflict_role
+            and sib.get("matched_symbol") == matched_symbol
             for sib in sibling_legs
         )
         if not same_symbol_terminal_conflict:
             resolution = CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
 
-    elif action_type == "name_change" and role in ("old_symbol", "new_symbol"):
+    elif action_type == NAME_CHANGE_RULE.action_type and role in NAME_CHANGE_RULE.allowed_roles:
         old_cusip = leg.get("old_cusip")
         new_cusip = leg.get("new_cusip")
-        if old_cusip and new_cusip and old_cusip == new_cusip:
+        old_ok = (not NAME_CHANGE_RULE.require_old_cusip_populated) or bool(old_cusip)
+        new_ok = (not NAME_CHANGE_RULE.require_new_cusip_populated) or bool(new_cusip)
+        equality_ok = (not NAME_CHANGE_RULE.require_cusip_equality) or (old_cusip == new_cusip)
+        if old_ok and new_ok and equality_ok:
             resolution = CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
 
     if resolution != CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW:

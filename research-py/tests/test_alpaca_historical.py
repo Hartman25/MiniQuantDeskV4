@@ -1750,21 +1750,195 @@ def test_trusted_v2_ca_resolution_policy_id_matches_bars_provenance_mirror():
     assert bp.TRUSTED_V2_CA_RESOLUTION_POLICY_ID == ah.resolution_policy_fingerprint()
 
 
-def test_policy_fingerprint_changes_when_merger_types_mutate():
-    """Required test: mutation of an automated policy rule (the merger-
-    acquirer rule's covered action types) changes the policy fingerprint --
-    F2's spec now encodes the RULE ITSELF, not just a version label."""
-    default_fp = ah.resolution_policy_fingerprint()
-    spec_without_stock_merger = ah._canonical_ca_resolution_policy_spec()
-    assert "stock_merger" in spec_without_stock_merger["merger_acquirer_rule"]["action_types"]
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-CA-POLICY-SINGLE-SOURCE-OF-TRUTH-01 -- proves classifier
+# BEHAVIOR and resolution_policy_fingerprint IDENTITY share the exact same
+# authoritative value: each test mutates ONE field of MERGER_ACQUIRER_RULE/
+# NAME_CHANGE_RULE via monkeypatch (a bare module-global reassignment, the
+# same seam classify_corporate_action_resolution/_event_group_key actually
+# read at call time -- see the module comment above MergerAcquirerRule in
+# alpaca_historical.py) and asserts BOTH the classifier's real admission
+# decision changes AND the fingerprint changes. A test that only checked the
+# fingerprint (Patch F's original mutation tests) could not distinguish a
+# genuinely single-sourced value from a hashed-but-unused decoy.
+# ---------------------------------------------------------------------------
 
+
+def test_policy_fingerprint_changes_when_merger_action_types_mutate():
+    """Mutating the merger-acquirer rule's covered action_types changes BOTH
+    classifier behavior (a stock_merger acquirer leg stops auto-resolving
+    once stock_merger is removed from the authoritative set) AND the policy
+    fingerprint."""
+    import dataclasses
     import mqk_research.data.alpaca_historical as ah_module
-    original = ah_module._MERGER_TYPES
+
+    leg = _merger_leg(event_id="action-types-1", role_symbol="BIG", other_role_symbol="SML")
+    assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
+    default_fp = ah.resolution_policy_fingerprint()
+
+    original = ah_module.MERGER_ACQUIRER_RULE
     try:
-        ah_module._MERGER_TYPES = frozenset({"cash_merger"})
+        ah_module.MERGER_ACQUIRER_RULE = dataclasses.replace(original, action_types=frozenset({"cash_merger"}))
+        assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
         mutated_fp = ah.resolution_policy_fingerprint()
     finally:
-        ah_module._MERGER_TYPES = original
+        ah_module.MERGER_ACQUIRER_RULE = original
+    assert mutated_fp != default_fp
+
+
+def test_merger_acquirer_required_role_mutation_changes_behavior_and_fingerprint():
+    """Required negative control 1: mutating MERGER_ACQUIRER_RULE.
+    required_role changes classifier behavior (the SAME acquirer leg that
+    previously auto-resolved now requires review) AND the fingerprint."""
+    import dataclasses
+    import mqk_research.data.alpaca_historical as ah_module
+
+    leg = _merger_leg(event_id="req-role-1", role_symbol="BIG", other_role_symbol="SML")
+    assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
+    default_fp = ah.resolution_policy_fingerprint()
+
+    original = ah_module.MERGER_ACQUIRER_RULE
+    try:
+        ah_module.MERGER_ACQUIRER_RULE = dataclasses.replace(original, required_role="acquiree")
+        assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+        mutated_fp = ah.resolution_policy_fingerprint()
+    finally:
+        ah_module.MERGER_ACQUIRER_RULE = original
+    assert mutated_fp != default_fp
+
+
+def test_merger_terminal_conflict_role_mutation_changes_behavior_and_fingerprint():
+    """Required negative control 2: mutating MERGER_ACQUIRER_RULE.
+    terminal_conflict_role changes whether the same-event self-consistency
+    check fires AND the fingerprint."""
+    import dataclasses
+    import mqk_research.data.alpaca_historical as ah_module
+
+    raw = {
+        "id": "term-role-mut-1", "acquirer_symbol": "AAA", "acquirer_cusip": "x",
+        "acquiree_symbol": "AAA", "acquiree_cusip": "y", "process_date": "2021-01-15",
+    }
+    legs = ah._effective_windows_for_entry("stock_merger", raw)
+    acquirer_leg = next(leg for leg in legs if leg["matched_role"] == "acquirer")
+    siblings = [leg for leg in legs if leg is not acquirer_leg]
+    assert (
+        ah.classify_corporate_action_resolution(acquirer_leg, sibling_legs=siblings, reviewed_resolutions=())
+        == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+    )
+    default_fp = ah.resolution_policy_fingerprint()
+
+    original = ah_module.MERGER_ACQUIRER_RULE
+    try:
+        ah_module.MERGER_ACQUIRER_RULE = dataclasses.replace(original, terminal_conflict_role="no_such_role")
+        assert (
+            ah.classify_corporate_action_resolution(acquirer_leg, sibling_legs=siblings, reviewed_resolutions=())
+            == ah.CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
+        )
+        mutated_fp = ah.resolution_policy_fingerprint()
+    finally:
+        ah_module.MERGER_ACQUIRER_RULE = original
+    assert mutated_fp != default_fp
+
+
+def test_name_change_allowed_roles_mutation_changes_behavior_and_fingerprint():
+    """Required negative control 3: mutating NAME_CHANGE_RULE.allowed_roles
+    changes classifier behavior (the new_symbol leg stops auto-resolving
+    once 'new_symbol' is removed from the authoritative allowed roles) AND
+    the fingerprint."""
+    import dataclasses
+    import mqk_research.data.alpaca_historical as ah_module
+
+    leg = _name_change_leg(old_symbol="FB", new_symbol="META", old_cusip="30303M102", new_cusip="30303M102")
+    assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
+    default_fp = ah.resolution_policy_fingerprint()
+
+    original = ah_module.NAME_CHANGE_RULE
+    try:
+        ah_module.NAME_CHANGE_RULE = dataclasses.replace(original, allowed_roles=frozenset({"old_symbol"}))
+        assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+        mutated_fp = ah.resolution_policy_fingerprint()
+    finally:
+        ah_module.NAME_CHANGE_RULE = original
+    assert mutated_fp != default_fp
+
+
+def test_name_change_cusip_equality_requirement_mutation_changes_behavior_and_fingerprint():
+    """Required negative control 4: mutating NAME_CHANGE_RULE.
+    require_cusip_equality changes classifier behavior (an unequal-CUSIP
+    name change that previously required review now auto-resolves) AND the
+    fingerprint."""
+    import dataclasses
+    import mqk_research.data.alpaca_historical as ah_module
+
+    leg = _name_change_leg(old_symbol="FB", new_symbol="META", old_cusip="30303M102", new_cusip="99999X999")
+    assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+    default_fp = ah.resolution_policy_fingerprint()
+
+    original = ah_module.NAME_CHANGE_RULE
+    try:
+        ah_module.NAME_CHANGE_RULE = dataclasses.replace(original, require_cusip_equality=False)
+        assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
+        mutated_fp = ah.resolution_policy_fingerprint()
+    finally:
+        ah_module.NAME_CHANGE_RULE = original
+    assert mutated_fp != default_fp
+
+
+def test_event_grouping_identity_mutation_changes_grouping_and_fingerprint():
+    """Required negative control 5: mutating MERGER_ACQUIRER_RULE.
+    same_event_grouping_identity changes which legs find_requires_review_
+    events (the real grouping consumer, via _event_group_key) treats as
+    siblings of the SAME event AND changes the fingerprint."""
+    import dataclasses
+    import mqk_research.data.alpaca_historical as ah_module
+
+    leg_evt_a = {"provider_event_id": "evt-A", "action_type": "stock_merger"}
+    leg_evt_b = {"provider_event_id": "evt-B", "action_type": "stock_merger"}
+    assert ah._event_group_key(leg_evt_a) != ah._event_group_key(leg_evt_b)
+
+    entries = list(
+        ah._effective_windows_for_entry(
+            "stock_merger",
+            {
+                "id": "evt-A", "acquirer_symbol": "AAA", "acquirer_cusip": "c1",
+                "acquiree_symbol": "SML1", "acquiree_cusip": "c2", "process_date": "2021-01-15",
+            },
+        )
+    ) + list(
+        ah._effective_windows_for_entry(
+            "stock_merger",
+            {
+                "id": "evt-B", "acquirer_symbol": "SML2", "acquirer_cusip": "c3",
+                "acquiree_symbol": "AAA", "acquiree_cusip": "c4", "process_date": "2021-01-15",
+            },
+        )
+    )
+    window_start = pd.Timestamp("2021-01-01T00:00:00Z")
+    window_end = pd.Timestamp("2021-02-01T00:00:00Z")
+    universe = ["AAA", "SML1", "SML2"]
+
+    default_hits = ah.find_requires_review_events(
+        entries, symbol_universe=universe, start_utc=window_start, end_utc=window_end
+    )
+    # Default grouping (provider_event_id + action_type): evt-A's AAA-
+    # acquirer leg is in a DIFFERENT group from evt-B's AAA-acquiree leg --
+    # no conflict, AAA-acquirer resolves cleanly, never appears in hits.
+    assert not any(h["matched_symbol"] == "AAA" and h["matched_role"] == "acquirer" for h in default_hits)
+    default_fp = ah.resolution_policy_fingerprint()
+
+    original = ah_module.MERGER_ACQUIRER_RULE
+    try:
+        ah_module.MERGER_ACQUIRER_RULE = dataclasses.replace(original, same_event_grouping_identity=("action_type",))
+        mutated_hits = ah.find_requires_review_events(
+            entries, symbol_universe=universe, start_utc=window_start, end_utc=window_end
+        )
+        # Mutated grouping (action_type only): both events collapse into ONE
+        # group -- evt-A's AAA-acquirer now sees evt-B's AAA-acquiree as a
+        # sibling -> terminal conflict fires -> requires review.
+        assert any(h["matched_symbol"] == "AAA" and h["matched_role"] == "acquirer" for h in mutated_hits)
+        mutated_fp = ah.resolution_policy_fingerprint()
+    finally:
+        ah_module.MERGER_ACQUIRER_RULE = original
     assert mutated_fp != default_fp
 
 

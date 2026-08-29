@@ -161,8 +161,15 @@ _V2_PLUS_EXTRACTOR_IDS: FrozenSet[str] = frozenset(
 # it would pass every check that existed before this repair. Recomputing a
 # hash over caller-controlled input proves internal consistency, never
 # authority -- see _require_trusted_ca_resolution_policy.
+#
+# BKT-RESEARCH-CA-POLICY-SINGLE-SOURCE-OF-TRUTH-01: this literal is
+# RECOMPUTED (never hand-chosen) from alpaca_historical's canonical policy
+# spec whenever that spec's shape or values change -- this value reflects
+# resolution_policy_fingerprint() after single-sourcing the merger-acquirer/
+# name-change rule values (policy_spec_version bumped v2 -> v3; see
+# alpaca_historical.CA_RESOLUTION_POLICY_VERSION).
 TRUSTED_V2_CA_RESOLUTION_POLICY_ID = (
-    "3d2b506909440441495134e64977a0688e66c72ebd2813f7a0956ab5e993f038"
+    "cbe0710e999ea377bf545e018c27551be5acd1b9e4b956062123b18f6eaa6ef8"
 )
 
 # BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 (Defect 3): a caller-typed
