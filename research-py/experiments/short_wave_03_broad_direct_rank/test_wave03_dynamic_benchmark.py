@@ -3,8 +3,21 @@
 synthetic fixture CSVs/DataFrames -- no Alpaca access, no research-py/src
 modification.
 
+R2 (WAVE03-DYNAMIC-BENCHMARK-FUTURE-EXECUTION-CHRONOLOGY-REPAIR-02): the
+benchmark's causal return attribution is DECISION -> PENDING -> EXECUTED,
+advanced one reference date at a time within each fold. A decision recorded
+at reference date D is EXECUTED only on D's immediate successor, and first
+EARNS a return on the interval ending at D's successor's successor. So
+within any fold: the first (reset) date's own computed return is
+irrelevant (forced 0.0 by the pre-existing convention); the SECOND date
+always produces no return observation (nothing has executed yet, no
+matter what was decided); only the THIRD date onward can ever carry a
+real observation, governed by the decision made two reference dates
+earlier (D_i is governed by RANKABLE_SET(D_{i-2})).
+
 Covers the mission's REQUIRED TESTS 1-10 (each test's docstring cites its
-number) plus the required mutation/negative proof.
+number), the REQUIRED RED CONTROL, the REQUIRED DROP CONTROL, and the
+PRODUCTION CONTRACT CROSS-CHECK.
 """
 from __future__ import annotations
 
@@ -65,6 +78,8 @@ FAR_FUTURE_HOLDOUT = "2099-01-01T00:00:00Z"
 
 # ---------------------------------------------------------------------------
 # REQUIRED TEST 1: dynamic membership A/B -> B/C changes correctly
+# (rankable_set_by_date is a pure membership read, unaffected by the R2
+# causal-return-timing repair -- unchanged from R1.)
 # ---------------------------------------------------------------------------
 
 
@@ -84,7 +99,9 @@ def test_dynamic_membership_changes_from_ab_to_bc(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# REQUIRED TEST 2: dropped symbol disappears immediately
+# REQUIRED TEST 2: dropped symbol disappears immediately from RANKABLE_SET
+# itself (a pure membership fact, distinct from when its EXIT executes --
+# see the REQUIRED DROP CONTROL below for the executed-holding timing).
 # ---------------------------------------------------------------------------
 
 
@@ -124,35 +141,52 @@ def test_later_symbol_never_appears_before_first_rankable_date(tmp_path: Path) -
 
 
 # ---------------------------------------------------------------------------
-# REQUIRED TEST 4: no stale carry forward
+# REQUIRED TEST 4: no stale carry-forward -- EXACTLY the decision two
+# reference dates prior governs a return, never an older decision reached
+# by skipping past an intervening empty one, and never a more recent
+# decision reached by executing one bar too early.
 # ---------------------------------------------------------------------------
 
 
-def test_no_stale_carry_forward_only_immediately_prior_date_governs_return(tmp_path: Path) -> None:
-    """R1 (WAVE03-DYNAMIC-BENCHMARK-CAUSALITY-REPAIR-01): under causal return
-    attribution, the return ending at reference date T is governed by
-    EXACTLY the immediately-preceding reference date's RANKABLE_SET, never
-    an earlier date reached through it. A date with an empty rankable set
-    must not let a still-earlier, non-empty date's membership "reach
-    through" it to govern a later date's return -- that would be exactly
-    the stale multi-step carry-forward defect PREDECLARED_WAVE.json's
+def test_no_stale_carry_forward_exactly_two_lag_prior_decision_governs_return(tmp_path: Path) -> None:
+    """Fold: D0 (reset, empty decision), D1 (decides {A}), D2 (empty
+    decision), D3. Under the R2 state machine: D3's EXECUTED membership is
+    D1's decision ({A}) -- two reference dates prior -- never D2's (empty,
+    which would wrongly suppress D3 if a one-lag-too-early bug reached for
+    the IMMEDIATELY prior decision instead) and never D0's alone (D2's
+    return, not D3's, is what D0's decision governs). D2's own return must
+    be MISSING (governed by D0's empty decision), proving the implementation
+    does not skip past that emptiness to reach D1's non-empty {A} instead --
+    exactly the stale/short-circuited-lag defect PREDECLARED_WAVE.json's
     dynamic_cross_section policy forbids."""
-    oos_csv = _write_oos_csv(tmp_path, [("2020-01-02", "A", 0.6, 1)])  # only 01-02 has any OOS row
-    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
+    oos_csv = _write_oos_csv(tmp_path, [("2020-01-03", "A", 0.6, 1)])  # only D1 has any OOS row
+    econ_csv = _write_economic_returns_csv(
+        tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)]
+    )
     bars = _bars_df(
-        [("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 300.0), ("A", "2020-01-06", 900.0)]
+        [
+            ("A", "2020-01-01", 100.0),
+            ("A", "2020-01-02", 100.0),
+            ("A", "2020-01-03", 100.0),
+            ("A", "2020-01-06", 100.0),
+            ("A", "2020-01-07", 110.0),  # only the D2->D3 leg moves
+        ]
     )
     result = run_wave.build_dynamic_rankable_benchmark(
-        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
+        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"], FAR_FUTURE_HOLDOUT
     )
-    # 2020-01-02 is the fold-reset date -> forced 0.0 regardless of membership.
-    assert result["rankable_cross_section_size_by_date"]["2020-01-02"] == 1
-    # 2020-01-03: prev=01-02, RANKABLE_SET(01-02)={A} (non-empty) -> real observation.
-    assert "2020-01-03" not in result["dates_with_no_return_observation"]
-    # 2020-01-06: prev=01-03, RANKABLE_SET(01-03)={} (no OOS rows there) -> missing,
-    # even though the EARLIER date 01-02 was non-empty -- proves no stale
-    # multi-step carry-forward reaching through the empty 01-03.
+    # D0 (2020-01-02): fold reset, forced 0.0.
+    # D1 (2020-01-03): always missing -- nothing has executed yet regardless
+    # of D0's (empty) decision.
+    assert "2020-01-03" in result["dates_with_no_return_observation"]
+    # D2 (2020-01-06): governed by D0's decision, which was empty -- missing.
+    # A stale-lag bug that instead reached for D1's non-empty {A} would make
+    # this a real observation.
     assert "2020-01-06" in result["dates_with_no_return_observation"]
+    # D3 (2020-01-07): governed by D1's decision ({A}), two reference dates
+    # prior -- real, and equal to exactly A's D2->D3 return.
+    assert "2020-01-07" not in result["dates_with_no_return_observation"]
+    assert result["cumulative_return_over_reference_dates"] == pytest.approx(110.0 / 100.0 - 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -208,32 +242,37 @@ def test_fails_closed_when_economic_authority_has_extra_date(tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# REQUIRED TEST 7: fold reset is actually observed
+# REQUIRED TEST 7: fold reset is actually observed, despite a large price
+# jump landing on the reset date itself. Uses 3 dates so a real (post-
+# bootstrap) observation exists to confirm the reset didn't just coincide
+# with an all-missing fold.
 # ---------------------------------------------------------------------------
 
 
 def test_fold_reset_date_forced_to_zero_despite_large_price_jump(tmp_path: Path) -> None:
     oos_csv = _write_oos_csv(
         tmp_path,
-        [
-            ("2020-01-02", "A", 0.6, 1), ("2020-01-02", "B", 0.4, 1),
-            ("2020-01-03", "A", 0.6, 1), ("2020-01-03", "B", 0.4, 1),
-        ],
+        [("2020-01-02", "A", 0.6, 1), ("2020-01-02", "B", 0.4, 1)],
     )
-    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1)])
+    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
     bars = _bars_df(
         [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 200.0), ("A", "2020-01-03", 202.0),
-            ("B", "2020-01-01", 100.0), ("B", "2020-01-02", 101.0), ("B", "2020-01-03", 102.0),
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 200.0), ("A", "2020-01-03", 201.0), ("A", "2020-01-06", 203.0),
+            ("B", "2020-01-01", 100.0), ("B", "2020-01-02", 101.0), ("B", "2020-01-03", 102.0), ("B", "2020-01-06", 103.0),
         ]
     )
     result = run_wave.build_dynamic_rankable_benchmark(
-        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03"], FAR_FUTURE_HOLDOUT
+        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
     )
-    expected_second_day = float(np.mean([(202.0 / 200.0) - 1.0, (102.0 / 101.0) - 1.0]))
-    expected_cumulative = (1.0 + 0.0) * (1.0 + expected_second_day) - 1.0
-    assert result["cumulative_return_over_reference_dates"] == pytest.approx(expected_cumulative)
+    # 2020-01-02's huge same-bar jump (100->200) is irrelevant -- fold reset
+    # forces it to 0.0 regardless of what the underlying return would be.
     assert result["fold_reset_dates_count"] == 1
+    # 2020-01-03 always misses (bootstrap -- nothing executed yet).
+    assert "2020-01-03" in result["dates_with_no_return_observation"]
+    # 2020-01-06 is governed by 2020-01-02's decision ({A, B}) -- real.
+    expected_0106 = float(np.mean([(203.0 / 201.0) - 1.0, (103.0 / 102.0) - 1.0]))
+    expected_cumulative = (1.0 + 0.0) * (1.0 + expected_0106) - 1.0
+    assert result["cumulative_return_over_reference_dates"] == pytest.approx(expected_cumulative)
 
 
 # ---------------------------------------------------------------------------
@@ -248,30 +287,37 @@ def test_row_order_permutation_does_not_change_result(tmp_path: Path) -> None:
     ]
     oos_forward = _write_oos_csv(tmp_path, rows, name="forward.csv")
     oos_reversed = _write_oos_csv(tmp_path, list(reversed(rows)), name="reversed.csv")
-    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1)])
+    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
     bars_forward = _bars_df(
         [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 101.0), ("A", "2020-01-03", 103.0),
-            ("B", "2020-01-01", 50.0), ("B", "2020-01-02", 49.0), ("B", "2020-01-03", 51.0),
-            ("C", "2020-01-01", 10.0), ("C", "2020-01-02", 10.5), ("C", "2020-01-03", 10.2),
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 101.0), ("A", "2020-01-03", 103.0), ("A", "2020-01-06", 107.0),
+            ("B", "2020-01-01", 50.0), ("B", "2020-01-02", 49.0), ("B", "2020-01-03", 51.0), ("B", "2020-01-06", 53.0),
+            ("C", "2020-01-01", 10.0), ("C", "2020-01-02", 10.5), ("C", "2020-01-03", 10.2), ("C", "2020-01-06", 10.8),
         ]
     )
     bars_shuffled = bars_forward.iloc[::-1].reset_index(drop=True)
 
     result_forward = run_wave.build_dynamic_rankable_benchmark(
-        bars_forward, oos_forward, econ_csv, ["2020-01-02", "2020-01-03"], FAR_FUTURE_HOLDOUT
+        bars_forward, oos_forward, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
     )
     result_reversed = run_wave.build_dynamic_rankable_benchmark(
-        bars_shuffled, oos_reversed, econ_csv, ["2020-01-02", "2020-01-03"], FAR_FUTURE_HOLDOUT
+        bars_shuffled, oos_reversed, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
     )
+    # 2020-01-06 is governed by 2020-01-02's decision {A, B} (C is excluded --
+    # C only first appears in RANKABLE_SET at 2020-01-03) -- a genuine,
+    # non-trivial real observation both permutations must agree on exactly.
     assert result_forward["cumulative_return_over_reference_dates"] == pytest.approx(
         result_reversed["cumulative_return_over_reference_dates"]
     )
     assert result_forward["rankable_cross_section_size_by_date"] == result_reversed["rankable_cross_section_size_by_date"]
+    assert result_forward["dates_with_no_return_observation"] == result_reversed["dates_with_no_return_observation"]
 
 
 # ---------------------------------------------------------------------------
-# REQUIRED TEST 9: zero/empty rankable set -- one explicit documented contract
+# REQUIRED TEST 9: zero/empty rankable set -- explicit documented contracts,
+# and REQUIRED CONTROL 10: rankable_cross_section_size_by_date stays tied to
+# the exact (unshifted) decision-date OOS membership, never to the shifted
+# EXECUTED holdings the causal return attribution actually uses.
 # ---------------------------------------------------------------------------
 
 
@@ -280,7 +326,9 @@ def test_empty_rankable_set_date_produces_no_return_observation_not_an_error(tmp
     a reference date with zero rankable symbols never raises and is never
     silently defaulted to a 0.0 return -- it is excluded from the return
     series and recorded in dates_with_no_return_observation, UNLESS it is
-    also a genuine fold-reset date (a distinct, unrelated 0.0 convention)."""
+    also a genuine fold-reset date (a distinct, unrelated 0.0 convention).
+    This test only inspects the reset date's own (unshifted) properties, so
+    it is unaffected by the R2 causal-timing repair."""
     oos_csv = _write_oos_csv(tmp_path, [("2020-01-03", "A", 0.6, 1)])
     econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1)])
     bars = _bars_df([("A", "2020-01-02", 100.0), ("A", "2020-01-03", 101.0)])
@@ -294,27 +342,56 @@ def test_empty_rankable_set_date_produces_no_return_observation_not_an_error(tmp
     assert result["dates_with_zero_rankable_symbols"] == ["2020-01-02"]
 
 
-def test_empty_rankable_set_on_non_reset_date_excludes_the_date_it_would_have_governed(tmp_path: Path) -> None:
-    """An empty RANKABLE_SET(T) itself still produces a zero cross-section
-    size AT T (signal-availability accounting, unshifted), but under causal
-    return attribution the return actually excluded is the FOLLOWING
-    reference date's (the one T would have governed as its T_prev), never
-    T's own same-day return."""
-    oos_csv = _write_oos_csv(
-        tmp_path,
-        [("2020-01-02", "A", 0.6, 1), ("2020-01-06", "A", 0.6, 1)],  # 01-03 has zero OOS rows
+def test_cross_section_size_reflects_unshifted_decision_not_shifted_execution(tmp_path: Path) -> None:
+    """REQUIRED CONTROL 10. Fold: D0 (reset, empty decision), D1 (decides
+    {A}), D2 (decides {C} -- non-empty), D3. D2's OWN rankable_cross_section
+    size must be 1 (RANKABLE_SET(D2)={C}, an unshifted signal-availability
+    fact), even though D2's causal EXECUTED return is MISSING (governed by
+    D0's decision, which was empty) -- proving the reported cross-section
+    size is never silently swapped for whatever the shifted execution
+    state happens to be that date."""
+    oos_csv = _write_oos_csv(tmp_path, [("2020-01-03", "A", 0.6, 1), ("2020-01-06", "C", 0.5, 1)])
+    econ_csv = _write_economic_returns_csv(
+        tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)]
     )
+    bars = _bars_df(
+        [
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0),
+            ("A", "2020-01-06", 100.0), ("A", "2020-01-07", 110.0),
+            ("C", "2020-01-01", 10.0), ("C", "2020-01-02", 10.0), ("C", "2020-01-03", 10.0),
+            ("C", "2020-01-06", 10.0), ("C", "2020-01-07", 10.0),
+        ]
+    )
+    result = run_wave.build_dynamic_rankable_benchmark(
+        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"], FAR_FUTURE_HOLDOUT
+    )
+    # RANKABLE_SET(2020-01-06) = {C} -- unshifted signal-availability fact.
+    assert result["rankable_cross_section_size_by_date"]["2020-01-06"] == 1
+    # But 2020-01-06's causal return is MISSING (governed by D0's empty
+    # decision) -- decoupled from the non-zero cross-section size above.
+    assert "2020-01-06" in result["dates_with_no_return_observation"]
+    # 2020-01-07 is governed by D1's decision ({A}) -- real.
+    assert "2020-01-07" not in result["dates_with_no_return_observation"]
+    assert result["cumulative_return_over_reference_dates"] == pytest.approx(110.0 / 100.0 - 1.0)
+
+
+# ---------------------------------------------------------------------------
+# MISSING BAR SAFETY: an executed, non-empty membership whose price bar is
+# simply absent on the reference date must produce a missing observation,
+# never a fabricated return.
+# ---------------------------------------------------------------------------
+
+
+def test_missing_bar_for_an_executed_symbol_produces_missing_not_fabricated_return(tmp_path: Path) -> None:
+    oos_csv = _write_oos_csv(tmp_path, [("2020-01-02", "A", 0.6, 1)])
     econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
-    bars = _bars_df([("A", "2020-01-02", 100.0), ("A", "2020-01-03", 101.0), ("A", "2020-01-06", 103.0)])
+    # A has no bar row at all on 2020-01-06, the date its D0 decision governs.
+    bars = _bars_df([("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0)])
     result = run_wave.build_dynamic_rankable_benchmark(
         bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
     )
-    assert result["rankable_cross_section_size_by_date"]["2020-01-03"] == 0  # RANKABLE_SET(01-03) itself is empty
-    # 01-03's return is governed by RANKABLE_SET(01-02)={A} (non-empty) -> real observation.
-    assert "2020-01-03" not in result["dates_with_no_return_observation"]
-    # 01-06's return would be governed by RANKABLE_SET(01-03)={} (empty) -> missing.
     assert "2020-01-06" in result["dates_with_no_return_observation"]
-    assert result["daily_return_observations_used"] == 2  # 01-02 (reset->0.0) and 01-03 only
+    assert result["cumulative_return_over_reference_dates"] == pytest.approx(0.0)  # only the forced reset date used
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +411,11 @@ def test_holdout_region_rows_never_influence_the_result(tmp_path: Path) -> None:
     """bars/oos_predictions_csv both legitimately span dates AFTER the
     holdout boundary (the full wave fetch/OOS stream is not pre-truncated) --
     proves the benchmark's OWN result is identical whether or not those
-    post-holdout rows are present, i.e. it structurally never reads them."""
-    reference_dates = ["2020-01-02", "2020-01-03"]
-    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1)])
+    post-holdout rows are present, i.e. it structurally never reads them.
+    Uses 3 reference dates so the compared result carries a genuine,
+    non-trivial real return rather than an all-missing/reset fold."""
+    reference_dates = ["2020-01-02", "2020-01-03", "2020-01-06"]
+    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
 
     oos_without_holdout_rows = _write_oos_csv(
         tmp_path,
@@ -352,11 +431,11 @@ def test_holdout_region_rows_never_influence_the_result(tmp_path: Path) -> None:
         name="with_holdout.csv",
     )
     bars_without_holdout_rows = _bars_df(
-        [("A", "2020-01-01", 100.0), ("A", "2020-01-02", 101.0), ("A", "2020-01-03", 102.0)]
+        [("A", "2020-01-01", 100.0), ("A", "2020-01-02", 101.0), ("A", "2020-01-03", 102.0), ("A", "2020-01-06", 104.0)]
     )
     bars_with_holdout_rows = _bars_df(
         [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 101.0), ("A", "2020-01-03", 102.0),
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 101.0), ("A", "2020-01-03", 102.0), ("A", "2020-01-06", 104.0),
             ("A", "2020-06-01", 9999.0), ("Z", "2020-06-01", 1.0),
         ]
     )
@@ -369,34 +448,38 @@ def test_holdout_region_rows_never_influence_the_result(tmp_path: Path) -> None:
         bars_with_holdout_rows, oos_with_holdout_rows, econ_csv, reference_dates, holdout_start
     )
     assert result_without == result_with
+    # 2020-01-06 (governed by 2020-01-02's decision, {A}) carries a genuine
+    # real observation in both -- not an all-missing/reset comparison.
+    assert "2020-01-06" not in result_without["dates_with_no_return_observation"]
 
 
 # ---------------------------------------------------------------------------
-# R1 (WAVE03-DYNAMIC-BENCHMARK-CAUSALITY-REPAIR-01) REQUIRED RED CONTROL:
-# a symbol whose first-ever rankable date T follows a huge T-1->T price
-# jump. The pre-repair SAME-BAR implementation incorrectly credits
-# RANKABLE_SET(T) with that jump (crediting a decision-date membership set
-# with a return interval that already ended before the decision was
-# available); the repaired CAUSAL implementation must not, because
-# RANKABLE_SET(T) can only ever govern a return interval starting AT T
-# (i.e. ending at some later reference date), never one ending at or
-# before T.
+# REQUIRED RED CONTROL: the mission's exact synthetic fold. A first becomes
+# rankable at T1, immediately followed by an enormous T1->T2 price jump. The
+# CURRENT (pre-R2, single-lag) implementation incorrectly captures that
+# jump; the repaired (R2) implementation must not, and must only pick A up
+# for the later, modest T2->T3 interval.
 # ---------------------------------------------------------------------------
 
 
-def _same_bar_BROKEN_build_dynamic_rankable_benchmark(
+def _pre_r2_single_lag_BROKEN_build_dynamic_rankable_benchmark(
     bars: pd.DataFrame, oos_predictions_csv: Path, economic_returns_csv: Path,
     reference_dates: list[str], holdout_start_utc: str,
 ) -> dict:
-    """Deliberately buggy reference implementation reproducing the PRE-REPAIR
-    same-bar defect: attributes the return ENDING at reference date T to
-    RANKABLE_SET(T) itself. Used ONLY by the mutation/negative proof below --
-    never call from production code."""
+    """Deliberately buggy reference implementation reproducing the CURRENT
+    1f92794 (pre-R2, R1-only single-lag) defect this mission repairs:
+    attributes the return ending at reference date T to RANKABLE_SET(T_prev)
+    (the IMMEDIATELY preceding reference date), one bar too early -- a
+    decision recorded at T_prev is treated as already executed by T,
+    instead of only executing at T and first earning a return at T's
+    successor. Used ONLY by the mutation/negative proof below -- never call
+    from production code."""
     holdout_ts = pd.Timestamp(holdout_start_utc)
     if holdout_ts.tzinfo is None:
         holdout_ts = holdout_ts.tz_localize("UTC")
     authority = run_wave.economic_fold_date_authority(economic_returns_csv)
     fold_start_dates = authority["reset_dates"]
+    fold_of_date = authority["fold_of_date"]
     reference_date_set = set(pd.Index(reference_dates).astype(str))
     rankable = run_wave.rankable_set_by_date(oos_predictions_csv)
     b = bars.copy()
@@ -406,8 +489,13 @@ def _same_bar_BROKEN_build_dynamic_rankable_benchmark(
     b["daily_ret"] = b.groupby("symbol")["close"].pct_change()
     sorted_dates = sorted(reference_date_set)
     per_date: dict[str, float] = {}
-    for d in sorted_dates:
-        syms = rankable.get(d, set())  # BUG: same-date membership, not T_prev
+    for i, d in enumerate(sorted_dates):
+        if d in fold_start_dates:
+            continue
+        prev_d = sorted_dates[i - 1]
+        if fold_of_date.get(prev_d) != fold_of_date.get(d):
+            continue
+        syms = rankable.get(prev_d, set())  # BUG: one bar too early
         if not syms:
             per_date[d] = float("nan")
             continue
@@ -421,192 +509,229 @@ def _same_bar_BROKEN_build_dynamic_rankable_benchmark(
     return {"cumulative_return_over_reference_dates": cumulative_return, "per_date": per_date_series.to_dict()}
 
 
-def test_mutation_proof_lookahead_jump_captured_by_broken_not_by_repaired(tmp_path: Path) -> None:
-    """REQUIRED RED CONTROL 1+2: symbol A first becomes rankable at
-    2020-01-03, right after a huge 01-02->01-03 jump (01-02 is a fold-reset
-    date so this jump cannot be attributed there either way -- the defect
-    must be proven at a NON-reset first-rankable date). The broken same-bar
-    implementation incorrectly captures the ~1000x jump; the repaired causal
-    implementation excludes A entirely from 01-03 (RANKABLE_SET(01-02) did
-    not include A) and only picks A back up for the LEGITIMATE 01-03->01-06
-    holding move once A is an established T_prev membership."""
+def test_required_red_control_mission_fixture_current_captures_jump_repaired_does_not(tmp_path: Path) -> None:
+    """REQUIRED RED CONTROL, exact mission fixture: T0 (reset), T1 (A first
+    rankable), T2 (huge T1->T2 jump), T3 (modest T2->T3 return)."""
     oos_csv = _write_oos_csv(
         tmp_path,
-        [
-            ("2020-01-02", "B", 0.4, 1),
-            ("2020-01-03", "A", 0.6, 1), ("2020-01-03", "B", 0.4, 1),  # A first rankable here
-            ("2020-01-06", "A", 0.6, 1), ("2020-01-06", "B", 0.4, 1),
-        ],
+        [("2020-01-03", "A", 0.6, 1), ("2020-01-06", "A", 0.6, 1)],  # A first rankable at T1=01-03
     )
-    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
+    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)])
     bars = _bars_df(
         [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100000.0),  # huge jump
-            ("A", "2020-01-06", 101000.0),
-            ("B", "2020-01-01", 50.0), ("B", "2020-01-02", 50.0), ("B", "2020-01-03", 50.5), ("B", "2020-01-06", 51.0),
+            ("A", "2020-01-03", 100.0),      # T1
+            ("A", "2020-01-06", 100000.0),   # T2 -- enormous T1->T2 jump
+            ("A", "2020-01-07", 101000.0),   # T3 -- modest T2->T3 return
         ]
     )
-    reference_dates = ["2020-01-02", "2020-01-03", "2020-01-06"]
+    reference_dates = ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
 
-    broken = _same_bar_BROKEN_build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+    broken = _pre_r2_single_lag_BROKEN_build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
     repaired = run_wave.build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
 
-    # Broken: RANKABLE_SET(01-03)={A,B} directly governs 01-03's own return
-    # -> captures the ~1000x A jump.
-    assert broken["per_date"]["2020-01-03"] == pytest.approx(np.mean([100000.0 / 100.0 - 1.0, 50.5 / 50.0 - 1.0]))
+    # CURRENT (pre-R2, single-lag): T2's return is governed by RANKABLE_SET
+    # (T1)={A} -- incorrectly captures the ~1000x T1->T2 jump.
+    assert broken["per_date"]["2020-01-06"] == pytest.approx(100000.0 / 100.0 - 1.0)
     assert broken["cumulative_return_over_reference_dates"] > 100.0
 
-    # Repaired: 01-03's return is governed by RANKABLE_SET(01-02)={B} only
-    # (A was not yet rankable at 01-02) -> the jump is structurally excluded.
-    assert repaired["rankable_cross_section_size_by_date"]["2020-01-02"] == 1  # {B} only
+    # REPAIRED (R2): T2 is governed by T0's decision (empty, A not yet
+    # rankable) -- structurally excluded, never attributed at all.
+    assert "2020-01-06" in repaired["dates_with_no_return_observation"]
+    # T3 is governed by T1's decision ({A}) -- A's first legitimate
+    # contribution, the modest T2->T3 move only.
+    assert "2020-01-07" not in repaired["dates_with_no_return_observation"]
+    expected_repaired_cumulative = 101000.0 / 100000.0 - 1.0
+    assert repaired["cumulative_return_over_reference_dates"] == pytest.approx(expected_repaired_cumulative)
     assert repaired["cumulative_return_over_reference_dates"] < 1.0  # never sees the ~1000x jump
 
-    # REQUIRED RED CONTROL 2: the T(01-03)->T+1(01-06) move IS captured for A
-    # once A is an established T_prev membership (RANKABLE_SET(01-03)={A,B}
-    # governs 01-06's return).
-    expected_0106 = float(np.mean([101000.0 / 100000.0 - 1.0, 51.0 / 50.5 - 1.0]))
-    assert expected_0106 == pytest.approx(0.01, abs=2e-4)  # both legs are genuine ~1% moves
-    # Reconstruct 01-06's per-date value the same way the function does, via
-    # the overall cumulative return identity: (1+r02)(1+r03)(1+r06)-1.
-    r02 = 0.0  # fold reset, forced
-    r03 = 50.5 / 50.0 - 1.0  # B only, from RANKABLE_SET(01-02)={B}
-    implied_r06 = (1.0 + repaired["cumulative_return_over_reference_dates"]) / ((1.0 + r02) * (1.0 + r03)) - 1.0
-    assert implied_r06 == pytest.approx(expected_0106)
-
 
 # ---------------------------------------------------------------------------
-# R1 REQUIRED ADDITIONAL COVERAGE: dropped symbol cannot earn T->T+1; prior
-# membership truthfully governs the interval ending at T; no membership
-# crosses a fold boundary; a later first-rankable date cannot earn
-# pre-entry/same-decision returns.
+# REQUIRED DROP CONTROL: a symbol already an EXECUTED holding before T,
+# dropped from RANKABLE_SET AT T, must still earn T->T+1 (its exit has not
+# executed yet) but must NOT earn T+1->T+2 (its exit executes at T+1).
 # ---------------------------------------------------------------------------
 
 
-def test_symbol_dropped_at_t_cannot_earn_t_to_t_plus_one(tmp_path: Path) -> None:
-    """A symbol rankable at T-1 but DROPPED at T (not in RANKABLE_SET(T))
-    must not earn the T->T+1 return, because T->T+1's return is governed by
-    RANKABLE_SET(T), which no longer includes it."""
+def test_required_drop_control_symbol_earns_one_more_interval_before_exit_executes(tmp_path: Path) -> None:
+    """Fold: D0 (reset), D1 (decides {A, B} -- this governs T's return),
+    D2=T-1 (decides {A, B} -- still holding, this governs T->T+1),
+    D3=T (drops A, decides {B} -- this governs T+1->T+2), D4=T+1, D5=T+2.
+    A is already executed BEFORE T (via D1's decision), gets dropped AT T,
+    and must earn exactly one more interval (T->T+1) before its exit
+    executes and stops earning (T+1->T+2)."""
     oos_csv = _write_oos_csv(
         tmp_path,
         [
-            ("2020-01-02", "A", 0.6, 1), ("2020-01-02", "B", 0.4, 1),
-            ("2020-01-03", "B", 0.4, 1),  # A dropped at 01-03
-        ],
-    )
-    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1)])
-    bars = _bars_df(
-        [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 999999.0),  # A would move huge
-            ("B", "2020-01-01", 50.0), ("B", "2020-01-02", 50.0), ("B", "2020-01-03", 50.5),
-        ]
-    )
-    result = run_wave.build_dynamic_rankable_benchmark(
-        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03"], FAR_FUTURE_HOLDOUT
-    )
-    # 01-03's return is governed by RANKABLE_SET(01-02)={A,B} -- but the huge
-    # A move only shows up if A is actually included; verify it IS included
-    # here (A was still rankable AT the governing date 01-02), then re-run
-    # with A dropped ALREADY at 01-02 (the governing date) to prove exclusion.
-    assert result["cumulative_return_over_reference_dates"] > 100.0  # A's move IS captured (rankable at 01-02)
-
-    oos_csv_dropped_earlier = _write_oos_csv(
-        tmp_path,
-        [("2020-01-02", "B", 0.4, 1), ("2020-01-03", "B", 0.4, 1)],  # A never rankable at all
-        name="dropped_earlier.csv",
-    )
-    result_dropped = run_wave.build_dynamic_rankable_benchmark(
-        bars, oos_csv_dropped_earlier, econ_csv, ["2020-01-02", "2020-01-03"], FAR_FUTURE_HOLDOUT
-    )
-    assert result_dropped["cumulative_return_over_reference_dates"] == pytest.approx(0.01)  # only B's ~1% move, reset then B
-
-
-def test_prior_membership_truthfully_governs_interval_ending_at_t(tmp_path: Path) -> None:
-    """The return ending at reference date T is governed by RANKABLE_SET
-    decided at the PRIOR reference date, not by whatever is (or isn't)
-    rankable AT T itself."""
-    oos_csv = _write_oos_csv(
-        tmp_path,
-        [("2020-01-02", "A", 0.6, 1), ("2020-01-03", "Z", 0.1, 1)],  # A gone, Z appears -- irrelevant to 01-03's return
-    )
-    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1)])
-    bars = _bars_df(
-        [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 110.0),
-            ("Z", "2020-01-01", 10.0), ("Z", "2020-01-02", 10.0), ("Z", "2020-01-03", 5.0),  # Z's -50% move must NOT count
-        ]
-    )
-    result = run_wave.build_dynamic_rankable_benchmark(
-        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03"], FAR_FUTURE_HOLDOUT
-    )
-    assert result["cumulative_return_over_reference_dates"] == pytest.approx(110.0 / 100.0 - 1.0)  # A only, not Z
-
-
-def test_no_membership_crosses_fold_boundaries(tmp_path: Path) -> None:
-    """A fold's first date must be forced to 0.0 (no valid in-fold T_prev)
-    even when the PRECEDING fold's last date had real membership -- proves
-    the causal shift never bridges a fold boundary."""
-    oos_csv = _write_oos_csv(
-        tmp_path,
-        [
-            ("2020-01-02", "A", 0.6, 1), ("2020-01-03", "A", 0.6, 1),  # fold 1
-            ("2020-04-01", "A", 0.6, 2), ("2020-04-02", "A", 0.6, 2),  # fold 2
+            ("2020-01-03", "A", 0.6, 1), ("2020-01-03", "B", 0.4, 1),  # D1
+            ("2020-01-06", "A", 0.6, 1), ("2020-01-06", "B", 0.4, 1),  # D2 = T-1
+            ("2020-01-07", "B", 0.4, 1),                                # D3 = T -- A dropped
         ],
     )
     econ_csv = _write_economic_returns_csv(
-        tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-04-01", 2), ("2020-04-02", 2)]
+        tmp_path,
+        [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1), ("2020-01-08", 1), ("2020-01-09", 1)],
     )
     bars = _bars_df(
         [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 101.0),
-            ("A", "2020-03-31", 500.0), ("A", "2020-04-01", 999999.0),  # huge jump landing on fold 2's reset date
-            ("A", "2020-04-02", 1000000.0),
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0),
+            ("A", "2020-01-06", 100.0), ("A", "2020-01-07", 100.0),
+            ("A", "2020-01-08", 200.0),      # T->T+1: A must earn this ~100% move
+            ("A", "2020-01-09", 100000.0),   # T+1->T+2: A must NOT earn this huge move
+            ("B", "2020-01-01", 50.0), ("B", "2020-01-02", 50.0), ("B", "2020-01-03", 50.0),
+            ("B", "2020-01-06", 50.0), ("B", "2020-01-07", 50.0), ("B", "2020-01-08", 51.0), ("B", "2020-01-09", 52.0),
         ]
     )
     result = run_wave.build_dynamic_rankable_benchmark(
-        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-04-01", "2020-04-02"], FAR_FUTURE_HOLDOUT
+        bars, oos_csv, econ_csv,
+        ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07", "2020-01-08", "2020-01-09"],
+        FAR_FUTURE_HOLDOUT,
     )
-    assert result["fold_reset_dates_count"] == 2
-    # fold 2's first date (04-01) is forced to 0.0 despite fold 1 ending with
-    # A rankable on 01-03 -- membership never crosses the fold boundary.
-    expected_0402 = 1000000.0 / 999999.0 - 1.0  # governed by RANKABLE_SET(04-01)={A}, within fold 2 only
-    expected_0103 = 101.0 / 100.0 - 1.0  # governed by RANKABLE_SET(01-02)={A}, within fold 1 only
-    expected_cumulative = (1.0 + 0.0) * (1.0 + expected_0103) * (1.0 + 0.0) * (1.0 + expected_0402) - 1.0
+    r_t_to_t_plus_1 = float(np.mean([200.0 / 100.0 - 1.0, 51.0 / 50.0 - 1.0]))  # A STILL earns this (executed via D2)
+    r_t_plus_1_to_t_plus_2 = 52.0 / 51.0 - 1.0  # A does NOT earn this -- B only (executed via D3, which dropped A)
+    assert r_t_plus_1_to_t_plus_2 < 1.0  # sanity: nowhere near A's huge available move
+    expected_cumulative = (1.0 + 0.0) * (1.0 + r_t_to_t_plus_1) * (1.0 + r_t_plus_1_to_t_plus_2) - 1.0
     assert result["cumulative_return_over_reference_dates"] == pytest.approx(expected_cumulative)
+    # D1 (2020-01-03) and D2 (2020-01-06) both miss for unrelated structural
+    # reasons (D1 = bootstrap; D2 governed by D0's empty decision).
+    assert "2020-01-03" in result["dates_with_no_return_observation"]
+    assert "2020-01-06" in result["dates_with_no_return_observation"]
+    assert result["daily_return_observations_used"] == 4  # D0(reset,0.0), D3, D4, D5
 
 
-def test_later_first_rankable_date_cannot_earn_pre_entry_or_same_decision_returns(tmp_path: Path) -> None:
-    """A symbol whose first-ever rankable date is T cannot earn the return
-    ending at T (that would require having been decided at T-1, before it
-    was ever rankable) nor any return before T -- it only starts
-    contributing to the return ending at the NEXT reference date after T."""
+# ---------------------------------------------------------------------------
+# ADDITIONAL COVERAGE: prior membership truthfully governs the interval
+# ending at a reference date, distinguishing it from BOTH a one-lag-too-
+# recent decision AND a same-date decision.
+# ---------------------------------------------------------------------------
+
+
+def test_prior_membership_truthfully_governs_interval_ending_at_t(tmp_path: Path) -> None:
+    """D0 decides {A} (must govern D2's return). D1 decides {Y} (a one-lag-
+    too-recent distractor -- would wrongly govern D2 under a pre-R1 same-
+    bar-adjacent-off-by-one bug). D2 itself decides {Z} (a same-date
+    distractor -- would wrongly govern under the pre-R1 same-bar bug). Y and
+    Z both have wild, easily-detectable price moves on the D1->D2 interval;
+    A has a modest, clean one. Only A's modest move must show up."""
     oos_csv = _write_oos_csv(
         tmp_path,
-        [
-            ("2020-01-02", "B", 0.4, 1),
-            ("2020-01-03", "A", 0.6, 1), ("2020-01-03", "B", 0.4, 1),  # A's first-ever rankable date
-            ("2020-01-06", "A", 0.6, 1), ("2020-01-06", "B", 0.4, 1),
-        ],
+        [("2020-01-02", "A", 0.6, 1), ("2020-01-03", "Y", 0.1, 1), ("2020-01-06", "Z", 0.1, 1)],
     )
     econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
     bars = _bars_df(
         [
-            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 900.0), ("A", "2020-01-06", 909.0),
-            ("B", "2020-01-01", 50.0), ("B", "2020-01-02", 50.0), ("B", "2020-01-03", 50.5), ("B", "2020-01-06", 51.0),
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0), ("A", "2020-01-06", 110.0),
+            ("Y", "2020-01-01", 10.0), ("Y", "2020-01-02", 10.0), ("Y", "2020-01-03", 10.0), ("Y", "2020-01-06", 1000.0),
+            ("Z", "2020-01-01", 5.0), ("Z", "2020-01-02", 5.0), ("Z", "2020-01-03", 5.0), ("Z", "2020-01-06", 0.05),
         ]
     )
     result = run_wave.build_dynamic_rankable_benchmark(
         bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
     )
-    r03 = 50.5 / 50.0 - 1.0  # B only -- A's 01-02->01-03 jump (100->900) never earned
-    r06 = float(np.mean([909.0 / 900.0 - 1.0, 51.0 / 50.5 - 1.0]))  # A now legitimately included
-    expected_cumulative = (1.0 + 0.0) * (1.0 + r03) * (1.0 + r06) - 1.0
+    # If Y (100x) or Z (-99%) incorrectly governed, the result would be
+    # wildly different from A's clean 10% move.
+    assert result["cumulative_return_over_reference_dates"] == pytest.approx(110.0 / 100.0 - 1.0)
+
+
+# ---------------------------------------------------------------------------
+# FOLD BOUNDARY: no membership, pending target, or executed target may
+# cross a fold boundary -- each fold bootstraps EXECUTED=empty/PENDING=None
+# independently, never seeded from the previous fold's ending state.
+# ---------------------------------------------------------------------------
+
+
+def test_no_membership_crosses_fold_boundaries(tmp_path: Path) -> None:
+    """Fold 1 (3 dates) decides {A} throughout and legitimately earns a real
+    10% return on its own 3rd date. Fold 2 (3 dates) decides {B} at its own
+    reset date and must earn a huge, unambiguous ~20000x jump on ITS OWN
+    3rd date -- governed by fold 2's own reset-date decision, never by
+    fold 1's ending membership. A is deliberately ALSO given bars on fold
+    2's dates with a tiny, easily-distinguished return: if fold 2 leaked
+    fold 1's stale {A} decision, the result would show A's tiny move
+    instead of B's enormous one."""
+    oos_csv = _write_oos_csv(
+        tmp_path,
+        [("2020-01-02", "A", 0.6, 1), ("2020-04-01", "B", 0.6, 2)],
+    )
+    econ_csv = _write_economic_returns_csv(
+        tmp_path,
+        [
+            ("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1),
+            ("2020-04-01", 2), ("2020-04-02", 2), ("2020-04-03", 2),
+        ],
+    )
+    bars = _bars_df(
+        [
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0), ("A", "2020-01-06", 110.0),
+            ("A", "2020-04-02", 100.0), ("A", "2020-04-03", 101.0),  # tiny 1% move if (wrongly) leaked into fold 2
+            ("B", "2020-03-31", 50.0), ("B", "2020-04-01", 50.0), ("B", "2020-04-02", 50.0), ("B", "2020-04-03", 1000000.0),
+        ]
+    )
+    result = run_wave.build_dynamic_rankable_benchmark(
+        bars, oos_csv, econ_csv,
+        ["2020-01-02", "2020-01-03", "2020-01-06", "2020-04-01", "2020-04-02", "2020-04-03"],
+        FAR_FUTURE_HOLDOUT,
+    )
+    assert result["fold_reset_dates_count"] == 2
+    # Both folds' 2nd dates always miss (bootstrap, independently per fold).
+    assert "2020-01-03" in result["dates_with_no_return_observation"]
+    assert "2020-04-02" in result["dates_with_no_return_observation"]
+    r_fold1 = 110.0 / 100.0 - 1.0
+    r_fold2 = 1000000.0 / 50.0 - 1.0
+    expected_cumulative = (1.0 + 0.0) * (1.0 + r_fold1) * (1.0 + 0.0) * (1.0 + r_fold2) - 1.0
     assert result["cumulative_return_over_reference_dates"] == pytest.approx(expected_cumulative)
+    assert result["cumulative_return_over_reference_dates"] > 1000.0  # unambiguously B's jump, not A's 1%
+
+
+# ---------------------------------------------------------------------------
+# PRODUCTION CONTRACT CROSS-CHECK: reversing the two operations (executing
+# the pending decision BEFORE attributing the incoming return, instead of
+# after) collapses back into the pre-R2 single-lag defect -- proving the
+# "incoming return before pending execution" ordering is load-bearing, not
+# cosmetic. Mirrors execution_rules.md's orchestrator phase-ordering
+# invariant (outbox claim before broker submit; inbound apply before
+# portfolio update) applied to this benchmark's own return/execution pair.
+# ---------------------------------------------------------------------------
+
+
+def test_production_contract_return_before_execution_ordering_is_load_bearing(tmp_path: Path) -> None:
+    """Executing the pending target before attributing the incoming return
+    is mathematically identical to the pre-R2 single-lag defect (a decision
+    recorded on the immediately preceding date would be treated as already
+    executed). Reusing the REQUIRED RED CONTROL fixture: the reversed-order
+    (broken) implementation and the correctly-ordered (repaired) production
+    function must disagree at T2, proving the ordering is load-bearing."""
+    oos_csv = _write_oos_csv(
+        tmp_path,
+        [("2020-01-03", "A", 0.6, 1), ("2020-01-06", "A", 0.6, 1)],
+    )
+    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)])
+    bars = _bars_df(
+        [
+            ("A", "2020-01-03", 100.0),
+            ("A", "2020-01-06", 100000.0),
+            ("A", "2020-01-07", 101000.0),
+        ]
+    )
+    reference_dates = ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
+
+    reversed_order_broken = _pre_r2_single_lag_BROKEN_build_dynamic_rankable_benchmark(
+        bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT
+    )
+    repaired = run_wave.build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+
+    assert reversed_order_broken["cumulative_return_over_reference_dates"] != pytest.approx(
+        repaired["cumulative_return_over_reference_dates"]
+    )
+    with pytest.raises(AssertionError):
+        assert reversed_order_broken["cumulative_return_over_reference_dates"] == pytest.approx(
+            repaired["cumulative_return_over_reference_dates"]
+        )
 
 
 # ---------------------------------------------------------------------------
 # MUTATION / NEGATIVE PROOF: a deliberately stale-membership implementation
 # fails the "dropped symbol disappears immediately" invariant (REQUIRED
-# TEST 2, above).
+# TEST 2, above). Tests rankable_set_by_date only, unaffected by R2.
 # ---------------------------------------------------------------------------
 
 

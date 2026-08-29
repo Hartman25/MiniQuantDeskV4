@@ -494,30 +494,52 @@ def build_dynamic_rankable_benchmark(
     date is forced to 0.0, and that is a distinct, unrelated convention
     checked by symbol/date identity, never by emptiness.
 
-    R1 (WAVE03-DYNAMIC-BENCHMARK-CAUSALITY-REPAIR-01) CAUSAL RETURN
-    ATTRIBUTION -- the economic execution contract is future-only (signal at
-    T -> first executable bar strictly after T -> no return ending at T may
-    be earned from a decision made at T). RANKABLE_SET(T) is a same-instant
-    SCORE/MEMBERSHIP fact (unchanged -- still read directly off decision
-    timestamp T, still `rankable_cross_section_size_by_date`'s basis for
-    signal-availability accounting elsewhere), but the RETURN this function
-    attributes to reference date T (the return ending AT T, i.e.
-    close[T]/close[T-1]-1) is governed by the RANKABLE_SET decided at the
-    immediately-PRIOR reference date within the SAME fold, never by
-    RANKABLE_SET(T) itself -- a decision made at T cannot retroactively earn
-    the interval that already ended at T. Concretely: for each non-fold-
-    reset reference date T, the benchmark holds exactly RANKABLE_SET(T_prev)
-    (T_prev = the immediately preceding reference date, which
-    economic_fold_date_authority's fold_of_date guarantees is within the
-    same fold for any non-reset T) and earns close[T]/close[T_prev]-1 for
-    those symbols. A fold's first (reset) date has no valid in-fold T_prev
-    to inherit membership from -- exactly the pre-existing fold-reset-forced-
-    0.0 convention, now also the correct causal boundary condition (no
-    membership may ever cross a fold boundary). This makes a same-bar
-    T-1->T jump for a symbol whose FIRST rankable date is T structurally
-    uncapturable (RANKABLE_SET(T) cannot govern any interval ending at or
-    before T), while a genuine T->T+1 holding move remains fully captured
-    once T becomes some later date's T_prev.
+    R2 (WAVE03-DYNAMIC-BENCHMARK-FUTURE-EXECUTION-CHRONOLOGY-REPAIR-02)
+    FUTURE-EXECUTION CHRONOLOGY -- supersedes R1's single-lag causal shift,
+    which still let a decision earn a return one bar too early. The
+    production execution contract (execution_rules.md orchestrator phase
+    ordering; CLAUDE.md canonical outbox -> broker submit -> broker truth ->
+    inbox -> portfolio flow) is: a decision/signal known at reference date D
+    can execute only at a strictly later bar; the return interval ENDING at
+    that later bar is earned by the position already executed BEFORE it;
+    only after that incoming return is realized does the pending decision
+    itself execute; the newly executed position can therefore first earn a
+    return on the interval AFTER its own execution bar. Modelled here per
+    fold as three explicit states advanced date-by-date, in this exact
+    order, for every reference date D (including the fold's first date):
+
+      A. RETURN FIRST: the return ending at D (close[D]/close[D_prev]-1) is
+         attributed to whatever membership is currently EXECUTED -- i.e.
+         the membership some EARLIER decision already had executed BEFORE
+         D. A decision recorded at D (or the immediately preceding date)
+         must never be allowed to govern this same return -- see the
+         PRODUCTION CONTRACT CROSS-CHECK test, which proves the result
+         changes if this step is reordered after execution.
+      B. EXECUTE PENDING: only now does the pending target membership
+         (the decision recorded on D's immediately preceding reference
+         date) become the new EXECUTED membership.
+      C. RECORD NEW DECISION: RANKABLE_SET(D), read fresh from D's own OOS
+         predictions, becomes the new PENDING target for some later date
+         to execute.
+
+    Net effect -- the return ending at the reference date two positions
+    after D (D's successor's successor) is the first interval RANKABLE_SET
+    (D) can ever earn; equivalently, the return ending at reference date
+    D_i (i>=2 within a fold) is governed by RANKABLE_SET(D_{i-2}), never by
+    D_{i-1}'s or D_i's own decision. EXECUTED starts EMPTY and PENDING
+    starts unset at each fold's first date (no fold may seed either from
+    the previous fold), so: the fold's first (reset) date's own computed
+    return is irrelevant (forced to 0.0 by the pre-existing convention,
+    below); the fold's SECOND date is always excluded from
+    dates_with_no_return_observation's complement -- i.e. it always
+    produces no return observation -- because nothing has executed yet
+    regardless of what was decided; only the THIRD date onward can ever
+    carry a real observation. This also means a symbol dropped from
+    RANKABLE_SET at some date D still earns the D->D_next interval (it was
+    already executed before D, from an earlier decision) but never the
+    interval after that (its exit itself executes one bar later, per the
+    EMPTY RANKABLE SET CONTRACT above whenever the governing decision was
+    itself empty).
 
     HOLDOUT SAFETY: every `reference_dates` entry must fall strictly before
     `holdout_start_utc` (fail closed otherwise, mirroring SHORT-WAVE-02); the
@@ -566,29 +588,44 @@ def build_dynamic_rankable_benchmark(
     # below (which uses T_prev's membership) -- see docstring.
     cross_section_size: dict[str, int] = {d: len(rankable.get(d, set())) for d in sorted_dates}
 
+    # Reference dates partition into contiguous per-fold blocks when sorted
+    # (fold_start_dates marks each block's first entry). Group into those
+    # blocks and run the DECISION/PENDING/EXECUTED state machine
+    # independently per fold -- EXECUTED and PENDING must never be seeded
+    # from a prior fold's state (FOLD BOUNDARY requirement).
+    fold_blocks: list[list[str]] = []
+    current_fold_id: Any = object()
+    for d in sorted_dates:
+        fid = fold_of_date.get(d)
+        if fid != current_fold_id:
+            fold_blocks.append([])
+            current_fold_id = fid
+        fold_blocks[-1].append(d)
+
     per_date: dict[str, float] = {}
-    for i, d in enumerate(sorted_dates):
-        if d in fold_start_dates:
-            # No valid in-fold T_prev exists for a fold's first date -- no
-            # membership may ever cross a fold boundary. Forced to 0.0 below,
-            # same mechanism/test as the pre-existing fold-reset convention.
-            continue
-        prev_d = sorted_dates[i - 1]
-        if fold_of_date.get(prev_d) != fold_of_date.get(d):
-            # Defensive fail-safe only: reference dates already partition
-            # into contiguous per-fold blocks when sorted (fold_start_dates
-            # marks each block's first entry), so this should be
-            # unreachable -- guards against ever bridging a fold boundary if
-            # that partitioning assumption is ever violated. Treated as a
-            # genuine missing observation (not raised), consistent with this
-            # function's general "sparse observation is not an error" policy.
-            continue
-        syms = rankable.get(prev_d, set())
-        if not syms:
-            per_date[d] = float("nan")
-            continue
-        day_rets = b.loc[(b["date"] == d) & (b["symbol"].isin(syms)), "daily_ret"].dropna()
-        per_date[d] = float(day_rets.mean()) if len(day_rets) else float("nan")
+    for block in fold_blocks:
+        executed: set[str] = set()
+        pending: Optional[set[str]] = None
+        for d in block:
+            # A. RETURN FIRST -- attribute D's incoming return to whatever
+            # is currently EXECUTED (set by an earlier date's step B, never
+            # by this date's own decision below). Empty EXECUTED covers both
+            # a fold still bootstrapping (nothing executed yet) and a
+            # genuinely empty governing decision -- both are legitimately
+            # missing observations, never a fabricated 0.0.
+            if not executed:
+                per_date[d] = float("nan")
+            else:
+                day_rets = b.loc[(b["date"] == d) & (b["symbol"].isin(executed)), "daily_ret"].dropna()
+                per_date[d] = float(day_rets.mean()) if len(day_rets) else float("nan")
+            # B. EXECUTE PENDING STATE -- only after D's incoming return is
+            # already attributed above does the pending target (decided on
+            # D's immediately preceding reference date) become EXECUTED.
+            if pending is not None:
+                executed = pending
+            # C. RECORD NEW DECISION -- read RANKABLE_SET(d) fresh; this
+            # becomes the PENDING target for some later date to execute.
+            pending = rankable.get(d, set())
 
     per_date_series = pd.Series(per_date).reindex(sorted_dates)
     for d in fold_start_dates & reference_date_set:
