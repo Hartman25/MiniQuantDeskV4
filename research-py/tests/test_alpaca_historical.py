@@ -715,18 +715,30 @@ def test_extraction_clean_on_verified_name_change_continuity():
     assert entries[0]["symbol"] == "META"
 
 
+def _dkng_reviewed_leg(**overrides: Any) -> Dict[str, Any]:
+    """The EXACT confirmed live Alpaca leg BKT-RESEARCH-CA-REVIEWED-
+    SUCCESSOR-RESOLUTION-01-REPAIR-01's registry record is bound to (see
+    ca_reviewed_resolutions.py module header)."""
+    leg = {
+        "symbol": "DKNG", "action_type": "stock_merger", "matched_role": "acquiree",
+        "matched_symbol": "DKNG", "matched_symbol_field": "acquiree_symbol",
+        "process_date": "2022-05-05",
+        "effective_start_ts": "2022-05-05", "effective_end_ts": "2022-05-05",
+        "provider_event_id": "e21ce7ea-649b-456a-a4f4-b025cbdc1fca",
+        "matched_cusip": "26142R104", "acquirer_cusip": "26142V105", "acquiree_cusip": "26142R104",
+    }
+    leg.update(overrides)
+    return leg
+
+
 def test_resolution_dkng_reviewed_event_resolves_via_default_registry():
-    """BKT-RESEARCH-CA-REVIEWED-SUCCESSOR-RESOLUTION-01: a reorganization
-    leg matching the canonical DKNG reviewed record exactly resolves via
-    the default registry -- no symbol-specific branching in Python, purely
-    a data-driven match."""
+    """BKT-RESEARCH-CA-REVIEWED-SUCCESSOR-RESOLUTION-01 (REPAIR-01): a
+    stock_merger acquiree leg matching the canonical DKNG reviewed record
+    exactly resolves via the default registry -- no symbol-specific
+    branching in Python, purely a data-driven match."""
     from mqk_research.data.ca_reviewed_resolutions import RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY
 
-    leg = {
-        "symbol": "DKNG", "action_type": "reorganization", "matched_role": "primary",
-        "matched_symbol": "DKNG", "process_date": "2022-05-05",
-        "effective_start_ts": "2022-05-05", "effective_end_ts": "2022-05-05",
-    }
+    leg = _dkng_reviewed_leg()
     assert ah.classify_corporate_action_resolution(leg) == RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY
 
 
@@ -734,11 +746,30 @@ def test_resolution_reviewed_registry_is_injectable_and_defaults_closed():
     """An empty reviewed_resolutions override (simulating a missing/absent
     reviewed-resolution artifact) must fall back to fail-closed -- required
     test 8, exercised through the actual resolution entry point."""
-    leg = {
-        "symbol": "DKNG", "action_type": "reorganization", "matched_role": "primary",
-        "matched_symbol": "DKNG", "process_date": "2022-05-05",
-    }
+    leg = _dkng_reviewed_leg()
     assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_dkng_different_provider_event_id_fails_closed():
+    """REPAIR-01 E2: a distinct provider event_id on an otherwise-identical
+    leg must not inherit the review."""
+    leg = _dkng_reviewed_leg(provider_event_id="00000000-0000-0000-0000-000000000000")
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_dkng_different_matched_symbol_field_fails_closed():
+    leg = _dkng_reviewed_leg(matched_symbol_field="symbol")
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_dkng_different_acquiree_cusip_fails_closed():
+    leg = _dkng_reviewed_leg(acquiree_cusip="99999999X", matched_cusip="99999999X")
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_dkng_different_acquirer_cusip_fails_closed():
+    leg = _dkng_reviewed_leg(acquirer_cusip="99999999X")
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
 
 
 def test_resolution_reviewed_match_does_not_bypass_covered_or_role_aware_categories():
@@ -752,17 +783,25 @@ def test_resolution_reviewed_match_does_not_bypass_covered_or_role_aware_categor
     assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
 
 
-def test_extraction_clean_on_dkng_reviewed_reorganization():
-    """Full-pipeline proof: the DKNG reorganization event no longer blocks
-    extraction via the default (built-in) reviewed-resolution registry."""
+_DKNG_LIVE_STOCK_MERGER_RAW: Dict[str, Any] = {
+    "id": "e21ce7ea-649b-456a-a4f4-b025cbdc1fca",
+    "acquiree_symbol": "DKNG",
+    "acquiree_cusip": "26142R104",
+    "acquirer_cusip": "26142V105",
+    "process_date": "2022-05-05",
+}
+
+
+def test_extraction_clean_on_dkng_reviewed_stock_merger():
+    """Full-pipeline proof: the EXACT confirmed live DKNG stock_merger
+    acquiree event no longer blocks extraction via the default (built-in)
+    reviewed-resolution registry."""
     http = FakeHttp()
     http.queue(BARS_URL, 200, _bars_page({"DKNG": [_bar("2022-05-06T00:00:00Z")]}))
     http.queue(
         CA_URL,
         200,
-        _ca_page(
-            {"reorganizations": [{"id": "r1", "symbol": "DKNG", "cusip": "some-new-cusip", "process_date": "2022-05-05"}]}
-        ),
+        _ca_page({"stock_mergers": [dict(_DKNG_LIVE_STOCK_MERGER_RAW)]}),
     )
     result = ah.extract_research_bars_with_provenance_diagnostic(
         symbols=["DKNG"],
@@ -778,19 +817,19 @@ def test_extraction_clean_on_dkng_reviewed_reorganization():
 
 
 def test_extraction_still_fails_closed_on_dkng_event_with_different_process_date():
-    """A reorganization reported for DKNG under a DIFFERENT process_date
-    than the exact reviewed record must still fail closed -- the reviewed
-    exception is bound to the exact event, not the symbol."""
+    """The SAME nominal stock_merger reported for DKNG under a DIFFERENT
+    process_date than the exact reviewed record must still fail closed --
+    the reviewed exception is bound to the exact event, not the symbol."""
     http = FakeHttp()
     http.queue(BARS_URL, 200, _bars_page({"DKNG": [_bar("2023-01-05T00:00:00Z")]}))
     http.queue(
         CA_URL,
         200,
         _ca_page(
-            {"reorganizations": [{"id": "r2", "symbol": "DKNG", "cusip": "another-cusip", "process_date": "2023-01-01"}]}
+            {"stock_mergers": [dict(_DKNG_LIVE_STOCK_MERGER_RAW, process_date="2023-01-01")]}
         ),
     )
-    with pytest.raises(ah.CorporateActionReviewRequired, match="reorganization"):
+    with pytest.raises(ah.CorporateActionReviewRequired, match="stock_merger"):
         ah.extract_research_bars_with_provenance_diagnostic(
             symbols=["DKNG"],
             start_utc=pd.Timestamp("2023-01-01T00:00:00Z"),
@@ -1678,8 +1717,9 @@ def test_resolution_policy_fingerprint_changes_with_reviewed_registry_content():
     from mqk_research.data.ca_reviewed_resolutions import RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY, build_reviewed_resolution
 
     edited_record = build_reviewed_resolution(
-        source_provider_id="alpaca", action_type="reorganization", requested_symbol="DKNG",
-        requested_role="primary", process_date="2022-05-06",  # one day off from the real record
+        source_provider_id="alpaca", provider_event_id="00000000-0000-0000-0000-000000000000",
+        action_type="stock_merger", requested_symbol="DKNG", requested_role="acquiree",
+        matched_symbol_field="acquiree_symbol", process_date="2022-05-06",  # one day off from the real record
         resolution=RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY,
         evidence_summary="edited fixture", primary_source_references=("ref",),
     )

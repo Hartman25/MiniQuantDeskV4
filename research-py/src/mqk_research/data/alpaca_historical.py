@@ -974,10 +974,12 @@ def classify_corporate_action_resolution(
          acquirer / name-change CUSIP continuity) apply where they hold;
       3. otherwise, ca_reviewed_resolutions.find_reviewed_resolution is
          consulted against `reviewed_resolutions` (default:
-         REVIEWED_CA_RESOLUTIONS) for an EXACT (provider=alpaca,
-         action_type, requested_symbol, requested_role, process_date)
-         match -- an individually-reviewed exception (see PATCH C module
-         header), never a type-wide bypass;
+         REVIEWED_CA_RESOLUTIONS) for an EXACT match on the provider's own
+         event id, action_type, requested_symbol, requested_role, the
+         matched symbol FIELD, process_date, and every observed CUSIP (see
+         ca_reviewed_resolutions.event_fingerprint) -- an individually-
+         reviewed exception (see PATCH C / REPAIR-01 module header), never a
+         type-wide bypass;
       4. anything still unresolved (including a blank/unmapped
          matched_role, an acquiree leg, an under-evidenced or mismatched
          name-change, or any other type) is
@@ -1010,10 +1012,15 @@ def classify_corporate_action_resolution(
 
     reviewed = find_reviewed_resolution(
         source_provider_id="alpaca",
+        provider_event_id=str(leg.get("provider_event_id")) if leg.get("provider_event_id") else "",
         action_type=str(action_type) if action_type else "",
         requested_symbol=str(matched_symbol) if matched_symbol else "",
         requested_role=str(role) if role else "",
+        matched_symbol_field=str(leg.get("matched_symbol_field")) if leg.get("matched_symbol_field") else "",
         process_date=str(leg.get("process_date")) if leg.get("process_date") else "",
+        matched_cusip=leg.get("matched_cusip"),
+        acquirer_cusip=leg.get("acquirer_cusip"),
+        acquiree_cusip=leg.get("acquiree_cusip"),
         registry=reviewed_resolutions,
     )
     if reviewed is not None:
