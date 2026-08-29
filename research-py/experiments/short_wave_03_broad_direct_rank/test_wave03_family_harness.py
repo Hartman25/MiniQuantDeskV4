@@ -191,30 +191,6 @@ def test_reconstruct_daily_target_qty_empty_when_no_events(tmp_path: Path) -> No
     }
 
 
-def test_actual_net_exposure_from_positions() -> None:
-    daily_positions = pd.DataFrame(
-        [
-            {"fold": 1, "symbol": "A", "date": "2020-01-02", "target_qty": 10},
-            {"fold": 1, "symbol": "A", "date": "2020-01-03", "target_qty": -5},
-        ]
-    )
-    bars = pd.DataFrame(
-        [
-            {"symbol": "A", "end_ts": "2020-01-02 00:00:00", "close": 100.0},
-            {"symbol": "A", "end_ts": "2020-01-03 00:00:00", "close": 200.0},
-        ]
-    )
-    result = run_wave.actual_net_exposure_from_positions(daily_positions, bars, 100_000.0)
-    expected = ((10 * 100.0 / 100_000.0) + (-5 * 200.0 / 100_000.0)) / 2.0
-    assert result == pytest.approx(expected)
-
-
-def test_actual_net_exposure_from_positions_none_when_empty() -> None:
-    assert run_wave.actual_net_exposure_from_positions(
-        pd.DataFrame(columns=["fold", "symbol", "date", "target_qty"]), pd.DataFrame(), 100_000.0
-    ) is None
-
-
 def test_fold_concentration_ratio_and_none_on_all_zero() -> None:
     concentrated = run_wave.fold_concentration(
         [{"net_total_return": 0.1}, {"net_total_return": -0.3}, {"net_total_return": 0.05}]

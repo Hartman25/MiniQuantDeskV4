@@ -203,6 +203,14 @@ RANK_SIDE_COUNT = 5
 MAX_GROSS_EXPOSURE = 1.0
 PLACEBO_SEED = 1234
 
+# R4 (WAVE03-RUN-RECORDING-TRUTH-REPAIR-01): the only holdout status any
+# Wave-03 trial's own registered economic artifact may ever report -- this
+# development-stage controller never consumes the final holdout (see module
+# docstring). run_one_trial fails closed if the real evaluator output
+# disagrees; compute_family_recording_fields derives the recorded
+# "holdout_status" field FROM that verified value, never a bare literal.
+RESERVED_NOT_EVALUATED_HOLDOUT_STATUS = "reserved_not_evaluated"
+
 COMMISSION_BPS_PER_SIDE = 10.0
 SLIPPAGE_BPS_PER_SIDE = 0.0
 EXECUTION_SLIPPAGE_BPS = 5
@@ -923,6 +931,14 @@ def run_one_trial(*, run_dir: Path, experiment_id: str, hypothesis_id: str, stra
         raise RuntimeError(
             f"Fail-closed: economic_walk_forward.json missing required 'aggregate' block: {economic_out_path}"
         )
+    holdout = economic_out.get("holdout")
+    if not isinstance(holdout, dict) or holdout.get("status") != RESERVED_NOT_EVALUATED_HOLDOUT_STATUS:
+        raise RuntimeError(
+            "Fail-closed (R4 WAVE03-RUN-RECORDING-TRUTH-REPAIR-01): expected the registered economic "
+            f"evaluator's own holdout.status == {RESERVED_NOT_EVALUATED_HOLDOUT_STATUS!r} for "
+            f"hypothesis_id={hypothesis_id!r}, got {holdout!r} ({economic_out_path}) -- refusing to "
+            "record a family result whose final holdout may already be consumed/evaluated"
+        )
     inputs = economic_out.get("inputs", {})
     oos_predictions_csv = inputs.get("oos_predictions_csv", {}).get("path")
     wf_eval_ref = inputs.get("walk_forward_eval", {}).get("path")
@@ -1091,34 +1107,87 @@ def executed_symbol_day_stats(daily_positions: pd.DataFrame) -> dict:
     }
 
 
-def actual_net_exposure_from_positions(daily_positions: pd.DataFrame, bars: pd.DataFrame, equity_usd: float) -> Optional[float]:
-    """Reconstructed EXECUTED net (signed) exposure, averaged over the days
-    with a resolvable price: weight = target_qty * close(symbol, date) /
-    equity_usd, summed across symbols for each date (mirrors the accepted
-    engine's own P7B-REPAIR-02 dollar-ledger weight formula), then averaged.
-    Distinct in methodology from actual_gross_exposure (a direct read of the
-    accepted engine's own persisted aggregate.average_gross_exposure) only
-    because no persisted artifact carries a SIGNED net-exposure series --
-    this reconstruction never disagrees with the engine's own gross-exposure
-    accounting for the long-only direction (net == gross there by
-    construction, since there are no short legs)."""
+class MissingCausalMarkError(RuntimeError):
+    """Fail-closed (R4 WAVE03-RUN-RECORDING-TRUTH-REPAIR-01): raised when a
+    nonzero held position has no causal mark (current-or-prior bar close)
+    available at all -- never silently dropped from exposure."""
+
+
+def price_held_positions_causally(daily_positions: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    """Attach a CAUSAL mark price to each (fold, symbol, date) held-position
+    row: today's close when the symbol has a bar that date, otherwise the
+    most recent PRIOR bar's close for that symbol (last known causal close
+    -- NEVER a future price), reconstructed independently per (fold, symbol)
+    -- daily_positions is already fold-scoped by reconstruct_daily_target_qty
+    (which never forward-fills a position across a fold boundary), so no
+    additional fold-scoping of the price lookback is needed here to satisfy
+    "do not carry POSITION state across fold boundaries"; using a real prior
+    close from before the fold started is legitimate historical pricing, not
+    carried position state. FAILS CLOSED (MissingCausalMarkError) if a
+    nonzero-qty row has no causal mark available at all -- never silently
+    dropped from exposure."""
     if daily_positions.empty:
-        return None
+        return daily_positions.assign(close=pd.Series(dtype=float))
+
     b = bars.copy()
     b["end_ts"] = pd.to_datetime(b["end_ts"], utc=True)
+    b = b.sort_values(["symbol", "end_ts"], kind="mergesort")
     b["date"] = b["end_ts"].dt.strftime("%Y-%m-%d")
-    price_lookup = b.drop_duplicates(subset=["symbol", "date"], keep="last").set_index(["symbol", "date"])["close"]
+    b = b.drop_duplicates(subset=["symbol", "date"], keep="last")
+    b["_date_ts"] = pd.to_datetime(b["date"])
 
-    merged = daily_positions.copy()
-    merged["close"] = [
-        price_lookup.get((sym, d), np.nan) for sym, d in zip(merged["symbol"], merged["date"])
-    ]
-    merged = merged.dropna(subset=["close"])
-    if merged.empty:
-        return None
-    merged["weight"] = merged["target_qty"].astype(float) * merged["close"].astype(float) / float(equity_usd)
-    per_date_net = merged.groupby("date")["weight"].sum()
-    return float(per_date_net.mean()) if len(per_date_net) else None
+    out_frames = []
+    for (_fold, sym), grp in daily_positions.groupby(["fold", "symbol"], sort=False):
+        grp = grp.sort_values("date", kind="mergesort").copy()
+        grp["_date_ts"] = pd.to_datetime(grp["date"])
+        sym_bars = b.loc[b["symbol"] == sym, ["_date_ts", "close"]].sort_values("_date_ts", kind="mergesort")
+        if sym_bars.empty:
+            # merge_asof rejects an empty right frame's default dtype against
+            # a non-empty left frame's datetime dtype -- and there is no
+            # causal mark to find here regardless, so skip straight to NaN.
+            grp["close"] = np.nan
+            out_frames.append(grp.drop(columns=["_date_ts"]))
+            continue
+        merged = pd.merge_asof(grp, sym_bars, on="_date_ts", direction="backward")
+        out_frames.append(merged.drop(columns=["_date_ts"]))
+    result = pd.concat(out_frames, ignore_index=True)
+
+    missing_mask = (result["target_qty"] != 0) & result["close"].isna()
+    if bool(missing_mask.any()):
+        bad = result.loc[missing_mask, ["fold", "symbol", "date", "target_qty"]].to_dict("records")
+        raise MissingCausalMarkError(
+            f"Fail-closed: no causal mark (current-or-prior bar) available for {len(bad)} nonzero "
+            f"held position row(s) -- refusing to silently drop them from exposure: {bad[:5]}"
+        )
+    return result
+
+
+def actual_gross_and_net_exposure_from_positions(
+    daily_positions: pd.DataFrame, bars: pd.DataFrame, equity_usd: float
+) -> tuple[Optional[float], Optional[float]]:
+    """Reconstructed EXECUTED discrete gross/net exposure -- the counterpart
+    to the accepted engine's own persisted aggregate.average_gross_exposure
+    (a CONTINUOUS desired-weight series), required because a continuous
+    nonzero desired weight can resolve to a discrete target_qty=0 after
+    fill-time admit/reject rounding/caps (see weight_to_share). For each
+    (fold, symbol, date) row: weight = target_qty * causal_mark(symbol,
+    date) / equity_usd (mirrors the accepted engine's own P7B-REPAIR-02
+    dollar-ledger weight formula, but priced via price_held_positions_
+    causally, which never future-fills and never silently drops a held
+    position for lacking today's bar). gross = mean over dates of
+    sum(abs(weight)); net = mean over dates of sum(weight). Flat
+    (target_qty=0) rows contribute 0 regardless of their mark price, so
+    they never need a resolvable price."""
+    if daily_positions.empty:
+        return None, None
+    priced = price_held_positions_causally(daily_positions, bars)
+    priced = priced.copy()
+    priced["weight"] = priced["target_qty"].astype(float) * priced["close"].fillna(0.0).astype(float) / float(equity_usd)
+    per_date_net = priced.groupby("date")["weight"].sum()
+    per_date_gross = priced.groupby("date")["weight"].apply(lambda w: w.abs().sum())
+    gross = float(per_date_gross.mean()) if len(per_date_gross) else None
+    net = float(per_date_net.mean()) if len(per_date_net) else None
+    return gross, net
 
 
 def fold_concentration(fold_summaries: list[dict]) -> Optional[float]:
@@ -1201,15 +1270,16 @@ def compute_family_recording_fields(
         )
         daily_positions = reconstruct_daily_target_qty(r["folds"], Path(r["economic_returns_csv"]))
         executed = executed_symbol_day_stats(daily_positions)
-        actual_net = actual_net_exposure_from_positions(daily_positions, bars, EQUITY_USD)
+        actual_gross, actual_net = actual_gross_and_net_exposure_from_positions(daily_positions, bars, EQUITY_USD)
         agg = r["aggregate"]
         per_direction[direction_key] = {
             **targets,
             **executed,
             "desired_gross_exposure": MAX_GROSS_EXPOSURE,
             "desired_net_exposure": MAX_GROSS_EXPOSURE if long_only else 0.0,
-            "actual_gross_exposure": agg.get("average_gross_exposure"),
+            "actual_gross_exposure": actual_gross,
             "actual_net_exposure": actual_net,
+            "diagnostic_continuous_average_gross_exposure": agg.get("average_gross_exposure"),
             "turnover": agg.get("total_turnover"),
             "cost_drag": agg.get("cost_drag"),
             "net_return": agg.get("net_total_return"),
@@ -1223,6 +1293,17 @@ def compute_family_recording_fields(
             },
         }
 
+    # R4 (WAVE03-RUN-RECORDING-TRUTH-REPAIR-01): DERIVE holdout_status from
+    # each trial's own already-verified "holdout" dict (run_one_trial already
+    # fails closed unless it equals RESERVED_NOT_EVALUATED_HOLDOUT_STATUS) --
+    # never a bare hardcoded literal here.
+    holdout_statuses = {r_lo["holdout"]["status"], r_ls["holdout"]["status"], r_pb["holdout"]["status"]}
+    if holdout_statuses != {RESERVED_NOT_EVALUATED_HOLDOUT_STATUS}:
+        raise RuntimeError(
+            f"Fail-closed: family {fam.key!r} long_only/long_short/placebo holdout status(es) are not "
+            f"uniformly {RESERVED_NOT_EVALUATED_HOLDOUT_STATUS!r}: {sorted(holdout_statuses)!r}"
+        )
+
     ever_never = symbols_ever_never_rankable(rankable_by_date, seed_symbols())
     return {
         "family": fam.key,
@@ -1235,7 +1316,7 @@ def compute_family_recording_fields(
         "long_short": per_direction["long_short"],
         "long_short_minus_long_only_paired_deltas": compute_paired_delta(r_lo, r_ls),
         "matched_placebo_comparison": compute_placebo_delta(r_ls, r_pb),
-        "holdout_status": "reserved_not_evaluated",
+        "holdout_status": next(iter(holdout_statuses)),
     }
 
 
@@ -1277,7 +1358,21 @@ def run_family(family_key: str) -> dict:
         strategy_id=fam.strategy_id, direction="long_short", bars_path=bars_path_pb, bars_provenance=manifest,
     )
 
-    rankable_by_date = rankable_set_by_date(Path(r_lo["oos_predictions_csv"]))
+    # R4 (WAVE03-RUN-RECORDING-TRUTH-REPAIR-01) additional cheap regression:
+    # long_only and long_short share byte-identical classification inputs
+    # (same features.csv/targets.csv) and the same model -- their OOS
+    # prediction membership must therefore be identical, differing only in
+    # downstream economic policy. Fail closed if they ever unexpectedly
+    # diverge rather than silently trusting only r_lo's file.
+    rankable_by_date_lo = rankable_set_by_date(Path(r_lo["oos_predictions_csv"]))
+    rankable_by_date_ls = rankable_set_by_date(Path(r_ls["oos_predictions_csv"]))
+    if rankable_by_date_lo != rankable_by_date_ls:
+        raise RuntimeError(
+            f"Fail-closed: family {family_key!r} long_only and long_short OOS prediction membership "
+            "differs despite identical classification inputs/model -- refusing to trust either as "
+            "this family's RANKABLE_SET(T) authority"
+        )
+    rankable_by_date = rankable_by_date_lo
 
     reference_dates_lo = sorted(pd.read_csv(r_lo["economic_daily_returns_csv"])["date"].astype(str).unique())
     benchmark_lo = build_dynamic_rankable_benchmark(
