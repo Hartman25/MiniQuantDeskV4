@@ -172,8 +172,13 @@ def test_run_family_judge_calls_build_multiple_testing_judge_with_real_experimen
         return {"judge_status": "not_evaluable", "registry_population": {}, "included_trial_ids": [], "excluded_trial_ids": []}
 
     fake_run_root = tmp_path / "runs" / "run_01"
+    db_path = fake_run_root / "registry" / "research.sqlite3"
+    store = ResearchResultStore(db_path)
+    _register_all_six_real_candidates(store, tmp_path)
+    _register_all_three_placebos(store, tmp_path)
+
     monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
-    monkeypatch.setattr(run_wave, "REGISTRY_DB", fake_run_root / "registry" / "research.sqlite3")
+    monkeypatch.setattr(run_wave, "REGISTRY_DB", db_path)
     monkeypatch.setattr(run_wave, "build_multiple_testing_judge", fake_build_judge)
 
     judge = run_wave.run_family_judge()
@@ -181,7 +186,7 @@ def test_run_family_judge_calls_build_multiple_testing_judge_with_real_experimen
     assert captured["experiment_id"] == run_wave.REAL_EXPERIMENT_ID
     assert captured["experiment_id"] != run_wave.PLACEBO_EXPERIMENT_ID
     assert captured["hypothesis_id"] is None
-    assert captured["registry_db"] == fake_run_root / "registry" / "research.sqlite3"
+    assert captured["registry_db"] == db_path
     assert (fake_run_root / "judge_artifact.json").exists()
     assert judge["judge_status"] == "not_evaluable"
 
@@ -257,21 +262,27 @@ def test_run_family_judge_never_includes_placebo_population(monkeypatch, tmp_pat
 
 
 def test_retry_does_not_inflate_registered_trial_count(monkeypatch, tmp_path: Path) -> None:
+    """R3: retries/attempts on the SAME trial (same trial_id, new attempt)
+    must remain allowed and must not count as a second candidate -- proven
+    here against the R3-repaired run_family_judge(), which now requires the
+    full frozen 6-candidate population to be present before it will even
+    call build_multiple_testing_judge."""
     db_path = tmp_path / "research.sqlite3"
     store = ResearchResultStore(db_path)
-    trial_id, _ = _register_trial_with_result(
-        store, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=REAL_CANDIDATE_HYPOTHESIS_IDS[0],
-        strategy_id="strategy-0", run_dir=tmp_path / "real_0", dates=_dates(20), net_returns=[0.001] * 20,
-    )
-    _register_failed_attempt(store, trial_id)  # a retry -- same trial_id, new attempt
+    _register_all_six_real_candidates(store, tmp_path)
+    _register_all_three_placebos(store, tmp_path)
+    retried_trial_id = store.list_trials(
+        experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=REAL_CANDIDATE_HYPOTHESIS_IDS[0],
+    )[0]["trial_id"]
+    _register_failed_attempt(store, retried_trial_id)  # a retry -- same trial_id, new attempt
 
     fake_run_root = tmp_path / "runs" / "run_01"
     monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
     monkeypatch.setattr(run_wave, "REGISTRY_DB", db_path)
 
     judge = run_wave.run_family_judge()
-    assert judge["registry_population"]["registered_unique_trials"] == 1
-    assert judge["registry_population"]["attempt_count"] == 2
+    assert judge["registry_population"]["registered_unique_trials"] == 6
+    assert judge["registry_population"]["attempt_count"] == 7  # 6 first attempts + 1 retry
 
 
 # ---------------------------------------------------------------------------
@@ -281,18 +292,24 @@ def test_retry_does_not_inflate_registered_trial_count(monkeypatch, tmp_path: Pa
 
 
 def test_return_series_date_misalignment_is_surfaced_not_silently_aligned(monkeypatch, tmp_path: Path) -> None:
+    """The underlying build_multiple_testing_judge date-misalignment
+    exclusion (an existing, already-accepted behavior, not part of R3) must
+    still fire once the R3-repaired frozen-population precheck passes --
+    proven here with all 6 frozen hypotheses present (one trial each, so
+    the precheck passes) but one of them registered under a disjoint
+    calendar range."""
     db_path = tmp_path / "research.sqlite3"
     store = ResearchResultStore(db_path)
-    dates_a = _dates(20, start="2021-01-01")
-    dates_b = _dates(20, start="2021-06-01")  # disjoint calendar range
-    _register_trial_with_result(
-        store, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=REAL_CANDIDATE_HYPOTHESIS_IDS[0],
-        strategy_id="strategy-0", run_dir=tmp_path / "real_0", dates=dates_a, net_returns=[0.001] * 20,
-    )
-    _register_trial_with_result(
-        store, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=REAL_CANDIDATE_HYPOTHESIS_IDS[1],
-        strategy_id="strategy-1", run_dir=tmp_path / "real_1", dates=dates_b, net_returns=[0.001] * 20,
-    )
+    dates_aligned = _dates(20, start="2021-01-01")
+    dates_misaligned = _dates(20, start="2021-06-01")  # disjoint calendar range
+    for i, hyp_id in enumerate(REAL_CANDIDATE_HYPOTHESIS_IDS):
+        _register_trial_with_result(
+            store, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=hyp_id,
+            strategy_id=f"strategy-{i}", run_dir=tmp_path / f"real_{i}",
+            dates=dates_misaligned if i == 1 else dates_aligned,
+            net_returns=[0.001 * ((i % 3) + 1)] * 20,
+        )
+    _register_all_three_placebos(store, tmp_path)
 
     fake_run_root = tmp_path / "runs" / "run_01"
     monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
@@ -301,7 +318,7 @@ def test_return_series_date_misalignment_is_surfaced_not_silently_aligned(monkey
     judge = run_wave.run_family_judge()
     reasons = {e["reason"] for e in judge["excluded_trial_ids"]}
     assert "return_series_date_misalignment" in reasons
-    assert judge["registry_population"]["registered_unique_trials"] == 2
+    assert judge["registry_population"]["registered_unique_trials"] == 6
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +338,7 @@ def test_registration_order_does_not_change_judge_identity(monkeypatch, tmp_path
             store_forward, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=hyp_id,
             strategy_id=f"strategy-{i}", run_dir=tmp_path / "fwd" / f"real_{i}", dates=dates, net_returns=[0.001] * 20,
         )
+    _register_all_three_placebos(store_forward, tmp_path / "fwd")
 
     db_reversed = tmp_path / "reversed.sqlite3"
     store_reversed = ResearchResultStore(db_reversed)
@@ -330,6 +348,7 @@ def test_registration_order_does_not_change_judge_identity(monkeypatch, tmp_path
             store_reversed, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=hyp_id,
             strategy_id=strategy_id, run_dir=tmp_path / "rev" / f"real_{i}", dates=dates, net_returns=[0.001] * 20,
         )
+    _register_all_three_placebos(store_reversed, tmp_path / "rev")
 
     fake_run_root_a = tmp_path / "runs_a"
     monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root_a)
@@ -343,3 +362,161 @@ def test_registration_order_does_not_change_judge_identity(monkeypatch, tmp_path
 
     assert judge_forward["included_trial_ids"] == judge_reversed["included_trial_ids"]
     assert judge_forward["registry_population"] == judge_reversed["registry_population"]
+
+
+# ---------------------------------------------------------------------------
+# R3 (WAVE03-FROZEN-JUDGE-POPULATION-REPAIR-01) REQUIRED RED/GREEN: the
+# frozen-population precheck must raise BEFORE build_multiple_testing_judge
+# is ever called, for every population-mismatch shape the mission lists.
+# ---------------------------------------------------------------------------
+
+
+def test_run_family_judge_fails_closed_before_judge_call_when_candidate_missing(monkeypatch, tmp_path: Path) -> None:
+    """RED (pre-fix behavior) / GREEN (post-fix behavior) proof: registering
+    only 5 of the 6 frozen real candidates must raise RuntimeError from
+    run_family_judge() itself, and must do so WITHOUT ever reaching
+    build_multiple_testing_judge (proven via a spy that records whether it
+    was called)."""
+    db_path = tmp_path / "research.sqlite3"
+    store = ResearchResultStore(db_path)
+    dates = _dates(20)
+    for i, hyp_id in enumerate(REAL_CANDIDATE_HYPOTHESIS_IDS[:5]):  # omit the 6th
+        _register_trial_with_result(
+            store, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=hyp_id,
+            strategy_id=f"strategy-{i}", run_dir=tmp_path / f"real_{i}", dates=dates, net_returns=[0.001] * 20,
+        )
+    _register_all_three_placebos(store, tmp_path)
+
+    judge_was_called = {"value": False}
+
+    def spy_build_judge(*, experiment_id, hypothesis_id=None, registry_db, spec=None):
+        judge_was_called["value"] = True
+        return {"judge_status": "not_evaluable", "registry_population": {}, "included_trial_ids": [], "excluded_trial_ids": []}
+
+    fake_run_root = tmp_path / "runs" / "run_01"
+    monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
+    monkeypatch.setattr(run_wave, "REGISTRY_DB", db_path)
+    monkeypatch.setattr(run_wave, "build_multiple_testing_judge", spy_build_judge)
+
+    with pytest.raises(RuntimeError, match="missing="):
+        run_wave.run_family_judge()
+    assert judge_was_called["value"] is False
+
+
+def test_run_family_judge_fails_closed_on_extra_seventh_real_trial(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "research.sqlite3"
+    store = ResearchResultStore(db_path)
+    _register_all_six_real_candidates(store, tmp_path)
+    _register_all_three_placebos(store, tmp_path)
+    _register_trial_with_result(
+        store, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id="wave03_rank04_unexpected_extra_v1",
+        strategy_id="strategy-extra", run_dir=tmp_path / "real_extra", dates=_dates(20), net_returns=[0.001] * 20,
+    )
+
+    fake_run_root = tmp_path / "runs" / "run_01"
+    monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
+    monkeypatch.setattr(run_wave, "REGISTRY_DB", db_path)
+
+    with pytest.raises(RuntimeError, match="unexpected="):
+        run_wave.run_family_judge()
+
+
+class _FakeTrialStore:
+    """Minimal list_trials-only stub for unit-testing
+    _require_exact_frozen_population's own logic directly against a
+    fabricated population shape, bypassing ResearchResultStore entirely."""
+
+    def __init__(self, trials: List[Dict[str, Any]]) -> None:
+        self._trials = trials
+
+    def list_trials(self, *, experiment_id=None, hypothesis_id=None, strategy_id=None):
+        return [t for t in self._trials if experiment_id is None or t["experiment_id"] == experiment_id]
+
+
+def test_require_exact_frozen_population_fails_closed_on_placebo_hypothesis_injected_into_real_experiment() -> None:
+    """The durable ResearchResultStore itself already refuses to register
+    the SAME hypothesis_id under two different experiment_ids (see
+    register_hypothesis's own collision check), so a placebo hypothesis id
+    literally landing under REAL_EXPERIMENT_ID can never arise through
+    legitimate registration once the matching placebo experiment has
+    registered it first (and vice versa) -- a stronger, independent
+    guarantee. This unit-tests _require_exact_frozen_population's own
+    population-shape logic directly against a fabricated registry state, so
+    the check would still catch this mislabeling on its own even if that
+    lower-layer guarantee were ever weakened."""
+    trials = [
+        {"experiment_id": run_wave.REAL_EXPERIMENT_ID, "hypothesis_id": hyp, "trial_id": f"trial-{hyp}"}
+        for hyp in REAL_CANDIDATE_HYPOTHESIS_IDS[:5]
+    ] + [
+        {
+            "experiment_id": run_wave.REAL_EXPERIMENT_ID,
+            "hypothesis_id": DIAGNOSTIC_PLACEBO_HYPOTHESIS_IDS[0],
+            "trial_id": "trial-mislabeled-placebo",
+        }
+    ]
+    with pytest.raises(RuntimeError, match="unexpected="):
+        run_wave._require_exact_frozen_population(
+            _FakeTrialStore(trials), experiment_id=run_wave.REAL_EXPERIMENT_ID,
+            expected_hypothesis_ids=REAL_CANDIDATE_HYPOTHESIS_IDS, population_label="real candidate",
+        )
+
+
+def test_run_family_judge_fails_closed_on_duplicate_distinct_trial_under_one_hypothesis(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Two DIFFERENT trials (distinct identity -> distinct trial_id)
+    registered under the SAME frozen hypothesis id -- must fail closed, not
+    silently pick one."""
+    db_path = tmp_path / "research.sqlite3"
+    store = ResearchResultStore(db_path)
+    _register_all_six_real_candidates(store, tmp_path)
+    _register_all_three_placebos(store, tmp_path)
+    _register_trial_with_result(
+        store, experiment_id=run_wave.REAL_EXPERIMENT_ID, hypothesis_id=REAL_CANDIDATE_HYPOTHESIS_IDS[0],
+        strategy_id="strategy-0-duplicate", run_dir=tmp_path / "real_0_dup", dates=_dates(20), net_returns=[0.001] * 20,
+        data_salt="-duplicate",
+    )
+
+    fake_run_root = tmp_path / "runs" / "run_01"
+    monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
+    monkeypatch.setattr(run_wave, "REGISTRY_DB", db_path)
+
+    with pytest.raises(RuntimeError, match="more than one distinct trial"):
+        run_wave.run_family_judge()
+
+
+def test_run_family_judge_fails_closed_on_missing_placebo_diagnostic_trial(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "research.sqlite3"
+    store = ResearchResultStore(db_path)
+    _register_all_six_real_candidates(store, tmp_path)
+    dates = _dates(20)
+    for i, hyp_id in enumerate(DIAGNOSTIC_PLACEBO_HYPOTHESIS_IDS[:2]):  # omit the 3rd
+        _register_trial_with_result(
+            store, experiment_id=run_wave.PLACEBO_EXPERIMENT_ID, hypothesis_id=hyp_id,
+            strategy_id=f"placebo-strategy-{i}", run_dir=tmp_path / f"placebo_{i}", dates=dates, net_returns=[0.0001] * 20,
+        )
+
+    fake_run_root = tmp_path / "runs" / "run_01"
+    monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
+    monkeypatch.setattr(run_wave, "REGISTRY_DB", db_path)
+
+    with pytest.raises(RuntimeError, match="diagnostic placebo"):
+        run_wave.run_family_judge()
+
+
+def test_run_family_judge_fails_closed_on_extra_placebo_diagnostic_trial(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "research.sqlite3"
+    store = ResearchResultStore(db_path)
+    _register_all_six_real_candidates(store, tmp_path)
+    _register_all_three_placebos(store, tmp_path)
+    _register_trial_with_result(
+        store, experiment_id=run_wave.PLACEBO_EXPERIMENT_ID, hypothesis_id="wave03_rank04_unexpected_placebo_v1",
+        strategy_id="placebo-strategy-extra", run_dir=tmp_path / "placebo_extra", dates=_dates(20), net_returns=[0.0001] * 20,
+    )
+
+    fake_run_root = tmp_path / "runs" / "run_01"
+    monkeypatch.setattr(run_wave, "RUN_ROOT", fake_run_root)
+    monkeypatch.setattr(run_wave, "REGISTRY_DB", db_path)
+
+    with pytest.raises(RuntimeError, match="diagnostic placebo"):
+        run_wave.run_family_judge()

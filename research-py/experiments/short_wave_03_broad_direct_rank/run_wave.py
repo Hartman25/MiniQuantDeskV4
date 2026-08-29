@@ -136,6 +136,7 @@ from mqk_research.ml.execution_pricing import (
     EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
     ExecutionPricingSpec,
 )
+from mqk_research.exp_distributed.storage import ResearchResultStore
 from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge
 from mqk_research.ml.schema import generate_feature_schema
 from mqk_research.ml.weight_to_share import WeightToShareSpec
@@ -1306,18 +1307,73 @@ def run_family(family_key: str) -> dict:
     return result
 
 
+def _hypothesis_to_unique_trial_ids(store: ResearchResultStore, experiment_id: str) -> dict[str, set[str]]:
+    by_hypothesis: dict[str, set[str]] = {}
+    for t in store.list_trials(experiment_id=experiment_id):
+        by_hypothesis.setdefault(t["hypothesis_id"], set()).add(t["trial_id"])
+    return by_hypothesis
+
+
+def _require_exact_frozen_population(
+    store: ResearchResultStore, *, experiment_id: str, expected_hypothesis_ids: list[str], population_label: str,
+) -> None:
+    """R3 (WAVE03-FROZEN-JUDGE-POPULATION-REPAIR-01): fail closed BEFORE any
+    judge/closeout call unless the durable registry holds EXACTLY the
+    frozen hypothesis population for `experiment_id` -- no missing
+    candidate, no extra/unexpected hypothesis (including a placebo
+    hypothesis leaking into the real experiment, or vice versa), and no
+    duplicated semantic trial (more than one distinct trial_id) under a
+    single expected hypothesis. Retries/attempts on the SAME trial_id are
+    unaffected -- they never create a second entry in this hypothesis's
+    trial-id set."""
+    by_hypothesis = _hypothesis_to_unique_trial_ids(store, experiment_id)
+    expected = set(expected_hypothesis_ids)
+    actual = set(by_hypothesis.keys())
+    missing = expected - actual
+    unexpected = actual - expected
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Fail-closed: {population_label} population for experiment_id={experiment_id!r} does not "
+            f"exactly match the frozen hypothesis set -- missing={sorted(missing)!r} "
+            f"unexpected={sorted(unexpected)!r}"
+        )
+    duplicated = {h: sorted(ids) for h, ids in by_hypothesis.items() if len(ids) != 1}
+    if duplicated:
+        raise RuntimeError(
+            f"Fail-closed: {population_label} population for experiment_id={experiment_id!r} has more "
+            f"than one distinct trial registered under a single frozen hypothesis id -- {duplicated!r}"
+        )
+
+
 def run_family_judge() -> dict:
-    """WAVE03-FAMILY-JUDGE-01: run build_multiple_testing_judge over the
-    REAL_EXPERIMENT_ID population only (hypothesis_id=None -> full
-    experiment population -- exactly the 6 frozen real-candidate hypothesis
-    IDs once all three families have run, since run_family only ever
-    registers real trials under REAL_EXPERIMENT_ID and the matched placebo
-    under the structurally distinct PLACEBO_EXPERIMENT_ID -- see
-    run_family's own experiment_id routing, proven in
-    test_wave03_family_harness.py). No placebo trial can ever enter this
-    judge's population: build_multiple_testing_judge's own registry query
-    is scoped by experiment_id, and a placebo trial is never registered
-    under REAL_EXPERIMENT_ID in the first place."""
+    """WAVE03-FAMILY-JUDGE-01, R3-repaired (WAVE03-FROZEN-JUDGE-POPULATION-
+    REPAIR-01): run build_multiple_testing_judge over the REAL_EXPERIMENT_ID
+    population only (hypothesis_id=None -> full experiment population --
+    exactly the 6 frozen real-candidate hypothesis IDs once all three
+    families have run, since run_family only ever registers real trials
+    under REAL_EXPERIMENT_ID and the matched placebo under the structurally
+    distinct PLACEBO_EXPERIMENT_ID -- see run_family's own experiment_id
+    routing, proven in test_wave03_family_harness.py).
+
+    BEFORE calling build_multiple_testing_judge, the durable registry is
+    inspected and required to hold EXACTLY the frozen 6-candidate real
+    population and EXACTLY the frozen 3-hypothesis diagnostic placebo
+    population (a complete Wave-03 execution is supposed to have produced
+    one placebo per family) -- see _require_exact_frozen_population. No
+    placebo trial can ALSO enter the judge's population even if this
+    precheck passed: build_multiple_testing_judge's own registry query is
+    scoped by experiment_id, and a placebo trial is never registered under
+    REAL_EXPERIMENT_ID in the first place."""
+    store = ResearchResultStore(REGISTRY_DB)
+    _require_exact_frozen_population(
+        store, experiment_id=REAL_EXPERIMENT_ID, expected_hypothesis_ids=REAL_CANDIDATE_HYPOTHESIS_IDS,
+        population_label="real candidate",
+    )
+    _require_exact_frozen_population(
+        store, experiment_id=PLACEBO_EXPERIMENT_ID, expected_hypothesis_ids=DIAGNOSTIC_PLACEBO_HYPOTHESIS_IDS,
+        population_label="diagnostic placebo",
+    )
+
     judge = build_multiple_testing_judge(experiment_id=REAL_EXPERIMENT_ID, registry_db=REGISTRY_DB)
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
     (RUN_ROOT / "judge_artifact.json").write_text(
