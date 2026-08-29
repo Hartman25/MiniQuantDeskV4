@@ -510,6 +510,239 @@ def test_find_requires_review_events_ignores_outside_universe_or_range():
 
 
 # ---------------------------------------------------------------------------
+# BKT-RESEARCH-CA-ROLE-AWARE-RESOLUTION-01 -- role-aware resolution (Patch
+# B). classify_corporate_action_type's TYPE-level output is unaffected
+# (test_classify_corporate_action_type above); these tests cover
+# classify_corporate_action_resolution's additional role/identity narrowing.
+# ---------------------------------------------------------------------------
+
+
+def _merger_leg(*, event_id: str, role_symbol: str, other_role_symbol: Optional[str] = None) -> Dict[str, Any]:
+    """Build a single stock_merger leg dict as _effective_windows_for_entry
+    would produce it, for the given role_symbol=acquirer."""
+    raw: Dict[str, Any] = {
+        "id": event_id,
+        "acquirer_symbol": role_symbol,
+        "acquirer_cusip": "cusip-acquirer",
+        "process_date": "2021-01-15",
+        "effective_date": "2021-01-15",
+    }
+    if other_role_symbol:
+        raw["acquiree_symbol"] = other_role_symbol
+        raw["acquiree_cusip"] = "cusip-acquiree"
+    legs = ah._effective_windows_for_entry("stock_merger", raw)
+    return next(leg for leg in legs if leg["symbol"] == role_symbol)
+
+
+def test_resolution_acquirer_only_merger_may_pass():
+    leg = _merger_leg(event_id="m1", role_symbol="BIG", other_role_symbol="SML")
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
+
+
+def test_resolution_acquiree_leg_still_blocks():
+    raw = {
+        "id": "m1", "acquirer_symbol": "BIG", "acquirer_cusip": "x",
+        "acquiree_symbol": "SML", "acquiree_cusip": "y",
+        "process_date": "2021-01-15", "effective_date": "2021-01-15",
+    }
+    legs = ah._effective_windows_for_entry("stock_merger", raw)
+    acquiree_leg = next(leg for leg in legs if leg["symbol"] == "SML")
+    assert ah.classify_corporate_action_resolution(acquiree_leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_same_event_mutated_from_acquirer_to_acquiree_must_fail():
+    """A leg for the SAME symbol under the SAME event, but with its role
+    field swapped from acquirer_symbol to acquiree_symbol, must fail closed
+    -- role correctness, not the raw event, drives resolution."""
+    raw_as_acquirer = {"id": "m1", "acquirer_symbol": "AAA", "acquirer_cusip": "x", "process_date": "2021-01-15"}
+    raw_as_acquiree = {"id": "m1", "acquiree_symbol": "AAA", "acquiree_cusip": "x", "process_date": "2021-01-15"}
+    leg_acquirer = ah._effective_windows_for_entry("stock_merger", raw_as_acquirer)[0]
+    leg_acquiree = ah._effective_windows_for_entry("stock_merger", raw_as_acquiree)[0]
+    assert ah.classify_corporate_action_resolution(leg_acquirer) == ah.CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
+    assert ah.classify_corporate_action_resolution(leg_acquiree) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_blank_role_still_blocks():
+    leg = {"symbol": "AAA", "action_type": "cash_merger", "effective_start_ts": "2021-01-15", "effective_end_ts": "2021-01-15"}
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_acquirer_blocked_by_same_event_terminal_conflict():
+    """Adversarial data-integrity case: the SAME symbol appears under BOTH
+    acquirer_symbol and acquiree_symbol of the SAME raw event -- the
+    acquirer leg must not auto-clear despite matched_role=='acquirer'."""
+    raw = {
+        "id": "m1", "acquirer_symbol": "AAA", "acquirer_cusip": "x",
+        "acquiree_symbol": "AAA", "acquiree_cusip": "y",
+        "process_date": "2021-01-15",
+    }
+    legs = ah._effective_windows_for_entry("stock_merger", raw)
+    acquirer_leg = next(leg for leg in legs if leg["matched_role"] == "acquirer")
+    siblings = [leg for leg in legs if leg is not acquirer_leg]
+    assert ah.classify_corporate_action_resolution(acquirer_leg, sibling_legs=siblings) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def _name_change_leg(*, old_symbol: str, new_symbol: str, old_cusip: Optional[str], new_cusip: Optional[str], event_id: str = "n1") -> Dict[str, Any]:
+    raw = {
+        "id": event_id, "old_symbol": old_symbol, "new_symbol": new_symbol,
+        "old_cusip": old_cusip, "new_cusip": new_cusip, "process_date": "2021-01-15",
+    }
+    legs = ah._effective_windows_for_entry("name_change", raw)
+    return next(leg for leg in legs if leg["symbol"] == new_symbol)
+
+
+def test_resolution_name_change_matching_cusips_verified_continuity():
+    leg = _name_change_leg(old_symbol="FB", new_symbol="META", old_cusip="30303M102", new_cusip="30303M102")
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
+
+
+def test_resolution_name_change_missing_cusip_still_blocks():
+    leg = _name_change_leg(old_symbol="FB", new_symbol="META", old_cusip="30303M102", new_cusip=None)
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_name_change_unequal_cusips_still_blocks():
+    leg = _name_change_leg(old_symbol="FB", new_symbol="META", old_cusip="30303M102", new_cusip="99999X999")
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_unrelated_same_ticker_name_change_not_authorized_by_a_different_resolved_one():
+    """Negative control: a genuine FB->META continuity chain resolving
+    cleanly must NOT authorize a totally unrelated, unresolved name-change
+    event that happens to share the literal ticker META."""
+    legit = _name_change_leg(old_symbol="FB", new_symbol="META", old_cusip="30303M102", new_cusip="30303M102", event_id="n1")
+    unrelated = _name_change_leg(old_symbol="OLDCO", new_symbol="META", old_cusip="c1", new_cusip="c2", event_id="n2")
+    assert ah.classify_corporate_action_resolution(legit) == ah.CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
+    assert ah.classify_corporate_action_resolution(unrelated) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+@pytest.mark.parametrize(
+    "action_type",
+    ["unit_split", "stock_dividend", "redemption", "worthless_removal", "rights_distribution", "partial_call", "reorganization"],
+)
+def test_resolution_unaddressed_types_remain_fail_closed(action_type):
+    leg = {
+        "symbol": "AAA", "action_type": action_type, "matched_role": "primary",
+        "effective_start_ts": "2021-01-15", "effective_end_ts": "2021-01-15",
+    }
+    assert ah.classify_corporate_action_resolution(leg) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_unknown_type_still_fails():
+    leg = {"symbol": "AAA", "action_type": "not_a_real_type", "matched_role": "primary"}
+    with pytest.raises(ValueError, match="Unknown corporate action"):
+        ah.classify_corporate_action_resolution(leg)
+
+
+def test_find_requires_review_events_clears_acquirer_leg_but_not_acquiree():
+    entries = ah._effective_windows_for_entry(
+        "stock_merger",
+        {"id": "m1", "acquirer_symbol": "BIG", "acquirer_cusip": "x", "acquiree_symbol": "SML", "acquiree_cusip": "y", "process_date": "2021-01-15"},
+    )
+    hits_big = ah.find_requires_review_events(entries, symbol_universe=["BIG"], start_utc=WINDOW_START, end_utc=WINDOW_END)
+    hits_sml = ah.find_requires_review_events(entries, symbol_universe=["SML"], start_utc=WINDOW_START, end_utc=WINDOW_END)
+    assert hits_big == []
+    assert len(hits_sml) == 1
+
+
+def test_find_requires_review_events_clears_verified_name_change_continuity():
+    entries = ah._effective_windows_for_entry(
+        "name_change",
+        {"id": "n1", "old_symbol": "FB", "new_symbol": "META", "old_cusip": "c1", "new_cusip": "c1", "process_date": "2021-01-15"},
+    )
+    hits = ah.find_requires_review_events(entries, symbol_universe=["META"], start_utc=WINDOW_START, end_utc=WINDOW_END)
+    assert hits == []
+
+
+def test_extraction_clean_on_acquirer_only_merger():
+    """Full-pipeline proof: an acquirer-only merger in range no longer
+    raises CorporateActionReviewRequired."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"BIG": [_bar("2021-01-04T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {
+                "stock_mergers": [
+                    {
+                        "id": "m1",
+                        "acquirer_symbol": "BIG",
+                        "acquirer_cusip": "x",
+                        "acquiree_symbol": "SML",
+                        "acquiree_cusip": "y",
+                        "process_date": "2021-01-15",
+                        "effective_date": "2021-01-15",
+                    }
+                ]
+            }
+        ),
+    )
+    result = ah.extract_research_bars_with_provenance_diagnostic(
+        symbols=["BIG"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+    )
+    entries = result["corporate_action_entries"]
+    assert len(entries) == 1
+    assert entries[0]["symbol"] == "BIG"
+
+
+def test_extraction_clean_on_verified_name_change_continuity():
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"META": [_bar("2021-01-04T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {
+                "name_changes": [
+                    {
+                        "id": "n1",
+                        "old_symbol": "FB",
+                        "new_symbol": "META",
+                        "old_cusip": "30303M102",
+                        "new_cusip": "30303M102",
+                        "process_date": "2021-01-15",
+                    }
+                ]
+            }
+        ),
+    )
+    result = ah.extract_research_bars_with_provenance_diagnostic(
+        symbols=["META"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+    )
+    entries = result["corporate_action_entries"]
+    assert len(entries) == 1
+    assert entries[0]["symbol"] == "META"
+
+
+def test_extraction_still_fails_closed_on_unresolved_name_change():
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"META": [_bar("2021-01-04T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {
+                "name_changes": [
+                    {
+                        "id": "n1",
+                        "old_symbol": "OLDCO",
+                        "new_symbol": "META",
+                        "old_cusip": "c1",
+                        "new_cusip": "c2",
+                        "process_date": "2021-01-15",
+                    }
+                ]
+            }
+        ),
+    )
+    with pytest.raises(ah.CorporateActionReviewRequired, match="name_change"):
+        ah.extract_research_bars_with_provenance_diagnostic(
+            symbols=["META"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds(), http_get=http
+        )
+
+
+# ---------------------------------------------------------------------------
 # extract_research_bars_with_provenance_diagnostic -- full orchestration
 # ---------------------------------------------------------------------------
 

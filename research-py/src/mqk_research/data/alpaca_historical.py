@@ -171,6 +171,16 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 # leg (see _SYMBOL_FIELD_ROLE / _ROLE_CUSIP_FIELD); this patch does NOT
 # change which events are admitted -- see classify_corporate_action_type /
 # find_requires_review_events, unchanged here.
+#
+# BKT-RESEARCH-CA-ROLE-AWARE-RESOLUTION-01: find_requires_review_events now
+# runs classify_corporate_action_resolution over the role/identity evidence
+# BKT-RESEARCH-CA-ROLE-IDENTITY-EVIDENCE-01 preserved, so a merger ACQUIRER
+# leg (never an acquiree leg) and a name_change with old_cusip==new_cusip
+# (real, provider-supplied security continuity, never a bare type-based
+# guess) no longer block the whole extraction -- see
+# CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG / CATEGORY_VERIFIED_SAME_
+# SECURITY_CONTINUITY. Every other REQUIRES_FAIL_CLOSED_REVIEW-by-type event
+# is unaffected and still fails the whole extraction closed.
 
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
@@ -317,6 +327,32 @@ _EX_DATE_TYPES: FrozenSet[str] = frozenset(
 
 CATEGORY_COVERED_BY_ADJUSTMENT = "covered_by_adjustment"
 CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW = "requires_fail_closed_review"
+
+# BKT-RESEARCH-CA-ROLE-AWARE-RESOLUTION-01: two additional, narrow,
+# provably-safe resolution outcomes a type-level CATEGORY_REQUIRES_FAIL_
+# CLOSED_REVIEW event can still resolve into, once the requested symbol's
+# ROLE and SECURITY IDENTITY (see BKT-RESEARCH-CA-ROLE-IDENTITY-EVIDENCE-01)
+# are examined -- see classify_corporate_action_resolution. Neither is
+# "covered by adjustment=all"; both are distinct, honestly-named claims:
+#   - a merger ACQUIRER leg's own shares are not converted/cancelled by the
+#     event, so no missing price-adjustment/return-transformation is
+#     required for THAT leg specifically (the acquirer's real traded
+#     returns are used as-is, never synthesized);
+#   - a name_change whose old_cusip/new_cusip are populated and equal is
+#     the SAME underlying security continuing under a new ticker (matching
+#     Alpaca's documented `asof` entity-mapping semantics), not a
+#     transformation requiring adjustment.
+# Every other REQUIRES_FAIL_CLOSED_REVIEW-by-type event (acquiree/terminal
+# merger legs, unresolved name changes, stock_dividend, unit_split,
+# redemption, worthless_removal, rights_distribution, partial_call,
+# reorganization) remains CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW -- this patch
+# deliberately does not attempt those; see PATCH C for the narrow,
+# explicit, auditable exception mechanism for an individually-reviewed
+# event no automated rule here can honestly resolve.
+CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG = "no_adjustment_required_for_requested_leg"
+CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY = "verified_same_security_continuity"
+
+_MERGER_TYPES: FrozenSet[str] = frozenset({"cash_merger", "stock_merger", "stock_and_cash_merger"})
 
 # Conservative, docs-verified classification for adjustment="all": Alpaca's
 # official documentation states adjustment=all "applies all" of the
@@ -816,6 +852,64 @@ def _filter_entries_intersecting_range(
     return sorted(hits, key=lambda e: (e["symbol"], e["action_type"], e["effective_start_ts"]))
 
 
+def _event_group_key(leg: Dict[str, Any]) -> Tuple[Any, str]:
+    """Group key identifying legs that came from the SAME raw provider
+    event -- provider_event_id alone is not guaranteed globally unique
+    across different action types, so action_type is included."""
+    return (leg.get("provider_event_id"), str(leg.get("action_type")))
+
+
+def classify_corporate_action_resolution(
+    leg: Dict[str, Any],
+    *,
+    sibling_legs: Sequence[Dict[str, Any]] = (),
+    adjustment_mode: str = ADJUSTMENT_ALL,
+) -> str:
+    """Pure, per-leg role-aware resolution (BKT-RESEARCH-CA-ROLE-AWARE-
+    RESOLUTION-01). `leg` is one normalized evidence dict as produced by
+    _effective_windows_for_entry (must carry action_type/matched_role/
+    old_cusip/new_cusip). `sibling_legs` are the OTHER legs of the SAME raw
+    event (same provider_event_id + action_type, see _event_group_key) --
+    used only for the merger acquirer contract's same-event terminal-role
+    self-consistency check (a requested symbol must not be simultaneously
+    represented by BOTH an acquirer and an acquiree leg of the SAME event).
+
+    Only ever NARROWS -- a type already CATEGORY_COVERED_BY_ADJUSTMENT stays
+    that; a type already CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW can resolve
+    into CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG or
+    CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY ONLY via the two explicit,
+    narrow contracts documented at CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG /
+    CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY above; every other case
+    (including a blank/unmapped matched_role, an acquiree leg, an
+    under-evidenced or mismatched name-change, or any other type) defaults
+    to CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW."""
+    action_type = leg.get("action_type")
+    base = classify_corporate_action_type(action_type, adjustment_mode=adjustment_mode)
+    if base == CATEGORY_COVERED_BY_ADJUSTMENT:
+        return CATEGORY_COVERED_BY_ADJUSTMENT
+
+    role = leg.get("matched_role")
+    matched_symbol = leg.get("matched_symbol")
+
+    if action_type in _MERGER_TYPES and role == "acquirer":
+        same_symbol_terminal_conflict = any(
+            sib.get("matched_role") == "acquiree" and sib.get("matched_symbol") == matched_symbol
+            for sib in sibling_legs
+        )
+        if not same_symbol_terminal_conflict:
+            return CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
+        return CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+    if action_type == "name_change" and role in ("old_symbol", "new_symbol"):
+        old_cusip = leg.get("old_cusip")
+        new_cusip = leg.get("new_cusip")
+        if old_cusip and new_cusip and old_cusip == new_cusip:
+            return CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
+        return CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+    return CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
 def find_requires_review_events(
     entries: Sequence[Dict[str, Any]],
     *,
@@ -824,18 +918,26 @@ def find_requires_review_events(
     end_utc: pd.Timestamp,
     adjustment_mode: str = ADJUSTMENT_ALL,
 ) -> List[Dict[str, Any]]:
-    """Return the subset of `entries` that are CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
-    and intersect [start_utc, end_utc) for a symbol in `symbol_universe` (see
-    _filter_entries_intersecting_range) -- deterministic, order-independent."""
+    """Return the subset of `entries` that remain
+    CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW after role-aware resolution (see
+    classify_corporate_action_resolution) and intersect [start_utc, end_utc)
+    for a symbol in `symbol_universe` (see _filter_entries_intersecting_range)
+    -- deterministic, order-independent."""
     intersecting = _filter_entries_intersecting_range(
         entries, symbol_universe=symbol_universe, start_utc=start_utc, end_utc=end_utc
     )
-    hits = [
-        e
-        for e in intersecting
-        if classify_corporate_action_type(e["action_type"], adjustment_mode=adjustment_mode)
-        == CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
-    ]
+    groups: Dict[Tuple[Any, str], List[Dict[str, Any]]] = {}
+    for leg in intersecting:
+        groups.setdefault(_event_group_key(leg), []).append(leg)
+
+    hits: List[Dict[str, Any]] = []
+    for leg in intersecting:
+        siblings = [s for s in groups[_event_group_key(leg)] if s is not leg]
+        resolution = classify_corporate_action_resolution(
+            leg, sibling_legs=siblings, adjustment_mode=adjustment_mode
+        )
+        if resolution == CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW:
+            hits.append(leg)
     return sorted(hits, key=lambda e: (e["symbol"], e["action_type"], e["effective_start_ts"]))
 
 
@@ -942,11 +1044,13 @@ def _neutral_extract(
     )
     if review_required:
         raise CorporateActionReviewRequired(
-            "Fail-closed: the following corporate action(s) intersect the requested symbol/range and "
-            f"are NOT covered by Alpaca's adjustment={ADJUSTMENT_ALL!r} semantics -- refusing to "
-            "produce official research bars provenance until an explicit handling policy exists for "
-            "them. Narrow the symbol universe or date range to exclude the affected symbol/period, or "
-            f"wait for a future patch that adds explicit handling: {review_required}"
+            "Fail-closed: the following corporate action(s) intersect the requested symbol/range, are "
+            f"NOT covered by Alpaca's adjustment={ADJUSTMENT_ALL!r} semantics, and could not be "
+            "role-aware-resolved (see classify_corporate_action_resolution) -- refusing to produce "
+            "official research bars provenance until an explicit handling policy or reviewed "
+            "resolution exists for them. Narrow the symbol universe or date range to exclude the "
+            f"affected symbol/period, or wait for a future patch that adds explicit handling: "
+            f"{review_required}"
         )
 
     evidence = build_corporate_action_evidence(
