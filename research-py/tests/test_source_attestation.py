@@ -27,6 +27,7 @@ from mqk_research.data.bars_provenance import (
     TRUSTED_CA_DISCOVERY_FLOOR_UTC,
     TRUSTED_CA_DISCOVERY_PROTOCOL_V2,
     TRUSTED_CA_DISCOVERY_TYPES,
+    TRUSTED_V2_CA_RESOLUTION_POLICY_ID,
     UNIVERSE_MODE_FIXED_EX_ANTE,
     BarsProvenanceUnverifiable,
     SourceAttestationUnverifiable,
@@ -907,10 +908,15 @@ def test_old_v1_manifest_remains_verifiable_under_its_historical_contract():
 
 
 def test_v2_extraction_manifest_verifies_with_ca_resolution_policy_id():
+    """REPAIR-01 F1: a V2 attestation carrying the EXACT trusted policy id
+    passes the full registered gate -- proves the new trust check does not
+    reject the real, correct value, only an arbitrary one (see
+    test_v2_extraction_manifest_with_arbitrary_policy_id_cannot_authorize_run
+    below for the corresponding negative control)."""
     bars = _bars_df([100.0, 101.0])
     evidence = _clean_ca_evidence(bars)
     attestation = _valid_attestation(
-        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id="real-policy-fingerprint"
+        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id=TRUSTED_V2_CA_RESOLUTION_POLICY_ID
     )
     manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
     require_registered_bars_provenance(manifest)
@@ -955,4 +961,70 @@ def test_diagnostic_v2_authority_still_cannot_pass_registered_gates():
     )
     manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
     with pytest.raises(SourceAttestationUnverifiable):
+        check_corporate_action_integrity(bars, manifest)
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01-REPAIR-01 (F1/F3) -- the missing
+# authority check: ca_resolution_policy_id must equal the EXACT trusted V2
+# policy identity, not merely be internally consistent with its own
+# recomputed attestation hash. Distinct from
+# test_hand_built_attestation_cannot_spoof_v2_authority_by_mutating_policy_id
+# above, which only proves a POST-MINT tamper (stale attestation_id) is
+# refused -- these tests build a BRAND-NEW, internally-consistent attestation
+# from scratch, with attestation_id/source_attestation_id correctly
+# recomputed over the arbitrary policy id, and still expect a refusal.
+# ---------------------------------------------------------------------------
+
+
+def test_v2_extraction_manifest_with_arbitrary_policy_id_cannot_authorize_run():
+    """Required test (F3): a real fresh-spoof, not a tamper. Every other
+    field is correct and internally consistent (correct extractor_id,
+    official source_authority, correct endpoints, correct bars hash, correct
+    CA evidence, correct CA discovery contract) -- only ca_resolution_policy_id
+    is an attacker/caller-selected arbitrary value, and ALL hashes
+    (attestation_id/source_attestation_id) are recomputed normally over that
+    value, so this is NOT the stale-id tamper case above. The full
+    registered integrity gate must still reject it, specifically because the
+    policy id is not the trusted V2 policy -- proving the missing authority
+    check this repair closes."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(
+        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id="attacker-selected-arbitrary-policy-id"
+    )
+    assert attestation["ca_resolution_policy_id"] == "attacker-selected-arbitrary-policy-id"
+    assert attestation["attestation_id"] == source_attestation_id(attestation)  # freshly, correctly minted
+    manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="does not equal the exact CA resolution policy"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_v2_extraction_manifest_missing_policy_id_cannot_authorize_run():
+    """Required test: a V2 attestation with NO ca_resolution_policy_id at
+    all (None) must fail closed, never silently treated as an implicit
+    legacy/default policy."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id=None)
+    manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="requires an explicit"):
+        check_corporate_action_integrity(bars, manifest)
+
+
+def test_v2_extraction_manifest_with_stale_previous_policy_id_cannot_authorize_run():
+    """Required test: a policy id that was once a legitimate value (e.g. a
+    prior policy generation, before a reviewed-resolution registry edit or a
+    CA_RESOLUTION_POLICY_VERSION bump) but is no longer the CURRENT trusted
+    value must fail closed -- trust is bound to the exact current policy,
+    never any policy id that was ever previously valid."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    stale_policy_id = "0" * 64  # a syntactically well-formed but non-current policy fingerprint
+    assert stale_policy_id != TRUSTED_V2_CA_RESOLUTION_POLICY_ID
+    attestation = _valid_attestation(
+        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id=stale_policy_id
+    )
+    manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable, match="does not equal the exact CA resolution policy"):
         check_corporate_action_integrity(bars, manifest)

@@ -1734,6 +1734,68 @@ def test_resolution_policy_fingerprint_deterministic_and_order_independent():
     assert fp_a == fp_b
 
 
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01-REPAIR-01 (F2/F3)
+# ---------------------------------------------------------------------------
+
+
+def test_trusted_v2_ca_resolution_policy_id_matches_bars_provenance_mirror():
+    """bars_provenance.TRUSTED_V2_CA_RESOLUTION_POLICY_ID must stay in sync
+    with this module's ACTUAL current resolution_policy_fingerprint() -- if
+    they drift, either a real official V2 extraction can never authorize
+    registered research (mirror stale/behind), or the trust check silently
+    stops meaning anything (mirror never enforced)."""
+    from mqk_research.data import bars_provenance as bp
+
+    assert bp.TRUSTED_V2_CA_RESOLUTION_POLICY_ID == ah.resolution_policy_fingerprint()
+
+
+def test_policy_fingerprint_changes_when_merger_types_mutate():
+    """Required test: mutation of an automated policy rule (the merger-
+    acquirer rule's covered action types) changes the policy fingerprint --
+    F2's spec now encodes the RULE ITSELF, not just a version label."""
+    default_fp = ah.resolution_policy_fingerprint()
+    spec_without_stock_merger = ah._canonical_ca_resolution_policy_spec()
+    assert "stock_merger" in spec_without_stock_merger["merger_acquirer_rule"]["action_types"]
+
+    import mqk_research.data.alpaca_historical as ah_module
+    original = ah_module._MERGER_TYPES
+    try:
+        ah_module._MERGER_TYPES = frozenset({"cash_merger"})
+        mutated_fp = ah.resolution_policy_fingerprint()
+    finally:
+        ah_module._MERGER_TYPES = original
+    assert mutated_fp != default_fp
+
+
+def test_policy_fingerprint_changes_when_covered_by_adjustment_all_mutates():
+    """Required test: mutation of the provider-adjusted covered type set
+    changes the policy fingerprint."""
+    default_fp = ah.resolution_policy_fingerprint()
+    import mqk_research.data.alpaca_historical as ah_module
+    original = ah_module._COVERED_BY_ADJUSTMENT_ALL
+    try:
+        ah_module._COVERED_BY_ADJUSTMENT_ALL = frozenset(original | {"stock_dividend"})
+        mutated_fp = ah.resolution_policy_fingerprint()
+    finally:
+        ah_module._COVERED_BY_ADJUSTMENT_ALL = original
+    assert mutated_fp != default_fp
+
+
+def test_stale_reviewed_resolution_id_fails_closed_during_policy_fingerprint_construction():
+    """Required test: a reviewed-resolution record with a stale/tampered
+    resolution_id in the registry passed to resolution_policy_fingerprint
+    must cause the fingerprint construction ITSELF to fail closed -- never
+    silently contribute the stale resolution_id to official source identity."""
+    from mqk_research.data.ca_reviewed_resolutions import ReviewedResolutionUnverifiable
+    import copy
+
+    tampered = copy.deepcopy(ah.REVIEWED_CA_RESOLUTIONS[0])
+    tampered["evidence_summary"] = "mutated without re-minting resolution_id"
+    with pytest.raises(ReviewedResolutionUnverifiable):
+        ah.resolution_policy_fingerprint(reviewed_resolutions=(tampered,))
+
+
 def test_category_b_event_still_prevents_official_manifest_minting():
     """Required test 7: an unresolved REQUIRES_FAIL_CLOSED_REVIEW event
     still raises before any manifest -- V2-01 only changed source IDENTITY,

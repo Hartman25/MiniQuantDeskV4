@@ -147,6 +147,24 @@ _V2_PLUS_EXTRACTOR_IDS: FrozenSet[str] = frozenset(
     {"mqk_research.data.alpaca_historical.v2", "mqk_research.data.alpaca_historical.diagnostic_v2"}
 )
 
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01-REPAIR-01 (F1): the EXACT CA
+# resolution policy identity trusted for the V2 OFFICIAL extractor -- a
+# mirrored literal (not imported: alpaca_historical already imports this
+# module, so importing back would be circular), kept in sync by
+# test_alpaca_historical.py::test_trusted_v2_ca_resolution_policy_id_matches_bars_provenance_mirror.
+# Defect this closes: Patch D (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01) only
+# ever included ca_resolution_policy_id in source_attestation_id -- it never
+# verified the value ITSELF was the real trusted V2 policy, so an attacker
+# could hand-build a fresh, internally-consistent V2 attestation carrying an
+# ARBITRARY caller-selected ca_resolution_policy_id (with attestation_id/
+# source_attestation_id correctly recomputed over that arbitrary value) and
+# it would pass every check that existed before this repair. Recomputing a
+# hash over caller-controlled input proves internal consistency, never
+# authority -- see _require_trusted_ca_resolution_policy.
+TRUSTED_V2_CA_RESOLUTION_POLICY_ID = (
+    "3d2b506909440441495134e64977a0688e66c72ebd2813f7a0956ab5e993f038"
+)
+
 # BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 (Defect 3): a caller-typed
 # extractor_id string alone was found to be an insufficiently strong
 # authority boundary -- see mqk_research.data.alpaca_historical's OFFICIAL
@@ -659,6 +677,37 @@ def _require_trusted_ca_discovery_contract(attestation: Dict[str, Any]) -> None:
         )
 
 
+def _require_trusted_ca_resolution_policy(attestation: Dict[str, Any]) -> None:
+    """Fail-closed (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01-REPAIR-01 F1):
+    a V2+ attestation's ca_resolution_policy_id must equal the EXACT policy
+    identity trusted for the V2 OFFICIAL extractor (TRUSTED_V2_CA_
+    RESOLUTION_POLICY_ID) -- an arbitrary caller-selected policy string,
+    even alongside an otherwise internally-consistent, freshly recomputed
+    attestation hash, must never authorize registered research. Only ever
+    called when attestation.extractor_id is already confirmed BOTH a
+    trusted extractor id (_TRUSTED_EXTRACTOR_IDS) and V2+
+    (_V2_PLUS_EXTRACTOR_IDS); that intersection is exactly the V2 OFFICIAL
+    extractor id -- diagnostic_v2 is V2+ but never a trusted extractor id,
+    and v1 is a trusted extractor id but never V2+ -- so this function is
+    never reached for diagnostic_v2 (already refused earlier) or for a
+    historical V1 artifact (never required to carry this field at all)."""
+    policy_id = attestation.get("ca_resolution_policy_id")
+    if not policy_id:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.extractor_id={attestation.get('extractor_id')!r} requires "
+            "an explicit, non-empty ca_resolution_policy_id -- missing/empty is refused, never treated "
+            "as an implicit legacy policy"
+        )
+    if policy_id != TRUSTED_V2_CA_RESOLUTION_POLICY_ID:
+        raise SourceAttestationUnverifiable(
+            f"Fail-closed: source_attestation.ca_resolution_policy_id={policy_id!r} does not equal the "
+            f"exact CA resolution policy trusted for extractor_id={attestation.get('extractor_id')!r} "
+            f"({TRUSTED_V2_CA_RESOLUTION_POLICY_ID!r}) -- an arbitrary, stale, or caller-selected policy "
+            "identity can never authorize official registered research, regardless of whether the "
+            "attestation hash recomputed over it is otherwise internally consistent"
+        )
+
+
 def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str, Any]) -> None:
     """Defect closure (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01): for a price
     convention in _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION,
@@ -708,6 +757,8 @@ def _require_verified_source_attestation(bars: pd.DataFrame, manifest: Dict[str,
             "provenance_diagnostic) can never authorize official registered research, regardless of "
             "whether it is otherwise internally consistent"
         )
+    if attestation.get("extractor_id") in _V2_PLUS_EXTRACTOR_IDS:
+        _require_trusted_ca_resolution_policy(attestation)
     expected_provider = _CONVENTION_REQUIRED_SOURCE_PROVIDER.get(convention)
     if expected_provider is not None and attestation.get("source_provider_id") != expected_provider:
         raise SourceAttestationUnverifiable(

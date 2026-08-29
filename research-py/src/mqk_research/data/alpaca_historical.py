@@ -16,6 +16,7 @@ import pandas as pd
 from mqk_research.data.ca_reviewed_resolutions import (
     REVIEWED_CA_RESOLUTIONS,
     find_reviewed_resolution,
+    require_verified_reviewed_resolution,
 )
 from mqk_research.data.bars_provenance import (
     CA_POLICY_ADJUSTED_DATA,
@@ -406,43 +407,80 @@ CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY = "verified_same_security_continuity"
 
 _MERGER_TYPES: FrozenSet[str] = frozenset({"cash_merger", "stock_merger", "stock_and_cash_merger"})
 
-# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01: bumped whenever
-# classify_corporate_action_resolution's actual decision logic changes
-# (which raw fields resolve which category) -- the discipline mirrors
-# CA_DISCOVERY_PROTOCOL_V2's existing versioning pattern in this module.
-# Part of resolution_policy_fingerprint, so a future logic change is
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01, bumped by -REPAIR-01 F2: bumped
+# whenever classify_corporate_action_resolution's actual decision logic
+# changes (which raw fields resolve which category) -- the discipline
+# mirrors CA_DISCOVERY_PROTOCOL_V2's existing versioning pattern in this
+# module. Part of resolution_policy_fingerprint (as policy_spec_version, see
+# _canonical_ca_resolution_policy_spec), so a future logic change is
 # reflected in official research source identity even if this constant is
 # NOT bumped in the same patch (the reviewed-resolution registry's own
-# resolution_ids still change identity independently) -- but bumping it IS
-# the correct thing to do whenever the merger/name-change contracts
-# themselves change, exactly like EXTRACTOR_ID.
-CA_RESOLUTION_POLICY_VERSION = "role_aware_reviewed_registry_v1"
+# resolution_ids still change identity independently, and the spec below now
+# also encodes the automated rules' actual semantics -- not just this
+# version label -- so a semantics change that forgets to bump this constant
+# still changes the fingerprint) -- but bumping it IS the correct thing to
+# do whenever the merger/name-change contracts themselves change, exactly
+# like EXTRACTOR_ID. REPAIR-01: bumped v1 -> v2 because this patch changed
+# ca_reviewed_resolutions' own fingerprint/resolution_id content-addressing
+# contract (RESOLUTION_SCHEMA_VERSION reviewed_ca_resolution_v1 -> v2).
+CA_RESOLUTION_POLICY_VERSION = "role_aware_reviewed_registry_v2"
+
+
+def _canonical_ca_resolution_policy_spec(
+    *, reviewed_resolutions: Sequence[Dict[str, Any]] = REVIEWED_CA_RESOLUTIONS
+) -> Dict[str, Any]:
+    """The full canonical CA RESOLUTION POLICY SPEC (BKT-RESEARCH-CA-
+    AUTHORITY-IDENTITY-V2-01-REPAIR-01 F2): explicitly describes
+    classify_corporate_action_resolution's actual automated-rule semantics
+    -- not merely a version label -- plus the exact provider-adjusted type
+    set and the reviewed registry actually in force. Every reviewed-
+    resolution record is independently re-verified (require_verified_
+    reviewed_resolution) before its resolution_id is trusted to contribute
+    to this spec: a stale/tampered reviewed-resolution record must fail
+    closed here too, not just at lookup time, so a corrupted registry entry
+    can never silently mint a policy identity that includes it."""
+    for record in reviewed_resolutions:
+        require_verified_reviewed_resolution(record)
+    return {
+        "policy_spec_version": CA_RESOLUTION_POLICY_VERSION,
+        "merger_acquirer_rule": {
+            "action_types": sorted(_MERGER_TYPES),
+            "required_role": "acquirer",
+            "same_event_grouping_identity": ["provider_event_id", "action_type"],
+            "reject_when_same_matched_symbol_also_acquiree_sibling": True,
+        },
+        "name_change_rule": {
+            "action_type": "name_change",
+            "allowed_roles": sorted(("old_symbol", "new_symbol")),
+            "require_old_cusip_populated": True,
+            "require_new_cusip_populated": True,
+            "require_old_cusip_equals_new_cusip": True,
+        },
+        "provider_adjusted_covered_types": sorted(_COVERED_BY_ADJUSTMENT_ALL),
+        "reviewed_registry_resolution_ids": sorted(r["resolution_id"] for r in reviewed_resolutions),
+    }
 
 
 def resolution_policy_fingerprint(
     *, reviewed_resolutions: Sequence[Dict[str, Any]] = REVIEWED_CA_RESOLUTIONS
 ) -> str:
     """Content-derived fingerprint of the CORPORATE-ACTION RESOLUTION POLICY
-    as a whole (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01): the policy
-    VERSION (bumped whenever classify_corporate_action_resolution's
-    decision logic itself changes) plus the exact set of types/roles the
-    automated rules cover, plus every reviewed-resolution record actually
-    in force, identified by ITS OWN content-addressed resolution_id (so
-    adding, removing, or editing a reviewed-resolution record changes this
-    fingerprint even if no Python logic changes at all). Threaded into
+    as a whole (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01, repaired by
+    -REPAIR-01 F2): hashes the full canonical policy spec (see
+    _canonical_ca_resolution_policy_spec) -- the policy VERSION, the
+    automated merger-acquirer and name-change rules' actual semantics, the
+    exact provider-adjusted type set, and every reviewed-resolution record
+    actually in force identified by ITS OWN content-addressed resolution_id
+    (so adding, removing, or editing a reviewed-resolution record changes
+    this fingerprint even if no Python logic changes at all). Threaded into
     build_source_attestation as ca_resolution_policy_id -- see that
     function and bars_provenance.canonical_source_attestation_content --
     so two extractions with byte-identical bars and byte-identical raw
     corporate-action evidence, but governed by a DIFFERENT resolution
-    policy, never share a source_attestation_id."""
-    return sha256_json(
-        {
-            "policy_version": CA_RESOLUTION_POLICY_VERSION,
-            "covered_by_adjustment_all": sorted(_COVERED_BY_ADJUSTMENT_ALL),
-            "merger_types": sorted(_MERGER_TYPES),
-            "reviewed_resolution_ids": sorted(r["resolution_id"] for r in reviewed_resolutions),
-        }
-    )
+    policy, never share a source_attestation_id. Fails closed (via
+    require_verified_reviewed_resolution) if any reviewed-resolution record
+    is itself stale/tampered."""
+    return sha256_json(_canonical_ca_resolution_policy_spec(reviewed_resolutions=reviewed_resolutions))
 
 
 # Conservative, docs-verified classification for adjustment="all": Alpaca's

@@ -23,7 +23,7 @@ from mqk_research.ml.util_hash import sha256_json
 # find_reviewed_resolution against a leg's own identity evidence. A record's
 # own event_fingerprint is independently RECOMPUTED from that evidence and
 # required to match before the record is ever trusted (see
-# _require_verified_resolution) -- mirrors bars_provenance's evidence_id /
+# require_verified_reviewed_resolution) -- mirrors bars_provenance's evidence_id /
 # attestation_id pattern (content-derived, never a caller/author-asserted
 # label): a hand-edited record whose event_fingerprint no longer matches
 # its own bound fields is refused, never silently accepted.
@@ -68,7 +68,7 @@ class ReviewedResolutionUnverifiable(RuntimeError):
     match the content independently recomputed from its own full content, its
     resolution is not a known semantics, or its lookup matched more than one
     registry record -- a hand-edited/tampered/malformed/ambiguous record is
-    never trusted (see _require_verified_resolution / find_reviewed_resolution)."""
+    never trusted (see require_verified_reviewed_resolution / find_reviewed_resolution)."""
 
 
 def _norm_optional_cusip(value: Any) -> Optional[str]:
@@ -156,9 +156,9 @@ def _canonical_resolution_content_for_id(
 ) -> Dict[str, Any]:
     """The full canonical reviewed-resolution content used to derive
     resolution_id -- everything EXCEPT resolution_id itself (REPAIR-01 E3).
-    Shared by build_reviewed_resolution (mint) and _require_verified_
-    resolution (independent recompute) so the two can never silently diverge
-    in what they hash."""
+    Shared by build_reviewed_resolution (mint) and
+    require_verified_reviewed_resolution (independent recompute) so the two
+    can never silently diverge in what they hash."""
     return {
         "schema_version": schema_version,
         **fingerprint_fields,
@@ -225,7 +225,7 @@ def build_reviewed_resolution(
     return record
 
 
-def _require_verified_resolution(record: Dict[str, Any]) -> None:
+def require_verified_reviewed_resolution(record: Dict[str, Any]) -> None:
     """Fail-closed content-integrity check (REPAIR-01 E3) -- mirrors
     bars_provenance's _require_verified_source_attestation /
     _require_verified_ca_evidence pattern: independently recompute the
@@ -303,7 +303,7 @@ def find_reviewed_resolution(
     fields' canonical fingerprint. Returns None (the fail-closed default) if
     no record matches. Raises ReviewedResolutionUnverifiable -- never
     returns None -- if the matching record itself fails content
-    verification (see _require_verified_resolution), or if more than one
+    verification (see require_verified_reviewed_resolution), or if more than one
     registry record shares the same canonical event fingerprint (an
     ambiguous match is refused outright, never resolved by silently
     choosing the first record)."""
@@ -328,7 +328,7 @@ def find_reviewed_resolution(
             f"event fingerprint ({target!r}) -- ambiguous match, refusing to silently choose the first"
         )
     record = matches[0]
-    _require_verified_resolution(record)
+    require_verified_reviewed_resolution(record)
     return record
 
 
