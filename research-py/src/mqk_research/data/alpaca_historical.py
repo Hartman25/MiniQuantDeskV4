@@ -156,6 +156,21 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 #     floor, research window, requested symbols/types) -- the wall-clock
 #     ca_discovery_end_utc stays on the attestation object for audit but no
 #     longer participates in source_attestation_id / trial identity.
+#
+# BKT-RESEARCH-CA-ROLE-IDENTITY-EVIDENCE-01: the prior normalized
+# corporate-action entry shape was exactly
+# {symbol, action_type, effective_start_ts, effective_end_ts} -- discarding,
+# after _effective_windows_for_entry ran, which raw symbol FIELD matched
+# (and therefore which ROLE the matched symbol plays, e.g. acquirer vs.
+# acquiree) and every SECURITY-IDENTITY field (CUSIPs, counterparty
+# symbols) the provider actually supplied. A future admission policy cannot
+# honestly distinguish "requested symbol is the acquirer" from "requested
+# symbol is the terminal acquiree" of the SAME merger, or prove two
+# same-ticker name-change events are unrelated securities, from that shape
+# alone. _effective_windows_for_entry now preserves this evidence on every
+# leg (see _SYMBOL_FIELD_ROLE / _ROLE_CUSIP_FIELD); this patch does NOT
+# change which events are admitted -- see classify_corporate_action_type /
+# find_requires_review_events, unchanged here.
 
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
@@ -250,6 +265,44 @@ _SYMBOL_FIELDS_BY_TYPE: Dict[str, Tuple[str, ...]] = {
     "unit_split": ("old_symbol", "new_symbol", "alternate_symbol"),
     "worthless_removal": ("symbol",),
 }
+
+# BKT-RESEARCH-CA-ROLE-IDENTITY-EVIDENCE-01: the semantic ROLE a matched
+# symbol field plays in its event -- a field name means the same role
+# regardless of which action_type it appears under (verified against the
+# same OpenAPI schema _SYMBOL_FIELDS_BY_TYPE cites). This is what lets a
+# downstream policy distinguish "requested symbol is the acquirer" from
+# "requested symbol is the acquiree" for the SAME cash_merger/stock_merger
+# event, instead of collapsing both legs to an undifferentiated "symbol".
+_SYMBOL_FIELD_ROLE: Dict[str, str] = {
+    "symbol": "primary",
+    "acquirer_symbol": "acquirer",
+    "acquiree_symbol": "acquiree",
+    "old_symbol": "old_symbol",
+    "new_symbol": "new_symbol",
+    "source_symbol": "source_symbol",
+    "alternate_symbol": "alternate_symbol",
+}
+
+# The raw CUSIP field (if any) the verified schema associates with a given
+# role -- used to attach real security-identity evidence to the leg that
+# role produced. A role absent here has no known CUSIP field; its identity
+# evidence is left None, never guessed.
+_ROLE_CUSIP_FIELD: Dict[str, str] = {
+    "primary": "cusip",
+    "acquirer": "acquirer_cusip",
+    "acquiree": "acquiree_cusip",
+    "old_symbol": "old_cusip",
+    "new_symbol": "new_cusip",
+}
+
+
+def _norm_symbol_or_none(value: Any) -> Optional[str]:
+    """Normalize an optional raw symbol field: uppercased/stripped when
+    populated, else None -- never an empty string or a fabricated default."""
+    if not value:
+        return None
+    return str(value).strip().upper()
+
 
 # Types whose schema includes an ex_date (verified against the OpenAPI
 # schema's "required" lists): cash_dividend, forward_split, reverse_split,
@@ -557,11 +610,16 @@ def fetch_historical_bars(
     return df, meta
 
 
-def _effective_windows_for_entry(action_type: str, raw: Dict[str, Any]) -> List[Tuple[str, str, str]]:
-    """Flatten one raw /v1/corporate-actions entry into
-    (symbol, effective_start_ts, effective_end_ts) tuples, one per affected
-    symbol leg. Fails closed on an unmapped action_type or an entry with no
-    populated symbol field -- never silently skips an entry."""
+def _effective_windows_for_entry(action_type: str, raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Flatten one raw /v1/corporate-actions entry into one normalized
+    evidence dict per affected symbol leg (BKT-RESEARCH-CA-ROLE-IDENTITY-
+    EVIDENCE-01). Each leg preserves enough provider-supplied information to
+    distinguish EVENT TYPE from the ROLE the matched symbol plays in that
+    event, and from SECURITY/ENTITY IDENTITY (CUSIPs) -- see
+    _SYMBOL_FIELD_ROLE / _ROLE_CUSIP_FIELD. Fails closed on an unmapped
+    action_type or an entry with no populated symbol field -- never silently
+    skips an entry. Does NOT decide which events are admitted -- that
+    remains classify_corporate_action_type / find_requires_review_events."""
     symbol_fields = _SYMBOL_FIELDS_BY_TYPE.get(action_type)
     if symbol_fields is None:
         raise AlpacaHistoricalExtractionError(
@@ -574,14 +632,50 @@ def _effective_windows_for_entry(action_type: str, raw: Dict[str, Any]) -> List[
         raise AlpacaHistoricalExtractionError(
             f"Alpaca corporate action entry missing required process_date: type={action_type} raw={raw}"
         )
-    start_date = raw.get("ex_date") if action_type in _EX_DATE_TYPES else None
+    ex_date = raw.get("ex_date")
+    start_date = ex_date if action_type in _EX_DATE_TYPES else None
     start_date = start_date or process_date
 
-    out: List[Tuple[str, str, str]] = []
+    # Raw identity context shared verbatim across every leg of this SAME
+    # event -- so a single leg's evidence (e.g. the acquirer leg) also
+    # records who its counterparty was, without a downstream consumer
+    # needing to re-join sibling legs by provider_event_id.
+    shared_identity: Dict[str, Any] = {
+        "old_symbol": _norm_symbol_or_none(raw.get("old_symbol")),
+        "new_symbol": _norm_symbol_or_none(raw.get("new_symbol")),
+        "old_cusip": raw.get("old_cusip"),
+        "new_cusip": raw.get("new_cusip"),
+        "acquirer_symbol": _norm_symbol_or_none(raw.get("acquirer_symbol")),
+        "acquiree_symbol": _norm_symbol_or_none(raw.get("acquiree_symbol")),
+        "acquirer_cusip": raw.get("acquirer_cusip"),
+        "acquiree_cusip": raw.get("acquiree_cusip"),
+        "source_symbol": _norm_symbol_or_none(raw.get("source_symbol")),
+        "alternate_symbol": _norm_symbol_or_none(raw.get("alternate_symbol")),
+    }
+
+    out: List[Dict[str, Any]] = []
     for field in symbol_fields:
         sym = raw.get(field)
-        if sym:
-            out.append((str(sym).strip().upper(), str(start_date), str(process_date)))
+        if not sym:
+            continue
+        role = _SYMBOL_FIELD_ROLE.get(field, field)
+        cusip_field = _ROLE_CUSIP_FIELD.get(role)
+        matched_symbol = str(sym).strip().upper()
+        leg: Dict[str, Any] = {
+            "symbol": matched_symbol,
+            "action_type": action_type,
+            "effective_start_ts": str(start_date),
+            "effective_end_ts": str(process_date),
+            "provider_event_id": raw.get("id"),
+            "process_date": str(process_date),
+            "ex_date": str(ex_date) if ex_date else None,
+            "matched_symbol": matched_symbol,
+            "matched_role": role,
+            "matched_symbol_field": field,
+            "matched_cusip": raw.get(cusip_field) if cusip_field else None,
+        }
+        leg.update(shared_identity)
+        out.append(leg)
     if not out:
         raise AlpacaHistoricalExtractionError(
             f"Alpaca corporate action entry has no populated symbol field(s): type={action_type} "
@@ -663,15 +757,7 @@ def fetch_corporate_actions(
             )
         for response_key, action_type in _RESPONSE_KEY_TO_TYPE.items():
             for raw in ca.get(response_key) or []:
-                for symbol, eff_start, eff_end in _effective_windows_for_entry(action_type, raw):
-                    entries.append(
-                        {
-                            "symbol": symbol,
-                            "action_type": action_type,
-                            "effective_start_ts": eff_start,
-                            "effective_end_ts": eff_end,
-                        }
-                    )
+                entries.extend(_effective_windows_for_entry(action_type, raw))
 
     meta: Dict[str, Any] = {
         "pagination_complete": complete,
@@ -868,15 +954,12 @@ def _neutral_extract(
         covered_symbol_universe=symbols_norm,
         coverage_start_utc=start_utc.tz_convert("UTC").isoformat(),
         coverage_end_utc=end_utc.tz_convert("UTC").isoformat(),
-        corporate_action_entries=[
-            {
-                "symbol": e["symbol"],
-                "action_type": e["action_type"],
-                "effective_start_ts": e["effective_start_ts"],
-                "effective_end_ts": e["effective_end_ts"],
-            }
-            for e in ca_entries
-        ],
+        # BKT-RESEARCH-CA-ROLE-IDENTITY-EVIDENCE-01: pass every leg's full
+        # role/identity evidence through verbatim -- previously narrowed to
+        # {symbol, action_type, effective_start_ts, effective_end_ts} here,
+        # which discarded exactly the role/CUSIP evidence
+        # _effective_windows_for_entry now preserves.
+        corporate_action_entries=[dict(e) for e in ca_entries],
     )
 
     corporate_action_query_coverage = {

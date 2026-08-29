@@ -1047,6 +1047,220 @@ def test_ca_discovery_incomplete_pagination_fails_closed():
 
 
 # ---------------------------------------------------------------------------
+# BKT-RESEARCH-CA-ROLE-IDENTITY-EVIDENCE-01 -- role/identity evidence
+# preserved on each corporate-action leg (Patch A). Does NOT touch admission
+# policy; classify_corporate_action_type / find_requires_review_events are
+# unchanged and covered by the existing tests above.
+# ---------------------------------------------------------------------------
+
+
+def test_effective_windows_acquirer_vs_acquiree_role_distinguishable():
+    """Negative control 1: the SAME merger event's two legs must carry
+    distinguishable role evidence, not an undifferentiated 'symbol'."""
+    raw = {
+        "id": "m1",
+        "acquirer_symbol": "BIG",
+        "acquirer_cusip": "cusip-big",
+        "acquiree_symbol": "SML",
+        "acquiree_cusip": "cusip-sml",
+        "process_date": "2021-01-15",
+        "effective_date": "2021-01-15",
+    }
+    legs = ah._effective_windows_for_entry("stock_merger", raw)
+    by_symbol = {leg["symbol"]: leg for leg in legs}
+    assert by_symbol["BIG"]["matched_role"] == "acquirer"
+    assert by_symbol["BIG"]["matched_cusip"] == "cusip-big"
+    assert by_symbol["SML"]["matched_role"] == "acquiree"
+    assert by_symbol["SML"]["matched_cusip"] == "cusip-sml"
+    # Each leg also records the full event's counterparty identity.
+    assert by_symbol["BIG"]["acquiree_symbol"] == "SML"
+    assert by_symbol["SML"]["acquirer_symbol"] == "BIG"
+
+
+def test_effective_windows_unit_split_three_roles_distinguishable():
+    raw = {
+        "id": "u1",
+        "old_symbol": "OLD",
+        "new_symbol": "NEW",
+        "alternate_symbol": "ALT",
+        "old_cusip": "cusip-old",
+        "new_cusip": "cusip-new",
+        "process_date": "2021-03-01",
+    }
+    legs = ah._effective_windows_for_entry("unit_split", raw)
+    roles = {leg["symbol"]: leg["matched_role"] for leg in legs}
+    assert roles == {"OLD": "old_symbol", "NEW": "new_symbol", "ALT": "alternate_symbol"}
+
+
+def test_effective_windows_missing_identity_field_not_fabricated():
+    """Negative control 5: a field the provider did not supply must come
+    through as None, never a fabricated placeholder."""
+    raw = {"id": "n1", "old_symbol": "OLD", "new_symbol": "META", "old_cusip": "cusip-old", "process_date": "2021-04-01"}
+    legs = ah._effective_windows_for_entry("name_change", raw)
+    new_leg = next(leg for leg in legs if leg["symbol"] == "META")
+    assert new_leg["new_cusip"] is None
+    assert new_leg["matched_cusip"] is None  # role=new_symbol -> cusip field=new_cusip, unsupplied
+
+
+def _name_change_ca_page(*, new_symbol: str, new_cusip: str, event_id: str, process_date: str = "2021-05-01") -> Dict[str, Any]:
+    return _ca_page(
+        {
+            "name_changes": [
+                {
+                    "id": event_id,
+                    "old_symbol": "OLDCO",
+                    "new_symbol": new_symbol,
+                    "old_cusip": "cusip-oldco",
+                    "new_cusip": new_cusip,
+                    "process_date": process_date,
+                }
+            ]
+        }
+    )
+
+
+def test_ca_ticker_collision_different_cusips_remain_distinguishable():
+    """Negative control 2: two unrelated name-change events that share the
+    literal ticker (and, here, the same process_date/effective window) but
+    have different CUSIPs must not collapse into the same evidence."""
+    from mqk_research.data.bars_provenance import build_corporate_action_evidence, corporate_action_evidence_id
+
+    http_a = FakeHttp()
+    http_a.queue(CA_URL, 200, _name_change_ca_page(new_symbol="META", new_cusip="cusip-real-meta", event_id="a1"))
+    entries_a, _ = ah.fetch_corporate_actions(
+        symbols=["META"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_a
+    )
+
+    http_b = FakeHttp()
+    http_b.queue(CA_URL, 200, _name_change_ca_page(new_symbol="META", new_cusip="cusip-unrelated-entity", event_id="b1"))
+    entries_b, _ = ah.fetch_corporate_actions(
+        symbols=["META"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_b
+    )
+
+    ev_a = build_corporate_action_evidence(
+        source_provider_id="alpaca", covered_symbol_universe=["META"],
+        coverage_start_utc=WINDOW_START.isoformat(), coverage_end_utc=WINDOW_END.isoformat(),
+        corporate_action_entries=entries_a,
+    )
+    ev_b = build_corporate_action_evidence(
+        source_provider_id="alpaca", covered_symbol_universe=["META"],
+        coverage_start_utc=WINDOW_START.isoformat(), coverage_end_utc=WINDOW_END.isoformat(),
+        corporate_action_entries=entries_b,
+    )
+    assert corporate_action_evidence_id(ev_a) != corporate_action_evidence_id(ev_b)
+
+
+def test_ca_evidence_identity_invariant_to_provider_page_order():
+    """Negative control 3: two ties on (symbol, action_type,
+    effective_start_ts, effective_end_ts) -- distinguishable only by CUSIP --
+    must hash identically regardless of which order the provider returns
+    them in."""
+    from mqk_research.data.bars_provenance import build_corporate_action_evidence, corporate_action_evidence_id
+
+    entry_1 = {
+        "id": "n1", "old_symbol": "OLDCO1", "new_symbol": "META", "old_cusip": "c1", "new_cusip": "cusip-real-meta",
+        "process_date": "2021-05-01",
+    }
+    entry_2 = {
+        "id": "n2", "old_symbol": "OLDCO2", "new_symbol": "META", "old_cusip": "c2", "new_cusip": "cusip-unrelated",
+        "process_date": "2021-05-01",
+    }
+
+    http_order_1 = FakeHttp()
+    http_order_1.queue(CA_URL, 200, _ca_page({"name_changes": [entry_1, entry_2]}))
+    entries_order_1, _ = ah.fetch_corporate_actions(
+        symbols=["META"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_order_1
+    )
+
+    http_order_2 = FakeHttp()
+    http_order_2.queue(CA_URL, 200, _ca_page({"name_changes": [entry_2, entry_1]}))
+    entries_order_2, _ = ah.fetch_corporate_actions(
+        symbols=["META"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_order_2
+    )
+
+    def _build(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return build_corporate_action_evidence(
+            source_provider_id="alpaca", covered_symbol_universe=["META"],
+            coverage_start_utc=WINDOW_START.isoformat(), coverage_end_utc=WINDOW_END.isoformat(),
+            corporate_action_entries=entries,
+        )
+
+    assert corporate_action_evidence_id(_build(entries_order_1)) == corporate_action_evidence_id(_build(entries_order_2))
+
+
+def test_ca_mutation_of_cusip_changes_evidence_identity():
+    """Negative control 4: mutating a resolution-relevant CUSIP field must
+    change the corporate-action semantic evidence identity."""
+    from mqk_research.data.bars_provenance import build_corporate_action_evidence, corporate_action_evidence_id
+
+    http_a = FakeHttp()
+    http_a.queue(CA_URL, 200, _name_change_ca_page(new_symbol="XYZ", new_cusip="cusip-1", event_id="e1"))
+    entries_a, _ = ah.fetch_corporate_actions(
+        symbols=["XYZ"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_a
+    )
+
+    http_b = FakeHttp()
+    http_b.queue(CA_URL, 200, _name_change_ca_page(new_symbol="XYZ", new_cusip="cusip-2", event_id="e1"))
+    entries_b, _ = ah.fetch_corporate_actions(
+        symbols=["XYZ"], start_utc=WINDOW_START, end_utc=WINDOW_END, credentials=_creds(), http_get=http_b
+    )
+
+    def _build(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return build_corporate_action_evidence(
+            source_provider_id="alpaca", covered_symbol_universe=["XYZ"],
+            coverage_start_utc=WINDOW_START.isoformat(), coverage_end_utc=WINDOW_END.isoformat(),
+            corporate_action_entries=entries,
+        )
+
+    assert corporate_action_evidence_id(_build(entries_a)) != corporate_action_evidence_id(_build(entries_b))
+
+    # Same mutation must also change the SAME role field: role/type mutation alone.
+    entries_role_mutated = [dict(e) for e in entries_a]
+    for e in entries_role_mutated:
+        if e["symbol"] == "XYZ":
+            e["matched_role"] = "acquirer"  # falsely reassign role
+    assert corporate_action_evidence_id(_build(entries_a)) != corporate_action_evidence_id(_build(entries_role_mutated))
+
+
+def test_extraction_preserves_role_identity_evidence_end_to_end():
+    """Full-pipeline proof: a merger event's role/identity evidence survives
+    all the way through _neutral_extract into the manifest's
+    corporate_action_evidence -- not narrowed away as it was pre-patch."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {
+                "cash_dividends": [
+                    {
+                        "id": "d1",
+                        "symbol": "AAA",
+                        "cusip": "cusip-aaa",
+                        "rate": 0.1,
+                        "process_date": "2021-01-10",
+                        "ex_date": "2021-01-09",
+                    }
+                ]
+            }
+        ),
+    )
+    result = _extract(http)
+    entries = result["corporate_action_entries"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["matched_role"] == "primary"
+    assert entry["matched_cusip"] == "cusip-aaa"
+    assert entry["provider_event_id"] == "d1"
+    assert entry["ex_date"] == "2021-01-09"
+    # The same evidence must also be reachable from the manifest's own
+    # corporate_action_evidence object, not just the raw entries list.
+    manifest_entries = result["manifest"]["corporate_action_evidence"]["corporate_action_entries"]
+    assert any(e.get("matched_cusip") == "cusip-aaa" for e in manifest_entries)
+
+
+# ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------
 

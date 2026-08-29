@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -1025,6 +1025,23 @@ def require_bars_pricing_provenance(bars: pd.DataFrame, manifest: Dict[str, Any]
         )
 
 
+def _ca_entry_sort_key(e: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Deterministic sort key for one corporate-action evidence entry.
+    BKT-RESEARCH-CA-ROLE-IDENTITY-EVIDENCE-01: entries now carry per-leg
+    role/CUSIP evidence, so two DIFFERENT legs (e.g. two unrelated
+    name-change events that happen to share a literal ticker, process_date,
+    and ex_date but have different CUSIPs -- the ticker-collision case) can
+    tie on the four identity-window fields alone. A full-content tiebreak is
+    appended so such entries still sort deterministically regardless of
+    provider row/page order, instead of silently depending on whatever
+    order the provider happened to return them in."""
+    return (
+        str(e.get("symbol")), str(e.get("action_type")),
+        str(e.get("effective_start_ts")), str(e.get("effective_end_ts")),
+        tuple(sorted((str(k), str(v)) for k, v in e.items())),
+    )
+
+
 def canonical_ca_evidence_content(evidence: Dict[str, Any]) -> Dict[str, Any]:
     """The canonical, hashable subset of a corporate-action evidence object
     (Defect 2) -- normalized field selection/ordering so two logically-
@@ -1035,10 +1052,7 @@ def canonical_ca_evidence_content(evidence: Dict[str, Any]) -> Dict[str, Any]:
     (never trusted -- see corporate_action_evidence_id)."""
     entries_sorted = sorted(
         (dict(e) for e in evidence.get("corporate_action_entries") or []),
-        key=lambda e: (
-            str(e.get("symbol")), str(e.get("action_type")),
-            str(e.get("effective_start_ts")), str(e.get("effective_end_ts")),
-        ),
+        key=_ca_entry_sort_key,
     )
     return {
         "schema_version": evidence.get("schema_version"),
@@ -1086,10 +1100,7 @@ def build_corporate_action_evidence(
     covered_sorted = sorted({str(s).strip().upper() for s in covered_symbol_universe if str(s).strip()})
     entries_sorted = sorted(
         (dict(e) for e in corporate_action_entries),
-        key=lambda e: (
-            str(e.get("symbol")), str(e.get("action_type")),
-            str(e.get("effective_start_ts")), str(e.get("effective_end_ts")),
-        ),
+        key=_ca_entry_sort_key,
     )
     evidence: Dict[str, Any] = {
         "schema_version": CA_EVIDENCE_SCHEMA_VERSION,
