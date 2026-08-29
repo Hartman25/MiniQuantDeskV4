@@ -386,7 +386,13 @@ def economic_fold_date_authority(economic_returns_csv: Path) -> dict:
     portability convention as build_causal_placebo_targets -- see module
     docstring). Maps every economic-return date to its owning fold and
     records each fold's reset (first) date, failing closed on any date
-    mapped to more than one fold."""
+    mapped to more than one fold.
+
+    R1 (WAVE03-DYNAMIC-BENCHMARK-CAUSALITY-REPAIR-01): also returns
+    fold_of_date (date -> fold), needed by build_dynamic_rankable_benchmark's
+    causal return attribution to detect (and refuse to bridge) a fold
+    boundary when looking up the immediately-prior reference date's
+    RANKABLE_SET."""
     econ = pd.read_csv(economic_returns_csv)
     if "fold" not in econ.columns or "timestamp" not in econ.columns:
         raise RuntimeError(f"Fail-closed: {economic_returns_csv} missing required 'fold'/'timestamp' column(s)")
@@ -401,7 +407,11 @@ def economic_fold_date_authority(economic_returns_csv: Path) -> dict:
         )
     fold_of_date = fold_sets_by_date.map(lambda fs: fs[0])
     reset_dates = set(fold_of_date.reset_index().groupby("fold")["date"].min().tolist())
-    return {"date_set": set(fold_of_date.index.tolist()), "reset_dates": reset_dates}
+    return {
+        "date_set": set(fold_of_date.index.tolist()),
+        "reset_dates": reset_dates,
+        "fold_of_date": fold_of_date.to_dict(),
+    }
 
 
 def rankable_set_by_date(oos_predictions_csv: Path) -> dict[str, set[str]]:
@@ -470,10 +480,36 @@ def build_dynamic_rankable_benchmark(
     date is forced to 0.0, and that is a distinct, unrelated convention
     checked by symbol/date identity, never by emptiness.
 
+    R1 (WAVE03-DYNAMIC-BENCHMARK-CAUSALITY-REPAIR-01) CAUSAL RETURN
+    ATTRIBUTION -- the economic execution contract is future-only (signal at
+    T -> first executable bar strictly after T -> no return ending at T may
+    be earned from a decision made at T). RANKABLE_SET(T) is a same-instant
+    SCORE/MEMBERSHIP fact (unchanged -- still read directly off decision
+    timestamp T, still `rankable_cross_section_size_by_date`'s basis for
+    signal-availability accounting elsewhere), but the RETURN this function
+    attributes to reference date T (the return ending AT T, i.e.
+    close[T]/close[T-1]-1) is governed by the RANKABLE_SET decided at the
+    immediately-PRIOR reference date within the SAME fold, never by
+    RANKABLE_SET(T) itself -- a decision made at T cannot retroactively earn
+    the interval that already ended at T. Concretely: for each non-fold-
+    reset reference date T, the benchmark holds exactly RANKABLE_SET(T_prev)
+    (T_prev = the immediately preceding reference date, which
+    economic_fold_date_authority's fold_of_date guarantees is within the
+    same fold for any non-reset T) and earns close[T]/close[T_prev]-1 for
+    those symbols. A fold's first (reset) date has no valid in-fold T_prev
+    to inherit membership from -- exactly the pre-existing fold-reset-forced-
+    0.0 convention, now also the correct causal boundary condition (no
+    membership may ever cross a fold boundary). This makes a same-bar
+    T-1->T jump for a symbol whose FIRST rankable date is T structurally
+    uncapturable (RANKABLE_SET(T) cannot govern any interval ending at or
+    before T), while a genuine T->T+1 holding move remains fully captured
+    once T becomes some later date's T_prev.
+
     HOLDOUT SAFETY: every `reference_dates` entry must fall strictly before
     `holdout_start_utc` (fail closed otherwise, mirroring SHORT-WAVE-02); the
     function only ever reads `bars`/`oos_predictions_csv` rows whose date is
-    in `reference_dates`, so a holdout-region row is structurally never
+    in `reference_dates` (T_prev is itself always an element of
+    `reference_dates`), so a holdout-region row is structurally never
     touched even though `bars` and the OOS predictions file may span dates
     beyond it."""
     ref_ts = pd.to_datetime(pd.Index(reference_dates), utc=True)
@@ -490,6 +526,7 @@ def build_dynamic_rankable_benchmark(
     authority = economic_fold_date_authority(economic_returns_csv)
     economic_date_set = authority["date_set"]
     fold_start_dates = authority["reset_dates"]
+    fold_of_date = authority["fold_of_date"]
     reference_date_set = set(pd.Index(reference_dates).astype(str))
     if reference_date_set != economic_date_set:
         only_reference = sorted(reference_date_set - economic_date_set)
@@ -509,11 +546,30 @@ def build_dynamic_rankable_benchmark(
     b["daily_ret"] = b.groupby("symbol")["close"].pct_change()
 
     sorted_dates = sorted(reference_date_set)
-    cross_section_size: dict[str, int] = {}
+    # SIGNAL-AVAILABILITY membership (unshifted -- how many symbols were
+    # actually scored AT date T; feeds rankable_cross_section_targets
+    # elsewhere) is deliberately distinct from the CAUSAL RETURN attribution
+    # below (which uses T_prev's membership) -- see docstring.
+    cross_section_size: dict[str, int] = {d: len(rankable.get(d, set())) for d in sorted_dates}
+
     per_date: dict[str, float] = {}
-    for d in sorted_dates:
-        syms = rankable.get(d, set())
-        cross_section_size[d] = len(syms)
+    for i, d in enumerate(sorted_dates):
+        if d in fold_start_dates:
+            # No valid in-fold T_prev exists for a fold's first date -- no
+            # membership may ever cross a fold boundary. Forced to 0.0 below,
+            # same mechanism/test as the pre-existing fold-reset convention.
+            continue
+        prev_d = sorted_dates[i - 1]
+        if fold_of_date.get(prev_d) != fold_of_date.get(d):
+            # Defensive fail-safe only: reference dates already partition
+            # into contiguous per-fold blocks when sorted (fold_start_dates
+            # marks each block's first entry), so this should be
+            # unreachable -- guards against ever bridging a fold boundary if
+            # that partitioning assumption is ever violated. Treated as a
+            # genuine missing observation (not raised), consistent with this
+            # function's general "sparse observation is not an error" policy.
+            continue
+        syms = rankable.get(prev_d, set())
         if not syms:
             per_date[d] = float("nan")
             continue
