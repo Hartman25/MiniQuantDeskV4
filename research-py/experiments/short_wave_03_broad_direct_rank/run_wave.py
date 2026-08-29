@@ -113,6 +113,11 @@ if not _wave03_resolved_mqk_research.is_relative_to(WAVE03_LOCAL_SRC):
 import numpy as np
 import pandas as pd
 
+from mqk_research.data.bars_provenance import (
+    check_corporate_action_integrity,
+    require_bars_match_manifest,
+    require_registered_bars_provenance,
+)
 from mqk_research.features.feature_set_v1 import build_feature_set_v1
 from mqk_research.ml.economic_walkforward import (
     SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
@@ -641,14 +646,96 @@ def _load_paper_credentials_into_env() -> None:
         raise RuntimeError(f"Fail-closed: required credential(s) not found in {env_path}: {missing}")
 
 
+def verify_wave03_bars_cache_authority(bars: pd.DataFrame, manifest: dict) -> None:
+    """R2 (WAVE03-CACHE-AUTHORITY-REPAIR-01): fail-closed verification that a
+    persisted raw_bars.csv/bars_provenance_manifest.json pair actually
+    describes THIS Wave-03 run's frozen identity (PREDECLARED_WAVE.json
+    "cache_safety": provider, feed, adjustment, asof, requested window,
+    frozen seed universe, corporate-action evidence, canonical semantic
+    bars hash) before any derived artifact (targets/features) may be
+    computed from it. Reuses existing production verification seams
+    (mqk_research.data.bars_provenance) rather than inventing a second
+    competing bars hash:
+      - require_registered_bars_provenance: manifest-SHAPE structural gate
+        (known price convention, real CA policy, supported universe mode).
+      - require_bars_match_manifest: CONTENT-BINDING preflight -- the bars
+        actually on disk recompute to the manifest's own declared canonical
+        semantic hash, symbol universe, and timestamp range (catches a
+        stale/wrong manifest paired with different bars).
+      - check_corporate_action_integrity: the manifest's adjusted-data /
+        forbid-affected-periods claim is independently verified, not merely
+        asserted.
+    Then binds the verified manifest to Wave-03's OWN frozen identity
+    (timeframe/window/seed-universe/feed/asof) -- the three checks above
+    only prove internal manifest/bars consistency, not that this is the
+    RIGHT extraction for this wave. Raises (never silently reuses) on any
+    mismatch -- no existence-only cache reuse."""
+    require_registered_bars_provenance(manifest)
+    require_bars_match_manifest(bars, manifest)
+    check_corporate_action_integrity(bars, manifest)
+
+    manifest_timeframe = manifest.get("timeframe")
+    if manifest_timeframe != TIMEFRAME:
+        raise RuntimeError(
+            f"Fail-closed: cached Wave-03 bars manifest timeframe={manifest_timeframe!r} != frozen "
+            f"timeframe {TIMEFRAME!r}"
+        )
+    manifest_start = pd.Timestamp(manifest.get("start_utc"))
+    manifest_end = pd.Timestamp(manifest.get("end_utc"))
+    if manifest_start != START_UTC or manifest_end != END_UTC:
+        raise RuntimeError(
+            f"Fail-closed: cached Wave-03 bars manifest window [{manifest_start}, {manifest_end}) != "
+            f"frozen window [{START_UTC}, {END_UTC})"
+        )
+
+    expected_symbols = sorted({str(s).strip().upper() for s in seed_symbols()})
+    actual_symbols = list(manifest.get("symbol_universe") or [])
+    if actual_symbols != expected_symbols:
+        raise RuntimeError(
+            "Fail-closed: cached Wave-03 bars manifest symbol_universe does not equal the frozen "
+            f"seed universe (manifest has {len(actual_symbols)} symbols, frozen seed has "
+            f"{len(expected_symbols)})"
+        )
+
+    attestation = manifest.get("source_attestation") or {}
+    if attestation.get("feed") != FEED:
+        raise RuntimeError(
+            f"Fail-closed: cached Wave-03 bars source_attestation feed={attestation.get('feed')!r} != "
+            f"frozen feed {FEED!r}"
+        )
+    if attestation.get("asof") != ASOF:
+        raise RuntimeError(
+            f"Fail-closed: cached Wave-03 bars source_attestation asof={attestation.get('asof')!r} != "
+            f"frozen asof {ASOF!r}"
+        )
+
+
 def ensure_bars() -> tuple[pd.DataFrame, dict]:
-    """Fetch (or reuse this run's own prior fetch of) real Alpaca bars,
-    feed=sip, for the frozen seed universe/window/asof. Cache reuse follows
-    the CACHE SAFETY policy in PREDECLARED_WAVE.json -- fail closed unless
-    exact manifest verification passes; this stub always fetches fresh
-    since no verified-cache implementation exists yet in this controller
-    (see mission "CACHE SAFETY REPAIR FROM WAVE-02 LESSON" -- no
-    existence-only cache path)."""
+    """Fetch, or reuse this run's own prior fetch of, real Alpaca bars,
+    feed=sip, for the frozen seed universe/window/asof. R2
+    (WAVE03-CACHE-AUTHORITY-REPAIR-01): a persisted raw_bars.csv/
+    bars_provenance_manifest.json pair is reused ONLY after
+    verify_wave03_bars_cache_authority passes fail-closed verification --
+    never on existence alone. A partial cache (one file present, the other
+    missing) fails closed rather than being silently treated as either
+    'no cache' or 'valid cache'."""
+    bars_path = RUN_ROOT / "raw_bars.csv"
+    manifest_path = RUN_ROOT / "bars_provenance_manifest.json"
+    bars_present = bars_path.exists()
+    manifest_present = manifest_path.exists()
+    if bars_present != manifest_present:
+        raise RuntimeError(
+            "Fail-closed: orphan Wave-03 bars cache artifact -- "
+            f"{bars_path.name} present={bars_present}, {manifest_path.name} present={manifest_present}; "
+            "refusing to reuse a partial cache"
+        )
+
+    if bars_present and manifest_present:
+        on_disk_bars = pd.read_csv(bars_path)
+        on_disk_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        verify_wave03_bars_cache_authority(on_disk_bars, on_disk_manifest)
+        return on_disk_bars, on_disk_manifest
+
     from mqk_research.data.alpaca_historical import extract_research_bars_with_provenance
 
     _load_paper_credentials_into_env()
@@ -656,9 +743,8 @@ def ensure_bars() -> tuple[pd.DataFrame, dict]:
         symbols=seed_symbols(), start_utc=START_UTC, end_utc=END_UTC,
         timeframe=TIMEFRAME, asof=ASOF, feed=FEED,
     )
+    verify_wave03_bars_cache_authority(result["bars"], result["manifest"])
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
-    bars_path = RUN_ROOT / "raw_bars.csv"
-    manifest_path = RUN_ROOT / "bars_provenance_manifest.json"
     result["bars"].to_csv(bars_path, index=False)
     manifest_path.write_text(json.dumps(result["manifest"], sort_keys=True, indent=2, default=str), encoding="utf-8")
     return result["bars"], result["manifest"]
@@ -702,22 +788,26 @@ def build_targets(bars: pd.DataFrame, *, horizon_bars: int, ret_threshold: float
 
 
 def ensure_real_targets(bars: pd.DataFrame) -> pd.DataFrame:
-    cached = RUN_ROOT / "real_targets.csv"
-    if cached.exists():
-        return pd.read_csv(cached)
+    """R2 (WAVE03-CACHE-AUTHORITY-REPAIR-01): deliberately NOT
+    existence-cached -- unlike bars (which carry an independently
+    verifiable provenance manifest), no equivalently strong content-binding
+    exists for a bare targets.csv on disk, so the fastest safe design is to
+    always recompute deterministically from the already-verified in-memory
+    `bars` this call was given (never re-reading a possibly-stale file from
+    a prior/different bars snapshot). Still written to disk for audit."""
     targets = build_targets(bars, horizon_bars=LABEL_HORIZON_BARS, ret_threshold=LABEL_RET_THRESHOLD)
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
-    targets.to_csv(cached, index=False)
+    targets.to_csv(RUN_ROOT / "real_targets.csv", index=False)
     return targets
 
 
 def ensure_placebo_targets(real_targets: pd.DataFrame) -> pd.DataFrame:
-    cached = RUN_ROOT / "placebo_targets.csv"
-    if cached.exists():
-        return pd.read_csv(cached)
+    """R2: see ensure_real_targets -- always recomputed from the
+    already-verified `real_targets` this call was given, never
+    existence-cached."""
     placebo = build_causal_placebo_targets(real_targets, seed=PLACEBO_SEED)
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
-    placebo.to_csv(cached, index=False)
+    placebo.to_csv(RUN_ROOT / "placebo_targets.csv", index=False)
     return placebo
 
 
@@ -725,13 +815,12 @@ def ensure_full_features(bars: pd.DataFrame) -> pd.DataFrame:
     """DEFAULT FeatureSetV1Spec already produces ret_rank_20 (default
     cross_section_windows=(5,20)), ret_5 (default ret_windows includes 5),
     and gap_pct_1 (always computed) -- no spec customization required (see
-    SHORT-WAVE-02's identical observation)."""
-    cached = RUN_ROOT / "full_features.csv"
-    if cached.exists():
-        return pd.read_csv(cached)
+    SHORT-WAVE-02's identical observation). R2: see ensure_real_targets --
+    always recomputed from the already-verified in-memory `bars`, never
+    existence-cached."""
     feats = build_feature_set_v1(bars)
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
-    feats.to_csv(cached, index=False)
+    feats.to_csv(RUN_ROOT / "full_features.csv", index=False)
     return feats
 
 

@@ -105,15 +105,6 @@ def test_seed_symbols_never_calls_live_registry_builder() -> None:
     assert "build_current_enabled_equity_registry_snapshot" not in body
 
 
-def test_ensure_bars_has_no_existence_only_cache_reuse() -> None:
-    source = (EXPERIMENT_ROOT / "run_wave.py").read_text(encoding="utf-8")
-    start = source.index("def ensure_bars(")
-    end = source.index("\ndef ", start + 1)
-    body = source[start:end]
-    assert "cached_bars" not in body
-    assert ".exists()" not in body
-
-
 # ---------------------------------------------------------------------------
 # 3. Required-output-recording-field helpers
 # ---------------------------------------------------------------------------
