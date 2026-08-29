@@ -109,6 +109,7 @@ fn minimal_snapshot(ts: i64) -> BrokerSnapshot {
             r#type: "market".to_string(),
             status: "accepted".to_string(),
             qty: "5".to_string(),
+            filled_qty: "0".to_string(),
             limit_price: None,
             stop_price: None,
             created_at_utc: DateTime::from_timestamp(ts, 0).expect("valid ts"),

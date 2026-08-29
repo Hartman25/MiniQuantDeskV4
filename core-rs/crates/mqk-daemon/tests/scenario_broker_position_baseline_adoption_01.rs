@@ -63,6 +63,7 @@ fn fake_broker_snapshot_with_open_order() -> mqk_schemas::BrokerSnapshot {
             r#type: "market".to_string(),
             status: "accepted".to_string(),
             qty: "1".to_string(),
+            filled_qty: "0".to_string(),
             limit_price: None,
             stop_price: None,
             created_at_utc: chrono::Utc::now(),

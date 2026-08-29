@@ -1329,6 +1329,7 @@ async fn gui_contract_portfolio_open_orders_active_snapshot() {
             r#type: "market".to_string(),
             status: "new".to_string(),
             qty: "5".to_string(),
+            filled_qty: "0".to_string(),
             limit_price: None,
             stop_price: None,
             created_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
@@ -1803,6 +1804,10 @@ async fn gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows()
             r#type: "limit".to_string(),
             status: "partially_filled".to_string(),
             qty: "80".to_string(),
+            // Deliberately 0, not a fabricated default: this preserves the
+            // pre-F1 test scenario as a GENUINE broker-reported filled_qty
+            // drift against local filled_qty=20 (see assertion below).
+            filled_qty: "0".to_string(),
             limit_price: Some("900.00".to_string()),
             stop_price: None,
             created_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),

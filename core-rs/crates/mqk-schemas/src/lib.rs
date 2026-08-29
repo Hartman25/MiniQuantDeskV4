@@ -34,6 +34,11 @@ pub struct BrokerOrder {
     pub r#type: String,
     pub status: String,
     pub qty: String,
+    /// Cumulative filled quantity as reported by the broker, verbatim
+    /// (F1-RECONCILE-FILLED-QTY-WIRING-01). Never fabricated — a snapshot
+    /// producer that cannot represent the actual broker-reported value must
+    /// fail closed rather than default this to `"0"`.
+    pub filled_qty: String,
     pub limit_price: Option<String>,
     pub stop_price: Option<String>,
     pub created_at_utc: DateTime<Utc>,

@@ -413,6 +413,13 @@ pub struct AlpacaOpenOrderRaw {
     pub status: String,
     /// Total order quantity as a decimal string.
     pub qty: String,
+    /// Cumulative filled quantity as a decimal string (F1: preserved verbatim
+    /// through normalization into `mqk_schemas::BrokerOrder.filled_qty` so
+    /// reconcile compares real broker-reported fill state, never a fabricated
+    /// zero). Alpaca returns this field on every order object; it is not
+    /// optional here because a missing value would be silent broker-truth
+    /// loss, not a legitimate absent-field case.
+    pub filled_qty: String,
     /// Limit price as a decimal string. `None` for non-limit orders.
     pub limit_price: Option<String>,
     /// Stop price as a decimal string. `None` for non-stop orders.

@@ -221,6 +221,7 @@ pub(crate) fn synthesize_paper_broker_snapshot(
                 r#type: "market".to_string(),
                 status: oms_state_to_broker_status(&order.state).to_string(),
                 qty: order.total_qty.to_string(),
+                filled_qty: order.filled_qty.to_string(),
                 limit_price: None,
                 stop_price: None,
                 created_at_utc: now,
@@ -290,6 +291,7 @@ pub(crate) fn synthesize_broker_snapshot_from_execution(
                 r#type: "market".to_string(),
                 status: order.status.to_ascii_lowercase(),
                 qty: order.total_qty.to_string(),
+                filled_qty: order.filled_qty.to_string(),
                 limit_price: None,
                 stop_price: None,
                 created_at_utc: now,
@@ -345,6 +347,14 @@ pub(crate) fn reconcile_broker_snapshot_from_schema(
         let qty = parse_signed_qty(&order.qty).ok_or(
             "broker snapshot contains non-integer order qty; refusing ambiguous broker truth",
         )?;
+        // F1-RECONCILE-FILLED-QTY-WIRING-01: the broker-reported filled_qty
+        // must flow through untouched. `parse_signed_qty` rejects fractional
+        // shares (e.g. "1.5") and malformed strings, so a broker value that
+        // cannot be represented under the whole-share reconcile contract
+        // fails the whole snapshot closed rather than silently becoming 0.
+        let filled_qty = parse_signed_qty(&order.filled_qty).ok_or(
+            "broker snapshot contains non-integer order filled_qty; refusing ambiguous broker truth",
+        )?;
         let order_id = if order.client_order_id.trim().is_empty() {
             order.broker_order_id.clone()
         } else {
@@ -357,7 +367,7 @@ pub(crate) fn reconcile_broker_snapshot_from_schema(
                 order.symbol.clone(),
                 reconcile_side_from_schema(&order.side),
                 qty,
-                0,
+                filled_qty,
                 reconcile_order_status_from_schema(&order.status),
             ),
         );
@@ -3071,5 +3081,151 @@ mod fill_economic_authority_closure_tests {
             assert!(msg.contains("UNKNOWN_ORDER_FILL"), "error must be UNKNOWN_ORDER_FILL: {msg}");
         })
         .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F1-RECONCILE-FILLED-QTY-WIRING-01 unit tests
+//
+// Root cause: `reconcile_broker_snapshot_from_schema` fabricated a literal
+// `0` for every order's `filled_qty` instead of parsing the real
+// broker-reported value now carried on `mqk_schemas::BrokerOrder`. These
+// tests exercise the REAL production conversion function plus the REAL
+// `mqk_reconcile::reconcile` engine end-to-end, so a regression back to a
+// fabricated zero fails F1-T5 (genuine drift goes undetected) even though
+// F1-T4/F1-T6 would still pass.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod f1_filled_qty_wiring_tests {
+    use super::reconcile_broker_snapshot_from_schema;
+    use chrono::{TimeZone, Utc};
+    use mqk_reconcile::{reconcile, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, ReconcileDiff, Side};
+    use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
+
+    fn schema_order(qty: &str, filled_qty: &str, status: &str) -> BrokerOrder {
+        BrokerOrder {
+            broker_order_id: "brk-1".to_string(),
+            client_order_id: "ord-1".to_string(),
+            symbol: "AAPL".to_string(),
+            side: "buy".to_string(),
+            r#type: "market".to_string(),
+            status: status.to_string(),
+            qty: qty.to_string(),
+            filled_qty: filled_qty.to_string(),
+            limit_price: None,
+            stop_price: None,
+            created_at_utc: Utc.with_ymd_and_hms(2024, 1, 15, 9, 30, 0).unwrap(),
+        }
+    }
+
+    fn schema_snapshot(order: BrokerOrder) -> BrokerSnapshot {
+        BrokerSnapshot {
+            captured_at_utc: Utc.with_ymd_and_hms(2024, 1, 15, 9, 30, 5).unwrap(),
+            account: BrokerAccount {
+                equity: "100000".to_string(),
+                cash: "100000".to_string(),
+                currency: "USD".to_string(),
+            },
+            positions: vec![],
+            orders: vec![order],
+            fills: vec![],
+        }
+    }
+
+    // F1-T3: daemon reconciliation normalization preserves the real broker
+    // filled_qty through the production conversion seam.
+    #[test]
+    fn f1_t3_daemon_normalization_preserves_filled_qty() {
+        let snap = schema_snapshot(schema_order("10", "4", "partially_filled"));
+        let reconcile_snap =
+            reconcile_broker_snapshot_from_schema(&snap).expect("valid snapshot must convert");
+        let order = reconcile_snap.orders.get("ord-1").expect("order must be present");
+        assert_eq!(order.qty, 10);
+        assert_eq!(order.filled_qty, 4, "filled_qty must be the real broker value, not a fabricated zero");
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+    }
+
+    // F1-T4: matching resting partial fill produces no filled_qty drift.
+    #[test]
+    fn f1_t4_matching_partial_fill_is_clean() {
+        let mut local = LocalSnapshot::empty();
+        local.orders.insert(
+            "ord-1".to_string(),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 10, 4, OrderStatus::PartiallyFilled),
+        );
+        let schema_snap = schema_snapshot(schema_order("10", "4", "partially_filled"));
+        let broker = reconcile_broker_snapshot_from_schema(&schema_snap).expect("valid snapshot must convert");
+
+        let report = reconcile(&local, &broker);
+        assert_eq!(report.action, ReconcileAction::Clean, "matching filled_qty must not drift: {:?}", report.diffs);
+        assert!(
+            !report.diffs.iter().any(|d| matches!(d, ReconcileDiff::OrderMismatch { field, .. } if field == "filled_qty")),
+            "no filled_qty OrderMismatch expected: {:?}", report.diffs
+        );
+    }
+
+    // F1-T5: genuine filled-quantity drift (local=4, broker=5) must be
+    // detected and fail closed -- this is the negative control that a
+    // fabricated-zero regression would silently defeat.
+    #[test]
+    fn f1_t5_genuine_filled_qty_drift_halts() {
+        let mut local = LocalSnapshot::empty();
+        local.orders.insert(
+            "ord-1".to_string(),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 10, 4, OrderStatus::PartiallyFilled),
+        );
+        let schema_snap = schema_snapshot(schema_order("10", "5", "partially_filled"));
+        let broker = reconcile_broker_snapshot_from_schema(&schema_snap).expect("valid snapshot must convert");
+
+        let report = reconcile(&local, &broker);
+        assert_eq!(report.action, ReconcileAction::Halt, "genuine filled_qty drift must halt: {:?}", report.diffs);
+        assert!(
+            report.diffs.iter().any(|d| matches!(
+                d,
+                ReconcileDiff::OrderMismatch { field, local, broker, .. }
+                    if field == "filled_qty" && local == "4" && broker == "5"
+            )),
+            "expected OrderMismatch(filled_qty, local=4, broker=5): {:?}", report.diffs
+        );
+    }
+
+    // F1-T6: ordinary zero-fill order remains unchanged/valid behavior.
+    #[test]
+    fn f1_t6_ordinary_zero_fill_order_is_clean() {
+        let mut local = LocalSnapshot::empty();
+        local.orders.insert(
+            "ord-1".to_string(),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 10, 0, OrderStatus::Accepted),
+        );
+        let schema_snap = schema_snapshot(schema_order("10", "0", "accepted"));
+        let broker = reconcile_broker_snapshot_from_schema(&schema_snap).expect("valid snapshot must convert");
+
+        let report = reconcile(&local, &broker);
+        assert_eq!(report.action, ReconcileAction::Clean, "zero-fill order must remain clean: {:?}", report.diffs);
+    }
+
+    // F1-T7: malformed broker filled_qty must fail closed, not panic and not
+    // fabricate a zero.
+    #[test]
+    fn f1_t7_malformed_filled_qty_fails_closed() {
+        let snap = schema_snapshot(schema_order("10", "not-a-number", "partially_filled"));
+        let result = reconcile_broker_snapshot_from_schema(&snap);
+        assert!(
+            result.is_err(),
+            "malformed broker filled_qty must be rejected, not silently defaulted"
+        );
+    }
+
+    // F1-T8: fractional broker filled_qty fails closed under the whole-share
+    // reconcile contract.
+    #[test]
+    fn f1_t8_fractional_filled_qty_fails_closed() {
+        let snap = schema_snapshot(schema_order("10", "1.5", "partially_filled"));
+        let result = reconcile_broker_snapshot_from_schema(&snap);
+        assert!(
+            result.is_err(),
+            "fractional broker filled_qty must be rejected under the whole-share contract"
+        );
     }
 }

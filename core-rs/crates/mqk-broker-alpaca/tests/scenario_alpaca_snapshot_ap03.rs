@@ -93,6 +93,7 @@ fn make_order_raw(limit_price: Option<&str>, stop_price: Option<&str>) -> Alpaca
         order_type: "limit".to_string(),
         status: "new".to_string(),
         qty: "200".to_string(),
+        filled_qty: "0".to_string(),
         limit_price: limit_price.map(str::to_string),
         stop_price: stop_price.map(str::to_string),
         created_at: "2024-01-15T09:30:00Z".to_string(),
@@ -149,6 +150,46 @@ fn n3_open_order_fractional_second_timestamp() {
     assert_eq!(order.created_at_utc.date_naive().year(), 2024);
     assert_eq!(order.created_at_utc.date_naive().month(), 6);
     assert_eq!(order.created_at_utc.date_naive().day(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// F1 — filled_qty wiring (F1-RECONCILE-FILLED-QTY-WIRING-01)
+// ---------------------------------------------------------------------------
+
+// F1-T1: Alpaca wire deserialization preserves filled_qty as a distinct
+// decimal string from qty.
+#[test]
+fn f1_t1_alpaca_wire_deserialization_preserves_filled_qty() {
+    let json = r#"{
+        "id": "broker-uuid-001",
+        "client_order_id": "client-uuid-abc",
+        "symbol": "MSFT",
+        "side": "buy",
+        "type": "limit",
+        "status": "partially_filled",
+        "qty": "10",
+        "filled_qty": "4",
+        "limit_price": null,
+        "stop_price": null,
+        "created_at": "2024-01-15T09:30:00Z"
+    }"#;
+    let raw: AlpacaOpenOrderRaw =
+        serde_json::from_str(json).expect("valid AlpacaOpenOrderRaw JSON must deserialize");
+    assert_eq!(raw.qty, "10");
+    assert_eq!(raw.filled_qty, "4");
+}
+
+// F1-T2: normalize_open_order preserves filled_qty verbatim into BrokerOrder,
+// distinct from qty.
+#[test]
+fn f1_t2_normalize_open_order_preserves_filled_qty() {
+    let mut raw = make_order_raw(None, None);
+    raw.qty = "10".to_string();
+    raw.filled_qty = "4".to_string();
+    raw.status = "partially_filled".to_string();
+    let order = normalize_open_order(&raw).expect("valid order must normalize");
+    assert_eq!(order.qty, "10");
+    assert_eq!(order.filled_qty, "4");
 }
 
 // ---------------------------------------------------------------------------

@@ -87,6 +87,7 @@ pub fn normalize_open_order(raw: &AlpacaOpenOrderRaw) -> Result<BrokerOrder, Bro
         r#type: raw.order_type.clone(),
         status: raw.status.clone(),
         qty: raw.qty.clone(),
+        filled_qty: raw.filled_qty.clone(),
         limit_price: raw.limit_price.clone(),
         stop_price: raw.stop_price.clone(),
         created_at_utc,
