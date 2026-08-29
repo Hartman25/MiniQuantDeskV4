@@ -240,8 +240,6 @@ def test_execution_requires_explicit_authorization() -> None:
         run_wave.run_family("RANK-01")
     with pytest.raises(NotImplementedError):
         run_wave.run_family_judge()
-    with pytest.raises(NotImplementedError):
-        run_wave.build_dynamic_rankable_benchmark()
 
 
 # ---------------------------------------------------------------------------

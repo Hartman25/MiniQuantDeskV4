@@ -113,6 +113,7 @@ if not _wave03_resolved_mqk_research.is_relative_to(WAVE03_LOCAL_SRC):
 import numpy as np
 import pandas as pd
 
+from mqk_research.features.feature_set_v1 import build_feature_set_v1
 from mqk_research.ml.economic_walkforward import (
     SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
     SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_SHORT_V1,
@@ -121,12 +122,16 @@ from mqk_research.ml.economic_walkforward import (
     CostModelSpec,
     EconomicWalkForwardSpec,
     SignalPolicySpec,
+    load_oos_predictions,
 )
+from mqk_research.ml.economic_registry_integration import run_registered_economic_walkforward_eval
+from mqk_research.ml.economics import compute_max_drawdown, compute_sharpe
 from mqk_research.ml.eval_walkforward import WalkForwardSpec
 from mqk_research.ml.execution_pricing import (
     EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
     ExecutionPricingSpec,
 )
+from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge
 from mqk_research.ml.schema import generate_feature_schema
 from mqk_research.ml.weight_to_share import WeightToShareSpec
 
@@ -376,18 +381,174 @@ def signal_policy_for(direction: str) -> SignalPolicySpec:
     raise ValueError(f"unknown direction policy key: {direction!r}")
 
 
-def build_dynamic_rankable_benchmark(*args: Any, **kwargs: Any) -> dict:
-    """Predeclared formula only (see PREDECLARED_WAVE.json "benchmark") --
-    intentionally NOT implemented by this predeclaration controller. Per
-    the mission: implementing/validating this against real fold-reset
-    dates is the separately-reviewed Wave-03 RUN mission's job; inventing
-    it here, unreviewed and untested, would risk exactly the "invent a
-    benchmark after seeing returns" failure mode the mission forbids."""
-    raise NotImplementedError(
-        "build_dynamic_rankable_benchmark is predeclared (formula in PREDECLARED_WAVE.json "
-        "'benchmark') but deliberately not implemented in this controller -- implement and "
-        "review it in the separate Wave-03 RUN mission before any real trial executes."
-    )
+def economic_fold_date_authority(economic_returns_csv: Path) -> dict:
+    """Exact reproduction of SHORT-WAVE-02's own inlined helper (same
+    portability convention as build_causal_placebo_targets -- see module
+    docstring). Maps every economic-return date to its owning fold and
+    records each fold's reset (first) date, failing closed on any date
+    mapped to more than one fold."""
+    econ = pd.read_csv(economic_returns_csv)
+    if "fold" not in econ.columns or "timestamp" not in econ.columns:
+        raise RuntimeError(f"Fail-closed: {economic_returns_csv} missing required 'fold'/'timestamp' column(s)")
+    econ = econ.copy()
+    econ["date"] = pd.to_datetime(econ["timestamp"], utc=True).dt.strftime("%Y-%m-%d")
+    fold_sets_by_date = econ.groupby("date")["fold"].agg(lambda s: sorted(set(s)))
+    ambiguous = {d: fs for d, fs in fold_sets_by_date.items() if len(fs) != 1}
+    if ambiguous:
+        raise RuntimeError(
+            f"Fail-closed: date(s) mapped to more than one economic fold in "
+            f"{economic_returns_csv}: {dict(list(ambiguous.items())[:5])}"
+        )
+    fold_of_date = fold_sets_by_date.map(lambda fs: fs[0])
+    reset_dates = set(fold_of_date.reset_index().groupby("fold")["date"].min().tolist())
+    return {"date_set": set(fold_of_date.index.tolist()), "reset_dates": reset_dates}
+
+
+def rankable_set_by_date(oos_predictions_csv: Path) -> dict[str, set[str]]:
+    """RANKABLE_SET(T) per calendar date, read directly from one family's
+    own test-fold OOS prediction rows (mqk_research.ml.economic_walkforward.
+    load_oos_predictions -- the SAME production loader the real economic
+    simulator uses to resolve, per exact decision_ts, which symbols were
+    actually scored; see _build_rank_pending_events's "DYNAMIC CROSS-SECTION
+    V1" docstring). A symbol is rankable on date d iff it has a row whose
+    decision_ts falls on d -- membership is exactly whatever this file says
+    at that exact row: no carry-forward of a stale prior date's membership,
+    no backfilling a later-listed symbol into an earlier date, no synthetic
+    default. One family's long-only and long-short real trials share
+    byte-identical classification inputs (same features.csv/targets.csv,
+    same model) and therefore the same OOS predictions file -- callers pass
+    either trial's copy interchangeably.
+
+    Fails closed if the same symbol is scored more than once on the same
+    calendar date (would only happen if two folds' test windows overlapped
+    on that date, which _parse_used_folds already forbids upstream -- this
+    is defense-in-depth on the primitive actually under test here)."""
+    oos = load_oos_predictions(oos_predictions_csv)
+    oos = oos.copy()
+    oos["date"] = oos["decision_ts"].dt.strftime("%Y-%m-%d")
+    dup_mask = oos.duplicated(subset=["date", "symbol"], keep=False)
+    if dup_mask.any():
+        dups = sorted(set(zip(oos.loc[dup_mask, "date"], oos.loc[dup_mask, "symbol"])))
+        raise RuntimeError(
+            f"Fail-closed: symbol scored more than once on the same calendar date in "
+            f"{oos_predictions_csv}: {dups[:5]}"
+        )
+    by_date: dict[str, set[str]] = {}
+    for d, group in oos.groupby("date", sort=True):
+        by_date[str(d)] = set(group["symbol"].astype(str))
+    return by_date
+
+
+def build_dynamic_rankable_benchmark(
+    bars: pd.DataFrame,
+    oos_predictions_csv: Path,
+    economic_returns_csv: Path,
+    reference_dates: list[str],
+    holdout_start_utc: str,
+) -> dict:
+    """WAVE03-DYNAMIC-RANKABLE-BENCHMARK-01: family-specific dynamic
+    equal-weight benchmark (see PREDECLARED_WAVE.json "benchmark"). At each
+    economic decision date T, equal-weights EXACTLY RANKABLE_SET(T) --
+    the symbols with a causally valid OOS ml_score for this family at that
+    exact decision timestamp (rankable_set_by_date, above) -- never a fixed
+    universe, never future membership, never a stale carried-forward
+    selection. Fold-reset semantics mirror SHORT-WAVE-02's
+    build_fold_reset_benchmark convention exactly: each fold's reset date is
+    forced to a 0.0 return, and the reference date set must equal the
+    economic fold-date authority's own date set exactly (economic_
+    fold_date_authority, fail closed on any mismatch).
+
+    EMPTY RANKABLE SET CONTRACT (explicit, documented, tested): a reference
+    date whose RANKABLE_SET(T) is empty (or whose rankable symbols have no
+    usable daily_ret observation that date) produces NO return observation
+    for that date -- it is recorded in `dates_with_no_return_observation`
+    and excluded from the cumulative/Sharpe/drawdown computation, exactly
+    like SHORT-WAVE-02's own missing-date handling. It is NOT an error by
+    itself (a real family can legitimately have zero rankable symbols on a
+    date before the underlying model has enough OOS coverage) and it is
+    NEVER silently defaulted to a 0.0 return -- only a genuine fold-reset
+    date is forced to 0.0, and that is a distinct, unrelated convention
+    checked by symbol/date identity, never by emptiness.
+
+    HOLDOUT SAFETY: every `reference_dates` entry must fall strictly before
+    `holdout_start_utc` (fail closed otherwise, mirroring SHORT-WAVE-02); the
+    function only ever reads `bars`/`oos_predictions_csv` rows whose date is
+    in `reference_dates`, so a holdout-region row is structurally never
+    touched even though `bars` and the OOS predictions file may span dates
+    beyond it."""
+    ref_ts = pd.to_datetime(pd.Index(reference_dates), utc=True)
+    holdout_ts = pd.Timestamp(holdout_start_utc)
+    if holdout_ts.tzinfo is None:
+        holdout_ts = holdout_ts.tz_localize("UTC")
+    if (ref_ts >= holdout_ts).any():
+        bad = sorted(str(d) for d in ref_ts[ref_ts >= holdout_ts])
+        raise RuntimeError(
+            f"Fail-closed: {len(bad)} benchmark reference date(s) fall at/after the reserved holdout "
+            f"boundary ({holdout_ts.isoformat()}): {bad[:5]}{'...' if len(bad) > 5 else ''}"
+        )
+
+    authority = economic_fold_date_authority(economic_returns_csv)
+    economic_date_set = authority["date_set"]
+    fold_start_dates = authority["reset_dates"]
+    reference_date_set = set(pd.Index(reference_dates).astype(str))
+    if reference_date_set != economic_date_set:
+        only_reference = sorted(reference_date_set - economic_date_set)
+        only_economic = sorted(economic_date_set - reference_date_set)
+        raise RuntimeError(
+            f"Fail-closed: reference date(s) and economic fold-authority date(s) in "
+            f"{economic_returns_csv} are not identical -- "
+            f"reference_only={only_reference[:5]} economic_only={only_economic[:5]}"
+        )
+
+    rankable = rankable_set_by_date(oos_predictions_csv)
+
+    b = bars.copy()
+    b["end_ts"] = pd.to_datetime(b["end_ts"], utc=True)
+    b = b.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+    b["date"] = b["end_ts"].dt.strftime("%Y-%m-%d")
+    b["daily_ret"] = b.groupby("symbol")["close"].pct_change()
+
+    sorted_dates = sorted(reference_date_set)
+    cross_section_size: dict[str, int] = {}
+    per_date: dict[str, float] = {}
+    for d in sorted_dates:
+        syms = rankable.get(d, set())
+        cross_section_size[d] = len(syms)
+        if not syms:
+            per_date[d] = float("nan")
+            continue
+        day_rets = b.loc[(b["date"] == d) & (b["symbol"].isin(syms)), "daily_ret"].dropna()
+        per_date[d] = float(day_rets.mean()) if len(day_rets) else float("nan")
+
+    per_date_series = pd.Series(per_date).reindex(sorted_dates)
+    for d in fold_start_dates & reference_date_set:
+        per_date_series.loc[d] = 0.0
+
+    missing_dates = sorted(d for d in sorted_dates if pd.isna(per_date_series.loc[d]))
+    daily_series = per_date_series.dropna()
+    cumulative_return = float(np.prod(1.0 + daily_series.to_numpy()) - 1.0) if len(daily_series) else None
+    sharpe = compute_sharpe(daily_series) if len(daily_series) else None
+    max_drawdown = compute_max_drawdown(daily_series) if len(daily_series) else None
+
+    sizes = list(cross_section_size.values())
+    return {
+        "benchmark_type": "dynamic_equal_weight_causally_rankable_fold_reset_v1",
+        "reference_date_count": len(reference_dates),
+        "reference_date_start": str(min(reference_dates)),
+        "reference_date_end": str(max(reference_dates)),
+        "fold_reset_dates_count": len(fold_start_dates & reference_date_set),
+        "rankable_cross_section_size_by_date": cross_section_size,
+        "rankable_cross_section_min": min(sizes) if sizes else 0,
+        "rankable_cross_section_median": float(np.median(sizes)) if sizes else None,
+        "rankable_cross_section_max": max(sizes) if sizes else 0,
+        "dates_with_zero_rankable_symbols": sorted(d for d, n in cross_section_size.items() if n == 0),
+        "dates_with_no_return_observation": missing_dates,
+        "daily_return_observations_used": int(len(daily_series)),
+        "cumulative_return_over_reference_dates": cumulative_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+        "holdout_start_utc": holdout_ts.isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------
