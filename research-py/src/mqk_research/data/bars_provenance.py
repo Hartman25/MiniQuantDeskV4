@@ -119,7 +119,33 @@ _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION: FrozenSet[str] = frozenset(_CONVENTIO
 # source_attestation that can satisfy _CONVENTIONS_REQUIRING_SOURCE_ATTESTATION.
 # Bumping the extractor's contract/logic should mint a new id here (an
 # explicit, auditable change), not silently keep trusting the old one.
-_TRUSTED_EXTRACTOR_IDS: FrozenSet[str] = frozenset({"mqk_research.data.alpaca_historical.v1"})
+_TRUSTED_EXTRACTOR_IDS: FrozenSet[str] = frozenset(
+    {
+        # Historical only (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01): a real
+        # extraction can never mint this id going forward -- it is retained
+        # ONLY so an already-persisted, pre-repair official V1 artifact
+        # remains independently verifiable under its own historical
+        # contract (see _V2_PLUS_EXTRACTOR_IDS / canonical_source_
+        # attestation_content). Do not reinterpret a V1 attestation as V2.
+        "mqk_research.data.alpaca_historical.v1",
+        "mqk_research.data.alpaca_historical.v2",
+    }
+)
+
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01: extractor identities whose
+# attestations bind ca_resolution_policy_id into semantic identity --
+# mirrored here (not imported: alpaca_historical already imports this
+# module, so importing back would be circular) from
+# alpaca_historical.EXTRACTOR_ID / DIAGNOSTIC_EXTRACTOR_ID. A V1 attestation
+# never carried this field; gating on the attestation's OWN declared
+# extractor_id (not a global "current version" flag) means a V1
+# attestation's canonical content -- and therefore its source_attestation_id
+# -- is computed exactly the same way today as it was before this patch,
+# regardless of what NEW attestations now also carry. Kept in sync by
+# test_alpaca_historical.py::test_v2_extractor_ids_match_bars_provenance_mirror.
+_V2_PLUS_EXTRACTOR_IDS: FrozenSet[str] = frozenset(
+    {"mqk_research.data.alpaca_historical.v2", "mqk_research.data.alpaca_historical.diagnostic_v2"}
+)
 
 # BKT-RESEARCH-MARKET-DATA-AUTHORITY-01-REPAIR-01 (Defect 3): a caller-typed
 # extractor_id string alone was found to be an insufficiently strong
@@ -401,8 +427,16 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
     the SEMANTIC subset of `corporate_action_query_coverage` (see
     canonical_ca_query_semantic_content) -- the full coverage dict, including
     its wall-clock ca_discovery_end_utc, remains on the attestation object
-    for audit but no longer participates in identity."""
-    return {
+    for audit but no longer participates in identity.
+
+    BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01: `ca_resolution_policy_id`
+    participates in identity ONLY for a V2+ extractor_id (see
+    _V2_PLUS_EXTRACTOR_IDS) -- a V1 attestation never carried this field, so
+    including it unconditionally would silently recompute a DIFFERENT hash
+    for every already-persisted V1 attestation than what was actually
+    hashed when it was built, breaking backward-compatible verification of
+    historical V1 artifacts (see _TRUSTED_EXTRACTOR_IDS)."""
+    content: Dict[str, Any] = {
         "schema_version": attestation.get("schema_version"),
         "source_provider_id": attestation.get("source_provider_id"),
         "extractor_id": attestation.get("extractor_id"),
@@ -427,6 +461,9 @@ def canonical_source_attestation_content(attestation: Dict[str, Any]) -> Dict[st
         "canonical_corporate_action_evidence_hash": attestation.get("canonical_corporate_action_evidence_hash"),
         "protocol_version": attestation.get("protocol_version"),
     }
+    if attestation.get("extractor_id") in _V2_PLUS_EXTRACTOR_IDS:
+        content["ca_resolution_policy_id"] = attestation.get("ca_resolution_policy_id")
+    return content
 
 
 def source_attestation_id(attestation: Dict[str, Any]) -> str:
@@ -462,6 +499,7 @@ def build_source_attestation(
     canonical_corporate_action_evidence_hash: str,
     retrieval_timestamp_utc: str,
     protocol_version: str = "1",
+    ca_resolution_policy_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Pure assembly of one durable, content-addressed source attestation
     (BKT-RESEARCH-MARKET-DATA-AUTHORITY-01) -- the evidence a trusted
@@ -474,7 +512,19 @@ def build_source_attestation(
     itself refused to produce clean adjusted data; such an attestation
     should never accompany a manifest claiming a usable adjusted_data
     policy in the first place (see
-    mqk_research.data.alpaca_historical.CorporateActionReviewRequired)."""
+    mqk_research.data.alpaca_historical.CorporateActionReviewRequired).
+
+    `ca_resolution_policy_id` (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01,
+    optional/None for backward compatibility) is a content-derived
+    fingerprint of the corporate-action RESOLUTION POLICY actually in force
+    for this extraction (see alpaca_historical.resolution_policy_fingerprint)
+    -- it participates in source_attestation_id ONLY when `extractor_id` is
+    a V2+ identity (see canonical_source_attestation_content /
+    _V2_PLUS_EXTRACTOR_IDS), so that two extractions sharing byte-identical
+    bars and corporate-action evidence but governed by a DIFFERENT
+    resolution policy (a code change to the role-aware rules, or an
+    added/removed/edited reviewed-resolution record) never share a
+    source_attestation_id."""
     attestation: Dict[str, Any] = {
         "schema_version": SOURCE_ATTESTATION_SCHEMA_VERSION,
         "source_provider_id": source_provider_id,
@@ -499,6 +549,7 @@ def build_source_attestation(
         "canonical_corporate_action_evidence_hash": canonical_corporate_action_evidence_hash,
         "protocol_version": protocol_version,
         "retrieval_timestamp_utc": retrieval_timestamp_utc,
+        "ca_resolution_policy_id": ca_resolution_policy_id,
     }
     attestation["attestation_id"] = source_attestation_id(attestation)
     return attestation

@@ -198,6 +198,21 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 # tuple -- see that module's header for why the provider's own opaque
 # event id is deliberately NOT part of the binding. This module contains
 # no symbol-specific branching for any such exception.
+#
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01: the three CA admission/
+# resolution patches above are a SEMANTIC data-authority change -- this
+# extractor now treats some events as non-blocking that V1 always refused.
+# EXTRACTOR_ID / DIAGNOSTIC_EXTRACTOR_ID are bumped from
+# EXTRACTOR_ID_V1_LEGACY to v2/diagnostic_v2 (never minted as v1 again),
+# and resolution_policy_fingerprint binds the actual resolution policy
+# (role-aware rules + reviewed-resolution registry content) into
+# source_attestation_id via a new ca_resolution_policy_id field -- see that
+# function and bars_provenance.canonical_source_attestation_content /
+# _V2_PLUS_EXTRACTOR_IDS. A V1 attestation never carried this field and its
+# canonical content/identity computation is untouched, so an
+# already-persisted V1 artifact remains independently verifiable under its
+# own historical contract (bars_provenance._TRUSTED_EXTRACTOR_IDS still
+# trusts EXTRACTOR_ID_V1_LEGACY) -- never reinterpreted as V2.
 
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
@@ -210,17 +225,37 @@ DEFAULT_TIMEFRAME = "1Day"
 ENV_ALPACA_KEY = "ALPACA_API_KEY_PAPER"
 ENV_ALPACA_SECRET = "ALPACA_API_SECRET_PAPER"
 
-# Trusted, OFFICIAL extraction identity -- the only extractor_id
-# bars_provenance._TRUSTED_EXTRACTOR_IDS accepts. Only
-# extract_research_bars_with_provenance (fixed base URL, real HTTP
-# transport) may mint an attestation carrying this id.
-EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v1"
+# Historical only (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01): the extractor
+# identity every OFFICIAL attestation minted BEFORE this repair carried.
+# This module no longer mints this id anywhere -- it is retained only so
+# bars_provenance._TRUSTED_EXTRACTOR_IDS can still independently verify an
+# already-persisted, pre-repair V1 artifact under its own historical
+# contract. Never reinterpret a V1 attestation as V2.
+EXTRACTOR_ID_V1_LEGACY = "mqk_research.data.alpaca_historical.v1"
 
-# Explicitly UNtrusted diagnostic identity (Defect 3). Minted only by
-# extract_research_bars_with_provenance_diagnostic; never satisfies
+# Trusted, OFFICIAL extraction identity -- the only extractor_id
+# bars_provenance._TRUSTED_EXTRACTOR_IDS accepts for a FRESH extraction.
+# Only extract_research_bars_with_provenance (fixed base URL, real HTTP
+# transport) may mint an attestation carrying this id.
+#
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01: bumped from
+# EXTRACTOR_ID_V1_LEGACY because BKT-RESEARCH-CA-ROLE-AWARE-RESOLUTION-01 /
+# BKT-RESEARCH-CA-REVIEWED-SUCCESSOR-RESOLUTION-01 changed which corporate
+# actions this extractor treats as non-blocking -- a SEMANTIC data-authority
+# change (CLAUDE.md #6) that must change official research source identity
+# even when the underlying OHLC bars are byte-identical to a V1 extraction
+# of the same window. See resolution_policy_fingerprint / bars_provenance.
+# canonical_source_attestation_content's ca_resolution_policy_id handling.
+EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v2"
+
+# Explicitly UNtrusted diagnostic identity (Defect 3), bumped alongside
+# EXTRACTOR_ID (V2-01) for the same reason -- the diagnostic path runs the
+# SAME role-aware/reviewed-resolution logic and should honestly report
+# which policy generation it ran under, even though it can never satisfy
 # bars_provenance._TRUSTED_EXTRACTOR_IDS or SOURCE_AUTHORITY_OFFICIAL_PROVIDER
-# regardless of what transport/base_url a caller injects.
-DIAGNOSTIC_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v1"
+# regardless of what transport/base_url a caller injects. Minted only by
+# extract_research_bars_with_provenance_diagnostic.
+DIAGNOSTIC_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v2"
 
 _ASOF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -370,6 +405,45 @@ CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG = "no_adjustment_required_for_requested_
 CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY = "verified_same_security_continuity"
 
 _MERGER_TYPES: FrozenSet[str] = frozenset({"cash_merger", "stock_merger", "stock_and_cash_merger"})
+
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01: bumped whenever
+# classify_corporate_action_resolution's actual decision logic changes
+# (which raw fields resolve which category) -- the discipline mirrors
+# CA_DISCOVERY_PROTOCOL_V2's existing versioning pattern in this module.
+# Part of resolution_policy_fingerprint, so a future logic change is
+# reflected in official research source identity even if this constant is
+# NOT bumped in the same patch (the reviewed-resolution registry's own
+# resolution_ids still change identity independently) -- but bumping it IS
+# the correct thing to do whenever the merger/name-change contracts
+# themselves change, exactly like EXTRACTOR_ID.
+CA_RESOLUTION_POLICY_VERSION = "role_aware_reviewed_registry_v1"
+
+
+def resolution_policy_fingerprint(
+    *, reviewed_resolutions: Sequence[Dict[str, Any]] = REVIEWED_CA_RESOLUTIONS
+) -> str:
+    """Content-derived fingerprint of the CORPORATE-ACTION RESOLUTION POLICY
+    as a whole (BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01): the policy
+    VERSION (bumped whenever classify_corporate_action_resolution's
+    decision logic itself changes) plus the exact set of types/roles the
+    automated rules cover, plus every reviewed-resolution record actually
+    in force, identified by ITS OWN content-addressed resolution_id (so
+    adding, removing, or editing a reviewed-resolution record changes this
+    fingerprint even if no Python logic changes at all). Threaded into
+    build_source_attestation as ca_resolution_policy_id -- see that
+    function and bars_provenance.canonical_source_attestation_content --
+    so two extractions with byte-identical bars and byte-identical raw
+    corporate-action evidence, but governed by a DIFFERENT resolution
+    policy, never share a source_attestation_id."""
+    return sha256_json(
+        {
+            "policy_version": CA_RESOLUTION_POLICY_VERSION,
+            "covered_by_adjustment_all": sorted(_COVERED_BY_ADJUSTMENT_ALL),
+            "merger_types": sorted(_MERGER_TYPES),
+            "reviewed_resolution_ids": sorted(r["resolution_id"] for r in reviewed_resolutions),
+        }
+    )
+
 
 # Conservative, docs-verified classification for adjustment="all": Alpaca's
 # official documentation states adjustment=all "applies all" of the
@@ -1175,6 +1249,15 @@ def _mint_manifest(neutral: Dict[str, Any], *, extractor_id: str, source_authori
         canonical_semantic_bars_hash=neutral["bars_hash"],
         canonical_corporate_action_evidence_hash=corporate_action_evidence_id(evidence),
         retrieval_timestamp_utc=neutral["retrieval_ts"],
+        # BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01: binds the CA resolution
+        # policy actually in force (role-aware rules + reviewed-resolution
+        # registry) into source identity -- see resolution_policy_fingerprint
+        # and bars_provenance.canonical_source_attestation_content. Applies
+        # to BOTH the official and diagnostic wrappers (both run through
+        # this same _mint_manifest); only the extractor_id gate in
+        # canonical_source_attestation_content decides whether it actually
+        # participates in a given attestation's identity.
+        ca_resolution_policy_id=resolution_policy_fingerprint(),
     )
 
     price_provenance = {

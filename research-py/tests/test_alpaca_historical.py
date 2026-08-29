@@ -1621,3 +1621,95 @@ def test_write_research_extraction_artifacts_writes_expected_files(tmp_path: Pat
 
     loaded = load_bars(paths["bars_csv"])
     assert list(loaded["symbol"].unique()) == ["AAA"]
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01 -- extractor identity bump +
+# resolution_policy_fingerprint. See test_source_attestation.py for the
+# canonical_source_attestation_content-level V1/V2 identity tests.
+# ---------------------------------------------------------------------------
+
+
+def test_extractor_id_bumped_to_v2_never_v1():
+    """Required test 4: a fresh extraction can never claim the V1 identity
+    -- EXTRACTOR_ID is now v2, and EXTRACTOR_ID_V1_LEGACY (kept only for
+    verifying historical artifacts) is a DIFFERENT, distinguishable
+    string."""
+    assert ah.EXTRACTOR_ID == "mqk_research.data.alpaca_historical.v2"
+    assert ah.EXTRACTOR_ID_V1_LEGACY == "mqk_research.data.alpaca_historical.v1"
+    assert ah.EXTRACTOR_ID != ah.EXTRACTOR_ID_V1_LEGACY
+    assert ah.DIAGNOSTIC_EXTRACTOR_ID == "mqk_research.data.alpaca_historical.diagnostic_v2"
+
+
+def test_v2_extractor_ids_match_bars_provenance_mirror():
+    """bars_provenance._V2_PLUS_EXTRACTOR_IDS must stay in sync with this
+    module's actual EXTRACTOR_ID/DIAGNOSTIC_EXTRACTOR_ID -- if either side
+    drifts, ca_resolution_policy_id would either wrongly drop out of a real
+    V2 attestation's identity or wrongly leak into a non-V2 one."""
+    from mqk_research.data import bars_provenance as bp
+
+    assert bp._V2_PLUS_EXTRACTOR_IDS == {ah.EXTRACTOR_ID, ah.DIAGNOSTIC_EXTRACTOR_ID}
+
+
+def test_official_extraction_mints_v2_attestation_with_policy_fingerprint(monkeypatch):
+    http = FakeHttp()
+    _queue_clean_extraction(http)
+    monkeypatch.setattr(ah, "_default_http_get", http)
+    monkeypatch.setattr(ah, "_utc_now", lambda: pd.Timestamp("2026-08-15T00:00:00Z"))
+    result = ah.extract_research_bars_with_provenance(
+        symbols=["AAA"], start_utc=WINDOW_START, end_utc=WINDOW_END, asof=ASOF, credentials=_creds()
+    )
+    attestation = result["manifest"]["source_attestation"]
+    assert attestation["extractor_id"] == ah.EXTRACTOR_ID
+    assert attestation["ca_resolution_policy_id"] == ah.resolution_policy_fingerprint()
+
+
+def test_resolution_policy_fingerprint_changes_with_reviewed_registry_content():
+    """Required test 2: identical policy version/type sets, but a mutated
+    (here: emptied) reviewed-resolution registry -> different policy
+    fingerprint, proving a changed/removed reviewed-resolution record
+    changes official source identity even with no other code change."""
+    default_fp = ah.resolution_policy_fingerprint()
+    empty_registry_fp = ah.resolution_policy_fingerprint(reviewed_resolutions=())
+    assert default_fp != empty_registry_fp
+
+    # Editing a record's content (even leaving the registry the same length)
+    # changes its own resolution_id, and therefore the aggregate fingerprint.
+    from mqk_research.data.ca_reviewed_resolutions import RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY, build_reviewed_resolution
+
+    edited_record = build_reviewed_resolution(
+        source_provider_id="alpaca", action_type="reorganization", requested_symbol="DKNG",
+        requested_role="primary", process_date="2022-05-06",  # one day off from the real record
+        resolution=RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY,
+        evidence_summary="edited fixture", primary_source_references=("ref",),
+    )
+    edited_registry_fp = ah.resolution_policy_fingerprint(reviewed_resolutions=(edited_record,))
+    assert edited_registry_fp != default_fp
+    assert edited_registry_fp != empty_registry_fp
+
+
+def test_resolution_policy_fingerprint_deterministic_and_order_independent():
+    fp_a = ah.resolution_policy_fingerprint(reviewed_resolutions=ah.REVIEWED_CA_RESOLUTIONS)
+    fp_b = ah.resolution_policy_fingerprint(reviewed_resolutions=tuple(reversed(ah.REVIEWED_CA_RESOLUTIONS)))
+    assert fp_a == fp_b
+
+
+def test_category_b_event_still_prevents_official_manifest_minting():
+    """Required test 7: an unresolved REQUIRES_FAIL_CLOSED_REVIEW event
+    still raises before any manifest -- V2-01 only changed source IDENTITY,
+    never weakened the fail-closed admission gate itself."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"AAA": [_bar("2021-01-04T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {
+                "unit_splits": [
+                    {"id": "u1", "old_symbol": "AAA", "new_symbol": "AAA", "alternate_symbol": "AAA", "process_date": "2021-01-15"}
+                ]
+            }
+        ),
+    )
+    with pytest.raises(ah.CorporateActionReviewRequired, match="unit_split"):
+        _extract(http)

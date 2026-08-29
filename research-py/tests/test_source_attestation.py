@@ -852,3 +852,107 @@ def test_no_secrets_in_source_attestation():
     blob = json.dumps(attestation)
     for forbidden in ("APCA-API-KEY-ID", "APCA-API-SECRET-KEY", "api_key", "api_secret"):
         assert forbidden not in blob
+
+
+# ---------------------------------------------------------------------------
+# BKT-RESEARCH-CA-AUTHORITY-IDENTITY-V2-01 -- ca_resolution_policy_id binds
+# the CA resolution policy into source_attestation_id for V2+ extractor
+# identities, while a V1 attestation's identity computation is untouched.
+# ---------------------------------------------------------------------------
+
+V2_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.v2"
+DIAGNOSTIC_V2_EXTRACTOR_ID = "mqk_research.data.alpaca_historical.diagnostic_v2"
+
+
+def test_identical_bars_different_ca_resolution_policy_yields_different_identity():
+    """Required test 1: identical bars + evidence, only ca_resolution_
+    policy_id differs (simulating two different CA-resolution policy
+    generations) -> different source_attestation_id for a V2 extractor."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation_a = _valid_attestation(
+        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id="policy-fingerprint-a"
+    )
+    attestation_b = _valid_attestation(
+        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id="policy-fingerprint-b"
+    )
+    assert attestation_a["canonical_semantic_bars_hash"] == attestation_b["canonical_semantic_bars_hash"]
+    assert attestation_a["canonical_corporate_action_evidence_hash"] == attestation_b["canonical_corporate_action_evidence_hash"]
+    assert attestation_a["attestation_id"] != attestation_b["attestation_id"]
+
+
+def test_ca_resolution_policy_id_ignored_for_v1_extractor_identity():
+    """A V1 attestation's identity must be unaffected by ca_resolution_
+    policy_id -- V1 never carried this field, so two V1 attestations that
+    differ ONLY in this field must still be the SAME identity (proves
+    canonical_source_attestation_content's V1/V2 gate, and that adding this
+    field could not silently reinterpret a historical V1 artifact's hash)."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation_a = _valid_attestation(bars, evidence, ca_resolution_policy_id="ignored-a")
+    attestation_b = _valid_attestation(bars, evidence, ca_resolution_policy_id="ignored-b")
+    assert attestation_a["extractor_id"] == TRUSTED_EXTRACTOR_ID
+    assert attestation_a["attestation_id"] == attestation_b["attestation_id"]
+
+
+def test_old_v1_manifest_remains_verifiable_under_its_historical_contract():
+    """Required test 3: a manifest built exactly as this module's PRE-V2
+    tests always built it (V1 extractor_id, no ca_resolution_policy_id
+    override) still passes the full registered gate, unaffected by V2-01."""
+    bars = _bars_df([100.0, 101.0, 102.0])
+    manifest = _valid_manifest(bars)
+    assert manifest["source_attestation"]["extractor_id"] == TRUSTED_EXTRACTOR_ID
+    require_registered_bars_provenance(manifest)
+    check_corporate_action_integrity(bars, manifest)  # must not raise
+
+
+def test_v2_extraction_manifest_verifies_with_ca_resolution_policy_id():
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(
+        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id="real-policy-fingerprint"
+    )
+    manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
+    require_registered_bars_provenance(manifest)
+    check_corporate_action_integrity(bars, manifest)  # must not raise
+
+
+def test_hand_built_attestation_cannot_spoof_v2_authority_by_mutating_policy_id():
+    """Required test 6: mutating a V2 attestation's ca_resolution_policy_id
+    AFTER it was minted (leaving attestation_id/source_attestation_id
+    stale) must be refused -- the recomputed identity no longer matches
+    the declared one, exactly like any other post-mint tamper this module
+    already defends against."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(
+        bars, evidence, extractor_id=V2_EXTRACTOR_ID, ca_resolution_policy_id="real-policy-fingerprint"
+    )
+    manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
+
+    tampered_attestation = dict(attestation)
+    tampered_attestation["ca_resolution_policy_id"] = "spoofed-policy-fingerprint"
+    # attestation_id/source_attestation_id deliberately left stale.
+    tampered_manifest = dict(manifest)
+    tampered_manifest["source_attestation"] = tampered_attestation
+    with pytest.raises(SourceAttestationUnverifiable, match="does not match"):
+        check_corporate_action_integrity(bars, tampered_manifest)
+
+
+def test_diagnostic_v2_authority_still_cannot_pass_registered_gates():
+    """Required test 5, at the bars_provenance level: a diagnostic_v2-
+    identified attestation is exactly as untrusted as diagnostic_v1ever was
+    -- V2-01 only changed WHICH official identity is trusted, never
+    weakened the official-vs-diagnostic authority boundary."""
+    bars = _bars_df([100.0, 101.0])
+    evidence = _clean_ca_evidence(bars)
+    attestation = _valid_attestation(
+        bars,
+        evidence,
+        extractor_id=DIAGNOSTIC_V2_EXTRACTOR_ID,
+        source_authority="diagnostic_synthetic",
+        ca_resolution_policy_id="real-policy-fingerprint",
+    )
+    manifest = _valid_manifest(bars, corporate_action_evidence=evidence, source_attestation=attestation)
+    with pytest.raises(SourceAttestationUnverifiable):
+        check_corporate_action_integrity(bars, manifest)
