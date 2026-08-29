@@ -715,6 +715,92 @@ def test_extraction_clean_on_verified_name_change_continuity():
     assert entries[0]["symbol"] == "META"
 
 
+def test_resolution_dkng_reviewed_event_resolves_via_default_registry():
+    """BKT-RESEARCH-CA-REVIEWED-SUCCESSOR-RESOLUTION-01: a reorganization
+    leg matching the canonical DKNG reviewed record exactly resolves via
+    the default registry -- no symbol-specific branching in Python, purely
+    a data-driven match."""
+    from mqk_research.data.ca_reviewed_resolutions import RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY
+
+    leg = {
+        "symbol": "DKNG", "action_type": "reorganization", "matched_role": "primary",
+        "matched_symbol": "DKNG", "process_date": "2022-05-05",
+        "effective_start_ts": "2022-05-05", "effective_end_ts": "2022-05-05",
+    }
+    assert ah.classify_corporate_action_resolution(leg) == RESOLUTION_VERIFIED_ONE_FOR_ONE_SUCCESSOR_SECURITY_CONTINUITY
+
+
+def test_resolution_reviewed_registry_is_injectable_and_defaults_closed():
+    """An empty reviewed_resolutions override (simulating a missing/absent
+    reviewed-resolution artifact) must fall back to fail-closed -- required
+    test 8, exercised through the actual resolution entry point."""
+    leg = {
+        "symbol": "DKNG", "action_type": "reorganization", "matched_role": "primary",
+        "matched_symbol": "DKNG", "process_date": "2022-05-05",
+    }
+    assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+
+
+def test_resolution_reviewed_match_does_not_bypass_covered_or_role_aware_categories():
+    """The reviewed registry is only ever consulted as a LAST resort -- a
+    type already CATEGORY_COVERED_BY_ADJUSTMENT, or a leg already resolved
+    by the automated role-aware rules, never even reaches the registry
+    lookup (proven indirectly: an acquirer leg resolves to
+    CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG even when passed an EMPTY
+    registry)."""
+    leg = _merger_leg(event_id="m1", role_symbol="BIG", other_role_symbol="SML")
+    assert ah.classify_corporate_action_resolution(leg, reviewed_resolutions=()) == ah.CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
+
+
+def test_extraction_clean_on_dkng_reviewed_reorganization():
+    """Full-pipeline proof: the DKNG reorganization event no longer blocks
+    extraction via the default (built-in) reviewed-resolution registry."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"DKNG": [_bar("2022-05-06T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {"reorganizations": [{"id": "r1", "symbol": "DKNG", "cusip": "some-new-cusip", "process_date": "2022-05-05"}]}
+        ),
+    )
+    result = ah.extract_research_bars_with_provenance_diagnostic(
+        symbols=["DKNG"],
+        start_utc=pd.Timestamp("2022-05-01T00:00:00Z"),
+        end_utc=pd.Timestamp("2022-06-01T00:00:00Z"),
+        asof="2022-06-15",
+        credentials=_creds(),
+        http_get=http,
+    )
+    entries = result["corporate_action_entries"]
+    assert len(entries) == 1
+    assert entries[0]["symbol"] == "DKNG"
+
+
+def test_extraction_still_fails_closed_on_dkng_event_with_different_process_date():
+    """A reorganization reported for DKNG under a DIFFERENT process_date
+    than the exact reviewed record must still fail closed -- the reviewed
+    exception is bound to the exact event, not the symbol."""
+    http = FakeHttp()
+    http.queue(BARS_URL, 200, _bars_page({"DKNG": [_bar("2023-01-05T00:00:00Z")]}))
+    http.queue(
+        CA_URL,
+        200,
+        _ca_page(
+            {"reorganizations": [{"id": "r2", "symbol": "DKNG", "cusip": "another-cusip", "process_date": "2023-01-01"}]}
+        ),
+    )
+    with pytest.raises(ah.CorporateActionReviewRequired, match="reorganization"):
+        ah.extract_research_bars_with_provenance_diagnostic(
+            symbols=["DKNG"],
+            start_utc=pd.Timestamp("2023-01-01T00:00:00Z"),
+            end_utc=pd.Timestamp("2023-02-01T00:00:00Z"),
+            asof="2023-02-15",
+            credentials=_creds(),
+            http_get=http,
+        )
+
+
 def test_extraction_still_fails_closed_on_unresolved_name_change():
     http = FakeHttp()
     http.queue(BARS_URL, 200, _bars_page({"META": [_bar("2021-01-04T00:00:00Z")]}))

@@ -13,6 +13,10 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tup
 import numpy as np
 import pandas as pd
 
+from mqk_research.data.ca_reviewed_resolutions import (
+    REVIEWED_CA_RESOLUTIONS,
+    find_reviewed_resolution,
+)
 from mqk_research.data.bars_provenance import (
     CA_POLICY_ADJUSTED_DATA,
     PRICE_CONVENTION_ALPACA_ALL_ADJUSTED,
@@ -181,6 +185,19 @@ from mqk_research.ml.util_hash import sha256_file, sha256_json
 # CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG / CATEGORY_VERIFIED_SAME_
 # SECURITY_CONTINUITY. Every other REQUIRES_FAIL_CLOSED_REVIEW-by-type event
 # is unaffected and still fails the whole extraction closed.
+#
+# BKT-RESEARCH-CA-REVIEWED-SUCCESSOR-RESOLUTION-01: classify_corporate_
+# action_resolution now falls back, as a LAST resort (never a bypass for
+# CATEGORY_COVERED_BY_ADJUSTMENT or an already role-aware-resolved leg), to
+# mqk_research.data.ca_reviewed_resolutions.find_reviewed_resolution -- a
+# narrow, explicit, content-addressed registry of individually-reviewed
+# exceptions (e.g. a holding-company reorganization whose legal-entity
+# CUSIP changes but whose ticker and economic ownership do not) for events
+# no automated rule here can honestly resolve. Matched on an EXACT
+# (provider, action_type, requested_symbol, requested_role, process_date)
+# tuple -- see that module's header for why the provider's own opaque
+# event id is deliberately NOT part of the binding. This module contains
+# no symbol-specific branching for any such exception.
 
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
@@ -864,25 +881,33 @@ def classify_corporate_action_resolution(
     *,
     sibling_legs: Sequence[Dict[str, Any]] = (),
     adjustment_mode: str = ADJUSTMENT_ALL,
+    reviewed_resolutions: Sequence[Dict[str, Any]] = REVIEWED_CA_RESOLUTIONS,
 ) -> str:
     """Pure, per-leg role-aware resolution (BKT-RESEARCH-CA-ROLE-AWARE-
+    RESOLUTION-01, extended by BKT-RESEARCH-CA-REVIEWED-SUCCESSOR-
     RESOLUTION-01). `leg` is one normalized evidence dict as produced by
     _effective_windows_for_entry (must carry action_type/matched_role/
-    old_cusip/new_cusip). `sibling_legs` are the OTHER legs of the SAME raw
-    event (same provider_event_id + action_type, see _event_group_key) --
-    used only for the merger acquirer contract's same-event terminal-role
-    self-consistency check (a requested symbol must not be simultaneously
-    represented by BOTH an acquirer and an acquiree leg of the SAME event).
+    old_cusip/new_cusip/process_date). `sibling_legs` are the OTHER legs of
+    the SAME raw event (same provider_event_id + action_type, see
+    _event_group_key) -- used only for the merger acquirer contract's
+    same-event terminal-role self-consistency check (a requested symbol
+    must not be simultaneously represented by BOTH an acquirer and an
+    acquiree leg of the SAME event).
 
-    Only ever NARROWS -- a type already CATEGORY_COVERED_BY_ADJUSTMENT stays
-    that; a type already CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW can resolve
-    into CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG or
-    CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY ONLY via the two explicit,
-    narrow contracts documented at CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG /
-    CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY above; every other case
-    (including a blank/unmapped matched_role, an acquiree leg, an
-    under-evidenced or mismatched name-change, or any other type) defaults
-    to CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW."""
+    Resolution order:
+      1. a type already CATEGORY_COVERED_BY_ADJUSTMENT stays that;
+      2. the two automated, narrow role/identity contracts (merger
+         acquirer / name-change CUSIP continuity) apply where they hold;
+      3. otherwise, ca_reviewed_resolutions.find_reviewed_resolution is
+         consulted against `reviewed_resolutions` (default:
+         REVIEWED_CA_RESOLUTIONS) for an EXACT (provider=alpaca,
+         action_type, requested_symbol, requested_role, process_date)
+         match -- an individually-reviewed exception (see PATCH C module
+         header), never a type-wide bypass;
+      4. anything still unresolved (including a blank/unmapped
+         matched_role, an acquiree leg, an under-evidenced or mismatched
+         name-change, or any other type) is
+         CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW."""
     action_type = leg.get("action_type")
     base = classify_corporate_action_type(action_type, adjustment_mode=adjustment_mode)
     if base == CATEGORY_COVERED_BY_ADJUSTMENT:
@@ -890,6 +915,7 @@ def classify_corporate_action_resolution(
 
     role = leg.get("matched_role")
     matched_symbol = leg.get("matched_symbol")
+    resolution = CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
 
     if action_type in _MERGER_TYPES and role == "acquirer":
         same_symbol_terminal_conflict = any(
@@ -897,15 +923,27 @@ def classify_corporate_action_resolution(
             for sib in sibling_legs
         )
         if not same_symbol_terminal_conflict:
-            return CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
-        return CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+            resolution = CATEGORY_NO_ADJUSTMENT_REQUIRED_FOR_LEG
 
-    if action_type == "name_change" and role in ("old_symbol", "new_symbol"):
+    elif action_type == "name_change" and role in ("old_symbol", "new_symbol"):
         old_cusip = leg.get("old_cusip")
         new_cusip = leg.get("new_cusip")
         if old_cusip and new_cusip and old_cusip == new_cusip:
-            return CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
-        return CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
+            resolution = CATEGORY_VERIFIED_SAME_SECURITY_CONTINUITY
+
+    if resolution != CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW:
+        return resolution
+
+    reviewed = find_reviewed_resolution(
+        source_provider_id="alpaca",
+        action_type=str(action_type) if action_type else "",
+        requested_symbol=str(matched_symbol) if matched_symbol else "",
+        requested_role=str(role) if role else "",
+        process_date=str(leg.get("process_date")) if leg.get("process_date") else "",
+        registry=reviewed_resolutions,
+    )
+    if reviewed is not None:
+        return reviewed["resolution"]
 
     return CATEGORY_REQUIRES_FAIL_CLOSED_REVIEW
 
