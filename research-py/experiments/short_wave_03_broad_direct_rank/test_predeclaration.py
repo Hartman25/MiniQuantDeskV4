@@ -230,14 +230,18 @@ def test_check_mode_never_contacts_alpaca(capsys: pytest.CaptureFixture[str]) ->
 def test_execution_requires_explicit_authorization() -> None:
     """REQUIRED TEST 20: every EXECUTE_REQUIRED_STAGES stage refuses
     (SystemExit(3)) unless the literal --execute flag is present; this
-    predeclaration controller never passes it."""
+    predeclaration controller never passes it. The guard lives ENTIRELY in
+    main()'s dispatch (mirroring SHORT-WAVE-02's accepted design) --
+    run_family/run_family_judge are not self-gating stubs once implemented,
+    so this test only ever calls them THROUGH main(), never directly (a
+    direct run_family() call is real, network-touching execution -- see
+    test_wave03_family_harness.py for run_family's own network-free,
+    monkeypatched structural tests)."""
     for stage in sorted(run_wave.EXECUTE_REQUIRED_STAGES):
         with pytest.raises(SystemExit) as exc_info:
             run_wave.main([stage])
         assert exc_info.value.code == 3
 
-    with pytest.raises(NotImplementedError):
-        run_wave.run_family("RANK-01")
     with pytest.raises(NotImplementedError):
         run_wave.run_family_judge()
 

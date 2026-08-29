@@ -65,7 +65,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 def resolve_wave03_checkout_local_src(experiment_file: Path) -> Path:
@@ -608,16 +608,557 @@ def ensure_bars() -> tuple[pd.DataFrame, dict]:
     return result["bars"], result["manifest"]
 
 
-def run_family(family_key: str) -> dict:
-    """Real-trial execution for one predeclared hypothesis family. Only
-    ever reachable via main()'s --execute guard."""
-    raise NotImplementedError(
-        f"run_family({family_key!r}) intentionally not implemented in this predeclaration "
-        "controller -- the full pipeline (feature isolation, per-trial run_registered_economic_"
-        "walkforward_eval calls, dynamic benchmark) is the separately-reviewed Wave-03 RUN "
-        "mission's job. This stub exists only so the --execute guard below has something real "
-        "to gate; it must never be reached from this controller."
+def build_targets(bars: pd.DataFrame, *, horizon_bars: int, ret_threshold: float) -> pd.DataFrame:
+    """Exact reproduction of SHORT-WAVE-02's own inlined helper (same
+    portability convention as build_causal_placebo_targets). fwd_ret =
+    log(close[t+horizon]/close[t]); label_end_ts is the truthful inclusive
+    timestamp of the bar whose close completes the label. Classification
+    LABEL only -- never executable P&L."""
+    bars = bars.copy()
+    bars["end_ts"] = pd.to_datetime(bars["end_ts"], utc=True)
+    bars = bars.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+
+    rows = []
+    for sym, g in bars.groupby("symbol", sort=True):
+        g = g.reset_index(drop=True)
+        closes = g["close"].astype(np.float64).to_numpy()
+        ts_list = g["end_ts"].to_numpy()
+        n = len(g)
+        for j in range(n - horizon_bars):
+            k = j + horizon_bars
+            c0, c1 = float(closes[j]), float(closes[k])
+            if c0 <= 0.0 or c1 <= 0.0:
+                continue
+            fwd_ret = float(np.log(c1 / c0))
+            rows.append(
+                {
+                    "symbol": sym,
+                    "end_ts": str(pd.Timestamp(ts_list[j])),
+                    "fwd_ret": fwd_ret,
+                    "target": 1 if fwd_ret > ret_threshold else 0,
+                    "label_end_ts": pd.Timestamp(ts_list[k]).isoformat(),
+                }
+            )
+    out = pd.DataFrame(rows)
+    if out.empty:
+        raise RuntimeError("No labeled rows produced -- check symbol/date coverage")
+    return out.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+
+
+def ensure_real_targets(bars: pd.DataFrame) -> pd.DataFrame:
+    cached = RUN_ROOT / "real_targets.csv"
+    if cached.exists():
+        return pd.read_csv(cached)
+    targets = build_targets(bars, horizon_bars=LABEL_HORIZON_BARS, ret_threshold=LABEL_RET_THRESHOLD)
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    targets.to_csv(cached, index=False)
+    return targets
+
+
+def ensure_placebo_targets(real_targets: pd.DataFrame) -> pd.DataFrame:
+    cached = RUN_ROOT / "placebo_targets.csv"
+    if cached.exists():
+        return pd.read_csv(cached)
+    placebo = build_causal_placebo_targets(real_targets, seed=PLACEBO_SEED)
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    placebo.to_csv(cached, index=False)
+    return placebo
+
+
+def ensure_full_features(bars: pd.DataFrame) -> pd.DataFrame:
+    """DEFAULT FeatureSetV1Spec already produces ret_rank_20 (default
+    cross_section_windows=(5,20)), ret_5 (default ret_windows includes 5),
+    and gap_pct_1 (always computed) -- no spec customization required (see
+    SHORT-WAVE-02's identical observation)."""
+    cached = RUN_ROOT / "full_features.csv"
+    if cached.exists():
+        return pd.read_csv(cached)
+    feats = build_feature_set_v1(bars)
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    feats.to_csv(cached, index=False)
+    return feats
+
+
+def isolate_feature(features: pd.DataFrame, feature_column: str) -> pd.DataFrame:
+    """FEATURE ISOLATION INVARIANT: select ONLY symbol, end_ts, and the one
+    declared feature column from the full FeatureSetV1 output -- guards
+    against the historical ALPHA-01 full-feature-matrix-consumption defect
+    (see test_wave03_family_harness.py)."""
+    missing = [c for c in ("symbol", "end_ts", feature_column) if c not in features.columns]
+    if missing:
+        raise RuntimeError(f"feature isolation failed: FeatureSetV1 output missing required column(s) {missing}")
+    return features[["symbol", "end_ts", feature_column]].copy()
+
+
+def assert_single_feature_schema(schema_path: Path, expected_column: str) -> None:
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    actual = schema.get("feature_columns")
+    if actual != [expected_column]:
+        raise RuntimeError(
+            f"FEATURE ISOLATION INVARIANT VIOLATED: expected feature_columns == "
+            f"{[expected_column]!r}, got {actual!r} (schema={schema_path})"
+        )
+
+
+def write_run_dir(run_dir: Path, bars: pd.DataFrame, isolated_features: pd.DataFrame,
+                   targets: pd.DataFrame, *, feature_column: str) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    bars_path = run_dir / "bars.csv"
+    bars_out = bars.copy()
+    bars_out["end_ts"] = pd.to_datetime(bars_out["end_ts"], utc=True).map(lambda t: t.isoformat())
+    bars_out.to_csv(bars_path, index=False)
+
+    feat_clean = isolated_features.dropna(axis=0, how="any")
+    common_keys = feat_clean[["symbol", "end_ts"]].merge(
+        targets[["symbol", "end_ts"]], on=["symbol", "end_ts"], how="inner"
     )
+    if common_keys.empty:
+        raise RuntimeError(
+            f"No overlapping non-NaN (symbol,end_ts) rows between isolated features "
+            f"({len(feat_clean)} after dropna, {len(isolated_features)} before) and targets ({len(targets)})"
+        )
+    feat_out = feat_clean.merge(common_keys, on=["symbol", "end_ts"], how="inner")
+    targ_out = targets.merge(common_keys, on=["symbol", "end_ts"], how="inner")
+
+    feat_out = feat_out.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+    targ_out = targ_out.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+
+    feat_out.to_csv(run_dir / "features.csv", index=False)
+    targ_out.to_csv(run_dir / "targets.csv", index=False)
+    schema_path = generate_feature_schema(run_dir, id_columns=["symbol", "end_ts"])
+    assert_single_feature_schema(schema_path, feature_column)
+    return bars_path
+
+
+def run_one_trial(*, run_dir: Path, experiment_id: str, hypothesis_id: str, strategy_id: str,
+                   direction: str, bars_path: Path, bars_provenance: dict) -> dict:
+    wf_spec = WalkForwardSpec(
+        train_years=WF_TRAIN_YEARS,
+        test_months=WF_TEST_MONTHS,
+        step_months=WF_STEP_MONTHS,
+        holdout_months=WF_HOLDOUT_MONTHS,
+        min_rows_per_fold=WF_MIN_ROWS_PER_FOLD,
+        purge_enabled=True,
+        embargo_seconds=0,
+    )
+    economic_spec = EconomicWalkForwardSpec(
+        signal_policy=signal_policy_for(direction),
+        cost_model=CostModelSpec(
+            commission_bps_per_side=COMMISSION_BPS_PER_SIDE, slippage_bps_per_side=SLIPPAGE_BPS_PER_SIDE
+        ),
+        execution_pricing=ExecutionPricingSpec(
+            pricing_model_id=EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
+            slippage_bps=EXECUTION_SLIPPAGE_BPS,
+            volatility_mult_bps=EXECUTION_VOLATILITY_MULT_BPS,
+        ),
+        weight_to_share=WeightToShareSpec(equity_usd=EQUITY_USD),
+        annualization=AnnualizationSpec(),
+    )
+
+    economic_out_path = run_registered_economic_walkforward_eval(
+        run_dir,
+        experiment_id=experiment_id,
+        hypothesis_id=hypothesis_id,
+        strategy_id=strategy_id,
+        bars_csv=bars_path,
+        economic_spec=economic_spec,
+        bars_provenance=bars_provenance,
+        registry_db=REGISTRY_DB,
+        wf_spec=wf_spec,
+        l2=MODEL_L2,
+        lr=MODEL_LR,
+        steps=MODEL_STEPS,
+        standardize=MODEL_STANDARDIZE,
+        clip_z=MODEL_CLIP_Z,
+    )
+    economic_out = json.loads(economic_out_path.read_text(encoding="utf-8"))
+    aggregate = economic_out.get("aggregate")
+    if aggregate is None:
+        raise RuntimeError(
+            f"Fail-closed: economic_walk_forward.json missing required 'aggregate' block: {economic_out_path}"
+        )
+    inputs = economic_out.get("inputs", {})
+    oos_predictions_csv = inputs.get("oos_predictions_csv", {}).get("path")
+    wf_eval_ref = inputs.get("walk_forward_eval", {}).get("path")
+    holdout_start_utc = None
+    folds_generated = folds_used = folds_skipped = None
+    if wf_eval_ref:
+        wf_eval = json.loads(Path(wf_eval_ref).read_text(encoding="utf-8"))
+        holdout_start_utc = wf_eval.get("temporal_contract", {}).get("holdout_start_utc")
+        summary = wf_eval.get("summary", {})
+        folds_generated = summary.get("folds_total")
+        folds_used = summary.get("folds_used")
+        if folds_generated is not None and folds_used is not None:
+            folds_skipped = folds_generated - folds_used
+
+    return {
+        "experiment_id": experiment_id,
+        "hypothesis_id": hypothesis_id,
+        "direction": direction,
+        "trial_id": economic_out["registry"]["trial_id"],
+        "economic_eval_id": economic_out["ids"]["economic_eval_id"],
+        "economic_walk_forward_json": str(economic_out_path),
+        "economic_daily_returns_csv": economic_out.get("outputs", {}).get("economic_daily_returns_csv", {}).get("path"),
+        "economic_returns_csv": economic_out.get("outputs", {}).get("economic_returns_csv", {}).get("path"),
+        "oos_predictions_csv": oos_predictions_csv,
+        "aggregate": aggregate,
+        "folds": economic_out.get("folds", []),
+        "holdout": economic_out.get("holdout"),
+        "holdout_start_utc": holdout_start_utc,
+        "folds_generated": folds_generated,
+        "folds_used": folds_used,
+        "folds_skipped": folds_skipped,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Required output recording fields (PREDECLARED_WAVE.json
+# "required_future_run_recording_fields") -- every helper below derives its
+# field(s) truthfully from an already-persisted, already-accepted-engine
+# artifact (economic_walk_forward.json's aggregate/folds/weight_to_share_
+# evidence, economic_returns.csv's fold/date authority, the family's own OOS
+# predictions, bars.csv) or from the frozen predeclaration's own config
+# constants -- never fabricated, never re-derived by reimplementing the
+# accepted engine's own signal-resolution logic.
+# ---------------------------------------------------------------------------
+
+
+def rankable_cross_section_targets(
+    cross_section_size_by_date: dict[str, int], *, rank_side_count: int, long_only: bool
+) -> dict:
+    """DESIRED (signal-time) symbol-day counts for one direction, derived
+    directly from build_dynamic_rankable_benchmark's own per-date cross-
+    section sizes: the frozen cross-sectional rank policy is a FIXED-K
+    selection (exactly rank_side_count longs, and for long_short exactly
+    rank_side_count more shorts) that either fully succeeds or fails closed
+    entirely for a given date's frame (_resolve_rank_direction_for_frame) --
+    so the desired long/short count on any date with a sufficient cross-
+    section is deterministically rank_side_count, and 0 on any date below
+    the minimum. No per-symbol identity is needed for this count, only the
+    cross-section size already computed by Patch A -- reuses that output
+    rather than re-invoking the private rank-resolution primitive."""
+    min_required = rank_side_count if long_only else 2 * rank_side_count
+    target_long_days = 0
+    target_short_days = 0
+    dates_below_minimum = []
+    for d, n in cross_section_size_by_date.items():
+        if n < min_required:
+            dates_below_minimum.append(d)
+            continue
+        target_long_days += rank_side_count
+        if not long_only:
+            target_short_days += rank_side_count
+    return {
+        "target_long_symbol_days": target_long_days,
+        "target_short_symbol_days": target_short_days,
+        "dates_below_rank_minimum": sorted(dates_below_minimum),
+        "max_concurrent_target_longs": rank_side_count if target_long_days else 0,
+        "max_concurrent_target_shorts": rank_side_count if (not long_only and target_short_days) else 0,
+    }
+
+
+def symbols_ever_never_rankable(rankable_by_date: dict[str, set[str]], universe: list[str]) -> dict:
+    ever: set[str] = set()
+    for syms in rankable_by_date.values():
+        ever |= syms
+    return {
+        "symbols_ever_rankable": sorted(ever),
+        "symbols_never_rankable": sorted(set(universe) - ever),
+    }
+
+
+def first_last_rankable_date_per_symbol(rankable_by_date: dict[str, set[str]]) -> dict:
+    first: dict[str, str] = {}
+    last: dict[str, str] = {}
+    for d in sorted(rankable_by_date.keys()):
+        for sym in rankable_by_date[d]:
+            if sym not in first:
+                first[sym] = d
+            last[sym] = d
+    return {sym: {"first": first[sym], "last": last[sym]} for sym in sorted(first)}
+
+
+def _fold_date_index(economic_returns_csv: Path) -> dict[int, list[str]]:
+    """fold -> sorted calendar dates that fold's economic_returns.csv rows
+    cover -- used only to forward-fill weight_to_share_evidence's sparse
+    per-symbol change events onto a full daily index for EXECUTED symbol-
+    day/exposure accounting; never used for return computation itself."""
+    econ = pd.read_csv(economic_returns_csv)
+    econ = econ.copy()
+    econ["date"] = pd.to_datetime(econ["timestamp"], utc=True).dt.strftime("%Y-%m-%d")
+    out: dict[int, list[str]] = {}
+    for fold, g in econ.groupby("fold"):
+        out[int(fold)] = sorted(g["date"].unique())
+    return out
+
+
+def reconstruct_daily_target_qty(fold_summaries: list[dict], economic_returns_csv: Path) -> pd.DataFrame:
+    """Per (fold, symbol, date) EXECUTED signed share position, forward-
+    filled from each fold summary's weight_to_share_evidence (already-
+    persisted, already-accepted P7B-REPAIR-01/02 evidence: target_qty is the
+    RESULTING position after that row's fill-time admit/reject decision,
+    signed positive=long/negative=short/zero=flat -- weight_to_target_qty's
+    own documented sign convention) onto the fold's own full trading-day
+    index. Never carried across a fold boundary -- _simulate_fold force-
+    flattens every symbol at fold end, so each fold's reconstruction starts
+    fresh. Adds no new signal-resolution logic -- purely a forward-fill
+    projection of already-computed, already-persisted evidence."""
+    fold_dates = _fold_date_index(economic_returns_csv)
+    rows = []
+    for fs in fold_summaries:
+        fold_no = int(fs["fold"])
+        dates = fold_dates.get(fold_no, [])
+        if not dates:
+            continue
+        evidence = fs.get("weight_to_share_evidence") or {}
+        date_index = pd.Index(dates)
+        for sym, events in evidence.items():
+            if not events:
+                continue
+            ev = pd.DataFrame(events)
+            ev["date"] = pd.to_datetime(ev["timestamp"], utc=True).dt.strftime("%Y-%m-%d")
+            ev = ev.sort_values("date", kind="mergesort").drop_duplicates("date", keep="last")
+            qty_by_date = ev.set_index("date")["target_qty"].reindex(date_index)
+            qty_by_date = qty_by_date.ffill().fillna(0).astype(int)
+            for d, qty in zip(date_index, qty_by_date):
+                rows.append({"fold": fold_no, "symbol": sym, "date": d, "target_qty": int(qty)})
+    if not rows:
+        return pd.DataFrame(columns=["fold", "symbol", "date", "target_qty"])
+    return pd.DataFrame(rows)
+
+
+def executed_symbol_day_stats(daily_positions: pd.DataFrame) -> dict:
+    if daily_positions.empty:
+        return {
+            "executed_long_symbol_days": 0, "executed_short_symbol_days": 0,
+            "max_concurrent_longs": 0, "max_concurrent_shorts": 0,
+        }
+    long_mask = daily_positions["target_qty"] > 0
+    short_mask = daily_positions["target_qty"] < 0
+    per_date_long = daily_positions.loc[long_mask].groupby("date").size()
+    per_date_short = daily_positions.loc[short_mask].groupby("date").size()
+    return {
+        "executed_long_symbol_days": int(long_mask.sum()),
+        "executed_short_symbol_days": int(short_mask.sum()),
+        "max_concurrent_longs": int(per_date_long.max()) if len(per_date_long) else 0,
+        "max_concurrent_shorts": int(per_date_short.max()) if len(per_date_short) else 0,
+    }
+
+
+def actual_net_exposure_from_positions(daily_positions: pd.DataFrame, bars: pd.DataFrame, equity_usd: float) -> Optional[float]:
+    """Reconstructed EXECUTED net (signed) exposure, averaged over the days
+    with a resolvable price: weight = target_qty * close(symbol, date) /
+    equity_usd, summed across symbols for each date (mirrors the accepted
+    engine's own P7B-REPAIR-02 dollar-ledger weight formula), then averaged.
+    Distinct in methodology from actual_gross_exposure (a direct read of the
+    accepted engine's own persisted aggregate.average_gross_exposure) only
+    because no persisted artifact carries a SIGNED net-exposure series --
+    this reconstruction never disagrees with the engine's own gross-exposure
+    accounting for the long-only direction (net == gross there by
+    construction, since there are no short legs)."""
+    if daily_positions.empty:
+        return None
+    b = bars.copy()
+    b["end_ts"] = pd.to_datetime(b["end_ts"], utc=True)
+    b["date"] = b["end_ts"].dt.strftime("%Y-%m-%d")
+    price_lookup = b.drop_duplicates(subset=["symbol", "date"], keep="last").set_index(["symbol", "date"])["close"]
+
+    merged = daily_positions.copy()
+    merged["close"] = [
+        price_lookup.get((sym, d), np.nan) for sym, d in zip(merged["symbol"], merged["date"])
+    ]
+    merged = merged.dropna(subset=["close"])
+    if merged.empty:
+        return None
+    merged["weight"] = merged["target_qty"].astype(float) * merged["close"].astype(float) / float(equity_usd)
+    per_date_net = merged.groupby("date")["weight"].sum()
+    return float(per_date_net.mean()) if len(per_date_net) else None
+
+
+def fold_concentration(fold_summaries: list[dict]) -> Optional[float]:
+    """Fraction of total ABSOLUTE per-fold net_total_return contributed by
+    the single most-concentrated fold -- a simple, documented, auditable
+    concentration ratio derived from already-persisted per-fold aggregate
+    data (economic_walk_forward.json's "folds" array). None when there are
+    no folds or every fold's net_total_return is exactly zero (undefined
+    concentration -- not fabricated as 0.0 or 1.0)."""
+    values = [abs(float(fs["net_total_return"])) for fs in fold_summaries if fs.get("net_total_return") is not None]
+    total = sum(values)
+    if not values or total <= 0.0:
+        return None
+    return float(max(values) / total)
+
+
+def compute_paired_delta(long_only: dict, long_short: dict) -> dict:
+    """delta = long_short - long_only, over exact matching OOS dates
+    (exact reproduction of SHORT-WAVE-02's own inlined helper)."""
+    lo_daily = pd.read_csv(long_only["economic_daily_returns_csv"])
+    ls_daily = pd.read_csv(long_short["economic_daily_returns_csv"])
+    lo_turnover = float(lo_daily["turnover"].sum())
+    ls_turnover = float(ls_daily["turnover"].sum())
+
+    lo_agg = long_only["aggregate"]
+    ls_agg = long_short["aggregate"]
+
+    def _delta(key):
+        a, b = lo_agg.get(key), ls_agg.get(key)
+        if a is None or b is None:
+            return None
+        return float(b) - float(a)
+
+    return {
+        "delta_net_total_return": _delta("net_total_return"),
+        "delta_net_sharpe": _delta("net_sharpe"),
+        "delta_max_drawdown": _delta("max_drawdown"),
+        "delta_turnover": ls_turnover - lo_turnover,
+        "delta_cost_drag": _delta("cost_drag"),
+        "long_only_turnover": lo_turnover,
+        "long_short_turnover": ls_turnover,
+    }
+
+
+def compute_placebo_delta(long_short: dict, placebo: dict) -> dict:
+    """delta = long_short(real) - placebo, over exact matching OOS dates
+    (exact reproduction of SHORT-WAVE-02's own inlined helper)."""
+    ls_agg = long_short["aggregate"]
+    pb_agg = placebo["aggregate"]
+
+    def _delta(key):
+        a, b = pb_agg.get(key), ls_agg.get(key)
+        if a is None or b is None:
+            return None
+        return float(b) - float(a)
+
+    return {
+        "delta_net_total_return": _delta("net_total_return"),
+        "delta_net_sharpe": _delta("net_sharpe"),
+        "delta_max_drawdown": _delta("max_drawdown"),
+    }
+
+
+def compute_family_recording_fields(
+    fam: HypothesisFamily, r_lo: dict, r_ls: dict, r_pb: dict,
+    benchmark_lo: dict, benchmark_ls: dict, rankable_by_date: dict[str, set[str]], bars: pd.DataFrame,
+) -> dict:
+    """Assembles PREDECLARED_WAVE.json's required_future_run_recording_fields
+    for one hypothesis family, from already-persisted trial/benchmark
+    artifacts only -- see the module-level docstring above this section."""
+    seed = load_seed_universe()
+
+    per_direction: dict[str, dict] = {}
+    for direction_key, r, benchmark, long_only in (
+        ("long_only", r_lo, benchmark_lo, True),
+        ("long_short", r_ls, benchmark_ls, False),
+    ):
+        targets = rankable_cross_section_targets(
+            benchmark["rankable_cross_section_size_by_date"], rank_side_count=RANK_SIDE_COUNT, long_only=long_only
+        )
+        daily_positions = reconstruct_daily_target_qty(r["folds"], Path(r["economic_returns_csv"]))
+        executed = executed_symbol_day_stats(daily_positions)
+        actual_net = actual_net_exposure_from_positions(daily_positions, bars, EQUITY_USD)
+        agg = r["aggregate"]
+        per_direction[direction_key] = {
+            **targets,
+            **executed,
+            "desired_gross_exposure": MAX_GROSS_EXPOSURE,
+            "desired_net_exposure": MAX_GROSS_EXPOSURE if long_only else 0.0,
+            "actual_gross_exposure": agg.get("average_gross_exposure"),
+            "actual_net_exposure": actual_net,
+            "turnover": agg.get("total_turnover"),
+            "cost_drag": agg.get("cost_drag"),
+            "net_return": agg.get("net_total_return"),
+            "sharpe": agg.get("net_sharpe"),
+            "max_drawdown": agg.get("max_drawdown"),
+            "fold_concentration": fold_concentration(r["folds"]),
+            "per_date_rankable_cross_section_min_median_max": {
+                "min": benchmark["rankable_cross_section_min"],
+                "median": benchmark["rankable_cross_section_median"],
+                "max": benchmark["rankable_cross_section_max"],
+            },
+        }
+
+    ever_never = symbols_ever_never_rankable(rankable_by_date, seed_symbols())
+    return {
+        "family": fam.key,
+        "feature_column": fam.feature_column,
+        "seed_universe_count": seed["symbol_count"],
+        "seed_universe_id": seed["universe_id"],
+        **ever_never,
+        "first_last_rankable_date_per_symbol": first_last_rankable_date_per_symbol(rankable_by_date),
+        "long_only": per_direction["long_only"],
+        "long_short": per_direction["long_short"],
+        "long_short_minus_long_only_paired_deltas": compute_paired_delta(r_lo, r_ls),
+        "matched_placebo_comparison": compute_placebo_delta(r_ls, r_pb),
+        "holdout_status": "reserved_not_evaluated",
+    }
+
+
+def run_family(family_key: str) -> dict:
+    """Real-trial execution for one predeclared hypothesis family: 2 real
+    trials (long-only, long-short) plus 1 matched diagnostic placebo trial,
+    plus the family-specific dynamic rankable benchmark for each real
+    direction, plus every required recording field. Only ever reachable via
+    main()'s --execute guard. Reuses the wave-shared bars/features/real-
+    targets/placebo-targets caches (ensure_bars/ensure_real_targets/
+    ensure_placebo_targets/ensure_full_features)."""
+    fam = FAMILIES[family_key]
+    bars, manifest = ensure_bars()
+    real_targets = ensure_real_targets(bars)
+    placebo_targets = ensure_placebo_targets(real_targets)
+    full_features = ensure_full_features(bars)
+    isolated = isolate_feature(full_features, fam.feature_column)
+
+    fam_root = RUN_ROOT / family_key.lower().replace("-", "_")
+
+    run_dir_lo = fam_root / "long_only"
+    bars_path_lo = write_run_dir(run_dir_lo, bars, isolated, real_targets, feature_column=fam.feature_column)
+    r_lo = run_one_trial(
+        run_dir=run_dir_lo, experiment_id=REAL_EXPERIMENT_ID, hypothesis_id=fam.hyp_long_only,
+        strategy_id=fam.strategy_id, direction="long_only", bars_path=bars_path_lo, bars_provenance=manifest,
+    )
+
+    run_dir_ls = fam_root / "long_short"
+    bars_path_ls = write_run_dir(run_dir_ls, bars, isolated, real_targets, feature_column=fam.feature_column)
+    r_ls = run_one_trial(
+        run_dir=run_dir_ls, experiment_id=REAL_EXPERIMENT_ID, hypothesis_id=fam.hyp_long_short,
+        strategy_id=fam.strategy_id, direction="long_short", bars_path=bars_path_ls, bars_provenance=manifest,
+    )
+
+    run_dir_pb = fam_root / "placebo"
+    bars_path_pb = write_run_dir(run_dir_pb, bars, isolated, placebo_targets, feature_column=fam.feature_column)
+    r_pb = run_one_trial(
+        run_dir=run_dir_pb, experiment_id=PLACEBO_EXPERIMENT_ID, hypothesis_id=fam.hyp_placebo,
+        strategy_id=fam.strategy_id, direction="long_short", bars_path=bars_path_pb, bars_provenance=manifest,
+    )
+
+    rankable_by_date = rankable_set_by_date(Path(r_lo["oos_predictions_csv"]))
+
+    reference_dates_lo = sorted(pd.read_csv(r_lo["economic_daily_returns_csv"])["date"].astype(str).unique())
+    benchmark_lo = build_dynamic_rankable_benchmark(
+        bars, Path(r_lo["oos_predictions_csv"]), Path(r_lo["economic_returns_csv"]),
+        reference_dates_lo, r_lo["holdout_start_utc"],
+    )
+    reference_dates_ls = sorted(pd.read_csv(r_ls["economic_daily_returns_csv"])["date"].astype(str).unique())
+    benchmark_ls = build_dynamic_rankable_benchmark(
+        bars, Path(r_ls["oos_predictions_csv"]), Path(r_ls["economic_returns_csv"]),
+        reference_dates_ls, r_ls["holdout_start_utc"],
+    )
+
+    recording_fields = compute_family_recording_fields(
+        fam, r_lo, r_ls, r_pb, benchmark_lo, benchmark_ls, rankable_by_date, bars,
+    )
+
+    result = {
+        "family": family_key, "feature_column": fam.feature_column,
+        "long_only": r_lo, "long_short": r_ls, "placebo": r_pb,
+        "benchmark_long_only": benchmark_lo, "benchmark_long_short": benchmark_ls,
+        "recording_fields": recording_fields,
+    }
+    fam_root.mkdir(parents=True, exist_ok=True)
+    (fam_root / "family_result.json").write_text(
+        json.dumps(result, sort_keys=True, indent=2, default=str), encoding="utf-8"
+    )
+    return result
 
 
 def run_family_judge() -> dict:
