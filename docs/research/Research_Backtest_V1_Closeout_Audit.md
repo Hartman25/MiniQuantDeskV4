@@ -2421,6 +2421,89 @@ Direct-Rank was accepted.
 
 ---
 
+## 1M. RESEARCH-BACKTEST-V1-FINAL-INTEGRATION-AND-ACCEPTANCE-01 ADDENDUM (2026-08-28)
+
+Mission `RESEARCH-BACKTEST-V1-FINAL-INTEGRATION-AND-ACCEPTANCE-01`
+integrated the independently accepted, pushed-verified proof commit
+`origin/research-promotion-lineage-proof-repair-01` @
+`12490668e57f0ab2a900bb0e4b045619e4a904be` into the authoritative
+integration spine `ledger-closure-integration-01` (start HEAD
+`484d93f3c153d22ff196b523f77844dfba67b750`) and recorded the completed
+independent acceptance of the Research/Promotion V1 closure chain this
+document's Section 1F and the master ledger's §24 describe. Per this
+document's own precedence rule (Section 0 of the master ledger): **the
+master ledger (§34, new) is authoritative for current status; this
+addendum records the same facts here for historical continuity only.**
+
+**Topology verified before merging:** `git merge-base
+origin/ledger-closure-integration-01
+origin/research-promotion-lineage-proof-repair-01` returned `484d93f3`
+exactly (the starting HEAD); the commit range contained exactly one
+commit (`12490668`, `test: prove promotion http route persists exact
+evidence lineage`); the file diff touched exactly two paths —
+`core-rs/crates/mqk-daemon/tests/scenario_strategy_promotion_closure_
+proof_01f.rs` and `core-rs/crates/mqk-promotion/tests/scenario_research_
+backtest_promotion_v1_acceptance_01.rs` — no unexpected commit or file.
+Fast-forward merge (`git merge --ff-only`) produced the exact expected
+resulting HEAD `12490668`; `git diff --check` clean.
+
+**Independent review and acceptance chain (ChatGPT):**
+
+1. Reviewed the entire historical Research/Promotion V1 closure range
+   `fbddeb3dba3066bc4f658a576d8393be127d9d62`..`06417bdcdc73ce2e0e9a0247
+   cb1656d9af211c4c` (24 commits) plus review bundle
+   `RESEARCH_PROMOTION_V1_INDEPENDENT_REVIEW_01.zip` (all 25
+   manifest-listed evidence files independently hash-verified). Findings:
+   `CANONICAL_PROMOTION_DECISION=SOUND`, `BACKTEST_EVIDENCE_SEAM=SOUND`,
+   `CROSS_CANDIDATE_AUTHORITY=ENFORCED`, `OOS_RESEARCH_AUTHORITY=SOUND`,
+   `DURABLE_PROMOTION_LINEAGE=structurally atomic`,
+   `STRESS_SUITE_AUTHORITY=SOUND`, `ROBUSTNESS_GAUNTLET=SOUND`,
+   `DSR_PBO_SENSITIVITY=SOUND`, `GENUINE_SHUFFLED_PLACEBO=SOUND`,
+   `P7A_P7B_REPLAY=SOUND`, `FINAL_P9_AUTHORITY_BINDING=CONFIRMED`. One
+   remaining deterministic proof defect: P10 claimed a route-level
+   Postgres V3 lineage readback that did not actually exist. The shared
+   `mqk_test` DB also had unrelated historical migration-checksum drift,
+   so DB proof was truthfully classified `BLOCKED`, not fabricated.
+2. Reviewed repair bundle
+   `RESEARCH_PROMOTION_LINEAGE_HTTP_PROOF_REPAIR_01.zip` (all 12
+   manifest-listed evidence files independently hash-verified). Repair
+   commit `12490668` closed the final proof gap with a real daemon HTTP
+   promotion route, exact returned `transition_id`, raw Postgres
+   readback, exact Research trial identity, exact economic evaluation
+   identity, exact judge artifact hash, exact backtest run identity,
+   exact stress protocol + artifact hash, exact robustness protocol +
+   artifact hash, exact promotion-policy fingerprint, exact
+   scanner/review evidence root/fingerprint binding, and a mutation-style
+   RED control. Fresh isolated disposable Postgres proof: closure proof
+   1/1, daemon promotion routes 33/33, `mqk-db` promotion registry/
+   lineage 33/33, P10 acceptance 5/5. Production files changed: none.
+
+**Production/test edits during this integration mission: NONE beyond the
+fast-forward itself.** This mission performed the merge plus this
+docs-only acceptance record; no production or test code was authored or
+modified.
+
+**Status: `RESEARCH_BACKTEST_V1_COMPLETE` = `CLOSED — INDEPENDENTLY
+ACCEPTED`.** Merged into `ledger-closure-integration-01` at `12490668`
+(identical SHA — true fast-forward, no merge commit). Not pushed to
+`origin` (per mission scope). `research-promotion-lineage-proof-repair-01`
+was not deleted.
+
+**This acceptance means:** the Research -> Backtest -> OOS/robustness
+evidence -> canonical promotion evaluation -> production HTTP promotion
+boundary -> durable Postgres evidence lineage engineering chain is
+independently accepted end to end.
+
+**This acceptance does NOT mean:** `PROVEN_ALPHA`; promotion-readiness
+for an arbitrary new strategy; final holdout consumed (it remains
+reserved); `SHORT-WAVE-03` executed (it remains unexecuted); Paper has
+validated any strategy (a separate operational/economic evidence stage);
+or Live is ready. `DIRECT_RANK`'s own independent acceptance (Section
+1L-2, above) is unaffected and unchanged by this entry — the two
+acceptances are of separate, non-overlapping chains.
+
+---
+
 ## 2. Baseline
 
 ```

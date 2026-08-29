@@ -43,7 +43,9 @@ The equity/ETF paper-trading core (orchestrator, OMS state machine, outbox/inbox
 **NOT READY, and cannot become ready without new work.** `LiveCapital` cold-start is hard-gated behind a trust-chain proof (`live_trust_complete`) that is **hardcoded `false`** in `research-py`'s TV-03 pipeline — this is by design, not a bug, and correctly enforced at both the advisory and cold-start-enforcement layers. Separately, live account truth is wrong today: `buying_power` is aliased to `cash` rather than pulled from Alpaca's real `buying_power`/`daytrading_buying_power` fields, which is economically dangerous for a margin account. No live-capital smoke-test tooling exists. A prior memory record claiming "daemon defaults to real Alpaca WS unless forced to paper" is **stale** — current default (`Paper`/`Paper`) is fail-closed and safe; this session is correcting that memory record.
 
 ### Current Research/Backtest Verdict
-**`RESEARCH_BACKTEST_V1_COMPLETE` — LOCALLY COMPLETE, PENDING INDEPENDENT REVIEW** (updated 2026-08-22, `FINAL-P9-AUTHORITY-BINDING-REPAIR-01`, commit `06417bdc`; supersedes the paragraph immediately below, `FINAL-P10-FIXTURE-REALISM-01`). Closes three remaining P9 evidence-authority bindings an independent review of `RESEARCH_BACKTEST_V1_FINAL_PRODUCTION_4.mbox` found still open, with no change to any frozen algorithm, robustness threshold, execution logic, or Research trial identity. (1) `dsr_pbo_sensitivity` now requires a caller-supplied `--judge-artifact-sha256` naming the exact P7C-authorized `research_judge_artifacts` row, resolves ITS registered `(experiment_id, hypothesis_id)` scope (never `trial_id`'s own `hypothesis_id`), and reuses that exact scope for every block-count rerun; `evaluate_promotion` now requires this authoritative judge identity to equal the P7C-verified judge identity — closing a real gap where a whole-experiment-scoped P7C judge could be silently narrowed to a single-hypothesis comparison population while claiming to vary "only" the block count. (2) `dsr_pbo_sensitivity` is a REQUIRED promotion-grade P9 scenario: every `not_evaluable` outcome (previously sometimes mapped to `applicable: false` for a structurally-too-small comparison population) now maps to `applicable: true, passed: false` unconditionally — it can no longer vanish from a promotion-grade P9 artifact. (3) `genuine_shuffled_placebo`'s `research_trial_id`, `baseline_economic_eval_id`, and `protocol_id` are now extracted from its structured evidence and checked against the P7C-verified trial/economic-result identity and the one accepted placebo protocol (`genuine_shuffled_placebo_v1`) — previously unchecked entirely. (4) `p7a_p7b_economic_replay_stress` evidence completeness is now checked against every required structured field (exact `protocol_id`, both economic-result identities and their content hashes, the three input-file hashes, bars-provenance/pricing identity, stress-spec identity, and the actual stressed pass/fail metric), not merely `baseline_economic_eval_id` alone. Verified: 9/9 `dsr_pbo_sensitivity.rs` unit tests, 11/11 `test_dsr_pbo_sensitivity_cli.py`, 18/18 `scenario_robustness_gauntlet_artifact_01.rs`, 13/13 `scenario_promotion_requires_robustness_evidence_01.rs` (including 7 new Section 1/3/4 negative controls), 5/5 `scenario_research_backtest_promotion_v1_acceptance_01.rs`, full `mqk-promotion`/`mqk-backtest`/`mqk-artifacts` suites green, full workspace `cargo check --workspace --tests` clean, and — against the same real disposable Postgres (`mqk-test-postgres`, port 5434) prior sessions used — `scenario_strategy_promotion_routes_01.rs` 33/33 pass, `scenario_strategy_promotion_closure_proof_01f.rs` 1/1 pass, both `--include-ignored --test-threads=1`. **This is still a local, self-assessed completion** — independent review of `06417bdc` has not yet occurred, and it has not been pushed to `origin/main` (which remains at `fbddeb3d`). Does not activate the Post-V1 Research Capability Backlog (§24) and does not alter Paper/Live status.
+**`RESEARCH_BACKTEST_V1_COMPLETE` — CLOSED — INDEPENDENTLY ACCEPTED** (2026-08-28, `RESEARCH-BACKTEST-V1-FINAL-INTEGRATION-AND-ACCEPTANCE-01`; supersedes the paragraph immediately below, `FINAL-P9-AUTHORITY-BINDING-REPAIR-01`, commit `06417bdc`). ChatGPT independently reviewed the full 24-commit Research/Promotion V1 closure range (`fbddeb3d`..`06417bdc`) plus its evidence bundle (`RESEARCH_PROMOTION_V1_INDEPENDENT_REVIEW_01.zip`, all 25 manifest-listed files hash-verified) and found `CANONICAL_PROMOTION_DECISION`, `BACKTEST_EVIDENCE_SEAM`, `CROSS_CANDIDATE_AUTHORITY`, `OOS_RESEARCH_AUTHORITY`, `DURABLE_PROMOTION_LINEAGE` (structurally atomic), `STRESS_SUITE_AUTHORITY`, `ROBUSTNESS_GAUNTLET`, `DSR_PBO_SENSITIVITY`, `GENUINE_SHUFFLED_PLACEBO`, and `P7A_P7B_REPLAY` all SOUND, with one remaining deterministic proof defect: P10's own acceptance had claimed a route-level Postgres lineage readback that did not actually exist (the shared `mqk_test` DB also carried unrelated historical migration-checksum drift, so DB proof was honestly classified BLOCKED, not fabricated). That gap was closed by test-only commit `12490668e57f0ab2a900bb0e4b045619e4a904be` (`test: prove promotion http route persists exact evidence lineage`) — a real daemon HTTP promotion route exercised end to end against a fresh isolated disposable Postgres (`mqk_promotion_lineage_review_20260828_55375fb1`), with a raw Postgres readback proving the exact Research trial identity, economic-evaluation identity, judge-artifact hash, backtest-run identity, stress/robustness protocol + artifact hashes, promotion-policy fingerprint, and scanner/review evidence-root binding actually judged, plus a mutation-style RED control (a wrong Research lineage identity is proven to cause failure). Repair bundle `RESEARCH_PROMOTION_LINEAGE_HTTP_PROOF_REPAIR_01.zip` (12 manifest-listed files) was independently hash-verified and accepted. Results on the fresh isolated DB: closure proof 1/1, `mqk-daemon` promotion routes 33/33, `mqk-db` promotion registry/lineage 33/33, P10 acceptance suite 5/5 — zero production files changed by the repair (test-only: exactly `core-rs/crates/mqk-daemon/tests/scenario_strategy_promotion_closure_proof_01f.rs` and `core-rs/crates/mqk-promotion/tests/scenario_research_backtest_promotion_v1_acceptance_01.rs`). `12490668` was fast-forward-integrated onto `ledger-closure-integration-01` at the identical SHA (`RESEARCH-BACKTEST-V1-FINAL-INTEGRATION-AND-ACCEPTANCE-01`, 2026-08-28); no test rerun was required for that integration step, since the fast-forward produced the byte-identical, already-reviewed commit — verified via `git diff --check` (clean) and `git diff --name-status` (only the same two test files). **This means engineering closure — Research -> Backtest -> OOS/robustness evidence -> canonical promotion evaluation -> production HTTP promotion boundary -> durable Postgres evidence lineage — is independently accepted end to end.** It does NOT mean `PROVEN_ALPHA`, promotion-readiness for an arbitrary new strategy, final-holdout consumption, `SHORT-WAVE-03` execution, Paper forward validation, or Live readiness — each of those remains a separate, unestablished stage. Does not activate the Post-V1 Research Capability Backlog (§24) and does not alter Paper/Live status. Underlying implementation commits `e56f94fb` and `06417bdc` were already pushed ancestors of `origin/main` before this acceptance (per the immediately-superseded paragraph below); `12490668` itself remains local-only on `ledger-closure-integration-01`, not pushed.
+
+**Prior (2026-08-22, `FINAL-P9-AUTHORITY-BINDING-REPAIR-01`) — now superseded by the correction immediately above:** `RESEARCH_BACKTEST_V1_COMPLETE` — LOCALLY COMPLETE, PENDING INDEPENDENT REVIEW (commit `06417bdc`; supersedes the paragraph immediately below, `FINAL-P10-FIXTURE-REALISM-01`). Closes three remaining P9 evidence-authority bindings an independent review of `RESEARCH_BACKTEST_V1_FINAL_PRODUCTION_4.mbox` found still open, with no change to any frozen algorithm, robustness threshold, execution logic, or Research trial identity. (1) `dsr_pbo_sensitivity` now requires a caller-supplied `--judge-artifact-sha256` naming the exact P7C-authorized `research_judge_artifacts` row, resolves ITS registered `(experiment_id, hypothesis_id)` scope (never `trial_id`'s own `hypothesis_id`), and reuses that exact scope for every block-count rerun; `evaluate_promotion` now requires this authoritative judge identity to equal the P7C-verified judge identity — closing a real gap where a whole-experiment-scoped P7C judge could be silently narrowed to a single-hypothesis comparison population while claiming to vary "only" the block count. (2) `dsr_pbo_sensitivity` is a REQUIRED promotion-grade P9 scenario: every `not_evaluable` outcome (previously sometimes mapped to `applicable: false` for a structurally-too-small comparison population) now maps to `applicable: true, passed: false` unconditionally — it can no longer vanish from a promotion-grade P9 artifact. (3) `genuine_shuffled_placebo`'s `research_trial_id`, `baseline_economic_eval_id`, and `protocol_id` are now extracted from its structured evidence and checked against the P7C-verified trial/economic-result identity and the one accepted placebo protocol (`genuine_shuffled_placebo_v1`) — previously unchecked entirely. (4) `p7a_p7b_economic_replay_stress` evidence completeness is now checked against every required structured field (exact `protocol_id`, both economic-result identities and their content hashes, the three input-file hashes, bars-provenance/pricing identity, stress-spec identity, and the actual stressed pass/fail metric), not merely `baseline_economic_eval_id` alone. Verified: 9/9 `dsr_pbo_sensitivity.rs` unit tests, 11/11 `test_dsr_pbo_sensitivity_cli.py`, 18/18 `scenario_robustness_gauntlet_artifact_01.rs`, 13/13 `scenario_promotion_requires_robustness_evidence_01.rs` (including 7 new Section 1/3/4 negative controls), 5/5 `scenario_research_backtest_promotion_v1_acceptance_01.rs`, full `mqk-promotion`/`mqk-backtest`/`mqk-artifacts` suites green, full workspace `cargo check --workspace --tests` clean, and — against the same real disposable Postgres (`mqk-test-postgres`, port 5434) prior sessions used — `scenario_strategy_promotion_routes_01.rs` 33/33 pass, `scenario_strategy_promotion_closure_proof_01f.rs` 1/1 pass, both `--include-ignored --test-threads=1`. **This is still a local, self-assessed completion** — independent review of `06417bdc` has not yet occurred, and it has not been pushed to `origin/main` (which remains at `fbddeb3d`). Does not activate the Post-V1 Research Capability Backlog (§24) and does not alter Paper/Live status.
 
 **Prior (2026-08-22, `FINAL-P10-FIXTURE-REALISM-01`) — now superseded by the correction immediately above:** `RESEARCH_BACKTEST_V1_COMPLETE` — LOCALLY COMPLETE, PENDING INDEPENDENT REVIEW (commit `e19602ff`; supersedes the paragraph immediately below, `FINAL-RESEARCH-BACKTEST-V1-CLOSURE-CONTROLLER-01`). Closes the exact, honestly-named blocker the prior session left open: the `mqk-daemon` DB/HTTP integration suite's own test-fixture debt, with zero production code changes. (1) Every positive-path test across both integration files now builds Research evidence via `write_real_research_evidence_via_production_pipeline` instead of the lightweight hand-built fixture, which could never satisfy the mandatory `p7a_p7b_economic_replay_stress`/`genuine_shuffled_placebo` scenarios' requirement for genuine `inputs`; `closure_proof_01f.rs` gained its own copy of that helper (duplicated for the file's existing "no cross-crate test visibility" reason) and its dead hand-built fixture was removed. (2) `smooth_uptrend_bars` (shared by both files) was replaced with one deterministic 240-bar/8-month sequence built from three legs — calm uptrend, wide-intrabar-range uptrend, and a decline leg the strategy genuinely shorts and profits from — verified directly against the real `detect_market_regime` classifier and `run_robustness_gauntlet` to produce 3 genuinely distinct, non-concentrated regime buckets (`month_year_regime_concentration` now genuinely passes, not merely inapplicable), with every other P9/stress scenario continuing to clear with real, unforced margin. (3) `closure_proof_01f.rs`'s own `write_real_backtest_evidence` had a separate, pre-existing fixture bug (its P7A/P7B stress call passed `max_target_qty=None`, failing the earlier `FINAL-P7A-P7B-REPLAY-AUTHORITY-01` genuine-tightening requirement) — fixed to `Some(1000)`, matching the routes file's already-correct call. Verified against the same real disposable Postgres (`mqk-test-postgres`, port 5434) the prior session used: `scenario_strategy_promotion_routes_01.rs` 33/33 pass, `scenario_strategy_promotion_closure_proof_01f.rs` 1/1 pass, both `--include-ignored --test-threads=1`. **This is still a local, self-assessed completion** — independent review of `e19602ff` has not yet occurred, and it has not been pushed to `origin/main` (which remains at `fbddeb3d`). Does not activate the Post-V1 Research Capability Backlog (§24) and does not alter Paper/Live status.
 
@@ -3082,6 +3084,88 @@ true at each of those points):
 No Paper soak is claimed to have passed by this entry — none was run as
 part of this acceptance. `smoke_logs/`/`.env.local` not modified; `git
 reset`/`git stash`/`git clean`/rebase/force-push not used; not pushed.
+
+---
+
+## 34. Independent Acceptance of Research/Backtest V1
+
+*Added by `RESEARCH-BACKTEST-V1-FINAL-INTEGRATION-AND-ACCEPTANCE-01`,
+2026-08-28, primary repo `C:\Users\Zacha\Desktop\MiniQuantDeskV4`, branch
+`ledger-closure-integration-01`, starting HEAD `484d93f3c153d22ff196b523
+f77844dfba67b750` (§33's tip, `docs: correct research promotion push
+truth`). Records that the Research/Promotion V1 closure chain's
+outstanding independent-review gate — the one deterministic proof defect
+`RESEARCH_BACKTEST_V1_COMPLETE`'s own `06417bdc` closure (Executive
+Summary, above) had not yet cleared — has now been cleared externally by
+ChatGPT. Fast-forward integration only; no production, test, or script
+file beyond the two named below is touched by this entry.*
+
+**Final authoritative status, superseding the `06417bdc` "LOCALLY
+COMPLETE — PENDING INDEPENDENT REVIEW" label recorded in the Executive
+Summary above (§24's own internal narrative text — §5, the closure/repair
+wave paragraphs, and the `1F`/`1L`/`1L-1`/`1L-2` addenda in
+`docs/research/Research_Backtest_V1_Closeout_Audit.md` — is left
+unmodified as an accurate record of what was true at each of those
+points):**
+
+- `RESEARCH_BACKTEST_V1_COMPLETE` = `CLOSED — INDEPENDENTLY ACCEPTED`.
+- `PROMOTION-BACKTEST-EVIDENCE-SEAM-01`, `PROMOTION-WALKFORWARD-GATE-
+  WIRING-01`, P9 `BKT-ROBUSTNESS-GAUNTLET-01`, and P10
+  `RESEARCH-BACKTEST-FINAL-ACCEPTANCE-01` (all §5/§24) = `CLOSED —
+  INDEPENDENTLY ACCEPTED` as components of the same accepted chain.
+- `DIRECT_RANK` (`RESEARCH-DIRECT-RANK-AND-LEDGER-CLOSURE-WAVE-01`,
+  §1L-2 of the closeout audit) is **unchanged** by this entry — it was
+  already `CLOSED — INDEPENDENTLY ACCEPTED` on its own, separate review,
+  and this acceptance does not re-review or extend that wave.
+
+**Acceptance chain of custody:**
+
+- Historical closure tip: `06417bdcdc73ce2e0e9a0247cb1656d9af211c4c`
+  (`FINAL-P9-AUTHORITY-BINDING-REPAIR-01`) — the 24-commit
+  Research/Promotion closure range independently reviewed is
+  `fbddeb3dba3066bc4f658a576d8393be127d9d62`..`06417bdc`.
+- Independent-review finding: production/promotion chain SOUND end to
+  end; one confirmed proof gap — P10 claimed a route-level Postgres V3
+  lineage readback that did not actually exist (shared `mqk_test` DB also
+  carried unrelated historical migration-checksum drift, so DB proof was
+  truthfully `BLOCKED`, not fabricated).
+- Final proof / repair commit:
+  `12490668e57f0ab2a900bb0e4b045619e4a904be` (`test: prove promotion http
+  route persists exact evidence lineage`) — real daemon HTTP promotion
+  route, real Postgres readback, exact Research/backtest/stress/
+  robustness/policy identity binding, mutation-style RED control.
+  Fresh isolated disposable Postgres results: closure proof 1/1, daemon
+  promotion routes 33/33, `mqk-db` promotion registry/lineage 33/33, P10
+  acceptance 5/5. Production files changed: none.
+- Integration acceptance base: `12490668` fast-forward-merged onto
+  `ledger-closure-integration-01` (`git merge --ff-only`, starting HEAD
+  `484d93f3` == merge-base with `origin/research-promotion-lineage-proof-
+  repair-01`), resulting HEAD `12490668e57f0ab2a900bb0e4b045619e4a904be`.
+  `git diff --check 484d93f3..HEAD` clean; `git diff --name-status
+  484d93f3..HEAD` touched exactly
+  `core-rs/crates/mqk-daemon/tests/scenario_strategy_promotion_closure_
+  proof_01f.rs` and `core-rs/crates/mqk-promotion/tests/scenario_
+  research_backtest_promotion_v1_acceptance_01.rs`. No test rerun was
+  performed for the fast-forward itself — the integrated commit is
+  byte-identical to the independently reviewed and tested commit, and a
+  fast-forward with no production/test divergence cannot alter test
+  semantics.
+
+**What this does not establish:** `PROVEN_ALPHA`; promotion-readiness for
+an arbitrary new strategy; final-holdout consumption (final holdout
+remains reserved, not consumed); `SHORT-WAVE-03` execution (unexecuted);
+Paper forward validation (separate operational/economic evidence stage,
+not established by this entry); Live readiness.
+
+Zero DB mutation beyond the reviewer's own disposable Postgres instance;
+zero Paper session started; zero order submitted; zero Live routing
+touched; `smoke_logs/`/`.env.local` not modified; `git reset`/`git
+stash`/`git clean`/rebase/force-push not used; not pushed.
+
+Review bundle:
+`Documents/MiniQuantDeskV4-Archive/2026-08-28/research-backtest-v1-final-
+acceptance-integration-01/
+RESEARCH_BACKTEST_V1_FINAL_ACCEPTANCE_INTEGRATION_01.zip`.
 
 ---
 
