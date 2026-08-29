@@ -547,7 +547,19 @@ def build_dynamic_rankable_benchmark(
     in `reference_dates` (T_prev is itself always an element of
     `reference_dates`), so a holdout-region row is structurally never
     touched even though `bars` and the OOS predictions file may span dates
-    beyond it."""
+    beyond it.
+
+    R3 (WAVE03-BENCHMARK-MISSING-BAR-EXECUTION-AUTHORITY-REPAIR-03) REAL-BAR
+    AUTHORITY: a non-empty EXECUTED basket may never silently shrink to its
+    surviving members -- every EXECUTED symbol must have an exact close at
+    both the previous reference date and the current one, or the return
+    computation raises RuntimeError (never drops/renormalizes/NaNs-through).
+    Every membership transition (entry or exit, i.e. EXECUTED ^ PENDING)
+    also requires a real execution bar AT the execution date itself, or step
+    B raises RuntimeError rather than fabricate an execution. These checks
+    key strictly off reference dates via an exact (symbol, date) close
+    lookup -- never off a bar row's previous OBSERVED date -- so a missing
+    reference-date bar can never be silently bridged into a longer return."""
     ref_ts = pd.to_datetime(pd.Index(reference_dates), utc=True)
     holdout_ts = pd.Timestamp(holdout_start_utc)
     if holdout_ts.tzinfo is None:
@@ -579,7 +591,20 @@ def build_dynamic_rankable_benchmark(
     b["end_ts"] = pd.to_datetime(b["end_ts"], utc=True)
     b = b.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
     b["date"] = b["end_ts"].dt.strftime("%Y-%m-%d")
-    b["daily_ret"] = b.groupby("symbol")["close"].pct_change()
+
+    # R3 (WAVE03-BENCHMARK-MISSING-BAR-EXECUTION-AUTHORITY-REPAIR-03): exact
+    # (symbol, reference-date) -> close lookup, replacing the prior
+    # groupby(...).pct_change() authority. pct_change() walked each symbol's
+    # own previous OBSERVED bar row, which need not be the previous economic
+    # REFERENCE date -- a missing row could silently bridge a gap (e.g.
+    # D1->D3 read as a single-interval return when D2 has no bar at all).
+    # Every return/execution lookup below is keyed by the exact reference
+    # date string, never by row adjacency. Non-finite/non-positive closes are
+    # treated as absent (fail closed, never used as a causal endpoint).
+    close_lookup: dict[tuple[str, str], float] = {}
+    for sym, date, close in zip(b["symbol"].astype(str), b["date"], b["close"]):
+        if pd.notna(close) and np.isfinite(close) and close > 0:
+            close_lookup[(sym, date)] = float(close)
 
     sorted_dates = sorted(reference_date_set)
     # SIGNAL-AVAILABILITY membership (unshifted -- how many symbols were
@@ -606,7 +631,7 @@ def build_dynamic_rankable_benchmark(
     for block in fold_blocks:
         executed: set[str] = set()
         pending: Optional[set[str]] = None
-        for d in block:
+        for idx, d in enumerate(block):
             # A. RETURN FIRST -- attribute D's incoming return to whatever
             # is currently EXECUTED (set by an earlier date's step B, never
             # by this date's own decision below). Empty EXECUTED covers both
@@ -616,12 +641,45 @@ def build_dynamic_rankable_benchmark(
             if not executed:
                 per_date[d] = float("nan")
             else:
-                day_rets = b.loc[(b["date"] == d) & (b["symbol"].isin(executed)), "daily_ret"].dropna()
-                per_date[d] = float(day_rets.mean()) if len(day_rets) else float("nan")
+                # d_prev is always defined here: EXECUTED can only be
+                # non-empty from the fold's 3rd date onward (it is first set
+                # by step B on the fold's 2nd iteration), so idx >= 2.
+                d_prev = block[idx - 1]
+                missing_endpoints: list[str] = []
+                r_values: list[float] = []
+                for s in sorted(executed):
+                    c_prev = close_lookup.get((s, d_prev))
+                    c_cur = close_lookup.get((s, d))
+                    if c_prev is None or c_cur is None:
+                        missing_endpoints.append(s)
+                        continue
+                    r_values.append(c_cur / c_prev - 1.0)
+                if missing_endpoints:
+                    # DEFECT A/B: a non-empty EXECUTED basket must never
+                    # silently shrink to its surviving members -- every
+                    # member must have an exact close at both D_prev and D.
+                    raise RuntimeError(
+                        f"Fail-closed: EXECUTED symbol(s) {missing_endpoints} lack an exact causal "
+                        f"close at both the previous reference date {d_prev!r} and reference date "
+                        f"{d!r}; a partial basket may never be silently used for the benchmark return"
+                    )
+                per_date[d] = float(np.mean(r_values))
             # B. EXECUTE PENDING STATE -- only after D's incoming return is
             # already attributed above does the pending target (decided on
             # D's immediately preceding reference date) become EXECUTED.
             if pending is not None:
+                # DEFECT C: a membership transition (entry or exit) may only
+                # be applied if every transition symbol has a real execution
+                # bar AT D itself -- otherwise this benchmark would be
+                # fabricating an execution that never truthfully occurred.
+                transition_symbols = executed.symmetric_difference(pending)
+                missing_execution_bar = sorted(s for s in transition_symbols if close_lookup.get((s, d)) is None)
+                if missing_execution_bar:
+                    raise RuntimeError(
+                        f"Fail-closed: membership transition symbol(s) {missing_execution_bar} lack a "
+                        f"real execution bar at reference date {d!r}; cannot apply PENDING without a "
+                        f"truthful execution price"
+                    )
                 executed = pending
             # C. RECORD NEW DECISION -- read RANKABLE_SET(d) fresh; this
             # becomes the PENDING target for some later date to execute.

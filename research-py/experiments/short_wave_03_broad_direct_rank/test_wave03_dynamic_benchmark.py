@@ -376,22 +376,26 @@ def test_cross_section_size_reflects_unshifted_decision_not_shifted_execution(tm
 
 
 # ---------------------------------------------------------------------------
-# MISSING BAR SAFETY: an executed, non-empty membership whose price bar is
-# simply absent on the reference date must produce a missing observation,
-# never a fabricated return.
+# MISSING BAR SAFETY (WAVE03-BENCHMARK-MISSING-BAR-EXECUTION-AUTHORITY-
+# REPAIR-03, DEFECT A/B): an executed, non-empty membership whose price bar
+# is simply absent on a reference date its return interval requires must
+# raise RuntimeError -- it must NEVER be silently recorded as an ordinary
+# "missing observation" (that contract is reserved for a genuinely EMPTY
+# EXECUTED/rankable set, not a partially-observed non-empty one). Even a
+# single-member EXECUTED basket trivially satisfies "not ALL executed
+# symbols have a valid endpoint" when that one member's bar is absent.
 # ---------------------------------------------------------------------------
 
 
-def test_missing_bar_for_an_executed_symbol_produces_missing_not_fabricated_return(tmp_path: Path) -> None:
+def test_missing_bar_for_an_executed_symbol_fails_closed_not_silently_missing(tmp_path: Path) -> None:
     oos_csv = _write_oos_csv(tmp_path, [("2020-01-02", "A", 0.6, 1)])
     econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
     # A has no bar row at all on 2020-01-06, the date its D0 decision governs.
     bars = _bars_df([("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0)])
-    result = run_wave.build_dynamic_rankable_benchmark(
-        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
-    )
-    assert "2020-01-06" in result["dates_with_no_return_observation"]
-    assert result["cumulative_return_over_reference_dates"] == pytest.approx(0.0)  # only the forced reset date used
+    with pytest.raises(RuntimeError, match="lack"):
+        run_wave.build_dynamic_rankable_benchmark(
+            bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -768,3 +772,213 @@ def test_mutation_proof_stale_membership_implementation_fails_dropped_symbol_inv
     assert "A" in broken_result["2020-01-06"]  # the stale-carry-forward defect keeps A around
     with pytest.raises(AssertionError):
         assert "A" not in broken_result["2020-01-06"]  # REQUIRED TEST 2's own assertion, proven to fail here
+
+
+# ---------------------------------------------------------------------------
+# WAVE03-BENCHMARK-MISSING-BAR-EXECUTION-AUTHORITY-REPAIR-03
+#
+# DEFECT A: a non-empty EXECUTED basket's return must never silently shrink
+# to its surviving members.
+# DEFECT B: the previous reference date's close -- never a bar row's
+# previous OBSERVED date -- is the only valid causal denominator.
+# DEFECT C: a membership transition (entry or exit) must never be applied
+# without a real execution bar AT the execution date.
+#
+# `_pre_r3_BROKEN_build_dynamic_rankable_benchmark` below is a faithful
+# reproduction of this repository's OWN pre-R3 `build_dynamic_rankable_
+# benchmark` (i.e. the exact code this repair replaces): same R2-accepted
+# DECISION -> PENDING -> EXECUTED chronology and phase ordering, but the
+# per-date return computed via `groupby("symbol")["close"].pct_change()`
+# (bar-row adjacency, silently bridges a missing reference-date row) and
+# `.dropna()` + mean-of-survivors (silently drops a partial basket down to
+# whichever members happen to have a return that date), and with no
+# execution-bar check before applying PENDING. Used ONLY by the negative
+# proofs below -- never call from production code.
+# ---------------------------------------------------------------------------
+
+
+def _pre_r3_BROKEN_build_dynamic_rankable_benchmark(
+    bars: pd.DataFrame, oos_predictions_csv: Path, economic_returns_csv: Path,
+    reference_dates: list[str], holdout_start_utc: str,
+) -> dict:
+    holdout_ts = pd.Timestamp(holdout_start_utc)
+    if holdout_ts.tzinfo is None:
+        holdout_ts = holdout_ts.tz_localize("UTC")
+    authority = run_wave.economic_fold_date_authority(economic_returns_csv)
+    fold_start_dates = authority["reset_dates"]
+    fold_of_date = authority["fold_of_date"]
+    reference_date_set = set(pd.Index(reference_dates).astype(str))
+    rankable = run_wave.rankable_set_by_date(oos_predictions_csv)
+    b = bars.copy()
+    b["end_ts"] = pd.to_datetime(b["end_ts"], utc=True)
+    b = b.sort_values(["symbol", "end_ts"], kind="mergesort").reset_index(drop=True)
+    b["date"] = b["end_ts"].dt.strftime("%Y-%m-%d")
+    b["daily_ret"] = b.groupby("symbol")["close"].pct_change()  # DEFECT B: bar-row adjacency, not reference-date adjacency
+
+    sorted_dates = sorted(reference_date_set)
+    fold_blocks: list[list[str]] = []
+    current_fold_id = object()
+    for d in sorted_dates:
+        fid = fold_of_date.get(d)
+        if fid != current_fold_id:
+            fold_blocks.append([])
+            current_fold_id = fid
+        fold_blocks[-1].append(d)
+
+    per_date: dict[str, float] = {}
+    for block in fold_blocks:
+        executed: set[str] = set()
+        pending = None
+        for d in block:
+            if not executed:
+                per_date[d] = float("nan")
+            else:
+                day_rets = b.loc[(b["date"] == d) & (b["symbol"].isin(executed)), "daily_ret"].dropna()
+                per_date[d] = float(day_rets.mean()) if len(day_rets) else float("nan")  # DEFECT A: silent mean-of-survivors
+            if pending is not None:
+                executed = pending  # DEFECT C: no execution-bar check before applying PENDING
+            pending = rankable.get(d, set())
+
+    per_date_series = pd.Series(per_date).reindex(sorted_dates)
+    for d in fold_start_dates & reference_date_set:
+        per_date_series.loc[d] = 0.0
+    daily_series = per_date_series.dropna()
+    cumulative_return = float(np.prod(1.0 + daily_series.to_numpy()) - 1.0) if len(daily_series) else None
+    return {"cumulative_return_over_reference_dates": cumulative_return, "per_date": per_date_series.to_dict()}
+
+
+# ---------------------------------------------------------------------------
+# REQUIRED NEGATIVE CONTROL 1 -- PARTIAL BASKET. EXECUTED={A,B} governs the
+# D2->D3 interval. A has exact D2/D3 bars; B has D2 but no D3 bar.
+# ---------------------------------------------------------------------------
+
+
+def test_required_negative_control_1_partial_basket_fails_closed(tmp_path: Path) -> None:
+    oos_csv = _write_oos_csv(tmp_path, [("2020-01-03", "A", 0.6, 1), ("2020-01-03", "B", 0.4, 1)])  # decision at D1
+    econ_csv = _write_economic_returns_csv(
+        tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)]
+    )
+    bars = _bars_df(
+        [
+            ("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0),
+            ("A", "2020-01-06", 100.0), ("A", "2020-01-07", 105.0),  # A: exact D2 and D3 bars
+            ("B", "2020-01-01", 50.0), ("B", "2020-01-02", 50.0), ("B", "2020-01-03", 50.0),
+            ("B", "2020-01-06", 50.0),  # B: D2 bar present, D3 bar ABSENT
+        ]
+    )
+    reference_dates = ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
+
+    # Pre-repair (broken): silently drops B, computes a return from A alone.
+    broken = _pre_r3_BROKEN_build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+    assert broken["per_date"]["2020-01-07"] == pytest.approx(105.0 / 100.0 - 1.0)  # RED: A-only, B silently dropped
+
+    # Post-repair: a five-- here two-name equal-weight basket cannot silently
+    # become a one-name basket. Must raise before any result is produced.
+    with pytest.raises(RuntimeError, match="lack"):
+        run_wave.build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+
+
+# ---------------------------------------------------------------------------
+# REQUIRED NEGATIVE CONTROL 2 -- MISSING EXECUTION BAR (ENTRY). D1 decides
+# enter A; D2 (A's execution date) has no bar for A at all.
+# ---------------------------------------------------------------------------
+
+
+def test_required_negative_control_2_missing_entry_execution_bar_fails_closed(tmp_path: Path) -> None:
+    oos_csv = _write_oos_csv(tmp_path, [("2020-01-03", "A", 0.6, 1)])  # D1 decides enter A
+    econ_csv = _write_economic_returns_csv(
+        tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)]
+    )
+    # A has no bar row at all on 2020-01-06 -- its execution date.
+    bars = _bars_df([("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0), ("A", "2020-01-07", 200.0)])
+    reference_dates = ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
+
+    # Pre-repair (broken): marks A executed at D2 regardless, and later
+    # bridges D1(01-03)->D3(01-07) into a single spurious return via
+    # pct_change's bar-row adjacency (D2's row simply does not exist).
+    broken = _pre_r3_BROKEN_build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+    assert broken["per_date"]["2020-01-07"] == pytest.approx(200.0 / 100.0 - 1.0)  # RED: fabricated D1->D3 bridge
+
+    # Post-repair: must fail at D2 (the execution date) -- no D3 result may
+    # ever be produced from this fixture.
+    with pytest.raises(RuntimeError, match="execution bar"):
+        run_wave.build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+
+
+# ---------------------------------------------------------------------------
+# REQUIRED NEGATIVE CONTROL 3 -- GAP BRIDGING. A(D1)=100, A(D2)=MISSING,
+# A(D3)=200, with A already EXECUTED (held, no transition) across D2. No
+# benchmark code may interpret this as a legitimate +100% return.
+# ---------------------------------------------------------------------------
+
+
+def test_required_negative_control_3_gap_bridging_fails_closed(tmp_path: Path) -> None:
+    oos_csv = _write_oos_csv(
+        tmp_path,
+        [("2020-01-02", "A", 0.6, 1), ("2020-01-03", "A", 0.6, 1)],  # D0 and D1 both hold {A} -- no transition at D2
+    )
+    econ_csv = _write_economic_returns_csv(
+        tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)]
+    )
+    # A: D1(01-03)=100, D2(01-06)=MISSING entirely, D3(01-07)=200.
+    bars = _bars_df([("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0), ("A", "2020-01-07", 200.0)])
+    reference_dates = ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
+
+    # Pre-repair (broken): pct_change's row-adjacency bridges the missing D2
+    # row and reports a spurious +100% return.
+    broken = _pre_r3_BROKEN_build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+    assert broken["per_date"]["2020-01-07"] == pytest.approx(200.0 / 100.0 - 1.0)  # RED: D1->D3 bridged as if legitimate
+
+    # Post-repair: must raise -- D2's exact close is required and absent;
+    # no interval may bridge past it. A mutation that reintroduces
+    # groupby(...).pct_change() would make this assertion fail.
+    with pytest.raises(RuntimeError, match="lack"):
+        run_wave.build_dynamic_rankable_benchmark(bars, oos_csv, econ_csv, reference_dates, FAR_FUTURE_HOLDOUT)
+
+
+# ---------------------------------------------------------------------------
+# REQUIRED EXIT CONTROL. A is EXECUTED (via D0's decision). D1 decides drop
+# A. At D2 the exit is supposed to execute -- A has no bar at D2.
+# ---------------------------------------------------------------------------
+
+
+def test_required_exit_control_missing_exit_execution_bar_fails_closed(tmp_path: Path) -> None:
+    oos_csv = _write_oos_csv(tmp_path, [("2020-01-02", "A", 0.6, 1)])  # D0 decides {A}; D1 has no row -- drop
+    econ_csv = _write_economic_returns_csv(tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1)])
+    # A executes fine at D1 (01-03 bar present) but has NO bar at D2 (01-06),
+    # the date its exit is supposed to execute.
+    bars = _bars_df([("A", "2020-01-01", 100.0), ("A", "2020-01-02", 100.0), ("A", "2020-01-03", 100.0)])
+    with pytest.raises(RuntimeError, match="lack"):
+        run_wave.build_dynamic_rankable_benchmark(
+            bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06"], FAR_FUTURE_HOLDOUT
+        )
+
+
+# ---------------------------------------------------------------------------
+# POSITIVE CONTROL: five-member portfolio -- all five members contribute
+# exactly once to the equal-weight mean; no survivor-renormalization
+# behavior exists when every required bar is genuinely present.
+# ---------------------------------------------------------------------------
+
+
+def test_positive_control_five_member_portfolio_all_contribute_exactly_once(tmp_path: Path) -> None:
+    symbols = ["A", "B", "C", "D", "E"]
+    oos_csv = _write_oos_csv(tmp_path, [("2020-01-03", s, 0.5, 1) for s in symbols])  # D1 decides all five
+    econ_csv = _write_economic_returns_csv(
+        tmp_path, [("2020-01-02", 1), ("2020-01-03", 1), ("2020-01-06", 1), ("2020-01-07", 1)]
+    )
+    d2_closes = {"A": 100.0, "B": 50.0, "C": 200.0, "D": 10.0, "E": 75.0}
+    d3_closes = {"A": 110.0, "B": 52.0, "C": 190.0, "D": 11.0, "E": 78.0}
+    bars_rows = []
+    for s in symbols:
+        bars_rows += [
+            (s, "2020-01-01", d2_closes[s]), (s, "2020-01-02", d2_closes[s]), (s, "2020-01-03", d2_closes[s]),
+            (s, "2020-01-06", d2_closes[s]), (s, "2020-01-07", d3_closes[s]),
+        ]
+    bars = _bars_df(bars_rows)
+    result = run_wave.build_dynamic_rankable_benchmark(
+        bars, oos_csv, econ_csv, ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"], FAR_FUTURE_HOLDOUT
+    )
+    expected = float(np.mean([d3_closes[s] / d2_closes[s] - 1.0 for s in symbols]))
+    assert "2020-01-07" not in result["dates_with_no_return_observation"]
+    assert result["cumulative_return_over_reference_dates"] == pytest.approx(expected)
