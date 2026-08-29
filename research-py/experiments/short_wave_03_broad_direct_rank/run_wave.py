@@ -1162,10 +1162,23 @@ def run_family(family_key: str) -> dict:
 
 
 def run_family_judge() -> dict:
-    raise NotImplementedError(
-        "run_family_judge() intentionally not implemented in this predeclaration controller -- "
-        "see run_family()."
+    """WAVE03-FAMILY-JUDGE-01: run build_multiple_testing_judge over the
+    REAL_EXPERIMENT_ID population only (hypothesis_id=None -> full
+    experiment population -- exactly the 6 frozen real-candidate hypothesis
+    IDs once all three families have run, since run_family only ever
+    registers real trials under REAL_EXPERIMENT_ID and the matched placebo
+    under the structurally distinct PLACEBO_EXPERIMENT_ID -- see
+    run_family's own experiment_id routing, proven in
+    test_wave03_family_harness.py). No placebo trial can ever enter this
+    judge's population: build_multiple_testing_judge's own registry query
+    is scoped by experiment_id, and a placebo trial is never registered
+    under REAL_EXPERIMENT_ID in the first place."""
+    judge = build_multiple_testing_judge(experiment_id=REAL_EXPERIMENT_ID, registry_db=REGISTRY_DB)
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    (RUN_ROOT / "judge_artifact.json").write_text(
+        json.dumps(judge, sort_keys=True, indent=2, default=str), encoding="utf-8"
     )
+    return judge
 
 
 EXECUTE_REQUIRED_STAGES = frozenset({"rank01", "rank02", "rank03", "judge"})

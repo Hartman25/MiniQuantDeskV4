@@ -234,16 +234,14 @@ def test_execution_requires_explicit_authorization() -> None:
     main()'s dispatch (mirroring SHORT-WAVE-02's accepted design) --
     run_family/run_family_judge are not self-gating stubs once implemented,
     so this test only ever calls them THROUGH main(), never directly (a
-    direct run_family() call is real, network-touching execution -- see
-    test_wave03_family_harness.py for run_family's own network-free,
-    monkeypatched structural tests)."""
+    direct run_family()/run_family_judge() call is real execution against
+    this experiment's own runs/run_01/ -- see test_wave03_family_harness.py
+    and test_wave03_family_judge.py for their own network-free,
+    monkeypatched/fixture-registry structural tests)."""
     for stage in sorted(run_wave.EXECUTE_REQUIRED_STAGES):
         with pytest.raises(SystemExit) as exc_info:
             run_wave.main([stage])
         assert exc_info.value.code == 3
-
-    with pytest.raises(NotImplementedError):
-        run_wave.run_family_judge()
 
 
 # ---------------------------------------------------------------------------
