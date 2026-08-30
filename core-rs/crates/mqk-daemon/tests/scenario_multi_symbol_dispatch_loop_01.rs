@@ -340,3 +340,272 @@ async fn m08_b5_alert_claim_is_independent_per_symbol() {
         "M08: AAPL's claim must not block MSFT's independent claim"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A1-PANIC-ISOLATION-REVIEW-REPAIR-01
+//
+// Repairs two review defects in A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01:
+//
+//   1. The prior tests injected their panic via `set_panic_on_symbol_for_test`,
+//      which fires at the very TOP of `dispatch_native_strategy_for_symbol_
+//      with_bar_and_facts` -- before any bar-window prep or strategy
+//      evaluation. That only proves an early dispatch-infrastructure panic
+//      is survivable; it never exercises a panic inside the real
+//      `StrategyHost -> Strategy::on_bar(&mut self)` callback, so it never
+//      proved anything about that callback's own state-corruption risk.
+//      That seam is kept below, repurposed as the A1-R6 infrastructure-panic
+//      negative control.
+//
+//   2. Tier A holds exactly one mutable `StrategyHost`/`Box<dyn Strategy>`
+//      for the whole run, shared across EVERY symbol dispatched this tick
+//      and every future tick. `Strategy::on_bar` takes `&mut self`; a panic
+//      mid-callback does not roll back whatever mutation the strategy
+//      already made, and `AssertUnwindSafe` does not prove the object is
+//      safe to reuse afterward. So the prior tests' expectation --  that
+//      siblings dispatched AFTER a panicking symbol still produce normal
+//      results -- was not structurally safe. The repaired production
+//      behavior (`AppState::invoke_native_strategy_host_on_bar`) instead
+//      quarantines the shared bootstrap to `Failed` the instant a real
+//      on_bar panic is caught: every symbol from that point on (siblings
+//      later in this tick, and every future tick) fails closed with
+//      ordinary `None`, indistinguishable from any other Dormant/Failed
+//      bootstrap -- never a fabricated result, never a retry.
+//
+// A1-R1/R2/R3 inject the panic through a real `Strategy` implementation
+// (`PanicOnNthCallStrategy`) registered into a real `StrategyHost`, so the
+// panic genuinely originates inside `Strategy::on_bar`, not a pre-dispatch
+// test hook.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+use futures_util::FutureExt;
+
+/// A real [`mqk_strategy::Strategy`] whose `on_bar` panics on its Nth
+/// invocation (1-indexed) and otherwise returns an empty (no-op) output.
+/// Dispatch is sequential, so "panics on call N" is equivalent to "panics
+/// while evaluating the Nth assignment in the list".
+struct PanicOnNthCallStrategy {
+    spec: mqk_strategy::StrategySpec,
+    call_count: AtomicU32,
+    panic_on_call: u32,
+}
+
+impl PanicOnNthCallStrategy {
+    fn new(panic_on_call: u32) -> Self {
+        Self {
+            spec: mqk_strategy::StrategySpec::new("a1_panic_probe", 60),
+            call_count: AtomicU32::new(0),
+            panic_on_call,
+        }
+    }
+}
+
+impl mqk_strategy::Strategy for PanicOnNthCallStrategy {
+    fn spec(&self) -> mqk_strategy::StrategySpec {
+        self.spec.clone()
+    }
+
+    fn on_bar(&mut self, _ctx: &mqk_strategy::StrategyContext) -> mqk_strategy::StrategyOutput {
+        let n = self.call_count.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        if n == self.panic_on_call {
+            panic!("A1_REAL_ON_BAR_PANIC call {n}");
+        }
+        mqk_strategy::StrategyOutput::new(vec![])
+    }
+}
+
+/// A real, Active `NativeStrategyBootstrap` whose host will panic on its
+/// `panic_on_call`th `on_bar` invocation this run.
+fn panic_probe_bootstrap(panic_on_call: u32) -> NativeStrategyBootstrap {
+    let mut host = mqk_strategy::StrategyHost::new(mqk_strategy::ShadowMode::Off);
+    host.register(Box::new(PanicOnNthCallStrategy::new(panic_on_call)))
+        .expect("host registration must succeed");
+    NativeStrategyBootstrap {
+        outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Active {
+            host,
+            strategy_id: "a1_panic_probe".to_string(),
+        },
+    }
+}
+
+fn result_symbols_wf(
+    results: &[(
+        SymbolStrategyAssignment,
+        mqk_strategy::StrategyBarResult,
+        Option<mqk_daemon::state::EvaluatedBarFacts>,
+    )],
+) -> Vec<&str> {
+    results.iter().map(|(a, _, _)| a.symbol.as_str()).collect()
+}
+
+/// A1-R1: a REAL panic inside the middle symbol's `Strategy::on_bar`
+/// callback quarantines the shared host. AAPL (dispatched before the
+/// panic) keeps its result; MSFT (the panicking call) and SPY (dispatched
+/// after quarantine) both produce no result -- SPY's absence is ordinary
+/// fail-closed behavior against a now-Failed bootstrap, not a fabricated
+/// decision.
+#[tokio::test]
+async fn a1_r1_real_middle_symbol_panic_quarantines_host_for_remaining_siblings() {
+    let st = bare_state().await;
+    st.set_native_strategy_bootstrap_for_test(Some(panic_probe_bootstrap(2)))
+        .await;
+    st.deposit_strategy_bar_input(test_bar_input()).await;
+
+    let assignments = vec![assignment("AAPL"), assignment("MSFT"), assignment("SPY")];
+    let results = st
+        .tick_strategy_dispatch_multi_symbol_with_bar_facts(&assignments)
+        .await;
+
+    assert_eq!(
+        result_symbols_wf(&results),
+        vec!["AAPL"],
+        "A1-R1: only AAPL (dispatched before the real on_bar panic) may keep a result -- \
+         MSFT panicked and SPY ran against the now-quarantined host"
+    );
+    assert_eq!(
+        st.dispatch_call_count_for_test(),
+        3,
+        "A1-R1: all three assignments must still be genuinely dispatched exactly once"
+    );
+    assert_eq!(
+        st.native_strategy_bootstrap_truth_state_for_test().await,
+        Some("failed"),
+        "A1-R1: the shared host must be quarantined (Failed) after the real on_bar panic"
+    );
+}
+
+/// A1-R2: a REAL panic on the FIRST symbol's callback quarantines the host
+/// before any sibling runs -- no symbol in this tick produces a result.
+#[tokio::test]
+async fn a1_r2_real_first_symbol_panic_blocks_all_siblings() {
+    let st = bare_state().await;
+    st.set_native_strategy_bootstrap_for_test(Some(panic_probe_bootstrap(1)))
+        .await;
+    st.deposit_strategy_bar_input(test_bar_input()).await;
+
+    let assignments = vec![assignment("AAPL"), assignment("MSFT"), assignment("SPY")];
+    let results = st
+        .tick_strategy_dispatch_multi_symbol_with_bar_facts(&assignments)
+        .await;
+
+    assert!(
+        results.is_empty(),
+        "A1-R2: AAPL's real on_bar panic quarantines the host before MSFT/SPY run -- \
+         no symbol this tick may produce a result"
+    );
+    assert_eq!(
+        st.dispatch_call_count_for_test(),
+        3,
+        "A1-R2: all three assignments must still be genuinely dispatched exactly once"
+    );
+}
+
+/// A1-R3: fault isolation must not retry the panicking strategy callback --
+/// exactly one dispatch call per assignment, never two.
+#[tokio::test]
+async fn a1_r3_panic_isolation_does_not_retry_the_panicking_symbol() {
+    let st = bare_state().await;
+    st.set_native_strategy_bootstrap_for_test(Some(panic_probe_bootstrap(2)))
+        .await;
+    st.deposit_strategy_bar_input(test_bar_input()).await;
+
+    let assignments = vec![assignment("AAPL"), assignment("MSFT"), assignment("SPY")];
+    let _results = st
+        .tick_strategy_dispatch_multi_symbol_with_bar_facts(&assignments)
+        .await;
+
+    assert_eq!(
+        st.dispatch_call_count_for_test(),
+        3,
+        "A1-R3: exactly one dispatch call per assignment -- no retry of the panicking symbol"
+    );
+}
+
+/// A1-R4: an ordinary `None` result (no active bootstrap -- ordinary
+/// fail-closed dormant behavior) is NOT classified as a panic/fault. Both
+/// symbols are genuinely invoked (proven by the call counter), and neither
+/// produces a result, exactly as before this patch.
+#[tokio::test]
+async fn a1_r4_ordinary_none_result_is_not_classified_as_panic() {
+    let st = bare_state().await;
+    // No bootstrap stored -- every per-symbol dispatch returns None.
+    st.deposit_strategy_bar_input(test_bar_input()).await;
+
+    let assignments = vec![assignment("AAPL"), assignment("MSFT")];
+    let results = st
+        .tick_strategy_dispatch_multi_symbol_with_bar_facts(&assignments)
+        .await;
+
+    assert!(
+        results.is_empty(),
+        "A1-R4: no active bootstrap -- ordinary None for every symbol, unchanged"
+    );
+    assert_eq!(
+        st.dispatch_call_count_for_test(),
+        2,
+        "A1-R4: both symbols were genuinely dispatched (real None, not skipped/faulted)"
+    );
+}
+
+/// A1-R5: with no panic injected, ordinary successful multi-symbol dispatch
+/// is unchanged -- every symbol produces a result, in assignment order.
+#[tokio::test]
+async fn a1_r5_ordinary_successful_dispatch_is_unchanged() {
+    let st = bare_state().await;
+    st.set_native_strategy_bootstrap_for_test(Some(active_bootstrap()))
+        .await;
+    st.deposit_strategy_bar_input(test_bar_input()).await;
+
+    let assignments = vec![assignment("AAPL"), assignment("MSFT"), assignment("SPY")];
+    let results = st
+        .tick_strategy_dispatch_multi_symbol_with_bar_facts(&assignments)
+        .await;
+
+    assert_eq!(
+        result_symbols_wf(&results),
+        vec!["AAPL", "MSFT", "SPY"],
+        "A1-R5: with no panic, every symbol must still produce a result in order"
+    );
+}
+
+/// A1-R6: infrastructure-panic negative control. `set_panic_on_symbol_for_test`
+/// injects a panic at the very TOP of the per-symbol dispatch function --
+/// before any bar-window preparation or strategy evaluation, squarely in
+/// dispatch infrastructure, never inside `Strategy::on_bar`. The repaired
+/// catch boundary lives ONLY inside `invoke_native_strategy_host_on_bar`
+/// (narrowly around the real on_bar call), so this infrastructure panic
+/// must NOT be caught/converted into a per-symbol strategy fault: it must
+/// escape as a genuine unwind out of the whole multi-symbol dispatch call,
+/// losing the entire tick's results (including AAPL's, dispatched earlier
+/// in iteration order) -- unlike a real on_bar panic, which is contained
+/// and leaves earlier per-symbol results intact (A1-R1). This proves the
+/// repaired boundary is actually narrow, not merely relabeled.
+#[tokio::test]
+async fn a1_r6_infrastructure_panic_is_not_downgraded_to_a_strategy_fault() {
+    let st = bare_state().await;
+    st.set_native_strategy_bootstrap_for_test(Some(active_bootstrap()))
+        .await;
+    st.set_panic_on_symbol_for_test(Some("MSFT".to_string()))
+        .await;
+    st.deposit_strategy_bar_input(test_bar_input()).await;
+
+    let assignments = vec![assignment("AAPL"), assignment("MSFT"), assignment("SPY")];
+    let outcome = std::panic::AssertUnwindSafe(
+        st.tick_strategy_dispatch_multi_symbol_with_bar_facts(&assignments),
+    )
+    .catch_unwind()
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "A1-R6: an infrastructure-seam panic (outside on_bar) must escape as a real unwind, \
+         never be silently converted into a per-symbol strategy fault"
+    );
+    assert_eq!(
+        st.native_strategy_bootstrap_truth_state_for_test().await,
+        Some("active"),
+        "A1-R6: an infrastructure panic must not quarantine the strategy host -- only a real \
+         on_bar panic does that"
+    );
+}

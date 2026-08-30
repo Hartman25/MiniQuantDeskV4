@@ -52,6 +52,7 @@ pub(crate) mod shared_test_locks {
 }
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -479,6 +480,23 @@ pub struct AppState {
     /// `accepted_artifact`.  Active bootstrap holds the strategy host in shadow
     /// mode; bar ingestion is not yet wired (B1A constraint).
     native_strategy_bootstrap: Arc<Mutex<Option<NativeStrategyBootstrap>>>,
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: test-only panic
+    /// injection seam. When set to `Some(symbol)`, the canonical per-symbol
+    /// dispatch implementation
+    /// ([`Self::dispatch_native_strategy_for_symbol_with_bar_and_facts`])
+    /// panics deterministically for that exact symbol (trimmed,
+    /// case-sensitive match) before doing any other work, letting tests
+    /// exercise the real production dispatch seam's panic-isolation
+    /// behavior without depending on an actual strategy-engine bug. `None`
+    /// (the permanent production value) never fires.
+    panic_on_symbol_for_test: Arc<Mutex<Option<String>>>,
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: counts every call into
+    /// the canonical per-symbol dispatch implementation
+    /// ([`Self::dispatch_native_strategy_for_symbol_with_bar_and_facts`]),
+    /// including one that panics. Always incremented (harmless in
+    /// production, mirrors `bar_tick_dispatch_count`'s always-on counting);
+    /// tests use it to prove fault isolation never retries a symbol.
+    dispatch_call_count_for_test: Arc<AtomicU32>,
     /// B1B: Pending strategy bar input deposited by the signal route for the
     /// execution loop to consume on its next tick.
     ///
@@ -1156,6 +1174,19 @@ pub(crate) enum SelectedHostDispatchFault {
         strategy_id: String,
         detail: String,
     },
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: `host.on_bar` panicked
+    /// (a Rust unwind, distinct from an ordinary `Err` return). Treated the
+    /// same as [`Self::HostOnBarError`] — zero decisions this tick, whole-
+    /// tick halt — per this backend's own frozen contract (Part 5 doc
+    /// comment on `tick_strategy_dispatch_selected_hosts_with_bar_facts`):
+    /// any host malfunction here is a structural fault, never a per-symbol-
+    /// only condition. The panic itself never escapes as an unwind past
+    /// this call site.
+    HostOnBarPanicked {
+        symbol: String,
+        strategy_id: String,
+        detail: String,
+    },
     SpecNameMismatch {
         symbol: String,
         expected_strategy_id: String,
@@ -1218,11 +1249,37 @@ impl SelectedHostDispatchFault {
         match self {
             Self::HostMissingAtDispatch { .. } => "selected_host_missing_at_dispatch",
             Self::HostOnBarError { .. } => "selected_host_on_bar_error",
+            Self::HostOnBarPanicked { .. } => "selected_host_on_bar_panicked",
             Self::SpecNameMismatch { .. } => "selected_host_spec_name_mismatch",
             Self::SpecTimeframeMismatch { .. } => "selected_host_spec_timeframe_mismatch",
             Self::TargetSymbolMismatch { .. } => "selected_host_target_symbol_mismatch",
         }
     }
+}
+
+/// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: best-effort extraction of a
+/// human-readable message from a caught panic payload. Rust panic payloads
+/// are conventionally `&'static str` (a string-literal `panic!`) or `String`
+/// (a formatted `panic!`); anything else (a deliberate `panic_any` with a
+/// custom type) falls back to a fixed label rather than guessing.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: evidence that the real
+/// `Strategy::on_bar` callback panicked, returned by
+/// [`AppState::invoke_native_strategy_host_on_bar`]. `strategy_id` is
+/// captured before the bootstrap quarantines itself, since
+/// `active_strategy_id()` is no longer available afterward.
+struct NativeStrategyOnBarPanicFault {
+    strategy_id: String,
+    detail: String,
 }
 
 /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 2: explicit authority
@@ -1809,6 +1866,8 @@ impl AppState {
             autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
             autonomous_history_degraded: Arc::new(AtomicBool::new(false)),
             native_strategy_bootstrap: Arc::new(Mutex::new(None)),
+            panic_on_symbol_for_test: Arc::new(Mutex::new(None)),
+            dispatch_call_count_for_test: Arc::new(AtomicU32::new(0)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
             completed_bar_post_claim_test_hook: Arc::new(Mutex::new(None)),
             coverage_authority_pre_bind_test_hook: Arc::new(Mutex::new(None)),
@@ -2683,6 +2742,20 @@ operator_reconcile_or_repair_required"
         self.last_bar_input_ts.store(end_ts, Ordering::SeqCst);
     }
 
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: install (or clear) the
+    /// per-symbol dispatch panic-injection seam. Test seam only; never
+    /// called in production. See `panic_on_symbol_for_test`'s field doc.
+    pub async fn set_panic_on_symbol_for_test(&self, symbol: Option<String>) {
+        *self.panic_on_symbol_for_test.lock().await = symbol;
+    }
+
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: total calls into the
+    /// canonical per-symbol dispatch implementation this process lifetime
+    /// (including calls that panicked). Test seam only.
+    pub fn dispatch_call_count_for_test(&self) -> u32 {
+        self.dispatch_call_count_for_test.load(Ordering::SeqCst)
+    }
+
     /// D4.4: install (or clear) the completed-bar driver's post-claim
     /// concurrency-proof rendezvous hook. Test seam only; never called in
     /// production.
@@ -3135,9 +3208,28 @@ operator_reconcile_or_repair_required"
         // tick must never reach here.
         #[cfg(test)]
         self.loop_call_trace_push_for_test(format!("legacy_dispatch:{symbol}"));
-        let result = self
-            .invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
-            .await;
+        let now_tick = bar.now_tick;
+        let result = match self
+            .invoke_native_strategy_host_on_bar(move |bootstrap| {
+                bootstrap.invoke_on_bar_from_window(now_tick, window)
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(fault) => {
+                let run_id = self.status.read().await.active_run_id;
+                self.record_dispatch_panic_fault(
+                    run_id,
+                    &fault.strategy_id,
+                    symbol,
+                    md_timeframe,
+                    now_tick,
+                    &fault.detail,
+                )
+                .await;
+                None
+            }
+        };
         // AUTON-NO-SIGNAL-OBS-01: the strategy's on_bar ran to completion —
         // durably record what it actually produced, whether or not that was a
         // trade signal. Skipped only when the bootstrap itself is missing
@@ -3303,6 +3395,132 @@ operator_reconcile_or_repair_required"
         }
     }
 
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: explicit durable fault
+    /// evidence for a symbol whose real `Strategy::on_bar` callback
+    /// panicked. `run_id`/`strategy_id` must be the exact identity captured
+    /// from the shared native bootstrap BEFORE
+    /// [`Self::invoke_native_strategy_host_on_bar`] quarantined it to
+    /// `Failed` — by the time this is called, the bootstrap's own
+    /// `active_strategy_id()` already returns `None`, so this cannot reuse
+    /// [`Self::record_signal_evaluation`]'s `Legacy` branch (which
+    /// re-resolves identity from current bootstrap state at write time).
+    /// Writes the same durable row shape directly instead, through the one
+    /// canonical identity helper
+    /// ([`Self::derive_strategy_signal_evaluation_id`]) every other
+    /// signal-evaluation journal writer already shares.
+    async fn record_dispatch_panic_fault(
+        &self,
+        run_id: Option<Uuid>,
+        strategy_id: &str,
+        symbol: &str,
+        timeframe: &str,
+        now_tick: u64,
+        detail: &str,
+    ) {
+        tracing::error!(
+            symbol = %symbol,
+            timeframe = %timeframe,
+            strategy_id = %strategy_id,
+            panic = %detail,
+            "a1_multi_symbol_dispatch_panic_isolation_01: real strategy on_bar panicked; the \
+             shared native strategy host is quarantined (Failed) for the rest of this run -- no \
+             decision emitted for this symbol, and no further symbol/tick can reuse the \
+             possibly-corrupted host"
+        );
+        let Some(ref pool) = self.db else {
+            return;
+        };
+        let evaluation_id = Self::derive_strategy_signal_evaluation_id(
+            run_id, strategy_id, symbol, timeframe, now_tick,
+        );
+        let args = mqk_db::InsertStrategySignalEvaluationArgs {
+            evaluation_id,
+            ts_utc: Utc::now(),
+            run_id,
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            timeframe: timeframe.to_string(),
+            bar_context_source: "dispatch_panicked".to_string(),
+            bars_loaded: 0,
+            latest_bar_ts_utc: None,
+            signal_generated: false,
+            signal_qty: None,
+            signal_side: None,
+            reason_code: "strategy_dispatch_panicked".to_string(),
+            reason: "strategy evaluation panicked for this symbol; host quarantined, no decision \
+                     emitted"
+                .to_string(),
+            decision_stage: "strategy_evaluated".to_string(),
+            source: "mqk-daemon.execution_loop".to_string(),
+        };
+        if let Err(e) = mqk_db::insert_strategy_signal_evaluation(pool, &args).await {
+            tracing::warn!(
+                symbol = %symbol,
+                timeframe = %timeframe,
+                error = %e,
+                "a1_multi_symbol_dispatch_panic_isolation_01: strategy_signal_evaluations write \
+                 failed (non-fatal)"
+            );
+        }
+    }
+
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: the one production seam
+    /// through which the shared `native_strategy_bootstrap`'s `on_bar` is
+    /// ever invoked, whichever of the two per-symbol dispatch paths
+    /// (DB-loaded bar window, or the single-stub signal fallback) calls it.
+    /// `on_bar` is synchronous, so a panic inside it is caught in-place
+    /// here — narrowly around the `call_on_bar` closure only. DB bar-window
+    /// loading, diagnostics, and durable-journal writes in the surrounding
+    /// caller are NOT wrapped in any catch and still propagate a real
+    /// unwind on a genuine infrastructure panic, exactly as before this
+    /// patch.
+    ///
+    /// Tier A holds exactly one mutable `StrategyHost`/`Box<dyn Strategy>`
+    /// for the whole run ([`NativeStrategyBootstrap`]'s single-strategy
+    /// policy), shared across every symbol dispatched this tick and every
+    /// future tick. `Strategy::on_bar` takes `&mut self`; a panic
+    /// mid-callback does not roll back a mutation the strategy already
+    /// made, and nothing here can prove what state it left behind. So a
+    /// caught panic permanently quarantines the bootstrap to `Failed`: the
+    /// exact same (possibly-corrupted) object can never be invoked again
+    /// this run — not by this symbol's siblings later in this tick, not by
+    /// any future tick — until the run is restarted and re-bootstrapped.
+    /// This quarantine is what makes catching the panic here (rather than
+    /// letting it unwind the whole tick, as before this repair) safe.
+    async fn invoke_native_strategy_host_on_bar(
+        &self,
+        call_on_bar: impl FnOnce(&mut NativeStrategyBootstrap) -> Option<mqk_strategy::StrategyBarResult>,
+    ) -> Result<Option<mqk_strategy::StrategyBarResult>, NativeStrategyOnBarPanicFault> {
+        let mut guard = self.native_strategy_bootstrap.lock().await;
+        let Some(bootstrap) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let strategy_id_before = bootstrap.active_strategy_id().unwrap_or_default().to_string();
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| call_on_bar(bootstrap)));
+        match outcome {
+            Ok(result) => Ok(result),
+            Err(panic_payload) => {
+                let detail = panic_payload_message(&*panic_payload);
+                // Re-acquire from `guard` (never moved) rather than reusing
+                // the `bootstrap` reborrow consumed by the closure above.
+                if let Some(bootstrap) = guard.as_mut() {
+                    bootstrap.outcome =
+                        mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Failed {
+                            strategy_id: strategy_id_before.clone(),
+                            reason: format!(
+                                "a1_multi_symbol_dispatch_panic_isolation_01: on_bar panicked \
+                                 and was quarantined: {detail}"
+                            ),
+                        };
+                }
+                Err(NativeStrategyOnBarPanicFault {
+                    strategy_id: strategy_id_before,
+                    detail,
+                })
+            }
+        }
+    }
+
     /// AUTON-NO-TRADE-OFFHOURS-01B: best-effort, non-fatal durable snapshot
     /// of one `GET /api/v1/autonomous/readiness` verdict.
     ///
@@ -3396,6 +3614,16 @@ operator_reconcile_or_repair_required"
         let symbol = symbol.trim();
         let md_timeframe = timeframe.trim();
 
+        self.dispatch_call_count_for_test
+            .fetch_add(1, Ordering::SeqCst);
+
+        // A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: test-only injection
+        // point, permanently `None` in production. See
+        // `panic_on_symbol_for_test`'s field doc.
+        if self.panic_on_symbol_for_test.lock().await.as_deref() == Some(symbol) {
+            panic!("A1_TEST_INJECTED_PANIC for symbol {symbol}");
+        }
+
         if let (Some(ref pool), true) = (&self.db, !symbol.is_empty() && !md_timeframe.is_empty()) {
             match mqk_db::fetch_recent_completed_bars_for_strategy(
                 pool,
@@ -3454,14 +3682,31 @@ operator_reconcile_or_repair_required"
             let diagnostics = mqk_strategy::intraday_scalper_compute_diagnostics(stub_bars);
             *self.last_strategy_diagnostics.lock().await = Some(diagnostics);
         }
-        self.invoke_native_strategy_on_bar_from_signal(
-            bar.now_tick,
-            bar.end_ts,
-            bar.limit_price,
-            bar.qty,
-        )
-        .await
-        .map(|result| (result, None))
+        let now_tick = bar.now_tick;
+        let end_ts = bar.end_ts;
+        let limit_price = bar.limit_price;
+        let qty = bar.qty;
+        match self
+            .invoke_native_strategy_host_on_bar(move |bootstrap| {
+                bootstrap.invoke_on_bar_from_signal(now_tick, end_ts, limit_price, qty)
+            })
+            .await
+        {
+            Ok(result) => result.map(|result| (result, None)),
+            Err(fault) => {
+                let run_id = self.status.read().await.active_run_id;
+                self.record_dispatch_panic_fault(
+                    run_id,
+                    &fault.strategy_id,
+                    symbol,
+                    md_timeframe,
+                    now_tick,
+                    &fault.detail,
+                )
+                .await;
+                None
+            }
+        }
     }
 
     /// PER-SYMBOL-BAR-WINDOW-01: symbol/timeframe-parameterized extraction of
@@ -3622,6 +3867,18 @@ operator_reconcile_or_repair_required"
     /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_MD_TIMEFRAME` pair), this call
     /// is behaviorally identical to [`Self::tick_strategy_dispatch`]: the
     /// same single `.take()`, the same single dispatch.
+    ///
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: a panic inside the real
+    /// `Strategy::on_bar` callback is caught narrowly at the one seam that
+    /// actually invokes it ([`Self::invoke_native_strategy_host_on_bar`]),
+    /// not around this whole per-symbol dispatch future. Infrastructure
+    /// (DB load, bar-window prep, journal writes) is NOT wrapped in any
+    /// catch — a genuine infrastructure panic still unwinds this loop
+    /// normally, exactly as before this patch, instead of being
+    /// misclassified as an isolatable strategy fault. See
+    /// [`Self::invoke_native_strategy_host_on_bar`]'s doc comment for why a
+    /// caught `on_bar` panic quarantines the shared host rather than
+    /// permitting sibling continuation against it.
     pub async fn tick_strategy_dispatch_multi_symbol(
         &self,
         assignments: &[SymbolStrategyAssignment],
@@ -3659,6 +3916,12 @@ operator_reconcile_or_repair_required"
     /// existing test callers and does not duplicate this dispatch logic —
     /// both ultimately call
     /// [`Self::dispatch_native_strategy_for_symbol_with_bar_and_facts`].
+    ///
+    /// A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: same narrow
+    /// on_bar-only panic containment as
+    /// [`Self::tick_strategy_dispatch_multi_symbol`] — see that method's
+    /// doc comment and [`Self::invoke_native_strategy_host_on_bar`] for the
+    /// isolation/quarantine argument.
     pub async fn tick_strategy_dispatch_multi_symbol_with_bar_facts(
         &self,
         assignments: &[SymbolStrategyAssignment],
@@ -3838,13 +4101,47 @@ operator_reconcile_or_repair_required"
                 "host_call:{}:{}",
                 binding.symbol, binding.strategy_id
             ));
-            let bar_result = match host.on_bar(&ctx) {
-                Ok(r) => r,
-                Err(e) => {
+            // A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01: `host.on_bar` is
+            // synchronous, so a panic here is caught in-place rather than
+            // propagated as an unwind through the surrounding async fn.
+            // Unlike the legacy loop, a caught panic here does NOT continue
+            // to the next binding -- this backend's own frozen contract
+            // (Part 5, doc comment above) already treats an ordinary
+            // `on_bar` `Err` as a whole-tick structural fault ("the caller
+            // must submit zero decisions for the whole tick and halt"); a
+            // panic is at least as severe a malfunction signal as a typed
+            // Err from the exact same call, so it gets the same whole-tick
+            // halt via `HostOnBarPanicked`, never more lenient treatment.
+            // Each binding's host is a separate object in `host_pool`
+            // (`DynamicSelectionHostPool` keys one `StrategyHost` per
+            // `(symbol, strategy_id, timeframe_secs)`), so this panic cannot
+            // corrupt any other binding's host regardless.
+            //
+            // Shares the same test-only injection seam as the legacy loop
+            // (`panic_on_symbol_for_test`), resolved here (async) so the
+            // synchronous `catch_unwind` closure below only needs a plain
+            // bool. Permanently `false` in production.
+            let inject_panic_for_test =
+                self.panic_on_symbol_for_test.lock().await.as_deref() == Some(binding.symbol.as_str());
+            let bar_result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                if inject_panic_for_test {
+                    panic!("A1_TEST_INJECTED_PANIC for symbol {}", binding.symbol);
+                }
+                host.on_bar(&ctx)
+            })) {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
                     return Err(SelectedHostDispatchFault::HostOnBarError {
                         symbol: binding.symbol.clone(),
                         strategy_id: binding.strategy_id.clone(),
                         detail: format!("{e:?}"),
+                    })
+                }
+                Err(panic_payload) => {
+                    return Err(SelectedHostDispatchFault::HostOnBarPanicked {
+                        symbol: binding.symbol.clone(),
+                        strategy_id: binding.strategy_id.clone(),
+                        detail: panic_payload_message(&*panic_payload),
                     })
                 }
             };
@@ -3979,19 +4276,6 @@ operator_reconcile_or_repair_required"
             Some(cap) if new_orders_this_tick >= cap => Some("max_new_orders_per_tick_reached"),
             _ => None,
         }
-    }
-
-    /// AUTON-SIGNAL-CONTEXT-01: Invoke `on_bar` with a pre-built DB-sourced window.
-    async fn invoke_native_strategy_on_bar_from_window(
-        &self,
-        now_tick: u64,
-        window: mqk_strategy::RecentBarsWindow,
-    ) -> Option<mqk_strategy::StrategyBarResult> {
-        self.native_strategy_bootstrap
-            .lock()
-            .await
-            .as_mut()?
-            .invoke_on_bar_from_window(now_tick, window)
     }
 
     pub fn adapter_id(&self) -> &str {
@@ -7179,6 +7463,200 @@ mod phase7b_selected_host_dispatch_tests {
 
         cleanup_bars(&pool, "PHASE7BAAPL").await;
         cleanup_bars(&pool, "PHASE7BMSFT").await;
+    }
+
+    // -----------------------------------------------------------------
+    // A1-T7: selected-host path panic assessment.
+    //
+    // `DynamicSelectionHostPool` keys one isolated `StrategyHost` per
+    // (symbol, strategy_id, timeframe_secs) -- a panic evaluating one
+    // binding's host cannot corrupt any other binding's host object. But
+    // this backend's own frozen Part 5 contract already treats an ordinary
+    // `on_bar` `Err` as a whole-tick structural fault ("zero decisions for
+    // the whole tick and halt"), never a per-symbol-only skip. A panic is
+    // at least as severe a malfunction signal as a typed Err from the same
+    // call, so it must get the same whole-tick-halt treatment, not the
+    // legacy loop's "continue to siblings" behavior -- this is the
+    // justified authority distinction the A1 mission allows. This test
+    // proves the panic is contained (never escapes as a raw unwind) and
+    // converted into the same class of fault (`HostOnBarPanicked`, treated
+    // identically to `HostOnBarError` by every caller) that a genuine
+    // `on_bar` error would already produce.
+    // -----------------------------------------------------------------
+
+    /// A1-T7: a panic inside `host.on_bar` for one binding must not escape
+    /// as a raw unwind -- it is caught and converted into
+    /// `SelectedHostDispatchFault::HostOnBarPanicked`, which the caller
+    /// (`loop_runner.rs`) treats exactly like `HostOnBarError`: zero
+    /// decisions, whole-tick halt. A sibling binding earlier in `bindings`
+    /// still produces no result either (the whole tick is refused), which
+    /// is the correct, deliberate behavior for this backend -- distinct
+    /// from the legacy loop's per-symbol continuation.
+    #[tokio::test]
+    async fn a1_t7_selected_host_panic_is_contained_and_halts_whole_tick() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-A1T7").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BA1T7AAPL", "5m", ts, 100_000_000).await;
+        seed_bar(&pool, "PHASE7BA1T7MSFT", "5m", ts, 200_000_000).await;
+
+        let keys = vec![
+            (
+                "PHASE7BA1T7AAPL".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+            (
+                "PHASE7BA1T7MSFT".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![
+            binding("PHASE7BA1T7AAPL", "intraday_scalper", 300, "5m"),
+            binding("PHASE7BA1T7MSFT", "intraday_scalper", 300, "5m"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .set_panic_on_symbol_for_test(Some("PHASE7BA1T7MSFT".to_string()))
+            .await;
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let err = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
+            .await
+            .expect_err("a panicking host must fail closed, not silently skip or produce a result");
+
+        match &err {
+            SelectedHostDispatchFault::HostOnBarPanicked {
+                symbol,
+                strategy_id,
+                ..
+            } => {
+                assert_eq!(symbol, "PHASE7BA1T7MSFT");
+                assert_eq!(strategy_id, "intraday_scalper");
+            }
+            other => panic!("expected HostOnBarPanicked, got {other:?}"),
+        }
+        assert_eq!(err.code(), "selected_host_on_bar_panicked");
+
+        cleanup_bars(&pool, "PHASE7BA1T7AAPL").await;
+        cleanup_bars(&pool, "PHASE7BA1T7MSFT").await;
+    }
+
+    // -----------------------------------------------------------------
+    // A1-R7: legacy multi-symbol dispatch, real on_bar panic, durable
+    // fault evidence via the production journal path.
+    // -----------------------------------------------------------------
+
+    struct AlwaysPanicOnBarStrategy {
+        spec: StrategySpec,
+    }
+
+    impl mqk_strategy::Strategy for AlwaysPanicOnBarStrategy {
+        fn spec(&self) -> StrategySpec {
+            self.spec.clone()
+        }
+
+        fn on_bar(&mut self, _ctx: &mqk_strategy::StrategyContext) -> StrategyOutput {
+            panic!("A1_REAL_ON_BAR_PANIC_LEGACY_DB_TEST");
+        }
+    }
+
+    /// A real, Active bootstrap whose host unconditionally panics on
+    /// `on_bar` -- used to prove durable fault evidence through the legacy
+    /// (DB-loaded) dispatch path.
+    fn legacy_panic_probe_bootstrap() -> NativeStrategyBootstrap {
+        let mut host = mqk_strategy::StrategyHost::new(mqk_strategy::ShadowMode::Off);
+        host.register(Box::new(AlwaysPanicOnBarStrategy {
+            spec: StrategySpec::new("a1_legacy_panic_probe", 300),
+        }))
+        .expect("host registration must succeed");
+        NativeStrategyBootstrap {
+            outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Active {
+                host,
+                strategy_id: "a1_legacy_panic_probe".to_string(),
+            },
+        }
+    }
+
+    /// A1-R7: when DB-backed journal infrastructure is available and a real
+    /// `Strategy::on_bar` callback panics via the legacy multi-symbol
+    /// dispatch path (`tick_strategy_dispatch_multi_symbol_with_bar_facts`
+    /// -> `dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts`
+    /// -> `AppState::invoke_native_strategy_host_on_bar`), durable fault
+    /// evidence is persisted through the production
+    /// `strategy_signal_evaluations` journal path -- not merely a log line
+    /// or an in-memory counter.
+    #[tokio::test]
+    async fn a1_r7_real_on_bar_panic_persists_durable_fault_evidence_via_legacy_path() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-A1R7").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BA1R7SYM", "5m", ts, 100_000_000).await;
+        cleanup_signal_evaluations(&pool, "PHASE7BA1R7SYM").await;
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .set_native_strategy_bootstrap_for_test(Some(legacy_panic_probe_bootstrap()))
+            .await;
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 42,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let assignments = vec![SymbolStrategyAssignment {
+            symbol: "PHASE7BA1R7SYM".to_string(),
+            strategy_id: "a1_legacy_panic_probe".to_string(),
+            timeframe: "5m".to_string(),
+        }];
+        let results = state
+            .tick_strategy_dispatch_multi_symbol_with_bar_facts(&assignments)
+            .await;
+        assert!(
+            results.is_empty(),
+            "A1-R7: the panicking symbol must produce no result"
+        );
+
+        let rows = mqk_db::fetch_recent_strategy_signal_evaluations(&pool, 50)
+            .await
+            .expect("fetch_recent_strategy_signal_evaluations failed");
+        let row = rows
+            .iter()
+            .find(|r| r.symbol == "PHASE7BA1R7SYM")
+            .expect("A1-R7: a durable journal row must exist for the panicking symbol");
+        assert_eq!(row.reason_code, "strategy_dispatch_panicked");
+        assert_eq!(row.strategy_id, "a1_legacy_panic_probe");
+        assert!(!row.signal_generated);
+        assert_eq!(row.signal_qty, None);
+
+        assert_eq!(
+            state.native_strategy_bootstrap_truth_state_for_test().await,
+            Some("failed"),
+            "A1-R7: the shared host must be quarantined (Failed) after the real on_bar panic"
+        );
+
+        cleanup_bars(&pool, "PHASE7BA1R7SYM").await;
+        cleanup_signal_evaluations(&pool, "PHASE7BA1R7SYM").await;
     }
 
     // -----------------------------------------------------------------
