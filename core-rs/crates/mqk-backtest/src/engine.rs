@@ -49,7 +49,7 @@ use crate::economics::{
     notional_micros, BacktestEconomicsLedger, BacktestEconomicsReport, BacktestInstrumentEconomics,
 };
 use crate::types::{
-    derive_input_data_hash, derive_run_id_with_execution_model, BacktestBar, BacktestConfig,
+    derive_input_data_hash, derive_run_id_with_semantic_identity, BacktestBar, BacktestConfig,
     BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport, OrderStatus,
     BACKTEST_EXECUTION_MODEL_ID,
 };
@@ -717,17 +717,19 @@ impl BacktestEngine {
             self.host.semantic_fingerprint().unwrap_or_default();
         let config_id = self.config.config_id();
         // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01 / BKT-FUTURE-EXECUTION-01-REPAIR-01
-        // (Blocker 2): run identity folds in both economics and the
-        // execution-model semantic, so two runs with identical
-        // strategy/config/input but different multiplier/margin, OR
-        // different fill semantics (same-bar vs. future-target-symbol-bar),
-        // cannot collide on run_id. See `derive_run_id_with_execution_model`.
-        let run_id = derive_run_id_with_execution_model(
+        // (Blocker 2) / BACKTEST-STRATEGY-SEMANTIC-RUN-IDENTITY-01: run
+        // identity folds in economics, the execution-model semantic, and the
+        // strategy's semantic fingerprint, so two runs with identical
+        // strategy_name/config/input but different multiplier/margin,
+        // different fill semantics, or different strategy semantics cannot
+        // collide on run_id. See `derive_run_id_with_semantic_identity`.
+        let run_id = derive_run_id_with_semantic_identity(
             &strategy_name,
             &config_id,
             &input_data_hash,
             &self.economics,
             BACKTEST_EXECUTION_MODEL_ID,
+            &strategy_semantic_fingerprint,
         );
 
         // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: report.equity_curve stays the

@@ -395,8 +395,15 @@ fn changing_execution_model_id_changes_replay_identity() {
 
 /// Test 6 -- `BacktestReport` reports the exact execution model that
 /// produced it, and the engine's real `run_id` matches what
-/// `derive_run_id_with_execution_model` would independently compute from
+/// `derive_run_id_with_semantic_identity` would independently compute from
 /// the report's own fields.
+///
+/// BACKTEST-STRATEGY-SEMANTIC-RUN-IDENTITY-01: `BacktestEngine::run` moved
+/// from the semantic-unaware `v4` derivation
+/// (`derive_run_id_with_execution_model`) to the semantic-aware `v5`
+/// derivation (`derive_run_id_with_semantic_identity`) -- see
+/// `scenario_strategy_semantic_run_identity_01.rs` for the full negative
+/// control suite on that change.
 #[test]
 fn report_carries_truthful_execution_model_and_run_id_matches_independent_derivation() {
     let bars = [flat_bar("AAPL", 1_000, 100_000_000)];
@@ -409,16 +416,17 @@ fn report_carries_truthful_execution_model_and_run_id_matches_independent_deriva
         "report must truthfully carry the execution model that actually produced it"
     );
 
-    let expected_run_id = derive_run_id_with_execution_model(
+    let expected_run_id = mqk_backtest::derive_run_id_with_semantic_identity(
         &report.strategy_name,
         &report.config_id,
         &report.input_data_hash,
         &BacktestInstrumentEconomics::equity(),
         &report.execution_model_id,
+        &report.strategy_semantic_fingerprint,
     );
     assert_eq!(
         report.run_id, expected_run_id,
-        "engine's real run_id must match independent derivation from the report's own fields"
+        "engine's real run_id must match independent v5 derivation from the report's own fields"
     );
 }
 

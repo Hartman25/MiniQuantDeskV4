@@ -89,7 +89,8 @@ pub use sweep::{
 };
 pub use types::{
     derive_input_data_hash, derive_run_id, derive_run_id_with_economics,
-    derive_run_id_with_execution_model, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder,
-    BacktestOrderSide, BacktestReport, CommissionModel, OrderStatus, StrategySizingConfig,
-    StressProfile, BACKTEST_EXECUTION_MODEL_ID,
+    derive_run_id_with_execution_model, derive_run_id_with_semantic_identity, BacktestBar,
+    BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
+    CommissionModel, OrderStatus, StrategySizingConfig, StressProfile,
+    BACKTEST_EXECUTION_MODEL_ID,
 };

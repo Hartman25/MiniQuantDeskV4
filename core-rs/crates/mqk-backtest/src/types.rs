@@ -855,6 +855,64 @@ pub fn derive_run_id_with_execution_model(
     Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
 }
 
+/// Derive a deterministic backtest run ID, folding in the strategy's semantic
+/// fingerprint alongside config, input data, economics, and execution model.
+///
+/// BACKTEST-STRATEGY-SEMANTIC-RUN-IDENTITY-01: [`derive_run_id_with_execution_model`]
+/// folds in strategy_name, config, input data, economics, and execution
+/// model -- but never [`crate::types::BacktestReport::strategy_semantic_fingerprint`]
+/// (i.e. `Strategy::semantic_fingerprint()`). Two strategy instances can
+/// share a `strategy_name` and `config_id` while differing in semantic
+/// implementation (thresholds, internal version, any parameter not captured
+/// by `BacktestConfig`), so without this, two materially different strategy
+/// semantics could collide on `run_id`. This function closes that gap:
+/// `strategy_semantic_fingerprint` is hashed in explicitly, under a new `v5`
+/// prefix that can never collide with a `v2`/`v3`/`v4` (semantic-unaware)
+/// digest, since the version prefix itself always differs.
+///
+/// Result metrics (P&L, order count, fills, equity, etc.) never participate
+/// in this derivation -- only inputs that are fully known before the run
+/// executes.
+///
+/// `BacktestEngine::run` always uses exactly this function today. Historical
+/// `v2`/`v3`/`v4` artifacts remain readable and are never rewritten or
+/// backfilled to `v5`.
+pub fn derive_run_id_with_semantic_identity(
+    strategy_name: &str,
+    config_id: &Uuid,
+    input_data_hash: &str,
+    economics: &BacktestInstrumentEconomics,
+    execution_model_id: &str,
+    strategy_semantic_fingerprint: &str,
+) -> Uuid {
+    let economics_token = if economics.is_default_equity() {
+        "equity".to_string()
+    } else {
+        format!(
+            "mult={}|im={}|mm={}",
+            economics.contract_multiplier,
+            economics
+                .initial_margin_micros
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            economics
+                .maintenance_margin_micros
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        )
+    };
+    let data = format!(
+        "mqk-bkt.run.v5|{}|{}|{}|{}|exec={}|sem={}",
+        strategy_name,
+        config_id,
+        input_data_hash,
+        economics_token,
+        execution_model_id,
+        strategy_semantic_fingerprint
+    );
+    Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
+}
+
 // ---------------------------------------------------------------------------
 // BacktestReport
 // ---------------------------------------------------------------------------
@@ -878,10 +936,13 @@ pub struct BacktestReport {
     pub strategy_semantic_fingerprint: String,
     /// BKT-PROV-01: Deterministic run identity UUID.
     ///
-    /// Derived via `derive_run_id(strategy_name, config_id, input_data_hash)`.
-    /// Encodes strategy name, every config parameter, **and** the full input bar sequence.
-    /// Stable across replays that use the same strategy, same config, and same input bars.
-    /// Any change to bar data, config, or strategy name produces a different `run_id`.
+    /// Derived via `derive_run_id_with_semantic_identity(strategy_name, config_id,
+    /// input_data_hash, economics, execution_model_id, strategy_semantic_fingerprint)`.
+    /// Encodes strategy name, every config parameter, the full input bar
+    /// sequence, economics, execution model, and the strategy's semantic
+    /// fingerprint. Stable across replays that use identical inputs. Any
+    /// change to bar data, config, strategy name, economics, execution
+    /// model, or strategy semantic fingerprint produces a different `run_id`.
     pub run_id: Uuid,
     /// Deterministic config identity UUID (UUIDv5 over canonical config string).
     /// Suitable as the `config_hash` in artifact manifests.
