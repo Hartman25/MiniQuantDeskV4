@@ -121,6 +121,63 @@ pub fn seed_token(result: &Result<String, ConfigIdentityError>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// R7: canonical config-identity verification predicate
+// ---------------------------------------------------------------------------
+//
+// CANONICAL-CONFIG-IDENTITY-VERIFIER-01: before this patch, the same narrow
+// rule -- status == verified_v1 AND both a durable/promoted fingerprint AND
+// a currently-resolved fingerprint are structurally valid AND the two are
+// byte-equal -- was independently reimplemented at three call sites (the
+// promotion-transition continuity check, the runtime dispatch gate, and the
+// dynamic-selection plan-build-time eligibility check). Independently
+// reimplemented copies of a security-critical predicate can silently drift
+// out of sync; verified_fingerprint and config_identity_is_verified are now
+// the ONE place this rule is defined. Every site that decides whether a
+// config identity is verified must call one of these, never reimplement the
+// check inline.
+
+/// Returns `fingerprint` iff `status` is exactly [`CONFIG_IDENTITY_STATUS_VERIFIED_V1`]
+/// AND `fingerprint` is `Some` and structurally valid
+/// (`mqk_db::is_valid_evidence_fingerprint_v2_hex`) -- `None` in every other
+/// case (wrong status, missing fingerprint, or malformed fingerprint).
+///
+/// This is the "one side" of [`config_identity_is_verified`]'s rule, exposed
+/// standalone because some callers need to know a record's own verified
+/// fingerprint (e.g. for a diagnostic message) independent of comparing it
+/// against a second fingerprint.
+pub fn verified_fingerprint<'a>(status: &str, fingerprint: Option<&'a str>) -> Option<&'a str> {
+    if status != CONFIG_IDENTITY_STATUS_VERIFIED_V1 {
+        return None;
+    }
+    fingerprint.filter(|fp| mqk_db::is_valid_evidence_fingerprint_v2_hex(fp))
+}
+
+/// The ONE canonical config-identity verification rule, reused by every
+/// site that decides whether a durable/promoted config fingerprint remains
+/// verified against a currently-resolved config fingerprint.
+///
+/// Narrow rule: `status == verified_v1` AND both `durable_config_fingerprint`
+/// and `current_config_fingerprint` are structurally valid AND the two are
+/// byte-equal. A caller claim of `status == verified_v1` alongside a
+/// mismatched, missing, or malformed fingerprint pair fails closed -- this
+/// function never trusts `status` alone.
+pub fn config_identity_is_verified(
+    status: &str,
+    durable_config_fingerprint: Option<&str>,
+    current_config_fingerprint: Option<&str>,
+) -> bool {
+    let Some(durable) = verified_fingerprint(status, durable_config_fingerprint) else {
+        return false;
+    };
+    let Some(current) =
+        current_config_fingerprint.filter(|fp| mqk_db::is_valid_evidence_fingerprint_v2_hex(fp))
+    else {
+        return false;
+    };
+    durable == current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +239,107 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // R7: config_identity_is_verified / verified_fingerprint negative
+    // controls -- CANONICAL-CONFIG-IDENTITY-VERIFIER-01.
+    // -----------------------------------------------------------------
+
+    fn hex(tag: char) -> String {
+        std::iter::repeat_n(tag, 64).collect()
+    }
+
+    #[test]
+    fn verified_status_with_exact_valid_pair_passes() {
+        let fp = hex('a');
+        assert!(config_identity_is_verified(
+            CONFIG_IDENTITY_STATUS_VERIFIED_V1,
+            Some(&fp),
+            Some(&fp),
+        ));
+    }
+
+    #[test]
+    fn verified_status_with_mismatched_fingerprints_refuses() {
+        assert!(!config_identity_is_verified(
+            CONFIG_IDENTITY_STATUS_VERIFIED_V1,
+            Some(&hex('a')),
+            Some(&hex('b')),
+        ));
+    }
+
+    #[test]
+    fn verified_status_with_malformed_durable_fingerprint_refuses() {
+        assert!(!config_identity_is_verified(
+            CONFIG_IDENTITY_STATUS_VERIFIED_V1,
+            Some("not-a-valid-hex-fingerprint"),
+            Some(&hex('a')),
+        ));
+    }
+
+    #[test]
+    fn verified_status_with_malformed_current_fingerprint_refuses() {
+        assert!(!config_identity_is_verified(
+            CONFIG_IDENTITY_STATUS_VERIFIED_V1,
+            Some(&hex('a')),
+            Some("not-a-valid-hex-fingerprint"),
+        ));
+    }
+
+    #[test]
+    fn verified_status_with_missing_durable_fingerprint_refuses() {
+        assert!(!config_identity_is_verified(
+            CONFIG_IDENTITY_STATUS_VERIFIED_V1,
+            None,
+            Some(&hex('a')),
+        ));
+    }
+
+    #[test]
+    fn verified_status_with_missing_current_fingerprint_refuses() {
+        assert!(!config_identity_is_verified(
+            CONFIG_IDENTITY_STATUS_VERIFIED_V1,
+            Some(&hex('a')),
+            None,
+        ));
+    }
+
+    #[test]
+    fn non_verified_status_with_matching_fingerprints_refuses() {
+        // A record whose fingerprints agree but whose status is NOT
+        // verified_v1 must still refuse -- status alone can never be
+        // bypassed by a coincidentally-matching fingerprint pair.
+        let fp = hex('a');
+        assert!(!config_identity_is_verified(
+            CONFIG_IDENTITY_STATUS_UNAVAILABLE,
+            Some(&fp),
+            Some(&fp),
+        ));
+    }
+
+    #[test]
+    fn verified_fingerprint_returns_none_for_non_verified_status() {
+        assert_eq!(
+            verified_fingerprint(CONFIG_IDENTITY_STATUS_UNAVAILABLE, Some(&hex('a'))),
+            None
+        );
+    }
+
+    #[test]
+    fn verified_fingerprint_returns_none_for_malformed_fingerprint() {
+        assert_eq!(
+            verified_fingerprint(CONFIG_IDENTITY_STATUS_VERIFIED_V1, Some("short")),
+            None
+        );
+    }
+
+    #[test]
+    fn verified_fingerprint_returns_fingerprint_when_coherent() {
+        let fp = hex('a');
+        assert_eq!(
+            verified_fingerprint(CONFIG_IDENTITY_STATUS_VERIFIED_V1, Some(&fp)),
+            Some(fp.as_str())
+        );
     }
 }

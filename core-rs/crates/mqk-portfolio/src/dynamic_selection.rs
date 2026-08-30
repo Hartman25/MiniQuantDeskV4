@@ -1169,8 +1169,31 @@ fn evaluate_evidence_gate(c: &SelectionCandidateInput) -> GateOutcome {
     // into the fingerprint checks above (which authenticate the scanner/
     // review evidence binding, not the strategy's own decision-affecting
     // configuration).
-    if !e.config_identity_verified {
-        return Invalid(ExactSelectionReason::ConfigIdentityUnavailable);
+    //
+    // CANONICAL-CONFIG-IDENTITY-VERIFIER-01 (R7): `mqk-portfolio` cannot
+    // depend on `mqk-daemon`'s canonical `strategy_config_identity::
+    // config_identity_is_verified` predicate (this crate has zero crate
+    // dependencies by design), so this pure gate performs its own INTEGRITY
+    // check over the material it already receives -- reusing the same
+    // `evaluate_fingerprint_gate` primitive the legacy/v2 fingerprint pairs
+    // above use. A caller's bare `config_identity_verified = true` claim is
+    // never trusted alone: it must COHERE with `durable_config_fingerprint`/
+    // `current_config_fingerprint` both being present, structurally valid,
+    // and byte-equal -- a contradictory claim (`verified=true` with
+    // mismatched, malformed, or missing fingerprints) fails closed exactly
+    // like every other fingerprint pair here.
+    match evaluate_fingerprint_gate(
+        &e.durable_config_fingerprint,
+        &e.current_config_fingerprint,
+        e.config_identity_verified,
+    ) {
+        FingerprintGateOutcome::Ok => {}
+        FingerprintGateOutcome::Missing
+        | FingerprintGateOutcome::Malformed
+        | FingerprintGateOutcome::Incoherent
+        | FingerprintGateOutcome::Mismatch => {
+            return Invalid(ExactSelectionReason::ConfigIdentityUnavailable)
+        }
     }
     if !e.plugin_instantiable {
         return Invalid(ExactSelectionReason::UnsupportedStrategyPlugin);
@@ -2879,6 +2902,124 @@ mod tests {
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
         assert_eq!(
             result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+    }
+
+    // ── CANONICAL-CONFIG-IDENTITY-VERIFIER-01 (R7): mqk-portfolio cannot
+    // depend on mqk-daemon's canonical predicate, so its pure gate performs
+    // its own integrity check over `config_identity_verified` +
+    // `durable_config_fingerprint` + `current_config_fingerprint`. A bare
+    // `config_identity_verified = true` claim must never be trusted alone.
+
+    /// `verified=true` alongside a genuinely mismatched fingerprint pair
+    /// (a contradictory caller claim) must fail closed.
+    #[test]
+    fn config_identity_verified_true_with_mismatched_fingerprints_is_refused() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = true;
+        c.evidence.durable_config_fingerprint = Some(fp_hex('c'));
+        c.evidence.current_config_fingerprint = Some(fp_hex('d'));
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+    }
+
+    /// `verified=true` alongside a malformed durable fingerprint must fail
+    /// closed.
+    #[test]
+    fn config_identity_verified_true_with_malformed_durable_fingerprint_is_refused() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = true;
+        c.evidence.durable_config_fingerprint = Some("not-valid-hex".to_string());
+        c.evidence.current_config_fingerprint = Some(fp_hex('c'));
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+    }
+
+    /// `verified=true` alongside a malformed current fingerprint must fail
+    /// closed.
+    #[test]
+    fn config_identity_verified_true_with_malformed_current_fingerprint_is_refused() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = true;
+        c.evidence.durable_config_fingerprint = Some(fp_hex('c'));
+        c.evidence.current_config_fingerprint = Some("not-valid-hex".to_string());
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+    }
+
+    /// `verified=true` with a missing durable fingerprint must fail closed
+    /// -- never treated as a wildcard match.
+    #[test]
+    fn config_identity_verified_true_with_missing_durable_fingerprint_is_refused() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = true;
+        c.evidence.durable_config_fingerprint = None;
+        c.evidence.current_config_fingerprint = Some(fp_hex('c'));
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+    }
+
+    /// `verified=true` with a missing current fingerprint must fail closed.
+    #[test]
+    fn config_identity_verified_true_with_missing_current_fingerprint_is_refused() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = true;
+        c.evidence.durable_config_fingerprint = Some(fp_hex('c'));
+        c.evidence.current_config_fingerprint = None;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+    }
+
+    /// `verified=false` alongside a genuinely matching fingerprint pair must
+    /// still fail closed -- the boolean's own claim is authoritative when it
+    /// disagrees with the derived equality in the OTHER direction too; a
+    /// coincidentally-matching pair can never override a `false` claim.
+    /// This is the same fixture `unverified_config_identity_is_refused_
+    /// despite_otherwise_valid_evidence` already exercises (its unmodified
+    /// `durable_config_fingerprint`/`current_config_fingerprint` already
+    /// agree, from [`valid_evidence`]) -- asserted explicitly here under its
+    /// own name for this gate's negative-control coverage.
+    #[test]
+    fn config_identity_verified_false_with_matching_fingerprints_is_refused() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = false;
+        c.evidence.durable_config_fingerprint = Some(fp_hex('c'));
+        c.evidence.current_config_fingerprint = Some(fp_hex('c'));
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+    }
+
+    /// Positive control: `verified=true` with an exact, valid, matching
+    /// pair passes this gate (already exercised implicitly by
+    /// `verified_config_identity_does_not_block_selection`'s baseline
+    /// fixture -- restated explicitly here).
+    #[test]
+    fn config_identity_verified_true_with_exact_valid_pair_passes() {
+        let c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let result = result_for(&plan, "AAPL");
+        assert_eq!(result.disposition, SelectionCandidateDisposition::Selected);
+        assert_ne!(
+            result.candidates[0].reason_code,
             REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
         );
     }

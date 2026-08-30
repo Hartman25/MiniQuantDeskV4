@@ -33,8 +33,8 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use mqk_db::{
-    evaluate_promotion_tradability, fetch_current_promotion_state,
-    is_valid_evidence_fingerprint_v2_hex, PromotionReasonCode, StrategyPromotionTransitionRecord,
+    evaluate_promotion_tradability, fetch_current_promotion_state, PromotionReasonCode,
+    StrategyPromotionTransitionRecord,
 };
 
 /// STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase E): the exact
@@ -120,25 +120,17 @@ pub fn evaluate_promotion_tradability_with_config_identity(
     // is therefore always `Some` here.
     let record = record.expect("durable_tradable=true implies record is Some");
 
-    let promoted_fp = match (
-        record.config_identity_status.as_str(),
+    // CANONICAL-CONFIG-IDENTITY-VERIFIER-01 (R7): the ONE canonical
+    // verification predicate, never a second independent reimplementation
+    // of "status == verified_v1 AND both fingerprints valid AND equal".
+    if crate::strategy_config_identity::config_identity_is_verified(
+        &record.config_identity_status,
         record.config_fingerprint.as_deref(),
+        current_fingerprint,
     ) {
-        (crate::strategy_config_identity::CONFIG_IDENTITY_STATUS_VERIFIED_V1, Some(fp))
-            if is_valid_evidence_fingerprint_v2_hex(fp) =>
-        {
-            fp
-        }
-        _ => return (false, PromotionReasonCode::PromotionConfigMismatch),
-    };
-
-    match current_fingerprint {
-        Some(current_fp)
-            if is_valid_evidence_fingerprint_v2_hex(current_fp) && current_fp == promoted_fp =>
-        {
-            (true, PromotionReasonCode::PromotionActive)
-        }
-        _ => (false, PromotionReasonCode::PromotionConfigMismatch),
+        (true, PromotionReasonCode::PromotionActive)
+    } else {
+        (false, PromotionReasonCode::PromotionConfigMismatch)
     }
 }
 

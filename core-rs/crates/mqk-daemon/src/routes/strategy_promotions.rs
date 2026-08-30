@@ -47,7 +47,7 @@ use crate::strategy_config_identity::{
 use mqk_db::{
     fetch_all_current_promotions, fetch_current_promotion_state,
     fetch_promotion_history, insert_strategy_promotion_transition_serialized,
-    is_known_promotion_state, is_legal_transition, is_valid_evidence_fingerprint_v2_hex,
+    is_known_promotion_state, is_legal_transition,
     resolve_evidence_lineage, transition_requires_evidence, InsertStrategyPromotionTransitionArgs,
     StrategyPromotionTransitionRecord, TransitionInsertOutcome, PROMOTION_STATE_ACTIVE_PAPER,
     PROMOTION_STATE_PAPER_APPROVED,
@@ -1208,20 +1208,36 @@ pub(crate) async fn strategy_promotion_transition(
             // structurally valid fingerprint (same 64-lowercase-hex format
             // C2's `evaluate_promotion_tradability_with_config_identity`
             // already requires) is ever treated as a match candidate.
-            let parent_verified_fingerprint = current.as_ref().and_then(|c| {
-                if c.config_identity_status == CONFIG_IDENTITY_STATUS_VERIFIED_V1 {
-                    c.config_fingerprint
-                        .as_deref()
-                        .filter(|fp| is_valid_evidence_fingerprint_v2_hex(fp))
-                } else {
-                    None
-                }
-            });
-            match (&config_identity_result, parent_verified_fingerprint) {
-                (Ok(fp), Some(parent_fp)) if *fp == parent_fp => {
+            // PROMOTION-CANONICAL-CONFIG-IDENTITY-VERIFIER-01 (R7): the
+            // PASS/FAIL decision below always comes from the single
+            // canonical `config_identity_is_verified` predicate, never from
+            // an inline reimplementation of "status == verified_v1 AND both
+            // fingerprints valid AND equal". `parent_verified_fingerprint`
+            // is extracted separately (via the same shared
+            // `verified_fingerprint` half of the rule) ONLY to choose
+            // between the two diagnostic blocker messages below -- it never
+            // itself authorizes anything.
+            let parent_status = current.as_ref().map(|c| c.config_identity_status.as_str());
+            let parent_fingerprint = current.as_ref().and_then(|c| c.config_fingerprint.as_deref());
+            let parent_verified_fingerprint = parent_status
+                .and_then(|status| crate::strategy_config_identity::verified_fingerprint(status, parent_fingerprint));
+
+            match &config_identity_result {
+                Ok(fp)
+                    if parent_status
+                        .map(|status| {
+                            crate::strategy_config_identity::config_identity_is_verified(
+                                status,
+                                parent_fingerprint,
+                                Some(fp.as_str()),
+                            )
+                        })
+                        .unwrap_or(false) =>
+                {
                     (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string())
                 }
-                (Ok(fp), Some(parent_fp)) => {
+                Ok(fp) if parent_verified_fingerprint.is_some() => {
+                    let parent_fp = parent_verified_fingerprint.expect("checked by guard above");
                     return transition_response(TransitionResponseArgs {
                         status: StatusCode::CONFLICT,
                         accepted: false,
@@ -1240,7 +1256,7 @@ pub(crate) async fn strategy_promotion_transition(
                         )],
                     });
                 }
-                (Ok(_), None) => {
+                Ok(_) => {
                     return transition_response(TransitionResponseArgs {
                         status: StatusCode::CONFLICT,
                         accepted: false,
@@ -1264,7 +1280,7 @@ pub(crate) async fn strategy_promotion_transition(
                         ],
                     });
                 }
-                (Err(e), _) => {
+                Err(e) => {
                     let blocker = format!(
                         "config identity could not be resolved for this identity right now: {}",
                         e.message(&strategy_id, timeframe_secs)

@@ -337,17 +337,20 @@ async fn evaluate_candidate(
         .await
         {
             Ok(v) => {
-                // DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: reuse the
-                // canonical config-identity comparison mechanism (same rule
+                // DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01 /
+                // CANONICAL-CONFIG-IDENTITY-VERIFIER-01 (R7): reuse the ONE
+                // canonical `strategy_config_identity::config_identity_is_
+                // verified` predicate -- the same rule
                 // `promotion_gate::evaluate_promotion_tradability_with_
-                // config_identity` enforces at the runtime dispatch gate,
-                // C1/C2/R2) -- never a duplicated policy. `current_config_
-                // fingerprint` is resolved fresh, right now, through the
-                // authoritative registry-construction seam and is the frozen
-                // "expected identity" this exact plan build establishes; a
-                // later host-pool construction must be proven to match THIS
-                // value, never a second independent re-derivation (see
-                // `dynamic_selection_start_gate`'s host-identity cross-check).
+                // config_identity` enforces at the runtime dispatch gate
+                // (C1/C2/R2/R7) -- never a duplicated inline reimplementation
+                // of it. `current_config_fingerprint` is resolved fresh,
+                // right now, through the authoritative registry-construction
+                // seam and is the frozen "expected identity" this exact plan
+                // build establishes; a later host-pool construction must be
+                // proven to match THIS value, never a second independent
+                // re-derivation (see `dynamic_selection_start_gate`'s
+                // host-identity cross-check).
                 let current_config_fingerprint =
                     crate::strategy_config_identity::resolve_server_semantic_fingerprint(
                         &p.strategy_id,
@@ -355,15 +358,11 @@ async fn evaluate_candidate(
                         p.timeframe_secs,
                     )
                     .ok();
-                let config_identity_verified = v.config_identity_status
-                    == crate::strategy_config_identity::CONFIG_IDENTITY_STATUS_VERIFIED_V1
-                    && v.config_fingerprint
-                        .as_deref()
-                        .is_some_and(mqk_db::is_valid_evidence_fingerprint_v2_hex)
-                    && current_config_fingerprint
-                        .as_deref()
-                        .is_some_and(mqk_db::is_valid_evidence_fingerprint_v2_hex)
-                    && v.config_fingerprint.as_deref() == current_config_fingerprint.as_deref();
+                let config_identity_verified = crate::strategy_config_identity::config_identity_is_verified(
+                    &v.config_identity_status,
+                    v.config_fingerprint.as_deref(),
+                    current_config_fingerprint.as_deref(),
+                );
                 (
                     SelectionCandidateEvidence {
                         promotion_query_ok: true,
