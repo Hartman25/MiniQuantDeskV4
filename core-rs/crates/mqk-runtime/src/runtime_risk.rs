@@ -421,8 +421,18 @@ fn runtime_risk_config_from_run_config(
     })
 }
 
+/// Convert a configured ratio (exclusive range `0 < ratio < 1`, matching the
+/// daemon env-var validity contract for `MQK_RISK_DAILY_LOSS_LIMIT` /
+/// `MQK_RISK_MAX_DRAWDOWN`) to an absolute micros limit.
+///
+/// RR2 (RUNTIME-RISK-CONFIG-PRECEDENCE-FAIL-CLOSED-01): a ratio `>= 1.0`
+/// would demand more loss/drawdown than the account holds — nonsensical as
+/// a limit — and previously passed through uncaught (only `ratio <= 0.0`
+/// was rejected), silently producing a limit larger than the account's own
+/// baseline equity. Rejected here so the caller fails the whole gate closed
+/// exactly as for any other malformed explicit ratio.
 fn ratio_limit_to_micros(ratio: f64, authoritative_equity_micros: i64) -> Option<i64> {
-    if !ratio.is_finite() || ratio <= 0.0 || authoritative_equity_micros <= 0 {
+    if !ratio.is_finite() || ratio <= 0.0 || ratio >= 1.0 || authoritative_equity_micros <= 0 {
         return None;
     }
 
@@ -1025,6 +1035,93 @@ mod tests {
             panic!("a non-positive max_drawdown ratio must fail closed");
         };
         assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+    }
+
+    // -----------------------------------------------------------------
+    // RR2 (RUNTIME-RISK-CONFIG-PRECEDENCE-FAIL-CLOSED-01): every malformed
+    // shape of an explicit ratio must fail the gate closed at the
+    // `RuntimeRiskGate` construction boundary — this is the downstream half
+    // of the fix (the upstream half is `effective_run_config_for_risk`
+    // refusing to "heal" these with an env value, tested in mqk-daemon).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn null_daily_loss_limit_fails_closed() {
+        let risk_gate = RuntimeRiskGate::from_run_config(
+            &serde_json::json!({ "risk": { "daily_loss_limit": null, "max_drawdown": 0.10 } }),
+            100_000 * 1_000_000,
+        );
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("a null daily_loss_limit must fail closed");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+    }
+
+    #[test]
+    fn wrong_type_string_daily_loss_limit_fails_closed() {
+        let risk_gate = RuntimeRiskGate::from_run_config(
+            &serde_json::json!({ "risk": { "daily_loss_limit": "high", "max_drawdown": 0.10 } }),
+            100_000 * 1_000_000,
+        );
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("a string daily_loss_limit must fail closed");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+    }
+
+    #[test]
+    fn non_finite_nan_daily_loss_limit_fails_closed() {
+        // JSON has no native NaN literal; serde_json refuses to serialize an
+        // f64 NaN into a Number at all, so the realistic non-finite
+        // surface is a value that fails `as_f64()` entirely (covered by
+        // the wrong-type test above) or a huge finite value handled below.
+        // This test documents that `ratio_limit_to_micros`'s own
+        // `is_finite()` guard remains defense-in-depth for any f64 that
+        // reaches it.
+        assert_eq!(ratio_limit_to_micros(f64::NAN, 100_000 * 1_000_000), None);
+        assert_eq!(ratio_limit_to_micros(f64::INFINITY, 100_000 * 1_000_000), None);
+    }
+
+    #[test]
+    fn non_positive_daily_loss_limit_ratio_fails_closed() {
+        let risk_gate = RuntimeRiskGate::from_run_config(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.0, "max_drawdown": 0.10 } }),
+            100_000 * 1_000_000,
+        );
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("a zero daily_loss_limit ratio must fail closed");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+
+        let risk_gate2 = RuntimeRiskGate::from_run_config(
+            &serde_json::json!({ "risk": { "daily_loss_limit": -0.02, "max_drawdown": 0.10 } }),
+            100_000 * 1_000_000,
+        );
+        let mqk_execution::RiskDecision::Deny(denial2) = risk_gate2.evaluate_gate() else {
+            panic!("a negative daily_loss_limit ratio must fail closed");
+        };
+        assert_eq!(denial2.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+    }
+
+    #[test]
+    fn ratio_at_or_above_one_fails_closed() {
+        let risk_gate = RuntimeRiskGate::from_run_config(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 1.0, "max_drawdown": 0.10 } }),
+            100_000 * 1_000_000,
+        );
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("a daily_loss_limit ratio of exactly 1.0 must fail closed");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+
+        let risk_gate2 = RuntimeRiskGate::from_run_config(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 2.0 } }),
+            100_000 * 1_000_000,
+        );
+        let mqk_execution::RiskDecision::Deny(denial2) = risk_gate2.evaluate_gate() else {
+            panic!("a max_drawdown ratio >= 1.0 must fail closed");
+        };
+        assert_eq!(denial2.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
     }
 
     #[test]

@@ -769,28 +769,37 @@ fn load_risk_env() -> (Option<i64>, Option<f64>, Option<f64>) {
 ///
 /// If neither env var is set and `base` has no `/risk` subtree, the returned
 /// value equals `base` and `RuntimeRiskGate` still fails closed as before.
+///
+/// # RR2 (RUNTIME-RISK-CONFIG-PRECEDENCE-FAIL-CLOSED-01)
+///
+/// "Already present in `base`" means the JSON key EXISTS at that pointer
+/// path — not that its value happens to parse as the expected type. A field
+/// that is present but malformed (wrong JSON type, `null`, or any other
+/// value that later fails `RuntimeRiskGate`'s own validation) is explicit
+/// operator/run intent and MUST NOT be silently replaced by an env value
+/// just because it fails to parse here. Using `.and_then(as_f64/as_i64)` to
+/// decide presence (the prior defect) conflates ABSENT with
+/// PRESENT-BUT-INVALID: a run row carrying `"daily_loss_limit": "high"`
+/// would have been "healed" by a valid `MQK_RISK_DAILY_LOSS_LIMIT`,
+/// silently overriding a broken explicit config with an env default instead
+/// of leaving it broken so `RuntimeRiskGate::from_run_config_with_account_authority`
+/// fails the gate closed on it, as the caller intended by writing it at all.
+/// `serde_json::Value::pointer` returning `Some` (including `Some(&Value::Null)`)
+/// is therefore the ONLY presence test used below — never followed by a type
+/// check.
 fn effective_run_config_for_risk(
     base: &serde_json::Value,
     env_equity_micros: Option<i64>,
     env_daily_loss_limit: Option<f64>,
     env_max_drawdown: Option<f64>,
 ) -> serde_json::Value {
-    let need_equity = base
-        .pointer("/risk/initial_equity_micros")
-        .and_then(|v| v.as_i64())
-        .is_none();
-    let need_loss_limit = base
-        .pointer("/risk/daily_loss_limit")
-        .and_then(|v| v.as_f64())
-        .is_none();
-    let need_max_drawdown = base
-        .pointer("/risk/max_drawdown")
-        .and_then(|v| v.as_f64())
-        .is_none();
+    let equity_present = base.pointer("/risk/initial_equity_micros").is_some();
+    let loss_limit_present = base.pointer("/risk/daily_loss_limit").is_some();
+    let max_drawdown_present = base.pointer("/risk/max_drawdown").is_some();
 
-    let will_add_equity = need_equity && env_equity_micros.is_some();
-    let will_add_loss_limit = need_loss_limit && env_daily_loss_limit.is_some();
-    let will_add_max_drawdown = need_max_drawdown && env_max_drawdown.is_some();
+    let will_add_equity = !equity_present && env_equity_micros.is_some();
+    let will_add_loss_limit = !loss_limit_present && env_daily_loss_limit.is_some();
+    let will_add_max_drawdown = !max_drawdown_present && env_max_drawdown.is_some();
 
     if !will_add_equity && !will_add_loss_limit && !will_add_max_drawdown {
         return base.clone();
@@ -1001,6 +1010,88 @@ mod tests {
         assert!(
             effective.pointer("/risk/max_drawdown").is_none(),
             "absent max_drawdown must never be silently filled with a default value"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RR2 (RUNTIME-RISK-CONFIG-PRECEDENCE-FAIL-CLOSED-01): a field PRESENT
+    // in `base` but malformed (wrong type, or `null`) must NEVER be
+    // "healed" by a valid env value — it must survive unchanged in the
+    // merged config so `RuntimeRiskGate` fails the whole gate closed on it
+    // downstream, exactly as the caller's explicit (if broken) config
+    // demands.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn malformed_explicit_daily_loss_limit_string_is_not_healed_by_env() {
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": 25_000_000_000i64,
+                "daily_loss_limit": "high",
+                "max_drawdown": 0.05_f64,
+            }
+        });
+        let effective = effective_run_config_for_risk(&base, None, Some(0.02), None);
+
+        assert_eq!(
+            effective.pointer("/risk/daily_loss_limit"),
+            Some(&serde_json::json!("high")),
+            "a present-but-malformed daily_loss_limit must remain untouched, \
+             never overwritten by a syntactically valid env value"
+        );
+    }
+
+    #[test]
+    fn malformed_explicit_max_drawdown_null_is_not_healed_by_env() {
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": 25_000_000_000i64,
+                "daily_loss_limit": 0.02_f64,
+                "max_drawdown": serde_json::Value::Null,
+            }
+        });
+        let effective = effective_run_config_for_risk(&base, None, None, Some(0.10));
+
+        assert!(
+            effective.pointer("/risk/max_drawdown").unwrap().is_null(),
+            "an explicit null max_drawdown must remain null, never overwritten by env"
+        );
+    }
+
+    #[test]
+    fn malformed_explicit_initial_equity_micros_wrong_type_is_not_healed_by_env() {
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": "not-a-number",
+                "daily_loss_limit": 0.02_f64,
+                "max_drawdown": 0.05_f64,
+            }
+        });
+        let effective =
+            effective_run_config_for_risk(&base, Some(99_000_000_000), None, None);
+
+        assert_eq!(
+            effective.pointer("/risk/initial_equity_micros"),
+            Some(&serde_json::json!("not-a-number")),
+            "a present-but-malformed initial_equity_micros must remain untouched, \
+             never overwritten by a syntactically valid env value"
+        );
+    }
+
+    #[test]
+    fn malformed_explicit_daily_loss_limit_wrong_type_array_is_not_healed_by_env() {
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": 25_000_000_000i64,
+                "daily_loss_limit": [0.02],
+                "max_drawdown": 0.05_f64,
+            }
+        });
+        let effective = effective_run_config_for_risk(&base, None, Some(0.03), None);
+
+        assert!(
+            effective.pointer("/risk/daily_loss_limit").unwrap().is_array(),
+            "a present-but-wrong-type (array) daily_loss_limit must remain untouched"
         );
     }
 
