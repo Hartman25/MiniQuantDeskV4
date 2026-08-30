@@ -225,7 +225,6 @@ fn case1_daily_loss_denies_before_broker_invocation() {
     let account = TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
     let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
         &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
-        100_000 * 1_000_000,
         account.clone(),
         clock.clone(),
     );
@@ -265,7 +264,6 @@ fn case2_max_drawdown_denies_before_broker_invocation() {
         // daily_loss_limit set very loose (50%) so it can never fire first;
         // max_drawdown at 10% is the only limit under test.
         &serde_json::json!({ "risk": { "daily_loss_limit": 0.50, "max_drawdown": 0.10 } }),
-        100_000 * 1_000_000,
         account.clone(),
         clock.clone(),
     );
@@ -312,7 +310,6 @@ fn case3_reject_storm_denies_next_new_risk_before_broker_invocation() {
                 "reject_storm": { "max_rejects": 3 },
             }
         }),
-        100_000 * 1_000_000,
         account,
         clock.clone(),
     );
@@ -350,7 +347,6 @@ fn case4_stale_authority_denies_before_broker_invocation() {
     let account = TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
     let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
         &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
-        100_000 * 1_000_000,
         account.clone(),
         clock.clone(),
     );

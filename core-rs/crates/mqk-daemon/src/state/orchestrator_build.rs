@@ -373,9 +373,18 @@ impl AppState {
         // reject_window_id are no longer computed here — `RuntimeRiskGate`
         // now derives them fresh from its own injected `SystemClock` on
         // every evaluation (AUTON-PAPER-RISK-04 formulas moved to
-        // `mqk_runtime::runtime_risk`). Equity is likewise no longer frozen
-        // at construction: `DaemonAccountAuthority` reads the live
-        // `broker_snapshot` cache on every evaluation.
+        // `mqk_runtime::runtime_risk`). RR1
+        // (RUNTIME-RISK-START-BASELINE-AUTHORITY-REPAIR-01): equity is no
+        // longer frozen from `effective_config`'s `initial_equity_micros`
+        // either — `from_run_config_with_account_authority` fetches this
+        // SAME `DaemonAccountAuthority` once at construction to seed
+        // `RiskState.day_start_equity_micros` / `peak_equity_micros` and to
+        // convert `daily_loss_limit` / `max_drawdown` ratios to absolute
+        // micros, and again on every subsequent evaluation. This guarantees
+        // the account-level risk baseline and every later evaluation read
+        // the same authoritative source, never the daemon/env-configured
+        // `initial_equity_micros` (which remains solely a LOCAL
+        // `PortfolioState` seed — see `recover_oms_and_portfolio` above).
         let account_authority: Arc<dyn RuntimeAccountAuthority> = Arc::new(DaemonAccountAuthority {
             broker_snapshot: Arc::clone(&self.broker_snapshot),
             source: self.broker_snapshot_source,
@@ -391,7 +400,6 @@ impl AppState {
             },
             mqk_runtime::runtime_risk::RuntimeRiskGate::from_run_config_with_account_authority(
                 &effective_config,
-                initial_equity_micros,
                 account_authority,
                 Arc::new(SystemClock),
             ),

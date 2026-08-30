@@ -153,7 +153,6 @@ impl RuntimeRiskGate {
     pub fn from_run_config(config_json: &serde_json::Value, initial_equity_micros: i64) -> Self {
         Self::from_run_config_with_account_authority(
             config_json,
-            initial_equity_micros,
             Arc::new(StaticAccountAuthority {
                 equity_micros: initial_equity_micros,
             }),
@@ -162,31 +161,49 @@ impl RuntimeRiskGate {
     }
 
     /// Production constructor: builds `RiskConfig` from `config_json` and
-    /// wires a real dynamic `account` authority + `clock`. `day_id` /
-    /// `reject_window_id` are derived from `clock.now_utc()` at
-    /// construction (to seed `RiskState`) AND on every subsequent
-    /// evaluation (so day/window rollover is observed without
-    /// reconstructing the gate).
+    /// wires a real dynamic `account` authority + `clock`.
+    ///
+    /// RR1 (RUNTIME-RISK-START-BASELINE-AUTHORITY-REPAIR-01): the SAME
+    /// authoritative equity that `account` will report on every subsequent
+    /// evaluation is fetched ONCE here, at construction, and used for BOTH:
+    /// - seeding `RiskState.day_start_equity_micros` / `peak_equity_micros`;
+    /// - converting the configured `daily_loss_limit` / `max_drawdown`
+    ///   ratios to absolute micros.
+    ///
+    /// This is deliberately NOT `initial_equity_micros` from `config_json` /
+    /// daemon env config — that value is a separate, run-scoped local
+    /// portfolio-seed authority (see `PortfolioState::new` in
+    /// `mqk-daemon`'s `recover_oms_and_portfolio`), which may legitimately
+    /// differ from the account's actual current broker equity. Mixing the
+    /// two here previously let a stale/incorrect configured figure silently
+    /// set the account-level daily-loss/drawdown baseline instead of the
+    /// broker-confirmed starting equity.
+    ///
+    /// If the authority cannot supply a truthful positive equity at
+    /// construction (`Unavailable`/`Stale`/`Malformed`, or a non-positive
+    /// value), the gate fails closed WITHOUT ever computing `RiskConfig` —
+    /// there is no trustworthy baseline to convert ratios against.
     pub fn from_run_config_with_account_authority(
         config_json: &serde_json::Value,
-        initial_equity_micros: i64,
         account: Arc<dyn RuntimeAccountAuthority>,
         clock: Arc<dyn RuntimeClock>,
     ) -> Self {
-        match runtime_risk_config_from_run_config(config_json, initial_equity_micros) {
-            Ok(config) => {
-                let now = clock.now_utc();
-                Self::ready(
-                    config,
-                    RiskState::new(
-                        day_id_for(now),
-                        initial_equity_micros,
-                        reject_window_id_for(now),
-                    ),
-                    account,
-                    clock,
-                )
-            }
+        let now = clock.now_utc();
+        let authoritative_equity_micros = match account.current_account(now) {
+            Ok(ctx) if ctx.equity_micros > 0 => ctx.equity_micros,
+            _ => return Self::fail_closed(runtime_risk_fail_closed_denial()),
+        };
+        match runtime_risk_config_from_run_config(config_json, authoritative_equity_micros) {
+            Ok(config) => Self::ready(
+                config,
+                RiskState::new(
+                    day_id_for(now),
+                    authoritative_equity_micros,
+                    reject_window_id_for(now),
+                ),
+                account,
+                clock,
+            ),
             Err(denial) => Self::fail_closed(denial),
         }
     }
@@ -348,9 +365,9 @@ fn reject_window_id_for(now: DateTime<Utc>) -> u32 {
 
 fn runtime_risk_config_from_run_config(
     config_json: &serde_json::Value,
-    initial_equity_micros: i64,
+    authoritative_equity_micros: i64,
 ) -> Result<RiskConfig, mqk_execution::RiskDenial> {
-    if initial_equity_micros <= 0 {
+    if authoritative_equity_micros <= 0 {
         return Err(runtime_risk_fail_closed_denial());
     }
 
@@ -360,8 +377,9 @@ fn runtime_risk_config_from_run_config(
         .and_then(|value| value.as_f64())
         .ok_or_else(runtime_risk_fail_closed_denial)?;
 
-    let daily_loss_limit_micros = ratio_limit_to_micros(daily_loss_ratio, initial_equity_micros)
-        .ok_or_else(runtime_risk_fail_closed_denial)?;
+    let daily_loss_limit_micros =
+        ratio_limit_to_micros(daily_loss_ratio, authoritative_equity_micros)
+            .ok_or_else(runtime_risk_fail_closed_denial)?;
 
     // RRA-2: max_drawdown is a real ordinary production risk configuration
     // input, required with the SAME validation discipline as
@@ -375,8 +393,9 @@ fn runtime_risk_config_from_run_config(
         .pointer("/risk/max_drawdown")
         .and_then(|value| value.as_f64())
         .ok_or_else(runtime_risk_fail_closed_denial)?;
-    let max_drawdown_limit_micros = ratio_limit_to_micros(max_drawdown_ratio, initial_equity_micros)
-        .ok_or_else(runtime_risk_fail_closed_denial)?;
+    let max_drawdown_limit_micros =
+        ratio_limit_to_micros(max_drawdown_ratio, authoritative_equity_micros)
+            .ok_or_else(runtime_risk_fail_closed_denial)?;
 
     let reject_storm_max_rejects_in_window = match config_json
         .pointer("/risk/reject_storm/max_rejects")
@@ -402,12 +421,12 @@ fn runtime_risk_config_from_run_config(
     })
 }
 
-fn ratio_limit_to_micros(ratio: f64, initial_equity_micros: i64) -> Option<i64> {
-    if !ratio.is_finite() || ratio <= 0.0 || initial_equity_micros <= 0 {
+fn ratio_limit_to_micros(ratio: f64, authoritative_equity_micros: i64) -> Option<i64> {
+    if !ratio.is_finite() || ratio <= 0.0 || authoritative_equity_micros <= 0 {
         return None;
     }
 
-    let limit = ratio * initial_equity_micros as f64;
+    let limit = ratio * authoritative_equity_micros as f64;
     if !limit.is_finite() || limit <= 0.0 || limit > i64::MAX as f64 {
         return None;
     }
@@ -1039,5 +1058,138 @@ mod tests {
         // Sanity: the first gate (config_json path) is at least constructed
         // and reachable (not FailClosed) given both ratios were valid.
         assert_eq!(risk_gate.evaluate_gate(), mqk_execution::RiskDecision::Allow);
+    }
+
+    // -----------------------------------------------------------------
+    // RR1 (RUNTIME-RISK-START-BASELINE-AUTHORITY-REPAIR-01) negative
+    // controls: the account-level risk baseline (day-start/peak equity,
+    // and the ratio→absolute conversion) must be seeded from the SAME
+    // authoritative account equity `evaluate_gate` will observe later —
+    // never from a separately-configured figure that can diverge from it.
+    // `from_run_config_with_account_authority`'s signature no longer even
+    // accepts a separate equity value (the prior defect's exact vector),
+    // so these prove the authority's own equity is what actually reaches
+    // both the seeded `RiskState` and the ratio conversion, in both
+    // directions.
+    // -----------------------------------------------------------------
+
+    /// Control A: broker-authoritative starting equity (95k) BELOW a
+    /// hypothetical stale configured figure (100k). daily_loss_limit=2%:
+    /// a floor wrongly anchored to 100k would be 98k, making 95k already a
+    /// breach. The correct floor anchored to the authoritative 95k is
+    /// 93_100 (95k * 0.98) — 95k itself must remain allowed.
+    #[test]
+    fn rr1_daily_loss_baseline_uses_lower_authoritative_equity_not_a_stale_higher_figure() {
+        let authority = MutableEquityAuthority::new(95_000 * 1_000_000);
+        let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
+            authority.clone(),
+            FixedClock::new(t(2024, 1, 15, 9, 0)),
+        );
+        assert_eq!(
+            risk_gate.evaluate_gate(),
+            mqk_execution::RiskDecision::Allow,
+            "starting equity must be allowed under a floor anchored to the \
+             authoritative 95k baseline (98k would incorrectly already deny)"
+        );
+
+        authority.set(93_099 * 1_000_000);
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("breach of the authoritative-95k-anchored floor must deny");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+    }
+
+    /// Control B: broker-authoritative starting equity (105k) ABOVE a
+    /// hypothetical stale configured figure (100k). daily_loss_limit=2%:
+    /// a floor wrongly anchored to 100k would be 98k, incorrectly ALLOWING
+    /// a drop to 97k. The correct floor anchored to 105k is 102_900 — 97k
+    /// must be denied.
+    #[test]
+    fn rr1_daily_loss_baseline_uses_higher_authoritative_equity_not_a_stale_lower_figure() {
+        let authority = MutableEquityAuthority::new(105_000 * 1_000_000);
+        let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
+            authority.clone(),
+            FixedClock::new(t(2024, 1, 15, 9, 0)),
+        );
+
+        authority.set(97_000 * 1_000_000);
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!(
+                "97k must breach the floor anchored to the authoritative 105k baseline \
+                 (102_900) — a stale 100k-anchored floor (98k) would incorrectly allow it"
+            );
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+    }
+
+    /// Control C: same mismatch proof for `max_drawdown` — the peak-equity
+    /// seed and drawdown floor must anchor to the authoritative equity.
+    #[test]
+    fn rr1_max_drawdown_baseline_uses_authoritative_equity_not_a_stale_figure() {
+        let authority = MutableEquityAuthority::new(105_000 * 1_000_000);
+        let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.90, "max_drawdown": 0.10 } }),
+            authority.clone(),
+            FixedClock::new(t(2024, 1, 15, 9, 0)),
+        );
+
+        // A stale 100k-anchored drawdown floor would be 90k, incorrectly
+        // allowing 94_499. The correct 105k-anchored floor is 94_500.
+        authority.set(94_499 * 1_000_000);
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("94_499 must breach the max-drawdown floor anchored to the authoritative peak");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+    }
+
+    /// Control D: an authority that cannot supply a truthful equity AT
+    /// CONSTRUCTION TIME must fail the gate closed — never fall back to a
+    /// configured/default figure.
+    #[test]
+    fn rr1_unavailable_authority_at_construction_fails_closed() {
+        let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
+            Arc::new(FailingAuthority(AccountAuthorityError::Unavailable)),
+            FixedClock::new(t(2024, 1, 15, 9, 0)),
+        );
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("an authority unavailable at construction must fail the gate closed");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+    }
+
+    #[test]
+    fn rr1_malformed_zero_equity_at_construction_fails_closed() {
+        let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
+            MutableEquityAuthority::new(0),
+            FixedClock::new(t(2024, 1, 15, 9, 0)),
+        );
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("non-positive authoritative equity at construction must fail the gate closed");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+    }
+
+    /// Control E: after construction, later authority-reported equity
+    /// changes still flow dynamically through the SAME gate built via the
+    /// production constructor (not just `for_test`).
+    #[test]
+    fn rr1_production_constructor_observes_live_equity_after_construction() {
+        let authority = MutableEquityAuthority::new(100_000 * 1_000_000);
+        let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
+            &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
+            authority.clone(),
+            FixedClock::new(t(2024, 1, 15, 9, 0)),
+        );
+        assert_eq!(risk_gate.evaluate_gate(), mqk_execution::RiskDecision::Allow);
+
+        authority.set(97_999 * 1_000_000);
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("a live equity drop after construction must still be observed and deny");
+        };
+        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
     }
 }
