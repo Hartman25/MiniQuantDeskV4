@@ -94,16 +94,21 @@ impl RuntimeAccountAuthority for DaemonAccountAuthority {
             return Err(AccountAuthorityError::Malformed);
         }
 
-        // RRA-4 disposition: no authoritative PDT source is wired yet (see
-        // runtime-risk authority map). `PdtContext::ok()` here is only
-        // reachable when `RiskConfig::pdt_auto_enabled == false` in
-        // practice-checked production config; `pdt_auto_enabled == true`
-        // with this stub would silently never enforce PDT, which is exactly
-        // the defect this mission tracks as PDT_AUTHORITY_PREREQUISITE_MISSING
-        // (unresolved — see final report). kill_switch stays `None`:
-        // canonical halt authority for staleness/manual/reconcile-drift
-        // lives in `StateIntegrityGate`, evaluated as an independent gate
-        // before this one.
+        // RR5 (ALPACA-LEGACY-PDT-DISPOSITION-2026-01) disposition: no
+        // authoritative PDT source is wired for the current Alpaca provider
+        // contract (the legacy Pattern Day Trader regime was retired
+        // 2026-07-06 — see `alpaca_legacy_pdt_disposition`'s doc for the
+        // full provider-contract citation — and a home-grown replacement
+        // model is out of scope). `PdtContext::ok()` here is made truthful
+        // for this External/Alpaca path by `alpaca_legacy_pdt_disposition`,
+        // which forces `pdt_auto_enabled` to an explicit `false` (NOT
+        // APPLICABLE by provider regime) unless the run's own config
+        // explicitly demanded `pdt_auto_enabled: true` — in which case
+        // `build_execution_orchestrator` refuses to start the run rather
+        // than ever reaching this stub with enforcement silently expected.
+        // kill_switch stays `None`: canonical halt authority for
+        // staleness/manual/reconcile-drift lives in `StateIntegrityGate`,
+        // evaluated as an independent gate before this one.
         Ok(AccountAuthorityContext {
             equity_micros,
             pdt: mqk_runtime::runtime_risk::RiskPdtContext::ok(),
@@ -168,6 +173,20 @@ impl AppState {
             env_daily_loss_limit,
             env_max_drawdown,
         );
+
+        // RR5 (ALPACA-LEGACY-PDT-DISPOSITION-2026-01): the current Alpaca
+        // provider contract retired the legacy Pattern Day Trader regime
+        // (see `alpaca_legacy_pdt_disposition` doc below) and this system has
+        // no authoritative replacement PDT source wired for it. Applies only
+        // to the External (Alpaca) broker-snapshot-truth path; Synthetic
+        // already fails closed on equity before PDT is ever consulted (see
+        // `DaemonAccountAuthority::current_account`).
+        let effective_config = if self.broker_snapshot_source == BrokerSnapshotTruthSource::External
+        {
+            alpaca_legacy_pdt_disposition(&run.config_json, effective_config)?
+        } else {
+            effective_config
+        };
 
         let initial_equity_micros = effective_config
             .pointer("/risk/initial_equity_micros")
@@ -838,6 +857,92 @@ fn effective_run_config_for_risk(
 }
 
 // ---------------------------------------------------------------------------
+// RR5 (ALPACA-LEGACY-PDT-DISPOSITION-2026-01)
+// ---------------------------------------------------------------------------
+
+/// Dispose of the legacy `pdt_auto_enabled` risk flag for the canonical
+/// Alpaca (External broker-snapshot-truth) production path.
+///
+/// # Provider-contract facts (verified against official Alpaca docs)
+///
+/// `docs.alpaca.markets` changelog entry `2026-06-03-pdt-651df23`,
+/// "Pattern day trading and DTBP fields and endpoints are deprecated",
+/// effective 2026-07-06: `pattern_day_trader`, `daytrade_count`,
+/// `daytrading_buying_power` (and the related `dtbp_check`/`pdt_check`
+/// configuration fields and the PDT status / one-time-removal endpoints)
+/// are removed from the Trading and Broker APIs. Alpaca's "The Intraday
+/// Margin Rule" documentation confirms this is a full regime replacement,
+/// not a relabeling: the PDT designation, the 4-in-5-trading-day count,
+/// and the $25,000 minimum-equity threshold are gone, superseded by
+/// real-time intraday margin exposure monitoring that Alpaca itself
+/// enforces broker-side.
+///
+/// # Why this system cannot honor `pdt_auto_enabled: true` for Alpaca
+///
+/// `DaemonAccountAuthority` (this module) has no authoritative PDT source
+/// for the current Alpaca contract — building a home-grown FINRA Intraday
+/// Margin Level/Deficit model is explicitly out of scope for this mission
+/// (new feature scope, would delay the equity/ETF Paper finish). It
+/// therefore always returns `PdtContext::ok()`. `RiskConfig::sane_defaults()`
+/// defaults `pdt_auto_enabled` to `true`. Left unchecked, an ordinary
+/// Alpaca Paper run with no explicit `/risk/pdt_auto_enabled` in its
+/// `config_json` would silently pair `pdt_auto_enabled == true` with an
+/// unconditional always-OK context — appearing configured to enforce PDT
+/// while never actually doing so.
+///
+/// # Disposition
+///
+/// - `base` (the run's own, unmodified `config_json` — never the
+///   env-supplemented `effective` view) does NOT explicitly request
+///   `pdt_auto_enabled: true`: the effective config gets an explicit
+///   `pdt_auto_enabled: false` for this run. This is NOT APPLICABLE /
+///   DISABLED by current provider regime, not a silently-never-enforced
+///   `true`. Risk-reducing order semantics, daily-loss, max-drawdown, and
+///   reject-storm are all untouched by this — only `pdt_auto_enabled`
+///   changes.
+/// - `base` DOES explicitly request `pdt_auto_enabled: true`: that is an
+///   unsupported configuration on the current Alpaca path (no
+///   authoritative source can honor it). The run refuses to start with a
+///   precise, operator-visible reason rather than silently pretending
+///   enforcement occurred.
+///
+/// Broker-side intraday-margin/order-acceptance enforcement remains
+/// Alpaca's own authority, unaffected by this function. No removed Alpaca
+/// PDT field is read or written anywhere in this disposition.
+fn alpaca_legacy_pdt_disposition(
+    base: &serde_json::Value,
+    effective: serde_json::Value,
+) -> Result<serde_json::Value, RuntimeLifecycleError> {
+    let explicit_pdt_auto_enabled = base
+        .pointer("/risk/pdt_auto_enabled")
+        .and_then(|value| value.as_bool());
+
+    if explicit_pdt_auto_enabled == Some(true) {
+        return Err(RuntimeLifecycleError::forbidden(
+            "runtime.start_refused.alpaca_legacy_pdt_unsupported",
+            "risk.pdt_auto_enabled",
+            "explicit pdt_auto_enabled=true is not supported on the current Alpaca \
+             provider contract: the legacy Pattern Day Trader regime (pattern_day_trader, \
+             daytrade_count, daytrading_buying_power, the $25k minimum) was retired \
+             2026-07-06 in favor of The Intraday Margin Rule, and no authoritative PDT \
+             source is wired for this path — refusing to start rather than silently \
+             never enforcing the requested check",
+        ));
+    }
+
+    let mut effective = effective;
+    if let Some(obj) = effective.as_object_mut() {
+        let risk = obj
+            .entry("risk")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(risk_obj) = risk.as_object_mut() {
+            risk_obj.insert("pdt_auto_enabled".to_string(), serde_json::json!(false));
+        }
+    }
+    Ok(effective)
+}
+
+// ---------------------------------------------------------------------------
 // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01 /
 // PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01 /
 // PAPER-EAGER-SNAPSHOT-REFRESH-WIRE-01: external broker snapshot fetcher
@@ -1091,6 +1196,126 @@ mod tests {
             effective.pointer("/risk/daily_loss_limit").unwrap().is_array(),
             "a present-but-wrong-type (array) daily_loss_limit must remain untouched"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // RR5 (ALPACA-LEGACY-PDT-DISPOSITION-2026-01)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ordinary_alpaca_config_gets_pdt_explicitly_disabled() {
+        // A daemon-created run with no explicit /risk/pdt_auto_enabled at
+        // all — the ordinary case.
+        let base = serde_json::json!({
+            "risk": { "initial_equity_micros": 25_000_000_000i64, "daily_loss_limit": 0.02_f64 }
+        });
+        let effective = alpaca_legacy_pdt_disposition(&base, base.clone())
+            .expect("ordinary config must not refuse to start");
+        assert_eq!(
+            effective.pointer("/risk/pdt_auto_enabled"),
+            Some(&serde_json::json!(false)),
+            "ordinary Alpaca Paper runtime must have pdt_auto_enabled explicitly \
+             disabled (NOT APPLICABLE by provider regime), never silently left \
+             at the sane_defaults() true paired with an always-OK context"
+        );
+    }
+
+    #[test]
+    fn explicit_false_pdt_auto_enabled_is_preserved_as_false() {
+        let base = serde_json::json!({ "risk": { "pdt_auto_enabled": false } });
+        let effective = alpaca_legacy_pdt_disposition(&base, base.clone())
+            .expect("explicit false must not refuse to start");
+        assert_eq!(
+            effective.pointer("/risk/pdt_auto_enabled"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[test]
+    fn explicit_stale_pdt_auto_enabled_true_refuses_to_start() {
+        let base = serde_json::json!({ "risk": { "pdt_auto_enabled": true } });
+        let err = alpaca_legacy_pdt_disposition(&base, base.clone())
+            .expect_err("explicit pdt_auto_enabled=true on the Alpaca path must refuse to start");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.alpaca_legacy_pdt_unsupported"
+        );
+    }
+
+    #[test]
+    fn stale_explicit_true_cannot_silently_run_using_pdt_context_ok() {
+        // Direct proof of the production invariant: there is no code path
+        // by which `alpaca_legacy_pdt_disposition` returns `Ok` with
+        // `pdt_auto_enabled: true` still present in the effective config —
+        // it is either forced to `false` or the call refuses to start.
+        for base in [
+            serde_json::json!({}),
+            serde_json::json!({ "risk": {} }),
+            serde_json::json!({ "risk": { "pdt_auto_enabled": false } }),
+        ] {
+            let effective = alpaca_legacy_pdt_disposition(&base, base.clone())
+                .expect("non-true-requesting config must not refuse to start");
+            assert_ne!(
+                effective.pointer("/risk/pdt_auto_enabled"),
+                Some(&serde_json::json!(true)),
+                "no disposition outcome may leave pdt_auto_enabled=true reachable \
+                 with the always-OK DaemonAccountAuthority stub, for base={base:?}"
+            );
+        }
+        let true_base = serde_json::json!({ "risk": { "pdt_auto_enabled": true } });
+        assert!(
+            alpaca_legacy_pdt_disposition(&true_base, true_base.clone()).is_err(),
+            "the only way base can request pdt_auto_enabled=true is refused entirely"
+        );
+    }
+
+    #[test]
+    fn pdt_disposition_does_not_alter_other_risk_fields() {
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": 25_000_000_000i64,
+                "daily_loss_limit": 0.02_f64,
+                "max_drawdown": 0.10_f64,
+                "reject_storm": { "max_rejects": 5 },
+            }
+        });
+        let effective = alpaca_legacy_pdt_disposition(&base, base.clone()).unwrap();
+        assert_eq!(
+            effective.pointer("/risk/initial_equity_micros"),
+            Some(&serde_json::json!(25_000_000_000i64)),
+            "daily loss / max drawdown / reject storm config must be untouched"
+        );
+        assert_eq!(
+            effective.pointer("/risk/daily_loss_limit"),
+            Some(&serde_json::json!(0.02))
+        );
+        assert_eq!(
+            effective.pointer("/risk/max_drawdown"),
+            Some(&serde_json::json!(0.10))
+        );
+        assert_eq!(
+            effective.pointer("/risk/reject_storm/max_rejects"),
+            Some(&serde_json::json!(5))
+        );
+    }
+
+    #[test]
+    fn pdt_disposition_never_introduces_removed_alpaca_fields() {
+        let base = serde_json::json!({});
+        let effective = alpaca_legacy_pdt_disposition(&base, base.clone()).unwrap();
+        let serialized = effective.to_string();
+        for removed_field in [
+            "pattern_day_trader",
+            "daytrade_count",
+            "daytrading_buying_power",
+            "dtbp_check",
+            "pdt_check",
+        ] {
+            assert!(
+                !serialized.contains(removed_field),
+                "must never introduce the removed Alpaca field '{removed_field}'"
+            );
+        }
     }
 
     #[test]
