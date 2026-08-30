@@ -1,6 +1,9 @@
 # Decision Record: HALT / DISARM Does Not Auto-Flatten
 
 **Recorded by:** `MASTER-LEDGER-CURRENT-TRUTH-CLOSURE-01` (L1), 2026-08-30
+**Corrected by:** `FULL-SYSTEM-COMPLETION-SITUATIONAL-AUDIT-01` (L2), 2026-08-30 — the `mqk-risk`
+wiring claim below was found incomplete during L2 research and is corrected in place
+(the decision itself is unchanged; see the "Correction" note in that section).
 **Baseline:** `main` @ `70ed507acfe02ef860b8378b9e5eddb25a36065d`
 **Status:** DOCUMENTS EXISTING BEHAVIOR — no runtime behavior was changed to produce this record.
 
@@ -41,34 +44,56 @@ before flatten becomes available again.
   available again after the operator has deliberately restored the run to
   armed/running.
 
-### The `mqk-risk` crate's `RiskAction::FlattenAndHalt` is not wired into the live daemon
+### The `mqk-risk` crate's `RiskAction::FlattenAndHalt` reaches the live gate, but only as a deny — never as an executed order
 
-`mqk-risk::evaluate()` can return a `RiskAction::FlattenAndHalt` verdict (e.g.
-for the `MissingProtectiveStop` kill-switch type, gated by
-`RiskConfig::missing_protective_stop_flattens`), proven by
-`core-rs/crates/mqk-risk/tests/scenario_auto_flatten_on_critical_event.rs`.
-However:
+**Correction (`FULL-SYSTEM-COMPLETION-SITUATIONAL-AUDIT-01`, L2, 2026-08-30):**
+the paragraph originally here claimed `mqk-daemon` does not depend on
+`mqk-risk` "at all." That was incomplete: `mqk-daemon` depends on
+`mqk-runtime` (`mqk-daemon/Cargo.toml`), and `mqk-runtime` depends on
+`mqk-risk` directly. `mqk-runtime/src/runtime_risk.rs`'s `RuntimeRiskGate`
+wraps `mqk_risk::evaluate()` and implements `mqk_execution::gateway::RiskGate`,
+which is wired into the live per-order gate pipeline
+(`mqk-execution/src/gateway.rs::enforce_gates`, invoked via
+`mqk-daemon/src/state/orchestrator_build.rs`) as the middle of three gates
+checked on every order submission: `IntegrityGate::is_armed()` →
+`RiskGate::evaluate_gate_for_request()` → `ReconcileGate::is_clean()`. So
+`mqk_risk::evaluate()` — and by extension a `FlattenAndHalt` verdict from it
+— genuinely does reach live/paper order submission. The decision below is
+otherwise unchanged, because of what happens to that verdict once it arrives:
 
-- `mqk-daemon` does not depend on the `mqk-risk` crate at all (no `mqk-risk`
-  entry in `core-rs/crates/mqk-daemon/Cargo.toml`, no `mqk_risk::`/`RiskAction`
-  reference anywhere under `core-rs/crates/mqk-daemon/src/`).
-- The only consumer of `RiskAction::FlattenAndHalt` that turns it into an
-  actual position close is `mqk-backtest/src/engine.rs` — the research
-  *simulation* engine, where "flattening" a simulated position has no
-  real-world broker consequence.
+- `runtime_risk_decision_to_execution_decision`
+  (`mqk-runtime/src/runtime_risk.rs`, the sole conversion from `mqk_risk`'s
+  `RiskAction` to the gateway's `RiskDecision`) maps **every** `RiskAction`
+  variant other than `Allow` — `Reject`, `Halt`, and `FlattenAndHalt` alike —
+  to the same `RiskDecision::Deny(...)`. The match arm carries no
+  `FlattenAndHalt`-specific case; the original `RiskAction` variant is not
+  even preserved in the resulting `RiskDenial`. There is no code path from
+  here that submits, enqueues, or otherwise executes a flatten order — a
+  `FlattenAndHalt` verdict has exactly the same practical effect on the
+  gateway as a plain `Reject`: the pending order is denied.
+- The only mechanism that lets a *reducing* order (a real flatten) through
+  this same gate is `RiskRequestContext.is_risk_reducing`, which the
+  *caller* sets when it already intends to submit a risk-reducing order —
+  the gate does not initiate this itself; it only permits an
+  already-risk-reducing request through where a non-reducing one would be
+  denied.
 - `mqk-testkit`'s own risk-gate test (`scenario_risk_engine_blocks_submit.rs`)
-  documents `FlattenAndHalt` as treated identically to `Reject`/`Halt` for
-  submission-blocking purposes — i.e. as a gate decision, not an executed
-  action, in any context where it is actually consumed as a gate.
+  and `mqk-runtime`'s own gate tests
+  (`evaluate_gate_for_request_denies_non_reducing_order_when_halted`,
+  `evaluate_gate_for_request_allows_verified_flatten_when_halted`) confirm
+  exactly this shape: deny by default, allow only a caller-verified
+  risk-reducing request.
 
-**Conclusion:** the enum name `FlattenAndHalt` describes an intended decision
-inside the standalone `mqk-risk` crate and its backtest-simulation consumer.
-It is not currently wired into the Paper/Live daemon's own halt path, so it
-does not contradict the decision above — no live/paper kill-switch trip,
-including a `MissingProtectiveStop` one, currently submits a flatten order
-automatically. If `mqk-risk::evaluate()` is ever wired into the daemon in the
-future, this decision record's claim would need to be re-verified against
-that new call site.
+**Conclusion (revised, same practical outcome as before, more strongly
+evidenced):** `mqk_risk::evaluate()`'s `FlattenAndHalt` decision is real
+production code reachable from the live gate — the earlier "not wired at
+all" framing was wrong — but the daemon's own conversion of that decision
+into a gateway `Deny` means it still functions purely as "block this
+order," never as "submit a flatten order automatically." No live/paper
+kill-switch trip, including a `MissingProtectiveStop` one that produces
+`FlattenAndHalt`, currently submits a flatten order automatically. The
+enum name remains a latent misnomer for what the daemon actually does with
+it today.
 
 ## Rationale
 
