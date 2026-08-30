@@ -449,6 +449,13 @@ mod tests {
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             ),
             exact_fingerprint_v2_matches: true,
+            config_identity_verified: true,
+            durable_config_fingerprint: Some(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ),
+            current_config_fingerprint: Some(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ),
             registry_enabled: true,
             plugin_instantiable: true,
             timeframe_matches: true,

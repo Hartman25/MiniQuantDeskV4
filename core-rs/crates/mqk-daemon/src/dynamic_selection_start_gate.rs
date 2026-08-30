@@ -218,6 +218,20 @@ pub enum DynamicSelectionStartGateReason {
         selected_count: usize,
         pool_count: usize,
     },
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01 (TOCTOU defense): the
+    /// actual `StrategyHost` instantiated for this selected key does not
+    /// carry the same semantic fingerprint that was validated against the
+    /// promoted config at plan-build time. Ambient configuration (e.g.
+    /// `MQK_STRATEGY_TARGET_QTY`) can change between plan validation and
+    /// host construction -- re-deriving both sides independently at their
+    /// own moment in time would not catch that drift, so this compares the
+    /// actual host against the FROZEN expected identity the plan itself
+    /// carries, never a second independent re-derivation.
+    HostSemanticIdentityMismatch {
+        symbol: String,
+        strategy_id: String,
+        timeframe_secs: i64,
+    },
 }
 
 impl DynamicSelectionStartGateReason {
@@ -238,6 +252,9 @@ impl DynamicSelectionStartGateReason {
             }
             Self::HostPoolCountMismatch { .. } => {
                 "dynamic_selection_start_gate_host_pool_count_mismatch"
+            }
+            Self::HostSemanticIdentityMismatch { .. } => {
+                "dynamic_selection_start_gate_host_semantic_identity_mismatch"
             }
         }
     }
@@ -371,6 +388,31 @@ pub(crate) fn selected_host_pool_keys(plan: &DynamicSelectionPlan) -> Vec<HostPo
         .collect()
 }
 
+/// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: every selected key
+/// paired with the FROZEN `current_config_fingerprint` the plan builder
+/// resolved for it at plan-build time (see `SelectionCandidateEvidence::
+/// current_config_fingerprint`'s own docs on why this must be the frozen
+/// value, never a fresh re-derivation). A selected candidate's own gate
+/// already required `config_identity_verified == true` to be selected at
+/// all, so `current_config_fingerprint` is always `Some` and structurally
+/// valid here -- this is defense-in-depth, not the primary eligibility
+/// check.
+fn selected_host_expected_fingerprints(
+    plan: &DynamicSelectionPlan,
+) -> Vec<(HostPoolKey, Option<String>)> {
+    plan.symbol_results
+        .iter()
+        .filter_map(|sr| {
+            let strategy_id = sr.selected_strategy_id.clone()?;
+            let candidate = sr.candidates.iter().find(|c| c.selected)?;
+            Some((
+                (sr.symbol.clone(), strategy_id, candidate.timeframe_secs),
+                candidate.current_config_fingerprint.clone(),
+            ))
+        })
+        .collect()
+}
+
 /// Evaluate an already-`computed` (or fail-closed) [`DynamicSelectionPlan`]
 /// against every paper_enforced start-gate requirement and, if it passes,
 /// build the run-scoped host pool. Split out from
@@ -452,6 +494,41 @@ fn evaluate_plan_for_start_gate(plan: DynamicSelectionPlan) -> DynamicSelectionS
                     }],
                 );
             }
+
+            // DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01 (TOCTOU
+            // defense): the actual host instantiated for each selected key
+            // must be proven to carry the same semantic fingerprint that was
+            // validated against promotion at plan-build time -- never merely
+            // re-derived independently a second time here, which would not
+            // detect ambient config drift between the two points in time.
+            // `pool` is still owned here (not yet moved into the Allowed
+            // outcome below), so every host is available for this check.
+            let mut pool = pool;
+            let expected = selected_host_expected_fingerprints(&plan);
+            for ((symbol, strategy_id, timeframe_secs), expected_fp) in &expected {
+                let actual_fp = pool
+                    .get_mut(symbol, strategy_id, *timeframe_secs)
+                    .and_then(|h| h.semantic_fingerprint().ok());
+                let matches = match (expected_fp.as_deref(), actual_fp.as_deref()) {
+                    (Some(e), Some(a)) => {
+                        mqk_db::is_valid_evidence_fingerprint_v2_hex(e)
+                            && mqk_db::is_valid_evidence_fingerprint_v2_hex(a)
+                            && e == a
+                    }
+                    _ => false,
+                };
+                if !matches {
+                    return refused(
+                        plan,
+                        vec![DynamicSelectionStartGateReason::HostSemanticIdentityMismatch {
+                            symbol: symbol.clone(),
+                            strategy_id: strategy_id.clone(),
+                            timeframe_secs: *timeframe_secs,
+                        }],
+                    );
+                }
+            }
+
             DynamicSelectionStartGateOutcome {
                 disposition: DynamicSelectionStartGateDisposition::PaperEnforcedAllowed,
                 not_applicable: false,
@@ -779,6 +856,13 @@ mod tests {
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             ),
             exact_fingerprint_v2_matches: true,
+            config_identity_verified: true,
+            durable_config_fingerprint: Some(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ),
+            current_config_fingerprint: Some(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ),
             registry_enabled: true,
             plugin_instantiable: true,
             timeframe_matches: true,
@@ -799,19 +883,55 @@ mod tests {
         }
     }
 
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: the host-pool
+    /// TOCTOU cross-check compares each selected candidate's
+    /// `current_config_fingerprint` against the REAL host actually
+    /// constructed for it -- so a test whose plan is expected to reach
+    /// `PaperEnforcedAllowed` (a real host pool) must carry the REAL
+    /// resolved fingerprint here, never `valid_evidence`'s generic
+    /// placeholder, which no genuine host can ever match.
+    fn evidence_with_real_config_fingerprint(
+        score_micros: i64,
+        strategy_id: &str,
+        symbol: &str,
+        timeframe_secs: i64,
+    ) -> SelectionCandidateEvidence {
+        let real_fp = crate::strategy_config_identity::resolve_server_semantic_fingerprint(
+            strategy_id,
+            symbol,
+            timeframe_secs,
+        )
+        .expect("fixture strategy_id/symbol/timeframe must resolve a real fingerprint");
+        SelectionCandidateEvidence {
+            durable_config_fingerprint: Some(real_fp.clone()),
+            current_config_fingerprint: Some(real_fp),
+            ..valid_evidence(score_micros)
+        }
+    }
+
     fn computed_plan_all_selected() -> DynamicSelectionPlan {
         let candidates = vec![
             SelectionCandidateInput {
                 symbol: "AAPL".to_string(),
                 strategy_id: "swing_momentum".to_string(),
                 timeframe_secs: 86400,
-                evidence: valid_evidence(500_000),
+                evidence: evidence_with_real_config_fingerprint(
+                    500_000,
+                    "swing_momentum",
+                    "AAPL",
+                    86400,
+                ),
             },
             SelectionCandidateInput {
                 symbol: "MSFT".to_string(),
                 strategy_id: "mean_reversion".to_string(),
                 timeframe_secs: 3600,
-                evidence: valid_evidence(700_000),
+                evidence: evidence_with_real_config_fingerprint(
+                    700_000,
+                    "mean_reversion",
+                    "MSFT",
+                    3600,
+                ),
             },
         ];
         mqk_portfolio::compute_dynamic_selection_plan(
@@ -844,6 +964,80 @@ mod tests {
         assert_eq!(pool.len(), 2);
         assert!(pool.contains_key("AAPL", "swing_momentum", 86400));
         assert!(pool.contains_key("MSFT", "mean_reversion", 3600));
+    }
+
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01 (TOCTOU defense):
+    /// the load-bearing negative control -- a selected candidate whose
+    /// frozen `current_config_fingerprint` does NOT match the real host
+    /// `DynamicSelectionHostPool::build` actually instantiates for it
+    /// (simulating ambient config drift between plan-build time and
+    /// host-construction time) must refuse the whole start, even though
+    /// every earlier gate (evidence, coherence, host construction itself)
+    /// passed cleanly.
+    #[test]
+    fn host_semantic_identity_mismatch_refuses_the_whole_start() {
+        let wrong_fp = "d".repeat(64);
+        let candidates = vec![
+            SelectionCandidateInput {
+                symbol: "AAPL".to_string(),
+                strategy_id: "swing_momentum".to_string(),
+                timeframe_secs: 86400,
+                evidence: SelectionCandidateEvidence {
+                    // A syntactically valid but WRONG frozen fingerprint --
+                    // simulates the config that was actually verified against
+                    // promotion at plan-build time having since drifted from
+                    // what the host pool now (genuinely) constructs.
+                    durable_config_fingerprint: Some(wrong_fp.clone()),
+                    current_config_fingerprint: Some(wrong_fp),
+                    ..evidence_with_real_config_fingerprint(
+                        500_000,
+                        "swing_momentum",
+                        "AAPL",
+                        86400,
+                    )
+                },
+            },
+            SelectionCandidateInput {
+                symbol: "MSFT".to_string(),
+                strategy_id: "mean_reversion".to_string(),
+                timeframe_secs: 3600,
+                evidence: evidence_with_real_config_fingerprint(
+                    700_000,
+                    "mean_reversion",
+                    "MSFT",
+                    3600,
+                ),
+            },
+        ];
+        let plan = mqk_portfolio::compute_dynamic_selection_plan(
+            ds_context(),
+            &["AAPL".to_string(), "MSFT".to_string()],
+            &candidates,
+        );
+        assert_eq!(
+            plan.selected_count(),
+            2,
+            "sanity: the pure gate has no way to see this drift -- both \
+             candidates are genuinely selected at the evidence-gate level"
+        );
+
+        let outcome = evaluate_plan_for_start_gate(plan);
+        assert!(
+            !outcome.allowed,
+            "a frozen/actual host fingerprint mismatch must refuse the whole start"
+        );
+        assert!(
+            outcome.host_pool.is_none(),
+            "no host pool may be retained on a TOCTOU refusal"
+        );
+        assert!(outcome.reasons.iter().any(|r| matches!(
+            r,
+            DynamicSelectionStartGateReason::HostSemanticIdentityMismatch {
+                symbol,
+                strategy_id,
+                timeframe_secs: 86400,
+            } if symbol == "AAPL" && strategy_id == "swing_momentum"
+        )));
     }
 
     #[test]

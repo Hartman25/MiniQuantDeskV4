@@ -108,6 +108,12 @@ pub const REASON_REFUSED_DATA_NOT_READY: &str = "refused_data_not_ready";
 pub const REASON_REFUSED_MISSING_SCORE: &str = "refused_missing_or_invalid_score";
 pub const REASON_REFUSED_MISSING_RANK_FOR_TIE: &str = "refused_missing_rank_required_for_tie";
 pub const REASON_REFUSED_DIVERGENT_DUPLICATE: &str = "refused_divergent_duplicate_evidence";
+/// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: the promoted semantic
+/// fingerprint for this candidate does not match (or could not be verified
+/// against) the current server-resolved semantic configuration -- see
+/// [`ExactSelectionReason::ConfigIdentityUnavailable`].
+pub const REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE: &str =
+    "refused_config_identity_unavailable";
 pub const REASON_NO_VALID_CANDIDATE: &str = "no_valid_candidate_for_symbol";
 
 pub const TRUTH_STATE_COMPUTED: &str = "computed";
@@ -306,6 +312,15 @@ pub enum ExactSelectionReason {
     /// [`gate_reason_accepts_pregate_refinement`]); disagreement fails
     /// closed here rather than silently accepting an unproven diagnosis.
     PreGateReasonInconsistent,
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: this candidate's
+    /// promoted semantic fingerprint (`config_identity_status == verified_v1`,
+    /// structurally valid, and byte-equal to the current server-resolved
+    /// fingerprint for the exact configuration that would actually be
+    /// activated) could not be verified. A stale/drifted/unverified/legacy
+    /// config can never be represented as a positively eligible candidate,
+    /// even though every other evidence check (promotion state, review
+    /// artifact, scanner score) passed.
+    ConfigIdentityUnavailable,
     // -- score/rank --
     ScoreMissing,
     ScoreNotFinite,
@@ -372,6 +387,7 @@ impl ExactSelectionReason {
             Self::FingerprintV2Malformed => "fingerprint_v2_malformed".to_string(),
             Self::FingerprintV2MatchIncoherent => "fingerprint_v2_match_incoherent".to_string(),
             Self::PreGateReasonInconsistent => "pre_gate_reason_inconsistent".to_string(),
+            Self::ConfigIdentityUnavailable => "config_identity_unavailable".to_string(),
             Self::ScoreMissing => "score_missing".to_string(),
             Self::ScoreNotFinite => "score_not_finite".to_string(),
             Self::RankOutOfRange => "rank_out_of_range".to_string(),
@@ -434,6 +450,7 @@ impl ExactSelectionReason {
             "fingerprint_v2_malformed" => Self::FingerprintV2Malformed,
             "fingerprint_v2_match_incoherent" => Self::FingerprintV2MatchIncoherent,
             "pre_gate_reason_inconsistent" => Self::PreGateReasonInconsistent,
+            "config_identity_unavailable" => Self::ConfigIdentityUnavailable,
             "score_missing" => Self::ScoreMissing,
             "score_not_finite" => Self::ScoreNotFinite,
             "rank_out_of_range" => Self::RankOutOfRange,
@@ -616,6 +633,31 @@ pub struct SelectionCandidateEvidence {
     /// [`Self::legacy_fingerprint_matches`] to both be explicitly `true` --
     /// see [`evaluate_evidence_gate`].
     pub exact_fingerprint_v2_matches: bool,
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: `true` only when the
+    /// caller independently verified, via the canonical config-identity
+    /// comparison mechanism (`mqk-daemon::promotion_gate::
+    /// evaluate_promotion_tradability_with_config_identity`'s own rule:
+    /// `config_identity_status == "verified_v1"`, a structurally valid
+    /// fingerprint, and byte-equality), that this candidate's promoted
+    /// semantic fingerprint matches the current server-resolved semantic
+    /// configuration for the exact `(strategy_id, symbol, timeframe_secs)`
+    /// that would actually be activated. `false` for legacy/unavailable/
+    /// malformed/mismatched config identity -- never a wildcard pass.
+    pub config_identity_verified: bool,
+    /// The durable `config_fingerprint` this candidate's `active_paper`
+    /// promotion record carries, as read back by the caller -- `None` when
+    /// unavailable (legacy row, or no promotion record). Carried through
+    /// (never gate-checked directly; only [`Self::config_identity_verified`]
+    /// is) for durable audit/read-side recomputation, mirroring how the
+    /// legacy/v2 fingerprint pairs above are carried through.
+    pub durable_config_fingerprint: Option<String>,
+    /// The current server-resolved semantic fingerprint the caller computed
+    /// AT PLAN-BUILD TIME for this exact identity -- the frozen "expected
+    /// identity" a later host-pool construction must be proven to match
+    /// (never re-derived independently a second time as a substitute for
+    /// this frozen value, which would not detect drift between the two
+    /// points in time). `None` when the caller could not resolve one.
+    pub current_config_fingerprint: Option<String>,
     /// IR4: `true` when the durable strategy registry
     /// (`sys_strategy_registry`) has an `enabled = true` row for this
     /// `strategy_id` -- independent of, and distinct from,
@@ -751,6 +793,14 @@ pub struct SelectionCandidateResult {
     pub durable_exact_fingerprint_v2: Option<String>,
     /// Defect 1: see [`SelectionCandidateEvidence::recomputed_exact_fingerprint_v2`].
     pub recomputed_exact_fingerprint_v2: Option<String>,
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: see
+    /// [`SelectionCandidateEvidence::config_identity_verified`].
+    pub config_identity_verified: bool,
+    /// See [`SelectionCandidateEvidence::durable_config_fingerprint`].
+    pub durable_config_fingerprint: Option<String>,
+    /// See [`SelectionCandidateEvidence::current_config_fingerprint`] -- the
+    /// frozen expected identity a host-pool construction must match.
+    pub current_config_fingerprint: Option<String>,
     pub exact_fingerprint_v2_matches: bool,
     /// IR4/IR6: see [`SelectionCandidateEvidence::registry_enabled`].
     pub registry_enabled: bool,
@@ -1112,6 +1162,16 @@ fn evaluate_evidence_gate(c: &SelectionCandidateInput) -> GateOutcome {
             return Invalid(ExactSelectionReason::FingerprintV2Mismatch)
         }
     }
+    // DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: a candidate whose
+    // review-artifact evidence is fully valid can still be running under a
+    // semantically different (stale) configuration than the one that was
+    // actually promoted -- checked as its own distinct gate, never folded
+    // into the fingerprint checks above (which authenticate the scanner/
+    // review evidence binding, not the strategy's own decision-affecting
+    // configuration).
+    if !e.config_identity_verified {
+        return Invalid(ExactSelectionReason::ConfigIdentityUnavailable);
+    }
     if !e.plugin_instantiable {
         return Invalid(ExactSelectionReason::UnsupportedStrategyPlugin);
     }
@@ -1181,6 +1241,7 @@ fn public_reason_code(reason: ExactSelectionReason) -> &'static str {
         R::FingerprintV2Malformed => REASON_REFUSED_FINGERPRINT_V2_MALFORMED,
         R::FingerprintV2MatchIncoherent => REASON_REFUSED_FINGERPRINT_V2_INCOHERENT,
         R::PreGateReasonInconsistent => REASON_REFUSED_PRE_GATE_REASON_INCONSISTENT,
+        R::ConfigIdentityUnavailable => REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE,
         R::ScoreMissing | R::ScoreNotFinite => REASON_REFUSED_MISSING_SCORE,
         R::DataNotReady(_) | R::DataNotReadyUnspecified => REASON_REFUSED_DATA_NOT_READY,
         R::DivergentDuplicate => REASON_REFUSED_DIVERGENT_DUPLICATE,
@@ -1302,6 +1363,9 @@ fn candidate_result(
         durable_exact_fingerprint_v2: e.durable_exact_fingerprint_v2.clone(),
         recomputed_exact_fingerprint_v2: e.recomputed_exact_fingerprint_v2.clone(),
         exact_fingerprint_v2_matches: e.exact_fingerprint_v2_matches,
+        config_identity_verified: e.config_identity_verified,
+        durable_config_fingerprint: e.durable_config_fingerprint.clone(),
+        current_config_fingerprint: e.current_config_fingerprint.clone(),
         registry_enabled: e.registry_enabled,
         plugin_instantiable: e.plugin_instantiable,
         timeframe_matches: e.timeframe_matches,
@@ -1462,6 +1526,11 @@ fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) ->
     push_opt_str(&mut buf, &e.durable_exact_fingerprint_v2);
     push_opt_str(&mut buf, &e.recomputed_exact_fingerprint_v2);
     push_bool(&mut buf, e.exact_fingerprint_v2_matches);
+    // DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: distinct fields, same
+    // rationale as the fingerprint provenance fields above.
+    push_bool(&mut buf, e.config_identity_verified);
+    push_opt_str(&mut buf, &e.durable_config_fingerprint);
+    push_opt_str(&mut buf, &e.current_config_fingerprint);
     push_bool(&mut buf, e.registry_enabled);
     push_bool(&mut buf, e.plugin_instantiable);
     push_bool(&mut buf, e.timeframe_matches);
@@ -2044,6 +2113,9 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_opt_str(&mut buf, &cand.durable_exact_fingerprint_v2);
             push_opt_str(&mut buf, &cand.recomputed_exact_fingerprint_v2);
             push_bool(&mut buf, cand.exact_fingerprint_v2_matches);
+            push_bool(&mut buf, cand.config_identity_verified);
+            push_opt_str(&mut buf, &cand.durable_config_fingerprint);
+            push_opt_str(&mut buf, &cand.current_config_fingerprint);
             push_bool(&mut buf, cand.registry_enabled);
             push_bool(&mut buf, cand.plugin_instantiable);
             push_bool(&mut buf, cand.timeframe_matches);
@@ -2128,6 +2200,9 @@ mod tests {
             durable_exact_fingerprint_v2: Some(fp_hex('b')),
             recomputed_exact_fingerprint_v2: Some(fp_hex('b')),
             exact_fingerprint_v2_matches: true,
+            config_identity_verified: true,
+            durable_config_fingerprint: Some(fp_hex('c')),
+            current_config_fingerprint: Some(fp_hex('c')),
             registry_enabled: true,
             plugin_instantiable: true,
             timeframe_matches: true,
@@ -2754,6 +2829,57 @@ mod tests {
         assert_eq!(
             result_for(&plan, "AAPL").candidates[0].reason_code,
             REASON_REFUSED_MISSING_SCORE
+        );
+    }
+
+    // ── DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01 ─────────────────────
+
+    /// A stale/unverified config (evidence otherwise fully valid) must never
+    /// be represented as a positively eligible candidate -- the whole point
+    /// of this gate is that it fires even when every earlier check (promotion
+    /// state, review-artifact fingerprints) passed cleanly.
+    #[test]
+    fn unverified_config_identity_is_refused_despite_otherwise_valid_evidence() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = false;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
+        );
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].exact_reason,
+            ExactSelectionReason::ConfigIdentityUnavailable
+        );
+    }
+
+    /// Positive control: a genuinely verified config identity does not, on
+    /// its own, block an otherwise-valid candidate from being selected --
+    /// `candidate()`'s own baseline fixture already sets
+    /// `config_identity_verified = true` (see [`valid_evidence`]).
+    #[test]
+    fn verified_config_identity_does_not_block_selection() {
+        let c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let result = result_for(&plan, "AAPL");
+        assert_eq!(result.disposition, SelectionCandidateDisposition::Selected);
+        assert_eq!(result.candidates[0].reason_code, REASON_SELECTED_HIGHEST_SCORE);
+    }
+
+    /// This gate fires strictly BEFORE plugin/timeframe/data-readiness in the
+    /// fixed gate order (mirrors the promotion/fingerprint checks' own
+    /// precedence) -- an unverified config identity must be the surfaced
+    /// reason even when a later-order check would also fail.
+    #[test]
+    fn config_identity_unavailable_takes_precedence_over_later_gate_stages() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.config_identity_verified = false;
+        c.evidence.timeframe_matches = false;
+        c.evidence.data_ready = false;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE
         );
     }
 

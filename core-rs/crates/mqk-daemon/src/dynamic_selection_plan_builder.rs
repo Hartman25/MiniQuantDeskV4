@@ -336,43 +336,75 @@ async fn evaluate_candidate(
         )
         .await
         {
-            Ok(v) => (
-                SelectionCandidateEvidence {
-                    promotion_query_ok: true,
-                    promotion_state: Some(mqk_db::PROMOTION_STATE_ACTIVE_PAPER.to_string()),
-                    promotion_effective: true,
-                    promotion_expired: false,
-                    evidence_resolved: true,
-                    review_state_is_paper_candidate: true,
-                    evidence_review_state: Some(v.evidence_review_state),
-                    durable_legacy_fingerprint: Some(v.durable_legacy_fingerprint),
-                    recomputed_legacy_fingerprint: Some(v.recomputed_legacy_fingerprint),
-                    legacy_fingerprint_matches: true,
-                    durable_exact_fingerprint_v2: Some(v.durable_exact_fingerprint_v2),
-                    recomputed_exact_fingerprint_v2: Some(v.recomputed_exact_fingerprint_v2),
-                    exact_fingerprint_v2_matches: true,
-                    // Overwritten unconditionally below from `registry_enabled`
-                    // (computed independently of this promotion-chain result).
-                    registry_enabled: false,
-                    plugin_instantiable: true,
-                    timeframe_matches: true,
-                    data_ready: true,
-                    canonical_score_decimal: Some(v.canonical_score_decimal),
-                    canonical_score_micros: v.canonical_score_micros,
-                    scanner_rank: v.scanner_rank,
-                    watchlist_assigned: false,
-                    evidence_review_id: Some(v.evidence_review_id),
-                    evidence_scanner_scan_id: Some(v.evidence_scanner_scan_id),
-                    evidence_artifact_path: Some(v.evidence_artifact_path),
-                    evidence_git_hash: Some(v.evidence_git_hash),
-                    promotion_transition_id: Some(v.promotion_transition_id.to_string()),
-                    promotion_effective_at: Some(v.promotion_effective_at.to_rfc3339()),
-                    promotion_expires_at: v.promotion_expires_at.map(|t| t.to_rfc3339()),
-                    evidence_transition_id: Some(v.evidence_transition_id.to_string()),
-                    exact_reason: None,
-                },
-                None,
-            ),
+            Ok(v) => {
+                // DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: reuse the
+                // canonical config-identity comparison mechanism (same rule
+                // `promotion_gate::evaluate_promotion_tradability_with_
+                // config_identity` enforces at the runtime dispatch gate,
+                // C1/C2/R2) -- never a duplicated policy. `current_config_
+                // fingerprint` is resolved fresh, right now, through the
+                // authoritative registry-construction seam and is the frozen
+                // "expected identity" this exact plan build establishes; a
+                // later host-pool construction must be proven to match THIS
+                // value, never a second independent re-derivation (see
+                // `dynamic_selection_start_gate`'s host-identity cross-check).
+                let current_config_fingerprint =
+                    crate::strategy_config_identity::resolve_server_semantic_fingerprint(
+                        &p.strategy_id,
+                        &p.symbol,
+                        p.timeframe_secs,
+                    )
+                    .ok();
+                let config_identity_verified = v.config_identity_status
+                    == crate::strategy_config_identity::CONFIG_IDENTITY_STATUS_VERIFIED_V1
+                    && v.config_fingerprint
+                        .as_deref()
+                        .is_some_and(mqk_db::is_valid_evidence_fingerprint_v2_hex)
+                    && current_config_fingerprint
+                        .as_deref()
+                        .is_some_and(mqk_db::is_valid_evidence_fingerprint_v2_hex)
+                    && v.config_fingerprint.as_deref() == current_config_fingerprint.as_deref();
+                (
+                    SelectionCandidateEvidence {
+                        promotion_query_ok: true,
+                        promotion_state: Some(mqk_db::PROMOTION_STATE_ACTIVE_PAPER.to_string()),
+                        promotion_effective: true,
+                        promotion_expired: false,
+                        evidence_resolved: true,
+                        review_state_is_paper_candidate: true,
+                        evidence_review_state: Some(v.evidence_review_state),
+                        durable_legacy_fingerprint: Some(v.durable_legacy_fingerprint),
+                        recomputed_legacy_fingerprint: Some(v.recomputed_legacy_fingerprint),
+                        legacy_fingerprint_matches: true,
+                        durable_exact_fingerprint_v2: Some(v.durable_exact_fingerprint_v2),
+                        recomputed_exact_fingerprint_v2: Some(v.recomputed_exact_fingerprint_v2),
+                        exact_fingerprint_v2_matches: true,
+                        config_identity_verified,
+                        durable_config_fingerprint: v.config_fingerprint,
+                        current_config_fingerprint,
+                        // Overwritten unconditionally below from `registry_enabled`
+                        // (computed independently of this promotion-chain result).
+                        registry_enabled: false,
+                        plugin_instantiable: true,
+                        timeframe_matches: true,
+                        data_ready: true,
+                        canonical_score_decimal: Some(v.canonical_score_decimal),
+                        canonical_score_micros: v.canonical_score_micros,
+                        scanner_rank: v.scanner_rank,
+                        watchlist_assigned: false,
+                        evidence_review_id: Some(v.evidence_review_id),
+                        evidence_scanner_scan_id: Some(v.evidence_scanner_scan_id),
+                        evidence_artifact_path: Some(v.evidence_artifact_path),
+                        evidence_git_hash: Some(v.evidence_git_hash),
+                        promotion_transition_id: Some(v.promotion_transition_id.to_string()),
+                        promotion_effective_at: Some(v.promotion_effective_at.to_rfc3339()),
+                        promotion_expires_at: v.promotion_expires_at.map(|t| t.to_rfc3339()),
+                        evidence_transition_id: Some(v.evidence_transition_id.to_string()),
+                        exact_reason: None,
+                    },
+                    None,
+                )
+            }
             Err(reason) => (refused_evidence(reason), Some(reason)),
         },
     };
@@ -400,16 +432,29 @@ async fn evaluate_candidate(
     } else {
         None
     };
+    // DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: slots into the
+    // precedence chain exactly where the pure gate itself checks it -- right
+    // after the promotion/evidence/fingerprint checks, before plugin/
+    // timeframe/readiness. `evidence.config_identity_verified` already
+    // defaults `true` on every non-`Ok(v)` branch (via `placeholder_evidence`),
+    // so this is only ever `Some` when the promotion chain itself succeeded
+    // but config identity genuinely did not verify.
+    let config_identity_exact_reason = if evidence.config_identity_verified {
+        None
+    } else {
+        Some(mqk_portfolio::ExactSelectionReason::ConfigIdentityUnavailable)
+    };
 
     // IR5/Defect E: exact_reason precedence mirrors the pure gate's own
     // fixed check order (`evaluate_evidence_gate` checks promotion/evidence
-    // fields, then plugin_instantiable, then timeframe_matches, then
-    // data_ready) -- a promotion-chain failure is always the true
-    // first-observed cause when one occurred; registry/plugin, then
-    // timeframe, then readiness are only surfaced as exact_reason when every
-    // earlier-in-order stage passed.
+    // fields, then config identity, then plugin_instantiable, then
+    // timeframe_matches, then data_ready) -- a promotion-chain failure is
+    // always the true first-observed cause when one occurred; config
+    // identity, then registry/plugin, then timeframe, then readiness are
+    // only surfaced as exact_reason when every earlier-in-order stage passed.
     let exact_reason = promotion_stage_reason
         .map(CandidateEvidenceReason::to_exact_selection_reason)
+        .or(config_identity_exact_reason)
         .or_else(|| {
             plugin_stage
                 .as_ref()
@@ -438,6 +483,11 @@ const PLACEHOLDER_LEGACY_FINGERPRINT: &str =
 /// accidentally collide in an equality assertion.
 const PLACEHOLDER_V2_FINGERPRINT: &str =
     "8d82312144cef2506a296d2620bad311a2095990045cb4518aa4bac054a2de95";
+/// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: valid-shaped (64
+/// lowercase hex) config-identity fingerprint placeholder, distinct from
+/// both fingerprints above for the same reason.
+const PLACEHOLDER_CONFIG_FINGERPRINT: &str =
+    "c15f0c15f0c15f0c15f0c15f0c15f0c15f0c15f0c15f0c15f0c15f0c15f0c15f";
 
 /// A "good" evidence baseline used only as a starting point for
 /// [`refused_evidence`] and the over-limit short-circuit's inert
@@ -467,6 +517,9 @@ fn placeholder_evidence() -> SelectionCandidateEvidence {
         durable_exact_fingerprint_v2: Some(PLACEHOLDER_V2_FINGERPRINT.to_string()),
         recomputed_exact_fingerprint_v2: Some(PLACEHOLDER_V2_FINGERPRINT.to_string()),
         exact_fingerprint_v2_matches: true,
+        config_identity_verified: true,
+        durable_config_fingerprint: Some(PLACEHOLDER_CONFIG_FINGERPRINT.to_string()),
+        current_config_fingerprint: Some(PLACEHOLDER_CONFIG_FINGERPRINT.to_string()),
         registry_enabled: true,
         plugin_instantiable: true,
         timeframe_matches: true,

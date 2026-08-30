@@ -64,6 +64,11 @@ pub struct NewDynamicSelectionPlanCandidate {
     pub durable_exact_fingerprint_v2: Option<String>,
     pub recomputed_exact_fingerprint_v2: Option<String>,
     pub exact_fingerprint_v2_matches: bool,
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: see
+    /// `mqk_portfolio::dynamic_selection::SelectionCandidateEvidence::config_identity_verified`.
+    pub config_identity_verified: bool,
+    pub durable_config_fingerprint: Option<String>,
+    pub current_config_fingerprint: Option<String>,
     pub registry_enabled: bool,
     pub plugin_instantiable: bool,
     pub timeframe_matches: bool,
@@ -187,6 +192,13 @@ pub struct DynamicSelectionPlanCandidateRecord {
     pub durable_exact_fingerprint_v2: Option<String>,
     pub recomputed_exact_fingerprint_v2: Option<String>,
     pub exact_fingerprint_v2_matches: bool,
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: `None` only for a
+    /// row persisted before migration 0067 -- the daemon-side read model
+    /// (`dynamic_selection_evidence_validator`) treats that as fail-closed
+    /// `false`, never optimistically verified.
+    pub config_identity_verified: Option<bool>,
+    pub durable_config_fingerprint: Option<String>,
+    pub current_config_fingerprint: Option<String>,
     pub registry_enabled: bool,
     pub plugin_instantiable: bool,
     pub timeframe_matches: bool,
@@ -282,6 +294,9 @@ struct CandidateSnapshot {
     durable_exact_fingerprint_v2: Option<String>,
     recomputed_exact_fingerprint_v2: Option<String>,
     exact_fingerprint_v2_matches: bool,
+    config_identity_verified: Option<bool>,
+    durable_config_fingerprint: Option<String>,
+    current_config_fingerprint: Option<String>,
     registry_enabled: bool,
     plugin_instantiable: bool,
     timeframe_matches: bool,
@@ -410,6 +425,9 @@ fn new_candidate_snapshots(
             durable_exact_fingerprint_v2: c.durable_exact_fingerprint_v2.clone(),
             recomputed_exact_fingerprint_v2: c.recomputed_exact_fingerprint_v2.clone(),
             exact_fingerprint_v2_matches: c.exact_fingerprint_v2_matches,
+            config_identity_verified: Some(c.config_identity_verified),
+            durable_config_fingerprint: c.durable_config_fingerprint.clone(),
+            current_config_fingerprint: c.current_config_fingerprint.clone(),
             registry_enabled: c.registry_enabled,
             plugin_instantiable: c.plugin_instantiable,
             timeframe_matches: c.timeframe_matches,
@@ -458,6 +476,9 @@ fn stored_candidate_snapshots(
             durable_exact_fingerprint_v2: c.durable_exact_fingerprint_v2.clone(),
             recomputed_exact_fingerprint_v2: c.recomputed_exact_fingerprint_v2.clone(),
             exact_fingerprint_v2_matches: c.exact_fingerprint_v2_matches,
+            config_identity_verified: c.config_identity_verified,
+            durable_config_fingerprint: c.durable_config_fingerprint.clone(),
+            current_config_fingerprint: c.current_config_fingerprint.clone(),
             registry_enabled: c.registry_enabled,
             plugin_instantiable: c.plugin_instantiable,
             timeframe_matches: c.timeframe_matches,
@@ -622,6 +643,8 @@ pub async fn insert_dynamic_selection_plan(
                  durable_legacy_fingerprint, recomputed_legacy_fingerprint,
                  legacy_fingerprint_matches, durable_exact_fingerprint_v2,
                  recomputed_exact_fingerprint_v2, exact_fingerprint_v2_matches,
+                 config_identity_verified, durable_config_fingerprint,
+                 current_config_fingerprint,
                  registry_enabled, plugin_instantiable, timeframe_matches, data_ready,
                  evidence_review_id, evidence_scanner_scan_id, evidence_artifact_path,
                  evidence_git_hash, promotion_transition_id, promotion_effective_at,
@@ -629,7 +652,7 @@ pub async fn insert_dynamic_selection_plan(
                  disposition, reason_code)
             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                     $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-                    $31, $32, $33, $34, $35, $36, $37, $38)
+                    $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41)
             "#,
         )
         .bind(plan.plan_id)
@@ -654,6 +677,9 @@ pub async fn insert_dynamic_selection_plan(
         .bind(&c.durable_exact_fingerprint_v2)
         .bind(&c.recomputed_exact_fingerprint_v2)
         .bind(c.exact_fingerprint_v2_matches)
+        .bind(c.config_identity_verified)
+        .bind(&c.durable_config_fingerprint)
+        .bind(&c.current_config_fingerprint)
         .bind(c.registry_enabled)
         .bind(c.plugin_instantiable)
         .bind(c.timeframe_matches)
@@ -688,7 +714,9 @@ const CANDIDATE_COLUMNS: &str = "plan_id, ordinal, symbol, strategy_id, timefram
      evidence_resolved, review_state_is_paper_candidate, evidence_review_state, \
      durable_legacy_fingerprint, recomputed_legacy_fingerprint, legacy_fingerprint_matches, \
      durable_exact_fingerprint_v2, recomputed_exact_fingerprint_v2, \
-     exact_fingerprint_v2_matches, registry_enabled, plugin_instantiable, timeframe_matches, \
+     exact_fingerprint_v2_matches, config_identity_verified, durable_config_fingerprint, \
+     current_config_fingerprint, \
+     registry_enabled, plugin_instantiable, timeframe_matches, \
      data_ready, evidence_review_id, evidence_scanner_scan_id, evidence_artifact_path, \
      evidence_git_hash, promotion_transition_id, promotion_effective_at, \
      promotion_expires_at, evidence_transition_id, exact_reason_code, selected, disposition, \
@@ -761,6 +789,9 @@ fn candidate_row_to_record(row: &sqlx::postgres::PgRow) -> DynamicSelectionPlanC
         durable_exact_fingerprint_v2: row.get("durable_exact_fingerprint_v2"),
         recomputed_exact_fingerprint_v2: row.get("recomputed_exact_fingerprint_v2"),
         exact_fingerprint_v2_matches: row.get("exact_fingerprint_v2_matches"),
+        config_identity_verified: row.get("config_identity_verified"),
+        durable_config_fingerprint: row.get("durable_config_fingerprint"),
+        current_config_fingerprint: row.get("current_config_fingerprint"),
         registry_enabled: row.get("registry_enabled"),
         plugin_instantiable: row.get("plugin_instantiable"),
         timeframe_matches: row.get("timeframe_matches"),

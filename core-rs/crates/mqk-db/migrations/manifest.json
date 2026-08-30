@@ -410,6 +410,12 @@
       "path": "0066_strategy_promotion_evidence_lineage_v3.sql",
       "status": "applied",
       "intent": "PROMOTION-EVIDENCE-LINEAGE-V3: add nullable research_judge_artifact_sha256/stress_protocol_version/stress_artifact_sha256/robustness_protocol_version/finalized_robustness_artifact_sha256/promotion_policy_fingerprint to sys_strategy_promotion_transitions, extending migration 0065's identity-pointer lineage so a transition can later prove the EXACT evidence judged (which judge artifact, which stress/robustness protocol and artifact content hash, which promotion-policy thresholds) rather than only which trial/run. Every hash reuses an existing accepted audit hash already computed and verified elsewhere in the evidence chain, except promotion_policy_fingerprint (genuinely new -- PromotionConfig was never durably hashed before). Additive only, no existing column or constraint from 0046/0047/0058/0065 altered."
+    },
+    {
+      "id": "0067",
+      "path": "0067_dynamic_selection_plan_candidates_config_identity.sql",
+      "status": "applied",
+      "intent": "DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: add nullable config_identity_verified/durable_config_fingerprint/current_config_fingerprint to sys_dynamic_selection_plan_candidates, extending migration 0059's evidence-store schema to carry the config-identity gate result (reuses the same canonical config-identity comparison mechanism C1/C2/R2 already established, never a new parallel policy). A NULL config_identity_verified on a pre-migration row reads back fail-closed as false, never optimistically verified. Additive only, no existing column or constraint from 0059/0060 altered."
     }
   ]
 }

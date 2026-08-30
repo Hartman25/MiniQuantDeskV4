@@ -926,6 +926,15 @@ pub struct ValidatedCandidateEvidence {
     /// `mqk_db::StrategyPromotionTransitionRecord::evidence_transition_id`
     /// / `resolve_evidence_lineage`).
     pub evidence_transition_id: uuid::Uuid,
+    /// DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: the current
+    /// `active_paper` record's own `config_identity_status`
+    /// (`sys_strategy_promotion_transitions.config_identity_status`) --
+    /// carried through unvalidated for the caller's own config-identity
+    /// gate; this function performs no config-identity judgment itself.
+    pub config_identity_status: String,
+    /// The current `active_paper` record's own `config_fingerprint`, `None`
+    /// for a legacy/unresolved row. See [`Self::config_identity_status`].
+    pub config_fingerprint: Option<String>,
 }
 
 /// Validate that `(strategy_id, symbol, timeframe_secs)` is currently an
@@ -1055,6 +1064,8 @@ pub async fn validate_active_paper_candidate(
         promotion_effective_at: record.effective_at_utc,
         promotion_expires_at: record.expires_at_utc,
         evidence_transition_id: evidence.transition_id,
+        config_identity_status: record.config_identity_status.clone(),
+        config_fingerprint: record.config_fingerprint.clone(),
     })
 }
 
