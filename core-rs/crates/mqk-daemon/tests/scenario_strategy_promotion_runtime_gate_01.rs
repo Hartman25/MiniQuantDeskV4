@@ -80,6 +80,17 @@ async fn seed_registry(pool: &sqlx::PgPool, strategy_id: &str, enabled: bool) {
     .expect("seed_registry: upsert failed");
 }
 
+/// C2: a fixed, syntactically-valid (64 lowercase hex) semantic fingerprint
+/// used consistently for every row `insert_transition`/`seed_promotion_state`
+/// create in this file, and by `make_decision`'s decisions and this file's
+/// direct `evaluate_paper_promotion_gate` calls — this file proves gate
+/// sequencing/mode/identity-matching, not config-identity binding itself
+/// (see `scenario_promotion_config_identity_01.rs` for that), so the exact
+/// value is irrelevant as long as every caller agrees on it.
+fn rtg01_test_fingerprint() -> String {
+    "9".repeat(64)
+}
+
 /// Insert one promotion transition row directly (no route/evidence
 /// validation — this file proves the *runtime gate*, not the operator
 /// transition surface, which is covered by
@@ -107,8 +118,8 @@ async fn insert_transition(
             strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             timeframe_secs,
-            config_fingerprint: None,
-            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            config_fingerprint: Some(rtg01_test_fingerprint()),
+            config_identity_status: "verified_v1".to_string(),
             previous_state: previous_state.map(|s| s.to_string()),
             new_state: new_state.to_string(),
             parent_transition_id: None,
@@ -200,8 +211,8 @@ async fn seed_promotion_state(
                 strategy_id: strategy_id.to_string(),
                 symbol: symbol.to_string(),
                 timeframe_secs,
-                config_fingerprint: None,
-                config_identity_status: "unavailable_in_current_runtime".to_string(),
+                config_fingerprint: Some(rtg01_test_fingerprint()),
+                config_identity_status: "verified_v1".to_string(),
                 previous_state: Some("paper_approved".to_string()),
                 new_state: "active_paper".to_string(),
                 parent_transition_id: None,
@@ -254,6 +265,82 @@ async fn seed_promotion_state(
     }
 }
 
+/// C2: seed a durable `active_paper` chain bound to a CALLER-SUPPLIED
+/// fingerprint rather than `rtg01_test_fingerprint()` — used only by the two
+/// external-signal positive tests below, which need `strategy_id` to be a
+/// REAL registered engine (so the external path's own server-side
+/// `resolve_server_semantic_fingerprint` re-derivation genuinely matches),
+/// unlike every other test in this file which controls both sides of the
+/// comparison directly and can use the fixed test fingerprint.
+async fn seed_active_paper_with_fingerprint(
+    pool: &sqlx::PgPool,
+    strategy_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+    fingerprint: &str,
+) {
+    let now = Utc::now();
+    let step = |transition_id: Uuid,
+                previous_state: Option<&str>,
+                new_state: &str,
+                effective_at: chrono::DateTime<Utc>| {
+        mqk_db::InsertStrategyPromotionTransitionArgs {
+            transition_id,
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            timeframe_secs,
+            config_fingerprint: Some(fingerprint.to_string()),
+            config_identity_status: "verified_v1".to_string(),
+            previous_state: previous_state.map(|s| s.to_string()),
+            new_state: new_state.to_string(),
+            parent_transition_id: None,
+            evidence_transition_id: None,
+            evidence_review_id: None,
+            evidence_scanner_scan_id: None,
+            evidence_git_hash: None,
+            evidence_artifact_path: None,
+            evidence_fingerprint: None,
+            evidence_fingerprint_v2: None,
+            effective_at_utc: effective_at,
+            expires_at_utc: None,
+            initiated_by: "rtg01-test-seed".to_string(),
+            reason: "test seed".to_string(),
+            created_at_utc: effective_at,
+        }
+    };
+    let seed = |suffix: &str| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("rtg01-seed-realfp:{strategy_id}:{symbol}:{timeframe_secs}:{suffix}").as_bytes(),
+        )
+    };
+    mqk_db::insert_strategy_promotion_transition(pool, &step(seed("1"), None, "shadow_approved", now))
+        .await
+        .expect("seed shadow_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("2"),
+            Some("shadow_approved"),
+            "paper_approved",
+            now + Duration::milliseconds(1),
+        ),
+    )
+    .await
+    .expect("seed paper_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("3"),
+            Some("paper_approved"),
+            "active_paper",
+            now + Duration::milliseconds(2),
+        ),
+    )
+    .await
+    .expect("seed active_paper");
+}
+
 async fn seed_active_run(st: &Arc<state::AppState>) -> Uuid {
     let pool = st.db.as_ref().expect("db configured");
     let run_id = Uuid::new_v4();
@@ -293,6 +380,7 @@ fn make_decision(
         strategy_id: strategy_id.to_string(),
         symbol: symbol.to_string(),
         timeframe_secs,
+        strategy_semantic_fingerprint: rtg01_test_fingerprint(),
         side: "buy".to_string(),
         qty: 10,
         order_type: "market".to_string(),
@@ -858,9 +946,20 @@ async fn external_active_paper_exact_identity_passes_promotion_gate() {
         .execute(&pool)
         .await
         .expect("cleanup sys_arm_state");
-    let sid = unique_id("rtg01e_accept");
+    // C2: the external path re-derives its semantic fingerprint server-side
+    // through the real authoritative strategy registry — a synthetic
+    // strategy_id can never resolve one, so this identity must be a real
+    // registered engine for the fingerprint comparison to genuinely match.
+    let sid = "swing_momentum".to_string();
+    let symbol = unique_id("RTG01E").to_uppercase();
+    let fingerprint = mqk_daemon::strategy_config_identity::resolve_server_semantic_fingerprint(
+        &sid,
+        &symbol,
+        TIMEFRAME_SECS,
+    )
+    .expect("swing_momentum must resolve");
     seed_registry(&pool, &sid, true).await;
-    seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, "active_paper").await;
+    seed_active_paper_with_fingerprint(&pool, &sid, &symbol, TIMEFRAME_SECS, &fingerprint).await;
     let st = make_external_signal_state(pool.clone()).await;
 
     let signal_id = unique_id("sig");
@@ -869,7 +968,7 @@ async fn external_active_paper_exact_identity_passes_promotion_gate() {
         signal_req(external_signal_body(
             &signal_id,
             &sid,
-            SYMBOL,
+            &symbol,
             Some(TIMEFRAME_SECS),
         )),
     )
@@ -892,9 +991,19 @@ async fn external_active_paper_exact_identity_passes_promotion_gate() {
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn external_active_paper_full_happy_path_reaches_outbox() {
     let pool = make_db_pool().await;
-    let sid = unique_id("rtg01e_e2e");
+    // C2: real registered engine, real matching fingerprint — see
+    // `external_active_paper_exact_identity_passes_promotion_gate`'s doc
+    // comment for why a synthetic strategy_id cannot be used here anymore.
+    let sid = "swing_momentum".to_string();
+    let symbol = unique_id("RTG01E2E").to_uppercase();
+    let fingerprint = mqk_daemon::strategy_config_identity::resolve_server_semantic_fingerprint(
+        &sid,
+        &symbol,
+        TIMEFRAME_SECS,
+    )
+    .expect("swing_momentum must resolve");
     seed_registry(&pool, &sid, true).await;
-    seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, "active_paper").await;
+    seed_active_paper_with_fingerprint(&pool, &sid, &symbol, TIMEFRAME_SECS, &fingerprint).await;
     mqk_db::persist_arm_state(&pool, "ARMED", None)
         .await
         .expect("persist ARMED");
@@ -907,7 +1016,7 @@ async fn external_active_paper_full_happy_path_reaches_outbox() {
         signal_req(external_signal_body(
             &signal_id,
             &sid,
-            SYMBOL,
+            &symbol,
             Some(TIMEFRAME_SECS),
         )),
     )
@@ -981,12 +1090,14 @@ async fn paper_promotion_gate_never_authorizes_live() {
     seed_registry(&pool, &sid, true).await;
     seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, "active_paper").await;
 
+    let fp = rtg01_test_fingerprint();
     let outcome = mqk_daemon::promotion_gate::evaluate_paper_promotion_gate(
         &pool,
         mqk_daemon::promotion_gate::PromotionRunMode::Paper,
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
+        Some(fp.as_str()),
     )
     .await;
     assert!(
@@ -1021,6 +1132,7 @@ async fn active_paper_denied_in_live_mode() {
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
+        None,
     )
     .await;
     assert!(
@@ -1047,6 +1159,7 @@ async fn active_paper_denied_in_unknown_mode() {
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
+        None,
     )
     .await;
     assert!(

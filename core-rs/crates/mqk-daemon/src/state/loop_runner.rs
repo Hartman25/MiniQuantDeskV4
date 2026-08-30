@@ -2211,6 +2211,7 @@ mod phase7b_provenance_tests {
             strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             timeframe_secs,
+            strategy_semantic_fingerprint: String::new(),
             side: "buy".to_string(),
             qty: 10,
             order_type: "market".to_string(),

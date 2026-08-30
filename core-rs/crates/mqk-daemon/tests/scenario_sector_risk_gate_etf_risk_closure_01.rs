@@ -162,6 +162,7 @@ fn make_decision(
         strategy_id: strategy_id.to_string(),
         symbol: FAKE_SYMBOL.to_string(),
         timeframe_secs: 86400,
+        strategy_semantic_fingerprint: String::new(),
         side: side.to_string(),
         qty,
         order_type: "market".to_string(),

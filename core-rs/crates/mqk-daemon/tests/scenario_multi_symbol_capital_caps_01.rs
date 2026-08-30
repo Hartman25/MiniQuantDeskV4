@@ -445,6 +445,7 @@ async fn c3_06_gate_1g_rejects_limit_order_over_per_symbol_notional_cap() {
         strategy_id: "strat-a".to_string(),
         symbol: "AAPL".to_string(),
         timeframe_secs: 86400,
+        strategy_semantic_fingerprint: String::new(),
         side: "buy".to_string(),
         qty: 15, // x $100 = $1500 > $1000 cap
         order_type: "limit".to_string(),

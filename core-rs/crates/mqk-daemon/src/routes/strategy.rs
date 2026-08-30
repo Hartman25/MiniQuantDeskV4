@@ -964,12 +964,31 @@ pub(crate) async fn strategy_signal(
                 );
             }
         };
+        // RUNTIME-PROMOTION-EVIDENCE-BINDING-01 (C2): the external signal
+        // carries no live strategy host to query — the only authoritative
+        // semantic identity available is re-derived server-side, right now,
+        // through the exact same registry-construction seam C1's promotion
+        // route and this gate's other caller (decision.rs) ultimately trace
+        // back to. Never trusts anything from the signal request itself
+        // (there is no such field in `validated` to trust). `Err` (unknown
+        // strategy_id, or a real registered timeframe that disagrees with
+        // this request's own `timeframe_secs`) means no server-authoritative
+        // semantic identity exists for this signal — `None` here can never
+        // match any promoted fingerprint, so the gate fails closed.
+        let current_semantic_fingerprint =
+            crate::strategy_config_identity::resolve_server_semantic_fingerprint(
+                &validated.strategy_id,
+                &validated.symbol,
+                timeframe_secs,
+            )
+            .ok();
         let promotion = crate::promotion_gate::evaluate_paper_promotion_gate(
             db,
             crate::promotion_gate::PromotionRunMode::from(st.deployment_mode()),
             &validated.strategy_id,
             &validated.symbol,
             timeframe_secs,
+            current_semantic_fingerprint.as_deref(),
         )
         .await;
         if !promotion.paper_tradable {

@@ -33,12 +33,22 @@ use uuid::Uuid;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// A fixed, syntactically-valid (64 lowercase hex) semantic fingerprint used
+/// consistently for both `seed_active_paper_promotion`'s row and every
+/// decision built by `make_decision` in this file — this file tests gate
+/// sequencing (registry/suppression/arm/run/outbox), not config-identity
+/// binding, so the exact value is irrelevant as long as both sides agree.
+fn test_fingerprint() -> String {
+    "e".repeat(64)
+}
+
 fn make_decision(decision_id: &str, strategy_id: &str) -> InternalStrategyDecision {
     InternalStrategyDecision {
         decision_id: decision_id.to_string(),
         strategy_id: strategy_id.to_string(),
         symbol: "AAPL".to_string(),
         timeframe_secs: 86400,
+        strategy_semantic_fingerprint: test_fingerprint(),
         side: "buy".to_string(),
         qty: 10,
         order_type: "market".to_string(),
@@ -117,8 +127,8 @@ async fn seed_active_paper_promotion(
             strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             timeframe_secs,
-            config_fingerprint: None,
-            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            config_fingerprint: Some(test_fingerprint()),
+            config_identity_status: "verified_v1".to_string(),
             previous_state: previous_state.map(|s| s.to_string()),
             new_state: new_state.to_string(),
             parent_transition_id: None,

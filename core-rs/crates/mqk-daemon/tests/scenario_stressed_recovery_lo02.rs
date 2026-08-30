@@ -579,6 +579,15 @@ async fn seed_registry_lo02(pool: &sqlx::PgPool, strategy_id: &str) {
     .expect("seed_registry_lo02 failed");
 }
 
+/// A fixed, syntactically-valid (64 lowercase hex) semantic fingerprint used
+/// consistently for both `seed_active_paper_promotion_lo02`'s row and the
+/// SR-11 decision submitted against it — this file tests durable-suppression
+/// recovery across a simulated restart, not config-identity binding, so the
+/// exact value is irrelevant as long as both sides agree.
+fn sr11_test_fingerprint() -> String {
+    "1".repeat(64)
+}
+
 /// STRATEGY-PROMOTION-REGISTRY-01D: seed a durable `active_paper` promotion
 /// for the exact `(strategy_id, symbol, timeframe_secs)` identity, walking
 /// the full legal transition graph (no state -> shadow_approved ->
@@ -605,8 +614,8 @@ async fn seed_active_paper_promotion_lo02(
             strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             timeframe_secs,
-            config_fingerprint: None,
-            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            config_fingerprint: Some(sr11_test_fingerprint()),
+            config_identity_status: "verified_v1".to_string(),
             previous_state: previous_state.map(|s| s.to_string()),
             new_state: new_state.to_string(),
             parent_transition_id: None,
@@ -875,6 +884,7 @@ async fn lo02_sr11_active_suppression_survives_restart_and_blocks_decision_seam(
             strategy_id: sid.clone(),
             symbol: "AAPL".to_string(),
             timeframe_secs: 86400,
+            strategy_semantic_fingerprint: sr11_test_fingerprint(),
             side: "buy".to_string(),
             qty: 1,
             order_type: "market".to_string(),

@@ -569,6 +569,7 @@ mod tests {
             strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             timeframe_secs: 300,
+            strategy_semantic_fingerprint: String::new(),
             side: side.to_string(),
             qty,
             order_type: "market".to_string(),

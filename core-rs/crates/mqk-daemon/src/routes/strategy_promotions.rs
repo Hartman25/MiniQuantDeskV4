@@ -45,7 +45,7 @@ use crate::strategy_config_identity::{
     CONFIG_IDENTITY_STATUS_VERIFIED_V1,
 };
 use mqk_db::{
-    evaluate_promotion_tradability, fetch_all_current_promotions, fetch_current_promotion_state,
+    fetch_all_current_promotions, fetch_current_promotion_state,
     fetch_promotion_history, insert_strategy_promotion_transition_serialized,
     is_known_promotion_state, is_legal_transition, resolve_evidence_lineage,
     transition_requires_evidence, InsertStrategyPromotionTransitionArgs,
@@ -75,7 +75,26 @@ async fn to_row(
     record: &StrategyPromotionTransitionRecord,
     now_utc: DateTime<Utc>,
 ) -> StrategyPromotionRow {
-    let (tradable_paper, reason_code) = evaluate_promotion_tradability(Some(record), now_utc);
+    // RUNTIME-PROMOTION-EVIDENCE-BINDING-01 (C2) observability: never claim
+    // `tradable_paper=true` from durable state alone when the same canonical
+    // comparison primitive the runtime dispatch gate uses would refuse this
+    // exact identity right now. Re-derives the current semantic fingerprint
+    // through the identical authoritative registry-construction seam C1's
+    // promotion route and the external signal path already use — cheap
+    // (in-memory only, no I/O) and safe to run per row.
+    let current_semantic_fingerprint =
+        crate::strategy_config_identity::resolve_server_semantic_fingerprint(
+            &record.strategy_id,
+            &record.symbol,
+            record.timeframe_secs,
+        )
+        .ok();
+    let (tradable_paper, reason_code) =
+        crate::promotion_gate::evaluate_promotion_tradability_with_config_identity(
+            Some(record),
+            now_utc,
+            current_semantic_fingerprint.as_deref(),
+        );
     // STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase D): resolve the
     // exact evidence-bearing transition durably rather than surfacing
     // this row's own possibly-null evidence_* columns directly -- a
@@ -399,8 +418,24 @@ pub(crate) async fn strategy_promotion_check(
     {
         Ok(record) => {
             let now_utc = Utc::now();
+            // RUNTIME-PROMOTION-EVIDENCE-BINDING-01 (C2): same canonical
+            // comparison primitive as `to_row` — see its own comment for why
+            // this route must never claim `tradable_paper=true` when the
+            // runtime dispatch gate would refuse the same identity.
+            let current_semantic_fingerprint = record.as_ref().and_then(|r| {
+                crate::strategy_config_identity::resolve_server_semantic_fingerprint(
+                    &r.strategy_id,
+                    &r.symbol,
+                    r.timeframe_secs,
+                )
+                .ok()
+            });
             let (tradable_paper, reason_code) =
-                evaluate_promotion_tradability(record.as_ref(), now_utc);
+                crate::promotion_gate::evaluate_promotion_tradability_with_config_identity(
+                    record.as_ref(),
+                    now_utc,
+                    current_semantic_fingerprint.as_deref(),
+                );
             let evidence = match record.as_ref() {
                 Some(r) => resolve_evidence_lineage(db, r).await.unwrap_or_else(|err| {
                     tracing::warn!(

@@ -568,12 +568,23 @@ fn get_req(uri: &str) -> Request<axum::body::Body> {
         .unwrap()
 }
 
+/// C2: real server-derived fingerprint for `strategy_id`/`symbol` — always
+/// resolves for `swing_momentum` (the strategy this whole file promotes), so
+/// the `active_paper` decision below genuinely matches the fingerprint the
+/// promotion route bound at `shadow_approved`.
 fn make_decision(decision_id: &str, strategy_id: &str, symbol: &str) -> InternalStrategyDecision {
     InternalStrategyDecision {
         decision_id: decision_id.to_string(),
         strategy_id: strategy_id.to_string(),
         symbol: symbol.to_string(),
         timeframe_secs: TIMEFRAME_SECS,
+        strategy_semantic_fingerprint:
+            mqk_daemon::strategy_config_identity::resolve_server_semantic_fingerprint(
+                strategy_id,
+                symbol,
+                TIMEFRAME_SECS,
+            )
+            .unwrap_or_default(),
         side: "buy".to_string(),
         qty: 10,
         order_type: "market".to_string(),

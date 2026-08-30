@@ -60,6 +60,17 @@ pub struct InternalStrategyDecision {
     /// part of the exact `(strategy_id, symbol, timeframe_secs)` identity
     /// the paper-promotion gate (Gate 3b) checks — must be positive.
     pub timeframe_secs: i64,
+    /// RUNTIME-PROMOTION-EVIDENCE-BINDING-01 (C2): the exact
+    /// [`mqk_strategy::Strategy::semantic_fingerprint`] of the host instance
+    /// that produced this decision (`StrategyBarResult::semantic_fingerprint`,
+    /// captured by `StrategyHost::on_bar` from the boxed instance it holds --
+    /// never re-derived from ambient environment state after the fact). The
+    /// paper-promotion gate (Gate 3b) refuses this decision if it does not
+    /// exactly match the durable `active_paper` config_fingerprint. Callers
+    /// that construct an `InternalStrategyDecision` outside
+    /// `bar_result_to_decisions` (test fixtures) must supply the same value
+    /// the promotion gate is expected to accept.
+    pub strategy_semantic_fingerprint: String,
     /// Order side: "buy" or "sell" (case-insensitive; normalised internally).
     pub side: String,
     /// Share quantity.  Must be positive.
@@ -99,6 +110,7 @@ pub struct InternalDecisionOutcome {
     /// | `"promotion_shadow_only"` | Gate 3b: current state is `shadow_approved` (research/shadow only, never paper-tradable) |
     /// | `"promotion_not_active"` | Gate 3b: current state is `paper_approved` (evidence accepted, activation still required) |
     /// | `"promotion_demoted"` / `"promotion_retired"` / `"promotion_rejected"` / `"promotion_expired"` | Gate 3b: current state blocks trading |
+    /// | `"promotion_config_mismatch"` | RUNTIME-PROMOTION-EVIDENCE-BINDING-01: durable `active_paper` exists but this decision's actual strategy semantic config does not match the promoted fingerprint (legacy/unavailable promoted identity, or genuine drift) |
     pub disposition: String,
     /// Echoed from [`InternalStrategyDecision::decision_id`].
     pub decision_id: String,
@@ -378,6 +390,7 @@ pub fn bar_result_to_decisions(
                 strategy_id: strategy_id.clone(),
                 symbol: t.symbol.clone(),
                 timeframe_secs: result.spec.timeframe_secs,
+                strategy_semantic_fingerprint: result.semantic_fingerprint.clone(),
                 side,
                 qty,
                 order_type: "market".to_string(),
@@ -779,6 +792,7 @@ pub async fn submit_internal_strategy_decision(
             &sid,
             decision.symbol.trim(),
             decision.timeframe_secs,
+            Some(decision.strategy_semantic_fingerprint.as_str()),
         )
         .await;
         if !promotion.paper_tradable {
