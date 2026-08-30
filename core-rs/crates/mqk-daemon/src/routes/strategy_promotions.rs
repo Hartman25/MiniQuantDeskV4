@@ -47,8 +47,8 @@ use crate::strategy_config_identity::{
 use mqk_db::{
     fetch_all_current_promotions, fetch_current_promotion_state,
     fetch_promotion_history, insert_strategy_promotion_transition_serialized,
-    is_known_promotion_state, is_legal_transition, resolve_evidence_lineage,
-    transition_requires_evidence, InsertStrategyPromotionTransitionArgs,
+    is_known_promotion_state, is_legal_transition, is_valid_evidence_fingerprint_v2_hex,
+    resolve_evidence_lineage, transition_requires_evidence, InsertStrategyPromotionTransitionArgs,
     StrategyPromotionTransitionRecord, TransitionInsertOutcome, PROMOTION_STATE_ACTIVE_PAPER,
     PROMOTION_STATE_PAPER_APPROVED,
 };
@@ -1189,8 +1189,29 @@ pub(crate) async fn strategy_promotion_transition(
                 }
             }
         } else if is_continuity_transition {
-            let parent_fingerprint = current.as_ref().and_then(|c| c.config_fingerprint.clone());
-            match (&config_identity_result, parent_fingerprint) {
+            // PROMOTION-CONFIG-CONTINUITY-STATUS-REPAIR-01: a parent's
+            // `config_fingerprint` alone is never sufficient authority --
+            // independent review found this branch previously matched on
+            // `Some(parent_fp)` without checking the parent's own
+            // `config_identity_status`, so a row carrying a real-looking
+            // fingerprint alongside a non-`verified_v1` status (legacy
+            // backfill, manual repair, or any future insert path that does
+            // not maintain the fresh-evidence pairing invariant) could
+            // silently launder unverified identity into a freshly-verified
+            // child. Only a parent that is BOTH `verified_v1` AND carries a
+            // structurally valid fingerprint (same 64-lowercase-hex format
+            // C2's `evaluate_promotion_tradability_with_config_identity`
+            // already requires) is ever treated as a match candidate.
+            let parent_verified_fingerprint = current.as_ref().and_then(|c| {
+                if c.config_identity_status == CONFIG_IDENTITY_STATUS_VERIFIED_V1 {
+                    c.config_fingerprint
+                        .as_deref()
+                        .filter(|fp| is_valid_evidence_fingerprint_v2_hex(fp))
+                } else {
+                    None
+                }
+            });
+            match (&config_identity_result, parent_verified_fingerprint) {
                 (Ok(fp), Some(parent_fp)) if *fp == parent_fp => {
                     (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string())
                 }
@@ -1213,7 +1234,7 @@ pub(crate) async fn strategy_promotion_transition(
                         )],
                     });
                 }
-                (_, None) => {
+                (Ok(_), None) => {
                     return transition_response(TransitionResponseArgs {
                         status: StatusCode::CONFLICT,
                         accepted: false,
@@ -1226,8 +1247,11 @@ pub(crate) async fn strategy_promotion_transition(
                         transition_id: None,
                         blockers: vec![
                             "the current approval chain carries no verified config_fingerprint \
-                             (legacy or unresolved evidence root) -- a legacy/unavailable \
-                             config identity can never authorize advancing this identity; \
+                             (legacy/unresolved evidence root, a parent \
+                             config_identity_status other than 'verified_v1', or a \
+                             structurally invalid fingerprint) -- only a parent transition \
+                             with config_identity_status=='verified_v1' and a structurally \
+                             valid fingerprint can authorize advancing this identity; \
                              re-approval through shadow_approved with fresh evidence is \
                              required"
                                 .to_string(),

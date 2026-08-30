@@ -364,6 +364,183 @@ async fn continuity_legacy_null_parent_is_rejected() {
     cleanup(&pool, &symbol).await;
 }
 
+/// PROMOTION-CONFIG-CONTINUITY-STATUS-REPAIR-01: a parent's real, currently-
+/// matching `config_fingerprint` is NOT sufficient authority on its own --
+/// the parent's own `config_identity_status` must also be `verified_v1`.
+/// This is the exact laundering path independent review flagged: a row
+/// carrying `config_fingerprint = <real current fingerprint>` alongside
+/// `config_identity_status = "unavailable_in_current_runtime"` (e.g. a
+/// legacy backfill, or a future insert path that fails to keep this pairing
+/// invariant) must never be treated as verified continuity authority.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn continuity_matching_fingerprint_but_unavailable_status_is_rejected() {
+    let pool = make_db_pool().await;
+    let symbol = unique_symbol();
+    let real_fp = resolve_server_semantic_fingerprint(STRATEGY_ID, &symbol, TIMEFRAME_SECS)
+        .expect("swing_momentum must resolve");
+
+    seed_transition(
+        &pool,
+        &symbol,
+        None,
+        "shadow_approved",
+        Some(&real_fp),
+        "unavailable_in_current_runtime",
+        "1",
+    )
+    .await;
+    let before = row_count_for(&pool, &symbol).await;
+
+    let st = app_state(pool.clone());
+    let (status, json) = call(
+        routes::build_router(Arc::clone(&st)),
+        transition_req(serde_json::json!({
+            "strategy_id": STRATEGY_ID,
+            "symbol": symbol,
+            "timeframe_secs": TIMEFRAME_SECS,
+            "target_state": "paper_approved",
+            "review_dir": null,
+            "effective_at_utc": Utc::now().to_rfc3339(),
+            "expires_at_utc": null,
+            "initiated_by": "config-identity-test",
+            "reason": "matching fingerprint, unavailable status",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a real, currently-matching fingerprint on a non-verified_v1 parent must never \
+         authorize continuity: {json}"
+    );
+    assert_eq!(json["disposition"], "config_identity_mismatch");
+    assert_eq!(
+        row_count_for(&pool, &symbol).await,
+        before,
+        "a rejected continuity transition must create no new row"
+    );
+
+    cleanup(&pool, &symbol).await;
+}
+
+/// Same laundering path, an arbitrary unrecognized status string instead of
+/// the specific `unavailable_in_current_runtime` constant -- proves the
+/// check is an exact `== "verified_v1"` comparison, never merely "is not
+/// unavailable_in_current_runtime".
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn continuity_matching_fingerprint_but_unknown_status_is_rejected() {
+    let pool = make_db_pool().await;
+    let symbol = unique_symbol();
+    let real_fp = resolve_server_semantic_fingerprint(STRATEGY_ID, &symbol, TIMEFRAME_SECS)
+        .expect("swing_momentum must resolve");
+
+    seed_transition(
+        &pool,
+        &symbol,
+        None,
+        "shadow_approved",
+        Some(&real_fp),
+        "some_arbitrary_unknown_status",
+        "1",
+    )
+    .await;
+    let before = row_count_for(&pool, &symbol).await;
+
+    let st = app_state(pool.clone());
+    let (status, json) = call(
+        routes::build_router(Arc::clone(&st)),
+        transition_req(serde_json::json!({
+            "strategy_id": STRATEGY_ID,
+            "symbol": symbol,
+            "timeframe_secs": TIMEFRAME_SECS,
+            "target_state": "paper_approved",
+            "review_dir": null,
+            "effective_at_utc": Utc::now().to_rfc3339(),
+            "expires_at_utc": null,
+            "initiated_by": "config-identity-test",
+            "reason": "matching fingerprint, unknown status",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an arbitrary unrecognized parent status must never authorize continuity: {json}"
+    );
+    assert_eq!(json["disposition"], "config_identity_mismatch");
+    assert_eq!(
+        row_count_for(&pool, &symbol).await,
+        before,
+        "a rejected continuity transition must create no new row"
+    );
+
+    cleanup(&pool, &symbol).await;
+}
+
+/// A parent marked `verified_v1` but whose persisted fingerprint is not
+/// structurally valid (wrong case -- the format is exactly 64 LOWERCASE hex
+/// chars, same rule C2's `evaluate_promotion_tradability_with_config_identity`
+/// enforces) must never authorize continuity, even though the value is the
+/// same identity up to case.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn continuity_verified_but_malformed_parent_fingerprint_is_rejected() {
+    let pool = make_db_pool().await;
+    let symbol = unique_symbol();
+    let real_fp = resolve_server_semantic_fingerprint(STRATEGY_ID, &symbol, TIMEFRAME_SECS)
+        .expect("swing_momentum must resolve");
+    let malformed_fp = real_fp.to_uppercase();
+    assert_ne!(
+        malformed_fp, real_fp,
+        "sanity: uppercasing a lowercase-hex fingerprint must actually change it"
+    );
+
+    seed_transition(
+        &pool,
+        &symbol,
+        None,
+        "shadow_approved",
+        Some(&malformed_fp),
+        "verified_v1",
+        "1",
+    )
+    .await;
+    let before = row_count_for(&pool, &symbol).await;
+
+    let st = app_state(pool.clone());
+    let (status, json) = call(
+        routes::build_router(Arc::clone(&st)),
+        transition_req(serde_json::json!({
+            "strategy_id": STRATEGY_ID,
+            "symbol": symbol,
+            "timeframe_secs": TIMEFRAME_SECS,
+            "target_state": "paper_approved",
+            "review_dir": null,
+            "effective_at_utc": Utc::now().to_rfc3339(),
+            "expires_at_utc": null,
+            "initiated_by": "config-identity-test",
+            "reason": "verified_v1 but malformed fingerprint",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a structurally invalid parent fingerprint must never authorize continuity, even when \
+         verified_v1: {json}"
+    );
+    assert_eq!(json["disposition"], "config_identity_mismatch");
+    assert_eq!(
+        row_count_for(&pool, &symbol).await,
+        before,
+        "a rejected continuity transition must create no new row"
+    );
+
+    cleanup(&pool, &symbol).await;
+}
+
 /// Safety exits must remain reachable even when the parent's config
 /// fingerprint has drifted -- demotion/retirement must never be blocked by
 /// a config mismatch that would refuse a continuity transition.
