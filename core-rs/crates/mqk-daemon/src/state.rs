@@ -210,6 +210,34 @@ const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// AUTON-PAPER-RISK-03: execution-loop ticks between External broker snapshot refreshes.
 /// At 1 s/tick this is 60 s — fresh enough for paper reconcile without hammering the API.
 const EXTERNAL_SNAPSHOT_REFRESH_TICKS: u32 = 60;
+
+/// RR3 (RUNTIME-RISK-ACCOUNT-FRESHNESS-AUTHORITY-01): maximum age of an
+/// External broker-snapshot equity reading that `DaemonAccountAuthority` may
+/// treat as current for account-level risk gating.
+///
+/// This is a DEDICATED risk-freshness policy, deliberately NOT
+/// `mqk_runtime::orchestrator::TERMINAL_FILL_SETTLE_GRACE_SECS` (a
+/// different-domain post-terminal-fill *reconciliation* settlement grace
+/// window — see that constant's doc for why the two must not be conflated).
+///
+/// Derived directly from this loop's own periodic External snapshot refresh
+/// cadence: `loop_runner.rs` refreshes the cached snapshot every
+/// `EXTERNAL_SNAPSHOT_REFRESH_TICKS` ticks of `EXECUTION_LOOP_INTERVAL`
+/// (nominally 60 s), and that refresh runs AFTER `orch.tick()`'s risk
+/// evaluation in the same loop iteration — so the snapshot backing risk
+/// evaluation can legitimately be up to one full refresh cadence old right
+/// before the next refresh fires. One additional `EXECUTION_LOOP_INTERVAL`
+/// is added as margin: Phase 2 of `orch.tick()` makes a real broker REST
+/// call every tick, so ordinary per-tick processing routinely adds a small
+/// amount of wall-clock time beyond the nominal 1 s interval, and a bound
+/// with zero margin would risk a false `Stale` denial from that ordinary
+/// jitter alone rather than from a genuinely stale snapshot. A tick that
+/// overruns far beyond this (e.g. the ~33 s single Phase-2 block observed in
+/// a smoke run — see `DEADMAN_TTL_SECONDS` doc above) SHOULD still trigger
+/// `Stale`: that is a genuinely old snapshot and correct fail-closed
+/// behavior, not a false halt.
+const ACCOUNT_RISK_FRESHNESS_BOUND_SECS: i64 =
+    (EXTERNAL_SNAPSHOT_REFRESH_TICKS as i64 + 1) * EXECUTION_LOOP_INTERVAL.as_secs() as i64;
 /// AUTON-SIGNAL-CONTEXT-01: DB timeframe string for loading completed bars for
 /// autonomous strategy context (e.g. "1D", "5m").  Must match the `timeframe`
 /// column value in `md_bars` for the configured symbol.  If absent, the daemon

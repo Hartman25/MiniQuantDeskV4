@@ -207,7 +207,15 @@ const PENDING_FILL_PROPAGATION_GRACE_SECS: i64 = 30;
 /// 180 seconds provides headroom above the observed 120s worst-case outage
 /// window.  The eager refresh (has_recent_terminal_fill) retries every tick so
 /// the snapshot clears as soon as Alpaca REST recovers.
-pub const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 180;
+// RR3 (RUNTIME-RISK-ACCOUNT-FRESHNESS-AUTHORITY-01): this was briefly made
+// `pub` so mqk-daemon's `DaemonAccountAuthority` could reuse it as an
+// account-level risk-freshness bound. That reuse was rejected — this is a
+// post-terminal-fill *reconciliation* settlement grace window, not a
+// pre-trade *risk* freshness contract, and the two can diverge. Account
+// risk freshness now has its own dedicated policy
+// (`mqk-daemon`'s `ACCOUNT_RISK_FRESHNESS_BOUND_SECS`). No other module
+// needs this constant, so it returns to its prior module-private visibility.
+const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 180;
 
 /// Maximum recent terminal fills to track in memory.
 const RECENT_FILLS_RING_CAP: usize = 50;

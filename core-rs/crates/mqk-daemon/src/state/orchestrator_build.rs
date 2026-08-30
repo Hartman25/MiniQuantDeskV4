@@ -388,9 +388,7 @@ impl AppState {
         let account_authority: Arc<dyn RuntimeAccountAuthority> = Arc::new(DaemonAccountAuthority {
             broker_snapshot: Arc::clone(&self.broker_snapshot),
             source: self.broker_snapshot_source,
-            freshness_bound: chrono::Duration::seconds(
-                mqk_runtime::orchestrator::TERMINAL_FILL_SETTLE_GRACE_SECS,
-            ),
+            freshness_bound: chrono::Duration::seconds(super::ACCOUNT_RISK_FRESHNESS_BOUND_SECS),
         });
 
         let gateway = build_gateway(
@@ -1253,5 +1251,247 @@ mod tests {
             Err(msg) => assert_eq!(msg, "simulated broker fetch failure"),
             Ok(_) => panic!("fetch failure must surface as Err, never as a fabricated snapshot"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // RR3 (RUNTIME-RISK-ACCOUNT-FRESHNESS-AUTHORITY-01) / F4: direct proof of
+    // the REAL `DaemonAccountAuthority` in its defining module. The E2E
+    // scenario test in mqk-runtime uses a hermetic `TestAccountAuthority`
+    // that only mirrors this type's behavior — it does not exercise this
+    // code. These tests construct the actual `DaemonAccountAuthority` and
+    // call its real `RuntimeAccountAuthority::current_account`.
+    //
+    // Deliberately plain `#[test]` (no `#[tokio::test]`, no runtime at all):
+    // `current_account` is a synchronous, non-`async fn` trait method with
+    // no `.await` anywhere in its body — it cannot perform network I/O
+    // (requirement 11). If it ever gained an awaited call, these tests
+    // would panic immediately with "no reactor running" rather than
+    // silently succeeding.
+    // -----------------------------------------------------------------------
+
+    fn schema_account(equity: &str) -> mqk_schemas::BrokerAccount {
+        mqk_schemas::BrokerAccount {
+            equity: equity.to_string(),
+            cash: "0".to_string(),
+            currency: "USD".to_string(),
+        }
+    }
+
+    fn schema_snapshot(equity: &str, captured_at_utc: DateTime<Utc>) -> mqk_schemas::BrokerSnapshot {
+        mqk_schemas::BrokerSnapshot {
+            captured_at_utc,
+            account: schema_account(equity),
+            orders: vec![],
+            fills: vec![],
+            positions: vec![],
+        }
+    }
+
+    fn make_authority(
+        seed: Option<mqk_schemas::BrokerSnapshot>,
+        source: BrokerSnapshotTruthSource,
+        freshness_bound_secs: i64,
+    ) -> DaemonAccountAuthority {
+        DaemonAccountAuthority {
+            broker_snapshot: Arc::new(RwLock::new(seed)),
+            source,
+            freshness_bound: chrono::Duration::seconds(freshness_bound_secs),
+        }
+    }
+
+    #[test]
+    fn rr3_external_fresh_valid_equity_returns_exact_micros() {
+        let now = Utc::now();
+        let authority = make_authority(
+            Some(schema_snapshot("100000.50", now)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+        let ctx = authority
+            .current_account(now)
+            .expect("fresh valid External snapshot must resolve");
+        assert_eq!(ctx.equity_micros, 100_000_500_000);
+    }
+
+    #[test]
+    fn rr3_snapshot_cache_replacement_is_observed_by_the_same_authority() {
+        let now = Utc::now();
+        let cache = Arc::new(RwLock::new(Some(schema_snapshot("100000", now))));
+        let authority = DaemonAccountAuthority {
+            broker_snapshot: Arc::clone(&cache),
+            source: BrokerSnapshotTruthSource::External,
+            freshness_bound: chrono::Duration::seconds(60),
+        };
+        assert_eq!(
+            authority.current_account(now).unwrap().equity_micros,
+            100_000_000_000
+        );
+
+        // Replace the cache contents (as the execution loop's periodic
+        // refresh does) — the SAME authority instance must observe it.
+        *cache.try_write().unwrap() = Some(schema_snapshot("150000", now));
+        assert_eq!(
+            authority.current_account(now).unwrap().equity_micros,
+            150_000_000_000
+        );
+    }
+
+    #[test]
+    fn rr3_synthetic_source_is_always_unavailable() {
+        let now = Utc::now();
+        let authority = make_authority(
+            Some(schema_snapshot("100000", now)),
+            BrokerSnapshotTruthSource::Synthetic,
+            60,
+        );
+        assert_eq!(
+            authority.current_account(now).unwrap_err(),
+            AccountAuthorityError::Unavailable,
+            "Synthetic source sets account.equity to cash, not mark-to-market \
+             equity, and must never be accepted for account-level risk gating"
+        );
+    }
+
+    #[test]
+    fn rr3_no_snapshot_is_unavailable() {
+        let now = Utc::now();
+        let authority = make_authority(None, BrokerSnapshotTruthSource::External, 60);
+        assert_eq!(
+            authority.current_account(now).unwrap_err(),
+            AccountAuthorityError::Unavailable
+        );
+    }
+
+    #[test]
+    fn rr3_malformed_decimal_equity_is_malformed() {
+        let now = Utc::now();
+        let authority = make_authority(
+            Some(schema_snapshot("not-a-number", now)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+        assert_eq!(
+            authority.current_account(now).unwrap_err(),
+            AccountAuthorityError::Malformed
+        );
+    }
+
+    #[test]
+    fn rr3_zero_or_negative_equity_is_malformed() {
+        let now = Utc::now();
+        let authority_zero = make_authority(
+            Some(schema_snapshot("0", now)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+        assert_eq!(
+            authority_zero.current_account(now).unwrap_err(),
+            AccountAuthorityError::Malformed
+        );
+
+        let authority_negative = make_authority(
+            Some(schema_snapshot("-500", now)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+        assert_eq!(
+            authority_negative.current_account(now).unwrap_err(),
+            AccountAuthorityError::Malformed
+        );
+    }
+
+    #[test]
+    fn rr3_snapshot_older_than_freshness_bound_is_stale() {
+        let captured_at = Utc::now();
+        let now = captured_at + chrono::Duration::seconds(61);
+        let authority = make_authority(
+            Some(schema_snapshot("100000", captured_at)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+        assert_eq!(
+            authority.current_account(now).unwrap_err(),
+            AccountAuthorityError::Stale
+        );
+    }
+
+    #[test]
+    fn rr3_future_captured_at_is_stale() {
+        let now = Utc::now();
+        let captured_at = now + chrono::Duration::seconds(30);
+        let authority = make_authority(
+            Some(schema_snapshot("100000", captured_at)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+        assert_eq!(
+            authority.current_account(now).unwrap_err(),
+            AccountAuthorityError::Stale,
+            "a snapshot captured in the future relative to `now` is not truthful \
+             current equity and must not be silently accepted"
+        );
+    }
+
+    #[test]
+    fn rr3_exact_freshness_boundary_behavior() {
+        let captured_at = Utc::now();
+        let authority = make_authority(
+            Some(schema_snapshot("100000", captured_at)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+
+        // Exactly at the bound: still fresh (age > bound is the Stale test,
+        // not age >= bound).
+        let at_bound = captured_at + chrono::Duration::seconds(60);
+        assert!(
+            authority.current_account(at_bound).is_ok(),
+            "age exactly equal to the freshness bound must still resolve"
+        );
+
+        // One second past the bound: stale.
+        let past_bound = captured_at + chrono::Duration::seconds(61);
+        assert_eq!(
+            authority.current_account(past_bound).unwrap_err(),
+            AccountAuthorityError::Stale
+        );
+    }
+
+    #[test]
+    fn rr3_write_lock_contention_fails_closed_as_unavailable() {
+        let now = Utc::now();
+        let cache = Arc::new(RwLock::new(Some(schema_snapshot("100000", now))));
+        let authority = DaemonAccountAuthority {
+            broker_snapshot: Arc::clone(&cache),
+            source: BrokerSnapshotTruthSource::External,
+            freshness_bound: chrono::Duration::seconds(60),
+        };
+
+        // Hold an exclusive write guard (as a concurrent snapshot-refresh
+        // write would, however briefly) so `try_read` inside
+        // `current_account` cannot establish truth.
+        let _write_guard = cache.try_write().expect("acquire write lock for the test");
+        assert_eq!(
+            authority.current_account(now).unwrap_err(),
+            AccountAuthorityError::Unavailable,
+            "lock contention must fail closed as Unavailable, never fall back \
+             to a guessed or stale-but-cached value"
+        );
+    }
+
+    #[test]
+    fn rr3_current_account_is_synchronous_and_requires_no_async_runtime() {
+        // This test function itself is NOT #[tokio::test] — there is no
+        // Tokio reactor running at all. If `current_account` ever performed
+        // real network I/O it would panic ("there is no reactor running")
+        // rather than returning a value, proving requirement 11
+        // structurally rather than by absence of observation.
+        let now = Utc::now();
+        let authority = make_authority(
+            Some(schema_snapshot("100000", now)),
+            BrokerSnapshotTruthSource::External,
+            60,
+        );
+        assert!(authority.current_account(now).is_ok());
     }
 }
