@@ -80,7 +80,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use chrono::Datelike;
 use mqk_execution::StrategyOutput;
-use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
+use mqk_strategy::{
+    SemanticIdentityBuilder, Strategy, StrategyContext, StrategySpec, SEMANTIC_IDENTITY_SCHEMA_V1,
+};
 use uuid::Uuid;
 
 use crate::regime::{detect_market_regime, MarketRegimeInput, MarketRegimePolicy};
@@ -247,14 +249,26 @@ impl Strategy for DelayedStrategy {
         self.inner.spec()
     }
 
-    /// STRESS-ROBUSTNESS-SEMANTIC-BINDING-01: execution delay is a stress
-    /// TRANSFORM applied on top of the candidate, not a change to the
-    /// candidate's own semantic configuration -- forward the wrapped
-    /// strategy's real fingerprint so identity verification stays about the
-    /// underlying candidate, never the decorator (which has no semantic
-    /// configuration of its own to fingerprint).
+    /// STRESS-TRANSFORM-SEMANTIC-IDENTITY-01: execution delay changes the
+    /// EFFECTIVE semantics actually executed (decisions are re-emitted
+    /// `delay_bars` bars late) -- this must have its own fingerprint,
+    /// distinct from the wrapped candidate's, so a delayed run can never
+    /// collide on `run_id` with the baseline (or with a different delay) it
+    /// shares strategy_name/config/bars/economics/execution_model with.
+    /// UNDERLYING CANDIDATE IDENTITY (proving the factory produced the
+    /// right baseline strategy) is a separate concern, checked via
+    /// `verify_candidate_identity` against `self.inner` BEFORE this wrapper
+    /// is ever constructed -- see callers below. Never hashes P&L, fills,
+    /// score, or any other result value.
     fn semantic_fingerprint(&self) -> String {
-        self.inner.semantic_fingerprint()
+        SemanticIdentityBuilder::new(
+            SEMANTIC_IDENTITY_SCHEMA_V1,
+            "robustness_delayed_strategy",
+            "v1",
+        )
+        .push_str(&self.inner.semantic_fingerprint())
+        .push_i64(self.delay_bars as i64)
+        .finish()
     }
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
@@ -377,23 +391,21 @@ impl RobustnessGauntletOutput {
 // Scenario implementations
 // ---------------------------------------------------------------------------
 
-/// STRESS-ROBUSTNESS-SEMANTIC-BINDING-01: the single choke point every
-/// canonical re-run scenario funnels through -- validates the EXACT
-/// `Box<dyn Strategy>` about to be executed carries the same semantic
-/// fingerprint as the baseline candidate this gauntlet purports to test,
-/// before that instance is ever added to an engine. `DelayedStrategy`
-/// forwards its wrapped strategy's real fingerprint (see its
-/// `semantic_fingerprint` impl above), so this check is about the
-/// underlying candidate's semantics even when `strategy` is
-/// delay-wrapped, never the decorator. A mismatch fails closed and is
-/// never comparable-by-result -- the mismatch is caught before any bar is
+/// STRESS-TRANSFORM-SEMANTIC-IDENTITY-01: UNDERLYING CANDIDATE IDENTITY --
+/// proves `strategy` (a fresh, UNWRAPPED factory instance) is the same
+/// candidate the baseline was computed from, before it is ever added to an
+/// engine. This is distinct from EFFECTIVE STRATEGY IDENTITY (what
+/// `run_id` actually binds to once a stress transform is applied) --
+/// callers that wrap the verified instance in a decorator like
+/// `DelayedStrategy` must call this against the UNWRAPPED instance and
+/// must never compare the wrapper's own (intentionally different)
+/// fingerprint against `expected_semantic_fingerprint`. A mismatch fails
+/// closed and is never comparable-by-result -- caught before any bar is
 /// ever processed.
-fn run_with_strategy(
-    config: BacktestConfig,
-    bars: &[BacktestBar],
-    strategy: Box<dyn Strategy>,
+fn verify_candidate_identity(
+    strategy: &dyn Strategy,
     expected_semantic_fingerprint: &str,
-) -> Result<BacktestReport, String> {
+) -> Result<(), String> {
     let actual = strategy.semantic_fingerprint();
     if actual != expected_semantic_fingerprint {
         return Err(format!(
@@ -403,11 +415,43 @@ fn run_with_strategy(
              purports to test"
         ));
     }
+    Ok(())
+}
+
+/// Adds `strategy` to a fresh engine and runs it -- no identity check of its
+/// own. Used directly by scenarios that execute the candidate unwrapped
+/// (via [`run_with_strategy`], which checks first) and, after a separate
+/// [`verify_candidate_identity`] call against the unwrapped inner instance,
+/// by scenarios that execute a stress-transformed wrapper (whose own
+/// fingerprint legitimately differs from the baseline's).
+fn run_engine(
+    config: BacktestConfig,
+    bars: &[BacktestBar],
+    strategy: Box<dyn Strategy>,
+) -> Result<BacktestReport, String> {
     let mut engine = BacktestEngine::new(config);
     engine
         .add_strategy(strategy)
         .map_err(|e| format!("add_strategy failed: {e}"))?;
     engine.run(bars).map_err(|e| format!("engine.run failed: {e}"))
+}
+
+/// The choke point every scenario that executes the candidate UNWRAPPED
+/// funnels through -- validates the exact `Box<dyn Strategy>` about to be
+/// executed carries the same semantic fingerprint as the baseline candidate
+/// this gauntlet purports to test, before that instance is ever added to an
+/// engine. Never call this with a stress-wrapped decorator (e.g.
+/// `DelayedStrategy`) as `strategy` -- its effective fingerprint legitimately
+/// differs from the baseline; verify the unwrapped inner instance separately
+/// via [`verify_candidate_identity`] before wrapping it instead.
+fn run_with_strategy(
+    config: BacktestConfig,
+    bars: &[BacktestBar],
+    strategy: Box<dyn Strategy>,
+    expected_semantic_fingerprint: &str,
+) -> Result<BacktestReport, String> {
+    verify_candidate_identity(strategy.as_ref(), expected_semantic_fingerprint)?;
+    run_engine(config, bars, strategy)
 }
 
 fn execution_delay_scenario(
@@ -419,13 +463,20 @@ fn execution_delay_scenario(
     let name = "execution_delay_stress".to_string();
     let initial_cash = base_config.initial_cash_micros;
     let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
-    let delayed = DelayedStrategy::new(make_strategy(), 1);
-    match run_with_strategy(
-        base_config.clone(),
-        bars,
-        Box::new(delayed),
-        &baseline.strategy_semantic_fingerprint,
-    ) {
+    let inner = make_strategy();
+    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(e.clone()),
+            detail: e,
+            research_trial_id: None,
+            evidence: None,
+        };
+    }
+    let delayed = DelayedStrategy::new(inner, 1);
+    match run_engine(base_config.clone(), bars, Box::new(delayed)) {
         Ok(report) => {
             let (bar_passed, bar_detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
             let (edge_passed, edge_detail) =
@@ -814,7 +865,6 @@ fn placebo_temporal_offset_scenario(
     let name = "placebo_temporal_offset".to_string();
     let initial_cash = base_config.initial_cash_micros;
     let delay_bars = (bars.len() / 2).max(1);
-    let delayed = DelayedStrategy::new(make_strategy(), delay_bars);
 
     let baseline_final = baseline
         .equity_curve
@@ -822,12 +872,21 @@ fn placebo_temporal_offset_scenario(
         .map(|(_, eq)| *eq)
         .unwrap_or(initial_cash);
 
-    match run_with_strategy(
-        base_config.clone(),
-        bars,
-        Box::new(delayed),
-        &baseline.strategy_semantic_fingerprint,
-    ) {
+    let inner = make_strategy();
+    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(e.clone()),
+            detail: e,
+            research_trial_id: None,
+            evidence: None,
+        };
+    }
+    let delayed = DelayedStrategy::new(inner, delay_bars);
+
+    match run_engine(base_config.clone(), bars, Box::new(delayed)) {
         Ok(report) => {
             let placebo_final = report
                 .equity_curve
@@ -993,5 +1052,217 @@ pub fn run_robustness_gauntlet(
         strategy_name: baseline.strategy_name.clone(),
         scenarios,
         deferred,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STRESS-TRANSFORM-SEMANTIC-IDENTITY-01 negative controls
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod stress_transform_semantic_identity_tests {
+    use super::*;
+    use mqk_strategy::RecentBarsWindow;
+
+    /// A strategy whose `spec()` is fixed but whose `semantic_fingerprint()`
+    /// is caller-controlled -- lets these tests simulate two materially
+    /// different candidates (A vs B) sharing an identical name/on_bar
+    /// behavior, so a real mismatch can never be explained away as "the
+    /// results merely differed".
+    struct FingerprintedStrategy {
+        fingerprint: &'static str,
+    }
+
+    impl Strategy for FingerprintedStrategy {
+        fn spec(&self) -> StrategySpec {
+            StrategySpec::new("fp_strategy", 60)
+        }
+
+        fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+            StrategyOutput::new(vec![])
+        }
+
+        fn semantic_fingerprint(&self) -> String {
+            self.fingerprint.to_string()
+        }
+    }
+
+    fn bars() -> Vec<BacktestBar> {
+        (0..5)
+            .map(|i| BacktestBar::new("AAPL", 1_000 + i * 60, 100, 100, 100, 100, 1_000))
+            .collect()
+    }
+
+    // 1. raw candidate A matches baseline A and is accepted for wrapping.
+    #[test]
+    fn raw_candidate_matching_baseline_is_accepted() {
+        let a = FingerprintedStrategy { fingerprint: "fp-a" };
+        assert!(verify_candidate_identity(&a, "fp-a").is_ok());
+    }
+
+    // 2. raw candidate B presented as baseline A is refused BEFORE wrapping.
+    #[test]
+    fn raw_candidate_b_presented_as_a_is_refused_before_wrapping() {
+        let b = FingerprintedStrategy { fingerprint: "fp-b" };
+        let err = verify_candidate_identity(&b, "fp-a")
+            .expect_err("mismatched raw candidate must be refused before any wrapping occurs");
+        assert!(err.contains("semantic fingerprint mismatch"));
+    }
+
+    // 3. DelayedStrategy(A,1).fp != A.fp
+    #[test]
+    fn wrapper_fingerprint_differs_from_inner_fingerprint() {
+        let a = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let inner_fp = a.semantic_fingerprint();
+        let wrapped = DelayedStrategy::new(a, 1);
+        assert_ne!(
+            wrapped.semantic_fingerprint(),
+            inner_fp,
+            "the execution-delay wrapper must carry its own effective fingerprint, distinct \
+             from the wrapped candidate's"
+        );
+    }
+
+    // 4. DelayedStrategy(A,1).fp != DelayedStrategy(A,2).fp
+    #[test]
+    fn wrapper_fingerprint_differs_by_delay_bars() {
+        let a1 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let a2 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let delayed_1 = DelayedStrategy::new(a1, 1);
+        let delayed_2 = DelayedStrategy::new(a2, 2);
+        assert_ne!(
+            delayed_1.semantic_fingerprint(),
+            delayed_2.semantic_fingerprint(),
+            "different delay_bars on the SAME underlying candidate must produce different \
+             wrapper fingerprints"
+        );
+    }
+
+    // 5. identical A + identical delay -> identical wrapper fingerprint
+    // (repeated construction is deterministic).
+    #[test]
+    fn wrapper_fingerprint_is_deterministic_for_same_candidate_and_delay() {
+        let a1 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let a2 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let fp1 = DelayedStrategy::new(a1, 1).semantic_fingerprint();
+        let fp2 = DelayedStrategy::new(a2, 1).semantic_fingerprint();
+        assert_eq!(
+            fp1, fp2,
+            "identical underlying candidate + identical delay must reproduce the identical \
+             wrapper fingerprint"
+        );
+    }
+
+    // 6. A != B -> wrapped A and wrapped B remain different.
+    #[test]
+    fn wrapper_fingerprint_changes_when_underlying_candidate_changes() {
+        let a = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let b = Box::new(FingerprintedStrategy { fingerprint: "fp-b" }) as Box<dyn Strategy>;
+        let fp_a = DelayedStrategy::new(a, 1).semantic_fingerprint();
+        let fp_b = DelayedStrategy::new(b, 1).semantic_fingerprint();
+        assert_ne!(
+            fp_a, fp_b,
+            "wrapping two different underlying candidates at the same delay must never collide"
+        );
+    }
+
+    // 7. Same strategy_name/config/bars/economics/execution_model: a
+    // baseline run and a DelayedStrategy(A,1) run of the SAME candidate must
+    // never collide on run_id -- the R9 defect this repair closes.
+    #[test]
+    fn baseline_and_delayed_run_never_collide_on_run_id() {
+        let config = BacktestConfig::test_defaults();
+        let bars = bars();
+
+        let mut baseline_engine = BacktestEngine::new(config.clone());
+        baseline_engine
+            .add_strategy(Box::new(FingerprintedStrategy { fingerprint: "fp-a" }))
+            .unwrap();
+        let baseline_report = baseline_engine.run(&bars).unwrap();
+
+        let delayed = DelayedStrategy::new(
+            Box::new(FingerprintedStrategy { fingerprint: "fp-a" }),
+            1,
+        );
+        let mut delayed_engine = BacktestEngine::new(config);
+        delayed_engine.add_strategy(Box::new(delayed)).unwrap();
+        let delayed_report = delayed_engine.run(&bars).unwrap();
+
+        assert_eq!(baseline_report.strategy_name, delayed_report.strategy_name);
+        assert_eq!(baseline_report.config_id, delayed_report.config_id);
+        assert_eq!(baseline_report.input_data_hash, delayed_report.input_data_hash);
+        assert_ne!(
+            baseline_report.run_id, delayed_report.run_id,
+            "an execution-delay-wrapped run of the SAME candidate must never collide on run_id \
+             with the unwrapped baseline run sharing strategy_name/config/bars"
+        );
+    }
+
+    // 8. With the SAME underlying candidate/config/bars, two different
+    // delays must never collide on run_id.
+    #[test]
+    fn delayed_runs_with_different_delays_never_collide_on_run_id() {
+        let config = BacktestConfig::test_defaults();
+        let bars = bars();
+
+        let mut engine_1 = BacktestEngine::new(config.clone());
+        engine_1
+            .add_strategy(Box::new(DelayedStrategy::new(
+                Box::new(FingerprintedStrategy { fingerprint: "fp-a" }),
+                1,
+            )))
+            .unwrap();
+        let report_1 = engine_1.run(&bars).unwrap();
+
+        let mut engine_2 = BacktestEngine::new(config);
+        engine_2
+            .add_strategy(Box::new(DelayedStrategy::new(
+                Box::new(FingerprintedStrategy { fingerprint: "fp-a" }),
+                2,
+            )))
+            .unwrap();
+        let report_2 = engine_2.run(&bars).unwrap();
+
+        assert_eq!(report_1.strategy_name, report_2.strategy_name);
+        assert_eq!(report_1.config_id, report_2.config_id);
+        assert_eq!(report_1.input_data_hash, report_2.input_data_hash);
+        assert_ne!(
+            report_1.run_id, report_2.run_id,
+            "the same underlying candidate wrapped at two different delays must never collide \
+             on run_id"
+        );
+    }
+
+    // 11. A single make_strategy() invocation returning the wrong underlying
+    // candidate still fails closed before any wrapping/execution occurs.
+    #[test]
+    fn wrong_underlying_candidate_fails_closed_before_wrapping() {
+        let b = FingerprintedStrategy { fingerprint: "fp-b" };
+        assert!(
+            verify_candidate_identity(&b, "fp-a").is_err(),
+            "a candidate presented under the wrong baseline fingerprint must fail closed"
+        );
+    }
+
+    // 12. No P&L/result/score/fill value participates in the wrapper
+    // fingerprint -- mutating the wrapper's internal buffer state via real
+    // `on_bar` calls must never change its fingerprint.
+    #[test]
+    fn wrapper_fingerprint_is_unaffected_by_on_bar_execution_state() {
+        let inner = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let mut wrapped = DelayedStrategy::new(inner, 1);
+        let fp_before = wrapped.semantic_fingerprint();
+
+        let ctx = StrategyContext::new(60, 0, RecentBarsWindow::new(1, vec![]));
+        for _ in 0..3 {
+            wrapped.on_bar(&ctx);
+        }
+
+        assert_eq!(
+            fp_before,
+            wrapped.semantic_fingerprint(),
+            "the wrapper's fingerprint must be fixed at construction, never influenced by \
+             execution/result state accumulated via on_bar"
+        );
     }
 }
