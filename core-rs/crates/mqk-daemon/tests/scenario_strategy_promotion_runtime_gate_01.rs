@@ -930,12 +930,18 @@ async fn external_no_db_query_failure_is_unavailable() {
     assert_eq!(json["disposition"], "unavailable");
 }
 
-/// Exact active-paper identity passes Gate 2b — proven by observing the
-/// response is NOT the Gate 2b refusal and instead reflects a later gate's
-/// own disposition (arm state, since this state was never armed).
+/// EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01: an exact, real,
+/// currently-matching `active_paper` identity is still refused at Gate 2b
+/// on the external signal path — this channel has no trusted way to
+/// authenticate what configuration/logic actually produced the signal's
+/// own side/qty, so a server-side reconstruction (which would only ever
+/// prove THIS daemon's own current config) is never attempted as a
+/// substitute. Contrast with the internal path's
+/// `internal_active_paper_exact_identity_accepted_one_outbox_row`, which
+/// DOES have a real running host to query and remains accepted unchanged.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn external_active_paper_exact_identity_passes_promotion_gate() {
+async fn external_active_paper_exact_identity_is_refused_at_promotion_gate() {
     let pool = make_db_pool().await;
     // Reset the global durable arm-state singleton: other tests in this
     // shared test DB may have left it ARMED, and this test's proof
@@ -973,27 +979,40 @@ async fn external_active_paper_exact_identity_passes_promotion_gate() {
         )),
     )
     .await;
-    assert_ne!(
-        json["disposition"], "promotion_missing",
-        "active_paper exact identity must not be refused at the promotion gate"
-    );
+    // EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01: independent review
+    // found this test previously asserted the DEFECT -- that an exact
+    // real-fingerprint match let the external path pass Gate 2b and reach
+    // Gate 3 (arm state). The external signal route now never attempts a
+    // server-side reconstruction as provenance for a config-bound identity,
+    // so even this exact real match is refused AT Gate 2b, before arm state
+    // is ever consulted -- never reaching (and never able to reach)
+    // "rejected" for an unrelated, later gate.
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "must reach Gate 3 (arm state, not armed in this fixture) — proves Gate 2b passed"
+        "must be refused at Gate 2b regardless of arm state: {json}"
     );
-    assert_eq!(json["disposition"], "rejected");
+    assert_eq!(
+        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+    );
 }
 
-/// Full end-to-end acceptance on the external path: promotion active, arm
-/// state ARMED, an active running run seeded — must reach the outbox.
+/// EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01: independent review
+/// found this test previously proved the DEFECT end-to-end -- every OTHER
+/// gate satisfied (armed, active running run) let a reconstructed-fingerprint
+/// match reach the outbox. Now proves the opposite, and the load-bearing
+/// "no live-authority gap" property the mission requires: with every other
+/// gate satisfied, the external path is STILL refused at Gate 2b and zero
+/// outbox rows are ever created -- config-bound Paper authority can never
+/// reach the outbox on this path, regardless of how "ready" every other
+/// gate is.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn external_active_paper_full_happy_path_reaches_outbox() {
+async fn external_active_paper_full_happy_path_is_refused_at_promotion_gate() {
     let pool = make_db_pool().await;
-    // C2: real registered engine, real matching fingerprint — see
-    // `external_active_paper_exact_identity_passes_promotion_gate`'s doc
-    // comment for why a synthetic strategy_id cannot be used here anymore.
+    // Real registered engine, real matching fingerprint -- see
+    // `external_active_paper_exact_identity_is_refused_at_promotion_gate`'s
+    // doc comment for why a synthetic strategy_id cannot be used here.
     let sid = "swing_momentum".to_string();
     let symbol = unique_id("RTG01E2E").to_uppercase();
     let fingerprint = mqk_daemon::strategy_config_identity::resolve_server_semantic_fingerprint(
@@ -1023,12 +1042,15 @@ async fn external_active_paper_full_happy_path_reaches_outbox() {
     .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "full happy path must reach outbox; got: {json}"
+        StatusCode::FORBIDDEN,
+        "every other gate satisfied, but the external path must still be refused for \
+         config-bound Paper authority: {json}"
     );
-    assert_eq!(json["disposition"], "enqueued");
-    assert_eq!(json["intent_placed"], true);
-    assert_eq!(outbox_row_count(&pool, &signal_id).await, 1);
+    assert_eq!(
+        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+    );
+    assert_eq!(json["intent_placed"], false);
+    assert_eq!(outbox_row_count(&pool, &signal_id).await, 0);
 }
 
 /// A promotion-denied signal never deposits a bar input for the execution
@@ -1097,7 +1119,7 @@ async fn paper_promotion_gate_never_authorizes_live() {
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
-        Some(fp.as_str()),
+        mqk_daemon::promotion_gate::SemanticProvenance::Fingerprint(Some(fp.as_str())),
     )
     .await;
     assert!(
@@ -1132,7 +1154,7 @@ async fn active_paper_denied_in_live_mode() {
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
-        None,
+        mqk_daemon::promotion_gate::SemanticProvenance::Fingerprint(None),
     )
     .await;
     assert!(
@@ -1159,7 +1181,7 @@ async fn active_paper_denied_in_unknown_mode() {
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
-        None,
+        mqk_daemon::promotion_gate::SemanticProvenance::Fingerprint(None),
     )
     .await;
     assert!(

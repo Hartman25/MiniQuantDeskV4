@@ -142,6 +142,37 @@ pub fn evaluate_promotion_tradability_with_config_identity(
     }
 }
 
+/// How a caller of [`evaluate_paper_promotion_gate`] can (or cannot)
+/// establish the semantic identity of the exact instance/config producing a
+/// decision. Every real caller must say which of these it is — there is no
+/// default, and no path from `ExternallyUnavailable` to `Fingerprint` other
+/// than the caller genuinely having one to offer.
+#[derive(Debug, Clone, Copy)]
+pub enum SemanticProvenance<'a> {
+    /// RUNTIME-PROMOTION-EVIDENCE-BINDING-01 (C2): the caller's own
+    /// server-derived [`mqk_strategy::Strategy::semantic_fingerprint`] for
+    /// the exact instance producing this decision -- `Some` from the
+    /// internal dispatch path (the already-running host's own captured
+    /// fingerprint); `None` when the caller attempted resolution but the
+    /// identity itself could not be established (e.g. an unknown
+    /// `strategy_id`, or a registered timeframe that disagrees with the
+    /// request). `None` can never match any promoted fingerprint -- see
+    /// [`evaluate_promotion_tradability_with_config_identity`].
+    Fingerprint(Option<&'a str>),
+    /// EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01: this call site
+    /// has NO trusted provenance channel for the decision at all. A
+    /// server-side reconstruction (re-instantiating a daemon-native
+    /// strategy and reading its fingerprint) would prove only THIS
+    /// daemon's own current configuration -- never the configuration or
+    /// logic that actually produced an externally-submitted decision's
+    /// side/qty -- so it must never be treated as a substitute for real
+    /// provenance. Durable state is still evaluated honestly first: an
+    /// identity that is not even `active_paper`/effective/unexpired reports
+    /// its own real reason, never masked by a provenance-unavailable
+    /// disposition that would misdiagnose an unrelated gate failure.
+    ExternallyUnavailable,
+}
+
 /// Evaluate the paper-promotion gate for one exact identity.
 ///
 /// STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase E): `mode` is a
@@ -152,16 +183,7 @@ pub fn evaluate_promotion_tradability_with_config_identity(
 /// observed as tradable from a non-`Paper` runtime context, regardless of
 /// what future call site might reuse this function.
 ///
-/// RUNTIME-PROMOTION-EVIDENCE-BINDING-01 (C2): `current_semantic_fingerprint`
-/// is the caller's own server-derived
-/// [`mqk_strategy::Strategy::semantic_fingerprint`] for the exact instance
-/// producing this decision -- `Some` from the internal dispatch path (the
-/// already-running host's own captured fingerprint) or the external signal
-/// path (freshly re-derived through the authoritative registry
-/// construction path, since there is no live host to query); `None` when
-/// the caller could not establish one at all (e.g. the external path's
-/// strategy_id does not resolve). `None` can never match any promoted
-/// fingerprint -- see [`evaluate_promotion_tradability_with_config_identity`].
+/// See [`SemanticProvenance`] for `semantic_provenance`'s contract.
 ///
 /// Callers must have already established DB presence and produced their
 /// own `unavailable`/`no_db` disposition before calling this — it takes
@@ -173,7 +195,7 @@ pub async fn evaluate_paper_promotion_gate(
     strategy_id: &str,
     symbol: &str,
     timeframe_secs: i64,
-    current_semantic_fingerprint: Option<&str>,
+    semantic_provenance: SemanticProvenance<'_>,
 ) -> PromotionGateOutcome {
     if mode != PromotionRunMode::Paper {
         return PromotionGateOutcome {
@@ -201,11 +223,29 @@ pub async fn evaluate_paper_promotion_gate(
     };
 
     let now_utc = Utc::now();
-    let (paper_tradable, reason_code) = evaluate_promotion_tradability_with_config_identity(
-        record.as_ref(),
-        now_utc,
-        current_semantic_fingerprint,
-    );
+    let (paper_tradable, reason_code) = match semantic_provenance {
+        SemanticProvenance::Fingerprint(fp) => {
+            evaluate_promotion_tradability_with_config_identity(record.as_ref(), now_utc, fp)
+        }
+        SemanticProvenance::ExternallyUnavailable => {
+            let (durable_tradable, durable_reason) =
+                evaluate_promotion_tradability(record.as_ref(), now_utc);
+            if durable_tradable {
+                // Durable state alone says this identity is active/effective/
+                // unexpired -- but this channel can never prove semantic
+                // provenance for it. A genuinely different, narrower reason
+                // than a real (mismatched) fingerprint comparison.
+                (
+                    false,
+                    PromotionReasonCode::PromotionExternalSemanticProvenanceUnavailable,
+                )
+            } else {
+                // The real, unrelated reason (not yet promoted, expired,
+                // demoted, etc.) -- never masked by a provenance disposition.
+                (false, durable_reason)
+            }
+        }
+    };
     let blocker = if paper_tradable {
         String::new()
     } else {

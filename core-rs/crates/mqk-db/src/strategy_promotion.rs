@@ -929,6 +929,20 @@ pub enum PromotionReasonCode {
     /// live-authorization check of any kind. A paper promotion state must
     /// never authorize a LIVE run or live-routing path.
     PromotionLiveNotAuthorized,
+    /// EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01: durable state
+    /// alone says this identity IS `active_paper`, effective, and unexpired
+    /// -- but the calling channel has no trusted way to authenticate the
+    /// exact semantic configuration that produced this specific decision
+    /// (the external signal route has no live strategy host to query, and a
+    /// server-side reconstruction would prove only the daemon's own current
+    /// configuration, never the external producer's). Distinct from
+    /// [`Self::PromotionConfigMismatch`] (a real, comparable fingerprint was
+    /// available and genuinely disagreed) so operator truth never conflates
+    /// "config drifted since approval" with "this channel cannot prove
+    /// provenance at all" -- and distinct from every other reason code here,
+    /// which describes an unrelated gate failure (not yet promoted, expired,
+    /// demoted, etc.) that would refuse regardless of provenance.
+    PromotionExternalSemanticProvenanceUnavailable,
 }
 
 impl PromotionReasonCode {
@@ -949,6 +963,9 @@ impl PromotionReasonCode {
             Self::PromotionQueryFailed => "promotion_query_failed",
             Self::PromotionNotYetEffective => "promotion_not_yet_effective",
             Self::PromotionLiveNotAuthorized => "promotion_live_not_authorized",
+            Self::PromotionExternalSemanticProvenanceUnavailable => {
+                "promotion_external_semantic_provenance_unavailable"
+            }
         }
     }
 }

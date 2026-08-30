@@ -792,7 +792,9 @@ pub async fn submit_internal_strategy_decision(
             &sid,
             decision.symbol.trim(),
             decision.timeframe_secs,
-            Some(decision.strategy_semantic_fingerprint.as_str()),
+            crate::promotion_gate::SemanticProvenance::Fingerprint(Some(
+                decision.strategy_semantic_fingerprint.as_str(),
+            )),
         )
         .await;
         if !promotion.paper_tradable {

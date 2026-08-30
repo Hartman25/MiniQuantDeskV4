@@ -964,31 +964,28 @@ pub(crate) async fn strategy_signal(
                 );
             }
         };
-        // RUNTIME-PROMOTION-EVIDENCE-BINDING-01 (C2): the external signal
-        // carries no live strategy host to query — the only authoritative
-        // semantic identity available is re-derived server-side, right now,
-        // through the exact same registry-construction seam C1's promotion
-        // route and this gate's other caller (decision.rs) ultimately trace
-        // back to. Never trusts anything from the signal request itself
-        // (there is no such field in `validated` to trust). `Err` (unknown
-        // strategy_id, or a real registered timeframe that disagrees with
-        // this request's own `timeframe_secs`) means no server-authoritative
-        // semantic identity exists for this signal — `None` here can never
-        // match any promoted fingerprint, so the gate fails closed.
-        let current_semantic_fingerprint =
-            crate::strategy_config_identity::resolve_server_semantic_fingerprint(
-                &validated.strategy_id,
-                &validated.symbol,
-                timeframe_secs,
-            )
-            .ok();
+        // EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01: the external
+        // signal route has no live strategy host to query, and — unlike C1's
+        // promotion-transition route, which is binding the DAEMON's own
+        // config identity to a promotion record it is itself writing —
+        // there is no trusted channel here proving what configuration or
+        // logic actually produced this externally-submitted decision's
+        // side/qty. Re-instantiating a daemon-native strategy and reading
+        // ITS fingerprint (the prior behavior) would only ever prove this
+        // daemon's own current configuration, never the external producer's
+        // -- treating that reconstruction as authority let ANY external
+        // signal for a config-bound `active_paper` identity launder through
+        // regardless of what actually produced it. Never disables the
+        // internal native-strategy dispatch path (`decision.rs` Gate 3b),
+        // which DOES have a real, already-running host to query and
+        // continues to use `SemanticProvenance::Fingerprint` unchanged.
         let promotion = crate::promotion_gate::evaluate_paper_promotion_gate(
             db,
             crate::promotion_gate::PromotionRunMode::from(st.deployment_mode()),
             &validated.strategy_id,
             &validated.symbol,
             timeframe_secs,
-            current_semantic_fingerprint.as_deref(),
+            crate::promotion_gate::SemanticProvenance::ExternallyUnavailable,
         )
         .await;
         if !promotion.paper_tradable {

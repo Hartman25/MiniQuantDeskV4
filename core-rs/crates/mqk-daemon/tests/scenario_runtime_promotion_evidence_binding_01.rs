@@ -434,13 +434,16 @@ fn external_signal_body(
     })
 }
 
-/// C2 external-path fail-closed proof: `active_paper` is durably recorded
-/// for a `strategy_id` that has NO server-authoritative semantic identity
-/// (unknown to the built-in registry — this bypasses C1's promotion-route
-/// protection entirely by seeding the row directly, simulating a residual
-/// legacy/out-of-band row). The external signal path can never derive a
-/// fingerprint for it, so it must be refused exactly like a genuine
-/// mismatch, never treated as a wildcard pass.
+/// External-path fail-closed proof: `active_paper` is durably recorded for a
+/// `strategy_id` that has NO server-authoritative semantic identity (unknown
+/// to the built-in registry — this bypasses C1's promotion-route protection
+/// entirely by seeding the row directly, simulating a residual legacy/
+/// out-of-band row). EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01:
+/// resolvability is irrelevant here — the external signal path never
+/// attempts (or trusts) a server-side reconstruction at all, so this
+/// resolves identically to any other `active_paper` identity submitted via
+/// this path: refused as provenance-unavailable, not merely "unresolvable
+/// mismatch".
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn external_unresolvable_strategy_identity_fails_closed() {
@@ -467,17 +470,24 @@ async fn external_unresolvable_strategy_identity_fails_closed() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "must be refused: {json}");
-    assert_eq!(json["disposition"], "promotion_config_mismatch");
+    assert_eq!(
+        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+    );
     assert_eq!(outbox_row_count(&pool, &signal_id).await, 0);
 }
 
-/// Caller-forgery proof on the external path: the signal request schema has
-/// no field through which a caller could claim a fingerprint at all — an
-/// extra, unrecognized JSON field is silently ignored, never becomes
-/// authority. Uses a REAL registered engine so the server-side resolution
-/// genuinely succeeds and the request is accepted end-to-end, proving the
-/// forged field had zero effect on the outcome (not merely "request
-/// rejected, so who knows").
+/// EXTERNAL-SIGNAL-SEMANTIC-PROVENANCE-FAIL-CLOSED-01: independent review
+/// found this test previously asserted the DEFECT itself -- a genuinely
+/// `active_paper`, config-bound identity was accepted on the external
+/// signal path merely because the daemon reconstructed a matching NATIVE
+/// fingerprint, which proves this daemon's own current configuration, never
+/// the actual external producer's decision logic. Now proves the opposite:
+/// even this exact real, correctly-promoted identity must be REFUSED on the
+/// external path (no trusted provenance channel exists there at all), and a
+/// forged request field claiming the (genuinely correct) fingerprint value
+/// still has zero effect -- it does not "rescue" the request into
+/// acceptance, exactly as it also could not before invent one that was
+/// never legitimate.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn external_forged_fingerprint_field_has_no_effect() {
@@ -500,16 +510,22 @@ async fn external_forged_fingerprint_field_has_no_effect() {
 
     let signal_id = unique_id("sig");
     let mut body = external_signal_body(&signal_id, &sid, &symbol, Some(TIMEFRAME_SECS));
-    // Not a real field on the request schema -- must be silently ignored.
-    body["config_fingerprint"] = serde_json::json!("f".repeat(64));
+    // Not a real field on the request schema -- must be silently ignored,
+    // and must not "rescue" this identity into acceptance even though the
+    // forged value here is the genuinely correct fingerprint.
+    body["config_fingerprint"] = serde_json::json!(real_fp);
     let (status, json) = call(routes::build_router(st), signal_req(body)).await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "genuine active_paper identity must succeed regardless of a forged extra field: {json}"
+        StatusCode::FORBIDDEN,
+        "external signals must be refused for config-bound Paper authority regardless of a \
+         forged (even genuinely-matching) fingerprint field -- there is no trusted provenance \
+         channel on this path: {json}"
     );
-    assert_eq!(json["disposition"], "enqueued");
-    assert_eq!(outbox_row_count(&pool, &signal_id).await, 1);
+    assert_eq!(
+        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+    );
+    assert_eq!(outbox_row_count(&pool, &signal_id).await, 0);
 }
 
 /// Live mode remains unconditionally denied even with an exact fingerprint
@@ -529,7 +545,7 @@ async fn exact_match_never_authorizes_live_mode() {
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
-        Some(fp.as_str()),
+        mqk_daemon::promotion_gate::SemanticProvenance::Fingerprint(Some(fp.as_str())),
     )
     .await;
     assert!(
