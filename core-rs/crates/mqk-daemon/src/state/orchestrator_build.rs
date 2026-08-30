@@ -12,9 +12,13 @@
 
 use std::sync::Arc;
 
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use mqk_execution::{wiring::build_gateway, BrokerError, BrokerOrderMap};
+use mqk_runtime::runtime_risk::{
+    AccountAuthorityContext, AccountAuthorityError, RuntimeAccountAuthority, SystemClock,
+};
 use sqlx::PgPool;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::broker::{build_daemon_broker, DaemonBroker};
@@ -27,6 +31,86 @@ use super::types::{
     RuntimeLifecycleError, StateIntegrityGate,
 };
 use super::{AppState, BrokerSnapshotFetcher, DAEMON_ENGINE_ID};
+
+// ---------------------------------------------------------------------------
+// RUNTIME-RISK-DYNAMIC-STATE-AUTHORITY-01 / RRA-2: daemon-owned dynamic
+// account authority.
+// ---------------------------------------------------------------------------
+
+/// Reads the SAME `AppState::broker_snapshot` cache the execution loop
+/// already refreshes (no network fetch is performed here — this is a
+/// read-only cache lookup, matching the pattern already used by
+/// `StateIntegrityGate::is_armed` and `ReconcileTruthGate::is_clean`).
+///
+/// # Equity source and the Synthetic hard stop
+///
+/// For `BrokerSnapshotTruthSource::External` (Paper+Alpaca, Live+Alpaca),
+/// `snapshot.account.equity` is the broker's own marked account equity
+/// (Alpaca `GET /v2/account` `equity` field) — already treated as
+/// authoritative equity elsewhere in this crate (see
+/// `accept_external_broker_snapshot`, which persists it as durable Paper
+/// portfolio truth via the same `parse_decimal_micros` parser reused here).
+///
+/// For `BrokerSnapshotTruthSource::Synthetic` (the internal Paper broker
+/// with no real broker behind it), `synthesize_paper_broker_snapshot` sets
+/// `account.equity` to `portfolio.cash_micros` — i.e. CASH, not
+/// mark-to-market equity (see `snapshot.rs`). This authority MUST NOT
+/// accept that value as current equity: doing so would silently let
+/// intraday drawdown gating be gated on cash instead of marked equity for
+/// every open position. Production account-level loss/drawdown gating for
+/// the Synthetic source therefore fails closed (`Unavailable`) rather than
+/// fabricate a number — see RUNTIME-RISK-DYNAMIC-STATE-AUTHORITY-01 mission
+/// hard stop.
+struct DaemonAccountAuthority {
+    broker_snapshot: Arc<RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
+    source: BrokerSnapshotTruthSource,
+    freshness_bound: chrono::Duration,
+}
+
+impl RuntimeAccountAuthority for DaemonAccountAuthority {
+    fn current_account(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<AccountAuthorityContext, AccountAuthorityError> {
+        if self.source != BrokerSnapshotTruthSource::External {
+            return Err(AccountAuthorityError::Unavailable);
+        }
+
+        let guard = self
+            .broker_snapshot
+            .try_read()
+            .map_err(|_| AccountAuthorityError::Unavailable)?;
+        let snapshot = guard.as_ref().ok_or(AccountAuthorityError::Unavailable)?;
+
+        let age = now.signed_duration_since(snapshot.captured_at_utc);
+        if age < chrono::Duration::zero() || age > self.freshness_bound {
+            return Err(AccountAuthorityError::Stale);
+        }
+
+        let equity_micros =
+            crate::routes::helpers::parse_decimal_micros(&snapshot.account.equity)
+                .ok_or(AccountAuthorityError::Malformed)?;
+        if equity_micros <= 0 {
+            return Err(AccountAuthorityError::Malformed);
+        }
+
+        // RRA-4 disposition: no authoritative PDT source is wired yet (see
+        // runtime-risk authority map). `PdtContext::ok()` here is only
+        // reachable when `RiskConfig::pdt_auto_enabled == false` in
+        // practice-checked production config; `pdt_auto_enabled == true`
+        // with this stub would silently never enforce PDT, which is exactly
+        // the defect this mission tracks as PDT_AUTHORITY_PREREQUISITE_MISSING
+        // (unresolved — see final report). kill_switch stays `None`:
+        // canonical halt authority for staleness/manual/reconcile-drift
+        // lives in `StateIntegrityGate`, evaluated as an independent gate
+        // before this one.
+        Ok(AccountAuthorityContext {
+            equity_micros,
+            pdt: mqk_runtime::runtime_risk::RiskPdtContext::ok(),
+            kill_switch: None,
+        })
+    }
+}
 
 impl AppState {
     pub(super) async fn next_daemon_run_id(
@@ -69,14 +153,20 @@ impl AppState {
             .await
             .map_err(|err| RuntimeLifecycleError::internal("fetch_run failed", err))?;
 
-        // AUTON-PAPER-BLOCKER-01: daemon-created runs store a minimal config_json
-        // with no /risk subtree.  Supplement from env vars so RuntimeRiskGate
-        // receives real inputs.  Fields already in config_json are never overwritten.
-        let (env_equity_micros, env_daily_loss_limit) = load_risk_env();
+        // AUTON-PAPER-BLOCKER-01 / RRA-2: daemon-created runs store a minimal
+        // config_json with no /risk subtree.  Supplement from env vars so
+        // RuntimeRiskGate receives real inputs.  Fields already in
+        // config_json are never overwritten. max_drawdown is supplemented
+        // the same way as daily_loss_limit — if neither the run's own config
+        // nor MQK_RISK_MAX_DRAWDOWN supplies it, `RuntimeRiskGate` fails the
+        // whole gate closed (RRA-2: max_drawdown is required, not
+        // defaulted to disabled).
+        let (env_equity_micros, env_daily_loss_limit, env_max_drawdown) = load_risk_env();
         let effective_config = effective_run_config_for_risk(
             &run.config_json,
             env_equity_micros,
             env_daily_loss_limit,
+            env_max_drawdown,
         );
 
         let initial_equity_micros = effective_config
@@ -279,28 +369,31 @@ impl AppState {
         );
         *self.alpaca_ws_continuity.write().await = ws_continuity;
 
-        // AUTON-PAPER-RISK-04: derive real day/window identifiers from UTC
-        // wall-clock at orchestrator construction time.  day_id is YYYYMMDD
-        // (matching RiskInput documentation); reject_window_id is the
-        // minute-of-day bucket (0..1439, matching "minute bucket counter").
-        // Both are evaluated once at run-start — the risk engine tracks
-        // subsequent window transitions via RiskState::record_reject().
-        let risk_now = Utc::now();
-        let risk_day = risk_now.date_naive();
-        let day_id: u32 =
-            (risk_day.year() as u32) * 10_000 + risk_day.month() * 100 + risk_day.day();
-        let reject_window_id: u32 = risk_now.hour() * 60 + risk_now.minute();
+        // RUNTIME-RISK-DYNAMIC-STATE-AUTHORITY-01 / RRA-2: day_id and
+        // reject_window_id are no longer computed here — `RuntimeRiskGate`
+        // now derives them fresh from its own injected `SystemClock` on
+        // every evaluation (AUTON-PAPER-RISK-04 formulas moved to
+        // `mqk_runtime::runtime_risk`). Equity is likewise no longer frozen
+        // at construction: `DaemonAccountAuthority` reads the live
+        // `broker_snapshot` cache on every evaluation.
+        let account_authority: Arc<dyn RuntimeAccountAuthority> = Arc::new(DaemonAccountAuthority {
+            broker_snapshot: Arc::clone(&self.broker_snapshot),
+            source: self.broker_snapshot_source,
+            freshness_bound: chrono::Duration::seconds(
+                mqk_runtime::orchestrator::TERMINAL_FILL_SETTLE_GRACE_SECS,
+            ),
+        });
 
         let gateway = build_gateway(
             daemon_broker,
             StateIntegrityGate {
                 integrity: Arc::clone(&self.integrity),
             },
-            mqk_runtime::runtime_risk::RuntimeRiskGate::from_run_config(
+            mqk_runtime::runtime_risk::RuntimeRiskGate::from_run_config_with_account_authority(
                 &effective_config,
                 initial_equity_micros,
-                day_id,
-                reject_window_id,
+                account_authority,
+                Arc::new(SystemClock),
             ),
             ReconcileTruthGate {
                 reconcile_status: Arc::clone(&self.reconcile_status),
@@ -625,13 +718,20 @@ pub(crate) const ENV_RISK_INITIAL_EQUITY_USD: &str = "MQK_RISK_INITIAL_EQUITY_US
 /// Env var: daily loss limit as a ratio (exclusive range 0 < r < 1).
 pub(crate) const ENV_RISK_DAILY_LOSS_LIMIT: &str = "MQK_RISK_DAILY_LOSS_LIMIT";
 
-/// Read the two required risk fields from env.
+/// Env var: max drawdown limit as a ratio (exclusive range 0 < r < 1).
+/// RRA-2: required with the same validation discipline as
+/// `ENV_RISK_DAILY_LOSS_LIMIT` — `RuntimeRiskGate` fails closed (not
+/// disabled) if this cannot be supplied from either the run's own
+/// `config_json` or this env var.
+pub(crate) const ENV_RISK_MAX_DRAWDOWN: &str = "MQK_RISK_MAX_DRAWDOWN";
+
+/// Read the three required risk fields from env.
 ///
-/// Returns `(equity_micros, daily_loss_limit)`.  Either or both may be `None`
-/// if the env var is absent, empty, unparseable, or out of range.  The risk
-/// gate already fails closed when these are absent, so `None` just preserves
-/// the prior fail-closed behavior.
-fn load_risk_env() -> (Option<i64>, Option<f64>) {
+/// Returns `(equity_micros, daily_loss_limit, max_drawdown)`.  Any may be
+/// `None` if the env var is absent, empty, unparseable, or out of range.
+/// The risk gate already fails closed when these are absent, so `None` just
+/// preserves the prior fail-closed behavior.
+fn load_risk_env() -> (Option<i64>, Option<f64>, Option<f64>) {
     let equity_micros = std::env::var(ENV_RISK_INITIAL_EQUITY_USD)
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())
@@ -643,7 +743,12 @@ fn load_risk_env() -> (Option<i64>, Option<f64>) {
         .and_then(|s| s.trim().parse::<f64>().ok())
         .filter(|&r| r.is_finite() && r > 0.0 && r < 1.0);
 
-    (equity_micros, daily_loss_limit)
+    let max_drawdown = std::env::var(ENV_RISK_MAX_DRAWDOWN)
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|&r| r.is_finite() && r > 0.0 && r < 1.0);
+
+    (equity_micros, daily_loss_limit, max_drawdown)
 }
 
 /// Build the effective run config for risk gate initialization.
@@ -660,6 +765,7 @@ fn effective_run_config_for_risk(
     base: &serde_json::Value,
     env_equity_micros: Option<i64>,
     env_daily_loss_limit: Option<f64>,
+    env_max_drawdown: Option<f64>,
 ) -> serde_json::Value {
     let need_equity = base
         .pointer("/risk/initial_equity_micros")
@@ -669,11 +775,16 @@ fn effective_run_config_for_risk(
         .pointer("/risk/daily_loss_limit")
         .and_then(|v| v.as_f64())
         .is_none();
+    let need_max_drawdown = base
+        .pointer("/risk/max_drawdown")
+        .and_then(|v| v.as_f64())
+        .is_none();
 
     let will_add_equity = need_equity && env_equity_micros.is_some();
     let will_add_loss_limit = need_loss_limit && env_daily_loss_limit.is_some();
+    let will_add_max_drawdown = need_max_drawdown && env_max_drawdown.is_some();
 
-    if !will_add_equity && !will_add_loss_limit {
+    if !will_add_equity && !will_add_loss_limit && !will_add_max_drawdown {
         return base.clone();
     }
 
@@ -698,6 +809,12 @@ fn effective_run_config_for_risk(
             risk_obj.insert(
                 "daily_loss_limit".to_string(),
                 serde_json::json!(env_daily_loss_limit.unwrap()),
+            );
+        }
+        if will_add_max_drawdown {
+            risk_obj.insert(
+                "max_drawdown".to_string(),
+                serde_json::json!(env_max_drawdown.unwrap()),
             );
         }
     }
@@ -744,40 +861,10 @@ pub(super) fn select_external_snapshot_fetcher(
 mod tests {
     use super::*;
 
-    // AUTON-PAPER-RISK-04: prove the day_id/reject_window_id derivation
-    // formulas produce the exact values the risk engine documentation specifies.
-    #[test]
-    fn risk_time_context_day_id_and_window_derivation_is_correct() {
-        use chrono::{Datelike, TimeZone, Timelike};
-        // 2024-01-15 09:32:45 UTC — a known reference moment.
-        let ts = chrono::Utc
-            .with_ymd_and_hms(2024, 1, 15, 9, 32, 45)
-            .unwrap();
-        let d = ts.date_naive();
-        let day_id: u32 = (d.year() as u32) * 10_000 + d.month() * 100 + d.day();
-        assert_eq!(day_id, 20_240_115, "day_id must be YYYYMMDD");
-
-        let reject_window_id: u32 = ts.hour() * 60 + ts.minute();
-        assert_eq!(
-            reject_window_id,
-            9 * 60 + 32,
-            "reject_window_id must be minute-of-day bucket"
-        );
-
-        // Boundary: midnight (00:00) yields bucket 0.
-        let midnight = chrono::Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
-        assert_eq!(midnight.hour() * 60 + midnight.minute(), 0);
-
-        // Boundary: 23:59 yields bucket 1439 (max for a 24-hour day).
-        let last_minute = chrono::Utc
-            .with_ymd_and_hms(2024, 1, 15, 23, 59, 0)
-            .unwrap();
-        assert_eq!(last_minute.hour() * 60 + last_minute.minute(), 1439);
-
-        // day_id must never overflow u32 for any sane calendar year.
-        let far: u32 = 9999 * 10_000 + 12 * 100 + 31;
-        assert!(far < u32::MAX, "day_id fits in u32 for any calendar date");
-    }
+    // AUTON-PAPER-RISK-04 / RRA-2: day_id/reject_window_id derivation moved
+    // to `mqk_runtime::runtime_risk` (see
+    // `day_id_and_reject_window_id_formulas_are_correct` there) — this
+    // orchestrator no longer computes them itself.
 
     #[test]
     fn supplements_missing_risk_fields_from_env_values() {
@@ -786,7 +873,8 @@ mod tests {
             "adapter": "alpaca",
             "mode": "paper",
         });
-        let effective = effective_run_config_for_risk(&base, Some(50_000 * 1_000_000), Some(0.02));
+        let effective =
+            effective_run_config_for_risk(&base, Some(50_000 * 1_000_000), Some(0.02), Some(0.10));
 
         assert_eq!(
             effective
@@ -799,6 +887,12 @@ mod tests {
                 .pointer("/risk/daily_loss_limit")
                 .and_then(|v| v.as_f64()),
             Some(0.02),
+        );
+        assert_eq!(
+            effective
+                .pointer("/risk/max_drawdown")
+                .and_then(|v| v.as_f64()),
+            Some(0.10),
         );
         // Non-risk fields preserved.
         assert_eq!(
@@ -813,10 +907,12 @@ mod tests {
             "risk": {
                 "initial_equity_micros": 10_000_000_000i64,
                 "daily_loss_limit": 0.01_f64,
+                "max_drawdown": 0.05_f64,
             }
         });
         // Env values that would overwrite if the guard failed.
-        let effective = effective_run_config_for_risk(&base, Some(99_999_000_000), Some(0.99));
+        let effective =
+            effective_run_config_for_risk(&base, Some(99_999_000_000), Some(0.99), Some(0.99));
 
         assert_eq!(
             effective
@@ -832,17 +928,72 @@ mod tests {
             Some(0.01),
             "base daily_loss_limit must not be overwritten",
         );
+        assert_eq!(
+            effective
+                .pointer("/risk/max_drawdown")
+                .and_then(|v| v.as_f64()),
+            Some(0.05),
+            "base max_drawdown must not be overwritten",
+        );
     }
 
     #[test]
     fn returns_base_unchanged_when_env_absent() {
         let base = serde_json::json!({ "runtime": "mqk-daemon" });
-        let effective = effective_run_config_for_risk(&base, None, None);
+        let effective = effective_run_config_for_risk(&base, None, None, None);
 
         // No /risk subtree added — fail-closed behavior preserved.
         assert!(effective.pointer("/risk/initial_equity_micros").is_none());
         assert!(effective.pointer("/risk/daily_loss_limit").is_none());
+        assert!(effective.pointer("/risk/max_drawdown").is_none());
         assert_eq!(effective, base);
+    }
+
+    // RRA-2: missing max_drawdown alone (equity + daily_loss_limit already
+    // present in base) must still be supplemented from env when available.
+    #[test]
+    fn supplements_only_missing_max_drawdown() {
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": 25_000_000_000i64,
+                "daily_loss_limit": 0.02_f64,
+            }
+        });
+        let effective = effective_run_config_for_risk(&base, None, None, Some(0.08));
+
+        assert_eq!(
+            effective
+                .pointer("/risk/max_drawdown")
+                .and_then(|v| v.as_f64()),
+            Some(0.08),
+        );
+        assert_eq!(
+            effective
+                .pointer("/risk/daily_loss_limit")
+                .and_then(|v| v.as_f64()),
+            Some(0.02),
+        );
+    }
+
+    // RRA-2: base has everything except max_drawdown, and env does NOT
+    // supply it either — the effective config must stay WITHOUT
+    // /risk/max_drawdown (never silently defaulted to a value), so
+    // `RuntimeRiskGate::from_run_config_with_account_authority` fails the
+    // gate closed downstream.
+    #[test]
+    fn missing_max_drawdown_is_never_silently_defaulted() {
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": 25_000_000_000i64,
+                "daily_loss_limit": 0.02_f64,
+            }
+        });
+        let effective = effective_run_config_for_risk(&base, None, None, None);
+
+        assert!(
+            effective.pointer("/risk/max_drawdown").is_none(),
+            "absent max_drawdown must never be silently filled with a default value"
+        );
     }
 
     #[test]
@@ -863,7 +1014,8 @@ mod tests {
                 "initial_equity_micros": 25_000_000_000i64,
             }
         });
-        let effective = effective_run_config_for_risk(&base, Some(99_000_000_000), Some(0.03));
+        let effective =
+            effective_run_config_for_risk(&base, Some(99_000_000_000), Some(0.03), Some(0.07));
 
         // Equity from base wins.
         assert_eq!(
@@ -878,6 +1030,13 @@ mod tests {
                 .pointer("/risk/daily_loss_limit")
                 .and_then(|v| v.as_f64()),
             Some(0.03),
+        );
+        // max_drawdown also supplemented from env (was missing from base).
+        assert_eq!(
+            effective
+                .pointer("/risk/max_drawdown")
+                .and_then(|v| v.as_f64()),
+            Some(0.07),
         );
     }
 
