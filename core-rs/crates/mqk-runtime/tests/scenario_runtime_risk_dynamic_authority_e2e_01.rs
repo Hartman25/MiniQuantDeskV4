@@ -13,6 +13,20 @@
 //!
 //! No real Alpaca call, no real Paper DB — the broker adapter is a hermetic
 //! in-memory stub and the account authority is a hermetic test double.
+//!
+//! This is proof lane A of four (RUNTIME-RISK-DYNAMIC-STATE-AUTHORITY-01-REPAIR):
+//! A. this file — RuntimeRiskGate/BrokerGateway hermetic proof.
+//! B. `mqk-daemon`'s `state::orchestrator_build::tests::rr3_*` — the REAL
+//!    `DaemonAccountAuthority` in its defining module (this file's
+//!    `TestAccountAuthority` only mirrors its behavior and must never be
+//!    presented as proof of it).
+//! C. `mqk-testkit`'s `scenario_inbound_reject_storm_rr4_01.rs` — the REAL
+//!    `ExecutionOrchestrator` against a disposable Postgres DB, proving the
+//!    asynchronous/polled inbound `BrokerEvent::Reject` path this file's
+//!    CASE 3 cannot exercise (CASE 3 drives the gateway directly).
+//! D. `mqk-daemon`'s `state::orchestrator_build::tests::{ordinary_alpaca_config_gets_pdt_explicitly_disabled,
+//!    explicit_stale_pdt_auto_enabled_true_refuses_to_start, ...}` — the
+//!    provider-contract PDT disposition.
 
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
