@@ -889,9 +889,12 @@ fn required_initial_equity_micros(
         None => Err(RuntimeLifecycleError::forbidden(
             "runtime.start_refused.portfolio_seed_missing",
             "risk.initial_equity_micros",
-            "no local portfolio initial_equity_micros seed is configured (neither the \
-             run's own config nor MQK_RISK_INITIAL_EQUITY_MICROS supplied one) — refusing \
-             to start rather than silently seeding PortfolioState with 0",
+            format!(
+                "no local portfolio initial_equity_micros seed is configured (neither the \
+                 run's /risk/initial_equity_micros field nor {ENV_RISK_INITIAL_EQUITY_USD} \
+                 supplied a usable value) — refusing to start rather than silently seeding \
+                 PortfolioState with 0"
+            ),
         )),
         Some(value) => match value.as_i64() {
             Some(micros) if micros > 0 => Ok(micros),
@@ -1297,6 +1300,18 @@ mod tests {
         let err = required_initial_equity_micros(&effective)
             .expect_err("absent seed must refuse to start, never default to 0");
         assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_missing");
+
+        // RUNTIME-RISK-EQUITY-ENV-OPERATOR-MESSAGE-01: the refusal must name
+        // the actual supported env var, not the nonexistent "_MICROS" literal.
+        let message = err.to_string();
+        assert!(
+            message.contains(ENV_RISK_INITIAL_EQUITY_USD),
+            "message must name the real env var {ENV_RISK_INITIAL_EQUITY_USD}: {message}"
+        );
+        assert!(
+            !message.contains("MQK_RISK_INITIAL_EQUITY_MICROS"),
+            "message must not reference the nonexistent env var: {message}"
+        );
     }
 
     #[test]
