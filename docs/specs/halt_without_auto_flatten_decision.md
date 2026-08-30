@@ -4,6 +4,10 @@
 **Corrected by:** `FULL-SYSTEM-COMPLETION-SITUATIONAL-AUDIT-01` (L2), 2026-08-30 — the `mqk-risk`
 wiring claim below was found incomplete during L2 research and is corrected in place
 (the decision itself is unchanged; see the "Correction" note in that section).
+**Further corrected by:** `MASTER-AUDIT-TRUTH-CORRECTION-01`, 2026-08-30 — the L2 correction's own
+heading overstated production reachability of a `FlattenAndHalt` *verdict specifically*; see the
+"Further correction" note in that section for the more precise current truth (the decision itself
+remains unchanged).
 **Baseline:** `main` @ `70ed507acfe02ef860b8378b9e5eddb25a36065d`
 **Status:** DOCUMENTS EXISTING BEHAVIOR — no runtime behavior was changed to produce this record.
 
@@ -44,7 +48,7 @@ before flatten becomes available again.
   available again after the operator has deliberately restored the run to
   armed/running.
 
-### The `mqk-risk` crate's `RiskAction::FlattenAndHalt` reaches the live gate, but only as a deny — never as an executed order
+### `mqk_risk::evaluate()` reaches the live gate; a `FlattenAndHalt` *verdict* is, separately, effectively unreachable through the ordinary daemon gate today — and even if produced, only ever denies, never executes an order
 
 **Correction (`FULL-SYSTEM-COMPLETION-SITUATIONAL-AUDIT-01`, L2, 2026-08-30):**
 the paragraph originally here claimed `mqk-daemon` does not depend on
@@ -94,6 +98,39 @@ kill-switch trip, including a `MissingProtectiveStop` one that produces
 `FlattenAndHalt`, currently submits a flatten order automatically. The
 enum name remains a latent misnomer for what the daemon actually does with
 it today.
+
+**Further correction (`MASTER-AUDIT-TRUTH-CORRECTION-01`, 2026-08-30):** the
+paragraph above, and this section's original heading, said `evaluate()`'s
+`FlattenAndHalt` decision "is real production code reachable from the live
+gate" without qualifying that `FlattenAndHalt` *itself* is, separately, a
+verdict the ordinary daemon gate cannot currently produce at all — this
+was true but incomplete. `mqk_risk::evaluate()` (`mqk-risk/src/engine.rs`)
+returns `RiskAction::FlattenAndHalt` from exactly two branches: (1) a
+non-`None` `kill_switch` input (either a `MissingProtectiveStop` kill
+switch with `missing_protective_stop_flattens` configured true, or any
+other kill-switch kind unconditionally), and (2) a max-drawdown breach,
+gated behind `cfg.max_drawdown_limit_micros > 0`. On the daemon's ordinary
+production/Paper path today, `RuntimeRiskGate`'s stored `RiskInput` fixes
+`kill_switch: None` for the life of the run (`mqk-runtime/src/runtime_risk.rs:44`,
+no production call site ever constructs a non-`None` value), and the
+daemon's ordinary risk-config seam (`mqk-daemon/src/state/orchestrator_build.rs`'s
+`load_risk_env`/`effective_run_config_for_risk`) never supplies
+`/risk/max_drawdown`, so `max_drawdown_limit_micros` is ordinarily `0` and
+branch (2)'s `> 0` guard never opens either. So: `mqk_risk::evaluate()` is
+genuinely production-reachable through `RuntimeRiskGate` — that part of
+the L2 correction stands — but given today's production input binding, a
+`FlattenAndHalt` verdict specifically is effectively unreachable through
+the ordinary daemon gate, on top of (not instead of) the
+`runtime_risk_decision_to_execution_decision` collapse-to-`Deny` behavior
+documented above. Both facts point the same direction — no path from a
+halt/kill-switch trip to an automatically-submitted flatten order exists
+today — but they are two independent reasons, not one, and the decision
+record should not be read as implying `FlattenAndHalt` is a verdict that
+routinely arises and is merely denied; today it does not arise at all
+through the ordinary gate. See
+`docs/audits/2026-08-30_full_system_completion_situational_audit.md`
+(Domain: Risk) for the fuller runtime-risk-authority defect set this
+correction is part of.
 
 ## Rationale
 

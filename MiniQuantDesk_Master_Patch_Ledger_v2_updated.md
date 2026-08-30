@@ -36,10 +36,14 @@ Any other document in this repository — including `MiniQuantDesk_Master_Patch_
 ## 0. Executive Summary
 
 ### Current Repository Verdict
-The equity/ETF paper-trading core (orchestrator, OMS state machine, outbox/inbox, broker adapters, risk, portfolio, reconciliation, backtest engine, promotion gates, GUI truth-state discipline) is **evidence-provably complete and fail-closed** at HEAD. No RED (soak-blocking) source defect was found anywhere in the audited codebase. The repository's real remaining gaps cluster in three places: (1) live-capital readiness — deliberately and completely gated off pending a trust-chain proof that doesn't exist yet; (2) operational hardening around multi-symbol dispatch resilience, CLI/daemon control-plane parity, and Discord alert coverage; (3) one uncommitted-but-well-formed patch closing a narrow halt/deadman race that needs a harness run before it can be called closed.
+**Corrected 2026-08-30 (`MASTER-AUDIT-TRUTH-CORRECTION-01`) — see "Current Paper/Risk Truth Correction" below.** The paragraph immediately below (unchanged, retained for history) predates the `FULL-SYSTEM-COMPLETION-SITUATIONAL-AUDIT-01` (2026-08-30) runtime-risk findings and overstates current truth in one respect: its "No RED (soak-blocking) source defect was found anywhere in the audited codebase" claim is now superseded — the live risk gate's runtime-state/config authority (frozen equity/day/reject-window, an unreachable kill-switch input, an ordinarily-disabled max-drawdown control) is a real, deterministic gap in exactly the RED-classified risk/safety category this ledger's own Paper-Soak Protection Rule (§1) exists to catch. The rest of this paragraph's characterization of engineering depth remains accurate.
+
+*Original (2026-08-10/29, retained for history):* The equity/ETF paper-trading core (orchestrator, OMS state machine, outbox/inbox, broker adapters, risk, portfolio, reconciliation, backtest engine, promotion gates, GUI truth-state discipline) is **evidence-provably complete and fail-closed** at HEAD. No RED (soak-blocking) source defect was found anywhere in the audited codebase. The repository's real remaining gaps cluster in three places: (1) live-capital readiness — deliberately and completely gated off pending a trust-chain proof that doesn't exist yet; (2) operational hardening around multi-symbol dispatch resilience, CLI/daemon control-plane parity, and Discord alert coverage; (3) one uncommitted-but-well-formed patch closing a narrow halt/deadman race that needs a harness run before it can be called closed.
 
 ### Current Paper Verdict
-**PAPER_SOAK_GO** (`FINAL-CANONICAL-PRE-SOAK-VALIDATION-01`, 2026-08-10, HEAD `e44e3ddd`). The one previously-open item, `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`, is now CLOSED — its H08 test passed against a real local Postgres as part of a full canonical safe-ignored matrix run (733/733 tests green: H01-H08, daemon-supervisor halt fence, runtime halt fence CAS, stale-claim recovery, deadman, durable portfolio/P&L, fill/replay authority, outbox/pre-submit authority, risk/kill-switch/reconcile all proven with zero failures). All previously-tracked blockers (TradeActivity schema mismatch, partial-fill dedup, stale-claim recovery, terminal-fill replay parity) have corresponding committed fixes at HEAD, and this validation reproduced no new regression against any of them. No known accepted-list paper-soak code blocker remains.
+**SUPERSEDED 2026-08-30 (`MASTER-AUDIT-TRUTH-CORRECTION-01`) — see "Current Paper/Risk Truth Correction" below for the current authoritative verdict.** The `PAPER_SOAK_GO` verdict immediately below (retained for history — it accurately reports what the 2026-08-10 validation session concluded at that time, against that HEAD) is **no longer current authoritative status**: it predates the 2026-08-30 runtime-risk findings and did not evaluate whether the account-level risk gate's runtime-state authority was wired. Current status is **BLOCKED FOR COUNTABLE PAPER SOAK / FORWARD VALIDATION**.
+
+*Original (2026-08-10, retained for history):* **PAPER_SOAK_GO** (`FINAL-CANONICAL-PRE-SOAK-VALIDATION-01`, 2026-08-10, HEAD `e44e3ddd`). The one previously-open item, `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`, is now CLOSED — its H08 test passed against a real local Postgres as part of a full canonical safe-ignored matrix run (733/733 tests green: H01-H08, daemon-supervisor halt fence, runtime halt fence CAS, stale-claim recovery, deadman, durable portfolio/P&L, fill/replay authority, outbox/pre-submit authority, risk/kill-switch/reconcile all proven with zero failures). All previously-tracked blockers (TradeActivity schema mismatch, partial-fill dedup, stale-claim recovery, terminal-fill replay parity) have corresponding committed fixes at HEAD, and this validation reproduced no new regression against any of them. No known accepted-list paper-soak code blocker remains.
 
 ### Current Live Verdict
 **NOT READY, and cannot become ready without new work.** `LiveCapital` cold-start is hard-gated behind a trust-chain proof (`live_trust_complete`) that is **hardcoded `false`** in `research-py`'s TV-03 pipeline — this is by design, not a bug, and correctly enforced at both the advisory and cold-start-enforcement layers. Separately, live account truth is wrong today: `buying_power` is aliased to `cash` rather than pulled from Alpaca's real `buying_power`/`daytrading_buying_power` fields, which is economically dangerous for a margin account. No live-capital smoke-test tooling exists. A prior memory record claiming "daemon defaults to real Alpaca WS unless forced to paper" is **stale** — current default (`Paper`/`Paper`) is fail-closed and safe; this session is correcting that memory record.
@@ -83,7 +87,22 @@ The equity/ETF paper-trading core (orchestrator, OMS state machine, outbox/inbox
 
 This wave also closed **`MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`** (§5), a previously-`READY` item, via a separate same-day commit (`060966be`, an ancestor of `4ef6b643` on this same ordered range) — see the §5 entry for the corrected acceptance description (the accepted mechanism is host quarantine, not unconditional per-symbol continuation).
 
+### Current Paper/Risk Truth Correction (2026-08-30, `MASTER-AUDIT-TRUTH-CORRECTION-01`)
+
+This correction supersedes the "Current Paper Verdict" and "Current Repository Verdict" paragraphs above (both retained, unedited, for history) and the percentage/status claims for "Risk System" and "Paper Trading Lifecycle" in the "Closest Subsystems to Completion" line immediately below and in §2's System Completion Map. It is driven by `FULL-SYSTEM-COMPLETION-SITUATIONAL-AUDIT-01`'s (2026-08-30) independently-spot-verified Risk domain finding — full detail and code citations in `docs/audits/2026-08-30_full_system_completion_situational_audit.md` (Domain: Risk, §D, §G) — and does not change any other domain's verdict in this ledger.
+
+- **Research/Backtest/Promotion engineering closure remains accepted** — unaffected by this correction; see the `RESEARCH_BACKTEST_V1_COMPLETE` verdict above.
+- **Equity/ETF Paper mechanics are substantially complete** — order lifecycle, portfolio accounting, reconciliation, autonomous-operation scheduling, and GUI truth-state discipline are all independently confirmed sound at the code level (situational audit §C).
+- **`mqk_risk::evaluate()` is real, production-reachable risk-engine logic** — it is wired as the middle of the three-gate order-submission pipeline (`IntegrityGate` → `RiskGate` → `ReconcileGate`) via `RuntimeRiskGate`, constructed per-run in `mqk-daemon/src/state/orchestrator_build.rs`. Every order submission is gated by it. This is genuine production wiring, not a stub.
+- **But the runtime state/config *authority* feeding that engine is partly static/inert, not fully wired.** `RuntimeRiskGate` binds one `RiskInput` once, at orchestrator construction time, and reuses it for the life of the run except for per-request overrides. Concretely: current equity is frozen at run-start (daily-loss-limit and max-drawdown checks cannot fire against a real intraday loss or drawdown); `day_id` and `reject_window_id` are equally frozen (day-rollover and reject-window rollover cannot occur); `RiskState::record_reject()` has zero production call sites (reject-storm detection cannot trigger); `PdtContext::ok()` is hardcoded (the PDT guard cannot deny); `kill_switch` is hardcoded `None` with no production call site ever constructing a non-`None` value (the kill-switch branch of `evaluate()` is unreachable); and the daemon's ordinary risk-config seam (`load_risk_env`/`effective_run_config_for_risk`) supplies only initial equity and daily-loss-limit, never max-drawdown, so max-drawdown is disabled by default on the ordinary daemon-created-run path, not merely on some unusual hand-authored config.
+- **Do not claim Paper safety readiness while the account-level risk gate is partly static/inert.** The mechanics of order routing, accounting, and reconciliation being sound does not substitute for the account-level kill switches CLAUDE.md's priority ordering exists to protect actually being able to fire.
+- **Required current verdict: countable autonomous Paper soak is BLOCKED** pending a runtime-risk dynamic state/config authority repair (recommended mission: `RUNTIME-RISK-DYNAMIC-STATE-AUTHORITY-01` — see the situational audit §M for the full decomposition) and required operational DB proof (migration `0067` confirmation against the running Paper DB). Sequencing: the risk-gate repair must close **before** any fresh soak session is run — a fresh soak session does not substitute for, or precede, that repair; it follows it. See the situational audit §D/§I/§K for the exact ordered sequence and the countable-session criteria.
+- **Halt/auto-flatten decision is unchanged** (`docs/specs/halt_without_auto_flatten_decision.md`) — halting the runtime still never automatically submits a flatten order; that document's own wording is separately corrected in this same commit to avoid overstating `RiskAction::FlattenAndHalt` verdict reachability given the frozen inputs above.
+- **This correction does not itself repair the defect** — it is a docs-only truth correction (`MASTER-AUDIT-TRUTH-CORRECTION-01`). No application code, DB, broker, or trading behavior was modified to produce it.
+
 ### Closest Subsystems to Completion
+*The percentages below are the 2026-08-10 `FULL-REPO-COMPLETION-AUDIT-01` baseline, retained for history. "Risk System" and "Paper Trading Lifecycle" are superseded by the correction immediately above — do not read either figure as current. See §2's Current Status Map (2026-08-30) for current categorical status.*
+
 Core Execution/OMS (~97%), Database Layer (~97%), Reconciliation (~97%), Risk System (~95%), Paper Trading Lifecycle (~95%), Backtesting Engine (~95%), Test Infrastructure (~95%).
 
 ### Highest-Risk Incomplete Subsystems
@@ -118,6 +137,8 @@ No patch in this ledger lacks a classification.
 
 ## 2. System Completion Map
 
+**HISTORICAL — 2026-08-10 `FULL-REPO-COMPLETION-AUDIT-01` baseline, retained for history and per-patch detail only. Not current authority.** The percentages, "PROVEN COMPLETE" labels, and remaining-patch counts below reflect that audit's own denominator at its own HEAD and have not been recomputed since; several rows (notably Risk System, Paper Trading Lifecycle) are directly superseded by the 2026-08-30 correction above. Do not cite this table as current status. See **§2a. Current Status Map (2026-08-30)** immediately after the table for current authoritative, categorical status per the situational audit.
+
 | Rank | Subsystem | Evidence-based Completion | Current State | Remaining Patches | Paper Impact | Lane |
 |---|---|---|---|---|---|---|
 | 1 | Core Execution / OMS / Outbox / Halt | ~97% — orchestrator phase ordering, OMS state machine, outbox atomicity, idempotency, and the halt gate are all PROVEN COMPLETE with full scenario-test coverage; only gap is the uncommitted fence patch pending harness proof. | PROVEN COMPLETE | 1 | RED | A |
@@ -146,6 +167,29 @@ No patch in this ledger lacks a classification.
 | 24 | Multi-Asset — Equity/ETF | 100% of current scope — trades as `Equity` with `instrument_kind="etf"` tag; fully operational. | PROVEN COMPLETE | 0 | — | — |
 | 25 | Multi-Asset — Crypto | ~25% — Kraken OHLC data-ingest lineage substantial; zero execution wiring. | PARTIAL (data only) | 1 | GREEN (isolated) | E |
 | 26 | Multi-Asset — Options/Futures/Forex | ~5% — `AssetClass` enum variants + risk-multiplier stub match-arms only; explicitly gated off (`MQK_ASSET_CLASS_*_ENABLED`, all default false); no broker/execution/GUI/tests. | SCAFFOLDED / DEFERRED BY DESIGN | 2 | GREEN (isolated) | E |
+
+### 2a. Current Status Map (2026-08-30)
+
+*Categorical statuses per `docs/audits/2026-08-30_full_system_completion_situational_audit.md` — no completion percentages are asserted here; none were recomputed against current HEAD and inventing fresh ones would imply false precision. This map covers the domains that audit inspected; it does not replace the row-level historical detail in the table above.*
+
+| Domain | Status | Note |
+|---|---|---|
+| Research / Backtest / Promotion | CONFIRMED — engineering-closed, independently accepted | Unaffected by this correction. |
+| Strategy Framework | CONFIRMED, with nuances | Concurrent long+short dispatch not yet multiplexed; `max_concurrent_symbols`-in-production status UNKNOWN-NEEDS-PROOF. |
+| Data | CONFIRMED, one real gap | Corporate-action/event-risk: no earnings-calendar feed, no pre-event flattening gate (operator-declared static blackout only). |
+| Execution / OMS | CONFIRMED | Atomic outbox claim, restart-safe idempotency, structural Paper/Live isolation. |
+| **Risk** | **CONFIRMED wired, BLOCKED on runtime-state authority** | `mqk_risk::evaluate()` is genuinely production-reachable, but equity/day/reject-window/kill-switch inputs are frozen at run-start and max-drawdown is ordinarily disabled — see the correction above and situational audit §G. **This is the current NOW-lane engineering blocker.** |
+| Portfolio / Accounting | CONFIRMED | Durable FIFO lot accounting, inbox-only dedup-guarded writes. |
+| Reconciliation / Recovery | CONFIRMED | One shared clean-reconcile definition; local backup/restore round-trip proven; real-B2 offsite round-trip still outstanding. |
+| Autonomous Paper Operations | CONFIRMED, soak-validity caveat | Stale-operation fix is independently-accepted CLOSED but has zero confirmed-VALID sessions since; see §K of the situational audit for countable-session criteria. |
+| Daemon / Control Plane | CONFIRMED | Single armed/halted source of truth, mode isolation from one source. |
+| GUI | CONFIRMED | `truth_state` hard-block discipline holds, stricter than documented minimum. |
+| Multi-Asset (equity/ETF) | CONFIRMED — full current scope | Other asset classes remain data/economics-layer scaffolding at most, by design. |
+| Live | CONFIRMED NOT READY, hard-gated by design | `live_trust_complete` hardcoded false; `buying_power` aliased to `cash` is a separate, real, Live-gated defect. |
+| Git / CI / Repository Governance | CONFIRMED — CI real; `main` has no branch protection or ruleset | Re-confirmed 2026-08-30 via `gh api` (protection: 404; rulesets: empty). Governance track, does not gate Paper/Live runtime safety — see situational audit §D. |
+| Testing | CONFIRMED | 520 test files, disciplined `#[ignore]` tracking, DB-backed CI by default, genuine adversarial controls. |
+
+**Current Paper readiness (this map's bottom line):** BLOCKED FOR COUNTABLE PAPER SOAK / FORWARD VALIDATION — see the correction above and situational audit §I/§K.
 
 ---
 
@@ -2351,7 +2395,7 @@ autonomous Paper operational validation
 10-20 session autonomous Paper soak
 ```
 
-This chain is separate from, and does not gate, the currently-running **supervised** Paper soak (`PAPER_SOAK_GO`, §0/§1) — that soak continues under Lane A/B rules unaffected by Research/Backtest or OPS-* status.
+This chain is separate from, and does not gate, Research/Backtest or OPS-* status — those remain independent tracks either way. **Corrected 2026-08-30 (`MASTER-AUDIT-TRUTH-CORRECTION-01`):** the parenthetical this sentence originally cited (`PAPER_SOAK_GO`, §0/§1) is superseded — see "Current Paper/Risk Truth Correction" in §0. Current Paper status is BLOCKED FOR COUNTABLE PAPER SOAK / FORWARD VALIDATION pending the runtime-risk dynamic-state-authority repair; no supervised Paper soak session should be treated as countable until that repair and its post-repair validation session (situational audit §D/§I) are complete.
 
 ---
 
