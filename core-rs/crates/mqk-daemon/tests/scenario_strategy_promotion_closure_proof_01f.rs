@@ -779,7 +779,8 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
                research_deflated_sharpe_ratio, research_probability_backtest_overfitting,
                backtest_run_id, research_judge_artifact_sha256, stress_protocol_version,
                stress_artifact_sha256, robustness_protocol_version,
-               finalized_robustness_artifact_sha256, promotion_policy_fingerprint
+               finalized_robustness_artifact_sha256, promotion_policy_fingerprint,
+               config_fingerprint, config_identity_status
         from sys_strategy_promotion_transitions
         where transition_id = $1
         "#,
@@ -788,6 +789,28 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     .fetch_one(&pool)
     .await
     .expect("readback of the durably persisted evidence-bearing transition row");
+
+    // PROMOTION-CONFIG-IDENTITY-01 (C1): the fresh shadow_approved root must
+    // bind a real, deterministic strategy semantic fingerprint -- never the
+    // pre-C1 hardcoded NULL/"unavailable_in_current_runtime" pair.
+    let db_config_fingerprint: Option<String> = row1.try_get("config_fingerprint").unwrap();
+    let db_config_identity_status: String = row1.try_get("config_identity_status").unwrap();
+    let expected_config_fingerprint =
+        mqk_daemon::strategy_config_identity::resolve_server_semantic_fingerprint(
+            &strategy_id,
+            &symbol,
+            TIMEFRAME_SECS,
+        )
+        .expect("swing_momentum must resolve a real semantic fingerprint");
+    assert_eq!(
+        db_config_fingerprint.as_deref(),
+        Some(expected_config_fingerprint.as_str()),
+        "C1: fresh shadow_approved must persist the real server-derived semantic fingerprint"
+    );
+    assert_eq!(db_config_identity_status, "verified_v1");
+    println!(
+        "[closure-proof] C1: config_fingerprint bound at shadow_approved = {expected_config_fingerprint}"
+    );
 
     let db_evidence_transition_id: Option<Uuid> = row1.try_get("evidence_transition_id").unwrap();
     let db_evidence_fingerprint: Option<String> = row1.try_get("evidence_fingerprint").unwrap();
@@ -973,6 +996,29 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         "active_paper transition must succeed: {json}"
     );
     println!("[closure-proof] step 4: paper_approved -> active_paper: {json}");
+
+    // C1: continuity carries the SAME verified fingerprint forward across
+    // both hops (shadow_approved -> paper_approved -> active_paper) with no
+    // fresh evidence presented at either hop.
+    let active_paper_transition_id: Uuid =
+        Uuid::parse_str(json["transition_id"].as_str().unwrap()).unwrap();
+    let active_paper_row = sqlx::query(
+        "select config_fingerprint, config_identity_status from sys_strategy_promotion_transitions where transition_id = $1",
+    )
+    .bind(active_paper_transition_id)
+    .fetch_one(&pool)
+    .await
+    .expect("readback of active_paper row");
+    let active_paper_fp: Option<String> = active_paper_row.try_get("config_fingerprint").unwrap();
+    let active_paper_status: String =
+        active_paper_row.try_get("config_identity_status").unwrap();
+    assert_eq!(
+        active_paper_fp.as_deref(),
+        Some(expected_config_fingerprint.as_str()),
+        "C1: active_paper must carry forward the SAME fingerprint bound at shadow_approved"
+    );
+    assert_eq!(active_paper_status, "verified_v1");
+    println!("[closure-proof] C1: config_fingerprint carried forward unchanged through continuity");
 
     let (_, check2) = call(routes::build_router(Arc::clone(&st)), get_req(&check_uri)).await;
     assert_eq!(check2["current_state"], "active_paper");

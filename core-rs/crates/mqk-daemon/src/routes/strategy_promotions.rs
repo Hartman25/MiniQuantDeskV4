@@ -40,12 +40,17 @@ use crate::api_types::{
 };
 use crate::promotion_evidence_validation::validate_paper_candidate_evidence;
 use crate::state::AppState;
+use crate::strategy_config_identity::{
+    resolve_server_semantic_fingerprint, seed_token, CONFIG_IDENTITY_STATUS_UNAVAILABLE,
+    CONFIG_IDENTITY_STATUS_VERIFIED_V1,
+};
 use mqk_db::{
     evaluate_promotion_tradability, fetch_all_current_promotions, fetch_current_promotion_state,
     fetch_promotion_history, insert_strategy_promotion_transition_serialized,
     is_known_promotion_state, is_legal_transition, resolve_evidence_lineage,
     transition_requires_evidence, InsertStrategyPromotionTransitionArgs,
-    StrategyPromotionTransitionRecord, TransitionInsertOutcome,
+    StrategyPromotionTransitionRecord, TransitionInsertOutcome, PROMOTION_STATE_ACTIVE_PAPER,
+    PROMOTION_STATE_PAPER_APPROVED,
 };
 
 const CANONICAL_ROUTE_PROMOTIONS: &str = "/api/v1/strategy/promotions";
@@ -669,12 +674,28 @@ pub(crate) async fn strategy_promotion_transition(
         .unwrap_or("")
         .trim()
         .to_string();
+
+    // PROMOTION-CONFIG-IDENTITY-01 (C1): resolve the server-side semantic
+    // config identity for this exact (strategy_id, symbol, timeframe_secs)
+    // up front -- never trusted from the request, always re-derived through
+    // the authoritative runtime registry construction path (see
+    // `strategy_config_identity`). Folded into the transition_id seed below
+    // (schema bumped v1 -> v2) so a byte-identical request body submitted
+    // after ambient config genuinely drifted (e.g. an operator changed
+    // MQK_STRATEGY_TARGET_QTY without an intervening request) mints a NEW
+    // transition_id rather than being silently short-circuited as an
+    // idempotent replay of the earlier, now-stale approval by Gate 1b below.
+    let config_identity_result =
+        resolve_server_semantic_fingerprint(&strategy_id, &symbol, timeframe_secs);
+    let config_identity_seed_token = seed_token(&config_identity_result);
+
     let seed = format!(
-        "mqk-strategy-promotion-transition.v1|strategy_id={strategy_id}|symbol={symbol}|\
+        "mqk-strategy-promotion-transition.v2|strategy_id={strategy_id}|symbol={symbol}|\
          timeframe_secs={timeframe_secs}|target_state={target_state}|review_dir={review_dir_raw}|\
          research_trial_id={research_trial_id_raw}|research_evidence_dir={research_evidence_dir_raw}|\
          research_judge_artifact_path={research_judge_artifact_path_raw}|\
          backtest_run_id={backtest_run_id_raw}|\
+         config_identity={config_identity_seed_token}|\
          effective_at_utc={}|expires_at_utc={:?}|initiated_by={initiated_by}|reason={}",
         effective_at_utc.to_rfc3339(),
         expires_at_utc.map(|t| t.to_rfc3339()),
@@ -1083,13 +1104,135 @@ pub(crate) async fn strategy_promotion_transition(
     };
     let parent_transition_id = current.as_ref().map(|c| c.transition_id);
 
+    // PROMOTION-CONFIG-IDENTITY-01 (C1): bind durable promotion authority to
+    // the server-derived semantic identity of the config actually being
+    // promoted -- never a request-supplied claim. Three categories:
+    //
+    // - fresh evidence-bearing (`evidence.is_some()`, i.e. this transition
+    //   is establishing a NEW evidence root: `no_state -> shadow_approved`
+    //   or `demoted -> shadow_approved` re-approval): config identity MUST
+    //   resolve; persisted as the authoritative fingerprint for this root.
+    // - continuity (`shadow_approved -> paper_approved`,
+    //   `paper_approved -> active_paper`): no fresh evidence is presented,
+    //   so the CURRENT server-resolved fingerprint must exactly match the
+    //   immediate parent's own persisted `config_fingerprint` -- a legacy
+    //   `NULL` parent, an unresolvable identity, or genuine semantic drift
+    //   since approval all fail closed rather than silently carrying old
+    //   evidence across changed semantics (normal re-approval through
+    //   `shadow_approved` is required instead).
+    // - safety exits (`demoted`, `retired`, `rejected`): must remain
+    //   reachable even when config identity is unavailable or has drifted
+    //   -- resolution is attempted for observability only, never blocking.
+    let is_fresh_evidence_transition = evidence.is_some();
+    let is_continuity_transition = matches!(
+        target_state.as_str(),
+        PROMOTION_STATE_PAPER_APPROVED | PROMOTION_STATE_ACTIVE_PAPER
+    );
+
+    let (config_fingerprint, config_identity_status): (Option<String>, String) =
+        if is_fresh_evidence_transition {
+            match &config_identity_result {
+                Ok(fp) => (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string()),
+                Err(e) => {
+                    let blocker = format!(
+                        "config identity could not be resolved for this evidence-bearing \
+                         transition: {}",
+                        e.message(&strategy_id, timeframe_secs)
+                    );
+                    return transition_response(TransitionResponseArgs {
+                        status: StatusCode::BAD_REQUEST,
+                        accepted: false,
+                        disposition: "evidence_invalid",
+                        strategy_id,
+                        symbol,
+                        timeframe_secs,
+                        previous_state,
+                        target_state,
+                        transition_id: None,
+                        blockers: vec![blocker],
+                    });
+                }
+            }
+        } else if is_continuity_transition {
+            let parent_fingerprint = current.as_ref().and_then(|c| c.config_fingerprint.clone());
+            match (&config_identity_result, parent_fingerprint) {
+                (Ok(fp), Some(parent_fp)) if *fp == parent_fp => {
+                    (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string())
+                }
+                (Ok(fp), Some(parent_fp)) => {
+                    return transition_response(TransitionResponseArgs {
+                        status: StatusCode::CONFLICT,
+                        accepted: false,
+                        disposition: "config_identity_mismatch",
+                        strategy_id,
+                        symbol,
+                        timeframe_secs,
+                        previous_state,
+                        target_state,
+                        transition_id: None,
+                        blockers: vec![format!(
+                            "strategy semantic configuration has changed since the \
+                             evidence-bearing approval (approved fingerprint {parent_fp}, \
+                             current fingerprint {fp}) -- re-approval through shadow_approved \
+                             with fresh evidence is required before this identity may advance"
+                        )],
+                    });
+                }
+                (_, None) => {
+                    return transition_response(TransitionResponseArgs {
+                        status: StatusCode::CONFLICT,
+                        accepted: false,
+                        disposition: "config_identity_mismatch",
+                        strategy_id,
+                        symbol,
+                        timeframe_secs,
+                        previous_state,
+                        target_state,
+                        transition_id: None,
+                        blockers: vec![
+                            "the current approval chain carries no verified config_fingerprint \
+                             (legacy or unresolved evidence root) -- a legacy/unavailable \
+                             config identity can never authorize advancing this identity; \
+                             re-approval through shadow_approved with fresh evidence is \
+                             required"
+                                .to_string(),
+                        ],
+                    });
+                }
+                (Err(e), _) => {
+                    let blocker = format!(
+                        "config identity could not be resolved for this identity right now: {}",
+                        e.message(&strategy_id, timeframe_secs)
+                    );
+                    return transition_response(TransitionResponseArgs {
+                        status: StatusCode::CONFLICT,
+                        accepted: false,
+                        disposition: "config_identity_mismatch",
+                        strategy_id,
+                        symbol,
+                        timeframe_secs,
+                        previous_state,
+                        target_state,
+                        transition_id: None,
+                        blockers: vec![blocker],
+                    });
+                }
+            }
+        } else {
+            // Safety exit: attempt, never block.
+            match &config_identity_result {
+                Ok(fp) => (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string()),
+                Err(_) => (None, CONFIG_IDENTITY_STATUS_UNAVAILABLE.to_string()),
+            }
+        };
+
     let args = InsertStrategyPromotionTransitionArgs {
         transition_id,
         strategy_id: strategy_id.clone(),
         symbol: symbol.clone(),
         timeframe_secs,
-        config_fingerprint: None,
-        config_identity_status: "unavailable_in_current_runtime".to_string(),
+        config_fingerprint,
+        config_identity_status,
         previous_state: previous_state.clone(),
         new_state: target_state.clone(),
         parent_transition_id,

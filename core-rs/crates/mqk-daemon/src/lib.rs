@@ -39,6 +39,7 @@ pub mod runtime_opportunity_mode;
 pub mod runtime_strategy_conflict;
 pub mod runtime_strategy_conflict_mode;
 pub mod state;
+pub mod strategy_config_identity;
 pub mod strategy_scan_jobs;
 pub mod suppression;
 pub mod watchlist_intake;
