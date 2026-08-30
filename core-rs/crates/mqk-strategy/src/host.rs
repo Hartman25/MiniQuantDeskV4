@@ -76,8 +76,15 @@ impl StrategyHost {
             .as_mut()
             .ok_or(StrategyHostError::NoStrategyRegistered)?;
 
-        let output = s.on_bar(ctx);
+        // S1 hardening: captured BEFORE on_bar runs, so this fingerprint
+        // unambiguously describes the semantic state that entered the
+        // decision, not whatever the instance's own mutable state happens to
+        // read back as immediately afterward. Built-in engines are
+        // config-static during on_bar today (the fingerprint cannot change
+        // as a result of evaluating this one bar), so this is a hardening
+        // of intent, not a behavior change for any current engine.
         let semantic_fingerprint = s.semantic_fingerprint();
+        let output = s.on_bar(ctx);
 
         let mode = match self.shadow {
             ShadowMode::Off => IntentMode::Live,
