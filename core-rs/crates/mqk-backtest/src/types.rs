@@ -865,6 +865,17 @@ pub struct BacktestReport {
     /// BKT-05P: Name of the strategy that drove this run.
     /// Populated from `StrategySpec::name`; empty string if no strategy was registered.
     pub strategy_name: String,
+    /// PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: `Strategy::semantic_fingerprint()`
+    /// of the EXACT boxed instance that ran this backtest, captured directly
+    /// from the engine's own `StrategyHost` at report-build time -- never
+    /// reconstructed afterward from `strategy_name`/config/env. Empty string
+    /// if no strategy was registered (mirrors `strategy_name`'s own default).
+    /// This is the only point in the entire Backtest/Research evidence chain
+    /// where a real, instantiated `Strategy` object's semantic identity is
+    /// captured; promotion binds fresh evidence to this value, never to
+    /// `strategy_name`/`config_id` alone (see
+    /// `mqk-daemon::backtest_evidence_gate`).
+    pub strategy_semantic_fingerprint: String,
     /// BKT-PROV-01: Deterministic run identity UUID.
     ///
     /// Derived via `derive_run_id(strategy_name, config_id, input_data_hash)`.
@@ -946,6 +957,7 @@ impl BacktestReport {
     pub fn test_fixture() -> Self {
         Self {
             strategy_name: String::new(),
+            strategy_semantic_fingerprint: String::new(),
             run_id: Uuid::nil(),
             config_id: Uuid::nil(),
             input_data_hash: String::new(),

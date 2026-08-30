@@ -286,6 +286,14 @@ impl From<BacktestEconomicsReportDto> for BacktestEconomicsReport {
 pub struct BacktestReportArtifact {
     pub schema_version: u32,
     strategy_name: String,
+    /// PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: additive field, defaults to
+    /// empty string when absent (an artifact written before this field
+    /// existed) -- an empty/default value can never equal a real resolved
+    /// `Strategy::semantic_fingerprint()`, so historical evidence fails
+    /// closed for semantic-identity binding without needing a schema-version
+    /// bump for this purely additive change.
+    #[serde(default)]
+    strategy_semantic_fingerprint: String,
     run_id: Uuid,
     config_id: Uuid,
     input_data_hash: String,
@@ -308,6 +316,7 @@ impl From<&BacktestReport> for BacktestReportArtifact {
         Self {
             schema_version: BACKTEST_REPORT_ARTIFACT_SCHEMA_VERSION,
             strategy_name: r.strategy_name.clone(),
+            strategy_semantic_fingerprint: r.strategy_semantic_fingerprint.clone(),
             run_id: r.run_id,
             config_id: r.config_id,
             input_data_hash: r.input_data_hash.clone(),
@@ -331,6 +340,7 @@ impl From<BacktestReportArtifact> for BacktestReport {
     fn from(a: BacktestReportArtifact) -> Self {
         BacktestReport {
             strategy_name: a.strategy_name,
+            strategy_semantic_fingerprint: a.strategy_semantic_fingerprint,
             run_id: a.run_id,
             config_id: a.config_id,
             input_data_hash: a.input_data_hash,

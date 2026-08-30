@@ -967,10 +967,16 @@ pub(crate) async fn strategy_promotion_transition(
                 }
             };
 
+        // PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: bind fresh evidence to the
+        // exact semantic configuration being promoted -- the same
+        // `config_identity_result` resolved once, up front (used for the
+        // config-identity persistence decision below), never a second
+        // independent derivation.
         let backtest_bundle = match crate::backtest_evidence_gate::evaluate_backtest_evidence_gate(
             &st,
             backtest_run_id,
             &strategy_id,
+            config_identity_result.as_deref().ok(),
         ) {
             crate::backtest_evidence_gate::BacktestEvidenceGateOutcome::Passed { bundle } => bundle,
             crate::backtest_evidence_gate::BacktestEvidenceGateOutcome::Rejected { blockers } => {

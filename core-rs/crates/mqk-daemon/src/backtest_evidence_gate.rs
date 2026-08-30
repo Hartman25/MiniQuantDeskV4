@@ -24,6 +24,7 @@
 
 use std::path::Path;
 
+use mqk_db::is_valid_evidence_fingerprint_v2_hex;
 use mqk_promotion::{resolve_backtest_evidence, BacktestEvidenceBundle};
 use uuid::Uuid;
 
@@ -51,10 +52,29 @@ fn reject(msg: impl Into<String>) -> BacktestEvidenceGateOutcome {
 /// ONLY -- there is no request field for it anywhere in
 /// `StrategyPromotionTransitionRequest`, so a caller cannot select an
 /// alternate artifact root no matter what a request body contains.
+///
+/// PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: `expected_semantic_fingerprint`
+/// is the current server-resolved
+/// [`crate::strategy_config_identity::resolve_server_semantic_fingerprint`]
+/// output for the exact promotion candidate being decided -- `None` when the
+/// caller could not resolve one at all. The resolved evidence's own
+/// `strategy_semantic_fingerprint` (captured directly from the boxed
+/// `Strategy` instance the real `BacktestEngine` ran, at report-build time --
+/// see `mqk_backtest::BacktestReport::strategy_semantic_fingerprint`) must be
+/// structurally valid AND byte-equal to it. This is independent of, and
+/// strictly narrower than, the `strategy_name` cross-candidate check above:
+/// two candidates can share a `strategy_name` yet run under materially
+/// different decision-affecting configuration (e.g. differing sizing), and
+/// evidence produced under a DIFFERENT configuration than the one actually
+/// being promoted must never authorize it. Historical evidence written
+/// before this field existed carries an empty string here, which can never
+/// equal any real fingerprint -- it fails closed, never backfilled from
+/// current runtime configuration.
 pub fn evaluate_backtest_evidence_gate(
     st: &AppState,
     backtest_run_id: &str,
     strategy_id: &str,
+    expected_semantic_fingerprint: Option<&str>,
 ) -> BacktestEvidenceGateOutcome {
     let backtest_run_id = backtest_run_id.trim();
     if backtest_run_id.is_empty() {
@@ -99,8 +119,29 @@ pub fn evaluate_backtest_evidence_gate(
         ));
     }
 
-    BacktestEvidenceGateOutcome::Passed {
-        bundle: Box::new(bundle),
+    // PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: the resolved evidence's own
+    // durably-authenticated semantic configuration must equal the exact
+    // configuration actually being promoted -- see this function's own docs.
+    let evidence_fp = bundle.report.strategy_semantic_fingerprint.trim();
+    match expected_semantic_fingerprint {
+        Some(expected)
+            if is_valid_evidence_fingerprint_v2_hex(expected)
+                && is_valid_evidence_fingerprint_v2_hex(evidence_fp)
+                && evidence_fp == expected =>
+        {
+            BacktestEvidenceGateOutcome::Passed {
+                bundle: Box::new(bundle),
+            }
+        }
+        _ => reject(format!(
+            "backtest-evidence gate rejected: resolved evidence's strategy_semantic_fingerprint \
+             {:?} does not authenticate the exact semantic configuration being promoted \
+             (current server-resolved fingerprint: {:?}) -- evidence produced under a different \
+             or unresolvable strategy configuration, or evidence written before this field \
+             existed, can never authorize this identity; re-run the Backtest candidate under \
+             the exact configuration being promoted",
+            bundle.report.strategy_semantic_fingerprint, expected_semantic_fingerprint
+        )),
     }
 }
 
@@ -132,7 +173,7 @@ mod tests {
     fn blank_backtest_run_id_is_rejected_before_any_io() {
         let root = std::env::temp_dir().join("mqk_beg01_blank_never_created");
         let st = state_with_root(&root);
-        let outcome = evaluate_backtest_evidence_gate(&st, "   ", "any_strategy");
+        let outcome = evaluate_backtest_evidence_gate(&st, "   ", "any_strategy", None);
         assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
     }
 
@@ -140,15 +181,19 @@ mod tests {
     fn malformed_uuid_is_rejected() {
         let root = std::env::temp_dir().join("mqk_beg01_malformed_never_created");
         let st = state_with_root(&root);
-        let outcome = evaluate_backtest_evidence_gate(&st, "not-a-uuid", "any_strategy");
+        let outcome = evaluate_backtest_evidence_gate(&st, "not-a-uuid", "any_strategy", None);
         assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
     }
 
     #[test]
     fn missing_artifact_root_config_fails_closed() {
         let st = state_without_root();
-        let outcome =
-            evaluate_backtest_evidence_gate(&st, &Uuid::from_u128(1).to_string(), "any_strategy");
+        let outcome = evaluate_backtest_evidence_gate(
+            &st,
+            &Uuid::from_u128(1).to_string(),
+            "any_strategy",
+            None,
+        );
         assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
     }
 
@@ -160,8 +205,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let st = state_with_root(&root);
-        let outcome =
-            evaluate_backtest_evidence_gate(&st, &Uuid::from_u128(2).to_string(), "any_strategy");
+        let outcome = evaluate_backtest_evidence_gate(
+            &st,
+            &Uuid::from_u128(2).to_string(),
+            "any_strategy",
+            None,
+        );
         assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
         std::fs::remove_dir_all(&root).ok();
     }
@@ -247,6 +296,23 @@ mod tests {
         mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
             .expect("write_canonical_stress_suite must succeed");
 
+        // `resolve_backtest_evidence` requires a loadable
+        // `robustness_gauntlet.json` to exist at all (structural presence +
+        // identity cross-check only -- completeness/pass-fail policy
+        // judgment belongs to `evaluate_promotion`, never this gate). The
+        // subprocess-backed DSR/PBO/P7A-P7B/placebo scenarios are
+        // deliberately left deferred here (no Research trial/registry exists
+        // in this lightweight unit-test fixture); only the pure-Rust
+        // re-run scenarios are populated.
+        let gauntlet_output =
+            mqk_backtest::run_robustness_gauntlet(&report, &config, &bars, || {
+                Box::new(HoldFlat {
+                    name: strategy_name_owned,
+                })
+            });
+        mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
+            .expect("write_canonical_robustness_gauntlet must succeed");
+
         (root, report.run_id)
     }
 
@@ -254,13 +320,25 @@ mod tests {
     fn genuine_candidate_for_matching_strategy_passes_gate() {
         let (root, run_id) = real_persisted_candidate("Beg01GenuinePass");
         let st = state_with_root(&root);
+        // `HoldFlat` does not override `semantic_fingerprint()` -- this is
+        // the real default (spec-only) value the exact same instance the
+        // engine ran would produce, never hand-computed independently.
+        let expected_fp = HoldFlat {
+            name: "Beg01GenuinePass",
+        }
+        .semantic_fingerprint();
 
-        let outcome =
-            evaluate_backtest_evidence_gate(&st, &run_id.to_string(), "Beg01GenuinePass");
+        let outcome = evaluate_backtest_evidence_gate(
+            &st,
+            &run_id.to_string(),
+            "Beg01GenuinePass",
+            Some(&expected_fp),
+        );
         match outcome {
             BacktestEvidenceGateOutcome::Passed { bundle } => {
                 assert_eq!(bundle.run_id, run_id);
                 assert_eq!(bundle.report.strategy_name, "Beg01GenuinePass");
+                assert_eq!(bundle.report.strategy_semantic_fingerprint, expected_fp);
             }
             other => panic!("expected Passed, got {other:?}"),
         }
@@ -271,14 +349,82 @@ mod tests {
     fn cross_candidate_strategy_id_mismatch_is_rejected() {
         let (root, run_id) = real_persisted_candidate("Beg01RealOwner");
         let st = state_with_root(&root);
+        let expected_fp = HoldFlat {
+            name: "Beg01RealOwner",
+        }
+        .semantic_fingerprint();
 
         // Real, structurally valid evidence -- but requested under a
         // DIFFERENT strategy_id than what actually produced it.
-        let outcome =
-            evaluate_backtest_evidence_gate(&st, &run_id.to_string(), "SomeOtherStrategy");
+        let outcome = evaluate_backtest_evidence_gate(
+            &st,
+            &run_id.to_string(),
+            "SomeOtherStrategy",
+            Some(&expected_fp),
+        );
         match outcome {
             BacktestEvidenceGateOutcome::Rejected { blockers } => {
                 assert!(blockers.iter().any(|b| b.contains("cross-candidate")));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: the load-bearing negative
+    /// control -- real, structurally valid evidence for the RIGHT
+    /// `strategy_id`, but the current server-resolved semantic fingerprint
+    /// (simulating a config change since this evidence was produced) does
+    /// not match. Must be refused even though `strategy_name` agrees.
+    #[test]
+    fn semantic_fingerprint_mismatch_is_rejected_even_when_strategy_name_matches() {
+        let (root, run_id) = real_persisted_candidate("Beg01SemanticMismatch");
+        let st = state_with_root(&root);
+        let wrong_fp = "a".repeat(64);
+        let real_fp = HoldFlat {
+            name: "Beg01SemanticMismatch",
+        }
+        .semantic_fingerprint();
+        assert_ne!(wrong_fp, real_fp, "sanity: fixture constant must not collide with reality");
+
+        let outcome = evaluate_backtest_evidence_gate(
+            &st,
+            &run_id.to_string(),
+            "Beg01SemanticMismatch",
+            Some(&wrong_fp),
+        );
+        match outcome {
+            BacktestEvidenceGateOutcome::Rejected { blockers } => {
+                assert!(
+                    blockers.iter().any(|b| b.contains("strategy_semantic_fingerprint")),
+                    "expected a semantic-fingerprint blocker, got: {blockers:?}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Evidence written before this field existed (or any other malformed
+    /// value) must fail closed exactly like a genuine mismatch -- never
+    /// treated as "not applicable" or silently passed through.
+    #[test]
+    fn missing_semantic_fingerprint_on_current_side_is_rejected() {
+        let (root, run_id) = real_persisted_candidate("Beg01NoCurrentFingerprint");
+        let st = state_with_root(&root);
+
+        let outcome = evaluate_backtest_evidence_gate(
+            &st,
+            &run_id.to_string(),
+            "Beg01NoCurrentFingerprint",
+            None,
+        );
+        match outcome {
+            BacktestEvidenceGateOutcome::Rejected { blockers } => {
+                assert!(
+                    blockers.iter().any(|b| b.contains("strategy_semantic_fingerprint")),
+                    "expected a semantic-fingerprint blocker, got: {blockers:?}"
+                );
             }
             other => panic!("expected Rejected, got {other:?}"),
         }

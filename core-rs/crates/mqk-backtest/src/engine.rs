@@ -708,6 +708,13 @@ impl BacktestEngine {
 
         // BKT-PROV-01: strategy identity — derive from spec if registered.
         let strategy_name = self.host.spec().map(|s| s.name.clone()).unwrap_or_default();
+        // PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: captured from the SAME
+        // `StrategyHost` instance `on_bar` dispatched to throughout this run
+        // -- never reconstructed from `strategy_name` or any other cached
+        // value. Empty string mirrors `strategy_name`'s own no-strategy
+        // default.
+        let strategy_semantic_fingerprint =
+            self.host.semantic_fingerprint().unwrap_or_default();
         let config_id = self.config.config_id();
         // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01 / BKT-FUTURE-EXECUTION-01-REPAIR-01
         // (Blocker 2): run identity folds in both economics and the
@@ -741,6 +748,7 @@ impl BacktestEngine {
 
         Ok(BacktestReport {
             strategy_name,
+            strategy_semantic_fingerprint,
             run_id,
             config_id,
             input_data_hash,
