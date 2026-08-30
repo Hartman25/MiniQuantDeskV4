@@ -1999,12 +1999,21 @@ mod tests {
     }
 
     #[test]
-    fn rr3_current_account_is_synchronous_and_requires_no_async_runtime() {
-        // This test function itself is NOT #[tokio::test] — there is no
-        // Tokio reactor running at all. If `current_account` ever performed
-        // real network I/O it would panic ("there is no reactor running")
-        // rather than returning a value, proving requirement 11
-        // structurally rather than by absence of observation.
+    fn rr3_current_account_requires_no_async_runtime() {
+        // RUNTIME-RISK-AUTHORITY-PROOF-WORDING-01 (FR3): this test function
+        // is NOT #[tokio::test] — there is no Tokio reactor running — so it
+        // proves ONLY that `current_account` does not require an async
+        // runtime. That is NOT by itself proof of no synchronous/blocking
+        // network I/O: blocking I/O can occur perfectly well with no async
+        // runtime present, so a prior version of this comment's claim that
+        // "real network I/O would panic because there is no reactor" was
+        // overstated. The actual no-network invariant comes from direct
+        // production-code structure: `DaemonAccountAuthority::current_account`
+        // (above) only reads/parses the already-cached `broker_snapshot`
+        // (`try_read` + local `parse_decimal_micros`) and performs no
+        // provider request of its own — provider refresh happens elsewhere
+        // (the eager/periodic loop and terminal-fill refreshers wired via
+        // `select_external_snapshot_fetcher`).
         let now = Utc::now();
         let authority = make_authority(
             Some(schema_snapshot("100000", now)),
