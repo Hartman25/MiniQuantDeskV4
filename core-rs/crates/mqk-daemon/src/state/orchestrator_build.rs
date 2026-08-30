@@ -188,10 +188,17 @@ impl AppState {
             effective_config
         };
 
-        let initial_equity_micros = effective_config
-            .pointer("/risk/initial_equity_micros")
-            .and_then(|value| value.as_i64())
-            .unwrap_or(0);
+        // RUNTIME-PORTFOLIO-SEED-CONFIG-VALIDATION-01: this is the LOCAL
+        // PortfolioState/recovery seed, distinct from the account-level
+        // `RuntimeRiskGate` equity baseline (which is sourced exclusively
+        // from `DaemonAccountAuthority`/broker truth above and is untouched
+        // by this check). `effective_config` has already run through RR2's
+        // `effective_run_config_for_risk` merge, so this validates the same
+        // ABSENT-vs-PRESENT-BUT-INVALID view: env may only fill a field the
+        // run's own `config_json` never mentioned; a malformed explicit
+        // value reaches here unhealed and is refused rather than silently
+        // becoming `0` (the prior `unwrap_or(0)` defect).
+        let initial_equity_micros = required_initial_equity_micros(&effective_config)?;
 
         // PAPER-SOAK-STALE-CLAIM-RECOVERY-02: the unconditional stale-claim
         // reset that used to run here (PATCH-01) is removed. It ran before
@@ -857,6 +864,59 @@ fn effective_run_config_for_risk(
 }
 
 // ---------------------------------------------------------------------------
+// RUNTIME-PORTFOLIO-SEED-CONFIG-VALIDATION-01
+// ---------------------------------------------------------------------------
+
+/// Extracts the LOCAL `PortfolioState`/recovery initial-equity seed from the
+/// (already RR2-merged) effective run config, requiring an explicit, typed,
+/// positive `i64`.
+///
+/// This is deliberately independent of `RuntimeRiskGate`'s account-level
+/// equity baseline: that value comes solely from `DaemonAccountAuthority`
+/// (broker truth) and this function never substitutes it in, per RR1's
+/// accepted separation between ACCOUNT-LEVEL RISK EQUITY and the LOCAL
+/// PORTFOLIO/RECOVERY SEED.
+///
+/// `serde_json::Value::pointer` returning `Some` (including `Some(&Value::
+/// Null)`) is the presence test, matching `effective_run_config_for_risk`'s
+/// ABSENT-vs-PRESENT-BUT-INVALID contract: a value that is present but not a
+/// positive `i64` (null, string, bool, float, zero, negative, array, object)
+/// is refused here, never healed by falling back to a default.
+fn required_initial_equity_micros(
+    effective_config: &serde_json::Value,
+) -> Result<i64, RuntimeLifecycleError> {
+    match effective_config.pointer("/risk/initial_equity_micros") {
+        None => Err(RuntimeLifecycleError::forbidden(
+            "runtime.start_refused.portfolio_seed_missing",
+            "risk.initial_equity_micros",
+            "no local portfolio initial_equity_micros seed is configured (neither the \
+             run's own config nor MQK_RISK_INITIAL_EQUITY_MICROS supplied one) — refusing \
+             to start rather than silently seeding PortfolioState with 0",
+        )),
+        Some(value) => match value.as_i64() {
+            Some(micros) if micros > 0 => Ok(micros),
+            Some(micros) => Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.portfolio_seed_invalid",
+                "risk.initial_equity_micros",
+                format!(
+                    "explicit risk.initial_equity_micros={micros} is not positive — refusing \
+                     to start rather than seed PortfolioState with a non-positive value"
+                ),
+            )),
+            None => Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.portfolio_seed_invalid",
+                "risk.initial_equity_micros",
+                format!(
+                    "explicit risk.initial_equity_micros is present but not a valid positive \
+                     i64 ({value}) — refusing to start rather than silently seed \
+                     PortfolioState with 0"
+                ),
+            )),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RR5 (ALPACA-LEGACY-PDT-DISPOSITION-2026-01)
 // ---------------------------------------------------------------------------
 
@@ -1196,6 +1256,132 @@ mod tests {
             effective.pointer("/risk/daily_loss_limit").unwrap().is_array(),
             "a present-but-wrong-type (array) daily_loss_limit must remain untouched"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // RUNTIME-PORTFOLIO-SEED-CONFIG-VALIDATION-01 (FR1): the LOCAL
+    // PortfolioState/recovery initial-equity seed must have explicit, typed,
+    // positive authority — never `unwrap_or(0)`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn missing_initial_equity_micros_refuses_to_start() {
+        let effective = serde_json::json!({ "risk": {} });
+        let err = required_initial_equity_micros(&effective)
+            .expect_err("absent seed must refuse to start, never default to 0");
+        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_missing");
+    }
+
+    #[test]
+    fn null_initial_equity_micros_refuses_to_start() {
+        let effective = serde_json::json!({ "risk": { "initial_equity_micros": null } });
+        let err = required_initial_equity_micros(&effective)
+            .expect_err("null seed must refuse to start");
+        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+    }
+
+    #[test]
+    fn string_initial_equity_micros_refuses_to_start() {
+        let effective = serde_json::json!({ "risk": { "initial_equity_micros": "bad" } });
+        let err = required_initial_equity_micros(&effective)
+            .expect_err("string seed must refuse to start, never coerce to 0");
+        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+    }
+
+    #[test]
+    fn float_initial_equity_micros_refuses_to_start() {
+        let effective = serde_json::json!({ "risk": { "initial_equity_micros": 50_000.5 } });
+        let err = required_initial_equity_micros(&effective)
+            .expect_err("non-integer float seed must refuse to start");
+        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+    }
+
+    #[test]
+    fn zero_initial_equity_micros_refuses_to_start() {
+        let effective = serde_json::json!({ "risk": { "initial_equity_micros": 0i64 } });
+        let err = required_initial_equity_micros(&effective)
+            .expect_err("zero seed must refuse to start");
+        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+    }
+
+    #[test]
+    fn negative_initial_equity_micros_refuses_to_start() {
+        let effective = serde_json::json!({ "risk": { "initial_equity_micros": -1i64 } });
+        let err = required_initial_equity_micros(&effective)
+            .expect_err("negative seed must refuse to start");
+        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+    }
+
+    #[test]
+    fn array_and_object_initial_equity_micros_refuse_to_start() {
+        for bad in [
+            serde_json::json!({ "risk": { "initial_equity_micros": [1] } }),
+            serde_json::json!({ "risk": { "initial_equity_micros": {} } }),
+            serde_json::json!({ "risk": { "initial_equity_micros": true } }),
+        ] {
+            let err = required_initial_equity_micros(&bad)
+                .expect_err("non-numeric-typed seed must refuse to start");
+            assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+        }
+    }
+
+    #[test]
+    fn positive_initial_equity_micros_returns_exact_value() {
+        let effective = serde_json::json!({ "risk": { "initial_equity_micros": 25_000_000_000i64 } });
+        assert_eq!(
+            required_initial_equity_micros(&effective).expect("positive seed must be accepted"),
+            25_000_000_000i64,
+        );
+    }
+
+    #[test]
+    fn valid_explicit_config_is_unchanged_by_validation() {
+        // Negative control 1: a config that was already valid before this
+        // patch must still validate to the exact same value.
+        let base = serde_json::json!({
+            "risk": {
+                "initial_equity_micros": 10_000_000_000i64,
+                "daily_loss_limit": 0.02_f64,
+            }
+        });
+        assert_eq!(
+            required_initial_equity_micros(&base).unwrap(),
+            10_000_000_000i64,
+        );
+    }
+
+    #[test]
+    fn absent_base_with_valid_env_supplementation_produces_exact_positive_seed() {
+        // Negative control 2: RR2's merge fills the ABSENT field from env,
+        // and this validation accepts the merged, now-present positive
+        // value exactly.
+        let base = serde_json::json!({ "runtime": "mqk-daemon" });
+        let effective =
+            effective_run_config_for_risk(&base, Some(50_000_000_000), None, None);
+        assert_eq!(
+            required_initial_equity_micros(&effective).expect("env-supplied seed must validate"),
+            50_000_000_000i64,
+        );
+    }
+
+    #[test]
+    fn malformed_explicit_base_with_valid_env_remains_refused_never_healed() {
+        // Negative control 3: RR2 never heals a PRESENT-BUT-INVALID explicit
+        // value with env, and this validation must refuse the still-broken
+        // merged config rather than fall back to the env value or 0.
+        let base = serde_json::json!({
+            "risk": { "initial_equity_micros": "bad" }
+        });
+        let effective =
+            effective_run_config_for_risk(&base, Some(50_000_000_000), None, None);
+        assert_eq!(
+            effective.pointer("/risk/initial_equity_micros"),
+            Some(&serde_json::json!("bad")),
+            "RR2 must not heal the malformed explicit value with env"
+        );
+        let err = required_initial_equity_micros(&effective)
+            .expect_err("malformed explicit seed must remain refused after RR2 merge");
+        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
     }
 
     // -----------------------------------------------------------------------
