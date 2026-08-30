@@ -247,6 +247,16 @@ impl Strategy for DelayedStrategy {
         self.inner.spec()
     }
 
+    /// STRESS-ROBUSTNESS-SEMANTIC-BINDING-01: execution delay is a stress
+    /// TRANSFORM applied on top of the candidate, not a change to the
+    /// candidate's own semantic configuration -- forward the wrapped
+    /// strategy's real fingerprint so identity verification stays about the
+    /// underlying candidate, never the decorator (which has no semantic
+    /// configuration of its own to fingerprint).
+    fn semantic_fingerprint(&self) -> String {
+        self.inner.semantic_fingerprint()
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         let real = self.inner.on_bar(ctx);
         self.buffer.push_back(real);
@@ -367,11 +377,32 @@ impl RobustnessGauntletOutput {
 // Scenario implementations
 // ---------------------------------------------------------------------------
 
+/// STRESS-ROBUSTNESS-SEMANTIC-BINDING-01: the single choke point every
+/// canonical re-run scenario funnels through -- validates the EXACT
+/// `Box<dyn Strategy>` about to be executed carries the same semantic
+/// fingerprint as the baseline candidate this gauntlet purports to test,
+/// before that instance is ever added to an engine. `DelayedStrategy`
+/// forwards its wrapped strategy's real fingerprint (see its
+/// `semantic_fingerprint` impl above), so this check is about the
+/// underlying candidate's semantics even when `strategy` is
+/// delay-wrapped, never the decorator. A mismatch fails closed and is
+/// never comparable-by-result -- the mismatch is caught before any bar is
+/// ever processed.
 fn run_with_strategy(
     config: BacktestConfig,
     bars: &[BacktestBar],
     strategy: Box<dyn Strategy>,
+    expected_semantic_fingerprint: &str,
 ) -> Result<BacktestReport, String> {
+    let actual = strategy.semantic_fingerprint();
+    if actual != expected_semantic_fingerprint {
+        return Err(format!(
+            "strategy semantic fingerprint mismatch: baseline candidate expects \
+             {expected_semantic_fingerprint:?}, robustness-gauntlet factory produced {actual:?} \
+             -- this strategy instance does not match the baseline candidate this evidence \
+             purports to test"
+        ));
+    }
     let mut engine = BacktestEngine::new(config);
     engine
         .add_strategy(strategy)
@@ -389,7 +420,12 @@ fn execution_delay_scenario(
     let initial_cash = base_config.initial_cash_micros;
     let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
     let delayed = DelayedStrategy::new(make_strategy(), 1);
-    match run_with_strategy(base_config.clone(), bars, Box::new(delayed)) {
+    match run_with_strategy(
+        base_config.clone(),
+        bars,
+        Box::new(delayed),
+        &baseline.strategy_semantic_fingerprint,
+    ) {
         Ok(report) => {
             let (bar_passed, bar_detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
             let (edge_passed, edge_detail) =
@@ -451,7 +487,12 @@ fn symbol_leave_one_out_scenario(
     for symbol in &symbols {
         let filtered: Vec<BacktestBar> =
             bars.iter().filter(|b| b.symbol != *symbol).cloned().collect();
-        let report = match run_with_strategy(base_config.clone(), &filtered, make_strategy()) {
+        let report = match run_with_strategy(
+            base_config.clone(),
+            &filtered,
+            make_strategy(),
+            &baseline.strategy_semantic_fingerprint,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return RobustnessScenarioOutcome {
@@ -678,15 +719,42 @@ fn parameter_neighborhood_scenario(
         max_position_notional_usd: vec![base_config.sizing.max_position_notional_usd],
     };
 
-    let rows = match run_sweep(bars, base_config, &grid, |_pt| Some(make_strategy())) {
+    // STRESS-ROBUSTNESS-SEMANTIC-BINDING-01: `run_sweep` calls this factory
+    // fresh for every neighborhood point (the sweep parameter-neighborhood
+    // path must not become a bypass for the semantic-identity check every
+    // other scenario enforces) -- returning `None` fails the point closed
+    // via `SweepError::RunFailed`, which the `Err(e)` arm below already
+    // converts into a failed, never-passing outcome. `mismatch_detail`
+    // captures the specific, attributable identity-mismatch reason (rather
+    // than surfacing `SweepError`'s generic "returned None" text) so this
+    // scenario's failure is as auditable as every other identity-bound
+    // scenario in this module.
+    let expected_fp = baseline.strategy_semantic_fingerprint.as_str();
+    let mismatch_detail: std::cell::Cell<Option<String>> = std::cell::Cell::new(None);
+    let rows = match run_sweep(bars, base_config, &grid, |_pt| {
+        let s = make_strategy();
+        let actual = s.semantic_fingerprint();
+        if actual == expected_fp {
+            Some(s)
+        } else {
+            mismatch_detail.set(Some(format!(
+                "strategy semantic fingerprint mismatch: baseline candidate expects \
+                 {expected_fp:?}, parameter-neighborhood factory produced {actual:?} -- this \
+                 strategy instance does not match the baseline candidate this evidence \
+                 purports to test"
+            )));
+            None
+        }
+    }) {
         Ok(r) => r,
         Err(e) => {
+            let reason = mismatch_detail.take().unwrap_or_else(|| e.to_string());
             return RobustnessScenarioOutcome {
                 name,
                 applicable: true,
                 passed: false,
-                reason: Some(e.to_string()),
-                detail: e.to_string(),
+                reason: Some(reason.clone()),
+                detail: reason,
                 research_trial_id: None,
                 evidence: None,
             }
@@ -754,7 +822,12 @@ fn placebo_temporal_offset_scenario(
         .map(|(_, eq)| *eq)
         .unwrap_or(initial_cash);
 
-    match run_with_strategy(base_config.clone(), bars, Box::new(delayed)) {
+    match run_with_strategy(
+        base_config.clone(),
+        bars,
+        Box::new(delayed),
+        &baseline.strategy_semantic_fingerprint,
+    ) {
         Ok(report) => {
             let placebo_final = report
                 .equity_curve
@@ -825,6 +898,7 @@ fn conservative_capacity_config(base: &BacktestConfig) -> BacktestConfig {
 }
 
 fn conservative_capacity_stress_scenario(
+    baseline: &BacktestReport,
     base_config: &BacktestConfig,
     bars: &[BacktestBar],
     make_strategy: &impl Fn() -> Box<dyn Strategy>,
@@ -832,7 +906,7 @@ fn conservative_capacity_stress_scenario(
     let name = "conservative_capacity_stress".to_string();
     let initial_cash = base_config.initial_cash_micros;
     let cfg = conservative_capacity_config(base_config);
-    match run_with_strategy(cfg, bars, make_strategy()) {
+    match run_with_strategy(cfg, bars, make_strategy(), &baseline.strategy_semantic_fingerprint) {
         Ok(report) => {
             let (passed, detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
             RobustnessScenarioOutcome {
@@ -876,7 +950,7 @@ pub fn run_robustness_gauntlet(
         month_year_regime_concentration_scenario(baseline, bars),
         parameter_neighborhood_scenario(baseline, base_config, bars, &make_strategy),
         placebo_temporal_offset_scenario(baseline, base_config, bars, &make_strategy),
-        conservative_capacity_stress_scenario(base_config, bars, &make_strategy),
+        conservative_capacity_stress_scenario(baseline, base_config, bars, &make_strategy),
     ];
 
     let deferred = vec![

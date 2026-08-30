@@ -160,6 +160,33 @@ fn conservative_risk_limits_config(base: &BacktestConfig) -> BacktestConfig {
     cfg
 }
 
+/// STRESS-ROBUSTNESS-SEMANTIC-BINDING-01: validates that a fresh strategy
+/// instance obtained from the caller's `make_strategy` factory carries the
+/// SAME semantic fingerprint as the baseline candidate this stress suite
+/// purports to test. The factory contract permits a new instance on every
+/// call, so every call site must check the actual instance about to be
+/// executed -- never a single sample call assumed representative of the
+/// rest. A mismatch fails closed and never becomes passing canonical
+/// evidence: the caller must never compare result values to infer semantic
+/// equivalence, and must never reconstruct identity from `strategy_name`
+/// alone.
+fn checked_strategy(
+    make_strategy: &impl Fn() -> Box<dyn Strategy>,
+    expected_semantic_fingerprint: &str,
+) -> Result<Box<dyn Strategy>, String> {
+    let strategy = make_strategy();
+    let actual = strategy.semantic_fingerprint();
+    if actual != expected_semantic_fingerprint {
+        return Err(format!(
+            "strategy semantic fingerprint mismatch: baseline candidate expects \
+             {expected_semantic_fingerprint:?}, stress-suite factory produced {actual:?} -- \
+             this strategy instance does not match the baseline candidate this evidence \
+             purports to test"
+        ));
+    }
+    Ok(strategy)
+}
+
 /// FINAL-P9-ROBUSTNESS-SEMANTICS-01: edge-collapse check -- when `Some`,
 /// carries the baseline's OWN final equity so a scenario that was genuinely
 /// profitable at baseline (`baseline_final_equity_micros > initial_cash`)
@@ -171,7 +198,7 @@ fn evaluate_scenario(
     name: &str,
     config: BacktestConfig,
     bars: &[BacktestBar],
-    strategy: Box<dyn Strategy>,
+    strategy: Result<Box<dyn Strategy>, String>,
     edge_collapse_baseline_final_equity_micros: Option<i64>,
 ) -> StressScenarioOutcome {
     let initial_cash = config.initial_cash_micros;
@@ -183,6 +210,11 @@ fn evaluate_scenario(
         reason: Some(reason),
         final_equity_micros: 0,
         max_drawdown_fraction: 0.0,
+    };
+
+    let strategy = match strategy {
+        Ok(s) => s,
+        Err(e) => return fail(e),
     };
 
     if let Err(e) = engine.add_strategy(strategy) {
@@ -274,27 +306,28 @@ pub fn run_backtest_stress_suite(
 ) -> StressSuiteRunOutput {
     let baseline_final_equity_micros =
         baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(base_config.initial_cash_micros);
+    let expected_fp = baseline.strategy_semantic_fingerprint.as_str();
 
     let scenarios = vec![
         evaluate_scenario(
             "cost_stress_2x",
             cost_stress_config(base_config, 2),
             bars,
-            make_strategy(),
+            checked_strategy(&make_strategy, expected_fp),
             Some(baseline_final_equity_micros),
         ),
         evaluate_scenario(
             "cost_stress_3x",
             cost_stress_config(base_config, 3),
             bars,
-            make_strategy(),
+            checked_strategy(&make_strategy, expected_fp),
             Some(baseline_final_equity_micros),
         ),
         evaluate_scenario(
             "conservative_risk_limits",
             conservative_risk_limits_config(base_config),
             bars,
-            make_strategy(),
+            checked_strategy(&make_strategy, expected_fp),
             None,
         ),
     ];
