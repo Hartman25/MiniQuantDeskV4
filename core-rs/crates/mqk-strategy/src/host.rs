@@ -47,6 +47,16 @@ impl StrategyHost {
             .ok_or(StrategyHostError::NoStrategyRegistered)
     }
 
+    /// S1: the currently-registered strategy's `semantic_fingerprint()`.
+    /// Queried from the exact same boxed instance `on_bar` dispatches to —
+    /// never reconstructed from `spec` or any other cached value.
+    pub fn semantic_fingerprint(&self) -> Result<String, StrategyHostError> {
+        self.strategy
+            .as_ref()
+            .map(|s| s.semantic_fingerprint())
+            .ok_or(StrategyHostError::NoStrategyRegistered)
+    }
+
     /// Run one bar evaluation. Validates timeframe and returns LIVE/SHADOW intents.
     pub fn on_bar(
         &mut self,
@@ -67,6 +77,7 @@ impl StrategyHost {
             .ok_or(StrategyHostError::NoStrategyRegistered)?;
 
         let output = s.on_bar(ctx);
+        let semantic_fingerprint = s.semantic_fingerprint();
 
         let mode = match self.shadow {
             ShadowMode::Off => IntentMode::Live,
@@ -75,6 +86,7 @@ impl StrategyHost {
 
         Ok(StrategyBarResult {
             spec,
+            semantic_fingerprint,
             intents: StrategyIntents { mode, output },
         })
     }

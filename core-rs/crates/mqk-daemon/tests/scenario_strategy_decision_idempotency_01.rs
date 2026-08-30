@@ -116,6 +116,7 @@ use mqk_strategy::{
 fn live_result(targets: Vec<TargetPosition>) -> StrategyBarResult {
     StrategyBarResult {
         spec: StrategySpec::new("test_strategy", 300),
+        semantic_fingerprint: "test-fixture:test_strategy".to_string(),
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput { targets },

@@ -1,3 +1,4 @@
+use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 use crate::{
     BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
     StrategySpec, TargetPosition,
@@ -67,6 +68,15 @@ impl SwingMomentumStrategy {
 impl Strategy for SwingMomentumStrategy {
     fn spec(&self) -> StrategySpec {
         StrategySpec::new(NAME, TIMEFRAME_SECS)
+    }
+
+    fn semantic_fingerprint(&self) -> String {
+        SemanticIdentityBuilder::new(SEMANTIC_IDENTITY_SCHEMA_V1, NAME, VERSION)
+            .push_str(&self.symbol)
+            .push_i64(TIMEFRAME_SECS)
+            .push_i64(LOOKBACK as i64)
+            .push_i64(ENTRY_BPS)
+            .finish()
     }
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {

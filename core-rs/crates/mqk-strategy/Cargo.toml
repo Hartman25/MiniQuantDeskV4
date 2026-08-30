@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 mqk-execution = { path = "../mqk-execution" }
+# S1: canonical semantic-identity fingerprint (deterministic SHA-256 over
+# each strategy instance's decision-affecting configuration).
+sha2 = "0.10"
+hex = "0.4"

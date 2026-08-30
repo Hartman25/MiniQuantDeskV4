@@ -2025,7 +2025,9 @@ dependencies = [
 name = "mqk-strategy"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "mqk-execution",
+ "sha2",
 ]
 
 [[package]]

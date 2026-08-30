@@ -136,6 +136,33 @@ pub trait Strategy: Send + Sync {
     fn spec(&self) -> StrategySpec;
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput;
+
+    /// STRATEGY-SEMANTIC-IDENTITY-SEAM-01 (S1): deterministic, hex-encoded
+    /// SHA-256 fingerprint over this instance's effective, decision-affecting
+    /// semantic configuration (see `crate::semantic_identity` for the
+    /// determinism contract). `spec()` alone (name + timeframe_secs) is not
+    /// sufficient — two instances can share a spec while differing in
+    /// sizing, thresholds, or long/short behavior.
+    ///
+    /// Default: derived solely from `spec()`. This default exists only so
+    /// dummy/harness `Strategy` implementations used across backtest and
+    /// daemon test fixtures do not all need updating for S1 — it carries
+    /// forward the exact pre-S1 collapse (two differently-configured
+    /// instances of the same registered name/timeframe are indistinguishable)
+    /// and must NOT be relied on by any strategy with decision-affecting
+    /// configuration beyond name/timeframe. Every built-in engine in
+    /// `crate::engines` overrides this explicitly.
+    fn semantic_fingerprint(&self) -> String {
+        let spec = self.spec();
+        crate::semantic_identity::SemanticIdentityBuilder::new(
+            crate::semantic_identity::SEMANTIC_IDENTITY_SCHEMA_V1,
+            "strategy-default-spec-only",
+            "v1",
+        )
+        .push_str(&spec.name)
+        .push_i64(spec.timeframe_secs)
+        .finish()
+    }
 }
 
 /// Host-level policy errors (Tier A).
@@ -177,5 +204,10 @@ impl StrategyIntents {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StrategyBarResult {
     pub spec: StrategySpec,
+    /// S1: the exact host instance's `semantic_fingerprint()` at the moment
+    /// it produced `intents` — propagated here so a downstream promotion
+    /// gate can bind a decision to the precise semantic configuration that
+    /// produced it, without re-deriving it from mutable ambient state.
+    pub semantic_fingerprint: String,
     pub intents: StrategyIntents,
 }

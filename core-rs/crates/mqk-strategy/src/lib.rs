@@ -14,11 +14,13 @@ mod types;
 
 pub mod engines;
 pub mod plugin_registry;
+pub mod semantic_identity;
 
 pub use host::*;
 pub use plugin_registry::{
     PluginRegistry, RegistryError, StrategyDataRequirements, StrategyFactory, StrategyMeta,
 };
+pub use semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 pub use types::*;
 
 // Re-export execution-facing output types so engine modules and downstream

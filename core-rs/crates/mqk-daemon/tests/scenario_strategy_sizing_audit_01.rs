@@ -43,6 +43,7 @@ use mqk_strategy::{
 fn live_result_with_target(symbol: &str, target: i64) -> StrategyBarResult {
     StrategyBarResult {
         spec: StrategySpec::new("intraday_scalper", 300),
+        semantic_fingerprint: "test-fixture:intraday_scalper".to_string(),
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput {

@@ -7254,6 +7254,7 @@ mod phase7b_selected_host_dispatch_tests {
     ) -> StrategyBarResult {
         StrategyBarResult {
             spec: StrategySpec::new(spec_name, timeframe_secs),
+            semantic_fingerprint: format!("test-fixture:{spec_name}:{timeframe_secs}"),
             intents: StrategyIntents {
                 mode: IntentMode::Live,
                 output: StrategyOutput::new(vec![TargetPosition {

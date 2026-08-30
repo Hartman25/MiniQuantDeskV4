@@ -182,3 +182,105 @@ mod registered_strategy_ids_tests {
         assert!(REGISTERED_STRATEGY_IDS.contains(&"intraday_short_scalper"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// STRATEGY-SEMANTIC-IDENTITY-SEAM-01 (S1): registry/host-wide identity checks.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod semantic_identity_tests {
+    use super::*;
+
+    /// Every built-in engine explicitly overrides `semantic_fingerprint` —
+    /// none of the five registered identities silently falls back to the
+    /// trait's spec-only default (which would carry forward exactly the
+    /// defect S1 exists to fix). Detected by comparing against two
+    /// deliberately mismatched-config instances of the SAME registered
+    /// name/timeframe: the trait default cannot see the mismatch (it only
+    /// sees `spec()`), so if any built-in were still using the default, the
+    /// pair below would incorrectly fingerprint identically for at least one
+    /// identity that has decision-affecting config beyond name/timeframe
+    /// (intraday_scalper / intraday_short_scalper here, since the other three
+    /// currently have no per-instance runtime-configurable field beyond
+    /// symbol, which this test also covers via a symbol change).
+    #[test]
+    fn every_registered_builtin_overrides_the_default_fingerprint() {
+        for symbol in ["AAPL", "MSFT"] {
+            let registry = build_registry_for(symbol);
+            for name in REGISTERED_STRATEGY_IDS {
+                let instance = registry.instantiate(name).unwrap();
+                let other_symbol = if symbol == "AAPL" { "MSFT" } else { "AAPL" };
+                let other_registry = build_registry_for(other_symbol);
+                let other_instance = other_registry.instantiate(name).unwrap();
+                assert_ne!(
+                    instance.semantic_fingerprint(),
+                    other_instance.semantic_fingerprint(),
+                    "identity '{name}': fingerprint did not change when symbol changed \
+                     ({symbol} -> {other_symbol}) — suspect it is still using the \
+                     spec-only trait default"
+                );
+            }
+        }
+        // intraday_scalper/intraday_short_scalper additionally vary target_qty.
+        let default_caps = build_registry_for("AAPL");
+        let custom_caps = {
+            let mut r = PluginRegistry::new();
+            register_builtin_strategies_with_sizing(&mut r, "AAPL", 9, Some(2), Some(3000))
+                .unwrap();
+            r
+        };
+        for name in ["intraday_scalper"] {
+            let a = default_caps.instantiate(name).unwrap();
+            let b = custom_caps.instantiate(name).unwrap();
+            assert_ne!(
+                a.semantic_fingerprint(),
+                b.semantic_fingerprint(),
+                "identity '{name}': sizing change did not change fingerprint"
+            );
+        }
+    }
+
+    fn build_registry_for(symbol: &str) -> PluginRegistry {
+        let mut r = PluginRegistry::new();
+        register_builtin_strategies(&mut r, symbol.to_string()).unwrap();
+        r
+    }
+
+    /// Fixed built-in descriptors (no per-instance runtime config beyond
+    /// symbol) are fully deterministic across repeated registry
+    /// construction: same symbol in -> same fingerprint out, every time.
+    #[test]
+    fn fixed_builtin_descriptors_are_deterministic_across_registrations() {
+        for name in REGISTERED_STRATEGY_IDS {
+            let r1 = build_registry_for("AAPL");
+            let r2 = build_registry_for("AAPL");
+            let fp1 = r1.instantiate(name).unwrap().semantic_fingerprint();
+            let fp2 = r2.instantiate(name).unwrap().semantic_fingerprint();
+            assert_eq!(fp1, fp2, "identity '{name}' is not deterministic");
+        }
+    }
+
+    /// `PluginRegistry::instantiate` produces an instance whose
+    /// `semantic_fingerprint()` is exactly what `StrategyHost` observes
+    /// after registration — the host neither loses nor reconstructs it.
+    #[test]
+    fn registry_instance_fingerprint_matches_what_host_observes_after_registration() {
+        use crate::{ShadowMode, StrategyHost};
+
+        let registry = build_registry_for("AAPL");
+        for name in REGISTERED_STRATEGY_IDS {
+            let instance = registry.instantiate(name).unwrap();
+            let expected = instance.semantic_fingerprint();
+
+            let mut host = StrategyHost::new(ShadowMode::Off);
+            host.register(instance).unwrap();
+
+            assert_eq!(
+                host.semantic_fingerprint().unwrap(),
+                expected,
+                "identity '{name}': host-observed fingerprint diverged from the \
+                 registry-instantiated instance's own fingerprint"
+            );
+        }
+    }
+}

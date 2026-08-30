@@ -115,6 +115,7 @@ fn dr01_no_dry_run_ids_configured_is_a_pure_noop() {
     // decision through the untouched `bar_result_to_decisions`.
     let primary_result = StrategyBarResult {
         spec: StrategySpec::new("intraday_scalper", 300),
+        semantic_fingerprint: "test-fixture:intraday_scalper".to_string(),
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput {
@@ -188,6 +189,7 @@ fn dr03_primary_long_strategy_result_remains_eligible_for_existing_path() {
     // this patch: buy decision, side/qty correct, B5 not involved.
     let result = StrategyBarResult {
         spec: StrategySpec::new("intraday_scalper", 300),
+        semantic_fingerprint: "test-fixture:intraday_scalper".to_string(),
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput {

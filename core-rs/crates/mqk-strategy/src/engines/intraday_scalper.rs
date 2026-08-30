@@ -53,6 +53,7 @@
 //! Effective target is always floored at 0 (never negative).
 //! Default target_qty=1 with no caps set preserves the prior conservative behavior.
 
+use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
 use crate::{
     BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
     StrategySpec, TargetPosition,
@@ -468,6 +469,29 @@ impl IntradayScalperStrategy {
 impl Strategy for IntradayScalperStrategy {
     fn spec(&self) -> StrategySpec {
         StrategySpec::new(self.strategy_name, TIMEFRAME_SECS)
+    }
+
+    /// S1: hashes every field that changes `on_bar`'s decision — the
+    /// registered identity (`strategy_name`: distinguishes the long and
+    /// short-only registrations sharing this struct), the captured symbol
+    /// (targets are emitted for it), the fixed engine constants, and the
+    /// three sizing/short-signal fields, all in their *effective*
+    /// (post-constructor-normalization) form. Env-var strings that
+    /// deterministically resolve to the same effective value (e.g. absent,
+    /// blank, or "0" all resolving to `target_qty=1`) never reach this
+    /// method at all — only the resolved `i64`/`bool` fields do.
+    fn semantic_fingerprint(&self) -> String {
+        SemanticIdentityBuilder::new(SEMANTIC_IDENTITY_SCHEMA_V1, self.strategy_name, VERSION)
+            .push_str(&self.symbol)
+            .push_i64(TIMEFRAME_SECS)
+            .push_i64(LOOKBACK as i64)
+            .push_i64(MICRO_MOVE_BPS)
+            .push_i64(self.target_qty)
+            .push_opt_i64(self.max_target_qty)
+            .push_opt_i64(self.max_notional_usd)
+            .push_bool(self.allow_short_signals)
+            .push_bool(self.is_short_only)
+            .finish()
     }
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
@@ -1044,6 +1068,7 @@ mod tests {
 
         let bar_result = StrategyBarResult {
             spec: StrategySpec::new(NAME, TIMEFRAME_SECS),
+            semantic_fingerprint: s.semantic_fingerprint(),
             intents: StrategyIntents {
                 mode: IntentMode::Live,
                 output: StrategyOutput {
@@ -1255,5 +1280,189 @@ mod tests {
             is_b5_blocked,
             "SSG11: delta={delta}, current={current} → B5 classifies ShortOpen and blocks"
         );
+    }
+
+    // ── STRATEGY-SEMANTIC-IDENTITY-SEAM-01 (S1) ──────────────────────────
+
+    /// RED proof: before S1, `StrategySpec` alone (name + timeframe_secs) is
+    /// the only identity a caller can observe from `Strategy::spec()`, and it
+    /// cannot distinguish two instances with materially different sizing —
+    /// they collapse to the identical spec despite producing different
+    /// decisions (target=1 vs target=5 on the same bullish input). This is
+    /// the exact defect `semantic_fingerprint` closes; kept as a permanent
+    /// regression proof that `spec()` was never meant to serve this purpose.
+    #[test]
+    fn red_proof_spec_alone_cannot_distinguish_different_target_qty_configs() {
+        let a = IntradayScalperStrategy::with_target_qty("AAPL", 1);
+        let b = IntradayScalperStrategy::with_target_qty("AAPL", 5);
+        assert_eq!(
+            a.spec(),
+            b.spec(),
+            "RED: StrategySpec collapses target_qty=1 and target_qty=5 to the same identity"
+        );
+        assert_ne!(
+            a.semantic_fingerprint(),
+            b.semantic_fingerprint(),
+            "GREEN: semantic_fingerprint distinguishes what spec() cannot"
+        );
+    }
+
+    #[test]
+    fn sfp01_identical_effective_config_same_fingerprint() {
+        let a = IntradayScalperStrategy::with_caps("AAPL", 3, Some(5), Some(1000));
+        let b = IntradayScalperStrategy::with_caps("AAPL", 3, Some(5), Some(1000));
+        assert_eq!(a.semantic_fingerprint(), b.semantic_fingerprint());
+    }
+
+    #[test]
+    fn sfp02_target_qty_mutation_changes_fingerprint() {
+        let a = IntradayScalperStrategy::with_target_qty("AAPL", 1);
+        let b = IntradayScalperStrategy::with_target_qty("AAPL", 2);
+        assert_ne!(a.semantic_fingerprint(), b.semantic_fingerprint());
+    }
+
+    #[test]
+    fn sfp03_max_target_qty_mutation_changes_fingerprint() {
+        let a = IntradayScalperStrategy::with_caps("AAPL", 10, Some(3), None);
+        let b = IntradayScalperStrategy::with_caps("AAPL", 10, Some(4), None);
+        assert_ne!(a.semantic_fingerprint(), b.semantic_fingerprint());
+        // None vs Some also must differ.
+        let c = IntradayScalperStrategy::with_caps("AAPL", 10, None, None);
+        assert_ne!(a.semantic_fingerprint(), c.semantic_fingerprint());
+    }
+
+    #[test]
+    fn sfp04_max_notional_usd_mutation_changes_fingerprint() {
+        let a = IntradayScalperStrategy::with_caps("AAPL", 10, None, Some(500));
+        let b = IntradayScalperStrategy::with_caps("AAPL", 10, None, Some(700));
+        assert_ne!(a.semantic_fingerprint(), b.semantic_fingerprint());
+        let c = IntradayScalperStrategy::with_caps("AAPL", 10, None, None);
+        assert_ne!(a.semantic_fingerprint(), c.semantic_fingerprint());
+    }
+
+    #[test]
+    fn sfp05_long_vs_short_only_variant_different_fingerprint() {
+        let long = IntradayScalperStrategy::new("AAPL");
+        let short = IntradayScalperStrategy::new_short("AAPL");
+        assert_ne!(long.spec().name, short.spec().name, "sanity: distinct registered names");
+        assert_ne!(long.semantic_fingerprint(), short.semantic_fingerprint());
+    }
+
+    #[test]
+    fn sfp06_allow_short_signals_flag_alone_changes_fingerprint() {
+        let default_long = IntradayScalperStrategy::with_target_qty("AAPL", 1);
+        let short_enabled = IntradayScalperStrategy::with_target_qty("AAPL", 1).short_signals(true);
+        assert_ne!(
+            default_long.semantic_fingerprint(),
+            short_enabled.semantic_fingerprint()
+        );
+    }
+
+    #[test]
+    fn sfp07_symbol_mutation_changes_fingerprint() {
+        let aapl = IntradayScalperStrategy::with_target_qty("AAPL", 1);
+        let msft = IntradayScalperStrategy::with_target_qty("MSFT", 1);
+        assert_ne!(aapl.semantic_fingerprint(), msft.semantic_fingerprint());
+    }
+
+    /// Env inputs that all deterministically resolve to the same effective
+    /// value (absent, blank, zero, negative) must never manufacture
+    /// different identities merely because their raw strings differed — the
+    /// fingerprint hashes only the resolved `i64`, never the raw env text.
+    #[test]
+    fn sfp08_equivalent_env_resolved_config_same_fingerprint() {
+        std::env::remove_var(TARGET_QTY_ENV);
+        let from_absent = IntradayScalperStrategy::new("AAPL");
+        std::env::set_var(TARGET_QTY_ENV, "0");
+        let from_zero = IntradayScalperStrategy::new("AAPL");
+        std::env::set_var(TARGET_QTY_ENV, "-3");
+        let from_negative = IntradayScalperStrategy::new("AAPL");
+        std::env::remove_var(TARGET_QTY_ENV);
+
+        assert_eq!(
+            from_absent.semantic_fingerprint(),
+            from_zero.semantic_fingerprint(),
+            "absent and zero both resolve to effective target_qty=1"
+        );
+        assert_eq!(
+            from_absent.semantic_fingerprint(),
+            from_negative.semantic_fingerprint(),
+            "absent and negative both resolve to effective target_qty=1"
+        );
+    }
+
+    #[test]
+    fn sfp09_repeated_construction_produces_identical_fingerprint() {
+        let a = IntradayScalperStrategy::with_caps("AAPL", 4, Some(6), Some(900));
+        let b = IntradayScalperStrategy::with_caps("AAPL", 4, Some(6), Some(900));
+        let c = IntradayScalperStrategy::with_caps("AAPL", 4, Some(6), Some(900));
+        assert_eq!(a.semantic_fingerprint(), b.semantic_fingerprint());
+        assert_eq!(b.semantic_fingerprint(), c.semantic_fingerprint());
+    }
+
+    /// `on_bar`'s output (a result value) must never participate: two
+    /// identically-configured instances fingerprint identically regardless
+    /// of what bars they are fed or what they decide.
+    #[test]
+    fn sfp10_on_bar_output_does_not_participate_in_fingerprint() {
+        let base = 200_000_000i64;
+        let mut a = IntradayScalperStrategy::with_target_qty("AAPL", 3);
+        let mut b = IntradayScalperStrategy::with_target_qty("AAPL", 3);
+        let fp_before = a.semantic_fingerprint();
+        let out_a = a.on_bar(&ctx_with_bars(bullish_bars(base)));
+        let out_b = b.on_bar(&ctx_with_bars(bearish_bars(base)));
+        assert_ne!(
+            out_a.targets[0].qty, out_b.targets[0].qty,
+            "sanity: the two on_bar calls produced different outputs"
+        );
+        assert_eq!(
+            a.semantic_fingerprint(),
+            fp_before,
+            "fingerprint must be unaffected by on_bar output"
+        );
+        assert_eq!(
+            a.semantic_fingerprint(),
+            b.semantic_fingerprint(),
+            "identical config -> identical fingerprint regardless of on_bar output"
+        );
+    }
+
+    /// No transport/path/wall-clock field participates: fingerprint is
+    /// stable across repeated calls with no dependency on `now_tick`/`end_ts`
+    /// in the context, since those never enter `semantic_fingerprint` at all.
+    #[test]
+    fn sfp11_no_wallclock_or_context_field_participates() {
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
+        let fp1 = s.semantic_fingerprint();
+        let _ = s.on_bar(&StrategyContext::new(
+            TIMEFRAME_SECS,
+            999_999,
+            RecentBarsWindow::new(LOOKBACK, bullish_bars(200_000_000)),
+        ));
+        let fp2 = s.semantic_fingerprint();
+        assert_eq!(fp1, fp2);
+    }
+
+    /// `StrategyHost` must expose exactly the fingerprint of the boxed
+    /// instance it holds — never a value it separately reconstructs — and
+    /// that same fingerprint must appear on every `StrategyBarResult` the
+    /// host produces after registration.
+    #[test]
+    fn sfp12_host_exposes_same_fingerprint_as_registered_instance_and_bar_result() {
+        use crate::{ShadowMode, StrategyHost};
+
+        let strategy = IntradayScalperStrategy::with_target_qty("AAPL", 7);
+        let expected = strategy.semantic_fingerprint();
+
+        let mut host = StrategyHost::new(ShadowMode::Off);
+        host.register(Box::new(strategy)).unwrap();
+
+        assert_eq!(host.semantic_fingerprint().unwrap(), expected);
+
+        let base = 200_000_000i64;
+        let result = host
+            .on_bar(&ctx_with_bars(bullish_bars(base)))
+            .expect("on_bar must succeed");
+        assert_eq!(result.semantic_fingerprint, expected);
     }
 }
