@@ -969,25 +969,52 @@ fn required_initial_equity_micros(
 /// Broker-side intraday-margin/order-acceptance enforcement remains
 /// Alpaca's own authority, unaffected by this function. No removed Alpaca
 /// PDT field is read or written anywhere in this disposition.
+///
+/// # ALPACA-LEGACY-PDT-CONFIG-STRICTNESS-01 (FR2)
+///
+/// `base.pointer(...).and_then(|v| v.as_bool())` previously collapsed EVERY
+/// present-but-non-bool value (`"true"`, `null`, `1`, `[]`, `{}`) to `None`,
+/// indistinguishable from the field being genuinely absent — silently
+/// healing a malformed explicit config to `false` instead of refusing it.
+/// That contradicted RR2's ABSENT-vs-PRESENT-BUT-INVALID contract. This now
+/// inspects presence and type explicitly and is a strict four-state
+/// disposition:
+///
+/// - ABSENT              -> explicit `false` (NOT APPLICABLE)
+/// - PRESENT bool `false` -> explicit `false` (accepted)
+/// - PRESENT bool `true`  -> refuse: unsupported legacy-PDT request
+/// - PRESENT, any other type (string, null, number, array, object) -> refuse:
+///   malformed explicit config, never healed to `false` or `true`
 fn alpaca_legacy_pdt_disposition(
     base: &serde_json::Value,
     effective: serde_json::Value,
 ) -> Result<serde_json::Value, RuntimeLifecycleError> {
-    let explicit_pdt_auto_enabled = base
-        .pointer("/risk/pdt_auto_enabled")
-        .and_then(|value| value.as_bool());
-
-    if explicit_pdt_auto_enabled == Some(true) {
-        return Err(RuntimeLifecycleError::forbidden(
-            "runtime.start_refused.alpaca_legacy_pdt_unsupported",
-            "risk.pdt_auto_enabled",
-            "explicit pdt_auto_enabled=true is not supported on the current Alpaca \
-             provider contract: the legacy Pattern Day Trader regime (pattern_day_trader, \
-             daytrade_count, daytrading_buying_power, the $25k minimum) was retired \
-             2026-07-06 in favor of The Intraday Margin Rule, and no authoritative PDT \
-             source is wired for this path — refusing to start rather than silently \
-             never enforcing the requested check",
-        ));
+    match base.pointer("/risk/pdt_auto_enabled") {
+        None => {}
+        Some(serde_json::Value::Bool(false)) => {}
+        Some(serde_json::Value::Bool(true)) => {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.alpaca_legacy_pdt_unsupported",
+                "risk.pdt_auto_enabled",
+                "explicit pdt_auto_enabled=true is not supported on the current Alpaca \
+                 provider contract: the legacy Pattern Day Trader regime (pattern_day_trader, \
+                 daytrade_count, daytrading_buying_power, the $25k minimum) was retired \
+                 2026-07-06 in favor of The Intraday Margin Rule, and no authoritative PDT \
+                 source is wired for this path — refusing to start rather than silently \
+                 never enforcing the requested check",
+            ));
+        }
+        Some(other) => {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.alpaca_legacy_pdt_malformed",
+                "risk.pdt_auto_enabled",
+                format!(
+                    "explicit risk.pdt_auto_enabled is present but not a valid bool ({other}) \
+                     — refusing to start rather than silently treat a malformed explicit \
+                     value as absent and heal it to false"
+                ),
+            ));
+        }
     }
 
     let mut effective = effective;
@@ -1502,6 +1529,87 @@ mod tests {
                 "must never introduce the removed Alpaca field '{removed_field}'"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ALPACA-LEGACY-PDT-CONFIG-STRICTNESS-01 (FR2): strict four-state
+    // disposition — absent/false/true/malformed must never collapse.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn absent_pdt_auto_enabled_becomes_explicit_false() {
+        let base = serde_json::json!({});
+        let effective = alpaca_legacy_pdt_disposition(&base, base.clone())
+            .expect("absent field must not refuse to start");
+        assert_eq!(
+            effective.pointer("/risk/pdt_auto_enabled"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[test]
+    fn explicit_bool_false_pdt_auto_enabled_is_accepted() {
+        let base = serde_json::json!({ "risk": { "pdt_auto_enabled": false } });
+        let effective = alpaca_legacy_pdt_disposition(&base, base.clone())
+            .expect("explicit bool false must not refuse to start");
+        assert_eq!(
+            effective.pointer("/risk/pdt_auto_enabled"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[test]
+    fn explicit_bool_true_pdt_auto_enabled_refuses_as_unsupported() {
+        let base = serde_json::json!({ "risk": { "pdt_auto_enabled": true } });
+        let err = alpaca_legacy_pdt_disposition(&base, base.clone())
+            .expect_err("explicit bool true must refuse as unsupported");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.alpaca_legacy_pdt_unsupported"
+        );
+    }
+
+    #[test]
+    fn malformed_non_bool_pdt_auto_enabled_refuses_never_healed_to_false() {
+        // Every present-but-non-bool value must refuse with the MALFORMED
+        // fault class, never silently collapse to the ABSENT disposition
+        // (false) the way `.and_then(as_bool)` used to.
+        for malformed in [
+            serde_json::json!("true"),
+            serde_json::json!("false"),
+            serde_json::Value::Null,
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let base = serde_json::json!({ "risk": { "pdt_auto_enabled": malformed.clone() } });
+            let err = alpaca_legacy_pdt_disposition(&base, base.clone()).unwrap_err();
+            assert_eq!(
+                err.fault_class(),
+                "runtime.start_refused.alpaca_legacy_pdt_malformed",
+                "malformed pdt_auto_enabled={malformed:?} must use the malformed fault class, \
+                 not silently heal to false or to the unsupported-true fault class"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_pdt_auto_enabled_cannot_be_healed_by_effective_or_env_view() {
+        // This disposition reads exclusively from `base` (the run's own
+        // unmodified config_json), never from an env-supplemented
+        // `effective` view — so a malformed explicit value has no path by
+        // which env could heal it. Pass a DIFFERENT, already-healthy
+        // `effective` (as if env had supplemented something) to prove the
+        // malformed `base` value is still refused regardless.
+        let base = serde_json::json!({ "risk": { "pdt_auto_enabled": "true" } });
+        let healthy_effective = serde_json::json!({ "risk": { "pdt_auto_enabled": false } });
+        let err = alpaca_legacy_pdt_disposition(&base, healthy_effective)
+            .expect_err("malformed base must refuse even if effective looks healthy");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.alpaca_legacy_pdt_malformed"
+        );
     }
 
     #[test]
