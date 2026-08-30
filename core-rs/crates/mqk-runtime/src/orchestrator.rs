@@ -207,7 +207,7 @@ const PENDING_FILL_PROPAGATION_GRACE_SECS: i64 = 30;
 /// 180 seconds provides headroom above the observed 120s worst-case outage
 /// window.  The eager refresh (has_recent_terminal_fill) retries every tick so
 /// the snapshot clears as soon as Alpaca REST recovers.
-const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 180;
+pub const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 180;
 
 /// Maximum recent terminal fills to track in memory.
 const RECENT_FILLS_RING_CAP: usize = 50;

@@ -125,6 +125,17 @@ pub trait RiskGate {
     fn evaluate_gate_for_request(&self, _ctx: RiskRequestContext) -> RiskDecision {
         self.evaluate_gate()
     }
+
+    /// Record a real hard broker reject (RRA-3,
+    /// RUNTIME-RISK-DYNAMIC-STATE-AUTHORITY-01).
+    ///
+    /// Called by [`BrokerGateway::submit_with_context`] ONLY when the broker
+    /// adapter returns [`crate::broker_error::BrokerError::Reject`] — a
+    /// confirmed hard business reject, never a transport/rate-limit/
+    /// transient/auth/ambiguous outcome. Default implementation is a no-op,
+    /// safe for gates that have no reject-storm state to track (test
+    /// stubs, permissive gates).
+    fn record_broker_reject(&self) {}
 }
 /// Evaluates whether the most recent reconcile report is clean.
 ///
@@ -387,9 +398,20 @@ where
             order_id: claim.idempotency_key.clone(),
             ..req
         };
-        self.router
-            .route_submit(submit_req)
-            .map_err(SubmitError::Broker)
+        match self.router.route_submit(submit_req) {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                // RRA-3: only a confirmed hard broker business reject counts
+                // toward reject-storm protection. Transport/RateLimit/
+                // Transient/AuthSession/AmbiguousSubmit/
+                // InboundContinuityUnproven are deliberately excluded — none
+                // of them is a broker-confirmed reject.
+                if matches!(err, BrokerError::Reject { .. }) {
+                    self.risk.record_broker_reject();
+                }
+                Err(SubmitError::Broker(err))
+            }
+        }
     }
     /// Cancel a broker order.
     ///
@@ -668,6 +690,246 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
+    // -------------------------------------------------------------------
+    // RRA-3: reject events reach RiskGate::record_broker_reject exactly
+    // when (and only when) the broker returns a confirmed hard Reject.
+    // -------------------------------------------------------------------
+    struct ErrorBroker(crate::broker_error::BrokerError);
+    impl BrokerAdapter for ErrorBroker {
+        fn submit_order(
+            &self,
+            _req: BrokerSubmitRequest,
+            _token: &BrokerInvokeToken,
+        ) -> Result<BrokerSubmitResponse, crate::broker_error::BrokerError> {
+            Err(self.0.clone())
+        }
+        fn cancel_order(
+            &self,
+            order_id: &str,
+            _token: &BrokerInvokeToken,
+        ) -> Result<BrokerCancelResponse, crate::broker_error::BrokerError> {
+            Ok(BrokerCancelResponse {
+                broker_order_id: order_id.to_string(),
+                cancelled_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+        fn replace_order(
+            &self,
+            req: BrokerReplaceRequest,
+            _token: &BrokerInvokeToken,
+        ) -> Result<BrokerReplaceResponse, crate::broker_error::BrokerError> {
+            Ok(BrokerReplaceResponse {
+                broker_order_id: req.broker_order_id,
+                replaced_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+        fn fetch_events(
+            &self,
+            _cursor: Option<&str>,
+            _token: &BrokerInvokeToken,
+        ) -> Result<
+            (Vec<crate::order_router::BrokerEvent>, Option<String>),
+            crate::broker_error::BrokerError,
+        > {
+            Ok((vec![], None))
+        }
+    }
+
+    /// Gate that is always all-clear but counts `record_broker_reject` calls.
+    struct CountingRejectGate(std::sync::atomic::AtomicU32);
+    impl CountingRejectGate {
+        fn new() -> Self {
+            Self(std::sync::atomic::AtomicU32::new(0))
+        }
+        fn count(&self) -> u32 {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    impl IntegrityGate for CountingRejectGate {
+        fn is_armed(&self) -> bool {
+            true
+        }
+    }
+    impl ReconcileGate for CountingRejectGate {
+        fn is_clean(&self) -> bool {
+            true
+        }
+    }
+    impl RiskGate for CountingRejectGate {
+        fn evaluate_gate(&self) -> crate::risk_decision::RiskDecision {
+            crate::risk_decision::RiskDecision::Allow
+        }
+        fn record_broker_reject(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn make_gateway_with_error(
+        err: crate::broker_error::BrokerError,
+    ) -> BrokerGateway<ErrorBroker, CountingRejectGate, CountingRejectGate, CountingRejectGate>
+    {
+        // Single shared gate instance used for all three roles so the same
+        // counter is reachable — split via Arc-free duplication is not
+        // needed because CountingRejectGate is stateless besides the
+        // counter, but only ONE of the three positions is actually the
+        // RiskGate consulted for `record_broker_reject`; the other two
+        // roles are inert (always-pass) copies.
+        BrokerGateway::new(
+            ErrorBroker(err),
+            CountingRejectGate::new(),
+            CountingRejectGate::new(),
+            CountingRejectGate::new(),
+        )
+    }
+
+    #[test]
+    fn hard_reject_increments_record_broker_reject_exactly_once() {
+        let gw = make_gateway_with_error(crate::broker_error::BrokerError::Reject {
+            code: "insufficient_qty".to_string(),
+            detail: "reject".to_string(),
+        });
+        let err = gw
+            .submit(&make_claim(), make_submit_req())
+            .expect_err("Reject must surface as SubmitError::Broker");
+        assert!(matches!(err, SubmitError::Broker(BrokerError::Reject { .. })));
+        assert_eq!(gw.risk.count(), 1, "exactly one Reject must record exactly one count");
+    }
+
+    #[test]
+    fn transport_error_does_not_increment_reject_count() {
+        let gw = make_gateway_with_error(crate::broker_error::BrokerError::Transport {
+            non_delivery_proven: true,
+            detail: "conn refused".to_string(),
+        });
+        let _ = gw.submit(&make_claim(), make_submit_req());
+        assert_eq!(gw.risk.count(), 0, "Transport is not a confirmed hard reject");
+    }
+
+    #[test]
+    fn rate_limit_error_does_not_increment_reject_count() {
+        let gw = make_gateway_with_error(crate::broker_error::BrokerError::RateLimit {
+            retry_after_ms: Some(500),
+            non_delivery_proven: true,
+            detail: "429".to_string(),
+        });
+        let _ = gw.submit(&make_claim(), make_submit_req());
+        assert_eq!(gw.risk.count(), 0, "RateLimit is not a confirmed hard reject");
+    }
+
+    #[test]
+    fn transient_error_does_not_increment_reject_count() {
+        let gw = make_gateway_with_error(crate::broker_error::BrokerError::Transient {
+            detail: "5xx".to_string(),
+        });
+        let _ = gw.submit(&make_claim(), make_submit_req());
+        assert_eq!(gw.risk.count(), 0, "Transient is not a confirmed hard reject");
+    }
+
+    #[test]
+    fn auth_session_error_does_not_increment_reject_count() {
+        let gw = make_gateway_with_error(crate::broker_error::BrokerError::AuthSession {
+            detail: "expired".to_string(),
+        });
+        let _ = gw.submit(&make_claim(), make_submit_req());
+        assert_eq!(gw.risk.count(), 0, "AuthSession halt policy is unchanged by reject counting");
+    }
+
+    #[test]
+    fn ambiguous_submit_error_does_not_increment_reject_count() {
+        let gw = make_gateway_with_error(crate::broker_error::BrokerError::AmbiguousSubmit {
+            detail: "timeout after send".to_string(),
+        });
+        let _ = gw.submit(&make_claim(), make_submit_req());
+        assert_eq!(
+            gw.risk.count(),
+            0,
+            "AmbiguousSubmit quarantine/halt policy is unchanged by reject counting"
+        );
+    }
+
+    #[test]
+    fn gate_refusal_does_not_reach_broker_or_increment_reject_count() {
+        // Risk gate itself refused (integrity disarmed) — the broker
+        // adapter is never invoked, so no reject can be recorded.
+        let gw = BrokerGateway::new(
+            ErrorBroker(crate::broker_error::BrokerError::Reject {
+                code: "would_be_ignored".to_string(),
+                detail: "unreachable".to_string(),
+            }),
+            BoolGate(false), // integrity disarmed
+            CountingRejectGate::new(),
+            CountingRejectGate::new(),
+        );
+        let err = gw
+            .submit(&make_claim(), make_submit_req())
+            .expect_err("integrity disarmed must refuse before broker invocation");
+        assert!(matches!(err, SubmitError::Gate(GateRefusal::IntegrityDisarmed)));
+        assert_eq!(
+            gw.risk.count(),
+            0,
+            "a gate refusal must never reach the broker adapter, so no reject can be recorded"
+        );
+    }
+
+    #[test]
+    fn n_rejects_reach_threshold_and_next_new_risk_is_refused() {
+        // Simulates the RiskGate-side reject-storm contract: after the Nth
+        // recorded reject, RiskGate::evaluate_gate begins denying. This
+        // proves the gateway calls record_broker_reject on every Reject
+        // (not just the first), by driving a gate whose evaluate_gate
+        // denies once record count >= 3.
+        struct ThresholdGate(std::sync::atomic::AtomicU32);
+        impl IntegrityGate for ThresholdGate {
+            fn is_armed(&self) -> bool {
+                true
+            }
+        }
+        impl ReconcileGate for ThresholdGate {
+            fn is_clean(&self) -> bool {
+                true
+            }
+        }
+        impl RiskGate for ThresholdGate {
+            fn evaluate_gate(&self) -> crate::risk_decision::RiskDecision {
+                if self.0.load(std::sync::atomic::Ordering::SeqCst) >= 3 {
+                    crate::risk_decision::RiskDecision::Deny(crate::risk_decision::RiskDenial {
+                        reason: crate::risk_decision::RiskReason::MaxOrderSizeExceeded,
+                        evidence: crate::risk_decision::RiskEvidence::default(),
+                    })
+                } else {
+                    crate::risk_decision::RiskDecision::Allow
+                }
+            }
+            fn record_broker_reject(&self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let gw: BrokerGateway<ErrorBroker, ThresholdGate, ThresholdGate, ThresholdGate> =
+            BrokerGateway::new(
+                ErrorBroker(crate::broker_error::BrokerError::Reject {
+                    code: "x".to_string(),
+                    detail: "x".to_string(),
+                }),
+                ThresholdGate(std::sync::atomic::AtomicU32::new(0)),
+                ThresholdGate(std::sync::atomic::AtomicU32::new(0)),
+                ThresholdGate(std::sync::atomic::AtomicU32::new(0)),
+            );
+
+        for i in 0..3 {
+            let err = gw.submit(&make_claim(), make_submit_req());
+            assert!(err.is_err(), "reject #{i} must still surface as a broker error");
+        }
+        // 3 rejects recorded; a 4th NEW submit is now refused by the gate
+        // itself, before the broker adapter is invoked again.
+        let err = gw
+            .submit(&make_claim(), make_submit_req())
+            .expect_err("threshold reached: next new-risk submit must be gate-refused");
+        assert!(matches!(err, SubmitError::Gate(GateRefusal::RiskBlocked(_))));
+    }
+
     #[test]
     fn all_clear_replace_succeeds() {
         let mut map = crate::id_map::BrokerOrderMap::new();

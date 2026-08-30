@@ -2449,7 +2449,7 @@ operator_reconcile_or_repair_required"
             reconcile_status: Arc::clone(&self.reconcile_status),
         };
         let risk_gate =
-            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64, 0, 0);
+            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
         let gateway = mqk_execution::wiring::build_gateway(
             daemon_broker,
@@ -4951,7 +4951,7 @@ operator_reconcile_or_repair_required"
             reconcile_status: Arc::clone(&self.reconcile_status),
         };
         let risk_gate =
-            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64, 0, 0);
+            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
         let gateway = mqk_execution::wiring::build_gateway(
             daemon_broker,
@@ -7041,7 +7041,7 @@ mod ownership_state_machine_tests {
             reconcile_status: Arc::clone(&state.reconcile_status),
         };
         let risk_gate =
-            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64, 0, 0);
+            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
         let gateway = mqk_execution::wiring::build_gateway(
             daemon_broker,
