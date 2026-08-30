@@ -443,6 +443,21 @@ where
     pub fn risk_engine_sticky_halt(&self) -> RiskEngineHaltStatus {
         self.risk.sticky_halt_status()
     }
+    /// Record a real hard broker reject against the risk engine's
+    /// reject-storm window (RR4, RUNTIME-RISK-INBOUND-REJECT-AUTHORITY-01).
+    ///
+    /// This is a passthrough to `RG::record_broker_reject()`, exposed so the
+    /// orchestrator's inbound event-apply path (Phase 3: canonical
+    /// `BrokerEvent::Reject` events fetched via `fetch_events` and applied
+    /// through the durable oms_inbox) can record a reject-storm hit for the
+    /// SAME risk engine `submit_with_context` already records synchronous
+    /// hard rejects into. Callers MUST only invoke this for a genuine,
+    /// first-time, current-run-owned `BrokerEvent::Reject` application —
+    /// never for `CancelReject`/`ReplaceReject`, and never more than once
+    /// per physical reject.
+    pub fn record_broker_reject(&self) {
+        self.risk.record_broker_reject();
+    }
     /// Fetch new broker events since `cursor`.
     ///
     /// This is a read-only operation; gate checks are NOT applied.  The system

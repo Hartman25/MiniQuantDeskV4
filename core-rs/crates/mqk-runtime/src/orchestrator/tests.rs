@@ -731,6 +731,120 @@ fn reject_unknown_order_does_not_remove_broker_map() {
         "unknown-order reject must not remove the broker mapping"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RR4 (RUNTIME-RISK-INBOUND-REJECT-AUTHORITY-01): `terminal_apply_succeeded`
+// is the exact-once guard `tick()`'s Phase 3 uses to decide whether to call
+// `self.gateway.record_broker_reject()` for an inbound `BrokerEvent::Reject`.
+// `reject_unknown_order_does_not_remove_broker_map` above already proves the
+// FALSE branch for an unowned order. These prove: the TRUE branch fires
+// exactly once for a genuine first-time owned reject, a replayed duplicate
+// of the SAME reject does not re-fire it, and CancelReject/ReplaceReject
+// (which the orchestrator's own `matches!(event, BrokerEvent::Reject {..})`
+// guard already excludes structurally) additionally can never satisfy this
+// flag even if that separate guard were ever weakened, because their own
+// OMS transitions land back in a non-terminal state.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reject_first_time_on_owned_order_sets_terminal_apply_succeeded() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-r1".to_string(), OmsOrder::new("ord-r1", "SPY", 10));
+
+    let outcome = apply_broker_event_step(
+        &mut oms,
+        "ord-r1",
+        &make_reject_event("ord-r1", "reject-msg-1"),
+        "reject-msg-1",
+    )
+    .expect("owned-order reject must apply");
+
+    assert!(
+        outcome.terminal_apply_succeeded,
+        "a genuine first-time reject on a run-owned order must set the \
+         exact-once guard the orchestrator uses to record a reject-storm hit"
+    );
+    assert_eq!(oms["ord-r1"].state, mqk_execution::oms::state_machine::OrderState::Rejected);
+}
+
+#[test]
+fn duplicate_reject_replay_does_not_re_trigger_terminal_apply_succeeded() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-r2".to_string(), OmsOrder::new("ord-r2", "SPY", 10));
+
+    // First application: genuine reject, sets the flag once.
+    let first = apply_broker_event_step(
+        &mut oms,
+        "ord-r2",
+        &make_reject_event("ord-r2", "reject-msg-2"),
+        "reject-msg-2",
+    )
+    .expect("first reject application must succeed");
+    assert!(first.terminal_apply_succeeded);
+
+    // Same physical reject re-read (e.g. a crash-window inbox row
+    // reprocessed, or a defensive re-apply) — SAME event_id
+    // (`broker_message_id` doubles as the economic identity here since
+    // `Reject` has no `broker_fill_id`). `apply_with_watermark`'s
+    // `applied_event_ids` check short-circuits before `do_transition`, so
+    // the state is unchanged (already `Rejected`) and the flag must NOT
+    // fire a second time.
+    let replay = apply_broker_event_step(
+        &mut oms,
+        "ord-r2",
+        &make_reject_event("ord-r2", "reject-msg-2"),
+        "reject-msg-2",
+    )
+    .expect("replayed reject must be a safe no-op, not an error");
+    assert!(
+        !replay.terminal_apply_succeeded,
+        "a replayed duplicate of the SAME reject must not manufacture a \
+         second reject-storm count"
+    );
+}
+
+#[test]
+fn cancel_reject_and_replace_reject_never_set_terminal_apply_succeeded() {
+    // CancelReject: CancelPending -> Open (non-terminal), even though the
+    // orchestrator's own `matches!(event, BrokerEvent::Reject {..})` guard
+    // already excludes this variant before terminal_apply_succeeded is even
+    // consulted.
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-cr".to_string(), OmsOrder::new("ord-cr", "SPY", 10));
+    oms.get_mut("ord-cr")
+        .unwrap()
+        .apply(&OmsEvent::CancelRequest, Some("cancel-req-1"))
+        .expect("Open -> CancelPending must succeed");
+
+    let outcome = apply_broker_event_step(
+        &mut oms,
+        "ord-cr",
+        &make_cancel_reject_event("ord-cr", "cancel-reject-msg"),
+        "cancel-reject-msg",
+    )
+    .expect("cancel-reject apply must succeed");
+    assert!(!outcome.terminal_apply_succeeded);
+    assert_eq!(oms["ord-cr"].state, mqk_execution::oms::state_machine::OrderState::Open);
+
+    // ReplaceReject: ReplacePending -> Open (non-terminal), same story.
+    let mut oms2: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms2.insert("ord-rr".to_string(), OmsOrder::new("ord-rr", "SPY", 10));
+    oms2.get_mut("ord-rr")
+        .unwrap()
+        .apply(&OmsEvent::ReplaceRequest, Some("replace-req-1"))
+        .expect("Open -> ReplacePending must succeed");
+
+    let outcome2 = apply_broker_event_step(
+        &mut oms2,
+        "ord-rr",
+        &make_replace_reject_event("ord-rr", "replace-reject-msg"),
+        "replace-reject-msg",
+    )
+    .expect("replace-reject apply must succeed");
+    assert!(!outcome2.terminal_apply_succeeded);
+    assert_eq!(oms2["ord-rr"].state, mqk_execution::oms::state_machine::OrderState::Open);
+}
+
 #[test]
 fn non_terminal_events_do_not_remove_broker_map() {
     // Ack on a live open order: non-terminal, mapping must remain.

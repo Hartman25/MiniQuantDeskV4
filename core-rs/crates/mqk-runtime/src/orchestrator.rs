@@ -1275,6 +1275,35 @@ where
                     )));
                 }
             };
+            // RR4 (RUNTIME-RISK-INBOUND-REJECT-AUTHORITY-01): record a real
+            // hard broker reject against the SAME risk engine's reject-storm
+            // window that `BrokerGateway::submit_with_context` already
+            // records synchronous hard rejects into. This is the
+            // asynchronous/polled half of reject-storm authority — the
+            // canonical inbound lifecycle (Alpaca "rejected" ->
+            // normalize_trade_update -> BrokerEvent::Reject -> durable
+            // oms_inbox -> this Phase 3 apply) — which the synchronous
+            // BrokerError::Reject path at submit time cannot observe.
+            //
+            // `terminal_apply_succeeded` (pre-state not terminal, post-state
+            // terminal) is the exact-once guard:
+            // - Only reachable when `apply_broker_event_step` actually
+            //   transitioned this run's own OMS order into `Rejected` — an
+            //   event for an order absent from `self.oms_orders` (no
+            //   current-run ownership) never enters the `Some(order)` branch
+            //   in `apply_fill_step` and so never sets this flag.
+            // - A duplicate/replayed `BrokerEvent::Reject` for an order
+            //   already `Rejected` (same physical reject re-read after a
+            //   crash between apply and `inbox_mark_applied`, or an inbox
+            //   row somehow reprocessed) short-circuits in
+            //   `apply_with_watermark`'s `applied_event_ids` check before
+            //   `do_transition` runs, so `pre_state == post_state ==
+            //   Rejected` and this flag stays `false` — it cannot manufacture
+            //   a second count for the same physical reject.
+            if matches!(event, BrokerEvent::Reject { .. }) && apply_outcome.terminal_apply_succeeded
+            {
+                self.gateway.record_broker_reject();
+            }
             // EXEC-OBS-LIVENESS-01: structured apply milestone log.
             // Fill events include symbol/side/qty/price for chain reconstruction.
             {
