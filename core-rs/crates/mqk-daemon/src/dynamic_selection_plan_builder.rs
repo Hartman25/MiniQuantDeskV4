@@ -849,6 +849,289 @@ mod tests {
     }
 
     // ── DB-backed: full evidence chain proven, refused only on data readiness ──
+    //
+    // DYNAMIC-SELECTION-PLAN-BUILDER-FIXTURE-REPAIR-01: the target test
+    // below drives a fresh `shadow_approved` transition, which requires
+    // Gate 4c/4d's real Research out-of-sample evidence AND a real
+    // canonical Backtest evidence bundle -- not just the scanner/review
+    // artifact this file already wrote. The helpers here are adapted from
+    // `scenario_dynamic_selection_evidence_validation_01.rs`'s proven Gate
+    // 4c/4d fixture (this repo's convention is one self-contained fixture
+    // set per test file/module -- integration test binaries and this
+    // crate's own `#[cfg(test)]` module cannot share code without a
+    // support crate).
+
+    struct ResearchEvidenceFixture {
+        trial_id: String,
+        economic_eval_id: String,
+        registry_db_path: std::path::PathBuf,
+        evidence_dir: std::path::PathBuf,
+        judge_path: std::path::PathBuf,
+        judge_artifact_sha256: String,
+    }
+
+    fn research_py_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("research-py")
+    }
+
+    /// 240 daily bars across three deterministic 30-day legs (calm uptrend
+    /// / wide-range uptrend / decline) -- three genuinely distinct market
+    /// regimes, each profitable for `swing_momentum`, so every P9
+    /// concentration/regime gate genuinely passes on real evidence. Mirrors
+    /// `scenario_strategy_promotion_closure_proof_01f.rs`'s identical
+    /// fixture.
+    fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
+        let m: i64 = 1_000_000;
+        let start: i64 = 1_704_229_200; // 2024-01-02T21:00:00Z
+        let mut price = 500.0_f64;
+        let mut bars = Vec::with_capacity(240);
+        for i in 0..240i64 {
+            let ts = start + i * 86_400;
+            let leg = (i / 30) % 3; // 0 = calm bull, 1 = wide-range bull, 2 = decline
+            match leg {
+                0 => price *= 1.0055,
+                1 => price *= 1.0017,
+                _ => price *= 0.9960,
+            }
+            let (hi_mult, lo_mult) = if leg == 1 { (1.09, 0.91) } else { (1.005, 0.995) };
+            let o = (price * m as f64) as i64;
+            let h = (price * hi_mult * m as f64) as i64;
+            let l = (price * lo_mult * m as f64) as i64;
+            let c = (price * m as f64) as i64;
+            bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+        }
+        bars
+    }
+
+    /// Runs the REAL Research production pipeline
+    /// (`mqk_research.ml.real_research_promotion_e2e_cli`).
+    fn write_real_research_evidence_via_production_pipeline(
+        root: &std::path::Path,
+        seed: &str,
+        strategy_id: &str,
+        entry_thresholds: &[f64],
+    ) -> Vec<ResearchEvidenceFixture> {
+        let registry_db_path = root.join("research_registry.sqlite3");
+        let run_root = root.join(format!("real_research_runs_{seed}"));
+        let judge_path = root.join(format!("real_research_judge_{seed}.json"));
+        let experiment_id = format!("exp.{seed}");
+        let hypothesis_id = format!("hyp.{seed}");
+        let thresholds_arg = entry_thresholds
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let src_dir = research_py_root().join("src");
+        let output = std::process::Command::new("python")
+            .env("PYTHONPATH", &src_dir)
+            .args([
+                "-m",
+                "mqk_research.ml.real_research_promotion_e2e_cli",
+                "--registry-db",
+                &registry_db_path.display().to_string(),
+                "--run-root",
+                &run_root.display().to_string(),
+                "--experiment-id",
+                &experiment_id,
+                "--hypothesis-id",
+                &hypothesis_id,
+                "--strategy-id",
+                strategy_id,
+                "--entry-thresholds",
+                &thresholds_arg,
+                "--periods-days",
+                "560",
+                "--steps",
+                "10",
+                "--judge-out",
+                &judge_path.display().to_string(),
+            ])
+            .output()
+            .expect("failed to spawn real_research_promotion_e2e_cli");
+        assert!(
+            output.status.success(),
+            "real_research_promotion_e2e_cli failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+            panic!(
+                "real_research_promotion_e2e_cli produced unparseable stdout: {e}; stdout={}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+        assert_eq!(
+            parsed["status"], "ok",
+            "real_research_promotion_e2e_cli reported non-ok status: {parsed}"
+        );
+        assert_eq!(
+            parsed["judge_status"], "evaluated",
+            "fixture precondition: the real judge must be genuinely 'evaluated': {parsed}"
+        );
+
+        let judge_artifact_sha256 = parsed["judge_artifact_sha256"]
+            .as_str()
+            .expect("judge_artifact_sha256")
+            .to_string();
+
+        let trials = parsed["trials"].as_array().expect("trials array");
+        assert_eq!(trials.len(), entry_thresholds.len());
+        trials
+            .iter()
+            .map(|t| {
+                assert_eq!(
+                    t["dsr_evaluable"], true,
+                    "fixture precondition: every real trial's DSR must be evaluable: {t}"
+                );
+                let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
+                let economic_eval_id =
+                    t["economic_eval_id"].as_str().expect("economic_eval_id").to_string();
+                let economic_json_path = std::path::PathBuf::from(
+                    t["economic_walk_forward_json"].as_str().expect("path"),
+                );
+                let evidence_dir = economic_json_path
+                    .parent()
+                    .expect("economic_walk_forward_json has a parent dir")
+                    .to_path_buf();
+                ResearchEvidenceFixture {
+                    trial_id,
+                    economic_eval_id,
+                    registry_db_path: registry_db_path.clone(),
+                    evidence_dir,
+                    judge_path: judge_path.clone(),
+                    judge_artifact_sha256: judge_artifact_sha256.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// Run a REAL `BacktestEngine`, write the REAL, genuinely complete
+    /// evidence set (manifest, audit, report, stress suite, robustness
+    /// gauntlet -- finalized with a REAL DSR/PBO sensitivity result, a real
+    /// P7A/P7B economic replay stress result, and a real genuine shuffled
+    /// placebo result, each via a real Python subprocess against a real
+    /// disposable SQLite registry). Returns the candidate's `run_id`.
+    fn write_real_backtest_evidence(
+        artifact_root: &std::path::Path,
+        research_trial_id: &str,
+        research_economic_eval_id: &str,
+        research_registry_db: &std::path::Path,
+        research_judge_artifact_sha256: &str,
+        symbol: &str,
+    ) -> uuid::Uuid {
+        use mqk_strategy::engines::register_builtin_strategies_with_sizing;
+        use mqk_strategy::PluginRegistry;
+
+        let mut cfg = mqk_backtest::BacktestConfig::conservative_defaults();
+        cfg.timeframe_secs = 86_400;
+        cfg.integrity_stale_threshold_ticks = 200_000;
+        let initial_cash = cfg.initial_cash_micros;
+
+        let mut reg = PluginRegistry::new();
+        register_builtin_strategies_with_sizing(&mut reg, symbol, 1, None, None)
+            .expect("register_builtin_strategies_with_sizing");
+
+        let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
+        engine
+            .add_strategy(reg.instantiate("swing_momentum").expect("swing_momentum registered"))
+            .expect("add_strategy");
+        let bars = smooth_uptrend_bars(symbol);
+        let report = engine.run(&bars).expect("engine.run");
+
+        let config_hash = report.config_id.to_string();
+        let init_result = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+            exports_root: artifact_root,
+            schema_version: 1,
+            run_id: report.run_id,
+            strategy_name: &report.strategy_name,
+            engine_id: "mqk-backtest",
+            mode: "backtest",
+            timeframe: None,
+            timeframe_secs: Some(86_400),
+            git_hash: "dyn_sel_plan_builder_fixture_repair_git_hash",
+            config_hash: &config_hash,
+            host_fingerprint: "dyn_sel_plan_builder_fixture_repair_host",
+            now_utc: Utc::now(),
+        })
+        .expect("init_run_artifacts");
+
+        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, initial_cash)
+            .expect("write_backtest_report");
+
+        let stress_output = mqk_backtest::run_backtest_stress_suite(&report, &cfg, &bars, || {
+            reg.instantiate("swing_momentum").expect("swing_momentum registered")
+        });
+        mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
+            .expect("write_canonical_stress_suite");
+
+        let gauntlet_output = mqk_backtest::run_robustness_gauntlet(&report, &cfg, &bars, || {
+            reg.instantiate("swing_momentum").expect("swing_momentum registered")
+        });
+        mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
+            .expect("write_canonical_robustness_gauntlet");
+
+        let sensitivity = mqk_backtest::dsr_pbo_sensitivity_scenario(
+            "python",
+            &research_py_root(),
+            research_registry_db,
+            research_trial_id,
+            &report.strategy_name,
+            research_judge_artifact_sha256,
+            &[8, 10],
+            0.25,
+            0.25,
+        );
+        mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+            &init_result.run_dir,
+            &sensitivity,
+        )
+        .expect("finalize_canonical_robustness_gauntlet_with_sensitivity");
+
+        let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
+            "python",
+            &research_py_root(),
+            research_registry_db,
+            research_trial_id,
+            research_economic_eval_id,
+            &report.strategy_name,
+            &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
+            20,
+            50,
+            Some(1000),
+            None,
+            0.30,
+        );
+        mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+            &init_result.run_dir,
+            &stress,
+        )
+        .expect(
+            "finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)",
+        );
+
+        let placebo = mqk_backtest::genuine_shuffled_placebo_scenario(
+            "python",
+            &research_py_root(),
+            research_registry_db,
+            research_trial_id,
+            research_economic_eval_id,
+            &report.strategy_name,
+            &artifact_root.join(format!("genuine_shuffled_placebo_{}", report.run_id)),
+        );
+        mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
+            &init_result.run_dir,
+            &placebo,
+        )
+        .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (genuine_shuffled_placebo)");
+
+        report.run_id
+    }
 
     #[tokio::test]
     #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-daemon --features testkit --lib dynamic_selection_plan_builder -- --include-ignored"]
@@ -872,6 +1155,15 @@ mod tests {
             "mqk_daemon_dyn_sel_plan_builder_{}",
             det_uuid("dynamic_selection_plan_builder::full_evidence_chain_passes_refused_only_on_data_readiness::root")
         ));
+        // Backtest run artifacts are content-hash-locked once written
+        // (`finalize_canonical_robustness_gauntlet_with_sensitivity` rejects
+        // a mismatched rewrite) -- this deterministic path is stable for
+        // debuggability across runs, but must start empty every invocation
+        // so a prior run's artifacts (this session's own earlier run, or a
+        // stale run from a different git checkout) never collide with a
+        // fresh build whose Research trial (and therefore DSR/PBO
+        // sensitivity/P7A-P7B/placebo evidence) is not byte-identical.
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create temp dir");
         std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
 
@@ -889,6 +1181,46 @@ mod tests {
                 .replace('-', "")[..8]
                 .to_ascii_uppercase()
         );
+
+        // DYNAMIC-SELECTION-PLAN-BUILDER-FIXTURE-REPAIR-01: the fresh
+        // shadow_approved transition below is Gate-4c/4d-bound
+        // (`transition_requires_evidence`) -- it requires one real,
+        // verified Research out-of-sample trial AND one real, genuinely
+        // complete canonical Backtest evidence bundle for this exact
+        // strategy_id, in addition to the scanner/review evidence written
+        // below. Neither can be synthesized or bypassed; both are produced
+        // by the real production pipeline/engine.
+        let research_trials = write_real_research_evidence_via_production_pipeline(
+            &root,
+            "dyn_sel_plan_builder_fixture_repair",
+            &strategy_id,
+            &[0.45, 0.55],
+        );
+        let research = &research_trials[0];
+        let backtest_run_id = write_real_backtest_evidence(
+            &root,
+            &research.trial_id,
+            &research.economic_eval_id,
+            &research.registry_db_path,
+            &research.judge_artifact_sha256,
+            &symbol,
+        );
+        // Gate 4c/4d config -- same env-var-sensitive section as
+        // MQK_STRATEGY_REVIEW_ARTIFACT_ROOT above. Thresholds are
+        // permissive (0.0/max) since this test validates identity/lineage
+        // plumbing (it must reach the data-readiness gate specifically),
+        // not promotion policy acceptance thresholds.
+        std::env::set_var("MQK_RESEARCH_REGISTRY_DB", &research.registry_db_path);
+        std::env::set_var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT", &root);
+        std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.0");
+        std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "1.0");
+        std::env::set_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT", &root);
+        std::env::set_var("MQK_PROMOTION_MIN_SHARPE", "0.0");
+        std::env::set_var("MQK_PROMOTION_MAX_MDD", "1.0");
+        std::env::set_var("MQK_PROMOTION_MIN_CAGR", "0.0");
+        std::env::set_var("MQK_PROMOTION_MIN_PROFIT_FACTOR", "0.0");
+        std::env::set_var("MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT", "0.0");
+
         let decision = mqk_backtest::StrategyScanReviewDecision {
             symbol: symbol.clone(),
             timeframe: "1D".to_string(),
@@ -997,6 +1329,10 @@ mod tests {
                 "timeframe_secs": 86400,
                 "target_state": "shadow_approved",
                 "review_dir": review_dir.to_str().unwrap(),
+                "research_trial_id": research.trial_id,
+                "research_evidence_dir": research.evidence_dir.to_str().unwrap(),
+                "research_judge_artifact_path": research.judge_path.to_str().unwrap(),
+                "backtest_run_id": backtest_run_id.to_string(),
                 "effective_at_utc": Utc::now().to_rfc3339(),
                 "expires_at_utc": null,
                 "initiated_by": "test-operator",
