@@ -1786,7 +1786,6 @@ dependencies = [
 name = "mqk-broker-alpaca"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "chrono",
  "mqk-execution",
  "mqk-schemas",
