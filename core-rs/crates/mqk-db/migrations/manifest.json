@@ -416,6 +416,12 @@
       "path": "0067_dynamic_selection_plan_candidates_config_identity.sql",
       "status": "applied",
       "intent": "DYNAMIC-SELECTION-CONFIG-ELIGIBILITY-CLOSURE-01: add nullable config_identity_verified/durable_config_fingerprint/current_config_fingerprint to sys_dynamic_selection_plan_candidates, extending migration 0059's evidence-store schema to carry the config-identity gate result (reuses the same canonical config-identity comparison mechanism C1/C2/R2 already established, never a new parallel policy). A NULL config_identity_verified on a pre-migration row reads back fail-closed as false, never optimistically verified. Additive only, no existing column or constraint from 0059/0060 altered."
+    },
+    {
+      "id": "0068",
+      "path": "0068_runtime_leader_lease_run_identity.sql",
+      "status": "applied",
+      "intent": "RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01: add nullable runtime_leader_lease.run_id (references runs(run_id) on delete cascade) so the single global leadership lease row is durably bound to the run it was acquired for, closing the confirmed defect where acquire_or_refresh_lease_for_running_run could only judge steal-eligibility by raw TTL expiry and had no way to distinguish an orphaned different-run lease (left behind because stop_run_if_evidence_clean does not delete it) from the same run's own prior lease -- a brand-new run's fresh heartbeat was being read as evidence about a completely different, older run's holder. run_id is nullable: no backfill decision is required for the at-most-one pre-existing row (mirrors migration 0067's precedent); a legacy run_id-IS-NULL row is treated as an anonymous lease under the pre-migration fail-closed contract and is naturally replaced by a proper run_id-bound row on the next successful acquisition. ON DELETE CASCADE: production never deletes a runs row, but disposable test fixtures across the workspace do, and a lease bound to a deleted run carries no remaining authority. Additive only, no existing column or constraint altered."
     }
   ]
 }

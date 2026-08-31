@@ -659,6 +659,7 @@ async fn t12_active_runtime_lease_blocks_release() {
             None,
             Utc::now(),
             300,
+            300,
         )
         .await
         .expect("acquire lease");
@@ -721,6 +722,7 @@ async fn t13_claim_wins_first_recovery_then_refuses() {
             "runtime-t13",
             None,
             Utc::now(),
+            300,
             300,
         )
         .await
@@ -804,6 +806,7 @@ async fn t14_recovery_wins_first_then_lease_and_claim_refuse() {
             None,
             Utc::now(),
             300,
+            300,
         )
         .await
         .expect("lease attempt must not error");
@@ -859,6 +862,7 @@ async fn t15_expired_lease_does_not_block_recovery() {
             None,
             acquire_at,
             5,
+            5,
         )
         .await
         .expect("acquire lease");
@@ -885,6 +889,7 @@ async fn t15_expired_lease_does_not_block_recovery() {
             "runtime-t15",
             Some(epoch),
             recovery_at + chrono::Duration::seconds(1),
+            5,
             5,
         )
         .await

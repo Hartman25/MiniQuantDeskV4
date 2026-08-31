@@ -15,9 +15,37 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01: canonical TTL constants
+// ---------------------------------------------------------------------------
+
+/// Canonical runtime leadership lease TTL (seconds). Single source of truth
+/// for `mqk-runtime`'s `ExecutionOrchestrator` -- do not redefine this value
+/// locally in another crate; import this constant instead. See
+/// `DEADMAN_TTL_SECS` for why the deadman TTL is deliberately a different,
+/// larger value, and [`acquire_or_refresh_lease_for_running_run`]'s doc
+/// comment for how the two are reconciled at the moment leadership actually
+/// transfers.
+pub const RUNTIME_LEASE_TTL_SECS: i64 = 90;
+
+/// Canonical deadman heartbeat TTL (seconds). Single source of truth for
+/// `mqk-daemon`'s execution-loop supervisor -- do not redefine this value
+/// locally in another crate; import this constant instead.
+///
+/// Deliberately larger than [`RUNTIME_LEASE_TTL_SECS`]: it must exceed the
+/// longest a single orchestrator tick can legitimately block (observed up to
+/// ~33s on a slow broker REST call) plus margin, or a merely-slow (not dead)
+/// runtime would be falsely halted on its next heartbeat check.
+pub const DEADMAN_TTL_SECS: i64 = 120;
+
 /// The single runtime leader lease row.
+///
+/// `run_id` is `None` only for a legacy row written before
+/// RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01 (migration 0068) added the
+/// column -- every lease acquired by current code always sets it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeLeaderLease {
+    pub run_id: Option<Uuid>,
     pub holder_id: String,
     pub epoch: i64,
     pub lease_expires_at: DateTime<Utc>,
@@ -78,6 +106,7 @@ pub async fn acquire_lease(
 
     if let Some((holder_id, epoch, lease_expires_at)) = acquired {
         return Ok(LeaseAcquireOutcome::Acquired(RuntimeLeaderLease {
+            run_id: None,
             holder_id,
             epoch,
             lease_expires_at,
@@ -133,6 +162,7 @@ pub async fn refresh_lease(
 
     refreshed
         .map(|(holder_id, epoch, lease_expires_at)| RuntimeLeaderLease {
+            run_id: None,
             holder_id,
             epoch,
             lease_expires_at,
@@ -179,11 +209,65 @@ pub async fn release_lease(pool: &PgPool, holder_id: &str, epoch: i64) -> anyhow
     Ok(())
 }
 
+/// Verify that `run_id`/`holder_id`/`epoch` still own an unexpired lease.
+/// Unlike [`verify_lease`], this also requires the lease to be bound to the
+/// exact `run_id` supplied -- a lease belonging to a different run (or a
+/// legacy row with no run binding at all) never validates another run's
+/// authority, regardless of holder/epoch/expiry.
+pub async fn verify_lease_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    holder_id: &str,
+    epoch: i64,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<bool> {
+    let current = fetch_current_lease(pool).await?;
+    Ok(match current {
+        None => false,
+        Some(lease) => {
+            lease.run_id == Some(run_id)
+                && lease.holder_id == holder_id
+                && lease.epoch == epoch
+                && !lease.is_expired_at(now_utc)
+        }
+    })
+}
+
+/// Release leadership for the exact `run_id`/`holder_id`/`epoch` triple.
+/// This is the canonical production release path (see
+/// `ExecutionOrchestrator::release_runtime_leadership`) -- unlike
+/// [`release_lease`], the delete is fenced to the caller's own bound run, so
+/// a caller can never delete a lease that (through some other bug) turns out
+/// to belong to a different run's holder/epoch pair.
+pub async fn release_lease_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    holder_id: &str,
+    epoch: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM runtime_leader_lease
+         WHERE id        = 1
+           AND run_id     = $1
+           AND holder_id  = $2
+           AND epoch      = $3
+        "#,
+    )
+    .bind(run_id)
+    .bind(holder_id)
+    .bind(epoch)
+    .execute(pool)
+    .await
+    .context("release_lease_for_run failed")?;
+    Ok(())
+}
+
 /// Read the current lease row, if present.
 pub async fn fetch_current_lease(pool: &PgPool) -> anyhow::Result<Option<RuntimeLeaderLease>> {
-    let row: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
+    let row: Option<(Option<Uuid>, String, i64, DateTime<Utc>)> = sqlx::query_as(
         r#"
-        SELECT holder_id, epoch, lease_expires_at
+        SELECT run_id, holder_id, epoch, lease_expires_at
           FROM runtime_leader_lease
          WHERE id = 1
         "#,
@@ -192,13 +276,12 @@ pub async fn fetch_current_lease(pool: &PgPool) -> anyhow::Result<Option<Runtime
     .await
     .context("fetch_current_lease failed")?;
 
-    Ok(
-        row.map(|(holder_id, epoch, lease_expires_at)| RuntimeLeaderLease {
-            holder_id,
-            epoch,
-            lease_expires_at,
-        }),
-    )
+    Ok(row.map(|(run_id, holder_id, epoch, lease_expires_at)| RuntimeLeaderLease {
+        run_id,
+        holder_id,
+        epoch,
+        lease_expires_at,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +344,54 @@ pub enum RunLeaseAuthorityOutcome {
 /// requests a refresh of that exact epoch (mirrors [`refresh_lease`]) — same
 /// caller-side branching `ExecutionOrchestrator::refresh_or_acquire_runtime_leadership`
 /// already used, now routed through this single fenced entrypoint instead of
-/// the two unfenced primitives.
+/// the two unfenced primitives. A refresh additionally requires the lease's
+/// bound `run_id` to equal `run_id` — a CAS that no longer matches (holder,
+/// epoch, or run_id mismatch) is reported as ordinary lease loss (`Lost`),
+/// exactly like any other CAS failure.
+///
+/// # Cross-run reconciliation (RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01)
+///
+/// `runtime_leader_lease` is a single global row (migration 0018); before
+/// migration 0068 it carried no notion of which run it was acquired for. A
+/// rejected earlier attempt at deadman reconciliation
+/// (DEADMAN-LEASE-TTL-RECONCILE-01) judged whether an existing, raw-expired
+/// lease could be stolen by reading `last_heartbeat_utc` for the run making
+/// the acquisition attempt — but an orphaned lease from a different,
+/// already-terminated run can survive on disk (`stop_run_if_evidence_clean`
+/// does not delete it), so that heartbeat was never evidence about the
+/// existing holder at all.
+///
+/// With `run_id` now durably bound to the lease (migration 0068), the acquire
+/// path distinguishes exactly three cases once an existing lease is found to
+/// be raw-expired:
+///
+/// - No existing row: nothing to reconcile against; proceed straight to
+///   acquisition.
+/// - Legacy row (`run_id IS NULL`, written before migration 0068): the
+///   owning run is unknowable. Raw expiry alone is authoritative, exactly the
+///   pre-0068 contract — never inferred from any run's heartbeat. Naturally
+///   self-heals: the next successful acquisition writes a real `run_id`.
+/// - Same run (`existing.run_id == run_id`): `last_heartbeat_utc` fetched
+///   above for the locked target run genuinely belongs to this lease's own
+///   owner, so it is valid deadman evidence — the 90s-lease/120s-deadman
+///   reconciliation applies (a lease expired only by its own clock is not
+///   stealable until deadman independently agrees the owner is gone).
+/// - Different run (`existing.run_id` is `Some` and not equal to `run_id`):
+///   the target run's heartbeat is never consulted. Disposition comes from
+///   the other run's own durable `runs.status` instead. If that run is still
+///   `RUNNING`, refuse (fail closed on ambiguous cross-run authority —
+///   structurally should not happen given
+///   `create_or_reuse_run_for_start`'s single-active-run invariant, but never
+///   assumed). Otherwise the lease is orphaned and safe to reclaim
+///   immediately: that run's own orchestrator can no longer legitimately
+///   refresh it either (its calls already hit `RunNotRunning` before ever
+///   reaching the lease), so no deadman wait is needed.
+///
+/// An unexpired lease is never stealable regardless of any of the above, and
+/// the final `INSERT ... ON CONFLICT ... WHERE lease_expires_at <= $now`
+/// remains the true atomic guarantee; the reconciliation above only decides
+/// whether this call attempts that write and what outcome to report when it
+/// deliberately does not.
 pub async fn acquire_or_refresh_lease_for_running_run(
     pool: &PgPool,
     run_id: Uuid,
@@ -269,10 +399,16 @@ pub async fn acquire_or_refresh_lease_for_running_run(
     current_epoch: Option<i64>,
     now_utc: DateTime<Utc>,
     ttl_secs: i64,
+    deadman_ttl_secs: i64,
 ) -> anyhow::Result<RunLeaseAuthorityOutcome> {
     if ttl_secs <= 0 {
         return Err(anyhow!(
             "acquire_or_refresh_lease_for_running_run: ttl_secs must be > 0, got {ttl_secs}"
+        ));
+    }
+    if deadman_ttl_secs <= 0 {
+        return Err(anyhow!(
+            "acquire_or_refresh_lease_for_running_run: deadman_ttl_secs must be > 0, got {deadman_ttl_secs}"
         ));
     }
 
@@ -281,14 +417,15 @@ pub async fn acquire_or_refresh_lease_for_running_run(
         .await
         .context("acquire_or_refresh_lease_for_running_run: begin tx failed")?;
 
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
-            .bind(run_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("acquire_or_refresh_lease_for_running_run: run lock failed")?;
+    let row: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT status, last_heartbeat_utc FROM runs WHERE run_id = $1 FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("acquire_or_refresh_lease_for_running_run: run lock failed")?;
 
-    let Some(status) = status else {
+    let Some((status, last_heartbeat_utc)) = row else {
         tx.rollback().await.ok();
         return Err(anyhow!(
             "acquire_or_refresh_lease_for_running_run: run {run_id} not found"
@@ -307,18 +444,20 @@ pub async fn acquire_or_refresh_lease_for_running_run(
     let new_expiry = now_utc + Duration::seconds(ttl_secs);
 
     if let Some(epoch) = current_epoch {
-        let refreshed: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
+        let refreshed: Option<(Option<Uuid>, String, i64, DateTime<Utc>)> = sqlx::query_as(
             r#"
             UPDATE runtime_leader_lease
-               SET lease_expires_at = $4,
-                   updated_at       = $3
+               SET lease_expires_at = $5,
+                   updated_at       = $4
              WHERE id               = 1
-               AND holder_id        = $1
-               AND epoch            = $2
-               AND lease_expires_at > $3
-            RETURNING holder_id, epoch, lease_expires_at
+               AND run_id           = $1
+               AND holder_id        = $2
+               AND epoch            = $3
+               AND lease_expires_at > $4
+            RETURNING run_id, holder_id, epoch, lease_expires_at
             "#,
         )
+        .bind(run_id)
         .bind(holder_id)
         .bind(epoch)
         .bind(now_utc)
@@ -328,11 +467,12 @@ pub async fn acquire_or_refresh_lease_for_running_run(
         .context("acquire_or_refresh_lease_for_running_run: refresh failed")?;
 
         return match refreshed {
-            Some((holder_id, epoch, lease_expires_at)) => {
+            Some((run_id, holder_id, epoch, lease_expires_at)) => {
                 tx.commit()
                     .await
                     .context("acquire_or_refresh_lease_for_running_run: commit (refresh) failed")?;
                 Ok(RunLeaseAuthorityOutcome::Refreshed(RuntimeLeaderLease {
+                    run_id,
                     holder_id,
                     epoch,
                     lease_expires_at,
@@ -347,19 +487,91 @@ pub async fn acquire_or_refresh_lease_for_running_run(
         };
     }
 
-    let acquired: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
+    let existing: Option<(Option<Uuid>, String, i64, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT run_id, holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .context("acquire_or_refresh_lease_for_running_run: fetch existing lease failed")?;
+
+    if let Some((existing_run_id, existing_holder, existing_epoch, existing_expires_at)) = &existing
+    {
+        let lease_raw_expired = *existing_expires_at <= now_utc;
+        if !lease_raw_expired {
+            tx.rollback()
+                .await
+                .context("acquire_or_refresh_lease_for_running_run: rollback (unexpired) failed")?;
+            return Ok(RunLeaseAuthorityOutcome::HeldByOther(RuntimeLeaderLease {
+                run_id: *existing_run_id,
+                holder_id: existing_holder.clone(),
+                epoch: *existing_epoch,
+                lease_expires_at: *existing_expires_at,
+            }));
+        }
+
+        match existing_run_id {
+            None => {
+                // Legacy anonymous lease: raw expiry alone is authoritative.
+            }
+            Some(same_run) if *same_run == run_id => {
+                let deadman_stale = match last_heartbeat_utc {
+                    None => true,
+                    Some(t) => now_utc.signed_duration_since(t).num_seconds() > deadman_ttl_secs,
+                };
+                if !deadman_stale {
+                    tx.rollback().await.context(
+                        "acquire_or_refresh_lease_for_running_run: rollback (deadman not yet expired) failed",
+                    )?;
+                    return Ok(RunLeaseAuthorityOutcome::HeldByOther(RuntimeLeaderLease {
+                        run_id: *existing_run_id,
+                        holder_id: existing_holder.clone(),
+                        epoch: *existing_epoch,
+                        lease_expires_at: *existing_expires_at,
+                    }));
+                }
+            }
+            Some(other_run_id) => {
+                let other_status: Option<String> =
+                    sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1")
+                        .bind(other_run_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .context(
+                            "acquire_or_refresh_lease_for_running_run: other-run status lookup failed",
+                        )?;
+
+                if matches!(other_status.as_deref(), Some("RUNNING")) {
+                    tx.rollback().await.context(
+                        "acquire_or_refresh_lease_for_running_run: rollback (other run still running) failed",
+                    )?;
+                    return Ok(RunLeaseAuthorityOutcome::HeldByOther(RuntimeLeaderLease {
+                        run_id: *existing_run_id,
+                        holder_id: existing_holder.clone(),
+                        epoch: *existing_epoch,
+                        lease_expires_at: *existing_expires_at,
+                    }));
+                }
+                // other_run_id is durably non-RUNNING (or its row is gone)
+                // and the lease is raw-expired: orphaned, safe to reclaim.
+            }
+        }
+    }
+
+    let acquired: Option<(Option<Uuid>, String, i64, DateTime<Utc>)> = sqlx::query_as(
         r#"
-        INSERT INTO runtime_leader_lease (id, holder_id, epoch, lease_expires_at, updated_at)
-        VALUES (1, $1, 1, $2, $3)
+        INSERT INTO runtime_leader_lease (id, run_id, holder_id, epoch, lease_expires_at, updated_at)
+        VALUES (1, $1, $2, 1, $3, $4)
         ON CONFLICT (id) DO UPDATE
-          SET holder_id        = excluded.holder_id,
+          SET run_id           = excluded.run_id,
+              holder_id        = excluded.holder_id,
               epoch            = runtime_leader_lease.epoch + 1,
               lease_expires_at = excluded.lease_expires_at,
               updated_at       = excluded.updated_at
-        WHERE runtime_leader_lease.lease_expires_at <= $3
-        RETURNING holder_id, epoch, lease_expires_at
+        WHERE runtime_leader_lease.lease_expires_at <= $4
+        RETURNING run_id, holder_id, epoch, lease_expires_at
         "#,
     )
+    .bind(run_id)
     .bind(holder_id)
     .bind(new_expiry)
     .bind(now_utc)
@@ -367,19 +579,20 @@ pub async fn acquire_or_refresh_lease_for_running_run(
     .await
     .context("acquire_or_refresh_lease_for_running_run: acquire failed")?;
 
-    if let Some((holder_id, epoch, lease_expires_at)) = acquired {
+    if let Some((run_id, holder_id, epoch, lease_expires_at)) = acquired {
         tx.commit()
             .await
             .context("acquire_or_refresh_lease_for_running_run: commit (acquire) failed")?;
         return Ok(RunLeaseAuthorityOutcome::Acquired(RuntimeLeaderLease {
+            run_id,
             holder_id,
             epoch,
             lease_expires_at,
         }));
     }
 
-    let current: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
+    let current: Option<(Option<Uuid>, String, i64, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT run_id, holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
     )
     .fetch_optional(&mut *tx)
     .await
@@ -389,13 +602,14 @@ pub async fn acquire_or_refresh_lease_for_running_run(
         .await
         .context("acquire_or_refresh_lease_for_running_run: rollback (held by other) failed")?;
 
-    let (holder_id, epoch, lease_expires_at) = current.ok_or_else(|| {
+    let (run_id, holder_id, epoch, lease_expires_at) = current.ok_or_else(|| {
         anyhow!(
             "acquire_or_refresh_lease_for_running_run: active conflict detected but lease row is missing"
         )
     })?;
 
     Ok(RunLeaseAuthorityOutcome::HeldByOther(RuntimeLeaderLease {
+        run_id,
         holder_id,
         epoch,
         lease_expires_at,
@@ -638,12 +852,14 @@ mod tests {
             None,
             ts(10_000),
             30,
+            30,
         )
         .await
         .expect("acquire");
 
         match outcome {
             RunLeaseAuthorityOutcome::Acquired(lease) => {
+                assert_eq!(lease.run_id, Some(run_id));
                 assert_eq!(lease.holder_id, "runtime-a");
                 assert_eq!(lease.epoch, 1);
             }
@@ -664,6 +880,7 @@ mod tests {
             None,
             ts(11_000),
             30,
+            30,
         )
         .await
         .expect("acquire");
@@ -679,11 +896,13 @@ mod tests {
             Some(epoch),
             ts(11_010),
             30,
+            30,
         )
         .await
         .expect("refresh");
         match second {
             RunLeaseAuthorityOutcome::Refreshed(lease) => {
+                assert_eq!(lease.run_id, Some(run_id));
                 assert_eq!(lease.holder_id, "runtime-a");
                 assert_eq!(lease.epoch, epoch);
                 assert_eq!(lease.lease_expires_at, ts(11_040));
@@ -698,9 +917,11 @@ mod tests {
         let pool = test_pool().await;
         let run_id = make_run_with_status(&pool, "RUNNING").await;
 
-        acquire_or_refresh_lease_for_running_run(&pool, run_id, "runtime-a", None, ts(12_000), 30)
-            .await
-            .expect("first acquire");
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_id, "runtime-a", None, ts(12_000), 30, 30,
+        )
+        .await
+        .expect("first acquire");
 
         let second = acquire_or_refresh_lease_for_running_run(
             &pool,
@@ -709,11 +930,13 @@ mod tests {
             None,
             ts(12_005),
             30,
+            30,
         )
         .await
         .expect("second attempt");
         match second {
             RunLeaseAuthorityOutcome::HeldByOther(current) => {
+                assert_eq!(current.run_id, Some(run_id));
                 assert_eq!(current.holder_id, "runtime-a");
             }
             other => panic!("expected HeldByOther, got {other:?}"),
@@ -732,6 +955,7 @@ mod tests {
             "runtime-a",
             None,
             ts(13_000),
+            30,
             30,
         )
         .await
@@ -764,6 +988,7 @@ mod tests {
             None,
             ts(14_000),
             30,
+            30,
         )
         .await
         .expect("call must not error");
@@ -795,6 +1020,7 @@ mod tests {
             None,
             ts(15_000),
             5,
+            5,
         )
         .await
         .expect("acquire");
@@ -812,9 +1038,478 @@ mod tests {
             Some(epoch),
             ts(15_011),
             5,
+            5,
         )
         .await
         .expect("refresh attempt must not error");
         assert_eq!(refreshed, RunLeaseAuthorityOutcome::Lost);
+    }
+
+    // -------------------------------------------------------------------
+    // RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01: run-bound cross-run
+    // reconciliation -- the negative controls proving the P6 defect (a
+    // different run's stale lease judged by the NEW run's own heartbeat) is
+    // closed, plus the restored same-run deadman reconciliation.
+    // -------------------------------------------------------------------
+
+    /// RED proof: reproduces the exact rejected-P6 failure mode using ONLY
+    /// evidence available in this test (no reliance on the old code path,
+    /// which no longer exists) -- a genuinely different, already-STOPPED
+    /// run's stale lease must never be judged using the NEW run's own fresh
+    /// heartbeat. If this reconciliation regressed to comparing the wrong
+    /// run's heartbeat, a fresh `run_b` heartbeat would make the lease look
+    /// "still owned by a live holder" and this acquisition would wrongly
+    /// return `HeldByOther` forever -- a permanent lockout for run_b.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr01_red_new_run_fresh_heartbeat_is_never_evidence_about_old_runs_lease() {
+        let pool = test_pool().await;
+
+        // run_a: acquires the lease, then is stopped WITHOUT the lease being
+        // deleted -- exactly what `stop_run_if_evidence_clean` produces in
+        // production (Layer A cleanup is `clear_halted_run_and_reset_stale_
+        // claims`-only; the RUNNING/ARMED -> STOPPED path never deletes it).
+        let run_a = make_run_with_status(&pool, "RUNNING").await;
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_a, "runtime-a", None, ts(30_000), 90, 120,
+        )
+        .await
+        .expect("run_a acquire")
+        .expect_acquired();
+        sqlx::query("UPDATE runs SET status = 'STOPPED', stopped_at_utc = $2 WHERE run_id = $1")
+            .bind(run_a)
+            .bind(ts(30_050))
+            .execute(&pool)
+            .await
+            .expect("force run_a to STOPPED (simulates stop_run_if_evidence_clean, which never deletes the lease)");
+
+        // run_b: a brand-new, different run. Its heartbeat is set FRESH,
+        // exactly like `start_runtime_effects`' initial `heartbeat_run` call
+        // before the first tick -- ts(30_101), only 1s before this
+        // acquisition attempt.
+        let run_b = make_run_with_status(&pool, "RUNNING").await;
+        crate::heartbeat_run(&pool, run_b, ts(30_101))
+            .await
+            .expect("run_b initial heartbeat");
+
+        // 121s after run_a's lease was acquired with a 90s TTL: raw-expired.
+        // run_b's own heartbeat is 1s old -- if it were (wrongly) used as
+        // evidence about run_a's holder, deadman_stale would evaluate false
+        // and this would return HeldByOther, permanently blocking run_b.
+        let outcome = acquire_or_refresh_lease_for_running_run(
+            &pool, run_b, "runtime-b", None, ts(30_121), 90, 120,
+        )
+        .await
+        .expect("run_b acquire must not error");
+
+        match outcome {
+            RunLeaseAuthorityOutcome::Acquired(lease) => {
+                assert_eq!(
+                    lease.run_id,
+                    Some(run_b),
+                    "run_b must acquire its own lease, bound to its own run_id"
+                );
+                assert_eq!(lease.holder_id, "runtime-b");
+            }
+            other => panic!(
+                "run_a's stopped, orphaned lease must not block run_b using run_b's own \
+                 fresh heartbeat as false evidence -- got {other:?}"
+            ),
+        }
+    }
+
+    /// Negative control 9 (explicit heartbeat-source proof): even when
+    /// run_b's heartbeat is set to look ARBITRARILY fresh (identical to
+    /// `now_utc`), a different, STOPPED run_a's raw-expired lease is still
+    /// reclaimed -- proving disposition never depends on run_b's heartbeat
+    /// value at all, in either direction.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr02_different_run_reclaim_is_independent_of_new_runs_heartbeat_value() {
+        let pool = test_pool().await;
+
+        let run_a = make_run_with_status(&pool, "RUNNING").await;
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_a, "runtime-a", None, ts(31_000), 90, 120,
+        )
+        .await
+        .expect("run_a acquire")
+        .expect_acquired();
+        sqlx::query("UPDATE runs SET status = 'STOPPED', stopped_at_utc = $2 WHERE run_id = $1")
+            .bind(run_a)
+            .bind(ts(31_050))
+            .execute(&pool)
+            .await
+            .expect("force run_a to STOPPED");
+
+        let run_b = make_run_with_status(&pool, "RUNNING").await;
+        // Heartbeat set to the EXACT instant of the acquisition attempt --
+        // maximally fresh, the strongest possible false signal if it were
+        // (wrongly) consulted.
+        crate::heartbeat_run(&pool, run_b, ts(31_121))
+            .await
+            .expect("run_b heartbeat");
+
+        let outcome = acquire_or_refresh_lease_for_running_run(
+            &pool, run_b, "runtime-b", None, ts(31_121), 90, 120,
+        )
+        .await
+        .expect("run_b acquire must not error");
+        assert!(
+            matches!(outcome, RunLeaseAuthorityOutcome::Acquired(_)),
+            "expected Acquired regardless of run_b's heartbeat freshness, got {outcome:?}"
+        );
+    }
+
+    /// Negative control 11: if the OTHER run somehow still reports RUNNING
+    /// (structurally should never happen given `create_or_reuse_run_for_start`'s
+    /// single-active-run invariant, but the reconciliation must not assume
+    /// that invariant holds), the new contender fails closed.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr03_different_run_still_running_fails_closed() {
+        let pool = test_pool().await;
+
+        let run_a = make_run_with_status(&pool, "RUNNING").await;
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_a, "runtime-a", None, ts(32_000), 90, 120,
+        )
+        .await
+        .expect("run_a acquire")
+        .expect_acquired();
+        // Force the lease raw-expired WITHOUT changing run_a's status --
+        // constructs the adversarial "other run still RUNNING" case directly
+        // via SQL, since the normal admission path cannot produce it.
+        sqlx::query("UPDATE runtime_leader_lease SET lease_expires_at = $1 WHERE id = 1")
+            .bind(ts(32_001))
+            .execute(&pool)
+            .await
+            .expect("force lease raw-expired");
+
+        let run_b = make_run_with_status(&pool, "RUNNING").await;
+        crate::heartbeat_run(&pool, run_b, ts(32_121))
+            .await
+            .expect("run_b heartbeat");
+
+        let outcome = acquire_or_refresh_lease_for_running_run(
+            &pool, run_b, "runtime-b", None, ts(32_121), 90, 120,
+        )
+        .await
+        .expect("run_b acquire attempt must not error");
+        match outcome {
+            RunLeaseAuthorityOutcome::HeldByOther(current) => {
+                assert_eq!(current.run_id, Some(run_a));
+            }
+            other => panic!("expected HeldByOther (fail closed), got {other:?}"),
+        }
+    }
+
+    /// Negative control 3: a refresh attempt whose `run_id` argument does not
+    /// match the lease's bound run must fail the CAS exactly like any other
+    /// mismatch (holder/epoch) -- reported as ordinary `Lost`.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr04_different_run_refresh_fails() {
+        let pool = test_pool().await;
+
+        let run_a = make_run_with_status(&pool, "RUNNING").await;
+        let first = acquire_or_refresh_lease_for_running_run(
+            &pool, run_a, "runtime-a", None, ts(33_000), 90, 120,
+        )
+        .await
+        .expect("run_a acquire");
+        let epoch = first.expect_acquired().epoch;
+
+        // A second, different RUNNING run attempts to "refresh" using run_a's
+        // own holder_id/epoch but its OWN run_id -- must not succeed.
+        let run_b = make_run_with_status(&pool, "RUNNING").await;
+        let refreshed = acquire_or_refresh_lease_for_running_run(
+            &pool,
+            run_b,
+            "runtime-a",
+            Some(epoch),
+            ts(33_001),
+            90,
+            120,
+        )
+        .await
+        .expect("refresh attempt must not error");
+        assert_eq!(refreshed, RunLeaseAuthorityOutcome::Lost);
+
+        // Sanity: run_a's real lease is completely untouched.
+        let lease = fetch_current_lease(&pool)
+            .await
+            .expect("fetch_current_lease")
+            .expect("lease row must still exist");
+        assert_eq!(lease.run_id, Some(run_a));
+        assert_eq!(lease.holder_id, "runtime-a");
+        assert_eq!(lease.epoch, epoch);
+    }
+
+    /// Negative control 4: `release_lease_for_run` must not delete a lease
+    /// bound to a different run, even with the exact same holder_id/epoch
+    /// values (a holder_id collision across runs should never happen in
+    /// practice, but the delete predicate must not rely on that).
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr05_different_run_release_cannot_delete_current_lease() {
+        let pool = test_pool().await;
+
+        let run_a = make_run_with_status(&pool, "RUNNING").await;
+        let first = acquire_or_refresh_lease_for_running_run(
+            &pool, run_a, "runtime-a", None, ts(34_000), 90, 120,
+        )
+        .await
+        .expect("run_a acquire");
+        let epoch = first.expect_acquired().epoch;
+
+        let run_b = uuid::Uuid::new_v4(); // allow: test-only — never a real run_id
+        release_lease_for_run(&pool, run_b, "runtime-a", epoch)
+            .await
+            .expect("release_lease_for_run must not error even on a non-matching run_id");
+
+        let lease = fetch_current_lease(&pool)
+            .await
+            .expect("fetch_current_lease")
+            .expect("run_a's lease must survive a different-run release attempt");
+        assert_eq!(lease.run_id, Some(run_a));
+        assert_eq!(lease.holder_id, "runtime-a");
+        assert_eq!(lease.epoch, epoch);
+    }
+
+    /// Negative control 5: `verify_lease_for_run` must not validate a lease
+    /// bound to a different run.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr06_different_run_verification_fails() {
+        let pool = test_pool().await;
+
+        let run_a = make_run_with_status(&pool, "RUNNING").await;
+        let first = acquire_or_refresh_lease_for_running_run(
+            &pool, run_a, "runtime-a", None, ts(35_000), 90, 120,
+        )
+        .await
+        .expect("run_a acquire");
+        let epoch = first.expect_acquired().epoch;
+
+        let run_b = uuid::Uuid::new_v4(); // allow: test-only — never a real run_id
+        let same_run_ok = verify_lease_for_run(&pool, run_a, "runtime-a", epoch, ts(35_001))
+            .await
+            .expect("verify must not error");
+        assert!(same_run_ok, "the true owning run must verify successfully");
+
+        let cross_run_ok = verify_lease_for_run(&pool, run_b, "runtime-a", epoch, ts(35_001))
+            .await
+            .expect("verify must not error");
+        assert!(
+            !cross_run_ok,
+            "a different run must never validate another run's lease authority"
+        );
+    }
+
+    /// Negative control 7: same-run raw-expired but deadman-fresh takeover is
+    /// refused -- the restored, correctly-scoped intent of
+    /// DEADMAN-LEASE-TTL-RECONCILE-01.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr07_same_run_lease_expired_but_deadman_fresh_refuses_steal() {
+        let pool = test_pool().await;
+        let run_id = make_run_with_status(&pool, "RUNNING").await;
+        crate::heartbeat_run(&pool, run_id, ts(36_000))
+            .await
+            .expect("heartbeat_run");
+
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_id, "runtime-a", None, ts(36_000), 90, 120,
+        )
+        .await
+        .expect("acquire")
+        .expect_acquired();
+
+        // 100s later: the 90s lease is raw-expired, but the heartbeat is
+        // only 100s old -- still within the 120s deadman TTL.
+        let steal_attempt = acquire_or_refresh_lease_for_running_run(
+            &pool, run_id, "runtime-b", None, ts(36_100), 90, 120,
+        )
+        .await
+        .expect("steal attempt must not error");
+        match steal_attempt {
+            RunLeaseAuthorityOutcome::HeldByOther(current) => {
+                assert_eq!(current.run_id, Some(run_id));
+                assert_eq!(current.holder_id, "runtime-a");
+            }
+            other => panic!(
+                "expected HeldByOther (deadman not yet expired must block the steal), got {other:?}"
+            ),
+        }
+    }
+
+    /// Negative control 8: same-run raw-expired AND deadman-expired takeover
+    /// succeeds -- the reconciliation gate must not become a permanent
+    /// lockout once both signals genuinely agree.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr08_same_run_lease_expired_and_deadman_expired_permits_steal() {
+        let pool = test_pool().await;
+        let run_id = make_run_with_status(&pool, "RUNNING").await;
+        crate::heartbeat_run(&pool, run_id, ts(37_000))
+            .await
+            .expect("heartbeat_run");
+
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_id, "runtime-a", None, ts(37_000), 90, 120,
+        )
+        .await
+        .expect("acquire")
+        .expect_acquired();
+
+        // 121s later: both the 90s lease AND the 120s deadman window have
+        // elapsed since the only heartbeat/refresh this run ever received.
+        let steal_attempt = acquire_or_refresh_lease_for_running_run(
+            &pool, run_id, "runtime-b", None, ts(37_121), 90, 120,
+        )
+        .await
+        .expect("steal attempt must not error");
+        match steal_attempt {
+            RunLeaseAuthorityOutcome::Acquired(lease) => {
+                assert_eq!(lease.run_id, Some(run_id));
+                assert_eq!(lease.holder_id, "runtime-b");
+                assert_eq!(lease.epoch, 2);
+            }
+            other => panic!("expected Acquired once both signals agree, got {other:?}"),
+        }
+    }
+
+    /// Negative control 10: STOPPED old run + expired old-run lease -> the
+    /// new run can eventually acquire without permanent lockout (a direct
+    /// restatement of cr01/cr02, phrased as the mission's own numbered
+    /// control for traceability).
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr09_stopped_old_run_never_permanently_locks_out_new_run() {
+        let pool = test_pool().await;
+
+        let run_a = make_run_with_status(&pool, "RUNNING").await;
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_a, "runtime-a", None, ts(38_000), 90, 120,
+        )
+        .await
+        .expect("run_a acquire")
+        .expect_acquired();
+        sqlx::query("UPDATE runs SET status = 'STOPPED', stopped_at_utc = $2 WHERE run_id = $1")
+            .bind(run_a)
+            .bind(ts(38_050))
+            .execute(&pool)
+            .await
+            .expect("force run_a to STOPPED");
+
+        let run_b = make_run_with_status(&pool, "RUNNING").await;
+        // Deliberately NO heartbeat_run call for run_b -- last_heartbeat_utc
+        // is NULL, the most adversarial case for a same-run deadman check,
+        // proving this path never reaches that check at all for a
+        // different-run lease.
+        let outcome = acquire_or_refresh_lease_for_running_run(
+            &pool, run_b, "runtime-b", None, ts(38_091), 90, 120,
+        )
+        .await
+        .expect("run_b acquire must not error");
+        assert!(
+            matches!(outcome, RunLeaseAuthorityOutcome::Acquired(_)),
+            "expected Acquired, got {outcome:?}"
+        );
+    }
+
+    /// Negative control 12: migration legacy-row behavior. A row with
+    /// `run_id IS NULL` (simulating a pre-migration-0068 row -- inserted
+    /// directly via SQL, bypassing every Rust writer) is raw-expiry-only
+    /// reclaimable, exactly the pre-0068 contract, regardless of the new
+    /// run's heartbeat state.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr10_legacy_null_run_id_row_is_raw_expiry_only_reclaimable() {
+        let pool = test_pool().await;
+
+        sqlx::query(
+            r#"
+            INSERT INTO runtime_leader_lease (id, run_id, holder_id, epoch, lease_expires_at, updated_at)
+            VALUES (1, NULL, 'legacy-holder', 1, $1, $2)
+            "#,
+        )
+        .bind(ts(39_010))
+        .bind(ts(39_000))
+        .execute(&pool)
+        .await
+        .expect("seed legacy unversioned lease row");
+
+        let run_b = make_run_with_status(&pool, "RUNNING").await;
+        // No heartbeat at all for run_b -- if the legacy branch wrongly fell
+        // into the same-run deadman path, `None` heartbeat is treated as
+        // stale (`true`) which would coincidentally still pass; use a FRESH
+        // heartbeat instead so a wrong fall-through would be caught by a
+        // false "not yet expired" refusal.
+        crate::heartbeat_run(&pool, run_b, ts(39_020))
+            .await
+            .expect("run_b heartbeat");
+
+        let outcome = acquire_or_refresh_lease_for_running_run(
+            &pool, run_b, "runtime-b", None, ts(39_020), 90, 120,
+        )
+        .await
+        .expect("run_b acquire must not error");
+        match outcome {
+            RunLeaseAuthorityOutcome::Acquired(lease) => {
+                assert_eq!(lease.run_id, Some(run_b));
+            }
+            other => panic!(
+                "legacy NULL-run_id row must be reclaimed on raw expiry alone, got {other:?}"
+            ),
+        }
+    }
+
+    /// Negative control 13 (fencing intact): the same run-row serialization
+    /// boundary `clear_halted_run_and_reset_stale_claims` relies on is still
+    /// exercised correctly end-to-end for a run-bound lease -- a HALTED run
+    /// with an unexpired run-bound lease still blocks `clear-halted-run`,
+    /// proving the run_id column addition did not weaken that fence.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr11_halted_run_with_unexpired_run_bound_lease_still_blocks_clear() {
+        let pool = test_pool().await;
+        let run_id = make_run_with_status(&pool, "RUNNING").await;
+
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_id, "runtime-a", None, ts(40_000), 300, 300,
+        )
+        .await
+        .expect("acquire")
+        .expect_acquired();
+
+        crate::halt_run(&pool, run_id, ts(40_010))
+            .await
+            .expect("halt_run");
+
+        let outcome = crate::clear_halted_run_and_reset_stale_claims(&pool, run_id, ts(40_020))
+            .await
+            .expect("clear attempt must not error");
+        assert!(
+            matches!(
+                outcome,
+                crate::ClearHaltedRunOutcome::ActiveRuntimeLease { .. }
+            ),
+            "an unexpired run-bound lease must still block clear-halted-run, got {outcome:?}"
+        );
+    }
+
+    trait ExpectAcquired {
+        fn expect_acquired(self) -> RuntimeLeaderLease;
+    }
+
+    impl ExpectAcquired for RunLeaseAuthorityOutcome {
+        fn expect_acquired(self) -> RuntimeLeaderLease {
+            match self {
+                RunLeaseAuthorityOutcome::Acquired(lease) => lease,
+                other => panic!("expected Acquired, got {other:?}"),
+            }
+        }
     }
 }

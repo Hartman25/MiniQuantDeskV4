@@ -47,7 +47,16 @@ impl TimeSource for WallClock {
 // 90 seconds provides 3× headroom over the observed maximum while still
 // detecting a dead owner within two minutes.  Do NOT lower this value without
 // first configuring a shorter HTTP request timeout on the broker adapter.
-const RUNTIME_LEASE_TTL_SECS: i64 = 90;
+//
+// RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01: this is now an alias for mqk-db's
+// canonical constant -- do not redefine the value here. The daemon's deadman
+// heartbeat TTL (a deliberately different, larger value; see
+// `mqk_db::runtime_lease::DEADMAN_TTL_SECS`) is reconciled against this one
+// at the moment leadership actually transfers, inside
+// `acquire_or_refresh_lease_for_running_run` -- but only for a lease bound to
+// this exact run; a different run's lease is judged by that run's own
+// durable lifecycle status instead, never by this run's heartbeat.
+const RUNTIME_LEASE_TTL_SECS: i64 = mqk_db::runtime_lease::RUNTIME_LEASE_TTL_SECS;
 /// Maximum entries in the in-memory risk denial ring buffer.
 ///
 /// Older entries are evicted when the cap is reached.  The buffer is
@@ -135,6 +144,11 @@ where
     runtime_epoch: Option<i64>,
     /// Lease TTL in seconds for renewals.
     runtime_lease_ttl_secs: i64,
+    /// Deadman heartbeat TTL in seconds, reconciled against
+    /// `runtime_lease_ttl_secs` at lease-acquire time for a lease bound to
+    /// this run (RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01) -- see
+    /// `mqk_db::runtime_lease::DEADMAN_TTL_SECS`.
+    deadman_ttl_secs: i64,
     /// Monotonic watermark that prevents stale broker snapshots from relaxing
     /// reconcile state across ticks.
     reconcile_watermark: SnapshotWatermark,
@@ -519,6 +533,7 @@ where
             runtime_holder_id: derive_runtime_holder_id(&dispatcher_id, run_id),
             runtime_epoch: None,
             runtime_lease_ttl_secs: RUNTIME_LEASE_TTL_SECS,
+            deadman_ttl_secs: mqk_db::runtime_lease::DEADMAN_TTL_SECS,
             reconcile_watermark: SnapshotWatermark::new(),
             last_risk_denial: None,
             recent_denials: VecDeque::new(),
@@ -1711,7 +1726,13 @@ where
         let Some(epoch) = self.runtime_epoch.take() else {
             return Ok(());
         };
-        mqk_db::runtime_lease::release_lease(&self.pool, &self.runtime_holder_id, epoch).await
+        mqk_db::runtime_lease::release_lease_for_run(
+            &self.pool,
+            self.run_id,
+            &self.runtime_holder_id,
+            epoch,
+        )
+        .await
     }
     /// PAPER-SOAK-STALE-CLAIM-RECOVERY-03: run-aware, transactionally-fenced
     /// leadership refresh/acquire.
@@ -1738,6 +1759,7 @@ where
             self.runtime_epoch,
             now,
             self.runtime_lease_ttl_secs,
+            self.deadman_ttl_secs,
         )
         .await?;
 

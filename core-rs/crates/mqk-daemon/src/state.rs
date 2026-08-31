@@ -204,7 +204,16 @@ const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 // a loop tick that blocks up to RUNTIME_LEASE_TTL_SECS (90 s) does not cause
 // a false deadman expiration on the next pre-tick check.  With TTL=120 a
 // truly dead loop is still detected within 2 minutes.
-const DEADMAN_TTL_SECONDS: i64 = 120;
+//
+// RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01: this is now an alias for mqk-db's
+// canonical constant -- do not redefine the value here. This TTL is
+// reconciled against the (shorter) runtime lease TTL at the moment
+// leadership actually transfers, inside
+// `mqk_db::runtime_lease::acquire_or_refresh_lease_for_running_run`, but only
+// when the existing lease is bound to the SAME run being acquired for -- a
+// different, already-terminated run's lease is never judged by this run's
+// heartbeat at all.
+const DEADMAN_TTL_SECONDS: i64 = mqk_db::runtime_lease::DEADMAN_TTL_SECS;
 /// DMON-06: background reconcile tick interval.
 const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// AUTON-PAPER-RISK-03: execution-loop ticks between External broker snapshot refreshes.

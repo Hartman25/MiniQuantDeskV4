@@ -876,6 +876,7 @@ async fn scr03_neg1_s07_s08_active_lease_survives_halt_and_blocks_clear_with_zer
             None,
             t0,
             300,
+            300,
         )
         .await
         .expect("acquire");
@@ -955,6 +956,7 @@ async fn scr03_neg2_neg6_no_lease_row_race_run_not_running_after_clear() {
             "runtime-a",
             None,
             t0,
+            300,
             300,
         )
         .await
@@ -1132,6 +1134,7 @@ async fn scr03_s09_release_then_clear_succeeds_immediately() {
             None,
             t0,
             300,
+            300,
         )
         .await
         .expect("acquire")
@@ -1196,6 +1199,7 @@ async fn scr03_s21_s22_s23_s24_fenced_claim_authority_matrix() {
             "runtime-a",
             None,
             t0,
+            30,
             30,
         )
         .await
@@ -1348,6 +1352,7 @@ async fn scr03_operator_route_409_on_active_lease() {
             "runtime-a",
             None,
             t0,
+            300,
             300,
         )
         .await

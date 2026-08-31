@@ -637,6 +637,7 @@ async fn r11_active_runtime_lease_blocks_release_via_route() {
             None,
             Utc::now(),
             300,
+            300,
         )
         .await
         .expect("acquire lease");
