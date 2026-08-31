@@ -367,10 +367,19 @@ pub enum RunLeaseAuthorityOutcome {
 ///
 /// - No existing row: nothing to reconcile against; proceed straight to
 ///   acquisition.
-/// - Legacy row (`run_id IS NULL`, written before migration 0068): the
-///   owning run is unknowable. Raw expiry alone is authoritative, exactly the
-///   pre-0068 contract — never inferred from any run's heartbeat. Naturally
-///   self-heals: the next successful acquisition writes a real `run_id`.
+/// - Legacy row (`run_id IS NULL`, written before migration 0068, or by one
+///   of this crate's legacy non-run-aware `acquire_lease`/`refresh_lease`
+///   primitives): the owning run is unknowable, so — unlike the same-run
+///   case below — no run's heartbeat can ever corroborate or refute its
+///   liveness (RUNTIME-LEASE-LEGACY-UNBOUND-MIGRATION-SAFETY-01). Raw expiry
+///   alone is therefore NOT sufficient: the row's own `updated_at` (its only
+///   available liveness signal) must also be older than `deadman_ttl_secs`
+///   before it is treated as orphaned — otherwise a legacy lease could be
+///   raw-expired (past the 90s `RUNTIME_LEASE_TTL_SECS`) while whatever holds
+///   it is still deadman-healthy (within the larger 120s `DEADMAN_TTL_SECS`).
+///   Migration 0069 additionally deletes any such row outright once the
+///   whole system is provably quiescent, so this branch is defense in depth
+///   for the case one is ever reintroduced.
 /// - Same run (`existing.run_id == run_id`): `last_heartbeat_utc` fetched
 ///   above for the locked target run genuinely belongs to this lease's own
 ///   owner, so it is valid deadman evidence — the 90s-lease/120s-deadman
@@ -487,14 +496,15 @@ pub async fn acquire_or_refresh_lease_for_running_run(
         };
     }
 
-    let existing: Option<(Option<Uuid>, String, i64, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT run_id, holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
+    let existing: Option<(Option<Uuid>, String, i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT run_id, holder_id, epoch, lease_expires_at, updated_at FROM runtime_leader_lease WHERE id = 1",
     )
     .fetch_optional(&mut *tx)
     .await
     .context("acquire_or_refresh_lease_for_running_run: fetch existing lease failed")?;
 
-    if let Some((existing_run_id, existing_holder, existing_epoch, existing_expires_at)) = &existing
+    if let Some((existing_run_id, existing_holder, existing_epoch, existing_expires_at, existing_updated_at)) =
+        &existing
     {
         let lease_raw_expired = *existing_expires_at <= now_utc;
         if !lease_raw_expired {
@@ -511,7 +521,32 @@ pub async fn acquire_or_refresh_lease_for_running_run(
 
         match existing_run_id {
             None => {
-                // Legacy anonymous lease: raw expiry alone is authoritative.
+                // RUNTIME-LEASE-LEGACY-UNBOUND-MIGRATION-SAFETY-01: the
+                // owning run is unknowable, so unlike the same-run branch
+                // below there is no run whose heartbeat could corroborate
+                // liveness. Raw lease-TTL expiry alone is therefore never
+                // sufficient evidence of abandonment -- use the row's own
+                // last-write timestamp as the only available liveness
+                // signal, and require a full deadman window of silence
+                // before treating it as orphaned. Without this, a legacy
+                // lease raw-expired past the 90s RUNTIME_LEASE_TTL_SECS
+                // could still belong to a runtime that remains healthy
+                // within the larger 120s DEADMAN_TTL_SECS.
+                let deadman_stale = now_utc
+                    .signed_duration_since(*existing_updated_at)
+                    .num_seconds()
+                    > deadman_ttl_secs;
+                if !deadman_stale {
+                    tx.rollback().await.context(
+                        "acquire_or_refresh_lease_for_running_run: rollback (legacy lease deadman not yet expired) failed",
+                    )?;
+                    return Ok(RunLeaseAuthorityOutcome::HeldByOther(RuntimeLeaderLease {
+                        run_id: *existing_run_id,
+                        holder_id: existing_holder.clone(),
+                        epoch: *existing_epoch,
+                        lease_expires_at: *existing_expires_at,
+                    }));
+                }
             }
             Some(same_run) if *same_run == run_id => {
                 let deadman_stale = match last_heartbeat_utc {
@@ -1419,14 +1454,22 @@ mod tests {
         );
     }
 
-    /// Negative control 12: migration legacy-row behavior. A row with
-    /// `run_id IS NULL` (simulating a pre-migration-0068 row -- inserted
-    /// directly via SQL, bypassing every Rust writer) is raw-expiry-only
-    /// reclaimable, exactly the pre-0068 contract, regardless of the new
-    /// run's heartbeat state.
+    /// Negative control 12 (RUNTIME-LEASE-LEGACY-UNBOUND-MIGRATION-SAFETY-01
+    /// RED proof, restated GREEN): a row with `run_id IS NULL` (simulating a
+    /// pre-migration-0068 row -- inserted directly via SQL, bypassing every
+    /// Rust writer) that is raw-expired (past its 90s lease TTL) but still
+    /// deadman-fresh (its own `updated_at` is inside the 120s deadman
+    /// window) must NOT be reclaimable. Before this patch, the legacy branch
+    /// treated raw expiry alone as authoritative and this scenario returned
+    /// `Acquired` -- exactly the unsafe transition the mission describes: a
+    /// legacy NULL lease raw-expiring while the runtime that holds it
+    /// remains deadman-healthy. A fresh run_b heartbeat is used deliberately
+    /// so a wrong fall-through into the same-run deadman path (which treats
+    /// a fresh heartbeat as evidence of liveness) would be caught by the
+    /// same correct refusal, not mask the bug.
     #[tokio::test]
     #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
-    async fn cr10_legacy_null_run_id_row_is_raw_expiry_only_reclaimable() {
+    async fn cr10_legacy_null_run_id_row_deadman_fresh_blocks_takeover() {
         let pool = test_pool().await;
 
         sqlx::query(
@@ -1435,24 +1478,62 @@ mod tests {
             VALUES (1, NULL, 'legacy-holder', 1, $1, $2)
             "#,
         )
-        .bind(ts(39_010))
-        .bind(ts(39_000))
+        .bind(ts(39_090)) // lease_expires_at = updated_at + 90s (RUNTIME_LEASE_TTL_SECS)
+        .bind(ts(39_000)) // updated_at
         .execute(&pool)
         .await
         .expect("seed legacy unversioned lease row");
 
         let run_b = make_run_with_status(&pool, "RUNNING").await;
-        // No heartbeat at all for run_b -- if the legacy branch wrongly fell
-        // into the same-run deadman path, `None` heartbeat is treated as
-        // stale (`true`) which would coincidentally still pass; use a FRESH
-        // heartbeat instead so a wrong fall-through would be caught by a
-        // false "not yet expired" refusal.
-        crate::heartbeat_run(&pool, run_b, ts(39_020))
+        crate::heartbeat_run(&pool, run_b, ts(39_100))
             .await
             .expect("run_b heartbeat");
 
+        // now=39_100: 100s since the legacy row's updated_at -- past its 90s
+        // lease TTL (raw-expired) but inside the 120s deadman window.
         let outcome = acquire_or_refresh_lease_for_running_run(
-            &pool, run_b, "runtime-b", None, ts(39_020), 90, 120,
+            &pool, run_b, "runtime-b", None, ts(39_100), 90, 120,
+        )
+        .await
+        .expect("run_b acquire must not error");
+        match outcome {
+            RunLeaseAuthorityOutcome::HeldByOther(current) => {
+                assert_eq!(current.run_id, None);
+            }
+            other => panic!(
+                "a raw-expired but deadman-fresh legacy NULL-run_id row must block takeover, got {other:?}"
+            ),
+        }
+    }
+
+    /// Companion to `cr10`: once the same legacy row's `updated_at` is also
+    /// past the 120s deadman window, it is not a permanent lockout -- the
+    /// same reconciliation that blocks the fresh case permits reclaim once
+    /// both signals genuinely agree, exactly like the same-run case (cr08).
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn cr10b_legacy_null_run_id_row_deadman_stale_permits_takeover() {
+        let pool = test_pool().await;
+
+        sqlx::query(
+            r#"
+            INSERT INTO runtime_leader_lease (id, run_id, holder_id, epoch, lease_expires_at, updated_at)
+            VALUES (1, NULL, 'legacy-holder', 1, $1, $2)
+            "#,
+        )
+        .bind(ts(40_090)) // lease_expires_at = updated_at + 90s
+        .bind(ts(40_000)) // updated_at
+        .execute(&pool)
+        .await
+        .expect("seed legacy unversioned lease row");
+
+        let run_b = make_run_with_status(&pool, "RUNNING").await;
+        // Deliberately no heartbeat for run_b -- proving disposition never
+        // depends on the new run's heartbeat state for the legacy branch.
+        // now=40_121: 121s since the legacy row's updated_at, past both the
+        // 90s lease TTL and the 120s deadman window.
+        let outcome = acquire_or_refresh_lease_for_running_run(
+            &pool, run_b, "runtime-b", None, ts(40_121), 90, 120,
         )
         .await
         .expect("run_b acquire must not error");
@@ -1461,9 +1542,44 @@ mod tests {
                 assert_eq!(lease.run_id, Some(run_b));
             }
             other => panic!(
-                "legacy NULL-run_id row must be reclaimed on raw expiry alone, got {other:?}"
+                "a raw-expired AND deadman-stale legacy NULL-run_id row must be reclaimable, got {other:?}"
             ),
         }
+    }
+
+    /// FK delete-action review (RUNTIME-LEASE-LEGACY-UNBOUND-MIGRATION-
+    /// SAFETY-01): migration 0069 changes `runtime_leader_lease_run_id_fkey`
+    /// from ON DELETE CASCADE to ON DELETE RESTRICT. Proves the production
+    /// invariant directly: a run row that a leadership lease still durably
+    /// points to must refuse deletion, not silently cascade the lease away.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn fk01_run_delete_restricted_while_runtime_lease_references_it() {
+        let pool = test_pool().await;
+        let run_id = make_run_with_status(&pool, "RUNNING").await;
+
+        acquire_or_refresh_lease_for_running_run(
+            &pool, run_id, "runtime-a", None, ts(41_000), 90, 120,
+        )
+        .await
+        .expect("acquire")
+        .expect_acquired();
+
+        let err = sqlx::query("DELETE FROM runs WHERE run_id = $1")
+            .bind(run_id)
+            .execute(&pool)
+            .await
+            .expect_err("deleting a run with live runtime_leader_lease authority must be refused");
+        assert!(
+            err.to_string().to_lowercase().contains("foreign key"),
+            "expected a foreign key violation, got: {err}"
+        );
+
+        let lease = fetch_current_lease(&pool)
+            .await
+            .expect("fetch_current_lease")
+            .expect("the lease must survive the refused delete");
+        assert_eq!(lease.run_id, Some(run_id));
     }
 
     /// Negative control 13 (fencing intact): the same run-row serialization
