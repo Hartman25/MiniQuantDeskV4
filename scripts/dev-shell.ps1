@@ -11,8 +11,10 @@ if ($env:Path -notlike "*$pgBin*") {
 
 Set-Location "$PSScriptRoot\..\core-rs"
 
+. "$PSScriptRoot\lib\dsn-mask.ps1"
+
 Write-Host "MQK shell ready"
 Write-Host "PGHOST=$env:PGHOST"
 Write-Host "PGPORT=$env:PGPORT"
 Write-Host "PGUSER=$env:PGUSER"
-Write-Host "MQK_DATABASE_URL=$env:MQK_DATABASE_URL"
+Write-Host "MQK_DATABASE_URL=$(Get-SafeDsnSummary $env:MQK_DATABASE_URL)"
