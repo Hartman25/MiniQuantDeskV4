@@ -8,6 +8,7 @@ from mqk_research.exp_distributed.hashing import short_hash
 from mqk_research.exp_distributed.runner import default_db_path, default_root
 from mqk_research.exp_distributed.storage import REGISTRY_SCHEMA_VERSION, ResearchResultStore
 from mqk_research.ml.eval_walkforward import WalkForwardSpec, run_walkforward_eval
+from mqk_research.ml.holdout_ledger import compute_holdout_id
 from mqk_research.ml.util_hash import file_record
 
 # Matches the walk-forward artifact's own "schema_version" field
@@ -175,13 +176,44 @@ def run_registered_walkforward_eval(
             clip_z=clip_z,
             spec=normalized_spec,
         )
+        out = json.loads(out_path.read_text(encoding="utf-8"))
+
+        # RESEARCH-HOLDOUT-RESERVATION-WIRING-01: durably reserve the exact
+        # holdout region this real evaluation run computed and excluded from
+        # discovery, BEFORE the attempt is trusted as a successful result.
+        # `dataset_identity` reuses this trial's own `identity["data_identity"]`
+        # (immutable content-hash facts already established above, never a
+        # result/metric value). `protocol_version` is `PROTOCOL_ID`, the
+        # canonical EVALUATION SEMANTICS identity this module already uses
+        # for trial identity (see the module-level constant's doc comment) --
+        # deliberately NOT `out["schema_version"]`, which identifies artifact
+        # layout, not evaluation semantics. The two happen to share the same
+        # string today, but must not be conflated: a future artifact-schema
+        # bump alone must not manufacture a new holdout region, and a future
+        # semantic protocol change must invalidate one even if the artifact
+        # shape is untouched. A ledger failure (e.g. a hash collision against
+        # conflicting facts) must deny this evaluation fail-closed, so it
+        # stays inside this same try block and is finalized failed like any
+        # other evaluation error.
+        holdout_id = compute_holdout_id(
+            dataset_identity=identity["data_identity"],
+            holdout_start_utc=out["holdout"]["start_utc"],
+            holdout_end_utc=out["holdout"]["end_utc"],
+            protocol_version=PROTOCOL_ID,
+        )
+        store.reserve_holdout(
+            holdout_id=holdout_id,
+            dataset_identity=identity["data_identity"],
+            holdout_start_utc=out["holdout"]["start_utc"],
+            holdout_end_utc=out["holdout"]["end_utc"],
+            protocol_version=PROTOCOL_ID,
+        )
     except Exception as exc:
         store.finalize_attempt(
             attempt_id, status="failed", failure_reason=f"{type(exc).__name__}: {exc}"
         )
         raise
 
-    out = json.loads(out_path.read_text(encoding="utf-8"))
     eval_id = out["ids"]["eval_id"]
     out["registry"] = {
         "schema_version": REGISTRY_SCHEMA_VERSION,
@@ -192,6 +224,7 @@ def run_registered_walkforward_eval(
         "attempt_id": attempt_id,
         "attempt_index": attempt_index,
         "status": "succeeded",
+        "holdout_id": holdout_id,
     }
     out_path.write_text(json.dumps(out, sort_keys=True, separators=(",", ":")), encoding="utf-8")
 

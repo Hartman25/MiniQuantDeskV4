@@ -16,6 +16,7 @@ from mqk_research.ml.economic_walkforward import (
 )
 from mqk_research.ml.eval_walkforward import WalkForwardSpec, run_walkforward_eval
 from mqk_research.ml.execution_pricing import EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1
+from mqk_research.ml.holdout_ledger import compute_holdout_id
 from mqk_research.ml.util_hash import file_record
 
 # RESEARCH-ECONOMIC-WALKFORWARD-01
@@ -313,13 +314,48 @@ def run_registered_economic_walkforward_eval(
             walk_forward_eval_path=wf_out_path,
             provenance_manifest=bars_provenance,
         )
+        economic_out = json.loads(economic_out_path.read_text(encoding="utf-8"))
+
+        # RESEARCH-HOLDOUT-RESERVATION-WIRING-01: durably reserve the exact
+        # holdout region this real evaluation run computed and excluded from
+        # discovery, BEFORE the attempt is trusted as a successful result.
+        # The economic protocol shares the SAME time boundary as the
+        # classification wf_out it was built on (run_economic_walkforward
+        # does not redefine a separate holdout window) -- read from wf_out
+        # rather than economic_out, whose own "holdout" block is a bare
+        # status literal. `dataset_identity` reuses this trial's own
+        # `identity["data_identity"]` (includes bars_provenance, so the
+        # economic protocol's holdout_id is intentionally distinct from the
+        # classification protocol's for the same time window). `protocol_version`
+        # is `ECONOMIC_PROTOCOL_ID`, the canonical EVALUATION SEMANTICS
+        # identity this module already uses for trial identity -- deliberately
+        # NOT `economic_out["schema_version"]`, which identifies artifact
+        # layout, not evaluation semantics (the two happen to share the same
+        # string today, but must not be conflated -- see registry_integration's
+        # identical distinction for the classification protocol). A ledger
+        # failure must deny this evaluation fail-closed, so it stays inside
+        # this same try block and is finalized failed like any other
+        # evaluation error.
+        wf_out = json.loads(wf_out_path.read_text(encoding="utf-8"))
+        holdout_id = compute_holdout_id(
+            dataset_identity=identity["data_identity"],
+            holdout_start_utc=wf_out["holdout"]["start_utc"],
+            holdout_end_utc=wf_out["holdout"]["end_utc"],
+            protocol_version=ECONOMIC_PROTOCOL_ID,
+        )
+        store.reserve_holdout(
+            holdout_id=holdout_id,
+            dataset_identity=identity["data_identity"],
+            holdout_start_utc=wf_out["holdout"]["start_utc"],
+            holdout_end_utc=wf_out["holdout"]["end_utc"],
+            protocol_version=ECONOMIC_PROTOCOL_ID,
+        )
     except Exception as exc:
         store.finalize_attempt(
             attempt_id, status="failed", failure_reason=f"{type(exc).__name__}: {exc}"
         )
         raise
 
-    economic_out = json.loads(economic_out_path.read_text(encoding="utf-8"))
     economic_eval_id = economic_out["ids"]["economic_eval_id"]
     economic_out["registry"] = {
         "schema_version": REGISTRY_SCHEMA_VERSION,
@@ -330,6 +366,7 @@ def run_registered_economic_walkforward_eval(
         "attempt_id": attempt_id,
         "attempt_index": attempt_index,
         "status": "succeeded",
+        "holdout_id": holdout_id,
     }
     economic_out_path.write_text(
         json.dumps(economic_out, sort_keys=True, separators=(",", ":")), encoding="utf-8"
