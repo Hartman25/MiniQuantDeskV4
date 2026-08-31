@@ -4,6 +4,77 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// DB-OUTBOX-SCHEMA-VERSION-01: order_json envelope schema identity
+// ---------------------------------------------------------------------------
+
+/// Current `order_json` envelope schema version. Every row inserted via
+/// [`outbox_enqueue`] / [`outbox_enqueue_for_running_run`] carries this value
+/// under the `schema_version` key. Bump only alongside a documented,
+/// backward-compatible change to the envelope shape the readers understand.
+pub const ORDER_JSON_SCHEMA_VERSION: i64 = 1;
+
+/// Validate-and-stamp `order_json` with the current schema version before it
+/// is durably written. This is the single writer-side primitive for
+/// `order_json` schema identity -- every INSERT path must route through it.
+///
+/// - Missing `schema_version`: current version is inserted.
+/// - `schema_version == ORDER_JSON_SCHEMA_VERSION`: preserved unchanged.
+/// - Any other value under the key (a different integer, zero, negative,
+///   wrong type) or a non-object envelope: the write is refused. A caller
+///   that already stamped an explicit, non-current version is never
+///   silently overwritten -- that would defeat explicit schema-version
+///   authority -- and a non-object payload never reaches disk without an
+///   explicit schema identity.
+fn stamp_order_json_schema_version(order_json: Value) -> Result<Value> {
+    let Value::Object(mut map) = order_json else {
+        return Err(anyhow!(
+            "order_json must be a JSON object to receive an explicit schema_version, refusing write"
+        ));
+    };
+    match map.get("schema_version") {
+        None => {
+            map.insert(
+                "schema_version".to_string(),
+                Value::from(ORDER_JSON_SCHEMA_VERSION),
+            );
+        }
+        Some(v) if v.as_i64() == Some(ORDER_JSON_SCHEMA_VERSION) => {}
+        Some(v) => {
+            return Err(anyhow!(
+                "order_json schema_version {v:?} is not writable (current={ORDER_JSON_SCHEMA_VERSION}); refusing to silently overwrite an explicit non-current value"
+            ));
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+/// Validate an `order_json` envelope's `schema_version` before it is trusted
+/// by a reader.
+///
+/// - Missing `schema_version` (a row written before this patch): accepted --
+///   proven historical compatibility, not a guess.
+/// - `schema_version == ORDER_JSON_SCHEMA_VERSION`: accepted.
+/// - An integer greater than [`ORDER_JSON_SCHEMA_VERSION`]: refused as an
+///   unsupported future version this build does not know how to read.
+/// - Anything else present under the key (wrong type, negative, zero, or any
+///   value other than the one currently-defined version): refused as
+///   malformed -- never guessed at or coerced.
+pub fn validate_order_json_schema_version(order_json: &Value) -> Result<()> {
+    let Some(field) = order_json.get("schema_version") else {
+        return Ok(());
+    };
+    match field.as_i64() {
+        Some(v) if v == ORDER_JSON_SCHEMA_VERSION => Ok(()),
+        Some(v) if v > ORDER_JSON_SCHEMA_VERSION => Err(anyhow!(
+            "order_json schema_version {v} is newer than this build supports (current={ORDER_JSON_SCHEMA_VERSION})"
+        )),
+        _ => Err(anyhow!(
+            "order_json schema_version {field:?} is malformed or unrecognized (current={ORDER_JSON_SCHEMA_VERSION})"
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboxRow {
     pub outbox_id: i64,
@@ -258,6 +329,7 @@ pub async fn outbox_enqueue(
     idempotency_key: &str,
     order_json: Value,
 ) -> Result<bool> {
+    let order_json = stamp_order_json_schema_version(order_json)?;
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         insert into oms_outbox (run_id, idempotency_key, order_json, status)
@@ -342,6 +414,8 @@ pub async fn outbox_enqueue_for_running_run(
     idempotency_key: &str,
     order_json: Value,
 ) -> Result<OutboxEnqueueOutcome> {
+    let order_json = stamp_order_json_schema_version(order_json)?;
+
     let mut tx = pool
         .begin()
         .await
@@ -1535,4 +1609,123 @@ pub async fn outbox_fetch_for_supervisor(
         });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// DB-OUTBOX-SCHEMA-VERSION-01: pure unit tests (no DB required)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod order_json_schema_version_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sv01_stamp_writes_current_version_when_missing() {
+        let stamped =
+            stamp_order_json_schema_version(json!({"symbol": "SPY", "qty": 1})).unwrap();
+        assert_eq!(
+            stamped.get("schema_version").and_then(Value::as_i64),
+            Some(ORDER_JSON_SCHEMA_VERSION)
+        );
+        assert_eq!(stamped.get("symbol").and_then(Value::as_str), Some("SPY"));
+    }
+
+    #[test]
+    fn sv02_stamp_refuses_a_non_object_value() {
+        assert!(stamp_order_json_schema_version(json!("not-an-object")).is_err());
+        assert!(stamp_order_json_schema_version(json!([1, 2, 3])).is_err());
+    }
+
+    #[test]
+    fn sv10_stamp_preserves_an_explicit_current_version() {
+        let stamped = stamp_order_json_schema_version(
+            json!({"symbol": "SPY", "schema_version": ORDER_JSON_SCHEMA_VERSION}),
+        )
+        .unwrap();
+        assert_eq!(
+            stamped.get("schema_version").and_then(Value::as_i64),
+            Some(ORDER_JSON_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn sv11_stamp_refuses_to_silently_overwrite_a_future_version() {
+        // The defect this repair closes: a caller-supplied future version
+        // must never be silently rewritten down to the current version.
+        let err = stamp_order_json_schema_version(
+            json!({"symbol": "SPY", "schema_version": ORDER_JSON_SCHEMA_VERSION + 1}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not writable"));
+    }
+
+    #[test]
+    fn sv12_stamp_refuses_malformed_schema_version() {
+        assert!(
+            stamp_order_json_schema_version(json!({"symbol": "SPY", "schema_version": "one"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sv13_stamp_refuses_zero_and_negative_schema_version() {
+        assert!(
+            stamp_order_json_schema_version(json!({"symbol": "SPY", "schema_version": 0}))
+                .is_err()
+        );
+        assert!(
+            stamp_order_json_schema_version(json!({"symbol": "SPY", "schema_version": -1}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sv03_missing_schema_version_is_accepted_as_historical() {
+        let legacy = json!({"symbol": "SPY", "qty": 1});
+        assert!(validate_order_json_schema_version(&legacy).is_ok());
+    }
+
+    #[test]
+    fn sv04_current_version_is_accepted() {
+        let current = json!({"symbol": "SPY", "qty": 1, "schema_version": ORDER_JSON_SCHEMA_VERSION});
+        assert!(validate_order_json_schema_version(&current).is_ok());
+    }
+
+    #[test]
+    fn sv05_future_version_is_refused() {
+        let future = json!({"symbol": "SPY", "schema_version": ORDER_JSON_SCHEMA_VERSION + 1});
+        let err = validate_order_json_schema_version(&future).unwrap_err();
+        assert!(err.to_string().contains("newer than this build supports"));
+    }
+
+    #[test]
+    fn sv06_non_integer_schema_version_is_refused_as_malformed() {
+        let malformed = json!({"symbol": "SPY", "schema_version": "one"});
+        let err = validate_order_json_schema_version(&malformed).unwrap_err();
+        assert!(err.to_string().contains("malformed"));
+    }
+
+    #[test]
+    fn sv07_negative_schema_version_is_refused_as_malformed() {
+        let malformed = json!({"symbol": "SPY", "schema_version": -1});
+        assert!(validate_order_json_schema_version(&malformed).is_err());
+    }
+
+    #[test]
+    fn sv08_zero_schema_version_is_refused_as_malformed() {
+        // Only a genuinely missing key means "historical" -- an explicit 0 is
+        // not a version this codebase ever emitted and must not be silently
+        // treated as compatible.
+        let malformed = json!({"symbol": "SPY", "schema_version": 0});
+        assert!(validate_order_json_schema_version(&malformed).is_err());
+    }
+
+    #[test]
+    fn sv09_writer_reader_round_trip_in_memory() {
+        let written =
+            stamp_order_json_schema_version(json!({"symbol": "SPY", "qty": 1})).unwrap();
+        // Simulate the DB round trip: serialize/deserialize as postgres JSONB would.
+        let round_tripped: Value = serde_json::from_str(&written.to_string()).unwrap();
+        assert!(validate_order_json_schema_version(&round_tripped).is_ok());
+    }
 }

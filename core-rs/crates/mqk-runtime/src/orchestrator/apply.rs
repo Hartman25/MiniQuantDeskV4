@@ -110,6 +110,7 @@ pub(super) fn build_canonical_apply_queue(
         let inbox_id = row.inbox_id;
         let msg_id = row.broker_message_id;
         let received_at = row.received_at_utc;
+        mqk_db::validate_message_json_schema_version(&row.message_json)?;
         let event: BrokerEvent = serde_json::from_value(row.message_json)?;
         apply_queue.push((inbox_id, msg_id, event, received_at));
     }

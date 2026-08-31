@@ -69,6 +69,7 @@ pub(super) fn build_validated_submit_request(
     order_id: &str,
     order_json: &serde_json::Value,
 ) -> anyhow::Result<BrokerSubmitRequest> {
+    mqk_db::validate_order_json_schema_version(order_json)?;
     let symbol = validated_order_symbol(order_json)?;
     let quantity = validated_order_quantity(order_json)?;
     let side = validated_order_side(order_json, quantity.signed_qty)?;

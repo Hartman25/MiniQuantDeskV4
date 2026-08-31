@@ -6,11 +6,81 @@
 // This module owns only the oms_inbox table operations.
 // The oms_outbox table and broker_order_map remain in orders.rs.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// DB-OUTBOX-SCHEMA-VERSION-01: message_json envelope schema identity
+// ---------------------------------------------------------------------------
+
+/// Current `message_json` envelope schema version. Every row inserted via
+/// [`inbox_insert_deduped`] / [`inbox_insert_deduped_with_identity`] carries
+/// this value under the `schema_version` key. Bump only alongside a
+/// documented, backward-compatible change to the envelope shape the readers
+/// (chiefly `serde_json::from_value::<mqk_execution::BrokerEvent>`) understand.
+pub const MESSAGE_JSON_SCHEMA_VERSION: i64 = 1;
+
+/// Validate-and-stamp `message_json` with the current schema version before
+/// it is durably written. This is the single writer-side primitive for
+/// `message_json` schema identity -- every INSERT path must route through
+/// it.
+///
+/// - Missing `schema_version`: current version is inserted.
+/// - `schema_version == MESSAGE_JSON_SCHEMA_VERSION`: preserved unchanged.
+/// - Any other value under the key (a different integer, zero, negative,
+///   wrong type) or a non-object envelope: the write is refused -- a
+///   caller-supplied explicit non-current version is never silently
+///   overwritten, and a non-object payload never reaches disk without an
+///   explicit schema identity.
+fn stamp_message_json_schema_version(message_json: &Value) -> Result<Value> {
+    let Value::Object(map) = message_json else {
+        return Err(anyhow!(
+            "message_json must be a JSON object to receive an explicit schema_version, refusing write"
+        ));
+    };
+    let mut map = map.clone();
+    match map.get("schema_version") {
+        None => {
+            map.insert(
+                "schema_version".to_string(),
+                Value::from(MESSAGE_JSON_SCHEMA_VERSION),
+            );
+        }
+        Some(v) if v.as_i64() == Some(MESSAGE_JSON_SCHEMA_VERSION) => {}
+        Some(v) => {
+            return Err(anyhow!(
+                "message_json schema_version {v:?} is not writable (current={MESSAGE_JSON_SCHEMA_VERSION}); refusing to silently overwrite an explicit non-current value"
+            ));
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+/// Validate a `message_json` envelope's `schema_version` before it is
+/// trusted by a reader (e.g. before `serde_json::from_value::<BrokerEvent>`).
+///
+/// Same fail-closed contract as
+/// [`crate::orders::validate_order_json_schema_version`]: missing is
+/// accepted (proven historical compatibility), the current version is
+/// accepted, a greater integer is refused as an unsupported future version,
+/// and anything else present under the key is refused as malformed.
+pub fn validate_message_json_schema_version(message_json: &Value) -> Result<()> {
+    let Some(field) = message_json.get("schema_version") else {
+        return Ok(());
+    };
+    match field.as_i64() {
+        Some(v) if v == MESSAGE_JSON_SCHEMA_VERSION => Ok(()),
+        Some(v) if v > MESSAGE_JSON_SCHEMA_VERSION => Err(anyhow!(
+            "message_json schema_version {v} is newer than this build supports (current={MESSAGE_JSON_SCHEMA_VERSION})"
+        )),
+        _ => Err(anyhow!(
+            "message_json schema_version {field:?} is malformed or unrecognized (current={MESSAGE_JSON_SCHEMA_VERSION})"
+        )),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct InboxRow {
@@ -223,6 +293,7 @@ async fn inbox_insert_transport_only_deduped(
     event_ts_ms: i64,
     received_at: DateTime<Utc>,
 ) -> Result<bool> {
+    let event_json = stamp_message_json_schema_version(event_json)?;
     let insert_result = sqlx::query(
         r#"
         insert into oms_inbox (
@@ -680,4 +751,96 @@ pub async fn inbox_load_all_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<I
         });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// DB-OUTBOX-SCHEMA-VERSION-01: pure unit tests (no DB required)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod message_json_schema_version_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sv01_stamp_writes_current_version_when_missing() {
+        let stamped = stamp_message_json_schema_version(&json!({"type": "ack"})).unwrap();
+        assert_eq!(
+            stamped.get("schema_version").and_then(Value::as_i64),
+            Some(MESSAGE_JSON_SCHEMA_VERSION)
+        );
+        assert_eq!(stamped.get("type").and_then(Value::as_str), Some("ack"));
+    }
+
+    #[test]
+    fn sv02_stamp_refuses_a_non_object_value() {
+        assert!(stamp_message_json_schema_version(&json!("not-an-object")).is_err());
+        assert!(stamp_message_json_schema_version(&json!([1, 2, 3])).is_err());
+    }
+
+    #[test]
+    fn sv10_stamp_preserves_an_explicit_current_version() {
+        let stamped = stamp_message_json_schema_version(
+            &json!({"type": "ack", "schema_version": MESSAGE_JSON_SCHEMA_VERSION}),
+        )
+        .unwrap();
+        assert_eq!(
+            stamped.get("schema_version").and_then(Value::as_i64),
+            Some(MESSAGE_JSON_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn sv11_stamp_refuses_to_silently_overwrite_a_future_version() {
+        let err = stamp_message_json_schema_version(
+            &json!({"type": "ack", "schema_version": MESSAGE_JSON_SCHEMA_VERSION + 1}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not writable"));
+    }
+
+    #[test]
+    fn sv12_stamp_refuses_malformed_schema_version() {
+        assert!(
+            stamp_message_json_schema_version(&json!({"type": "ack", "schema_version": "one"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sv13_stamp_refuses_zero_and_negative_schema_version() {
+        assert!(
+            stamp_message_json_schema_version(&json!({"type": "ack", "schema_version": 0}))
+                .is_err()
+        );
+        assert!(
+            stamp_message_json_schema_version(&json!({"type": "ack", "schema_version": -1}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sv03_missing_schema_version_is_accepted_as_historical() {
+        let legacy = json!({"type": "ack"});
+        assert!(validate_message_json_schema_version(&legacy).is_ok());
+    }
+
+    #[test]
+    fn sv04_current_version_is_accepted() {
+        let current = json!({"type": "ack", "schema_version": MESSAGE_JSON_SCHEMA_VERSION});
+        assert!(validate_message_json_schema_version(&current).is_ok());
+    }
+
+    #[test]
+    fn sv05_future_version_is_refused() {
+        let future = json!({"type": "ack", "schema_version": MESSAGE_JSON_SCHEMA_VERSION + 1});
+        let err = validate_message_json_schema_version(&future).unwrap_err();
+        assert!(err.to_string().contains("newer than this build supports"));
+    }
+
+    #[test]
+    fn sv06_non_integer_schema_version_is_refused_as_malformed() {
+        let malformed = json!({"type": "ack", "schema_version": "one"});
+        let err = validate_message_json_schema_version(&malformed).unwrap_err();
+        assert!(err.to_string().contains("malformed"));
+    }
 }
