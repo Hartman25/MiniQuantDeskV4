@@ -27,12 +27,18 @@
 --      this check+delete; compatible with the ROW SHARE plain `SELECT ...
 --      FOR UPDATE` takes, so it does not deadlock against
 --      acquire_or_refresh_lease_for_running_run's own row lock) and refuse
---      to proceed if any run reports ARMED status, or RUNNING status with a
---      last_heartbeat_utc inside the deadman window -- either could
---      plausibly be the row's unknowable owner. NULL last_heartbeat_utc is
---      treated as already-stale, mirroring acquire_or_refresh_lease_for_
---      running_run's own same-run deadman check (no heartbeat ever recorded
---      is no evidence of life).
+--      to proceed if any run reports ARMED or RUNNING status, full stop.
+--      Heartbeat freshness is NOT part of this check: runs.rs::begin_run's
+--      ARMED -> RUNNING transition does not atomically write
+--      last_heartbeat_utc -- that is a separate, later heartbeat_run call --
+--      so a RUNNING row can legitimately carry a NULL or stale
+--      last_heartbeat_utc while a real runtime is still starting or
+--      resuming. Treating heartbeat age as proof of absence would let this
+--      migration race a starting runtime and delete a lease row that is not
+--      actually safe to touch. An orphaned/stale RUNNING row must instead be
+--      resolved through the existing explicit recovery/lifecycle authority
+--      before retrying this migration -- migration itself never recovers or
+--      stops a run.
 --   4. Otherwise the system is quiescent: the row cannot correspond to any
 --      currently live authority, so delete it.
 --
@@ -71,15 +77,10 @@ begin
 
     select count(*) into active_authority_count
       from runs
-     where status = 'ARMED'
-        or (
-             status = 'RUNNING'
-             and last_heartbeat_utc is not null
-             and now() - last_heartbeat_utc <= interval '120 seconds'
-           );
+     where status in ('ARMED', 'RUNNING');
 
     if active_authority_count > 0 then
-        raise exception 'runtime_leader_lease legacy migration safety: % run(s) report ARMED or deadman-fresh RUNNING authority while an unbound (run_id IS NULL) lease row exists; its true owner is unknowable, so refusing to remove it until the system is quiescent. Resolve (halt/clear) active runs before retrying this migration.', active_authority_count;
+        raise exception 'runtime_leader_lease legacy migration safety: % run(s) report ARMED or RUNNING status while an unbound (run_id IS NULL) lease row exists; its true owner is unknowable, so refusing to remove it until the system is quiescent. Heartbeat freshness is not evidence either way -- begin_run does not atomically establish a heartbeat. Resolve (halt/clear) active runs before retrying this migration.', active_authority_count;
     end if;
 
     delete from runtime_leader_lease where id = 1 and run_id is null;
