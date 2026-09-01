@@ -939,6 +939,16 @@ pub struct AppState {
     /// Dedup: at most one alert per (run, symbol). Reset at run start
     /// alongside `b5_alerted_symbols`.
     per_symbol_position_cap_alerted_symbols: Arc<RwLock<HashSet<String>>>,
+    /// DISCORD-DATA-STALENESS-ALERT-01: Per-run set of symbols for which a
+    /// market-data staleness/missing-bar Discord alert has already been
+    /// fired, keyed by the same `md_staleness_per_tick_gate_01` refusal in
+    /// `prepare_bar_window_for_symbol_timeframe` that already durably
+    /// records the refused signal evaluation. Not a second staleness
+    /// authority — this only decides whether to also notify.
+    ///
+    /// Dedup: at most one alert per (run, symbol). Reset at run start
+    /// alongside `b5_alerted_symbols`.
+    md_staleness_alerted_symbols: Arc<RwLock<HashSet<String>>>,
     /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3: process-local completed-bar
     /// task ownership/liveness/cancellation handles. Constructed once per
     /// `AppState` and never reconstructed for the process lifetime.
@@ -1998,6 +2008,7 @@ impl AppState {
             b5_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             day_limit_alert_fired: Arc::new(AtomicBool::new(false)),
             per_symbol_position_cap_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
+            md_staleness_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             completed_bar_task:
                 autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime::default(),
             dynamic_selection_fault_seam: Arc::new(RwLock::new(None)),
@@ -2723,6 +2734,26 @@ operator_reconcile_or_repair_required"
         self.try_claim_per_symbol_position_cap_alert(symbol).await
     }
 
+    /// DISCORD-DATA-STALENESS-ALERT-01 test seam: `pub` re-export of the
+    /// crate-private [`Self::try_claim_md_staleness_alert`]
+    /// (`signal_intake.rs`) for the staleness alert-dedup proof.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub async fn try_claim_md_staleness_alert_for_test(&self, symbol: &str) -> bool {
+        self.try_claim_md_staleness_alert(symbol).await
+    }
+
+    /// DISCORD-DATA-STALENESS-ALERT-01 test seam: `pub` re-export of the
+    /// crate-private [`Self::reset_signal_blocked_alert_state`]
+    /// (`signal_intake.rs`) — the same reset the run-start lifecycle path
+    /// calls — for proving the staleness alert dedup set (and its sibling
+    /// B5/day-limit/cap-#2 dedup sets) clears at run start.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub fn reset_signal_blocked_alert_state_for_test(&self) {
+        self.reset_signal_blocked_alert_state();
+    }
+
     /// B1B: Invoke the native strategy `on_bar` callback from raw bar parameters.
     ///
     /// Fail-closed: no bootstrap stored (no active run) → `None`, no callback.
@@ -3034,6 +3065,55 @@ operator_reconcile_or_repair_required"
     /// — moved verbatim, not reimplemented, so both backends see byte-
     /// identical staleness/diagnostic behavior. Neither backend performs a
     /// second DB bar-window load after this call.
+    ///
+    /// DISCORD-DATA-STALENESS-ALERT-01: best-effort Discord alert for a
+    /// `md_staleness_per_tick_gate_01` refusal (missing or stale completed
+    /// bar). This derives from -- and never duplicates -- the canonical
+    /// per-tick staleness gate already evaluated by the caller
+    /// (`prepare_bar_window_for_symbol_timeframe`, immediately below): the
+    /// refusal and its durable `SignalEvaluationAttempt` record already
+    /// happened before this is called; this only decides whether to also
+    /// notify. Fires at most once per (run, symbol) via the existing
+    /// `try_claim_*_alert` dedup pattern (mirrors cap #2's
+    /// `try_claim_per_symbol_position_cap_alert`), so a symbol whose data
+    /// stays stale/missing across many consecutive ticks alerts once, not
+    /// every tick. Delivery is best-effort: failures are logged and
+    /// swallowed by `DiscordNotifier` itself; this never affects the
+    /// dispatch refusal that already occurred.
+    async fn maybe_alert_md_staleness(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        no_order_reason: &'static str,
+        detail: String,
+    ) {
+        if !self.try_claim_md_staleness_alert(symbol).await {
+            return;
+        }
+        let notifier = self.discord_notifier.clone();
+        let env = Some(self.deployment_mode().as_api_label().to_string());
+        let run_id = self.locally_owned_run_id().await.map(|id| id.to_string());
+        let symbol_owned = symbol.to_string();
+        let timeframe_owned = timeframe.to_string();
+        let ts = Utc::now().to_rfc3339();
+        tokio::spawn(async move {
+            notifier
+                .notify_critical_alert(&CriticalAlertPayload {
+                    alert_class: "market_data.staleness_detected".to_string(),
+                    severity: "warning".to_string(),
+                    summary: format!(
+                        "market data staleness gate refused dispatch for {symbol_owned} \
+                         ({timeframe_owned}): {no_order_reason}"
+                    ),
+                    detail: Some(detail),
+                    environment: env,
+                    run_id,
+                    ts_utc: ts,
+                })
+                .await;
+        });
+    }
+
     async fn prepare_bar_window_for_symbol_timeframe(
         &self,
         symbol: &str,
@@ -3091,6 +3171,13 @@ operator_reconcile_or_repair_required"
                     reason: "no completed bars in md_bars for this symbol/timeframe",
                     decision_stage: "pre_dispatch_gate",
                 },
+            )
+            .await;
+            self.maybe_alert_md_staleness(
+                symbol,
+                md_timeframe,
+                no_order_reason,
+                "no completed bars in md_bars for this symbol/timeframe".to_string(),
             )
             .await;
             return BarWindowPrepOutcome::Refused;
@@ -3154,6 +3241,17 @@ operator_reconcile_or_repair_required"
                     reason: "latest completed bar exceeds the per-symbol staleness threshold",
                     decision_stage: "pre_dispatch_gate",
                 },
+            )
+            .await;
+            self.maybe_alert_md_staleness(
+                symbol,
+                md_timeframe,
+                no_order_reason,
+                format!(
+                    "latest completed bar exceeds the per-symbol staleness threshold: \
+                     latest_completed_bar_ts={latest_completed_bar_ts:?} age_seconds={age_seconds:?} \
+                     max_allowed_age_seconds={staleness_cap_secs:?}"
+                ),
             )
             .await;
             return BarWindowPrepOutcome::Refused;

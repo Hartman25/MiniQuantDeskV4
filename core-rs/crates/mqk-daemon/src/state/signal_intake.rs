@@ -322,9 +322,22 @@ impl AppState {
         set.insert(symbol.to_string())
     }
 
-    /// Reset B5 dedup set, day-limit alert flag, and cap #2 position-cap
-    /// alert dedup set.  Called at run start so each new run gets fresh dedup
-    /// state.
+    /// DISCORD-DATA-STALENESS-ALERT-01: Returns `true` the FIRST time this
+    /// symbol is claimed for a market-data staleness/missing-bar Discord
+    /// alert this run; `false` on subsequent calls (already alerted).
+    ///
+    /// Same shape as [`try_claim_per_symbol_position_cap_alert`]
+    /// (Self::try_claim_per_symbol_position_cap_alert): at most one alert per
+    /// (run, symbol), to avoid alert storms when a symbol's market data
+    /// stays stale/missing across many consecutive dispatch ticks.
+    pub(crate) async fn try_claim_md_staleness_alert(&self, symbol: &str) -> bool {
+        let mut set = self.md_staleness_alerted_symbols.write().await;
+        set.insert(symbol.to_string())
+    }
+
+    /// Reset B5 dedup set, day-limit alert flag, cap #2 position-cap alert
+    /// dedup set, and market-data staleness alert dedup set.  Called at run
+    /// start so each new run gets fresh dedup state.
     pub(super) fn reset_signal_blocked_alert_state(&self) {
         // Clear the B5 symbol set synchronously using try_write; always succeeds
         // because lifecycle.rs holds the exclusive lifecycle_op lock during start.
@@ -333,6 +346,9 @@ impl AppState {
         }
         self.day_limit_alert_fired.store(false, Ordering::SeqCst);
         if let Ok(mut set) = self.per_symbol_position_cap_alerted_symbols.try_write() {
+            set.clear();
+        }
+        if let Ok(mut set) = self.md_staleness_alerted_symbols.try_write() {
             set.clear();
         }
     }
