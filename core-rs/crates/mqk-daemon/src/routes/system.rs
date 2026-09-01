@@ -508,6 +508,15 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     if status.notes.is_some() {
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
     }
+    // MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01: advisory-only warning when any
+    // of caps #2/#3/#5 are unset. Strictly additive — never affects
+    // deployment_start_allowed or any blocker; reuses the exact existing
+    // cap-resolution authority for each cap, never a second env parser.
+    warnings.extend(multi_symbol_capital_caps_preflight_warnings(
+        crate::state::signal_intake::per_symbol_max_position_qty_from_env(),
+        crate::capital_policy::position_sizing::per_symbol_max_notional_usd_cap_from_env(),
+        crate::capital_policy::portfolio_risk::aggregate_gross_exposure_cap_usd_from_env(),
+    ));
 
     // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: canonical readiness report,
     // shared with the dedicated route/autonomous-readiness/ingest-plan (§C.4).
@@ -650,6 +659,48 @@ struct SessionWindowDiagnostics {
 /// derived UTC times are `None` (NYSE seam, time varies by calendar day).
 /// Raw env values are always returned verbatim so the operator can see what was
 /// configured even when parsing fails.
+/// MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01: advisory (non-blocking) preflight
+/// warnings for any of caps #2/#3/#5 that are unset/disabled.
+///
+/// Pure: takes the already-resolved cap values (read via each cap's own
+/// existing `_from_env` authority — never a second, independent parser) and
+/// returns zero or more human-readable warning strings, one per unset cap.
+/// Strictly additive: callers must append these to an existing `warnings`
+/// list, never use them to gate `deployment_start_allowed` or populate
+/// `blockers` — enforcement and defaults are unchanged by this function.
+fn multi_symbol_capital_caps_preflight_warnings(
+    per_symbol_max_position_qty: Option<i64>,
+    per_symbol_max_notional_usd: Option<f64>,
+    aggregate_gross_exposure_cap_usd: Option<f64>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if per_symbol_max_position_qty.is_none() {
+        warnings.push(
+            "MQK_PER_SYMBOL_MAX_POSITION_QTY (cap #2, per-symbol max position qty) \
+             is unset — no per-symbol position-quantity protection beyond \
+             portfolio-level gates."
+                .to_string(),
+        );
+    }
+    if per_symbol_max_notional_usd.is_none() {
+        warnings.push(
+            "MQK_PER_SYMBOL_MAX_NOTIONAL_USD (cap #3, per-symbol max notional) \
+             is unset — no per-symbol notional protection beyond portfolio-level \
+             gates."
+                .to_string(),
+        );
+    }
+    if aggregate_gross_exposure_cap_usd.is_none() {
+        warnings.push(
+            "MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD (cap #5, aggregate gross \
+             exposure cap) is unset — no aggregate cross-symbol exposure \
+             protection beyond portfolio-level gates."
+                .to_string(),
+        );
+    }
+    warnings
+}
+
 fn session_window_diagnostics(now: chrono::DateTime<chrono::Utc>) -> SessionWindowDiagnostics {
     let start_raw = std::env::var(SESSION_START_HH_MM_ENV)
         .ok()
@@ -2868,6 +2919,52 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01: cap #2/#3/#5 preflight warning
+    // matrix.
+    #[test]
+    fn mscw01_all_three_caps_set_no_warnings() {
+        let warnings = multi_symbol_capital_caps_preflight_warnings(
+            Some(100),
+            Some(50_000.0),
+            Some(250_000.0),
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn mscw02_only_cap2_missing_names_cap2() {
+        let warnings =
+            multi_symbol_capital_caps_preflight_warnings(None, Some(50_000.0), Some(250_000.0));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("MQK_PER_SYMBOL_MAX_POSITION_QTY"));
+    }
+
+    #[test]
+    fn mscw03_only_cap3_missing_names_cap3() {
+        let warnings = multi_symbol_capital_caps_preflight_warnings(Some(100), None, Some(250_000.0));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("MQK_PER_SYMBOL_MAX_NOTIONAL_USD"));
+    }
+
+    #[test]
+    fn mscw04_only_cap5_missing_names_cap5() {
+        let warnings =
+            multi_symbol_capital_caps_preflight_warnings(Some(100), Some(50_000.0), None);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD"));
+    }
+
+    #[test]
+    fn mscw05_all_three_missing_names_all_three() {
+        let warnings = multi_symbol_capital_caps_preflight_warnings(None, None, None);
+        assert_eq!(warnings.len(), 3);
+        assert!(warnings.iter().any(|w| w.contains("MQK_PER_SYMBOL_MAX_POSITION_QTY")));
+        assert!(warnings.iter().any(|w| w.contains("MQK_PER_SYMBOL_MAX_NOTIONAL_USD")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD")));
+    }
 
     // AUTON-NO-TRADE-01: bar ticker Gate 2 derivation tests.
     #[test]

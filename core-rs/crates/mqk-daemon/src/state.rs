@@ -32,7 +32,7 @@ mod per_symbol_bar_window;
 pub mod required_market_data_autofresh;
 pub mod runtime_session_source;
 mod session_controller;
-mod signal_intake;
+pub(crate) mod signal_intake;
 mod snapshot;
 mod types;
 pub mod ws_gap_recovery;

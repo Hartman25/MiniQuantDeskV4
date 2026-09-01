@@ -351,6 +351,19 @@ pub fn evaluate_portfolio_risk(
     }
 }
 
+/// Read the optional aggregate gross exposure cap (cap #5, design doc §6)
+/// from `MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`.
+///
+/// `None` (unset or not a positive number) disables cap #5 entirely — this
+/// is the default, matching the `Option<f64> = None` default for cap #5's
+/// `aggregate_gross_exposure_cap_usd` in design doc §6.
+pub fn aggregate_gross_exposure_cap_usd_from_env() -> Option<f64> {
+    std::env::var("MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|&c| c > 0.0)
+}
+
 /// Read [`super::ENV_CAPITAL_POLICY_PATH`] and
 /// `MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD` from the environment and evaluate
 /// per-signal portfolio risk for `strategy_id`.
@@ -374,10 +387,7 @@ pub fn evaluate_portfolio_risk_from_env(
     } else {
         Some(std::path::PathBuf::from(raw.trim()))
     };
-    let aggregate_gross_exposure_cap_usd = std::env::var("MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD")
-        .ok()
-        .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|&c| c > 0.0);
+    let aggregate_gross_exposure_cap_usd = aggregate_gross_exposure_cap_usd_from_env();
     evaluate_portfolio_risk(
         path.as_deref(),
         strategy_id,

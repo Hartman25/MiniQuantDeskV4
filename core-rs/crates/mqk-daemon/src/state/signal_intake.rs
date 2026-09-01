@@ -40,7 +40,7 @@ pub(super) fn per_symbol_day_order_count_limit_from_env() -> Option<u32> {
 /// `None` (unset or not a positive integer) disables the B1C target-qty clamp
 /// entirely — this is the default, matching the `Option<i64> = None` default
 /// for cap #2's `per_symbol_max_position_qty` in design doc §6.
-pub(super) fn per_symbol_max_position_qty_from_env() -> Option<i64> {
+pub(crate) fn per_symbol_max_position_qty_from_env() -> Option<i64> {
     std::env::var("MQK_PER_SYMBOL_MAX_POSITION_QTY")
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())

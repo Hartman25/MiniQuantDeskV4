@@ -369,6 +369,19 @@ pub fn evaluate_per_symbol_notional_cap(
     PositionSizingOutcome::NoSizingConstraint
 }
 
+/// Read the optional per-symbol maximum notional cap (cap #3, design doc §6)
+/// from `MQK_PER_SYMBOL_MAX_NOTIONAL_USD`.
+///
+/// `None` (unset or not a positive number) disables cap #3 entirely — this is
+/// the default, matching the `Option<f64> = None` default for cap #3's
+/// `per_symbol_max_notional_usd` in design doc §6.
+pub fn per_symbol_max_notional_usd_cap_from_env() -> Option<f64> {
+    std::env::var("MQK_PER_SYMBOL_MAX_NOTIONAL_USD")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|&c| c > 0.0)
+}
+
 /// Read `MQK_PER_SYMBOL_MAX_NOTIONAL_USD` from the environment and evaluate
 /// the per-symbol notional cap (cap #3) for `symbol`.
 ///
@@ -380,9 +393,6 @@ pub fn evaluate_per_symbol_notional_cap_from_env(
     qty: i64,
     limit_price_micros: Option<i64>,
 ) -> PositionSizingOutcome {
-    let cap_usd = std::env::var("MQK_PER_SYMBOL_MAX_NOTIONAL_USD")
-        .ok()
-        .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|&c| c > 0.0);
+    let cap_usd = per_symbol_max_notional_usd_cap_from_env();
     evaluate_per_symbol_notional_cap(symbol, qty, limit_price_micros, cap_usd)
 }
