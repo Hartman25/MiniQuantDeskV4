@@ -563,8 +563,56 @@ fn row_decimal_str(
     })
 }
 
+/// Bounded retry attempts (beyond the initial attempt) for transient Kraken
+/// OHLC fetch failures: HTTP 429, retryable 5xx (500/502/503/504), and
+/// connect/timeout transport errors. Permanent 4xx and decode/parse failures
+/// are never retried -- they are not proven transient.
+const KRAKEN_FETCH_RETRY_MAX_ATTEMPTS: u32 = 3;
+
+/// Fallback sleep between retries when no valid `Retry-After` response
+/// header is present. Production default; tests inject 0 via
+/// [`fetch_kraken_ohlc_body_from`] so no unit test sleeps in real time.
+const KRAKEN_FETCH_RETRY_FALLBACK_SLEEP_SECS: u64 = 2;
+
+/// `true` iff `status` is a Kraken OHLC fetch failure proven transient:
+/// rate-limited (429) or a retryable server error (500/502/503/504).
+/// Any other non-success status (auth/permission, bad request, not-found,
+/// etc.) is a permanent failure and must never be retried.
+fn kraken_fetch_status_is_retryable(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
+/// `true` iff `err` is a connect or timeout failure -- the only transport
+/// error classes treated as transient. Request-building or other transport
+/// errors are not retried.
+fn kraken_fetch_transport_error_is_retryable(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_timeout()
+}
+
+/// Parse a `Retry-After` header value as a non-negative integer seconds
+/// count. Kraken's public OHLC endpoint does not document this header, but
+/// if a proxy/future response supplies one, honor it; any missing or
+/// malformed value falls back to the caller's fixed backoff instead of
+/// failing the request.
+fn kraken_fetch_parse_retry_after_secs(value: Option<&str>) -> Option<u64> {
+    value?.trim().parse::<u64>().ok()
+}
+
+/// `true` iff a provider-requested `Retry-After` of `secs` is within the
+/// permitted in-call retry-delay budget `budget_secs` (the fixed fallback
+/// backoff). A wait strictly greater than the budget must never be honored
+/// by sleeping, nor clamped down and retried early -- the caller fails
+/// closed instead.
+fn kraken_fetch_retry_after_within_budget(secs: u64, budget_secs: u64) -> bool {
+    secs <= budget_secs
+}
+
 /// Fetch the raw Kraken `/0/public/OHLC` response body for `query_pair` at
-/// Kraken's `interval=1440` (1D) via exactly one HTTP GET.
+/// Kraken's `interval=1440` (1D), retrying only proven-transient failures
+/// (see [`kraken_fetch_status_is_retryable`] /
+/// [`kraken_fetch_transport_error_is_retryable`]) up to
+/// [`KRAKEN_FETCH_RETRY_MAX_ATTEMPTS`] times with a fixed fallback backoff,
+/// honoring a `Retry-After` header when present and parseable.
 ///
 /// This function performs the network call unconditionally when invoked --
 /// it does **not** check any environment variable itself. Callers
@@ -572,13 +620,98 @@ fn row_decimal_str(
 /// opt-in (e.g. `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`) before invoking it. No
 /// credentials are sent; Kraken's public OHLC endpoint requires none.
 pub async fn fetch_kraken_ohlc_body(query_pair: &str) -> anyhow::Result<String> {
-    let url = format!("{KRAKEN_BASE_URL}/0/public/OHLC?pair={query_pair}&interval=1440");
-    let resp = reqwest::get(&url)
-        .await
-        .map_err(|err| anyhow::anyhow!("kraken ohlc transport error: {err}"))?;
-    resp.text()
-        .await
-        .map_err(|err| anyhow::anyhow!("kraken ohlc body read error: {err}"))
+    fetch_kraken_ohlc_body_from(
+        KRAKEN_BASE_URL,
+        query_pair,
+        KRAKEN_FETCH_RETRY_MAX_ATTEMPTS,
+        KRAKEN_FETCH_RETRY_FALLBACK_SLEEP_SECS,
+    )
+    .await
+}
+
+/// Narrow testable helper behind [`fetch_kraken_ohlc_body`]: parameterizes
+/// base URL, max retries, and fallback sleep so tests can point at a mock
+/// server and pass `fallback_sleep_secs: 0` (no real sleeps in unit tests).
+async fn fetch_kraken_ohlc_body_from(
+    base_url: &str,
+    query_pair: &str,
+    max_retries: u32,
+    fallback_sleep_secs: u64,
+) -> anyhow::Result<String> {
+    let url = format!(
+        "{}/0/public/OHLC?pair={query_pair}&interval=1440",
+        base_url.trim_end_matches('/')
+    );
+    let client = reqwest::Client::new();
+    let mut retries_remaining = max_retries;
+
+    loop {
+        let send_result = client.get(&url).send().await;
+
+        let resp = match send_result {
+            Ok(resp) => resp,
+            Err(err) => {
+                if kraken_fetch_transport_error_is_retryable(&err) && retries_remaining > 0 {
+                    retries_remaining -= 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(fallback_sleep_secs)).await;
+                    continue;
+                }
+                return Err(anyhow::anyhow!("kraken ohlc transport error: {err}"));
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            if kraken_fetch_status_is_retryable(status) {
+                if retries_remaining > 0 {
+                    let retry_after = kraken_fetch_parse_retry_after_secs(
+                        resp.headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok()),
+                    );
+                    // The fixed fallback backoff is also the in-call
+                    // retry-delay budget authority: a provider-requested
+                    // wait at or under that budget is honored exactly, but
+                    // a wait beyond it must fail closed -- never sleep
+                    // unboundedly, and never clamp a large requested wait
+                    // downward and retry before the provider asked us to.
+                    if let Some(secs) = retry_after {
+                        if !kraken_fetch_retry_after_within_budget(secs, fallback_sleep_secs) {
+                            let body = resp.text().await.unwrap_or_default();
+                            return Err(anyhow::anyhow!(
+                                "kraken ohlc http status={} requested retry-after={secs}s \
+                                 exceeds the permitted in-call retry budget of \
+                                 {fallback_sleep_secs}s; failing closed rather than \
+                                 sleeping unboundedly or retrying early: {body}",
+                                status.as_u16()
+                            ));
+                        }
+                    }
+                    retries_remaining -= 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        retry_after.unwrap_or(fallback_sleep_secs),
+                    ))
+                    .await;
+                    continue;
+                }
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!(
+                    "kraken ohlc http status={} persisted after {max_retries} retries: {body}",
+                    status.as_u16()
+                ));
+            }
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "kraken ohlc http error status={}: {body}",
+                status.as_u16()
+            ));
+        }
+
+        return resp
+            .text()
+            .await
+            .map_err(|err| anyhow::anyhow!("kraken ohlc body read error: {err}"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,5 +1279,308 @@ mod tests {
         use crate::HistoricalProvider;
         let provider = KrakenHistoricalProvider::new();
         assert_eq!(provider.source_name(), "kraken");
+    }
+
+    // -----------------------------------------------------------------------
+    // fetch_kraken_ohlc_body retry/backoff (MD-KRAKEN-FETCH-RETRY-BACKOFF-01)
+    // -----------------------------------------------------------------------
+
+    // Per-test call counters for the "fails N times then succeeds" httpmock
+    // pattern (custom `.matches()` closures must be non-capturing fn ptrs in
+    // httpmock 0.7, so each test needing this shape gets its own static).
+    static KF01_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static KF02_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    // KF-01: a single transient 429 followed by success returns the body
+    // from the successful retry, having actually retried (2 total hits).
+    #[tokio::test]
+    async fn kf01_transient_429_then_success_returns_body() {
+        use httpmock::prelude::*;
+        use std::sync::atomic::Ordering;
+
+        KF01_CALL.store(0, Ordering::SeqCst);
+        let server = MockServer::start();
+
+        // httpmock's internal mock table is a BTreeMap keyed by an
+        // auto-incrementing id, so `find_mock` checks mocks in registration
+        // order (first-registered wins ties) -- register the conditional
+        // mock first so it gets first refusal, then the unconditional
+        // catch-all second.
+        let mock_429 = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD")
+                .matches(|_req: &HttpMockRequest| KF01_CALL.fetch_add(1, Ordering::SeqCst) < 1);
+            then.status(429).body("rate limited");
+        });
+        let mock_ok = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(200).body("ok-body-after-retry");
+        });
+
+        let body = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(body, "ok-body-after-retry");
+        // httpmock's own assert_hits() is unreliable with a side-effecting
+        // `.matches()` closure on this platform/version, so the retry is
+        // proven via the counter driving the matcher directly: exactly 2
+        // real requests occurred (429 then a fresh retry that only mock_ok
+        // could have served, since mock_429 no longer matches call #2).
+        assert_eq!(KF01_CALL.load(Ordering::SeqCst), 2);
+        let _ = (&mock_ok, &mock_429);
+    }
+
+    // KF-02: a retryable 503 that recovers on the next attempt succeeds and
+    // returns the successful body, proving the loop actually retries a
+    // 5xx rather than failing fast.
+    #[tokio::test]
+    async fn kf02_retryable_5xx_then_success_returns_body() {
+        use httpmock::prelude::*;
+        use std::sync::atomic::Ordering;
+
+        KF02_CALL.store(0, Ordering::SeqCst);
+        let server = MockServer::start();
+
+        // See kf01 above: register the conditional mock first so it is
+        // checked before the unconditional catch-all (registration order,
+        // not LIFO).
+        let mock_503 = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD")
+                .matches(|_req: &HttpMockRequest| KF02_CALL.fetch_add(1, Ordering::SeqCst) < 1);
+            then.status(503).body("service unavailable");
+        });
+        let mock_ok = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(200).body("ok-body-after-5xx-retry");
+        });
+
+        let body = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(body, "ok-body-after-5xx-retry");
+        assert_eq!(KF02_CALL.load(Ordering::SeqCst), 2);
+        let _ = (&mock_ok, &mock_503);
+    }
+
+    // KF-03: an always-retryable 503 exhausts the bounded retry budget and
+    // returns a truthful "persisted after N retries" error, with the mock
+    // hit exactly max_retries + 1 times (bounded, not unbounded).
+    #[tokio::test]
+    async fn kf03_retryable_5xx_exhaustion_is_bounded_and_truthful() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(503).body("service unavailable");
+        });
+
+        let err = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 2, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("persisted after 2 retries"),
+            "error must truthfully state retry exhaustion: {err}"
+        );
+        mock.assert_hits(3); // 1 initial attempt + 2 retries, never more.
+    }
+
+    // KF-04: a permanent 4xx (404) is never retried -- exactly one attempt.
+    #[tokio::test]
+    async fn kf04_permanent_4xx_is_never_retried() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(404).body("unknown pair");
+        });
+
+        let err = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 5, 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("http error status=404"));
+        mock.assert_hits(1);
+    }
+
+    // KF-05: a successful (200) response with a malformed body is returned
+    // as-is -- decode/parse failures happen downstream and must never
+    // trigger a fetch-layer retry.
+    #[tokio::test]
+    async fn kf05_malformed_200_body_is_not_retried() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(200).body("{ not json");
+        });
+
+        let body = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 5, 0)
+            .await
+            .unwrap();
+        assert_eq!(body, "{ not json");
+        mock.assert_hits(1);
+    }
+
+    // KF-06: attempts are strictly bounded -- max_retries=0 means exactly
+    // one attempt, never a retry, on a retryable status.
+    #[tokio::test]
+    async fn kf06_zero_max_retries_means_exactly_one_attempt() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(429).body("rate limited");
+        });
+
+        let err = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 0, 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("persisted after 0 retries"));
+        mock.assert_hits(1);
+    }
+
+    // KF-07: a connect failure (nothing listening) is retried up to the
+    // bound and then fails with a truthful transport-error message -- no
+    // hang, no unbounded loop.
+    #[tokio::test]
+    async fn kf07_connect_failure_is_bounded_and_truthful() {
+        // Port 1 is a reserved/unassigned port; nothing listens there, so
+        // this reliably produces a connect error without any real network
+        // dependency or flakiness.
+        let err = fetch_kraken_ohlc_body_from("http://127.0.0.1:1", "XBTUSD", 2, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("kraken ohlc transport error"),
+            "must surface a truthful transport error, got: {err}"
+        );
+    }
+
+    // KF-08: Retry-After header value, when present and a valid integer, is
+    // parsed; a malformed Retry-After falls back to the fixed backoff rather
+    // than failing the request outright.
+    #[test]
+    fn kf08_retry_after_parsing_accepts_valid_and_falls_back_on_malformed() {
+        assert_eq!(kraken_fetch_parse_retry_after_secs(Some("5")), Some(5));
+        assert_eq!(kraken_fetch_parse_retry_after_secs(Some(" 5 ")), Some(5));
+        assert_eq!(kraken_fetch_parse_retry_after_secs(Some("not-a-number")), None);
+        assert_eq!(kraken_fetch_parse_retry_after_secs(Some("")), None);
+        assert_eq!(kraken_fetch_parse_retry_after_secs(None), None);
+    }
+
+    // KF-09: status classification matches exactly the documented transient
+    // set -- 429 and 500/502/503/504 -- and nothing else.
+    #[test]
+    fn kf09_status_retryable_classification_is_exact() {
+        for code in [429u16, 500, 502, 503, 504] {
+            assert!(
+                kraken_fetch_status_is_retryable(reqwest::StatusCode::from_u16(code).unwrap()),
+                "status {code} must be classified retryable"
+            );
+        }
+        for code in [400u16, 401, 403, 404, 405, 501, 505] {
+            assert!(
+                !kraken_fetch_status_is_retryable(reqwest::StatusCode::from_u16(code).unwrap()),
+                "status {code} must NOT be classified retryable"
+            );
+        }
+    }
+
+    // KF-10: the retry-after/budget comparison is an exact boundary -- equal
+    // to the budget is within it, one second over is not.
+    #[test]
+    fn kf10_retry_after_budget_boundary_is_exact() {
+        assert!(kraken_fetch_retry_after_within_budget(0, 2));
+        assert!(kraken_fetch_retry_after_within_budget(2, 2));
+        assert!(!kraken_fetch_retry_after_within_budget(3, 2));
+        assert!(kraken_fetch_retry_after_within_budget(0, 0));
+        assert!(!kraken_fetch_retry_after_within_budget(1, 0));
+    }
+
+    // KF-11: a numeric Retry-After at or under the in-call retry budget
+    // (the fixed fallback backoff) is honored -- the retry actually
+    // happens and returns the successful body.
+    #[tokio::test]
+    async fn kf11_retry_after_within_budget_is_honored() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+
+        static KF11_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        KF11_CALL.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let mock_first = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD")
+                .matches(|_req: &HttpMockRequest| {
+                    KF11_CALL.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 1
+                });
+            then.status(429).header("Retry-After", "0").body("rate limited");
+        });
+        let mock_ok = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(200).body("ok-body-after-budgeted-retry-after");
+        });
+
+        // Budget (fallback_sleep_secs) is 0, matching the header's requested
+        // Retry-After of 0s exactly -- within budget, so the retry happens.
+        let body = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(body, "ok-body-after-budgeted-retry-after");
+        assert_eq!(KF11_CALL.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let _ = (&mock_first, &mock_ok);
+    }
+
+    // KF-12: a numeric Retry-After that exceeds the in-call retry budget
+    // fails closed immediately -- no sleep, no retry attempted, and the
+    // error names the exceeded budget rather than silently clamping the
+    // wait down and retrying early.
+    #[tokio::test]
+    async fn kf12_retry_after_above_budget_fails_closed_without_retry() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(429)
+                .header("Retry-After", "3600")
+                .body("rate limited");
+        });
+
+        // Budget (fallback_sleep_secs) is 0; the provider's requested
+        // 3600s wait is far beyond it, so this must fail closed on the
+        // very first response rather than sleeping for an hour.
+        let err = fetch_kraken_ohlc_body_from(&server.base_url(), "XBTUSD", 5, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds the permitted in-call retry budget"),
+            "must fail closed naming the exceeded budget, got: {err}"
+        );
+        mock.assert_hits(1);
     }
 }
