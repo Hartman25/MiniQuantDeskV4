@@ -1620,14 +1620,17 @@ pub(crate) async fn ops_action(
         "test-discord-alert" => {
             let ts = Utc::now().to_rfc3339();
             let env_label = st.deployment_mode().as_api_label().to_string();
-            let notifier_status = st.discord_notifier.status();
 
-            let (disposition, warnings) = if !notifier_status.configured {
+            // notify_test_alert routes to the `alerts` channel specifically
+            // (see notify module docs) — check that channel, not just
+            // "any channel configured", so the disposition below is
+            // accurate to what this call will actually do.
+            let (disposition, warnings) = if !st.discord_notifier.is_alerts_channel_configured() {
                 (
                     "noop_unconfigured".to_string(),
                     vec![
-                        "Discord notifier not configured; DISCORD_WEBHOOK_URL is absent or \
-                         empty — set it to enable delivery"
+                        "Discord alerts channel not configured; DISCORD_WEBHOOK_ALERTS is \
+                         absent or empty — set it to enable delivery"
                             .to_string(),
                     ],
                 )
@@ -1651,7 +1654,7 @@ pub(crate) async fn ops_action(
                 let mut warns = vec![];
                 if !delivered {
                     warns.push(
-                        "Discord test-alert delivery failed; check DISCORD_WEBHOOK_URL \
+                        "Discord test-alert delivery failed; check DISCORD_WEBHOOK_ALERTS \
                          and network connectivity"
                             .to_string(),
                     );

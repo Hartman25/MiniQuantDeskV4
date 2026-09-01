@@ -1024,11 +1024,16 @@ pub struct AutonomousPaperStatusResponse {
     pub evidence_ready: bool,
     /// `true` — GUI trade lifecycle visibility exists (GUI-TRADE-LIFECYCLE-VISIBILITY-01).
     pub gui_visibility_ready: bool,
-    /// `true` when `DISCORD_WEBHOOK_URL` is configured, so the Discord
-    /// lifecycle alerts implemented under DISCORD-TRADE-LIFECYCLE-REAL-01 will
-    /// actually be delivered (best-effort). `false` when unconfigured — the
-    /// alert code paths exist but every `notify_*` call is a silent no-op, so
-    /// Discord visibility is not operationally ready (DISCORD-LIFECYCLE-OBSERVABILITY-COMPLETION-01).
+    /// `true` when the `paper` Discord channel specifically (see the
+    /// `notify` module's channel routing) is configured — the channel Paper
+    /// trade/run lifecycle notifications (DISCORD-TRADE-LIFECYCLE-REAL-01)
+    /// actually route to for this deployment. Checking any other channel
+    /// (e.g. `c2`/`live`/`alerts` alone) would be untruthful here: a
+    /// deployment with only those configured still has Paper lifecycle
+    /// visibility not ready, because every Paper `notify_*` call is a
+    /// silent no-op until the `paper` channel itself is configured
+    /// (DISCORD-LIFECYCLE-OBSERVABILITY-COMPLETION-01, DISCORD-CHANNEL-
+    /// ROUTING-01).
     pub discord_visibility_ready: bool,
     /// Watchlist intake outcome for the configured artifact:
     /// `"not_configured"` | `"missing"` | `"invalid"` | `"loaded_not_approved"` | `"loaded_approved"`.

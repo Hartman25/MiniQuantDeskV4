@@ -43,6 +43,9 @@ sqlx.workspace = true
 
 # Your internal crates (hook these in as you wire real status/control)
 mqk-db = { path = "../mqk-db" }
+# DISCORD-CHANNEL-ROUTING-01: canonical Discord webhook channel-routing
+# authority (config/env-name resolution only — never broker credentials).
+mqk-config = { path = "../mqk-config" }
 mqk-testkit = { path = "../mqk-testkit" }
 mqk-integrity = { path = "../mqk-integrity" }
 mqk-audit = { path = "../mqk-audit" }

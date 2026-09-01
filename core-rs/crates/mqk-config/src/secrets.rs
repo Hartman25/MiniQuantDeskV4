@@ -114,13 +114,20 @@ struct SecretEnvNames {
     broker_api_key_var: String,
     broker_api_secret_var: String,
     twelvedata_api_key_var: String,
-    discord_paper_var: Option<String>,
-    discord_live_var: Option<String>,
-    discord_backtest_var: Option<String>,
-    discord_alerts_var: Option<String>,
-    discord_heartbeat_var: Option<String>,
-    discord_c2_var: Option<String>,
 }
+
+/// Default Discord webhook-URL env var NAMES, matching
+/// `config/defaults/base.yaml`'s `discord.channels.*` values exactly. Used
+/// by [`resolve_discord_webhooks`] whenever a channel's pointer is absent
+/// from `config_json` — the same fallback-default pattern already used for
+/// `broker_api_key_var` / `broker_api_secret_var` / `twelvedata_api_key_var`
+/// above, never a silent `None`.
+const DISCORD_ENV_PAPER_DEFAULT: &str = "DISCORD_WEBHOOK_PAPER";
+const DISCORD_ENV_LIVE_DEFAULT: &str = "DISCORD_WEBHOOK_LIVE";
+const DISCORD_ENV_BACKTEST_DEFAULT: &str = "DISCORD_WEBHOOK_BACKTEST";
+const DISCORD_ENV_ALERTS_DEFAULT: &str = "DISCORD_WEBHOOK_ALERTS";
+const DISCORD_ENV_HEARTBEAT_DEFAULT: &str = "DISCORD_WEBHOOK_HEARTBEAT";
+const DISCORD_ENV_C2_DEFAULT: &str = "DISCORD_WEBHOOK_C2";
 
 /// Read a non-empty string value at `pointer` from a JSON config.
 /// Returns `None` if the pointer is absent, the value is not a string, or it
@@ -158,13 +165,46 @@ fn parse_env_names(config_json: &Value) -> SecretEnvNames {
         // Extension point: add fmp: read_str_at(config_json, "/data/providers/fmp/api_key_env")
         twelvedata_api_key_var: read_str_at(config_json, "/data/providers/twelvedata/api_key_env")
             .unwrap_or_else(|| "TWELVEDATA_API_KEY".to_string()),
+    }
+}
 
-        discord_paper_var: read_str_at(config_json, "/discord/channels/paper"),
-        discord_live_var: read_str_at(config_json, "/discord/channels/live"),
-        discord_backtest_var: read_str_at(config_json, "/discord/channels/backtest"),
-        discord_alerts_var: read_str_at(config_json, "/discord/channels/alerts"),
-        discord_heartbeat_var: read_str_at(config_json, "/discord/channels/heartbeat"),
-        discord_c2_var: read_str_at(config_json, "/discord/channels/c2"),
+/// Resolve Discord webhook URLs from the environment for every logical
+/// channel — the narrowest Discord-only slice of the config/env-name
+/// parsing authority.
+///
+/// Reads each channel's env var NAME from `config_json` (`/discord/channels/
+/// <channel>`), falling back to the canonical default NAME
+/// (`config/defaults/base.yaml`'s literal values, e.g. `DISCORD_WEBHOOK_PAPER`)
+/// when the pointer is absent — exactly the same fallback-default pattern
+/// [`parse_env_names`] already uses for broker/TwelveData. This means a
+/// caller with no loaded config JSON at all (`&Value::Null`) still resolves
+/// correctly against the canonical env var names.
+///
+/// [`resolve_secrets_for_mode`] calls this function for its own `discord`
+/// field — there is exactly one Discord env-name-resolution implementation.
+/// No mode is consulted here: Discord webhooks are always optional,
+/// independent of LIVE/PAPER/BACKTEST enforcement.
+pub fn resolve_discord_webhooks(config_json: &Value) -> ResolvedDiscordWebhooks {
+    let paper_var = read_str_at(config_json, "/discord/channels/paper")
+        .unwrap_or_else(|| DISCORD_ENV_PAPER_DEFAULT.to_string());
+    let live_var = read_str_at(config_json, "/discord/channels/live")
+        .unwrap_or_else(|| DISCORD_ENV_LIVE_DEFAULT.to_string());
+    let backtest_var = read_str_at(config_json, "/discord/channels/backtest")
+        .unwrap_or_else(|| DISCORD_ENV_BACKTEST_DEFAULT.to_string());
+    let alerts_var = read_str_at(config_json, "/discord/channels/alerts")
+        .unwrap_or_else(|| DISCORD_ENV_ALERTS_DEFAULT.to_string());
+    let heartbeat_var = read_str_at(config_json, "/discord/channels/heartbeat")
+        .unwrap_or_else(|| DISCORD_ENV_HEARTBEAT_DEFAULT.to_string());
+    let c2_var = read_str_at(config_json, "/discord/channels/c2")
+        .unwrap_or_else(|| DISCORD_ENV_C2_DEFAULT.to_string());
+
+    ResolvedDiscordWebhooks {
+        paper: resolve_env(&paper_var),
+        live: resolve_env(&live_var),
+        backtest: resolve_env(&backtest_var),
+        alerts: resolve_env(&alerts_var),
+        heartbeat: resolve_env(&heartbeat_var),
+        c2: resolve_env(&c2_var),
     }
 }
 
@@ -248,14 +288,7 @@ pub fn resolve_secrets_for_mode(config_json: &Value, mode: &str) -> Result<Resol
         }
     }
 
-    let discord = ResolvedDiscordWebhooks {
-        paper: names.discord_paper_var.as_deref().and_then(resolve_env),
-        live: names.discord_live_var.as_deref().and_then(resolve_env),
-        backtest: names.discord_backtest_var.as_deref().and_then(resolve_env),
-        alerts: names.discord_alerts_var.as_deref().and_then(resolve_env),
-        heartbeat: names.discord_heartbeat_var.as_deref().and_then(resolve_env),
-        c2: names.discord_c2_var.as_deref().and_then(resolve_env),
-    };
+    let discord = resolve_discord_webhooks(config_json);
 
     Ok(ResolvedSecrets {
         broker_api_key,

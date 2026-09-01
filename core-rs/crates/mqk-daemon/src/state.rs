@@ -437,9 +437,11 @@ pub struct AppState {
     gap_escalation_pending: Arc<AtomicBool>,
     /// CC-01: Configured strategy fleet.
     strategy_fleet: Arc<RwLock<Option<Vec<StrategyFleetEntry>>>>,
-    /// OPS-NOTIFY-01: Best-effort Discord webhook notifier.  No-op when
-    /// `DISCORD_WEBHOOK_URL` is unset.  Delivery failure does not affect
-    /// primary daemon control truth.
+    /// OPS-NOTIFY-01 / DISCORD-CHANNEL-ROUTING-01: Best-effort, per-channel
+    /// Discord webhook notifier (see `notify` module docs for channel
+    /// routing).  No-op for any notification whose resolved channel is
+    /// unconfigured.  Delivery failure does not affect primary daemon
+    /// control truth.
     pub discord_notifier: DiscordNotifier,
     /// PT-AUTO-02: Per-run autonomous signal intake counter.
     ///

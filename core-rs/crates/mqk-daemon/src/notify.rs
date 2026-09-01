@@ -3,11 +3,46 @@
 //! Discord is an **OUTBOUND SIGNAL RAIL ONLY**.  It is NOT the source of truth.
 //! Delivery failure must not affect primary daemon action results.
 //!
-//! # Configuration
+//! # Configuration (DISCORD-CHANNEL-ROUTING-01)
 //!
-//! Set `DISCORD_WEBHOOK_URL` to a valid Discord webhook URL to enable delivery.
-//! When the environment variable is absent or empty the notifier operates as a
-//! silent no-op.  No delivery is attempted; no error is returned.
+//! Webhook URLs are resolved per logical channel via the canonical
+//! `mqk_config::secrets::resolve_discord_webhooks` authority — the same
+//! config/env-name parsing `ResolvedSecrets`/`resolve_secrets_for_mode` uses,
+//! never a second parser. `config/defaults/base.yaml`'s `discord.channels.*`
+//! names the env var per channel; the canonical defaults are
+//! `DISCORD_WEBHOOK_PAPER`, `DISCORD_WEBHOOK_LIVE`, `DISCORD_WEBHOOK_BACKTEST`,
+//! `DISCORD_WEBHOOK_ALERTS`, `DISCORD_WEBHOOK_HEARTBEAT`, `DISCORD_WEBHOOK_C2`.
+//! Each channel is independently optional — an unconfigured channel silently
+//! no-ops for any notification routed to it. No delivery is attempted; no
+//! error is returned.
+//!
+//! `DiscordNotifier::from_env()` (the production constructor — see
+//! [`load_discord_config_json_from_env`]) additionally loads the operator's
+//! own `/discord/channels/*` env-var-NAME mapping from the layered YAML
+//! file(s) named by `MQK_DISCORD_CONFIG_PATH` (comma-separated, merge
+//! order), when set — a custom channel NAME in that config is honored, not
+//! silently discarded. `MQK_DISCORD_CONFIG_PATH` unset, unreadable, or
+//! malformed is not an error: the canonical default env var NAMES apply,
+//! same as before this bridge existed.
+//!
+//! # Channel routing
+//!
+//! - `notify_critical_alert` (DIS-01) and `notify_test_alert` → `alerts`
+//!   channel (a test alert is meant to land where real fault alerts do, so
+//!   an operator can confirm delivery works).
+//! - `notify_operator_action` → `c2` channel (accepted operator control
+//!   actions — arm/disarm/start/stop/halt — are exactly the
+//!   command-and-control messages the `c2` channel exists for).
+//! - `notify_trade_event` (DISCORD-TRADE-LIFECYCLE-ALERTS-01) and
+//!   `notify_run_status` (DIS-02) → `paper`/`live`/`backtest` channel,
+//!   selected by the payload's own `environment` label
+//!   (`AppState::deployment_mode().as_api_label()`: `"paper"` →  paper,
+//!   `"live-shadow"`/`"live-capital"` → live, `"backtest"` → backtest). An
+//!   absent or unrecognized `environment` label routes nowhere (fail closed
+//!   on channel selection — never guessed).
+//! - `heartbeat` has no current caller in this daemon; the channel resolves
+//!   but nothing routes to it yet (unwired, not ambiguous — there is no
+//!   heartbeat notification to route).
 //!
 //! # Delivery contract
 //!
@@ -16,7 +51,7 @@
 //! - HTTP non-2xx is classified as a sanitized, best-effort delivery failure.
 //! - Delivery failure is logged as `warn!` and swallowed — it does not propagate.
 //! - A 3-second timeout caps worst-case latency impact on the calling handler.
-//! - All methods are no-ops when unconfigured.
+//! - All methods are no-ops when their resolved channel is unconfigured.
 //!
 //! # Notification types
 //!
@@ -26,11 +61,55 @@
 
 use std::time::Duration;
 
+use mqk_config::secrets::ResolvedDiscordWebhooks;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-/// Environment variable name for the Discord webhook URL.
-pub const DISCORD_WEBHOOK_URL_ENV: &str = "DISCORD_WEBHOOK_URL";
+/// Layered YAML config path(s) (comma-separated, merge order) carrying the
+/// operator's `/discord/channels/*` env-var-NAME mapping — DISCORD-CHANNEL-
+/// ROUTING-01's narrowest Discord-only startup bridge. This does NOT load
+/// broker credentials or any other secret: `resolve_discord_webhooks` only
+/// ever reads the `/discord/channels/*` pointers out of the resulting JSON,
+/// and env var NAMES are not themselves secrets (the env vars they point at
+/// hold the actual webhook URLs, read separately by `resolve_env`).
+pub const DISCORD_CONFIG_PATH_ENV: &str = "MQK_DISCORD_CONFIG_PATH";
+
+/// Load the config JSON `resolve_discord_webhooks` should resolve
+/// `/discord/channels/*` against, from `MQK_DISCORD_CONFIG_PATH`.
+///
+/// Reuses the canonical `mqk_config::load_layered_yaml` loader — never a
+/// second YAML parser. Absent, empty, unreadable, or malformed config
+/// resolves to `Value::Null`, which `resolve_discord_webhooks` already
+/// treats as "use the canonical default env var NAMES": Discord channel
+/// configuration is always optional, so a missing or bad config path is
+/// never a hard failure, only a fallback to defaults (logged at `warn!` when
+/// the path was set but failed to load, so a operator typo is visible).
+pub fn load_discord_config_json_from_env() -> serde_json::Value {
+    let raw = match std::env::var(DISCORD_CONFIG_PATH_ENV) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return serde_json::Value::Null,
+    };
+    let paths: Vec<&str> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if paths.is_empty() {
+        return serde_json::Value::Null;
+    }
+    match mqk_config::load_layered_yaml(&paths) {
+        Ok(loaded) => loaded.config_json,
+        Err(error) => {
+            warn!(
+                %error,
+                path_env = DISCORD_CONFIG_PATH_ENV,
+                "discord_config: failed to load MQK_DISCORD_CONFIG_PATH; falling back to \
+                 canonical default Discord channel env var NAMES"
+            );
+            serde_json::Value::Null
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Payload types
@@ -122,10 +201,11 @@ pub struct TestAlertPayload {
 /// No secrets (webhook URL) are included.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordNotifierStatus {
-    /// True when `DISCORD_WEBHOOK_URL` is set and non-empty.
+    /// True when at least one Discord channel is configured.
     pub configured: bool,
-    /// True when delivery will be attempted on the next notify call.
-    /// Identical to `configured` — present for clarity on operator surfaces.
+    /// True when delivery will be attempted on the next notify call whose
+    /// resolved channel is configured. Identical to `configured` — present
+    /// for clarity on operator surfaces.
     pub delivery_enabled: bool,
 }
 
@@ -207,57 +287,151 @@ pub fn discord_delivery_status_summary(
 // Notifier
 // ---------------------------------------------------------------------------
 
-/// Best-effort Discord webhook notifier.
+/// Best-effort Discord webhook notifier (DISCORD-CHANNEL-ROUTING-01).
 ///
-/// Cloneable — `reqwest::Client` wraps an `Arc` internally so cloning is cheap.
-/// Constructed once at daemon startup and shared via `AppState`.
+/// Holds one independently-optional webhook URL per canonical channel (see
+/// module docs for routing). Cloneable — `reqwest::Client` wraps an `Arc`
+/// internally so cloning is cheap. Constructed once at daemon startup and
+/// shared via `AppState`.
 #[derive(Clone)]
 pub struct DiscordNotifier {
-    webhook_url: Option<String>,
+    channels: ResolvedDiscordWebhooks,
     client: Option<reqwest::Client>,
 }
 
+/// Which canonical Discord channel a notification is routed to. See module
+/// docs for the routing table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    Paper,
+    Live,
+    Backtest,
+    Alerts,
+    #[allow(dead_code)] // No current caller routes here — see module docs.
+    Heartbeat,
+    C2,
+}
+
 impl DiscordNotifier {
-    /// Construct from environment.  Silent no-op when `DISCORD_WEBHOOK_URL`
-    /// is absent or empty.
+    /// Construct directly from an already-resolved per-channel webhook set
+    /// (e.g. `mqk_config::secrets::resolve_discord_webhooks`'s output). The
+    /// one real constructor every other constructor on this type delegates
+    /// to — never a second, independent way to build a `DiscordNotifier`.
+    pub fn from_resolved_webhooks(channels: ResolvedDiscordWebhooks) -> Self {
+        let any_configured = channels.paper.is_some()
+            || channels.live.is_some()
+            || channels.backtest.is_some()
+            || channels.alerts.is_some()
+            || channels.heartbeat.is_some()
+            || channels.c2.is_some();
+        let client = any_configured.then(reqwest::Client::new);
+        Self { channels, client }
+    }
+
+    /// Construct from environment via the canonical
+    /// `mqk_config::secrets::resolve_discord_webhooks` authority — the same
+    /// config/env-name parsing `ResolvedSecrets` uses, never a second
+    /// parser. When `MQK_DISCORD_CONFIG_PATH` names one or more layered YAML
+    /// config file(s) (see [`load_discord_config_json_from_env`]), the
+    /// operator's actually-configured `/discord/channels/*` env-var-NAME
+    /// mapping is loaded and honored; otherwise (unset, unreadable, or
+    /// malformed) the resolver's own fallback-default env var NAMES
+    /// (matching `config/defaults/base.yaml` exactly) apply, so the
+    /// canonical `DISCORD_WEBHOOK_*` env vars are honored either way. Each
+    /// channel independently silently no-ops when its env var is absent or
+    /// empty.
     pub fn from_env() -> Self {
-        let url = std::env::var(DISCORD_WEBHOOK_URL_ENV)
-            .ok()
-            .filter(|s| !s.is_empty());
-        let client = url.as_ref().map(|_| reqwest::Client::new());
-        Self {
-            webhook_url: url,
-            client,
-        }
+        Self::from_resolved_webhooks(mqk_config::secrets::resolve_discord_webhooks(
+            &load_discord_config_json_from_env(),
+        ))
     }
 
-    /// Construct with an explicit URL.  Used in tests and targeted wiring.
+    /// Construct with a single URL applied to every channel. Used in tests
+    /// and targeted wiring where per-channel routing is not the concern.
     pub fn from_url(url: impl Into<String>) -> Self {
-        Self {
-            webhook_url: Some(url.into()),
-            client: Some(reqwest::Client::new()),
-        }
+        let url = url.into();
+        Self::from_resolved_webhooks(ResolvedDiscordWebhooks {
+            paper: Some(url.clone()),
+            live: Some(url.clone()),
+            backtest: Some(url.clone()),
+            alerts: Some(url.clone()),
+            heartbeat: Some(url.clone()),
+            c2: Some(url),
+        })
     }
 
-    /// Explicit no-op instance — never attempts delivery.
+    /// Explicit no-op instance — never attempts delivery on any channel.
     pub fn noop() -> Self {
-        Self {
-            webhook_url: None,
-            client: None,
+        Self::from_resolved_webhooks(ResolvedDiscordWebhooks {
+            paper: None,
+            live: None,
+            backtest: None,
+            alerts: None,
+            heartbeat: None,
+            c2: None,
+        })
+    }
+
+    /// Returns `true` when at least one channel is configured.
+    pub fn is_configured(&self) -> bool {
+        self.client.is_some()
+    }
+
+    /// Returns `true` when the `alerts` channel specifically is configured
+    /// — the channel `notify_critical_alert` and `notify_test_alert` route
+    /// to. Distinct from [`Self::is_configured`] (any channel) because a
+    /// caller that specifically triggers a test-alert or critical-alert
+    /// delivery needs to know whether *that* channel, not some other one,
+    /// will actually deliver.
+    pub fn is_alerts_channel_configured(&self) -> bool {
+        self.channels.alerts.is_some()
+    }
+
+    /// Returns `true` when the `paper` channel specifically is configured
+    /// — the channel `notify_trade_event`/`notify_run_status` route to for
+    /// `environment == "paper"` (see module docs). Distinct from
+    /// [`Self::is_configured`] (any channel): a caller asking whether Paper
+    /// lifecycle notifications will actually be delivered must check the
+    /// Paper channel specifically — e.g. `c2`/`live`-only configuration
+    /// makes `is_configured()` true but Paper visibility is still not ready.
+    pub fn is_paper_channel_configured(&self) -> bool {
+        self.channels.paper.is_some()
+    }
+
+    /// Returns a redacted status snapshot — never includes any webhook URL.
+    pub fn status(&self) -> DiscordNotifierStatus {
+        let configured = self.is_configured();
+        DiscordNotifierStatus {
+            configured,
+            delivery_enabled: configured,
         }
     }
 
-    /// Returns `true` when a webhook URL is configured and delivery will be
-    /// attempted on the next call.
-    pub fn is_configured(&self) -> bool {
-        self.webhook_url.is_some()
+    /// Resolve the webhook URL for `channel`, or `None` if that channel is
+    /// unconfigured (or the notifier has no client at all).
+    fn url_for(&self, channel: Channel) -> Option<(&String, &reqwest::Client)> {
+        let client = self.client.as_ref()?;
+        let url = match channel {
+            Channel::Paper => self.channels.paper.as_ref(),
+            Channel::Live => self.channels.live.as_ref(),
+            Channel::Backtest => self.channels.backtest.as_ref(),
+            Channel::Alerts => self.channels.alerts.as_ref(),
+            Channel::Heartbeat => self.channels.heartbeat.as_ref(),
+            Channel::C2 => self.channels.c2.as_ref(),
+        }?;
+        Some((url, client))
     }
 
-    /// Returns a redacted status snapshot — never includes the webhook URL.
-    pub fn status(&self) -> DiscordNotifierStatus {
-        DiscordNotifierStatus {
-            configured: self.webhook_url.is_some(),
-            delivery_enabled: self.webhook_url.is_some(),
+    /// Select the `paper`/`live`/`backtest` channel from a payload's
+    /// `environment` label (`AppState::deployment_mode().as_api_label()`).
+    /// An absent or unrecognized label routes to no channel — fail closed
+    /// on channel selection rather than guessing.
+    fn channel_for_environment(environment: Option<&str>) -> Option<Channel> {
+        match environment {
+            Some("paper") => Some(Channel::Paper),
+            Some("live-shadow") | Some("live-capital") => Some(Channel::Live),
+            Some("backtest") => Some(Channel::Backtest),
+            _ => None,
         }
     }
 
@@ -271,7 +445,7 @@ impl DiscordNotifier {
     /// The payload is clearly labelled `"[TEST]"` so operators can distinguish
     /// it from production fault alerts.  No trading state is mutated.
     pub async fn notify_test_alert(&self, payload: &TestAlertPayload) -> bool {
-        let (Some(url), Some(client)) = (&self.webhook_url, &self.client) else {
+        let Some((url, client)) = self.url_for(Channel::Alerts) else {
             return false;
         };
 
@@ -328,7 +502,7 @@ impl DiscordNotifier {
     /// Delivery errors are logged as `warn!` and swallowed — the primary
     /// daemon action has already been applied before this is called.
     pub async fn notify_operator_action(&self, payload: &OperatorNotifyPayload) {
-        let (Some(url), Some(client)) = (&self.webhook_url, &self.client) else {
+        let Some((url, client)) = self.url_for(Channel::C2) else {
             return;
         };
 
@@ -394,7 +568,7 @@ impl DiscordNotifier {
     /// Same delivery contract: no-op when unconfigured, errors logged as
     /// `warn!` and swallowed, 3-second timeout.
     pub async fn notify_critical_alert(&self, payload: &CriticalAlertPayload) {
-        let (Some(url), Some(client)) = (&self.webhook_url, &self.client) else {
+        let Some((url, client)) = self.url_for(Channel::Alerts) else {
             return;
         };
 
@@ -464,7 +638,10 @@ impl DiscordNotifier {
     /// Same delivery contract: no-op when unconfigured, errors logged as
     /// `warn!` and swallowed, 3-second timeout.
     pub async fn notify_run_status(&self, payload: &RunStatusPayload) {
-        let (Some(url), Some(client)) = (&self.webhook_url, &self.client) else {
+        let Some(channel) = Self::channel_for_environment(payload.environment.as_deref()) else {
+            return;
+        };
+        let Some((url, client)) = self.url_for(channel) else {
             return;
         };
 
@@ -532,7 +709,10 @@ impl DiscordNotifier {
     /// Same delivery contract: no-op when unconfigured, errors logged as
     /// `warn!` and swallowed, 3-second timeout.
     pub async fn notify_trade_event(&self, payload: &TradeEventPayload) {
-        let (Some(url), Some(client)) = (&self.webhook_url, &self.client) else {
+        let Some(channel) = Self::channel_for_environment(payload.environment.as_deref()) else {
+            return;
+        };
+        let Some((url, client)) = self.url_for(channel) else {
             return;
         };
 

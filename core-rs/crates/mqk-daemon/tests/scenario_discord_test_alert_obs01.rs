@@ -141,9 +141,12 @@ async fn dt01_unconfigured_notifier_returns_noop_unconfigured() {
         "DT-01: at least one warning must explain how to enable Discord delivery"
     );
     let first_warn = warnings[0].as_str().unwrap_or("");
+    // DISCORD-CHANNEL-ROUTING-01: test-discord-alert routes to the `alerts`
+    // channel specifically, so the warning names that channel's canonical
+    // env var (DISCORD_WEBHOOK_ALERTS), not the retired flat DISCORD_WEBHOOK_URL.
     assert!(
-        first_warn.contains("DISCORD_WEBHOOK_URL"),
-        "DT-01: warning must mention DISCORD_WEBHOOK_URL; got: {first_warn}"
+        first_warn.contains("DISCORD_WEBHOOK_ALERTS"),
+        "DT-01: warning must mention DISCORD_WEBHOOK_ALERTS; got: {first_warn}"
     );
 }
 

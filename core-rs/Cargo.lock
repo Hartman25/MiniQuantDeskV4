@@ -1868,6 +1868,7 @@ dependencies = [
  "mqk-backtest",
  "mqk-broker-alpaca",
  "mqk-broker-paper",
+ "mqk-config",
  "mqk-db",
  "mqk-execution",
  "mqk-integrity",

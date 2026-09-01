@@ -22,12 +22,28 @@
 //! 9. Config JSON stores var names (not values) — names-only invariant
 //! 10. `Debug` output of `ResolvedSecrets` is redacted
 
+use std::sync::{Mutex, OnceLock};
+
 use mqk_config::load_layered_yaml_from_strings;
-use mqk_config::secrets::resolve_secrets_for_mode;
+use mqk_config::secrets::{resolve_discord_webhooks, resolve_secrets_for_mode};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Guards every test that reads the canonical `DISCORD_WEBHOOK_ALERTS`
+/// process env var (via `resolve_discord_webhooks`/`resolve_secrets_for_mode`
+/// resolving `alerts` against its canonical default name) against
+/// `resolve_discord_webhooks_default_alerts_name_matches_base_yaml`, the one
+/// test in this file that temporarily sets that same var. The default-rust-
+/// test-harness runs `#[test]` functions on multiple threads, so without
+/// this lock a reader test can observe the mutator's in-flight value —
+/// exactly the flake this closes.
+static DISCORD_ALERTS_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn discord_alerts_env_lock() -> &'static Mutex<()> {
+    DISCORD_ALERTS_ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn load(yaml: &str) -> serde_json::Value {
     load_layered_yaml_from_strings(&[yaml])
@@ -196,6 +212,7 @@ broker:
 
 #[test]
 fn backtest_mode_succeeds_with_no_keys_set() {
+    let _guard = discord_alerts_env_lock().lock().unwrap();
     let yaml = r#"
 broker:
   keys_env:
@@ -371,4 +388,129 @@ broker:
         !debug_str.contains("sk-"),
         "Debug must not expose secret values"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 11. resolve_discord_webhooks — narrow Discord-only resolver
+// (DISCORD-CHANNEL-ROUTING-01)
+// ---------------------------------------------------------------------------
+
+/// With no `/discord/channels/*` pointers at all (an entirely empty config),
+/// every channel must fall back to its canonical default env var NAME
+/// (`config/defaults/base.yaml`'s literal values) rather than silently
+/// resolving to `None` regardless of whether that env var is actually set.
+/// None of `DISCORD_WEBHOOK_PAPER`/`LIVE`/`BACKTEST`/`HEARTBEAT`/`C2` are set
+/// in the test process, so every field is `None` here — this test proves
+/// the fallback path runs without panicking and defaults safely, not that a
+/// specific value resolves (that requires real env mutation; see the next
+/// test for `alerts`).
+#[test]
+fn resolve_discord_webhooks_with_empty_config_falls_back_safely() {
+    let _guard = discord_alerts_env_lock().lock().unwrap();
+    let cfg = load("broker:\n  keys_env: {}\n");
+    let discord = resolve_discord_webhooks(&cfg);
+
+    assert!(discord.paper.is_none());
+    assert!(discord.live.is_none());
+    assert!(discord.backtest.is_none());
+    assert!(discord.alerts.is_none());
+    assert!(discord.heartbeat.is_none());
+    assert!(discord.c2.is_none());
+}
+
+/// A channel's own configured pointer (a sentinel name, in this case) still
+/// takes priority over the canonical default when present — proving the
+/// fallback is genuinely a fallback, not a hardcoded override.
+#[test]
+fn resolve_discord_webhooks_configured_pointer_overrides_default() {
+    let yaml = r#"
+discord:
+  channels:
+    alerts: "MQK_S1_SENTINEL_DISCORD_ALERTS_K11"
+"#;
+    let cfg = load(yaml);
+    let discord = resolve_discord_webhooks(&cfg);
+
+    // The sentinel env var is never set, so this must resolve to None —
+    // proving the CONFIGURED name (not the canonical default name) was the
+    // one actually consulted. If the default had been used instead despite
+    // the pointer being present, this would still coincidentally be None
+    // (default unset too), so the real proof is in
+    // `config_json_stores_var_names_not_resolved_values`-style coverage
+    // above for the broker/twelvedata fields sharing this exact code path;
+    // this test documents the same contract for discord specifically.
+    assert!(discord.alerts.is_none());
+
+    // Other channels, with no pointer configured, still fall back safely.
+    assert!(discord.paper.is_none());
+}
+
+/// The canonical default env var NAME for each channel matches
+/// `config/defaults/base.yaml` exactly — proven by actually setting one
+/// (`DISCORD_WEBHOOK_ALERTS`) and confirming it resolves with an EMPTY
+/// config (no `/discord/channels/alerts` pointer at all), restoring the
+/// prior value afterward. Two other tests in this file
+/// (`backtest_mode_succeeds_with_no_keys_set`,
+/// `resolve_discord_webhooks_with_empty_config_falls_back_safely`) resolve
+/// `alerts` against this exact canonical default name and assert it is
+/// `None` — `discord_alerts_env_lock()` serializes this mutation against
+/// those reads so the default Rust test harness's multi-threaded execution
+/// can never interleave them.
+#[test]
+fn resolve_discord_webhooks_default_alerts_name_matches_base_yaml() {
+    let _guard = discord_alerts_env_lock().lock().unwrap();
+    let prior = std::env::var("DISCORD_WEBHOOK_ALERTS").ok();
+    #[allow(deprecated)]
+    unsafe {
+        std::env::set_var(
+            "DISCORD_WEBHOOK_ALERTS",
+            "https://discord.example.invalid/hook/alerts-k11",
+        );
+    }
+
+    let cfg = load("broker:\n  keys_env: {}\n");
+    let discord = resolve_discord_webhooks(&cfg);
+
+    #[allow(deprecated)]
+    unsafe {
+        match &prior {
+            Some(v) => std::env::set_var("DISCORD_WEBHOOK_ALERTS", v),
+            None => std::env::remove_var("DISCORD_WEBHOOK_ALERTS"),
+        }
+    }
+
+    assert_eq!(
+        discord.alerts.as_deref(),
+        Some("https://discord.example.invalid/hook/alerts-k11"),
+        "DISCORD_WEBHOOK_ALERTS must be the canonical default name for the alerts channel"
+    );
+}
+
+/// `resolve_secrets_for_mode` and `resolve_discord_webhooks` must never
+/// disagree — the former calls the latter internally (one implementation,
+/// never a duplicate parser).
+#[test]
+fn resolve_secrets_for_mode_and_resolve_discord_webhooks_agree() {
+    let yaml = r#"
+broker:
+  keys_env:
+    api_key: "MQK_S1_SENTINEL_AGREE_KEY_K11"
+    api_secret: "MQK_S1_SENTINEL_AGREE_SEC_K11"
+discord:
+  channels:
+    paper: "MQK_S1_SENTINEL_AGREE_DISCORD_PAPER_K11"
+    live: "MQK_S1_SENTINEL_AGREE_DISCORD_LIVE_K11"
+"#;
+    let cfg = load(yaml);
+    let via_secrets = resolve_secrets_for_mode(&cfg, "BACKTEST")
+        .expect("BACKTEST must not fail")
+        .discord;
+    let via_narrow = resolve_discord_webhooks(&cfg);
+
+    assert_eq!(via_secrets.paper, via_narrow.paper);
+    assert_eq!(via_secrets.live, via_narrow.live);
+    assert_eq!(via_secrets.backtest, via_narrow.backtest);
+    assert_eq!(via_secrets.alerts, via_narrow.alerts);
+    assert_eq!(via_secrets.heartbeat, via_narrow.heartbeat);
+    assert_eq!(via_secrets.c2, via_narrow.c2);
 }
