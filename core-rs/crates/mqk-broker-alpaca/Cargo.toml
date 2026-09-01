@@ -23,3 +23,4 @@ tokio = { workspace = true }
 # Activates BrokerInvokeToken::for_test() for live adapter tests.
 mqk-execution = { path = "../mqk-execution", features = ["testkit"] }
 serde_json.workspace = true
+httpmock = "0.7"

@@ -137,6 +137,17 @@ impl AlpacaBrokerAdapter {
             client,
         }
     }
+
+    /// Test constructor: injects a mock base URL so `Retry-After`-threading
+    /// tests can point the adapter at an in-process mock server.
+    #[cfg(test)]
+    fn new_for_test(base_url: String) -> Self {
+        Self::new(AlpacaConfig {
+            base_url,
+            api_key_id: "test-key".to_string(),
+            api_secret_key: "test-secret".to_string(),
+        })
+    }
     /// Convenience constructor for Alpaca paper trading.
     ///
     /// Targets `https://paper-api.alpaca.markets`.  Use for `(Paper, Alpaca)`
@@ -195,6 +206,12 @@ impl AlpacaBrokerAdapter {
     }
 
     /// Perform an authenticated `GET` and deserialize the JSON response body.
+    ///
+    /// A single attempt, exactly like every other call site in this adapter
+    /// -- no in-adapter retry policy. A 429/5xx surfaces to the caller with
+    /// any parsed `Retry-After` guidance threaded onto `BrokerError::
+    /// RateLimit` (see [`parse_success_response`]) for the orchestrator's
+    /// existing outbox-driven redispatch authority to act on.
     fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, BrokerError> {
         let url = format!("{}{}", self.cfg.base_url, path);
         let client = self.client.clone();
@@ -238,6 +255,10 @@ impl AlpacaBrokerAdapter {
         })
     }
     /// Perform an authenticated `DELETE`; return Ok(()) on success.
+    ///
+    /// Not retried in-adapter: a 429/5xx here surfaces to the orchestrator's
+    /// existing outbox-driven redispatch authority (`non_delivery_proven`)
+    /// rather than being retried blindly against a mutating endpoint.
     fn delete(&self, path: &str) -> Result<(), BrokerError> {
         let url = format!("{}{}", self.cfg.base_url, path);
         let client = self.client.clone();
@@ -255,8 +276,13 @@ impl AlpacaBrokerAdapter {
             if status.is_success() {
                 Ok(())
             } else {
+                let retry_after_ms = parse_retry_after_ms(
+                    resp.headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                );
                 let body = resp.text().await.unwrap_or_default();
-                Err(classify_http_status(status, &body))
+                Err(classify_http_status(status, &body, retry_after_ms))
             }
         })
     }
@@ -507,8 +533,14 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 .map_err(classify_transport_err_for_submit)?;
             let status = http_resp.status();
             if !status.is_success() {
+                let retry_after_ms = parse_retry_after_ms(
+                    http_resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                );
                 let resp_body = http_resp.text().await.unwrap_or_default();
-                return Err(classify_http_status(status, &resp_body));
+                return Err(classify_http_status(status, &resp_body, retry_after_ms));
             }
             let alpaca: AlpacaSubmitResponse = http_resp.json().await.map_err(|e| {
                 // We got a 2xx but couldn't parse the body.  The order may be live.
@@ -1082,9 +1114,21 @@ async fn parse_success_response<T: serde::de::DeserializeOwned>(
             detail: format!("response parse error: {e}"),
         })
     } else {
+        let retry_after_ms = parse_retry_after_ms(
+            resp.headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
         let body = resp.text().await.unwrap_or_default();
-        Err(classify_http_status(status, &body))
+        Err(classify_http_status(status, &body, retry_after_ms))
     }
+}
+/// Parse a `Retry-After` response header value as milliseconds. Alpaca (like
+/// standard HTTP) sends this as an integer count of seconds; missing or
+/// malformed values return `None` rather than failing the request.
+fn parse_retry_after_ms(value: Option<&str>) -> Option<u64> {
+    let secs: u64 = value?.trim().parse().ok()?;
+    secs.checked_mul(1000)
 }
 /// Map a `reqwest::Error` to `BrokerError` for **submit** calls.
 ///
@@ -1122,7 +1166,17 @@ fn classify_transport_err(err: reqwest::Error) -> BrokerError {
     }
 }
 /// Map an HTTP status code + response body to a typed `BrokerError`.
-fn classify_http_status(status: reqwest::StatusCode, body: &str) -> BrokerError {
+///
+/// `retry_after_ms`, when the response carried a parseable `Retry-After`
+/// header, is threaded onto `BrokerError::RateLimit` so the orchestrator's
+/// existing outbox-driven redispatch can honor the broker's actual timing
+/// guidance instead of guessing a fixed delay. This function itself never
+/// retries anything -- it only classifies.
+fn classify_http_status(
+    status: reqwest::StatusCode,
+    body: &str,
+    retry_after_ms: Option<u64>,
+) -> BrokerError {
     match status.as_u16() {
         401 | 403 => BrokerError::AuthSession {
             detail: body.to_string(),
@@ -1136,7 +1190,7 @@ fn classify_http_status(status: reqwest::StatusCode, body: &str) -> BrokerError 
             detail: format!("not found: {body}"),
         },
         429 => BrokerError::RateLimit {
-            retry_after_ms: None,
+            retry_after_ms,
             non_delivery_proven: true,
             detail: body.to_string(),
         },
@@ -1229,5 +1283,204 @@ mod classify_fill_subtype_tests {
     fn fill_class_empty_type_fails_closed() {
         let a = activity("FILL", Some(""));
         assert!(classify_fill_subtype(&a).is_err());
+    }
+}
+// ---------------------------------------------------------------------------
+// Unit tests: Retry-After parsing + threading (BROKER-ALPACA-RATE-LIMIT-
+// RETRY-AFTER-01). Scope is strictly the parser and its threading onto
+// BrokerError::RateLimit -- no retry/backoff policy change of any kind.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod broker_retry_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Pure helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn br01_retry_after_parses_seconds_to_ms_and_falls_back_on_malformed() {
+        assert_eq!(parse_retry_after_ms(Some("5")), Some(5_000));
+        assert_eq!(parse_retry_after_ms(Some(" 5 ")), Some(5_000));
+        assert_eq!(parse_retry_after_ms(Some("not-a-number")), None);
+        assert_eq!(parse_retry_after_ms(Some("")), None);
+        assert_eq!(parse_retry_after_ms(None), None);
+    }
+
+    // BR-02: a seconds value whose ms conversion overflows u64 must return
+    // None rather than panic (checked_mul, not a bare multiply).
+    #[test]
+    fn br02_retry_after_overflowing_seconds_to_ms_returns_none_no_panic() {
+        assert_eq!(parse_retry_after_ms(Some(&u64::MAX.to_string())), None);
+    }
+
+    // BR-03: classify_http_status threads a parsed Retry-After onto
+    // RateLimit; other variants ignore it (their shape carries no such
+    // field) -- non-429 classification is unchanged by this patch.
+    #[test]
+    fn br03_classify_http_status_threads_retry_after_onto_rate_limit_only() {
+        let err = classify_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down", Some(30_000));
+        assert_eq!(
+            err,
+            BrokerError::RateLimit {
+                retry_after_ms: Some(30_000),
+                non_delivery_proven: true,
+                detail: "slow down".to_string(),
+            }
+        );
+
+        let err_no_header = classify_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down", None);
+        assert_eq!(
+            err_no_header,
+            BrokerError::RateLimit {
+                retry_after_ms: None,
+                non_delivery_proven: true,
+                detail: "slow down".to_string(),
+            }
+        );
+
+        // A retry_after_ms value is passed through unused for a status
+        // whose BrokerError variant carries no such field -- classification
+        // itself is otherwise identical to before this patch.
+        let err_500 = classify_http_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "oops", Some(5_000));
+        assert!(matches!(err_500, BrokerError::Transient { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // get() Retry-After threading via httpmock -- single attempt only, no
+    // retry of any kind.
+    // -----------------------------------------------------------------------
+
+    // BR-04: a 429 with a valid Retry-After header surfaces the correctly
+    // parsed retry_after_ms on the very first (and only) attempt.
+    #[test]
+    fn br04_get_429_with_valid_retry_after_surfaces_parsed_ms() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/assets/AAPL");
+            then.status(429)
+                .header("Retry-After", "5")
+                .body("rate limited");
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let err = adapter.fetch_asset("AAPL").unwrap_err();
+        assert_eq!(
+            err,
+            BrokerError::RateLimit {
+                retry_after_ms: Some(5_000),
+                non_delivery_proven: true,
+                detail: "rate limited".to_string(),
+            }
+        );
+        mock.assert_hits(1);
+    }
+
+    // BR-05: a 429 with no Retry-After header surfaces retry_after_ms=None
+    // -- absent guidance is reported truthfully, never guessed.
+    #[test]
+    fn br05_get_429_without_retry_after_header_surfaces_none() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/assets/AAPL");
+            then.status(429).body("rate limited");
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let err = adapter.fetch_asset("AAPL").unwrap_err();
+        match err {
+            BrokerError::RateLimit { retry_after_ms, .. } => assert_eq!(retry_after_ms, None),
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+        mock.assert_hits(1);
+    }
+
+    // BR-06: a 429 with a malformed Retry-After header surfaces
+    // retry_after_ms=None rather than failing the request outright.
+    #[test]
+    fn br06_get_429_with_malformed_retry_after_surfaces_none() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/assets/AAPL");
+            then.status(429)
+                .header("Retry-After", "not-a-number")
+                .body("rate limited");
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let err = adapter.fetch_asset("AAPL").unwrap_err();
+        match err {
+            BrokerError::RateLimit { retry_after_ms, .. } => assert_eq!(retry_after_ms, None),
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+        mock.assert_hits(1);
+    }
+
+    // BR-07: a permanent 4xx read (404) is classified as Reject exactly as
+    // before this patch -- non-429 status behavior is unchanged.
+    #[test]
+    fn br07_permanent_4xx_read_classification_unchanged() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/assets/UNKNOWN");
+            then.status(404).body("not found");
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let err = adapter.fetch_asset("UNKNOWN").unwrap_err();
+        assert!(matches!(err, BrokerError::Reject { .. }));
+        mock.assert_hits(1);
+    }
+
+    // BR-08: a retryable status on a read (GET) is never retried in-adapter
+    // -- exactly one attempt. This is the negative control proving R2-P3
+    // introduces no new automatic retry behavior anywhere, on the one call
+    // site the rejected implementation had looped.
+    #[test]
+    fn br08_get_429_is_never_retried_in_adapter() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/assets/AAPL");
+            then.status(429).body("rate limited");
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let err = adapter.fetch_asset("AAPL").unwrap_err();
+        assert!(matches!(err, BrokerError::RateLimit { .. }));
+        mock.assert_hits(1);
+    }
+
+    // BR-09: mutating calls (DELETE / cancel) are never retried in-adapter,
+    // even on a retryable status -- exactly one attempt, surfaced as
+    // RateLimit for the orchestrator's own redispatch authority to own.
+    // Request counts for submit/patch/delete are otherwise unaffected by
+    // this patch, which only threads Retry-After parsing onto their
+    // existing (unlooped) single-attempt call sites.
+    #[test]
+    fn br09_cancel_429_is_never_retried_in_adapter() {
+        use httpmock::prelude::*;
+        use mqk_execution::{BrokerAdapter, BrokerInvokeToken};
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(DELETE).path("/v2/orders/order-1");
+            then.status(429).body("rate limited");
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let token = BrokerInvokeToken::for_test();
+        let err = adapter.cancel_order("order-1", &token).unwrap_err();
+        assert!(matches!(err, BrokerError::RateLimit { .. }));
+        mock.assert_hits(1);
     }
 }

@@ -1787,6 +1787,7 @@ name = "mqk-broker-alpaca"
 version = "0.0.1"
 dependencies = [
  "chrono",
+ "httpmock",
  "mqk-execution",
  "mqk-schemas",
  "reqwest",
