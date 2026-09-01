@@ -23,6 +23,48 @@ const ALPACA_PAGE_LIMIT: u32 = 10_000;
 /// Operator may override via `ALPACA_MARKET_DATA_FEED` env var.
 const ALPACA_DEFAULT_FEED: &str = "iex";
 
+/// Bounded retry attempts (beyond the initial attempt) for transient Alpaca
+/// market-data fetch failures: HTTP 429, retryable 5xx (500/502/503/504),
+/// and connect/timeout transport errors. Permanent 4xx (auth, bad request,
+/// not found) and decode/parse failures are never retried -- they are not
+/// proven transient.
+const ALPACA_MD_RETRY_MAX_ATTEMPTS: u32 = 3;
+
+/// Fallback sleep between retries when no valid `Retry-After` response
+/// header is present. Production default; tests inject 0 via
+/// `new_for_test` so no unit test sleeps in real time.
+const ALPACA_MD_RETRY_FALLBACK_SLEEP_SECS: u64 = 2;
+
+/// `true` iff `status` is an Alpaca market-data fetch failure proven
+/// transient: rate-limited (429) or a retryable server error
+/// (500/502/503/504). Any other non-success status (auth/permission, bad
+/// request, not-found, etc.) is permanent and must never be retried.
+fn alpaca_md_status_is_retryable(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
+/// `true` iff `err` is a connect or timeout failure -- the only transport
+/// error classes treated as transient.
+fn alpaca_md_transport_error_is_retryable(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_timeout()
+}
+
+/// Parse a `Retry-After` header value as a non-negative integer seconds
+/// count. Missing or malformed values fall back to the fixed backoff
+/// instead of failing the request.
+fn alpaca_md_parse_retry_after_secs(value: Option<&str>) -> Option<u64> {
+    value?.trim().parse::<u64>().ok()
+}
+
+/// `true` iff a provider-requested `Retry-After` of `secs` is within the
+/// permitted in-call retry-delay budget `budget_secs` (the fixed fallback
+/// backoff). A wait strictly greater than the budget must never be honored
+/// by sleeping, nor clamped down and retried early -- the caller fails
+/// closed instead.
+fn alpaca_md_retry_after_within_budget(secs: u64, budget_secs: u64) -> bool {
+    secs <= budget_secs
+}
+
 // ---------------------------------------------------------------------------
 // Provider struct
 // ---------------------------------------------------------------------------
@@ -35,6 +77,10 @@ pub struct AlpacaHistoricalProvider {
     http: reqwest::Client,
     base_url: String,
     feed: String,
+    /// Seconds to sleep between retries when no `Retry-After` header is
+    /// present. Production: [`ALPACA_MD_RETRY_FALLBACK_SLEEP_SECS`].
+    /// Tests: 0 (instant, no real sleep).
+    retry_sleep_secs: u64,
 }
 
 impl AlpacaHistoricalProvider {
@@ -52,6 +98,7 @@ impl AlpacaHistoricalProvider {
             http: reqwest::Client::new(),
             base_url,
             feed,
+            retry_sleep_secs: ALPACA_MD_RETRY_FALLBACK_SLEEP_SECS,
         }
     }
 
@@ -64,6 +111,7 @@ impl AlpacaHistoricalProvider {
             http: reqwest::Client::new(),
             base_url,
             feed: "iex".to_string(),
+            retry_sleep_secs: 0,
         }
     }
 
@@ -131,30 +179,95 @@ impl crate::HistoricalProvider for AlpacaHistoricalProvider {
                 params.push(("page_token", tok.clone()));
             }
 
-            let resp = self
-                .http
-                .get(&url)
-                .header("APCA-API-KEY-ID", &self.api_key)
-                .header("APCA-API-SECRET-KEY", &self.api_secret)
-                .query(&params)
-                .send()
-                .await
-                .context("alpaca data api request failed")?;
+            // Bounded retry: handles Alpaca 429 rate-limit responses and
+            // retryable 5xx / connect-or-timeout transport errors. Permanent
+            // 4xx and decode failures are fatal immediately (no retry).
+            let mut retries_remaining = ALPACA_MD_RETRY_MAX_ATTEMPTS;
+            let page: AlpacaBarsResponse = loop {
+                let send_result = self
+                    .http
+                    .get(&url)
+                    .header("APCA-API-KEY-ID", &self.api_key)
+                    .header("APCA-API-SECRET-KEY", &self.api_secret)
+                    .query(&params)
+                    .send()
+                    .await;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(anyhow!(
-                    "alpaca data api http error status={}: {}",
-                    status.as_u16(),
-                    body
-                ));
-            }
+                let resp = match send_result {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        if alpaca_md_transport_error_is_retryable(&err) && retries_remaining > 0 {
+                            retries_remaining -= 1;
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                self.retry_sleep_secs,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        return Err(anyhow!("alpaca data api request failed: {err}"));
+                    }
+                };
 
-            let page: AlpacaBarsResponse = resp
-                .json()
-                .await
-                .context("alpaca data api response json decode failed")?;
+                let status = resp.status();
+                if !status.is_success() {
+                    if alpaca_md_status_is_retryable(status) {
+                        if retries_remaining > 0 {
+                            let retry_after = alpaca_md_parse_retry_after_secs(
+                                resp.headers()
+                                    .get(reqwest::header::RETRY_AFTER)
+                                    .and_then(|v| v.to_str().ok()),
+                            );
+                            // The fixed fallback backoff is also the
+                            // in-call retry-delay budget authority: a
+                            // provider-requested wait at or under that
+                            // budget is honored exactly, but a wait beyond
+                            // it must fail closed -- never sleep
+                            // unboundedly, and never clamp a large
+                            // requested wait downward and retry early.
+                            if let Some(secs) = retry_after {
+                                if !alpaca_md_retry_after_within_budget(secs, self.retry_sleep_secs)
+                                {
+                                    let body = resp.text().await.unwrap_or_default();
+                                    return Err(anyhow!(
+                                        "alpaca data api http status={} requested \
+                                         retry-after={}s exceeds the permitted in-call \
+                                         retry budget of {}s; failing closed rather than \
+                                         sleeping unboundedly or retrying early: {}",
+                                        status.as_u16(),
+                                        secs,
+                                        self.retry_sleep_secs,
+                                        body
+                                    ));
+                                }
+                            }
+                            retries_remaining -= 1;
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                retry_after.unwrap_or(self.retry_sleep_secs),
+                            ))
+                            .await;
+                            continue;
+                        }
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(anyhow!(
+                            "alpaca data api http status={} persisted after {} retries: {}",
+                            status.as_u16(),
+                            ALPACA_MD_RETRY_MAX_ATTEMPTS,
+                            body
+                        ));
+                    }
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(anyhow!(
+                        "alpaca data api http error status={}: {}",
+                        status.as_u16(),
+                        body
+                    ));
+                }
+
+                break resp
+                    .json()
+                    .await
+                    .context("alpaca data api response json decode failed")?;
+            };
 
             for (sym, raw_bars) in page.bars.unwrap_or_default() {
                 let entry = all_bars.entry(sym.clone()).or_default();
@@ -493,5 +606,336 @@ mod tests {
         if _k.is_none() && _s.is_none() {
             assert!(load_alpaca_paper_credentials().is_err());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Retry/backoff (MD-ALPACA-FETCH-RETRY-BACKOFF-01)
+    // -----------------------------------------------------------------------
+
+    // Per-test call counters. httpmock's internal mock table is keyed by an
+    // auto-incrementing id and iterated in that order, so the conditional
+    // mock must be REGISTERED FIRST to get first refusal over an
+    // unconditional catch-all registered after it (registration order, not
+    // LIFO -- confirmed against httpmock 0.7's BTreeMap-backed mock table).
+    static AF01_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static AF02_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    // AF-01: a single transient 429 followed by success returns the bars
+    // from the successful retry (2 real requests occurred).
+    #[tokio::test]
+    async fn af01_transient_429_then_success_returns_bars() {
+        use httpmock::prelude::*;
+        use std::sync::atomic::Ordering;
+
+        AF01_CALL.store(0, Ordering::SeqCst);
+        let server = MockServer::start();
+
+        let _mock_429 = server.mock(|when, then| {
+            when.method(GET)
+                .path("/v2/stocks/bars")
+                .matches(|_req: &HttpMockRequest| AF01_CALL.fetch_add(1, Ordering::SeqCst) < 1);
+            then.status(429).body("rate limited");
+        });
+        let _mock_ok = server.mock(|when, then| {
+            when.method(GET).path("/v2/stocks/bars");
+            then.status(200).json_body(serde_json::json!({
+                "bars": {
+                    "AAPL": [{ "t": "2026-06-03T13:30:00Z", "o": 195.5, "h": 196.0, "l": 194.8, "c": 195.8, "v": 100 }]
+                },
+                "next_page_token": null
+            }));
+        });
+
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "key".to_string(),
+            "secret".to_string(),
+            server.base_url(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let bars = provider.fetch_bars(req).await.unwrap();
+        assert_eq!(bars.len(), 1, "must return the bar from the successful retry");
+        assert_eq!(AF01_CALL.load(Ordering::SeqCst), 2, "must have retried exactly once");
+    }
+
+    // AF-02: a retryable 503 that recovers on the next attempt succeeds.
+    #[tokio::test]
+    async fn af02_retryable_5xx_then_success_returns_bars() {
+        use httpmock::prelude::*;
+        use std::sync::atomic::Ordering;
+
+        AF02_CALL.store(0, Ordering::SeqCst);
+        let server = MockServer::start();
+
+        let _mock_503 = server.mock(|when, then| {
+            when.method(GET)
+                .path("/v2/stocks/bars")
+                .matches(|_req: &HttpMockRequest| AF02_CALL.fetch_add(1, Ordering::SeqCst) < 1);
+            then.status(503).body("service unavailable");
+        });
+        let _mock_ok = server.mock(|when, then| {
+            when.method(GET).path("/v2/stocks/bars");
+            then.status(200).json_body(serde_json::json!({
+                "bars": {
+                    "AAPL": [{ "t": "2026-06-03T13:30:00Z", "o": 195.5, "h": 196.0, "l": 194.8, "c": 195.8, "v": 100 }]
+                },
+                "next_page_token": null
+            }));
+        });
+
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "key".to_string(),
+            "secret".to_string(),
+            server.base_url(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let bars = provider.fetch_bars(req).await.unwrap();
+        assert_eq!(bars.len(), 1);
+        assert_eq!(AF02_CALL.load(Ordering::SeqCst), 2);
+    }
+
+    // AF-03: an always-retryable 503 exhausts the bounded retry budget and
+    // returns a truthful "persisted after N retries" error; hit exactly
+    // max_retries + 1 times.
+    #[tokio::test]
+    async fn af03_retryable_5xx_exhaustion_is_bounded_and_truthful() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/stocks/bars");
+            then.status(503).body("service unavailable");
+        });
+
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "key".to_string(),
+            "secret".to_string(),
+            server.base_url(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let err = provider.fetch_bars(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains(&format!(
+                "persisted after {ALPACA_MD_RETRY_MAX_ATTEMPTS} retries"
+            )),
+            "error must truthfully state retry exhaustion: {err}"
+        );
+        mock.assert_hits((ALPACA_MD_RETRY_MAX_ATTEMPTS + 1) as usize);
+    }
+
+    // AF-04: a permanent 4xx (403) is never retried -- exactly one attempt
+    // (matches the pre-existing fetch_bars_http_error_returns_err behavior,
+    // now proven bounded to a single hit).
+    #[tokio::test]
+    async fn af04_permanent_4xx_is_never_retried() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/stocks/bars");
+            then.status(403).body("forbidden");
+        });
+
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "bad-key".to_string(),
+            "bad-secret".to_string(),
+            server.base_url(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let err = provider.fetch_bars(req).await.unwrap_err();
+        assert!(err.to_string().contains("403"));
+        mock.assert_hits(1);
+    }
+
+    // AF-05: status classification matches exactly the documented transient
+    // set -- 429 and 500/502/503/504 -- and nothing else.
+    #[test]
+    fn af05_status_retryable_classification_is_exact() {
+        for code in [429u16, 500, 502, 503, 504] {
+            assert!(
+                alpaca_md_status_is_retryable(reqwest::StatusCode::from_u16(code).unwrap()),
+                "status {code} must be classified retryable"
+            );
+        }
+        for code in [400u16, 401, 403, 404, 405, 501, 505] {
+            assert!(
+                !alpaca_md_status_is_retryable(reqwest::StatusCode::from_u16(code).unwrap()),
+                "status {code} must NOT be classified retryable"
+            );
+        }
+    }
+
+    // AF-06: Retry-After parsing accepts valid integers and falls back to
+    // None (fixed backoff) on missing/malformed values.
+    #[test]
+    fn af06_retry_after_parsing_accepts_valid_and_falls_back_on_malformed() {
+        assert_eq!(alpaca_md_parse_retry_after_secs(Some("7")), Some(7));
+        assert_eq!(alpaca_md_parse_retry_after_secs(Some(" 7 ")), Some(7));
+        assert_eq!(
+            alpaca_md_parse_retry_after_secs(Some("not-a-number")),
+            None
+        );
+        assert_eq!(alpaca_md_parse_retry_after_secs(Some("")), None);
+        assert_eq!(alpaca_md_parse_retry_after_secs(None), None);
+    }
+
+    // AF-07: a connect failure (nothing listening) is retried up to the
+    // bound and then fails with a truthful transport-error message -- no
+    // hang, no unbounded loop.
+    #[tokio::test]
+    async fn af07_connect_failure_is_bounded_and_truthful() {
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "key".to_string(),
+            "secret".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let err = provider.fetch_bars(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("alpaca data api request failed"),
+            "must surface a truthful transport error, got: {err}"
+        );
+    }
+
+    // AF-08: a successful (200) response with a malformed body never
+    // triggers a fetch-layer retry -- decode failures happen downstream.
+    #[tokio::test]
+    async fn af08_malformed_200_body_is_not_retried() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/stocks/bars");
+            then.status(200).body("{ not json");
+        });
+
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "key".to_string(),
+            "secret".to_string(),
+            server.base_url(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let err = provider.fetch_bars(req).await.unwrap_err();
+        assert!(err.to_string().contains("response json decode failed"));
+        mock.assert_hits(1);
+    }
+
+    // AF-09: the retry-after/budget comparison is an exact boundary --
+    // equal to the budget is within it, one second over is not.
+    #[test]
+    fn af09_retry_after_budget_boundary_is_exact() {
+        assert!(alpaca_md_retry_after_within_budget(0, 2));
+        assert!(alpaca_md_retry_after_within_budget(2, 2));
+        assert!(!alpaca_md_retry_after_within_budget(3, 2));
+        assert!(alpaca_md_retry_after_within_budget(0, 0));
+        assert!(!alpaca_md_retry_after_within_budget(1, 0));
+    }
+
+    // AF-10: a numeric Retry-After at or under the in-call retry budget
+    // (the fixed fallback backoff, 0 for `new_for_test`) is honored -- the
+    // retry actually happens and returns the successful bars.
+    #[tokio::test]
+    async fn af10_retry_after_within_budget_is_honored() {
+        use httpmock::prelude::*;
+        use std::sync::atomic::Ordering;
+
+        static AF10_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        AF10_CALL.store(0, Ordering::SeqCst);
+        let server = MockServer::start();
+
+        let _mock_429 = server.mock(|when, then| {
+            when.method(GET)
+                .path("/v2/stocks/bars")
+                .matches(|_req: &HttpMockRequest| AF10_CALL.fetch_add(1, Ordering::SeqCst) < 1);
+            then.status(429).header("Retry-After", "0").body("rate limited");
+        });
+        let _mock_ok = server.mock(|when, then| {
+            when.method(GET).path("/v2/stocks/bars");
+            then.status(200).json_body(serde_json::json!({
+                "bars": {
+                    "AAPL": [{ "t": "2026-06-03T13:30:00Z", "o": 195.5, "h": 196.0, "l": 194.8, "c": 195.8, "v": 100 }]
+                },
+                "next_page_token": null
+            }));
+        });
+
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "key".to_string(),
+            "secret".to_string(),
+            server.base_url(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let bars = provider.fetch_bars(req).await.unwrap();
+        assert_eq!(bars.len(), 1, "must return the bar from the budgeted retry");
+        assert_eq!(AF10_CALL.load(Ordering::SeqCst), 2, "must have retried exactly once");
+    }
+
+    // AF-11: a numeric Retry-After that exceeds the in-call retry budget
+    // fails closed immediately -- no sleep, no retry attempted, and the
+    // error names the exceeded budget rather than silently clamping the
+    // wait down and retrying early.
+    #[tokio::test]
+    async fn af11_retry_after_above_budget_fails_closed_without_retry() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/stocks/bars");
+            then.status(429)
+                .header("Retry-After", "3600")
+                .body("rate limited");
+        });
+
+        let provider = AlpacaHistoricalProvider::new_for_test(
+            "key".to_string(),
+            "secret".to_string(),
+            server.base_url(),
+        );
+        let req = FetchBarsRequest {
+            symbols: vec!["AAPL".to_string()],
+            timeframe: Timeframe::M5,
+            start: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
+        };
+        let err = provider.fetch_bars(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds the permitted in-call retry budget"),
+            "must fail closed naming the exceeded budget, got: {err}"
+        );
+        mock.assert_hits(1);
     }
 }
