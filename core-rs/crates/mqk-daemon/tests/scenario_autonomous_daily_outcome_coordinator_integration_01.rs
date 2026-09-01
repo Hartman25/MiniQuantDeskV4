@@ -1507,3 +1507,159 @@ async fn ci_25_finalization_reachable_through_resolution_failure_fallback_lookup
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(alerts.lock().await.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// DISCORD-DAILY-SUMMARY-PUSH-01: the OutcomeFinalized notification carries a
+// bounded, truthful autonomous_no_trade_diagnostics summary, derived from
+// the same read-only truth GET /api/v1/autonomous/no-trade-diagnostics uses.
+// (Items 2/3 -- AlreadyFinalized/repeated-tick never duplicate -- are
+// already covered by ci_07_08/ci_09_10 above, unmodified by this feature:
+// those code paths never reach the OutcomeFinalized arm at all. Item 7 --
+// a diagnostics DB read error must not alter finalization -- is covered by
+// session_controller.rs's own p8_04-p8_06 unit tests, since it needs a
+// deliberately broken pool isolated from the finalization write path,
+// which this real-DB fixture cannot express.)
+// ---------------------------------------------------------------------------
+
+/// Req P8-1/P8-4: when a known no-trade diagnostic row exists for the
+/// finalized run, the single OutcomeFinalized notification's `note` carries
+/// that source-backed reason -- never fabricated, never a second
+/// notification.
+#[tokio::test]
+#[ignore]
+async fn p8_01_outcome_notification_carries_source_backed_diagnostics_summary() {
+    let Some(pool) = maybe_db("p8_01").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("p801");
+    ci_set_env(&adapter_id);
+    let plan = ci_plan();
+    let (webhook_url, alerts) = ci_webhook_sink().await;
+    let (operation, run_id) = ci_clean_fixture(&pool, &plan, &adapter_id, ci_now(), false).await;
+
+    // Insert a known diagnostic row for this run_id (deterministic UUIDv5,
+    // matching the production write-path convention in state.rs's
+    // record_no_trade_diagnostic).
+    let observed_at_utc = ci_now();
+    let diagnostic_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!("mqk.no-trade-diagnostic.v1.p8_01|{run_id}").as_bytes(),
+    );
+    mqk_db::insert_autonomous_no_trade_diagnostic(
+        &pool,
+        &mqk_db::InsertAutonomousNoTradeDiagnosticArgs {
+            diagnostic_id,
+            observed_at_utc,
+            run_id: Some(run_id),
+            mode: "PAPER".to_string(),
+            session_window_state: "in_window".to_string(),
+            runtime_start_allowed: true,
+            arm_state: "armed".to_string(),
+            overall_ready: false,
+            reason_code: "p8_01_known_no_trade_reason".to_string(),
+            reason: "no qualifying signal observed this session (p8_01 fixture)".to_string(),
+            stage: "strategy_evaluation".to_string(),
+            paper_order_attempted: false,
+            live_order_attempted: false,
+            source: "p8_01_test_fixture".to_string(),
+        },
+    )
+    .await
+    .expect("insert diagnostic row ok");
+
+    let st = ci_daemon_state(pool.clone(), &webhook_url).await;
+    ci_tick(&st, ci_now()).await;
+
+    let record = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(record.state, mqk_db::STATE_COMPLETED_NO_TRADE);
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let captured = alerts.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected exactly one notification, got {captured:?}"
+    );
+    let note = captured[0]["note"].as_str().unwrap_or("");
+    assert!(
+        note.contains("p8_01_known_no_trade_reason"),
+        "note must carry the source-backed diagnostics reason_code, got: {note}"
+    );
+    assert!(
+        note.contains("strategy_evaluation"),
+        "note must carry the source-backed diagnostics stage, got: {note}"
+    );
+}
+
+/// Req P8-5: when no diagnostic row exists for the finalized run, the
+/// notification explicitly states diagnostics were not recorded -- never a
+/// fabricated reason.
+#[tokio::test]
+#[ignore]
+async fn p8_02_no_diagnostic_rows_states_none_recorded_not_fabricated() {
+    let Some(pool) = maybe_db("p8_02").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("p802");
+    ci_set_env(&adapter_id);
+    let plan = ci_plan();
+    let (webhook_url, alerts) = ci_webhook_sink().await;
+    let (operation, _run_id) = ci_clean_fixture(&pool, &plan, &adapter_id, ci_now(), false).await;
+    let st = ci_daemon_state(pool.clone(), &webhook_url).await;
+
+    ci_tick(&st, ci_now()).await;
+
+    let record = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(record.state, mqk_db::STATE_COMPLETED_NO_TRADE);
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let captured = alerts.lock().await;
+    assert_eq!(captured.len(), 1);
+    let note = captured[0]["note"].as_str().unwrap_or("");
+    assert!(
+        note.contains("diagnostics: none recorded for this run"),
+        "note must explicitly state no diagnostics were recorded, got: {note}"
+    );
+}
+
+/// Req P8-6: a Discord delivery failure (nothing listening at the webhook
+/// URL) must never alter the already-durably-committed finalization truth
+/// -- best-effort notification failure is isolated from finalization.
+#[tokio::test]
+#[ignore]
+async fn p8_03_discord_delivery_failure_does_not_alter_finalization_truth() {
+    let Some(pool) = maybe_db("p8_03").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("p803");
+    ci_set_env(&adapter_id);
+    let plan = ci_plan();
+    let (operation, _run_id) = ci_clean_fixture(&pool, &plan, &adapter_id, ci_now(), false).await;
+
+    // Point the notifier at a URL with nothing listening -- delivery must
+    // fail (connection refused), and that failure must not propagate.
+    let st = ci_daemon_state(pool.clone(), "http://127.0.0.1:1/nonexistent-webhook-sink").await;
+
+    ci_tick(&st, ci_now()).await;
+
+    let record = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(
+        record.state,
+        mqk_db::STATE_COMPLETED_NO_TRADE,
+        "finalization truth must be unaffected by a Discord delivery failure"
+    );
+    assert_eq!(
+        record.outcome.as_deref(),
+        Some(mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL)
+    );
+    assert!(record.finalized_at_utc.is_some());
+}

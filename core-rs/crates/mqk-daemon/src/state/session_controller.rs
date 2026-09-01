@@ -66,6 +66,7 @@ use std::time::Duration;
 use chrono::{DateTime, Timelike, Utc};
 use mqk_integrity::CalendarSpec;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use super::runtime_session_source::{
     evaluate_runtime_session_source_active_decision, runtime_session_source_mode_from_env,
@@ -413,6 +414,17 @@ async fn log_coordinator_outcome(
                     ),
                 })
                 .await;
+            // DISCORD-DAILY-SUMMARY-PUSH-01: derive a bounded, truthful
+            // diagnostics summary from the SAME `autonomous_no_trade_
+            // diagnostics` truth the `/api/v1/autonomous/no-trade-
+            // diagnostics` read surface uses -- never an independently
+            // reimplemented classification. This is a best-effort read that
+            // runs strictly after finalization truth has already been
+            // durably applied above; a read failure only degrades the
+            // notification's content (an explicit "unavailable" string), it
+            // never rolls back or alters finalization truth.
+            let diagnostics_summary =
+                summarize_no_trade_diagnostics_for_run(state, *run_id).await;
             state
                 .discord_notifier
                 .notify_run_status(&RunStatusPayload {
@@ -420,7 +432,8 @@ async fn log_coordinator_outcome(
                     run_id: run_id.map(|id| id.to_string()),
                     environment: env,
                     note: Some(format!(
-                        "operation_id={operation_id} outcome={outcome_reason_code}"
+                        "operation_id={operation_id} outcome={outcome_reason_code} | \
+                         {diagnostics_summary}"
                     )),
                     ts_utc: now.to_rfc3339(),
                 })
@@ -590,6 +603,60 @@ async fn log_coordinator_outcome(
         | Outcome::PreparingData
         | Outcome::AwaitingOpen
         | Outcome::RetryNotDue => {}
+    }
+}
+
+/// DISCORD-DAILY-SUMMARY-PUSH-01: bounded, truthful diagnostics summary for
+/// the `OutcomeFinalized` notification, derived from the exact same
+/// `autonomous_no_trade_diagnostics` truth the `/api/v1/autonomous/
+/// no-trade-diagnostics` read surface (`routes::system::
+/// autonomous_no_trade_diagnostics`) uses via `mqk_db::
+/// fetch_autonomous_no_trade_diagnostics_for_run` -- never an independently
+/// reimplemented classification.
+///
+/// Every branch is explicit about WHY a summary could not be produced
+/// (`unavailable: ...`) rather than fabricating a reason. Called strictly
+/// after finalization truth is already durably applied by the caller, so a
+/// read failure here degrades only the notification's content, never
+/// finalization truth.
+async fn summarize_no_trade_diagnostics_for_run(state: &Arc<AppState>, run_id: Option<Uuid>) -> String {
+    let Some(run_id) = run_id else {
+        return "diagnostics: unavailable (no run_id associated with this operation)".to_string();
+    };
+    let Some(db) = state.db.as_ref() else {
+        return "diagnostics: unavailable (db not connected)".to_string();
+    };
+    match mqk_db::fetch_autonomous_no_trade_diagnostics_for_run(db, run_id, 1).await {
+        Ok(rows) => match rows.first() {
+            Some(r) => format!(
+                "diagnostics: reason_code={} stage={} overall_ready={} reason={}",
+                r.reason_code,
+                r.stage,
+                r.overall_ready,
+                truncate_for_notification(&r.reason, 200)
+            ),
+            None => "diagnostics: none recorded for this run".to_string(),
+        },
+        Err(e) => {
+            warn!(
+                error = %e,
+                run_id = %run_id,
+                "daily_operation_outcome: diagnostics read failed for finalization \
+                 notification (best-effort; finalization truth unaffected)"
+            );
+            "diagnostics: unavailable (read error)".to_string()
+        }
+    }
+}
+
+/// Bound a diagnostics `reason` string to `max_chars` (char count, not
+/// bytes) for inclusion in a Discord notification body.
+fn truncate_for_notification(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{truncated}…")
     }
 }
 
@@ -1135,6 +1202,60 @@ mod tests {
             in_session,
             "default (unset) mode must never depend on the v2 registry at all; legacy \
              regular-open truth must pass through unchanged"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // DISCORD-DAILY-SUMMARY-PUSH-01: summarize_no_trade_diagnostics_for_run
+    // negative controls. A diagnostics DB read error must produce an
+    // explicit "unavailable" summary -- never a fabricated reason, never a
+    // panic. connect_lazy against an unreachable address (port 1) is the
+    // repo's established convention for deterministic DB-error simulation
+    // with no real network/DB dependency -- see scenario_daemon_routes.rs,
+    // scenario_daily_data_readiness_01.rs, state.rs's own connect_lazy test
+    // stubs.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn p8_04_diagnostics_no_run_id_is_explicit_unavailable_not_fabricated() {
+        let state = Arc::new(AppState::new_for_test_with_broker_kind(
+            super::super::types::BrokerKind::Alpaca,
+        ));
+        let summary = summarize_no_trade_diagnostics_for_run(&state, None).await;
+        assert_eq!(
+            summary,
+            "diagnostics: unavailable (no run_id associated with this operation)"
+        );
+    }
+
+    #[tokio::test]
+    async fn p8_05_diagnostics_no_db_is_explicit_unavailable_not_fabricated() {
+        let state = Arc::new(AppState::new_for_test_with_broker_kind(
+            super::super::types::BrokerKind::Alpaca,
+        ));
+        assert!(state.db.is_none(), "test fixture precondition: no db configured");
+        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::new_v4())).await;
+        assert_eq!(summary, "diagnostics: unavailable (db not connected)");
+    }
+
+    #[tokio::test]
+    async fn p8_06_diagnostics_read_error_is_explicit_unavailable_not_fabricated() {
+        // connect_lazy never eagerly connects -- pool construction succeeds
+        // synchronously; the first real query against port 1 (nothing
+        // listens there) fails deterministically and fast (connection
+        // refused).
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/nonexistent_p8_06")
+            .expect("connect_lazy never eagerly connects");
+        let state = Arc::new(AppState::new_with_db_and_operator_auth(
+            pool,
+            super::super::types::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::new_v4())).await;
+        assert_eq!(
+            summary, "diagnostics: unavailable (read error)",
+            "a genuine DB read error must produce an explicit unavailable string, never a \
+             fabricated reason and never a panic"
         );
     }
 }
