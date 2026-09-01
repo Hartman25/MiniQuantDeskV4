@@ -1291,8 +1291,38 @@ mod tests {
 
         let server = MockServer::start();
 
-        // Registered first → lower priority (httpmock is LIFO for tie-breaking).
-        // Matches all requests; returns a good bar.
+        // MD-TWELVEDATA-HTTPMOCK-PRIORITY-TEST-INTEGRITY-01: httpmock 0.7's
+        // internal mock table is a BTreeMap keyed by an auto-incrementing id
+        // (`server::mod.rs`'s `MockServerState.mocks`), and `find_mock` does
+        // `mocks.values().find(...)`, which iterates in ASCENDING id order --
+        // i.e. FIRST-registered wins ties (registration order), never LIFO.
+        // A prior version of this test registered the unconditional
+        // catch-all mock FIRST and the conditional 429 mock SECOND under an
+        // incorrect "httpmock is LIFO" assumption; the catch-all silently won
+        // every request, the 429 mock's `.matches()` closure never actually
+        // fired, and this test passed even with the retry logic deleted --
+        // a false positive confirmed by direct RED-proof investigation (see
+        // commit message). The conditional mock must be registered FIRST so
+        // it gets first refusal over the unconditional catch-all registered
+        // after it.
+        //
+        // Registered first → checked first; matches only the first call.
+        // Non-capturing closure (reads only the static RL_SUCC_CALL) — coercible
+        // to fn ptr, which is what httpmock 0.7 requires for `matches()`.
+        // Falls through to _mock_ok on subsequent calls.
+        let _mock_rl = server.mock(|when, then| {
+            when.method(GET)
+                .path("/time_series")
+                .matches(|_req: &HttpMockRequest| RL_SUCC_CALL.fetch_add(1, Ordering::SeqCst) < 1);
+            then.status(200).json_body(serde_json::json!({
+                "status": "error",
+                "code": 429,
+                "message": "You have run out of API credits for the current minute."
+            }));
+        });
+
+        // Registered second → checked second; matches all requests once the
+        // conditional mock above no longer matches. Returns a good bar.
         let _mock_ok = server.mock(|when, then| {
             when.method(GET).path("/time_series");
             then.status(200).json_body(serde_json::json!({
@@ -1308,21 +1338,6 @@ mod tests {
             }));
         });
 
-        // Registered second → higher priority.
-        // Non-capturing closure (reads only the static RL_SUCC_CALL) — coercible
-        // to fn ptr, which is what httpmock 0.7 requires for `matches()`.
-        // Matches only the first call; falls through to _mock_ok on subsequent calls.
-        let _mock_rl = server.mock(|when, then| {
-            when.method(GET)
-                .path("/time_series")
-                .matches(|_req: &HttpMockRequest| RL_SUCC_CALL.fetch_add(1, Ordering::SeqCst) < 1);
-            then.status(200).json_body(serde_json::json!({
-                "status": "error",
-                "code": 429,
-                "message": "You have run out of API credits for the current minute."
-            }));
-        });
-
         let provider =
             TwelveDataHistoricalProvider::new_for_test("test-key".to_string(), server.base_url());
         let bars = provider
@@ -1335,6 +1350,23 @@ mod tests {
             "must return bar from successful retry attempt"
         );
         assert_eq!(bars[0].symbol, "AAPL");
+        // Load-bearing proof that the retry path was actually exercised, not
+        // just that some response eventually succeeded: RL_SUCC_CALL's
+        // matcher is only reachable while it is the highest-priority
+        // (first-registered) mock, so its final value is exactly the number
+        // of real HTTP requests observed. A value of 1 would mean the first
+        // request already succeeded (429 mock never truly fired, or the
+        // registration-order assumption above regressed); a value of 2 means
+        // the first request hit the 429 path and the second request (the
+        // retry) is what actually returned the bar asserted above. If the
+        // retry loop were removed, `fetch_bars` would return `Err` on the
+        // first 429 response and the `.unwrap()` above would panic before
+        // this assertion is even reached.
+        assert_eq!(
+            RL_SUCC_CALL.load(Ordering::SeqCst),
+            2,
+            "must have made exactly two requests: the initial 429 and the retry that succeeded"
+        );
         // DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01 (§B2.2):
         // this mock response's `"datetime": "2024-01-02"` is TwelveData's real
         // date-only `1D` response shape (not a fabricated fixture — the same
