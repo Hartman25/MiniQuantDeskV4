@@ -598,6 +598,7 @@ mod frozen_fleet_raw_inputs_tests {
             max_symbols_to_trade: 1,
             max_concurrent_positions: 1,
             approved_for_autonomous_paper: false,
+            dropped_symbols: vec![],
         };
         let outcome = WatchlistIntakeOutcome::LoadedApproved { artifact };
 

@@ -479,6 +479,7 @@ mod tests {
             max_symbols_to_trade: 2,
             max_concurrent_positions: 2,
             approved_for_autonomous_paper: true,
+            dropped_symbols: vec![],
         }
     }
 

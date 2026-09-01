@@ -59,11 +59,25 @@ pub(crate) fn build_watchlist_status_response(
     let approved_for_autonomous_paper = outcome.approved_for_autonomous_paper();
     let failure_reasons = outcome.failure_reasons().to_vec();
 
-    let (schema_version, symbols, top_symbol, strategy_assignments, max_symbols, max_concurrent) =
-        match outcome.artifact() {
-            Some(art) => artifact_fields(art),
-            None => (None, vec![], None, serde_json::json!({}), None, None),
-        };
+    let (
+        schema_version,
+        symbols,
+        dropped_symbols,
+        top_symbol,
+        strategy_assignments,
+        max_symbols,
+        max_concurrent,
+    ) = match outcome.artifact() {
+        Some(art) => artifact_fields(art),
+        None => (None, vec![], vec![], None, serde_json::json!({}), None, None),
+    };
+    // requested_symbols = symbols (admitted) ++ dropped_symbols, in that
+    // order — reconstructs the artifact's originally-requested list.
+    let requested_symbols: Vec<String> = symbols
+        .iter()
+        .cloned()
+        .chain(dropped_symbols.iter().cloned())
+        .collect();
 
     WatchlistStatusResponse {
         configured_path,
@@ -72,6 +86,8 @@ pub(crate) fn build_watchlist_status_response(
         approved_for_autonomous_paper,
         approved_for_live: false, // hard invariant — never true
         symbols,
+        requested_symbols,
+        dropped_symbols,
         top_symbol,
         strategy_assignments,
         max_symbols_to_trade: max_symbols,
@@ -81,9 +97,10 @@ pub(crate) fn build_watchlist_status_response(
     }
 }
 
-/// (schema_version, symbols, top_symbol, strategy_assignments, max_symbols_to_trade, max_concurrent_positions)
+/// (schema_version, symbols, dropped_symbols, top_symbol, strategy_assignments, max_symbols_to_trade, max_concurrent_positions)
 type ArtifactFields = (
     Option<String>,
+    Vec<String>,
     Vec<String>,
     Option<String>,
     serde_json::Value,
@@ -101,6 +118,7 @@ fn artifact_fields(art: &LoadedWatchlistArtifact) -> ArtifactFields {
     (
         Some(art.schema_version.clone()),
         art.symbols.clone(),
+        art.dropped_symbols.clone(),
         art.top_symbol.clone(),
         serde_json::Value::Object(assignments),
         Some(art.max_symbols_to_trade),

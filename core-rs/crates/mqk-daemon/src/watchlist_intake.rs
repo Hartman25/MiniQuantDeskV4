@@ -22,10 +22,15 @@
 //!   `max_concurrent_positions` must both equal 1.
 //! - **`watchlist-v2`** (WATCHLIST-V2-SCHEMA-01) — multi-symbol schema.
 //!   `max_symbols_to_trade` may be in `1..=MULTI_SYMBOL_HARD_CEILING` (5);
-//!   `max_concurrent_positions` may be in `1..=max_symbols_to_trade`;
-//!   `symbols.len()` must not exceed `max_symbols_to_trade` (no
-//!   truncation — exceeding the cap is `Invalid`); every entry in `symbols`
-//!   must have a corresponding `strategy_assignments` entry.
+//!   `max_concurrent_positions` may be in `1..=max_symbols_to_trade`; when
+//!   `symbols.len()` exceeds a *valid* `max_symbols_to_trade`
+//!   (`MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`), the artifact is truncated
+//!   to the first `max_symbols_to_trade` entries in artifact order rather
+//!   than rejected — the dropped tail is surfaced on
+//!   [`LoadedWatchlistArtifact::dropped_symbols`]; every entry in the FULL
+//!   originally-requested `symbols` list, including any symbol that will be
+//!   dropped by truncation, must have a corresponding `strategy_assignments`
+//!   entry — truncation is decided only after that check passes.
 //!
 //!   v2 is schema/validation only in this patch — it does NOT implement
 //!   runtime multi-symbol dispatch, does NOT modify `loop_runner.rs` or
@@ -104,8 +109,9 @@ const REQUIRED_MAX_CONCURRENT: u64 = 1;
 pub struct LoadedWatchlistArtifact {
     /// `"watchlist-v1"` or `"watchlist-v2"`.
     pub schema_version: String,
-    /// Approved symbols.  Exactly one entry in v1; up to
-    /// [`MULTI_SYMBOL_HARD_CEILING`] entries in v2.
+    /// Admitted symbols, already truncated to `max_symbols_to_trade` where
+    /// applicable (see [`Self::dropped_symbols`]).  Exactly one entry in v1;
+    /// up to [`MULTI_SYMBOL_HARD_CEILING`] entries in v2.
     pub symbols: Vec<String>,
     /// Top-ranked symbol (symbols[0]) if present.
     pub top_symbol: Option<String>,
@@ -119,6 +125,14 @@ pub struct LoadedWatchlistArtifact {
     pub max_concurrent_positions: u64,
     /// Whether scanner-level promotion approved autonomous paper trading.
     pub approved_for_autonomous_paper: bool,
+    /// v2 only, cap #1 (`max_symbols_to_trade`) truncate-and-surface
+    /// (`MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`): the tail of the
+    /// artifact's original `symbols` array dropped because it exceeded
+    /// `max_symbols_to_trade`, in the artifact's own order. Empty when no
+    /// truncation occurred (including always, for v1). `symbols ++
+    /// dropped_symbols` (in that order) reconstructs the artifact's
+    /// originally-requested symbol list.
+    pub dropped_symbols: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -253,12 +267,29 @@ impl WatchlistIntakeOutcome {
 ///       (`watchlist_max_concurrent_positions_invalid`).
 ///     - v2: must be in `1..=max_symbols_to_trade` → otherwise `Invalid`
 ///       (`watchlist_max_concurrent_positions_invalid`).
-/// 12. `symbols.len() <= max_symbols_to_trade` → otherwise `Invalid`
-///     (`watchlist_max_symbols_invalid`).  No truncation is performed.
-/// 13. v2 only: every entry in `symbols` must have a corresponding
+/// 12. `symbols.len() <= max_symbols_to_trade`:
+///     - v1: no truncation — exceeding the cap is `Invalid`
+///       (`watchlist_max_symbols_invalid`), matching the v1 single-symbol
+///       hard constraint.
+///     - v2, when `max_symbols_to_trade` is itself valid (step 10 above
+///       raised no reason): eligible for truncate-and-surface
+///       (`MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`) — see step 14 below.
+///       Eligibility does not by itself raise `watchlist_max_symbols_invalid`.
+///     - v2, when `max_symbols_to_trade` is itself invalid: no truncation
+///       is attempted — `Invalid` (`watchlist_max_symbols_invalid`), same
+///       as before this patch.
+/// 13. v2 only: every entry in the FULL originally-requested `symbols` list
+///     (i.e. before any step-14 truncation) must have a corresponding
 ///     `strategy_assignments` entry → otherwise `Invalid`
-///     (`watchlist_strategy_assignment_missing`).
-/// 14. If `approved_for_autonomous_paper=true`, `symbols` must be non-empty
+///     (`watchlist_strategy_assignment_missing`). A symbol that would
+///     otherwise be dropped by truncation is not exempt: an unassigned
+///     symbol anywhere in the requested list fails the whole artifact.
+/// 14. Only once steps 1-13 have raised no reason: if step 12 found the
+///     artifact eligible for truncate-and-surface, `symbols` is truncated to
+///     the first `max_symbols_to_trade` entries in artifact order and the
+///     dropped tail is recorded on
+///     [`LoadedWatchlistArtifact::dropped_symbols`]. Otherwise a no-op.
+/// 15. If `approved_for_autonomous_paper=true`, `symbols` must be non-empty
 ///     (internal consistency) → otherwise `Invalid`
 ///     (`watchlist_symbols_invalid`).
 ///
@@ -357,7 +388,7 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
     };
 
     // Step 7: symbols must be an array.
-    let symbols: Vec<String> = match j.get("symbols") {
+    let mut symbols: Vec<String> = match j.get("symbols") {
         Some(v) => match v.as_array() {
             Some(arr) => arr
                 .iter()
@@ -465,9 +496,22 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
             }
         };
 
-    // Step 11: symbols.len() must not exceed max_symbols_to_trade. No truncation —
-    // exceeding the cap is a validation failure, not a silent drop.
-    if symbols.len() as u64 > max_symbols_to_trade {
+    // Step 11 (MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01): determine whether
+    // symbols.len() exceeds max_symbols_to_trade, and whether that excess is
+    // eligible for truncate-and-surface rather than outright rejection. This
+    // does NOT mutate `symbols` yet — validation below (step 12) must run
+    // against the full originally-requested list, not a truncated one, or a
+    // missing strategy assignment on the dropped tail would silently pass.
+    // v1 (single-symbol) keeps the original fail-closed behavior —
+    // truncating a v1 artifact would violate its exactly-one-symbol
+    // invariant. An invalid max_symbols_to_trade (step 9 already raised a
+    // reason for it) is not trustworthy as a truncation point, so it also
+    // keeps the original fail-closed behavior.
+    let max_symbols_to_trade_is_valid =
+        (1..=MULTI_SYMBOL_HARD_CEILING).contains(&max_symbols_to_trade);
+    let exceeds_cap = symbols.len() as u64 > max_symbols_to_trade;
+    let eligible_for_truncation = exceeds_cap && is_v2 && max_symbols_to_trade_is_valid;
+    if exceeds_cap && !eligible_for_truncation {
         reasons.push(format!(
             "watchlist_max_symbols_invalid: symbols.len()={} exceeds \
              max_symbols_to_trade={}",
@@ -476,7 +520,11 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
         ));
     }
 
-    // Step 12: v2 only — every symbol must have a strategy_assignments entry.
+    // Step 12: v2 only — every ORIGINALLY REQUESTED symbol (i.e. the full
+    // pre-truncation list) must have a strategy_assignments entry. Checking
+    // against the full requested list — not the post-truncation admitted
+    // list — is load-bearing: a malformed dropped-tail symbol must still
+    // fail the whole artifact, not be silently discarded by truncation.
     if is_v2 {
         let missing: Vec<&String> = symbols
             .iter()
@@ -488,6 +536,13 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
                  strategy_assignments entries: {missing:?}"
             ));
         }
+    }
+
+    // Only after all unrelated validation above (steps 1-12) has been
+    // evaluated may the effective symbol list actually be truncated.
+    let mut dropped_symbols: Vec<String> = Vec::new();
+    if eligible_for_truncation {
+        dropped_symbols = symbols.split_off(max_symbols_to_trade as usize);
     }
 
     // Step 13: internal consistency — if approved, symbols must be non-empty.
@@ -516,6 +571,7 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
         max_symbols_to_trade,
         max_concurrent_positions,
         approved_for_autonomous_paper: approved_for_paper,
+        dropped_symbols,
     };
 
     if approved_for_paper {

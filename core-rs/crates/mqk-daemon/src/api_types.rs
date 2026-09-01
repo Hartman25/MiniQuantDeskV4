@@ -6360,8 +6360,21 @@ pub struct WatchlistStatusResponse {
     pub approved_for_autonomous_paper: bool,
     /// Always `false` — hard live-lock invariant.
     pub approved_for_live: bool,
-    /// Approved symbols list.  Empty unless `status == "loaded_approved"`.
+    /// Admitted (effective) symbols list, already truncated to
+    /// `max_symbols_to_trade` (cap #1) when the artifact requested more
+    /// than the cap allows — see `dropped_symbols`
+    /// (`MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`).  Empty unless
+    /// `status == "loaded_approved"`.
     pub symbols: Vec<String>,
+    /// The artifact's originally-requested symbols, before any cap #1
+    /// truncation — `symbols ++ dropped_symbols` in that order.  Equal to
+    /// `symbols` when nothing was dropped.  Empty unless
+    /// `status == "loaded_approved"`.
+    pub requested_symbols: Vec<String>,
+    /// Symbols dropped because `requested_symbols.len()` exceeded
+    /// `max_symbols_to_trade` (cap #1) — the cap responsible for the drop
+    /// is `max_symbols_to_trade` above.  Empty when nothing was dropped.
+    pub dropped_symbols: Vec<String>,
     /// Top-ranked symbol (`symbols[0]`) if present.  `null` otherwise.
     pub top_symbol: Option<String>,
     /// Strategy assignment map: symbol → strategy_id.

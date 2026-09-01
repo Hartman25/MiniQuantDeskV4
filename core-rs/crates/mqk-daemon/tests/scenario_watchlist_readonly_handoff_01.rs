@@ -43,7 +43,7 @@
 //! |------|-------------------------------------------------------------------------------|
 //! | W21  | v2 valid, 3 symbols all assigned → LoadedApproved                             |
 //! | W22  | v2 max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING → Invalid                 |
-//! | W23  | v2 symbols.len() > max_symbols_to_trade → Invalid, no truncation              |
+//! | W23  | v2 symbols.len() > max_symbols_to_trade → truncates, surfaces dropped tail    |
 //! | W24  | v2 max_concurrent_positions > max_symbols_to_trade → Invalid                  |
 //! | W25  | v2 symbol missing strategy_assignments entry → Invalid                        |
 //! | W26  | v2 approved_for_live=true → Invalid (hard live lock still applies)            |
@@ -53,6 +53,22 @@
 //! | W30  | Status endpoint surfaces schema_version == "watchlist-v2" for v2 artifacts    |
 //! | W31  | v2 dry admission allows symbol #2 and #3 with their assigned strategies       |
 //! | W32  | v2 boundary: max_symbols_to_trade==ceiling and max_concurrent==max_symbols    |
+//!
+//! # MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01 proof matrix (additions)
+//!
+//! | Test | What it proves                                                                |
+//! |------|-------------------------------------------------------------------------------|
+//! | W33  | v2 symbols.len() == max_symbols_to_trade (boundary) → no drop                 |
+//! | W34  | v2 symbols.len() < max_symbols_to_trade → unchanged, dropped_symbols empty    |
+//! | W35  | Truncation admits the first N in artifact (JSON) order, not any other order   |
+//! | W36  | A cap-unrelated failure (mode != paper) still refuses even if cap exceeded    |
+//! | W37  | Missing strategy_assignments for an admitted (surviving) symbol still refuses |
+//! | W38  | An invalid cap value (> hard ceiling) is never used as a truncation point     |
+//! | W39  | v1 exceeding its (forced) cap of 1 stays fully refused — no v1 truncation     |
+//! | W40  | Truncated LoadedApproved still carries approved_for_live=false (unchanged)    |
+//! | W41  | Status endpoint surfaces symbols/dropped_symbols/requested_symbols correctly |
+//! | W42  | NEGATIVE CONTROL: missing assignment on the dropped tail still refuses whole  |
+//! | W43  | POSITIVE PROOF: full-request validation + first-N dispatch via real seams     |
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -789,9 +805,9 @@ fn w22_v2_max_symbols_above_hard_ceiling_is_invalid() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn w23_v2_symbols_exceeding_max_symbols_to_trade_is_invalid_no_truncation() {
+fn w23_v2_symbols_exceeding_max_symbols_to_trade_truncates_and_surfaces_drop() {
     let json = valid_watchlist_v2(
-        false,
+        true,
         false,
         "paper",
         &["AAPL", "MSFT", "TSLA"],
@@ -807,18 +823,24 @@ fn w23_v2_symbols_exceeding_max_symbols_to_trade_is_invalid_no_truncation() {
     let outcome = evaluate_watchlist_intake(Some(&path));
     cleanup(&path);
 
-    assert_eq!(outcome.status_label(), "invalid");
-    assert!(
-        outcome.artifact().is_none(),
-        "Invalid outcome must not carry a truncated artifact"
+    assert_eq!(
+        outcome.status_label(),
+        "loaded_approved",
+        "exceeding cap #1 must truncate and admit, not fail closed"
     );
-    let reasons = outcome.failure_reasons();
-    assert!(
-        reasons
-            .iter()
-            .any(|r| r.contains("symbols.len()=3") && r.contains("max_symbols_to_trade=2")),
-        "expected symbols-exceed-max reason, got: {reasons:?}"
+    assert!(outcome.failure_reasons().is_empty());
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(
+        art.symbols,
+        vec!["AAPL".to_string(), "MSFT".to_string()],
+        "first max_symbols_to_trade=2 symbols, in artifact order, must be admitted"
     );
+    assert_eq!(
+        art.dropped_symbols,
+        vec!["TSLA".to_string()],
+        "the tail beyond the cap must be surfaced as dropped"
+    );
+    assert_eq!(art.max_symbols_to_trade, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,4 +1101,443 @@ fn w32_v2_boundary_at_hard_ceiling_is_loaded_approved() {
     assert_eq!(art.max_concurrent_positions, MULTI_SYMBOL_HARD_CEILING);
     assert_eq!(art.symbols.len() as u64, MULTI_SYMBOL_HARD_CEILING);
     assert!(!outcome.approved_for_live());
+}
+
+// ---------------------------------------------------------------------------
+// W33 — v2 symbols.len() == max_symbols_to_trade (boundary) → no drop
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w33_v2_symbols_len_equals_cap_no_drop() {
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT"],
+        &[("AAPL", "strat-scalper-001"), ("MSFT", "strat-scalper-002")],
+        2,
+        2,
+    );
+    let path = write_watchlist("w33", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "loaded_approved");
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(art.symbols, vec!["AAPL".to_string(), "MSFT".to_string()]);
+    assert!(
+        art.dropped_symbols.is_empty(),
+        "exactly at the cap must drop nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W34 — v2 symbols.len() < max_symbols_to_trade → unchanged, no drop
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w34_v2_symbols_len_under_cap_unchanged() {
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL"],
+        &[("AAPL", "strat-scalper-001")],
+        3,
+        1,
+    );
+    let path = write_watchlist("w34", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "loaded_approved");
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(art.symbols, vec!["AAPL".to_string()]);
+    assert!(art.dropped_symbols.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// W35 — truncation admits the first N in artifact (JSON) order
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w35_truncation_uses_artifact_order_not_any_other_order() {
+    // Deliberately not alphabetical / not rank order — the artifact's own
+    // JSON array order is the only order that must control admission.
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["ZETA", "ALPHA", "MID"],
+        &[
+            ("ZETA", "strat-a"),
+            ("ALPHA", "strat-b"),
+            ("MID", "strat-c"),
+        ],
+        2,
+        1,
+    );
+    let path = write_watchlist("w35", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(
+        art.symbols,
+        vec!["ZETA".to_string(), "ALPHA".to_string()],
+        "admission must follow artifact order (ZETA, ALPHA), not alphabetical order"
+    );
+    assert_eq!(art.dropped_symbols, vec!["MID".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// W36 — a cap-unrelated failure still refuses even if the cap is exceeded
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w36_cap_unrelated_failure_still_refuses_even_with_cap_exceeded() {
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "not-paper", // unrelated failure: mode != paper
+        &["AAPL", "MSFT", "TSLA"],
+        &[
+            ("AAPL", "strat-scalper-001"),
+            ("MSFT", "strat-scalper-002"),
+            ("TSLA", "strat-scalper-003"),
+        ],
+        2,
+        1,
+    );
+    let path = write_watchlist("w36", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(
+        outcome.status_label(),
+        "invalid",
+        "an unrelated validation failure must still fail the whole artifact, \
+         cap truncation must not silently paper over it"
+    );
+    let reasons = outcome.failure_reasons();
+    assert!(reasons.iter().any(|r| r.contains("watchlist_mode_not_paper")));
+}
+
+// ---------------------------------------------------------------------------
+// W37 — missing strategy_assignments for an admitted (surviving) symbol
+// still refuses, even after truncation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w37_missing_assignment_for_admitted_symbol_still_refuses() {
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        // MSFT (the second, admitted, symbol) has no assignment.
+        &[("AAPL", "strat-scalper-001"), ("TSLA", "strat-scalper-003")],
+        2,
+        1,
+    );
+    let path = write_watchlist("w37", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("watchlist_strategy_assignment_missing") && r.contains("MSFT")),
+        "expected missing-assignment reason naming MSFT, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W38 — an invalid cap value (> hard ceiling) is never used as a
+// truncation point, even though symbols.len() also exceeds it
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w38_invalid_cap_value_is_never_a_truncation_point() {
+    let over_ceiling = MULTI_SYMBOL_HARD_CEILING + 1;
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT"],
+        &[("AAPL", "strat-scalper-001"), ("MSFT", "strat-scalper-002")],
+        over_ceiling,
+        1,
+    );
+    let path = write_watchlist("w38", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(
+        outcome.status_label(),
+        "invalid",
+        "an out-of-range cap value must never be trusted as a truncation point"
+    );
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("watchlist_multi_symbol_ceiling_exceeded")),
+        "expected ceiling-exceeded reason, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W39 — v1 exceeding its (forced) cap of 1 stays fully refused; v1 is never
+// truncated (single-symbol hard invariant preserved)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w39_v1_exceeding_cap_stays_fully_refused_no_truncation() {
+    let json = valid_watchlist(
+        true,
+        false,
+        &["AAPL", "MSFT"],
+        &[("AAPL", "strat-scalper-001"), ("MSFT", "strat-scalper-002")],
+        1,
+        1,
+    );
+    let path = write_watchlist("w39", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    assert!(
+        outcome.artifact().is_none(),
+        "v1 must never produce a truncated artifact"
+    );
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("symbols.len()=2") && r.contains("max_symbols_to_trade=1")),
+        "expected symbols-exceed-max reason, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W40 — a truncated LoadedApproved outcome still carries
+// approved_for_live=false (Live authorization/tradability unchanged)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w40_truncated_outcome_still_carries_approved_for_live_false() {
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        &[
+            ("AAPL", "strat-scalper-001"),
+            ("MSFT", "strat-scalper-002"),
+            ("TSLA", "strat-scalper-003"),
+        ],
+        2,
+        1,
+    );
+    let path = write_watchlist("w40", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "loaded_approved");
+    assert!(!outcome.approved_for_live(), "hard live lock must be untouched by truncation");
+}
+
+// ---------------------------------------------------------------------------
+// W41 — status endpoint surfaces symbols / dropped_symbols /
+// requested_symbols correctly for a truncated watchlist
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn w41_endpoint_surfaces_truncation_fields() {
+    let _guard = env_lock().lock().await;
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        &[
+            ("AAPL", "strat-scalper-001"),
+            ("MSFT", "strat-scalper-002"),
+            ("TSLA", "strat-scalper-003"),
+        ],
+        2,
+        1,
+    );
+    let path = write_watchlist("w41", &json);
+    std::env::set_var(ENV_PAPER_WATCHLIST_PATH, path.to_str().unwrap());
+
+    let router = build_router();
+    let req = Request::builder()
+        .uri("/api/v1/watchlist/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    std::env::remove_var(ENV_PAPER_WATCHLIST_PATH);
+    cleanup(&path);
+
+    assert_eq!(status, StatusCode::OK);
+    let json_body = parse_json(body);
+    assert_eq!(json_body["status"], "loaded_approved");
+    assert_eq!(json_body["symbols"], serde_json::json!(["AAPL", "MSFT"]));
+    assert_eq!(json_body["dropped_symbols"], serde_json::json!(["TSLA"]));
+    assert_eq!(
+        json_body["requested_symbols"],
+        serde_json::json!(["AAPL", "MSFT", "TSLA"])
+    );
+    assert_eq!(json_body["max_symbols_to_trade"], 2);
+}
+
+// ---------------------------------------------------------------------------
+// W42 — MANDATORY NEGATIVE CONTROL (MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01
+// repair): a missing strategy assignment on a symbol that WOULD be dropped
+// by cap #1 truncation must still fail the whole artifact. Truncation must
+// never be used to silently discard a malformed requested symbol.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w42_missing_assignment_on_dropped_tail_symbol_still_refuses() {
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        // AAPL and MSFT (the two symbols cap #1 would admit) are validly
+        // assigned; TSLA — the symbol that would be dropped by truncation —
+        // has no strategy_assignments entry at all.
+        &[("AAPL", "strat-scalper-001"), ("MSFT", "strat-scalper-002")],
+        2,
+        1,
+    );
+    let path = write_watchlist("w42", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(
+        outcome.status_label(),
+        "invalid",
+        "a missing strategy assignment on the dropped tail must not be \
+         papered over by truncation — the full originally-requested list \
+         must be validated before any truncation is decided"
+    );
+    assert!(
+        outcome.artifact().is_none(),
+        "Invalid outcome must not carry a truncated artifact"
+    );
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("watchlist_strategy_assignment_missing") && r.contains("TSLA")),
+        "expected missing-assignment reason naming TSLA, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W43 — MANDATORY POSITIVE RUNTIME PROOF: a real approved v2 watchlist
+// requesting [AAPL, MSFT, TSLA] with cap #1 = 2 is driven through the actual
+// production seams —
+//   evaluate_watchlist_intake
+//   -> build_multi_symbol_config_from_watchlist_artifact (watchlist-to-
+//      MultiSymbolRuntimeConfig path)
+//   -> AppState::tick_strategy_dispatch_multi_symbol (the real dispatch
+//      seam MULTI-SYMBOL-DISPATCH-LOOP-01 proves loop_runner.rs uses)
+// and proves requested=[AAPL,MSFT,TSLA], effective=[AAPL,MSFT],
+// dropped=[TSLA], and that TSLA is never dispatched while AAPL/MSFT are.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn w43_first_n_truncation_proven_through_real_runtime_dispatch_seam() {
+    use mqk_daemon::state::{
+        build_multi_symbol_config_from_watchlist_artifact, AppState, StrategyBarInput,
+    };
+    use mqk_runtime::native_strategy::{build_daemon_plugin_registry, NativeStrategyBootstrap};
+
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        &[
+            ("AAPL", "strat-scalper-001"),
+            ("MSFT", "strat-scalper-002"),
+            ("TSLA", "strat-scalper-003"),
+        ],
+        2,
+        1,
+    );
+    let path = write_watchlist("w43", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    // Requested vs. effective vs. dropped, straight off the real intake
+    // outcome (requested = symbols ++ dropped_symbols, artifact order).
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(art.symbols, vec!["AAPL".to_string(), "MSFT".to_string()]);
+    assert_eq!(art.dropped_symbols, vec!["TSLA".to_string()]);
+    let requested: Vec<String> = art
+        .symbols
+        .iter()
+        .cloned()
+        .chain(art.dropped_symbols.iter().cloned())
+        .collect();
+    assert_eq!(
+        requested,
+        vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()]
+    );
+
+    // Real watchlist-to-MultiSymbolRuntimeConfig production seam.
+    let runtime_config =
+        build_multi_symbol_config_from_watchlist_artifact(&outcome, path.to_str().unwrap(), Some("1Min"))
+            .expect("truncated approved artifact must build a valid runtime config");
+    let dispatched_symbols: Vec<&str> = runtime_config
+        .symbols
+        .iter()
+        .map(|a| a.symbol.as_str())
+        .collect();
+    assert_eq!(
+        dispatched_symbols,
+        vec!["AAPL", "MSFT"],
+        "runtime config must carry only the admitted (post-truncation) symbols"
+    );
+
+    // Real dispatch seam: AppState::tick_strategy_dispatch_multi_symbol,
+    // the same seam loop_runner.rs's B1C block calls in production.
+    let st = Arc::new(AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    ));
+    let reg = build_daemon_plugin_registry();
+    let bootstrap = NativeStrategyBootstrap::bootstrap(Some(&["swing_momentum".to_string()]), &reg);
+    st.set_native_strategy_bootstrap_for_test(Some(bootstrap))
+        .await;
+    st.deposit_strategy_bar_input(StrategyBarInput {
+        now_tick: 1,
+        end_ts: 1_700_000_000,
+        limit_price: Some(150_000_000),
+        qty: 10,
+    })
+    .await;
+
+    let results = st
+        .tick_strategy_dispatch_multi_symbol(&runtime_config.symbols)
+        .await;
+    let result_symbols: Vec<&str> = results.iter().map(|(a, _)| a.symbol.as_str()).collect();
+    assert_eq!(
+        result_symbols,
+        vec!["AAPL", "MSFT"],
+        "W43: only the first-N admitted symbols are ever dispatched"
+    );
+    assert!(
+        !result_symbols.contains(&"TSLA"),
+        "W43: the dropped symbol TSLA must never be dispatched"
+    );
 }

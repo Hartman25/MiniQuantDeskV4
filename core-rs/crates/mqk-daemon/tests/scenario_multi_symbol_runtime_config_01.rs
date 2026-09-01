@@ -76,6 +76,7 @@ fn artifact_v2(
         max_symbols_to_trade,
         max_concurrent_positions,
         approved_for_autonomous_paper: true,
+        dropped_symbols: vec![],
     }
 }
 
@@ -91,6 +92,7 @@ fn artifact_v1(symbol: &str, strategy_id: &str) -> LoadedWatchlistArtifact {
         max_symbols_to_trade: 1,
         max_concurrent_positions: 1,
         approved_for_autonomous_paper: true,
+        dropped_symbols: vec![],
     }
 }
 
