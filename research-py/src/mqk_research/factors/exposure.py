@@ -50,6 +50,7 @@ NOT_EVALUABLE_SINGULAR_EXPOSURE_MATRIX = "singular_exposure_design_matrix"
 NOT_EVALUABLE_ILL_CONDITIONED_EXPOSURE_MATRIX = "ill_conditioned_exposure_design_matrix"
 NOT_EVALUABLE_INSUFFICIENT_PERIODS_FOR_NEUTRALIZATION = "insufficient_periods_for_neutralization"
 NOT_EVALUABLE_BASELINE_NOT_EVALUABLE = "baseline_not_evaluable"
+NOT_EVALUABLE_MISSING_EXPOSURE_DATA = "missing_exposure_data"
 
 # RESEARCH-FACTOR-RANK-AND-NEUTRALIZATION-NUMERICS-02: an exactly (or
 # near-exactly) collinear per-period fit leaves an OLS residual that is pure
@@ -178,6 +179,30 @@ def _build_design_matrix(group: pd.DataFrame, schema: ExposureSchema, vocab: Dic
     return np.column_stack(columns)
 
 
+def _validate_exposure_columns_present(observations: pd.DataFrame, exposure_cols: List[str]) -> None:
+    missing_cols = [c for c in exposure_cols if c not in observations.columns]
+    if missing_cols:
+        raise ValueError(f"observations is missing exposure columns: {missing_cols}")
+
+
+def _rows_missing_required_exposure(observations: pd.DataFrame, exposure_cols: List[str]) -> pd.DataFrame:
+    """Rows with a present `factor_value` (the population `neutralize_factor`
+    would otherwise use) that are missing a value in at least one required
+    exposure column. Single shared definition of the missing-exposure
+    population, used by both the top-level orchestrator and
+    `neutralize_factor` itself -- a missing exposure value must never
+    silently change which population is evaluated on only one side of a
+    baseline-vs-neutralized comparison (RESEARCH-FACTOR-EXPOSURE-
+    ATTRIBUTION-01)."""
+    if not exposure_cols:
+        return observations.iloc[0:0]
+    factor_usable = observations.dropna(subset=[FACTOR_VALUE_COL])
+    if factor_usable.empty:
+        return factor_usable
+    missing_mask = factor_usable[exposure_cols].isna().any(axis=1)
+    return factor_usable[missing_mask]
+
+
 def neutralize_factor(
     observations: pd.DataFrame,
     schema: ExposureSchema,
@@ -202,11 +227,20 @@ def neutralize_factor(
     """
     schema.validate()
     exposure_cols = schema.numeric_exposure_columns + schema.categorical_exposure_columns
-    missing_cols = [c for c in exposure_cols if c not in observations.columns]
-    if missing_cols:
-        raise ValueError(f"observations is missing exposure columns: {missing_cols}")
+    _validate_exposure_columns_present(observations, exposure_cols)
 
-    usable = observations.dropna(subset=[FACTOR_VALUE_COL] + exposure_cols)
+    missing_exposure_rows = _rows_missing_required_exposure(observations, exposure_cols)
+    if not missing_exposure_rows.empty:
+        raise ValueError(
+            "neutralize_factor: observations with a present factor_value are "
+            f"missing required exposure data in columns {exposure_cols} -- "
+            "fail closed rather than silently drop them from the "
+            "neutralized population only (RESEARCH-FACTOR-EXPOSURE-"
+            "ATTRIBUTION-01); resolve missing exposure data before calling, "
+            "or exclude those rows explicitly upstream"
+        )
+
+    usable = observations.dropna(subset=[FACTOR_VALUE_COL])
 
     parts = []
     excluded: Dict[str, str] = {}
@@ -379,6 +413,8 @@ def evaluate_factor_exposure_diagnostics(
     attribution -- only reports observed associations and the change in
     IC/spread after neutralization."""
     schema.validate()
+    exposure_cols = schema.numeric_exposure_columns + schema.categorical_exposure_columns
+    _validate_exposure_columns_present(observations, exposure_cols)
     effective_min_cross_section = min_cross_section if min_cross_section is not None else n_quantiles
 
     baseline = evaluate_factor_ic_ir(
@@ -393,6 +429,22 @@ def evaluate_factor_exposure_diagnostics(
             status=EVAL_STATUS_NOT_EVALUABLE,
             reason=f"{NOT_EVALUABLE_BASELINE_NOT_EVALUABLE}:{baseline.reason}",
             metrics={},
+        )
+
+    # Fail closed BEFORE computing association/quantile-profile/neutralized
+    # diagnostics: missing exposure data must never silently shrink only the
+    # neutralized population relative to the baseline population computed
+    # above, which would let a missing observation make the neutralized
+    # result look stronger than it truthfully is.
+    missing_exposure_rows = _rows_missing_required_exposure(observations, exposure_cols)
+    if not missing_exposure_rows.empty:
+        return FactorExposureReport(
+            status=EVAL_STATUS_NOT_EVALUABLE,
+            reason=NOT_EVALUABLE_MISSING_EXPOSURE_DATA,
+            metrics={
+                "baseline_mean_ic": baseline.metrics["mean_ic"],
+                "missing_exposure_row_count": int(len(missing_exposure_rows)),
+            },
         )
 
     association = compute_exposure_association(observations, schema, min_cross_section=effective_min_cross_section)

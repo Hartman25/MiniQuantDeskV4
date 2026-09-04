@@ -23,9 +23,11 @@ from mqk_research.factors.contracts import (
     NORMALIZATION_CROSS_SECTIONAL_RANK,
     TIMING_NEXT_BAR_TRADABLE,
 )
+from mqk_research.factors.diagnostics import FACTOR_VALUE_COL, evaluate_factor_ic_ir
 from mqk_research.factors.exposure import (
     NOT_EVALUABLE_ILL_CONDITIONED_EXPOSURE_MATRIX,
     NOT_EVALUABLE_INSUFFICIENT_PERIODS_FOR_NEUTRALIZATION,
+    NOT_EVALUABLE_MISSING_EXPOSURE_DATA,
     NOT_EVALUABLE_SINGULAR_EXPOSURE_MATRIX,
     ExposureSchema,
     FactorExposureEvaluationSpec,
@@ -394,3 +396,179 @@ def test_association_reports_none_for_zero_variance_exposure():
     schema = ExposureSchema(numeric_exposure_columns=["constant_exposure"])
     associations = compute_exposure_association(df, schema, min_cross_section=3)
     assert associations["constant_exposure"] is None
+
+
+# -- missing-exposure population integrity ---------------------------------
+# RESEARCH-FACTOR-EXPOSURE-ATTRIBUTION-01: a missing exposure value must
+# never silently shrink only the neutralized population relative to the
+# baseline population -- see module docstring / neutralize_factor.
+
+def _clear_one_cell(df: pd.DataFrame, period: str, symbol: str, col: str) -> pd.DataFrame:
+    out = df.copy()
+    idx = out.index[(out["period_ts_utc"] == period) & (out["symbol"] == symbol)]
+    out.loc[idx, col] = None
+    return out
+
+
+# 1. complete exposure data -> existing successful behavior unchanged
+
+def test_complete_exposure_data_still_succeeds():
+    df = _independent_factor_dataset()
+    report = evaluate_factor_exposure_diagnostics(df, _schema(), **_kwargs())
+    assert report.status == EVAL_STATUS_SUCCEEDED
+    assert report.reason is None
+    assert "missing_exposure_row_count" not in report.metrics
+
+
+# 2. one otherwise-usable row has numeric exposure NaN -> typed not_evaluable
+
+def test_missing_numeric_exposure_value_is_not_evaluable():
+    df = _independent_factor_dataset()
+    first_period = sorted(df["period_ts_utc"].unique())[0]
+    df = _clear_one_cell(df, first_period, "SYM0", "size")
+
+    report = evaluate_factor_exposure_diagnostics(df, _schema(), **_kwargs())
+    assert report.status == EVAL_STATUS_NOT_EVALUABLE
+    assert report.reason == NOT_EVALUABLE_MISSING_EXPOSURE_DATA
+    assert "neutralized_status" not in report.metrics
+    assert "neutralized_mean_ic" not in report.metrics
+
+    with pytest.raises(ValueError, match="missing required exposure data"):
+        neutralize_factor(df, _schema())
+
+
+# 3. one otherwise-usable row has categorical exposure missing -> same
+
+def test_missing_categorical_exposure_value_is_not_evaluable():
+    df = _independent_factor_dataset_with_sector()
+    first_period = sorted(df["period_ts_utc"].unique())[0]
+    df = _clear_one_cell(df, first_period, "SYM0", "sector")
+    schema = ExposureSchema(categorical_exposure_columns=["sector"])
+
+    report = evaluate_factor_exposure_diagnostics(df, schema, **_kwargs())
+    assert report.status == EVAL_STATUS_NOT_EVALUABLE
+    assert report.reason == NOT_EVALUABLE_MISSING_EXPOSURE_DATA
+
+    with pytest.raises(ValueError, match="missing required exposure data"):
+        neutralize_factor(df, schema)
+
+
+# 4. missing factor_value (not exposure) -> preserve current
+# factor-missingness contract; do not invent an exposure blocker for a row
+# already unusable as a factor observation
+
+def test_missing_factor_value_does_not_trigger_exposure_blocker():
+    df = _independent_factor_dataset()
+    first_period = sorted(df["period_ts_utc"].unique())[0]
+    df = _clear_one_cell(df, first_period, "SYM0", "factor_value")
+
+    report = evaluate_factor_exposure_diagnostics(df, _schema(), **_kwargs())
+    assert report.status == EVAL_STATUS_SUCCEEDED
+    assert report.reason is None
+
+    # neutralize_factor directly must also treat this as ordinary
+    # factor-missingness (silently excluded), never an exposure fail-close.
+    result = neutralize_factor(df, _schema())
+    assert ("SYM0", first_period) not in {
+        (r["symbol"], r["period_ts_utc"]) for r in result["neutralized_observations"].to_dict("records")
+    }
+
+
+# 5. adversarial optimism proof: a deliberately BAD factor/label observation
+# (high factor_value paired with a strongly opposite label_fwd_ret, so it
+# actively hurts the factor/label rank correlation) is the only row with
+# missing exposure. `_independent_factor_dataset` cannot prove this -- there
+# factor_value == label_fwd_ret for every row, so the row that would be
+# complete-case-dropped is never deliberately poor, and dropping it can
+# never be shown to help. This fixture makes the dropped row's badness, and
+# the resulting population/metric shift, the load-bearing evidence.
+
+def _adversarial_bad_observation_dataset(n_symbols=6, n_periods=2, seed=1, noise_scale=0.4) -> pd.DataFrame:
+    """Real (noisy, non-perfect) factor/label relationship in every row,
+    EXCEPT one deliberately corrupted observation in the first period: its
+    factor_value is set above every genuine value in that period while its
+    label_fwd_ret is set below every genuine value -- i.e. it is ranked
+    exactly backwards from what the factor predicts, actively dragging that
+    period's (and therefore the dataset's) rank correlation down. That same
+    row is the only row with a missing `size` exposure value, so it is the
+    complete-case-drop candidate under the historical (pre-repair) policy."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for period in _periods(n_periods):
+        label = rng.permutation(n_symbols).astype(float)
+        factor = label + rng.normal(scale=noise_scale, size=n_symbols)
+        size = rng.permutation(n_symbols).astype(float)
+        for sym, fv, lb, sz in zip(_symbols(n_symbols), factor, label, size):
+            rows.append(
+                {"symbol": sym, "period_ts_utc": period, "factor_value": float(fv), "label_fwd_ret": float(lb), "size": float(sz)}
+            )
+    df = pd.DataFrame(rows)
+    first_period = sorted(df["period_ts_utc"].unique())[0]
+    first_period_mask = df["period_ts_utc"] == first_period
+    max_factor = df.loc[first_period_mask, "factor_value"].max()
+    min_label = df.loc[first_period_mask, "label_fwd_ret"].min()
+    bad_row_mask = first_period_mask & (df["symbol"] == "SYM0")
+    df.loc[bad_row_mask, "factor_value"] = max_factor + 5.0
+    df.loc[bad_row_mask, "label_fwd_ret"] = min_label - 5.0
+    df.loc[bad_row_mask, "size"] = np.nan
+    return _with_causal_columns(df)
+
+
+def test_adversarial_missing_exposure_row_never_yields_optimistic_result():
+    df = _adversarial_bad_observation_dataset()
+    schema = _schema()
+    exposure_cols = schema.numeric_exposure_columns + schema.categorical_exposure_columns
+    eval_kwargs = dict(n_quantiles=3, min_cross_section=3, min_periods=2)
+
+    # --- OLD-PATH EVIDENCE ---------------------------------------------
+    # Reconstruct exactly what the historical complete-case-drop policy
+    # produced: `usable = observations.dropna(subset=[FACTOR_VALUE_COL] +
+    # exposure_cols)` inside the pre-repair `neutralize_factor`, i.e. the
+    # bad row (missing `size`) silently disappears from the neutralized
+    # side only. Pre-filtering it out here and running today's UNCHANGED
+    # OLS-residualization math on that already-complete subset reproduces
+    # that historical population/regression exactly -- `neutralize_factor`
+    # never raises on this pre-filtered frame because it contains no
+    # missing exposure values by construction.
+    baseline_report = evaluate_factor_ic_ir(df, **eval_kwargs)
+    assert baseline_report.status == EVAL_STATUS_SUCCEEDED
+    baseline_population_count = df.dropna(subset=[FACTOR_VALUE_COL]).shape[0]
+
+    old_style_population = df.dropna(subset=[FACTOR_VALUE_COL] + exposure_cols)
+    old_neutralization = neutralize_factor(old_style_population, schema)
+    old_neutralized_population = old_neutralization["neutralized_observations"]
+    old_neutralized_report = evaluate_factor_ic_ir(old_neutralized_population, **eval_kwargs)
+    assert old_neutralized_report.status == EVAL_STATUS_SUCCEEDED
+
+    # The bad row -- and only the bad row -- silently vanished from the
+    # neutralized side while baseline still evaluated the full population.
+    assert baseline_population_count != len(old_neutralized_population)
+    assert len(old_neutralized_population) == baseline_population_count - 1
+
+    # The dropped row was deliberately ranked backwards from the factor's
+    # prediction, so its removal is not a wash: the historical (pre-repair)
+    # neutralized comparison reports a MATERIALLY more favorable IC and
+    # spread than the true (baseline) population supports -- the exact
+    # optimism this policy exists to prevent.
+    baseline_mean_ic = baseline_report.metrics["mean_ic"]
+    old_neutralized_mean_ic = old_neutralized_report.metrics["mean_ic"]
+    baseline_spread = baseline_report.metrics["quantile"]["top_minus_bottom_spread"]
+    old_neutralized_spread = old_neutralized_report.metrics["quantile"]["top_minus_bottom_spread"]
+    assert old_neutralized_mean_ic > baseline_mean_ic + 0.2
+    assert old_neutralized_spread > baseline_spread
+
+    # --- REPAIRED PRODUCTION PATH ---------------------------------------
+    # Same dataset, same missing exposure value still present: the repaired
+    # policy must fail closed rather than reproduce the optimism proven
+    # above, and must emit no successful neutralized comparison field.
+    report = evaluate_factor_exposure_diagnostics(df, schema, **_kwargs())
+    assert report.status == EVAL_STATUS_NOT_EVALUABLE
+    assert report.reason == NOT_EVALUABLE_MISSING_EXPOSURE_DATA
+    assert report.metrics["missing_exposure_row_count"] == 1
+    assert "neutralized_status" not in report.metrics
+    assert "neutralized_mean_ic" not in report.metrics
+    assert "neutralized_top_minus_bottom_spread" not in report.metrics
+    assert "mean_ic_delta_after_neutralization" not in report.metrics
+
+    with pytest.raises(ValueError, match="missing required exposure data"):
+        neutralize_factor(df, schema)
