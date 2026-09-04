@@ -61,6 +61,7 @@ fn sweep_01_two_by_two_grid_produces_four_runs() {
         volatility_mult_bps: vec![],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
     assert_eq!(grid.combination_count(&base), 4);
 
@@ -83,6 +84,7 @@ fn sweep_02_deterministic_repeated_sweep_same_summary() {
         volatility_mult_bps: vec![],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
 
     let run1 = run_sweep(&bars, &base, &grid, |pt| strategy_factory("SPY", pt)).unwrap();
@@ -111,6 +113,7 @@ fn sweep_03_ranking_is_deterministic() {
         volatility_mult_bps: vec![],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
 
     let mut results = run_sweep(&bars, &base, &grid, |pt| strategy_factory("SPY", pt)).unwrap();
@@ -137,6 +140,7 @@ fn sweep_04_empty_grid_refused() {
         volatility_mult_bps: vec![],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
     // combination_count defaults dims to 1 when empty — so this actually gives 1 combo.
     // To truly produce 0, we'd need a different mechanism. Instead test the too-many path.
@@ -164,6 +168,7 @@ fn sweep_05_oversized_grid_refused() {
         volatility_mult_bps: vec![],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
 
     assert!(grid.combination_count(&base) > SWEEP_MAX_COMBINATIONS);
@@ -190,6 +195,7 @@ fn sweep_06_all_rows_have_unique_rank() {
         volatility_mult_bps: vec![],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
     let results = run_sweep(&bars, &base, &grid, |pt| strategy_factory("SPY", pt)).unwrap();
     assert_eq!(results.len(), 6);
@@ -219,6 +225,7 @@ fn sweep_07_each_member_has_distinct_run_id() {
         volatility_mult_bps: vec![],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
     let results = run_sweep(&bars, &base, &grid, |pt| strategy_factory("SPY", pt)).unwrap();
     let run_ids: std::collections::HashSet<&str> =
@@ -245,6 +252,7 @@ fn sweep_08_volatility_mult_dimension_works() {
         volatility_mult_bps: vec![0, 2500, 5000],
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: vec![],
     };
     assert_eq!(grid.combination_count(&base), 3);
     let results = run_sweep(&bars, &base, &grid, |pt| strategy_factory("SPY", pt)).unwrap();

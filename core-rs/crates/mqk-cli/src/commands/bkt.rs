@@ -711,6 +711,7 @@ pub async fn run_sweep_csv(
     target_qty_list: String,
     slippage_bps_list: String,
     volatility_mult_bps_list: String,
+    max_participation_rate_bps_list: String,
     contract_multiplier: Option<i64>,
     initial_margin_micros: Option<i64>,
     maintenance_margin_micros: Option<i64>,
@@ -741,6 +742,7 @@ pub async fn run_sweep_csv(
     let target_qty_vals = parse_i64_list(&target_qty_list)?;
     let slippage_bps_vals = parse_i64_list(&slippage_bps_list)?;
     let vol_mult_vals = parse_i64_list(&volatility_mult_bps_list)?;
+    let max_participation_rate_bps_vals = parse_i64_list(&max_participation_rate_bps_list)?;
 
     if target_qty_vals.is_empty() {
         anyhow::bail!("--target-qty must contain at least one value");
@@ -764,6 +766,7 @@ pub async fn run_sweep_csv(
         volatility_mult_bps: vol_mult_vals,
         max_target_qty: vec![],
         max_position_notional_usd: vec![],
+        max_participation_rate_bps: max_participation_rate_bps_vals,
     };
 
     let combo_count = grid.combination_count(&base_cfg);
@@ -815,6 +818,9 @@ pub async fn run_sweep_csv(
             // reset to 0.
             participation_impact_bps: base_cfg.stress.participation_impact_bps,
         };
+        cfg.liquidity = mqk_backtest::LiquidityConfig {
+            max_participation_rate_bps: pt.max_participation_rate_bps,
+        };
 
         let mut engine = BacktestEngine::new(cfg);
         if let Some(ref econ) = economics {
@@ -863,13 +869,15 @@ pub async fn run_sweep_csv(
         let row = mqk_backtest::sweep_row_from_report(&report, pt, artifact_path);
         results.push(row);
         println!(
-            "sweep_run={}/{} tq={} slip={} vol={} return={:.2}% halted={}",
+            "sweep_run={}/{} tq={} slip={} vol={} liq_cap={} return={:.2}% liq_rejects={} halted={}",
             i + 1,
             combos.len(),
             pt.target_qty,
             pt.slippage_bps,
             pt.volatility_mult_bps,
+            pt.max_participation_rate_bps,
             results.last().unwrap().total_return_pct,
+            results.last().unwrap().rejected_liquidity_capacity_count,
             results.last().unwrap().halted,
         );
     }
@@ -892,11 +900,12 @@ pub async fn run_sweep_csv(
     );
     if let Some(best) = results.first() {
         println!(
-            "sweep_best_run_id={} tq={} slip={} vol={} return={:.2}% alpha={:.2}% dd={:.2}%",
+            "sweep_best_run_id={} tq={} slip={} vol={} liq_cap={} return={:.2}% alpha={:.2}% dd={:.2}%",
             best.run_id,
             best.target_qty,
             best.slippage_bps,
             best.volatility_mult_bps,
+            best.max_participation_rate_bps,
             best.total_return_pct,
             best.alpha_pct.unwrap_or(f64::NAN),
             best.max_drawdown_pct,
@@ -917,14 +926,15 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
     let csv_path = sweep_dir.join("sweep_summary.csv");
     let mut csv = String::from(
         "rank,run_id,config_id,target_qty,max_target_qty,max_position_notional_usd,\
-         slippage_bps,volatility_mult_bps,total_return_pct,buy_and_hold_return_pct,\
-         alpha_pct,max_drawdown_pct,fill_count,trade_count,win_rate_pct,profit_factor,\
+         slippage_bps,volatility_mult_bps,max_participation_rate_bps,total_return_pct,\
+         buy_and_hold_return_pct,alpha_pct,max_drawdown_pct,fill_count,\
+         rejected_liquidity_capacity_count,trade_count,win_rate_pct,profit_factor,\
          halted,artifact_path\n",
     );
     for r in rows {
         writeln!(
             csv,
-            "{},{},{},{},{},{},{},{},{:.4},{},{},{:.4},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{:.4},{},{},{:.4},{},{},{},{},{},{},{}",
             r.rank,
             r.run_id,
             r.config_id,
@@ -935,6 +945,7 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
                 .unwrap_or_default(),
             r.slippage_bps,
             r.volatility_mult_bps,
+            r.max_participation_rate_bps,
             r.total_return_pct,
             r.buy_and_hold_return_pct
                 .map(|v| format!("{v:.4}"))
@@ -942,6 +953,7 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
             r.alpha_pct.map(|v| format!("{v:.4}")).unwrap_or_default(),
             r.max_drawdown_pct,
             r.fill_count,
+            r.rejected_liquidity_capacity_count,
             r.trade_count,
             r.win_rate_pct
                 .map(|v| format!("{v:.2}"))
@@ -971,11 +983,13 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
                 "max_position_notional_usd": r.max_position_notional_usd,
                 "slippage_bps": r.slippage_bps,
                 "volatility_mult_bps": r.volatility_mult_bps,
+                "max_participation_rate_bps": r.max_participation_rate_bps,
                 "total_return_pct": r.total_return_pct,
                 "buy_and_hold_return_pct": r.buy_and_hold_return_pct,
                 "alpha_pct": r.alpha_pct,
                 "max_drawdown_pct": r.max_drawdown_pct,
                 "fill_count": r.fill_count,
+                "rejected_liquidity_capacity_count": r.rejected_liquidity_capacity_count,
                 "trade_count": r.trade_count,
                 "win_rate_pct": r.win_rate_pct,
                 "profit_factor": r.profit_factor,
@@ -984,6 +998,14 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
             })
         })
         .collect();
+    // BKT-BAR-VOLUME-CAPACITY-SWEEP-01: max_participation_rate_bps and
+    // rejected_liquidity_capacity_count are purely additive row fields.
+    // mqk-artifacts' BacktestReportArtifact establishes this repo's schema-
+    // versioning convention (see PROMOTION-EVIDENCE-SEMANTIC-BINDING-01's
+    // doc comment on `strategy_semantic_fingerprint`): a purely additive
+    // field does not require a schema-version bump. No typed consumer reads
+    // sweep_summary.json today, so schema_version stays "sweep-summary-v1"
+    // -- proven by `sweep_summary_schema_version_unchanged_by_new_columns`.
     let json_obj = serde_json::json!({
         "schema_version": "sweep-summary-v1",
         "total_runs": rows.len(),
@@ -999,22 +1021,24 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
     let md_path = sweep_dir.join("sweep_report.md");
     let mut md = String::from("# Sweep Summary\n\n");
     writeln!(md, "Total runs: {}\n", rows.len()).unwrap();
-    writeln!(md, "| Rank | target_qty | slippage_bps | vol_mult_bps | return% | alpha% | dd% | fills | wins | halted |").unwrap();
-    writeln!(md, "|------|-----------|-------------|--------------|---------|--------|-----|-------|------|--------|").unwrap();
+    writeln!(md, "| Rank | target_qty | slippage_bps | vol_mult_bps | liq_cap_bps | return% | alpha% | dd% | fills | liq_rejects | wins | halted |").unwrap();
+    writeln!(md, "|------|-----------|-------------|--------------|-------------|---------|--------|-----|-------|-------------|------|--------|").unwrap();
     for r in rows {
         writeln!(
             md,
-            "| {} | {} | {} | {} | {:.2} | {} | {:.2} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {:.2} | {} | {:.2} | {} | {} | {} | {} |",
             r.rank,
             r.target_qty,
             r.slippage_bps,
             r.volatility_mult_bps,
+            r.max_participation_rate_bps,
             r.total_return_pct,
             r.alpha_pct
                 .map(|v| format!("{v:.2}"))
                 .unwrap_or_else(|| "n/a".to_string()),
             r.max_drawdown_pct,
             r.fill_count,
+            r.rejected_liquidity_capacity_count,
             r.win_rate_pct
                 .map(|v| format!("{v:.1}%"))
                 .unwrap_or_else(|| "n/a".to_string()),

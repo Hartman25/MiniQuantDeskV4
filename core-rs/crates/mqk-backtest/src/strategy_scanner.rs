@@ -382,6 +382,7 @@ pub fn evaluate_scan_candidate(
         max_position_notional_usd: cfg.sizing.max_position_notional_usd,
         slippage_bps: cfg.stress.slippage_bps,
         volatility_mult_bps: cfg.stress.volatility_mult_bps,
+        max_participation_rate_bps: cfg.liquidity.max_participation_rate_bps,
     };
     let row = sweep_row_from_report(&report, &point, None);
 

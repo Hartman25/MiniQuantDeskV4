@@ -295,6 +295,16 @@ enum BacktestCmd {
         #[arg(long, default_value = "")]
         volatility_mult_bps: String,
 
+        /// Comma-separated resolving-bar volume participation-cap values to
+        /// sweep (bps; 10_000 = 100% of the resolving bar's own volume; must
+        /// each satisfy 0..=10_000). This is NOT an ADV/average-daily-volume
+        /// cap. If omitted, uses the base config default (0 = disabled).
+        /// Sweeping this alongside target_qty produces a BAR-VOLUME capacity
+        /// curve -- see SweepRowResult::rejected_liquidity_capacity_count in
+        /// the summary output for where a given cap starts refusing fills.
+        #[arg(long, default_value = "")]
+        max_participation_rate_bps: String,
+
         /// Contract multiplier for multiplier-bearing instruments (futures/options-style
         /// metadata; e.g. ES futures = 50, standard equity options = 100). Omitted = equity
         /// default (multiplier=1), identical to current behavior. Metadata only -- does
@@ -1528,6 +1538,7 @@ async fn run_cli() -> Result<()> {
                 target_qty,
                 slippage_bps,
                 volatility_mult_bps,
+                max_participation_rate_bps,
                 contract_multiplier,
                 initial_margin_micros,
                 maintenance_margin_micros,
@@ -1546,6 +1557,7 @@ async fn run_cli() -> Result<()> {
                     target_qty,
                     slippage_bps,
                     volatility_mult_bps,
+                    max_participation_rate_bps,
                     contract_multiplier,
                     initial_margin_micros,
                     maintenance_margin_micros,

@@ -16,7 +16,8 @@ use mqk_strategy::Strategy;
 
 use crate::engine::BacktestEngine;
 use crate::types::{
-    BacktestBar, BacktestConfig, BacktestFill, BacktestReport, StrategySizingConfig, StressProfile,
+    BacktestBar, BacktestConfig, BacktestFill, BacktestReport, LiquidityConfig, OrderStatus,
+    StrategySizingConfig, StressProfile,
 };
 
 /// Hard cap on sweep combinations. Refuse grids larger than this.
@@ -46,6 +47,18 @@ pub struct SweepGrid {
     pub max_target_qty: Vec<Option<i64>>,
     /// max_position_notional_usd values to sweep. If empty, defaults to `[None]`.
     pub max_position_notional_usd: Vec<Option<i64>>,
+    /// BKT-BAR-VOLUME-CAPACITY-SWEEP-01 — resolving-bar volume participation
+    /// cap values to sweep (bps; must satisfy `0..=10_000` each, matching
+    /// `LiquidityConfig::max_participation_rate_bps`). If empty, the
+    /// base_config's own `liquidity.max_participation_rate_bps` is used as
+    /// the single value (mirroring `volatility_mult_bps`'s own
+    /// default-passthrough). Sweeping this alongside `target_qty` produces a
+    /// BAR-VOLUME capacity curve: at what position size (for a given cap)
+    /// does the strategy start being refused fills for exceeding the
+    /// resolving bar's own liquidity, and how does that affect realized
+    /// return. This is NOT an ADV or capital-scaling capacity curve -- see
+    /// `LiquidityConfig`'s own doc comment.
+    pub max_participation_rate_bps: Vec<i64>,
 }
 
 impl SweepGrid {
@@ -68,13 +81,19 @@ impl SweepGrid {
         } else {
             self.max_position_notional_usd.len()
         };
-        let _ = base_config; // used only for vol default selection
-        tq * slip * vol * mtq * mno
+        let liq = if self.max_participation_rate_bps.is_empty() {
+            1
+        } else {
+            self.max_participation_rate_bps.len()
+        };
+        let _ = base_config; // used only for vol/liq default selection
+        tq * slip * vol * mtq * mno * liq
     }
 
     /// Enumerate all combinations in stable, deterministic order.
     ///
-    /// Order: target_qty × slippage_bps × volatility_mult_bps × max_target_qty × max_position_notional_usd.
+    /// Order: target_qty × slippage_bps × volatility_mult_bps ×
+    /// max_target_qty × max_position_notional_usd × max_participation_rate_bps.
     pub fn combinations(&self, base_config: &BacktestConfig) -> Vec<SweepPoint> {
         let tq_vals: &[i64] = if self.target_qty.is_empty() {
             &[1]
@@ -109,19 +128,30 @@ impl SweepGrid {
             &self.max_position_notional_usd
         };
 
+        let default_liq = base_config.liquidity.max_participation_rate_bps;
+        let liq_default_slice = [default_liq];
+        let liq_vals: &[i64] = if self.max_participation_rate_bps.is_empty() {
+            &liq_default_slice
+        } else {
+            &self.max_participation_rate_bps
+        };
+
         let mut out = Vec::new();
         for &tq in tq_vals {
             for &slip in slip_vals {
                 for &vol in vol_vals {
                     for &mtq in mtq_vals {
                         for &mno in mno_vals {
-                            out.push(SweepPoint {
-                                target_qty: tq,
-                                max_target_qty: mtq,
-                                max_position_notional_usd: mno,
-                                slippage_bps: slip,
-                                volatility_mult_bps: vol,
-                            });
+                            for &liq in liq_vals {
+                                out.push(SweepPoint {
+                                    target_qty: tq,
+                                    max_target_qty: mtq,
+                                    max_position_notional_usd: mno,
+                                    slippage_bps: slip,
+                                    volatility_mult_bps: vol,
+                                    max_participation_rate_bps: liq,
+                                });
+                            }
                         }
                     }
                 }
@@ -145,6 +175,9 @@ pub struct SweepPoint {
     pub slippage_bps: i64,
     /// Volatility multiplier in basis points (must be ≥ 0).
     pub volatility_mult_bps: i64,
+    /// BKT-BAR-VOLUME-CAPACITY-SWEEP-01 — resolving-bar volume participation
+    /// cap in basis points (must satisfy `0..=10_000`; `0` = disabled).
+    pub max_participation_rate_bps: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -163,12 +196,21 @@ pub struct SweepRowResult {
     pub max_position_notional_usd: Option<i64>,
     pub slippage_bps: i64,
     pub volatility_mult_bps: i64,
+    /// BKT-BAR-VOLUME-CAPACITY-SWEEP-01 — resolving-bar volume participation
+    /// cap this row ran with (bps; `0` = disabled).
+    pub max_participation_rate_bps: i64,
     pub total_return_pct: f64,
     pub buy_and_hold_return_pct: Option<f64>,
     pub alpha_pct: Option<f64>,
     pub max_drawdown_pct: f64,
     /// Total fills executed.
     pub fill_count: usize,
+    /// BKT-BAR-VOLUME-CAPACITY-SWEEP-01 — number of orders refused
+    /// specifically by the resolving-bar volume participation cap
+    /// (`OrderStatus::RejectedLiquidityCapacity`) in this row. The BAR-VOLUME
+    /// capacity ceiling for a given cap is where this count first becomes
+    /// nonzero as `target_qty` increases across a swept curve.
+    pub rejected_liquidity_capacity_count: usize,
     /// Completed FIFO round-trip trades.
     pub trade_count: usize,
     pub win_rate_pct: Option<f64>,
@@ -188,6 +230,9 @@ pub enum SweepError {
     TooManyCombinations { count: usize, limit: usize },
     InvalidTargetQty { value: i64 },
     NegativeSlippage { field: &'static str, value: i64 },
+    /// BKT-BAR-VOLUME-CAPACITY-SWEEP-01 -- `max_participation_rate_bps` must
+    /// satisfy `0..=10_000` (see `BacktestError::InvalidLiquidityConfig`).
+    InvalidLiquidityConfig { value: i64 },
     RunFailed { point_index: usize, reason: String },
 }
 
@@ -210,6 +255,12 @@ impl core::fmt::Display for SweepError {
                 write!(
                     f,
                     "negative slippage rejected: {field} = {value} bps (must be ≥ 0)"
+                )
+            }
+            SweepError::InvalidLiquidityConfig { value } => {
+                write!(
+                    f,
+                    "invalid liquidity config rejected: max_participation_rate_bps = {value} (must satisfy 0..=10_000)"
                 )
             }
             SweepError::RunFailed {
@@ -277,6 +328,11 @@ pub fn run_sweep(
                 value: pt.volatility_mult_bps,
             });
         }
+        if !(0..=10_000).contains(&pt.max_participation_rate_bps) {
+            return Err(SweepError::InvalidLiquidityConfig {
+                value: pt.max_participation_rate_bps,
+            });
+        }
         let _ = i;
     }
 
@@ -306,6 +362,9 @@ pub fn run_sweep(
             // carried through from the caller's base config rather than
             // silently reset to 0.
             participation_impact_bps: base_config.stress.participation_impact_bps,
+        };
+        cfg.liquidity = LiquidityConfig {
+            max_participation_rate_bps: pt.max_participation_rate_bps,
         };
 
         let mut engine = BacktestEngine::new(cfg);
@@ -366,6 +425,12 @@ pub fn sweep_row_from_report(
         None // no losing trades (infinite profit factor) or no trades — both represented as None
     };
 
+    let rejected_liquidity_capacity_count = report
+        .orders
+        .iter()
+        .filter(|o| o.status == OrderStatus::RejectedLiquidityCapacity)
+        .count();
+
     SweepRowResult {
         rank: 0, // set by rank_sweep_results
         run_id: report.run_id.to_string(),
@@ -375,11 +440,13 @@ pub fn sweep_row_from_report(
         max_position_notional_usd: point.max_position_notional_usd,
         slippage_bps: point.slippage_bps,
         volatility_mult_bps: point.volatility_mult_bps,
+        max_participation_rate_bps: point.max_participation_rate_bps,
         total_return_pct,
         buy_and_hold_return_pct: bah,
         alpha_pct: alpha,
         max_drawdown_pct,
         fill_count: report.fills.len(),
+        rejected_liquidity_capacity_count,
         trade_count,
         win_rate_pct,
         profit_factor,

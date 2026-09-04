@@ -768,6 +768,9 @@ fn parameter_neighborhood_scenario(
         volatility_mult_bps: Vec::new(),
         max_target_qty: vec![base_config.sizing.max_target_qty],
         max_position_notional_usd: vec![base_config.sizing.max_position_notional_usd],
+        // Not swept here -- empty carries base_config's own cap through
+        // unchanged, matching volatility_mult_bps's own default-passthrough.
+        max_participation_rate_bps: Vec::new(),
     };
 
     // STRESS-ROBUSTNESS-SEMANTIC-BINDING-01: `run_sweep` calls this factory
