@@ -24,11 +24,17 @@ from mqk_research.factors.contracts import (
     NORMALIZATION_CROSS_SECTIONAL_RANK,
     TIMING_NEXT_BAR_TRADABLE,
 )
-from mqk_research.factors.diagnostics import evaluate_factor_ic_ir
+from mqk_research.factors.diagnostics import (
+    FACTOR_VALUE_COL,
+    PERIOD_COL,
+    SYMBOL_COL,
+    evaluate_factor_ic_ir,
+)
 from mqk_research.factors.null_controls import (
     CONTROL_KIND_CROSS_SECTIONAL_PERMUTATION,
     CONTROL_KIND_TEMPORAL_OFFSET,
     FactorNullControlSpec,
+    apply_cross_sectional_permutation,
     compare_real_vs_null,
     run_null_control,
 )
@@ -119,6 +125,42 @@ def _eval_spec(factor_id: str) -> FactorEvaluationSpec:
 
 def _eval_kwargs():
     return dict(n_quantiles=3, min_cross_section=3)
+
+
+# -- apply_cross_sectional_permutation stays strictly period-local --------
+# RESEARCH-FACTOR-NULL-CONTROLS-01: a direct, load-bearing negative control
+# on the production transform itself (not just the composed evaluation).
+# Two periods with deliberately DISJOINT factor-value ranges -- if the
+# permutation ever leaked across periods (e.g. a whole-panel shuffle
+# instead of a per-period groupby), a period-B value would appear in
+# period A's output, which the per-period multiset-equality check below
+# would catch immediately.
+
+def test_cross_sectional_permutation_stays_period_local():
+    label_col = "label_fwd_ret"
+    period_a = "2024-01-01T00:00:00+00:00"
+    period_b = "2024-01-02T00:00:00+00:00"
+    rows = []
+    for sym, val in zip(_symbols(4), [1.0, 2.0, 3.0, 4.0]):
+        rows.append({SYMBOL_COL: sym, PERIOD_COL: period_a, FACTOR_VALUE_COL: val, label_col: val * 10.0})
+    for sym, val in zip(_symbols(4), [101.0, 102.0, 103.0, 104.0]):
+        rows.append({SYMBOL_COL: sym, PERIOD_COL: period_b, FACTOR_VALUE_COL: val, label_col: val * 10.0})
+    original = pd.DataFrame(rows)
+
+    permuted = apply_cross_sectional_permutation(original, seed=17)
+
+    # Every period's factor-value MULTISET is preserved exactly -- proves
+    # the shuffle never draws a value from a different period.
+    for period in (period_a, period_b):
+        orig_vals = sorted(original.loc[original[PERIOD_COL] == period, FACTOR_VALUE_COL].tolist())
+        perm_vals = sorted(permuted.loc[permuted[PERIOD_COL] == period, FACTOR_VALUE_COL].tolist())
+        assert perm_vals == orig_vals, f"permutation leaked factor values across periods for {period!r}"
+
+    # Symbol/period/label stay attached to their original row identity --
+    # only factor_value is permuted.
+    orig_label_by_key = {(row[SYMBOL_COL], row[PERIOD_COL]): row[label_col] for _, row in original.iterrows()}
+    perm_label_by_key = {(row[SYMBOL_COL], row[PERIOD_COL]): row[label_col] for _, row in permuted.iterrows()}
+    assert perm_label_by_key == orig_label_by_key
 
 
 # -- known synthetic signal beats its destroyed-alignment control --------
