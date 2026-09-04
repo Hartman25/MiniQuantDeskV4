@@ -35,6 +35,7 @@ not_evaluable) never carries a `rejected_factor_ids`/`q_values` decision.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
@@ -42,7 +43,7 @@ from typing import Any, Callable, Dict, Iterable, Optional
 import pandas as pd
 
 from .contracts import EVAL_STATUS_FAILED, EVAL_STATUS_NOT_EVALUABLE, EVAL_STATUS_SUCCEEDED, FactorEvaluationSpec
-from .diagnostics import FactorDiagnosticsReport, evaluate_factor_ic_ir
+from .diagnostics import FactorDiagnosticsReport, evaluate_factor_ic_ir, observations_content_hash
 from .null_controls import CONTROL_KIND_CROSS_SECTIONAL_PERMUTATION, FactorNullControlSpec, run_null_control
 from .registry import list_factor_evaluation_attempts, list_factors
 
@@ -336,4 +337,183 @@ def build_fdr_population_report(
         "q_values": bh["q_values"],
         "rejected_factor_ids": bh["rejected_factor_ids"],
         "hypothesis_count": bh["hypothesis_count"],
+    }
+
+
+@dataclass(frozen=True)
+class FactorFDREvidenceInput:
+    """Caller-declared binding of one factor's observations to the EXACT
+    registered evaluation SLICE (factor_id, evaluation_id) they are claimed
+    to reproduce.
+
+    There is deliberately no `attempt_id` here -- naming a specific
+    attempt_id would let a caller turn outcome knowledge into authority by
+    picking a favorable succeeded attempt after a later retry of the SAME
+    evaluation_id failed. `evaluation_id` is pure identity (fixed before any
+    result is known, from `FactorEvaluationSpec`); which attempt of it is
+    authoritative is decided by the driver, deterministically and
+    result-independently -- see `run_registered_factor_family_fdr`. The
+    driver still proves the supplied `observations` really are the
+    observations that produced the authoritative attempt's real metric
+    before ever computing a p-value from them."""
+
+    factor_id: str
+    evaluation_id: str
+    observations: pd.DataFrame
+
+
+def run_registered_factor_family_fdr(
+    registry_db: Path,
+    *,
+    family: str,
+    evidence_inputs: Iterable[FactorFDREvidenceInput],
+    alpha: float,
+    n_permutations: int = 200,
+    base_seed: int = 0,
+) -> Dict[str, Any]:
+    """Production driver: the FIRST real caller connecting
+    `compute_empirical_pvalue` + `FactorPValueEvidence` +
+    `build_fdr_population_report` into one entry point.
+
+    The FULL factor population still comes from the durable registry (via
+    `build_fdr_population_report`'s own `list_factors` call) -- never from
+    `evidence_inputs`. A registered factor with no `FactorFDREvidenceInput`
+    supplied, or whose supplied evidence is not backed by a succeeded
+    authoritative attempt, simply receives no p-value and appears in the
+    final report via `build_fdr_population_report`'s own typed exclusion
+    accounting (e.g. `FDR_REASON_PVALUE_NOT_SUPPLIED`) -- supplying
+    evidence for only a "winning" subset therefore cannot manufacture a
+    `complete` report, only `incomplete`.
+
+    For each `FactorFDREvidenceInput`, the AUTHORITATIVE attempt for that
+    exact (factor_id, evaluation_id) slice is the one with the highest
+    `attempt_index` among that slice's attempts -- deterministic and
+    RESULT-INDEPENDENT, never the caller's choice of a favorable earlier
+    attempt. If that authoritative attempt did not succeed (failed,
+    not_evaluable, or still `started`/in-flight), this factor simply
+    receives NO p-value -- it is never satisfied by falling back to an
+    older succeeded attempt of the same evaluation_id;
+    `build_fdr_population_report`'s own accounting then reports the correct
+    typed reason from the factor's full attempt history.
+
+    When the authoritative attempt DID succeed, this FAILS CLOSED (raises
+    `ValueError`) unless ALL of the following hold, so a caller can never
+    bind an empirical p-value to a registered evaluation it did not
+    actually produce:
+      - `evaluation_id` matches at least one durable attempt of `factor_id`
+        (never a fabricated evaluation_id that was never attempted);
+      - the authoritative attempt's registered `factor_diagnostics`
+        artifact is itself bound to this exact `factor_id`/`evaluation_id`;
+      - `observations_content_hash(observations)` matches that artifact's
+        own recorded `input_provenance.content_sha256` -- the supplied
+        observations are provably the ones that produced the real metric,
+        never a caller-supplied replacement;
+      - the attempt's durable `metadata["diagnostic_protocol"]` (P1) is
+        present, and is the EXACT protocol used to compute the null
+        permutation draws -- there is no free-form knob override here, so
+        the null distribution can never silently diverge from the protocol
+        that produced the real registered metric.
+
+    `n_permutations`/`base_seed`/the empirical p-value protocol version are
+    methodology inputs, not factor or evaluation identity -- they are
+    returned in the report's `pvalue_method`, never folded into
+    `factor_id`/`evaluation_id`.
+    """
+    declared_factor_ids = {f["factor_id"] for f in list_factors(registry_db, family=family)}
+    evidence = []
+    for evidence_input in evidence_inputs:
+        factor_id = evidence_input.factor_id
+        if factor_id not in declared_factor_ids:
+            raise ValueError(
+                f"FDR evidence supplied for factor_id={factor_id!r}, which is outside the declared "
+                f"family={family!r} population"
+            )
+        attempts = list_factor_evaluation_attempts(registry_db, factor_id)
+        matching = [a for a in attempts if a.get("evaluation_id") == evidence_input.evaluation_id]
+        if not matching:
+            raise ValueError(
+                f"evaluation_id={evidence_input.evaluation_id!r} for factor_id={factor_id!r} does not match "
+                "any durable evaluation attempt -- refusing to accept evidence for an evaluation that was "
+                "never attempted"
+            )
+        # Deterministic, result-independent authority: the latest
+        # attempt_index for this exact (factor_id, evaluation_id) slice --
+        # never the caller's choice of a favorable earlier attempt.
+        authoritative = max(matching, key=lambda a: a["attempt_index"])
+        if authoritative["status"] != EVAL_STATUS_SUCCEEDED:
+            # The authoritative attempt for this evaluation slice did not
+            # succeed (failed / not_evaluable / still started) -- truthfully
+            # produce NO p-value for this factor rather than falling back to
+            # an older succeeded attempt of the same evaluation_id.
+            continue
+
+        artifact_path = (authoritative.get("artifact_paths") or {}).get("factor_diagnostics")
+        if not artifact_path:
+            raise ValueError(
+                f"succeeded attempt_id={authoritative['attempt_id']!r} for factor_id={factor_id!r} carries no "
+                "factor_diagnostics artifact path -- cannot verify FDR evidence content binding"
+            )
+        artifact = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+        if artifact.get("factor_id") != factor_id or artifact.get("evaluation_id") != evidence_input.evaluation_id:
+            raise ValueError(
+                f"factor_diagnostics artifact at {artifact_path!r} is not bound to factor_id={factor_id!r} / "
+                f"evaluation_id={evidence_input.evaluation_id!r} -- refusing to trust mismatched evidence"
+            )
+        supplied_content_hash = observations_content_hash(evidence_input.observations)
+        artifact_content_hash = (artifact.get("input_provenance") or {}).get("content_sha256")
+        if supplied_content_hash != artifact_content_hash:
+            raise ValueError(
+                f"supplied observations for factor_id={factor_id!r} do not match the content hash recorded "
+                f"on the registered factor_diagnostics artifact for attempt_id={authoritative['attempt_id']!r} "
+                "-- refusing to substitute different evidence for an existing registered evaluation_id"
+            )
+
+        diagnostic_protocol = (authoritative.get("metadata") or {}).get("diagnostic_protocol")
+        if not diagnostic_protocol:
+            raise ValueError(
+                f"attempt_id={authoritative['attempt_id']!r} for factor_id={factor_id!r} carries no durable "
+                "diagnostic_protocol metadata -- cannot prove which diagnostic protocol produced its real "
+                "metric, so a comparable null permutation cannot be run"
+            )
+
+        identity = authoritative["evaluation_identity"]
+        eval_spec = FactorEvaluationSpec(
+            factor_id=factor_id,
+            universe_identity=identity["universe_identity"],
+            evaluation_window_start_utc=identity["evaluation_window_start_utc"],
+            evaluation_window_end_utc=identity["evaluation_window_end_utc"],
+            label_protocol_version=identity["label_protocol_version"],
+            evaluation_protocol_version=identity["evaluation_protocol_version"],
+        )
+        real_report = FactorDiagnosticsReport(
+            status=EVAL_STATUS_SUCCEEDED,
+            metrics=(authoritative.get("result_summary") or {}).get("metrics") or {},
+        )
+        pvalue_result = compute_empirical_pvalue(
+            evidence_input.observations,
+            eval_spec,
+            real_report,
+            n_permutations=n_permutations,
+            base_seed=base_seed,
+            direction=diagnostic_protocol["direction"],
+            n_quantiles=diagnostic_protocol["n_quantiles"],
+            min_cross_section=diagnostic_protocol["min_cross_section"],
+            min_periods=diagnostic_protocol["min_periods"],
+        )
+        evidence.append(
+            FactorPValueEvidence(
+                factor_id=factor_id,
+                evaluation_id=evidence_input.evaluation_id,
+                p_value=pvalue_result["p_value"],
+            )
+        )
+
+    report = build_fdr_population_report(registry_db, family=family, p_value_evidence=evidence, alpha=alpha)
+    return {
+        **report,
+        "pvalue_method": {
+            "protocol_version": EMPIRICAL_PVALUE_PROTOCOL_VERSION,
+            "n_permutations": n_permutations,
+            "base_seed": base_seed,
+        },
     }
