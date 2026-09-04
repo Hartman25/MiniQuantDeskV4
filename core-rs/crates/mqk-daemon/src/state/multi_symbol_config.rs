@@ -11,11 +11,22 @@
 //!   `watchlist-v2` artifact (see `crate::watchlist_intake`), producing up to
 //!   `MULTI_SYMBOL_HARD_CEILING` assignments.
 //!
-//! # NOT WIRED — this patch only
-//! This module is **not called from `tick_strategy_dispatch`,
-//! `loop_runner.rs`, or `POST /api/v1/strategy/signal`**. It is a pure
-//! config-construction seam for `PER-SYMBOL-BAR-WINDOW-01` (Patch 3) and
-//! `MULTI-SYMBOL-DISPATCH-LOOP-01` (Patch 4) to consume.
+//! # Wiring status
+//! This module is **not called from the legacy single-symbol
+//! `tick_strategy_dispatch`, `loop_runner.rs`, or `POST
+//! /api/v1/strategy/signal` path** — those remain single-symbol today.
+//! It IS a real, wired config-construction seam consumed by the
+//! autonomous-operations and dynamic-selection surfaces, including:
+//! `daily_data_readiness.rs`, `routes/autonomous_daily_operator.rs`,
+//! `state/autonomous_completed_bar_task.rs`,
+//! `state/autonomous_daily_coordinator.rs` (multiple call sites),
+//! `routes/market_data_readiness.rs`, and
+//! `state/required_market_data_autofresh.rs` (all via
+//! [`build_multi_symbol_runtime_config_from_env`]), plus
+//! `state/lifecycle.rs`'s dynamic-selection start snapshot (via
+//! [`read_multi_symbol_config_raw_inputs_from_env_and_fleet`]). Treat
+//! this module as wired production config plumbing, not a dormant seam
+//! awaiting a future patch.
 //!
 //! # Fail-closed reasons
 //! [`MultiSymbolConfigError`] enumerates every way construction can fail.
