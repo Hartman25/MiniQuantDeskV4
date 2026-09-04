@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from mqk_research.exp_distributed.hashing import stable_hash
+from mqk_research.exp_distributed.hashing import short_hash, stable_hash
 
 from .contracts import (
     DIRECTION_HIGHER_IS_BETTER,
@@ -37,6 +37,7 @@ from .contracts import (
 
 FACTOR_IC_IR_PROTOCOL_VERSION = "factor_ic_ir_quantile_v1"
 IC_METHOD_SPEARMAN = "spearman_rank"
+FACTOR_DIAGNOSTICS_PROTOCOL_SCHEMA_VERSION = "factor_diagnostics_protocol_v1"
 
 SYMBOL_COL = "symbol"
 PERIOD_COL = "period_ts_utc"
@@ -61,6 +62,16 @@ NOT_EVALUABLE_DUPLICATE_OBSERVATION = "duplicate_symbol_period_observation"
 NOT_EVALUABLE_TIME_ORDER_VIOLATION = "time_order_violation"
 NOT_EVALUABLE_MISSING_CAUSAL_METADATA = "missing_causal_metadata"
 NOT_EVALUABLE_EMPTY_QUANTILE_BUCKET = "empty_quantile_bucket"
+
+
+class EvaluationWindowViolation(ValueError):
+    """Raised when an observation row's period falls outside the declared
+    FactorEvaluationSpec evaluation window -- proves the actual rows
+    consumed by `evaluate_factor_ic_ir` belong to the evaluation identity's
+    declared time slice. PIT universe membership coverage (see
+    `mqk_research.factors.universe`) does NOT substitute for this check: a
+    row can be an active universe member yet still fall outside the
+    declared evaluation window."""
 
 
 def _parse_ts(value: Any) -> datetime:
@@ -90,6 +101,55 @@ class FactorDiagnosticsReport:
 
 def _not_evaluable(reason: str) -> FactorDiagnosticsReport:
     return FactorDiagnosticsReport(status=EVAL_STATUS_NOT_EVALUABLE, reason=reason, metrics={})
+
+
+@dataclass(frozen=True)
+class FactorDiagnosticsProtocolSpec:
+    """Identity-bearing binding of every `evaluate_factor_ic_ir` knob capable
+    of changing evaluability, period inclusion, quantile construction, the
+    IC/IR/spread result, or direction interpretation.
+
+    `evaluation_protocol_version()` is the ONLY sanctioned way to derive
+    `FactorEvaluationSpec.evaluation_protocol_version` for a registered
+    diagnostic run (see `mqk_research.factors.runner`) -- a caller can never
+    supply a free-form protocol string disconnected from these knobs, so two
+    evaluations that differ in any of them can never collide under the same
+    evaluation_id (CLAUDE.md sections 6/20: semantic input changes must
+    change relevant identity).
+
+    `min_cross_section` is normalized to its EFFECTIVE resolved value (the
+    same `min_cross_section if is not None else n_quantiles` resolution
+    `evaluate_factor_ic_ir` itself performs) so an explicit value that
+    happens to equal the default does not mint a spurious new identity.
+    """
+
+    base_protocol_version: str = FACTOR_IC_IR_PROTOCOL_VERSION
+    direction: str = DIRECTION_HIGHER_IS_BETTER
+    n_quantiles: int = 5
+    min_cross_section: Optional[int] = None
+    min_periods: int = 2
+
+    def effective_min_cross_section(self) -> int:
+        return self.min_cross_section if self.min_cross_section is not None else self.n_quantiles
+
+    def identity_payload(self) -> Dict[str, Any]:
+        return {
+            "schema_version": FACTOR_DIAGNOSTICS_PROTOCOL_SCHEMA_VERSION,
+            "base_protocol_version": self.base_protocol_version,
+            "direction": self.direction,
+            "n_quantiles": self.n_quantiles,
+            "min_cross_section": self.effective_min_cross_section(),
+            "min_periods": self.min_periods,
+        }
+
+    def compute_protocol_id(self) -> str:
+        return short_hash(self.identity_payload(), length=16)
+
+    def evaluation_protocol_version(self) -> str:
+        """Deterministic string fed to `FactorEvaluationSpec` -- embeds both
+        the human-readable base protocol and a content hash of every knob, so
+        a mismatched knob always changes this string."""
+        return f"{self.base_protocol_version}:{self.compute_protocol_id()}"
 
 
 def _quantile_buckets(values: np.ndarray, n_quantiles: int) -> np.ndarray:
@@ -341,6 +401,33 @@ def compare_to_benchmark(
             report.metrics["quantile"]["top_minus_bottom_spread"] - float(bench_spread)
         )
     return comparison
+
+
+def assert_observations_within_evaluation_window(
+    observations: pd.DataFrame,
+    *,
+    evaluation_window_start_utc: str,
+    evaluation_window_end_utc: str,
+    period_col: str = PERIOD_COL,
+) -> None:
+    """Fail closed if any observation row's period falls outside the
+    declared evaluation window `[evaluation_window_start_utc,
+    evaluation_window_end_utc)` (half-open, end exclusive -- the same
+    convention as `mqk_research.factors.universe.UniverseSpec`'s coverage
+    window). An evaluation identity that declares one time window must
+    never silently consume rows outside it, regardless of whether those
+    rows would otherwise be excluded downstream (e.g. for missing
+    factor_value/label)."""
+    window_start = _parse_ts(evaluation_window_start_utc)
+    window_end = _parse_ts(evaluation_window_end_utc)
+    for _, row in observations.iterrows():
+        period_raw = row[period_col]
+        period_ts = _parse_ts(period_raw)
+        if period_ts < window_start or period_ts >= window_end:
+            raise EvaluationWindowViolation(
+                f"observation period {period_raw!r} falls outside declared evaluation window "
+                f"[{evaluation_window_start_utc}, {evaluation_window_end_utc})"
+            )
 
 
 def observations_content_hash(observations: pd.DataFrame) -> str:
