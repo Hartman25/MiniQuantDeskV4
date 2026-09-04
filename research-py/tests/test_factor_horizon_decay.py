@@ -211,6 +211,42 @@ def test_success_then_later_failed_retry_resolves_to_the_later_attempt(tmp_path)
     assert row63["mean_ic"] is None
 
 
+def test_success_then_later_started_retry_makes_member_incomplete(tmp_path):
+    """A horizon factor that succeeded, then had a SECOND attempt opened
+    under the SAME comparison scope that is still `started`, must be
+    reported incomplete immediately -- the in-flight retry supersedes the
+    older success the instant it is opened, not only once it too becomes
+    terminal, so a stale success can never be surfaced while the current
+    retry is unresolved."""
+    registry_db = tmp_path / "registry.sqlite3"
+    anchor = _run(registry_db, tmp_path / "anchor", observations=_monotonic_dataset(), spec=_spec(horizon_periods=21))
+    spec63 = _spec(horizon_periods=63)
+    first = _run(registry_db, tmp_path / "h63_a", observations=_monotonic_dataset(), spec=spec63)
+    assert first.status == EVAL_STATUS_SUCCEEDED
+
+    eval_spec = FactorEvaluationSpec(
+        factor_id=first.factor_id,
+        universe_identity=_UNIVERSE_IDENTITY,
+        evaluation_window_start_utc="2024-01-01T00:00:00+00:00",
+        evaluation_window_end_utc="2024-06-01T00:00:00+00:00",
+        label_protocol_version="fwd_ret_label_v1",
+        evaluation_protocol_version=_protocol_version_of(registry_db, first),
+    )
+    begin_factor_evaluation(registry_db, eval_spec)
+
+    attempts = list_factor_evaluation_attempts(registry_db, first.factor_id)
+    assert len(attempts) == 2
+    assert attempts[-1]["status"] == "started"
+
+    report = build_factor_horizon_decay_report(
+        registry_db, anchor_factor_id=anchor.factor_id, anchor_evaluation_id=anchor.evaluation_id
+    )
+
+    assert report["status"] == HORIZON_STATUS_INCOMPLETE
+    assert first.factor_id in report["incomplete_factor_ids"]
+    assert all(h["factor_id"] != first.factor_id for h in report["horizons"])
+
+
 def test_retry_of_same_horizon_factor_never_creates_two_points(tmp_path):
     registry_db = tmp_path / "registry.sqlite3"
     spec = _spec(horizon_periods=21)

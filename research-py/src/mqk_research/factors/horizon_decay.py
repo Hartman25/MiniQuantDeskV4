@@ -21,20 +21,26 @@ protocol identity -- everything in an evaluation identity except
 caller-named anchor evaluation, never invented.
 
 For each family member, the AUTHORITATIVE attempt is the one with the
-highest `attempt_index` among that member's attempts whose evaluation
-identity matches the comparison scope AND whose status is terminal
-(never `started`) -- this is deterministic and result-independent: a
-caller cannot select a favorable earlier attempt once a later retry of
-the same scope exists, and two attempts of the same member can never
-produce two horizon points. A family member with no terminal attempt
-under the comparison scope is reported as incomplete, never silently
-dropped from `family_identity`/`incomplete_factor_ids` accounting.
+highest `attempt_index` among ALL of that member's attempts (terminal
+or not) whose evaluation identity matches the comparison scope. If that
+authoritative attempt is still `started`, the member is incomplete: a
+later retry supersedes an older terminal attempt the instant it is
+opened, not only once it too becomes terminal, so a stale success can
+never be surfaced while a current retry of the same scope is
+unresolved. This is deterministic and result-independent: a caller
+cannot select a favorable earlier attempt once a later retry of the
+same scope exists, and two attempts of the same member can never
+produce two horizon points. A family member with no attempt under the
+comparison scope, or whose authoritative attempt is still in flight, is
+reported as incomplete, never silently dropped from
+`family_identity`/`incomplete_factor_ids` accounting.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .contracts import EVAL_STATUS_FAILED, EVAL_STATUS_NOT_EVALUABLE, EVAL_STATUS_SUCCEEDED
 from .registry import get_factor, list_factor_evaluation_attempts, list_factors
 
 FACTOR_HORIZON_DECAY_REPORT_SCHEMA_VERSION = "factor_horizon_decay_report_v2"
@@ -86,20 +92,25 @@ def build_factor_horizon_decay_report(
         apart from `factor_id`, read off one durable attempt that produced
         it.
       - AUTHORITATIVE ATTEMPT per family member: the highest
-        `attempt_index` among that member's TERMINAL attempts (never
-        `started`) whose evaluation identity matches the comparison scope.
-        This is deterministic and result-independent -- a member with a
+        `attempt_index` among ALL of that member's attempts (terminal or
+        not) whose evaluation identity matches the comparison scope. This
+        is deterministic and result-independent -- a member with a
         succeeded attempt followed by a later failed/not_evaluable retry
         of the SAME scope resolves to that later attempt, never the older
-        success; two attempts of the same member can never both appear.
+        success; and a member with a succeeded attempt followed by a
+        later, still-`started` retry of the SAME scope is incomplete
+        immediately, never the older success. Two attempts of the same
+        member can never both appear.
 
-    Fails closed (raises) if `anchor_factor_id` is unregistered or
-    `anchor_evaluation_id` does not match any of its attempts -- the
+    Fails closed (raises) if `anchor_factor_id` is unregistered,
+    `anchor_evaluation_id` does not match any of its attempts, or a
+    member's authoritative attempt carries an unrecognized status -- the
     comparison scope cannot be derived from an evaluation that was never
-    attempted. A family member with no terminal attempt under the
-    comparison scope is never silently omitted: it is recorded in
-    `incomplete_factor_ids` and the report's `status` is
-    `HORIZON_STATUS_INCOMPLETE`, never a false `complete`.
+    attempted, nor can an unrecognized status be safely classified. A
+    family member with no attempt under the comparison scope, or whose
+    authoritative attempt is still `started`, is never silently omitted:
+    it is recorded in `incomplete_factor_ids` and the report's `status`
+    is `HORIZON_STATUS_INCOMPLETE`, never a false `complete`.
     """
     anchor_factor = get_factor(registry_db, anchor_factor_id)
     family_identity = _non_horizon_identity(anchor_factor["identity"])
@@ -129,8 +140,7 @@ def build_factor_horizon_decay_report(
         matching = [
             a
             for a in attempts
-            if a["status"] != _ATTEMPT_STATUS_STARTED
-            and a.get("evaluation_identity")
+            if a.get("evaluation_identity")
             and _non_factor_evaluation_identity(a["evaluation_identity"]) == reference_evaluation_identity
         ]
         if not matching:
@@ -138,9 +148,23 @@ def build_factor_horizon_decay_report(
             continue
 
         # Deterministic, result-independent authority: the latest
-        # attempt_index among this member's terminal attempts under the
-        # comparison scope -- never a caller-selected favorable attempt.
+        # attempt_index among ALL of this member's attempts (terminal or
+        # not) under the comparison scope -- a later retry supersedes an
+        # older terminal attempt the instant it is opened, never a
+        # caller-selected favorable attempt.
         authoritative = max(matching, key=lambda a: a["attempt_index"])
+
+        if authoritative["status"] == _ATTEMPT_STATUS_STARTED:
+            # The current retry has not resolved yet -- never surface the
+            # older terminal attempt it supersedes as this member's row.
+            incomplete_factor_ids.append(factor_id)
+            continue
+        if authoritative["status"] not in (EVAL_STATUS_SUCCEEDED, EVAL_STATUS_FAILED, EVAL_STATUS_NOT_EVALUABLE):
+            raise ValueError(
+                f"factor_id={factor_id!r} authoritative attempt_id={authoritative['attempt_id']!r} has an "
+                f"unrecognized status {authoritative['status']!r}; refusing to classify it for the horizon "
+                "decay report"
+            )
 
         metrics = (authoritative.get("result_summary") or {}).get("metrics") or {}
         quantile = metrics.get("quantile") or {}
