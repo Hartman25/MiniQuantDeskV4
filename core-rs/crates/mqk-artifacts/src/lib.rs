@@ -1150,10 +1150,23 @@ pub fn write_backtest_report(
         .iter()
         .filter(|o| o.status == mqk_backtest::OrderStatus::Filled)
         .count();
+    // BKT-LIQUIDITY-CAPACITY-REJECTION-EVIDENCE-01: counts both the generic
+    // risk/allocation-cap Rejected status and the bar-volume-participation-
+    // specific RejectedLiquidityCapacity variant -- both are a refusal to
+    // fill, and this summary metric is a "how many orders were refused"
+    // total, not a reason breakdown. Reason-specific evidence remains
+    // available per-order via `BacktestOrder.status` (and, in CSV/JSON
+    // exports, the REJECTED vs REJECTED_LIQUIDITY_CAPACITY status strings).
     let orders_rejected = report
         .orders
         .iter()
-        .filter(|o| o.status == mqk_backtest::OrderStatus::Rejected)
+        .filter(|o| {
+            matches!(
+                o.status,
+                mqk_backtest::OrderStatus::Rejected
+                    | mqk_backtest::OrderStatus::RejectedLiquidityCapacity
+            )
+        })
         .count();
 
     // Equity performance.
@@ -1948,6 +1961,128 @@ mod tests {
                 stop_price_val
             );
         }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // BKT-LIQUIDITY-CAPACITY-REJECTION-EVIDENCE-01
+    // -----------------------------------------------------------------------
+
+    /// A report with one filled order, one generic risk/allocation-cap
+    /// rejection, and one bar-volume-participation-cap rejection -- proving
+    /// the two rejection reasons remain distinguishable on the same report
+    /// (neither collapses into the other's status) while both still count
+    /// toward the aggregate "orders refused" total.
+    fn test_report_with_mixed_rejections() -> BacktestReport {
+        let order_id = Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"mixed_filled");
+        let fill_id = Uuid::new_v5(&Uuid::from_bytes([1u8; 16]), order_id.as_bytes());
+        BacktestReport {
+            strategy_name: "test_strategy".to_string(),
+            run_id: Uuid::new_v5(&Uuid::from_bytes([2u8; 16]), b"mixed_run"),
+            config_id: Uuid::new_v5(&Uuid::from_bytes([3u8; 16]), b"mixed_cfg"),
+            input_data_hash: derive_input_data_hash(&[]),
+            equity_curve: vec![(1_000, 1_000_000_000), (2_000, 1_010_000_000)],
+            orders: vec![
+                BacktestOrder {
+                    order_id,
+                    signal_ts: 1_000,
+                    symbol: "SPY".to_string(),
+                    side: BacktestOrderSide::Buy,
+                    qty: 10,
+                    status: OrderStatus::Filled,
+                },
+                BacktestOrder {
+                    order_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"mixed_allocation_reject"),
+                    signal_ts: 2_000,
+                    symbol: "SPY".to_string(),
+                    side: BacktestOrderSide::Buy,
+                    qty: 10_000,
+                    status: OrderStatus::Rejected,
+                },
+                BacktestOrder {
+                    order_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"mixed_liquidity_reject"),
+                    signal_ts: 3_000,
+                    symbol: "SPY".to_string(),
+                    side: BacktestOrderSide::Sell,
+                    qty: 5_000,
+                    status: OrderStatus::RejectedLiquidityCapacity,
+                },
+            ],
+            fills: vec![BacktestFill {
+                fill_id,
+                order_id,
+                signal_ts: 1_000,
+                fill_ts: 1_000,
+                inner: Fill::new("SPY", Side::Buy, 10, 150_000_000, 5_000),
+            }],
+            last_prices: {
+                let mut m = BTreeMap::new();
+                m.insert("SPY".to_string(), 151_000_000i64);
+                m
+            },
+            first_bar_open_micros: Some(150_000_000),
+            last_bar_close_micros: Some(151_000_000),
+            ..BacktestReport::test_fixture()
+        }
+    }
+
+    /// Liquidity-capacity refusal renders as its own dedicated CSV status
+    /// string, distinguishable from the generic allocation/risk refusal --
+    /// neither collapses into the other.
+    #[test]
+    fn liquidity_capacity_rejection_is_not_generic_rejected_in_orders_csv() {
+        let tmp =
+            std::env::temp_dir().join(format!("mqk_art_test_liq_reject_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let report = test_report_with_mixed_rejections();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
+
+        let csv = std::fs::read_to_string(tmp.join("orders.csv")).unwrap();
+        assert!(
+            csv.contains("REJECTED_LIQUIDITY_CAPACITY"),
+            "orders.csv must carry the dedicated liquidity-capacity status string: {csv}"
+        );
+        // The generic allocation-cap rejection's row must still read exactly
+        // "REJECTED" and not have been reinterpreted as liquidity-specific.
+        let generic_rejected_rows = csv
+            .lines()
+            .filter(|l| l.ends_with(",REJECTED"))
+            .count();
+        assert_eq!(
+            generic_rejected_rows, 1,
+            "exactly one order must carry the plain REJECTED status: {csv}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The `orders_rejected` aggregate in metrics.json counts both refusal
+    /// reasons (a "how many orders were refused" total), while
+    /// `orders_filled` is unaffected by either rejection reason.
+    #[test]
+    fn metrics_orders_rejected_counts_both_rejection_reasons() {
+        let tmp =
+            std::env::temp_dir().join(format!("mqk_art_test_liq_metrics_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let report = test_report_with_mixed_rejections();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.join("metrics.json")).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&contents).expect("metrics.json must be valid JSON");
+
+        assert_eq!(
+            parsed["orders_rejected"], 2,
+            "orders_rejected must count both the generic Rejected and the \
+             RejectedLiquidityCapacity order: {contents}"
+        );
+        assert_eq!(
+            parsed["orders_filled"], 1,
+            "orders_filled must be unaffected by either rejection reason: {contents}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
