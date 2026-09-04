@@ -46,7 +46,8 @@ use mqk_strategy::{
 };
 
 use crate::economics::{
-    notional_micros, BacktestEconomicsLedger, BacktestEconomicsReport, BacktestInstrumentEconomics,
+    clamp_i128_to_i64, notional_micros, saturating_mul_i128, BacktestEconomicsLedger,
+    BacktestEconomicsReport, BacktestInstrumentEconomics,
 };
 use crate::types::{
     derive_input_data_hash, derive_run_id_with_semantic_identity, BacktestBar, BacktestConfig,
@@ -364,6 +365,12 @@ impl BacktestEngine {
             return Err(BacktestError::NegativeSlippage {
                 field: "volatility_mult_bps",
                 value_bps: self.config.stress.volatility_mult_bps,
+            });
+        }
+        if self.config.stress.participation_impact_bps < 0 {
+            return Err(BacktestError::NegativeSlippage {
+                field: "participation_impact_bps",
+                value_bps: self.config.stress.participation_impact_bps,
             });
         }
         Ok(())
@@ -1098,7 +1105,7 @@ impl BacktestEngine {
         };
         let is_risk_reducing = residual_increasing_qty == 0;
 
-        let fill_price = self.conservative_fill_price(bar, &exec_side);
+        let fill_price = self.conservative_fill_price(bar, &exec_side, pending.qty);
 
         if !is_risk_reducing {
             let equity = compute_equity_micros(
@@ -1208,11 +1215,24 @@ impl BacktestEngine {
     ///
     /// Patch B5 — Slippage Realism v1
     ///
-    /// Effective slippage is the sum of a flat floor and a volatility proxy:
+    /// Effective slippage is the sum of a flat floor, a volatility proxy, and
+    /// (BKT-BAR-VOLUME-IMPACT-STRESS-01) a bar-volume participation impact
+    /// component:
     /// - bar_spread_bps = (high - low) * 10_000 / close
     /// - vol_component = bar_spread_bps * volatility_mult_bps / 10_000
-    /// - effective_slippage_bps = slippage_bps + vol_component
-    fn conservative_fill_price(&self, bar: &BacktestBar, side: &ExecSide) -> i64 {
+    /// - participation_bps = min(qty * 10_000 / volume, 10_000), or 10_000
+    ///   if `volume <= 0` (unknown liquidity is priced as worst-case full
+    ///   participation, not silently ignored)
+    /// - impact_component = participation_bps * participation_impact_bps / 10_000
+    /// - effective_slippage_bps = slippage_bps + vol_component + impact_component
+    ///
+    /// `impact_component` (and the final `base * effective_slippage_bps`
+    /// multiplication, since `participation_impact_bps` is an unbounded
+    /// nonnegative i64) are computed with saturating i128 arithmetic --
+    /// see `crate::economics::saturating_mul_i128` -- so no accepted
+    /// nonnegative configuration can panic, wrap, or produce a favorable
+    /// (rather than conservative) price via overflow.
+    fn conservative_fill_price(&self, bar: &BacktestBar, side: &ExecSide, qty: i64) -> i64 {
         let base = match side {
             ExecSide::Buy => bar.high_micros,
             ExecSide::Sell => bar.low_micros,
@@ -1225,21 +1245,30 @@ impl BacktestEngine {
         };
         let vol_component = bar_spread_bps * self.config.stress.volatility_mult_bps / 10_000;
 
-        let effective_slippage_bps = self.config.stress.slippage_bps + vol_component;
+        let impact_component: i128 = if self.config.stress.participation_impact_bps == 0 {
+            0
+        } else {
+            let participation_bps: i128 = if bar.volume <= 0 {
+                10_000
+            } else {
+                ((qty as i128) * 10_000i128 / (bar.volume as i128)).min(10_000i128)
+            };
+            saturating_mul_i128(
+                participation_bps,
+                self.config.stress.participation_impact_bps as i128,
+            ) / 10_000i128
+        };
+
+        let effective_slippage_bps: i128 =
+            (self.config.stress.slippage_bps as i128) + (vol_component as i128) + impact_component;
         if effective_slippage_bps == 0 {
             return base;
         }
 
-        let adjustment = (base as i128 * effective_slippage_bps as i128) / 10_000i128;
+        let adjustment = saturating_mul_i128(base as i128, effective_slippage_bps) / 10_000i128;
         match side {
-            ExecSide::Buy => {
-                let result = base as i128 + adjustment;
-                result.min(i64::MAX as i128) as i64
-            }
-            ExecSide::Sell => {
-                let result = base as i128 - adjustment;
-                result.max(0) as i64
-            }
+            ExecSide::Buy => clamp_i128_to_i64(base as i128 + adjustment),
+            ExecSide::Sell => clamp_i128_to_i64((base as i128 - adjustment).max(0)),
         }
     }
 

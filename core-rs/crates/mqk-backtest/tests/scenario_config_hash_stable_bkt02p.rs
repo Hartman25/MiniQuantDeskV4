@@ -92,6 +92,23 @@ fn config_id_differs_on_changed_volatility_mult() {
     );
 }
 
+/// P2 identity negative control (BKT-BAR-VOLUME-IMPACT-STRESS-01):
+/// `participation_impact_bps` changes fill economics (see
+/// `scenario_bar_volume_impact_stress_01.rs`) and must therefore be bound
+/// into `config_id()` exactly like `slippage_bps`/`volatility_mult_bps`.
+#[test]
+fn config_id_differs_on_changed_participation_impact() {
+    let mut a = BacktestConfig::test_defaults();
+    a.stress.participation_impact_bps = 0;
+    let mut b = BacktestConfig::test_defaults();
+    b.stress.participation_impact_bps = 500;
+    assert_ne!(
+        a.config_id(),
+        b.config_id(),
+        "participation_impact_bps change must produce different ID"
+    );
+}
+
 #[test]
 fn config_id_differs_on_enabled_integrity() {
     let a = BacktestConfig::test_defaults(); // integrity_enabled=false

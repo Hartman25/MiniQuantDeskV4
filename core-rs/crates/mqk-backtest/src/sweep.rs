@@ -302,6 +302,10 @@ pub fn run_sweep(
         cfg.stress = StressProfile {
             slippage_bps: pt.slippage_bps,
             volatility_mult_bps: pt.volatility_mult_bps,
+            // BKT-BAR-VOLUME-IMPACT-STRESS-01: not a swept dimension --
+            // carried through from the caller's base config rather than
+            // silently reset to 0.
+            participation_impact_bps: base_config.stress.participation_impact_bps,
         };
 
         let mut engine = BacktestEngine::new(cfg);

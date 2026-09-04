@@ -53,6 +53,7 @@ fn stress_slippage_worsens_equity() {
     base_cfg.stress = StressProfile {
         slippage_bps: 0,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let mut engine_base = BacktestEngine::new(base_cfg);
@@ -64,6 +65,7 @@ fn stress_slippage_worsens_equity() {
     stressed_cfg.stress = StressProfile {
         slippage_bps: 200,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let mut engine_stressed = BacktestEngine::new(stressed_cfg);

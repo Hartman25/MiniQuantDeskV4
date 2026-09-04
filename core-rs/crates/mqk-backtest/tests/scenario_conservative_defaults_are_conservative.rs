@@ -243,6 +243,7 @@ fn test_defaults_has_zero_slippage() {
         StressProfile {
             slippage_bps: 0,
             volatility_mult_bps: 0,
+            participation_impact_bps: 0,
         },
         "test_defaults stress profile must be all-zero"
     );

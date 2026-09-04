@@ -276,6 +276,7 @@ fn test7_slippage_remains_adverse_on_the_future_bar() {
     cfg.stress = StressProfile {
         slippage_bps: 50, // 0.5% flat floor
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let bars = [

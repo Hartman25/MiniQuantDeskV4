@@ -229,12 +229,24 @@ pub struct BacktestOrder {
 /// ```text
 /// bar_spread_bps         = (high - low) * 10_000 / close   (volatility proxy)
 /// vol_component          = bar_spread_bps * volatility_mult_bps / 10_000
-/// effective_slippage_bps = slippage_bps + vol_component
+/// participation_bps      = min(qty * 10_000 / volume, 10_000)   (or 10_000 if volume <= 0)
+/// impact_component       = participation_bps * participation_impact_bps / 10_000
+/// effective_slippage_bps = slippage_bps + vol_component + impact_component
 /// ```
 /// - `slippage_bps` is a deterministic minimum floor (calibrated or stress-tested).
 /// - `volatility_mult_bps` scales slippage with actual bar volatility so that
 ///   wide-spread (volatile) bars incur more slippage than narrow ones.
 ///   A value of `0` disables the volatility component (pre-B5 behavior).
+/// - `participation_impact_bps` (BKT-BAR-VOLUME-IMPACT-STRESS-01) scales
+///   slippage with how much of the *resolving bar's own volume* the order
+///   consumes, so large-relative-to-liquidity orders incur more price
+///   impact than small ones even when neither the flat floor nor
+///   volatility component alone would flag them. `0` disables the impact
+///   component. This is BAR-VOLUME participation impact, not ADV impact --
+///   an independent, optional stress-test knob from the hard participation
+///   cap in [`LiquidityConfig`] (a reducing OR increasing order can incur
+///   impact regardless of whether it also passes, or the cap is disabled
+///   and it never faces, the capacity gate).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StressProfile {
     /// Flat slippage floor in basis points (1 bps = 0.01%).
@@ -248,6 +260,14 @@ pub struct StressProfile {
     /// Wide-spread bars automatically incur more slippage, making the model
     /// conservative for volatile market conditions.
     pub volatility_mult_bps: i64,
+
+    /// BKT-BAR-VOLUME-IMPACT-STRESS-01 — extra slippage per 100% of the
+    /// resolving bar's own volume the order consumes, in bps. `0` =
+    /// disabled (pre-existing behavior). Must be non-negative (negative
+    /// values would produce favorable fills and are rejected at run()
+    /// start, matching `slippage_bps`/`volatility_mult_bps`). See the
+    /// struct-level formula above.
+    pub participation_impact_bps: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +543,7 @@ impl BacktestConfig {
             stress: StressProfile {
                 slippage_bps: 0,
                 volatility_mult_bps: 0,
+                participation_impact_bps: 0,
             },
             // BKT-03P: zero commission for unit tests (predictable P&L)
             commission: CommissionModel::ZERO,
@@ -593,6 +614,10 @@ impl BacktestConfig {
             stress: StressProfile {
                 slippage_bps: 5,
                 volatility_mult_bps: 5_000,
+                // BKT-BAR-VOLUME-IMPACT-STRESS-01: no calibrated evidence
+                // yet for a production impact coefficient (see field doc) --
+                // left disabled here, not folded into the conservative floor.
+                participation_impact_bps: 0,
             },
             // BKT-03P: $0.005/share flat (IB tiered-1 conservative proxy; 5000 micros)
             commission: CommissionModel {
@@ -649,7 +674,7 @@ impl BacktestConfig {
         let sizing_str = self.sizing.canonical_str();
         let canonical = format!(
             "v2|ts={ts}|hist={hist}|cash={cash}|shadow={shadow}|dll={dll}|mdd={mdd}|\
-             rs={rs}|pdt={pdt}|ks={ks}|exp={exp}|slip={slip}|vol={vol}|\
+             rs={rs}|pdt={pdt}|ks={ks}|exp={exp}|slip={slip}|vol={vol}|impact={impact}|\
              comm_ps={comm_ps}|comm_bps={comm_bps}|liq={liq}|\
              int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}|{sz}",
             ts = self.timeframe_secs,
@@ -664,6 +689,7 @@ impl BacktestConfig {
             exp = self.max_gross_exposure_mult_micros,
             slip = self.stress.slippage_bps,
             vol = self.stress.volatility_mult_bps,
+            impact = self.stress.participation_impact_bps,
             comm_ps = self.commission.per_share_micros,
             comm_bps = self.commission.bps_of_notional,
             liq = self.liquidity.max_participation_rate_bps,

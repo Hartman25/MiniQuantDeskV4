@@ -810,6 +810,10 @@ pub async fn run_sweep_csv(
         cfg.stress = mqk_backtest::StressProfile {
             slippage_bps: pt.slippage_bps,
             volatility_mult_bps: pt.volatility_mult_bps,
+            // BKT-BAR-VOLUME-IMPACT-STRESS-01: not a swept dimension --
+            // carried through from the base config rather than silently
+            // reset to 0.
+            participation_impact_bps: base_cfg.stress.participation_impact_bps,
         };
 
         let mut engine = BacktestEngine::new(cfg);

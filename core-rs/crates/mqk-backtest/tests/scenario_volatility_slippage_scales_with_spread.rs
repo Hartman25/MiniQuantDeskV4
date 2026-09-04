@@ -103,6 +103,7 @@ fn zero_volatility_mult_disables_vol_component() {
     let stress = StressProfile {
         slippage_bps: 0,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let ts_base = 1_700_000_000_i64;
@@ -137,6 +138,7 @@ fn wide_spread_bars_incur_more_slippage_than_narrow() {
     let stress = StressProfile {
         slippage_bps: 0,
         volatility_mult_bps: 10_000,
+        participation_impact_bps: 0,
     };
 
     let ts_base = 1_700_000_000_i64;
@@ -169,10 +171,12 @@ fn flat_slippage_floor_still_applies_with_zero_vol_mult() {
     let no_slip = StressProfile {
         slippage_bps: 0,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
     let flat_slip = StressProfile {
         slippage_bps: 200,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     }; // 2% flat
 
     let eq_no_slip = run_flip(no_slip, bars_a);
@@ -200,10 +204,12 @@ fn combined_slippage_is_worse_than_flat_alone() {
     let flat_only = StressProfile {
         slippage_bps: 100,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
     let combined = StressProfile {
         slippage_bps: 100,
         volatility_mult_bps: 5_000,
+        participation_impact_bps: 0,
     }; // flat + 50% of spread
 
     let eq_flat = run_flip(flat_only, bars_a);
@@ -226,6 +232,7 @@ fn volatility_slippage_is_deterministic() {
     let stress = StressProfile {
         slippage_bps: 50,
         volatility_mult_bps: 7_500,
+        participation_impact_bps: 0,
     };
     let ts_base = 1_700_000_000_i64;
 

@@ -168,7 +168,7 @@ impl BacktestEconomicsReport {
 /// caller-supplied i64 magnitudes together (qty * price * multiplier),
 /// one more factor than the qty*price-only formulas in `mqk-portfolio`,
 /// which raises the realistic overflow ceiling.
-fn saturating_mul_i128(a: i128, b: i128) -> i128 {
+pub(crate) fn saturating_mul_i128(a: i128, b: i128) -> i128 {
     match a.checked_mul(b) {
         Some(v) => v,
         None if (a >= 0) == (b >= 0) => i128::MAX,
@@ -176,7 +176,7 @@ fn saturating_mul_i128(a: i128, b: i128) -> i128 {
     }
 }
 
-fn clamp_i128_to_i64(x: i128) -> i64 {
+pub(crate) fn clamp_i128_to_i64(x: i128) -> i64 {
     if x > i64::MAX as i128 {
         i64::MAX
     } else if x < i64::MIN as i128 {

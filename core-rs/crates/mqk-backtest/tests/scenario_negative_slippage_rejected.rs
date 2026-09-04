@@ -54,6 +54,7 @@ fn negative_slippage_bps_rejected() {
     cfg.stress = StressProfile {
         slippage_bps: -1,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);
@@ -76,6 +77,7 @@ fn large_negative_slippage_bps_rejected() {
     cfg.stress = StressProfile {
         slippage_bps: -9999,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);
@@ -98,6 +100,7 @@ fn negative_volatility_mult_bps_rejected() {
     cfg.stress = StressProfile {
         slippage_bps: 0,
         volatility_mult_bps: -500,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);
@@ -120,6 +123,7 @@ fn both_negative_slippage_bps_checked_first() {
     cfg.stress = StressProfile {
         slippage_bps: -10,
         volatility_mult_bps: -20,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);
@@ -144,6 +148,7 @@ fn zero_slippage_accepted() {
     cfg.stress = StressProfile {
         slippage_bps: 0,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);
@@ -162,6 +167,7 @@ fn positive_slippage_accepted() {
     cfg.stress = StressProfile {
         slippage_bps: 200,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);
@@ -179,6 +185,7 @@ fn positive_volatility_mult_accepted() {
     cfg.stress = StressProfile {
         slippage_bps: 0,
         volatility_mult_bps: 5_000,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);
@@ -196,6 +203,7 @@ fn negative_slippage_error_message_is_informative() {
     cfg.stress = StressProfile {
         slippage_bps: -42,
         volatility_mult_bps: 0,
+        participation_impact_bps: 0,
     };
 
     let mut engine = BacktestEngine::new(cfg);

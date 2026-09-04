@@ -108,6 +108,7 @@ fn golden_vector_matches_real_engine_fill_prices() {
         cfg.stress = StressProfile {
             slippage_bps: case.slippage_bps,
             volatility_mult_bps: case.volatility_mult_bps,
+            participation_impact_bps: 0,
         };
 
         let (bars, plan, expected_fill_count) = match case.side.as_str() {
