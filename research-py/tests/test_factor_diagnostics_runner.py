@@ -28,11 +28,12 @@ from mqk_research.factors.contracts import (
 )
 from mqk_research.factors.diagnostics import EvaluationWindowViolation
 from mqk_research.factors.registry import get_factor, list_factor_evaluation_attempts, list_factors
-from mqk_research.factors.runner import run_registered_factor_diagnostics
+from mqk_research.factors.runner import UNIVERSE_MODE_FIXED_EX_ANTE, run_registered_factor_diagnostics
 
 N_SYMBOLS = 6
 N_PERIODS = 8
 _FAR_FUTURE_LABEL_END = "2099-01-01T00:00:00+00:00"
+_UNIVERSE_IDENTITY = {"universe_id": "sp500_pit_v1", "universe_mode": UNIVERSE_MODE_FIXED_EX_ANTE}
 
 
 def _periods():
@@ -81,7 +82,7 @@ def _spec(**overrides) -> FactorSpec:
         horizon_periods=21,
         normalization=NORMALIZATION_CROSS_SECTIONAL_RANK,
         direction=DIRECTION_HIGHER_IS_BETTER,
-        universe_identity={"universe_id": "sp500_pit_v1"},
+        universe_identity=_UNIVERSE_IDENTITY,
         data_provenance_identity={"provider": "alpaca"},
         timing_convention=TIMING_NEXT_BAR_TRADABLE,
         information_lag_periods=1,
@@ -94,7 +95,7 @@ def _run(registry_db, out_dir, *, observations, spec=None, **overrides):
     kwargs = dict(
         factor_spec=spec or _spec(),
         observations=observations,
-        universe_identity={"universe_id": "sp500_pit_v1"},
+        universe_identity=_UNIVERSE_IDENTITY,
         evaluation_window_start_utc="2024-01-01T00:00:00+00:00",
         evaluation_window_end_utc="2024-06-01T00:00:00+00:00",
         label_protocol_version="fwd_ret_label_v1",

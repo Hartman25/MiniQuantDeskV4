@@ -18,11 +18,35 @@ durably visible via
 silently dropped. No hand-built winner-only registration: this is the
 only sanctioned path for producing an authoritative registered
 factor-diagnostics artifact.
+
+RESEARCH-POINT-IN-TIME-UNIVERSE-01: callers pass exactly one of
+`universe_identity` (a fixed, ex-ante declared universe label -- legal,
+but never mislabeled point-in-time) or `pit_universe` (a real
+`mqk_research.factors.universe.UniverseSpec`). Which mode was used is
+NOT just informational: PIT and fixed-ex-ante execute genuinely
+different membership rules (PIT proves every observation row's own
+universe membership at its own period; fixed-ex-ante does not), so the
+resolved mode is baked directly into the bound `universe_identity`
+payload (`{"universe_mode": ..., **declared_identity}`, mode always
+resolved server-side last) -- a fixed-ex-ante call and a PIT call can
+therefore never collide under the same `evaluation_id` merely because
+the caller passed the same underlying universe dictionary/coverage
+data, and a caller can never spoof `metadata["universe_mode"]` into
+claiming proven PIT authority for an unproven fixed-ex-ante run: that
+metadata key is always overwritten from the actual resolved mode, never
+caller-supplied.
+
+`factor_spec.universe_identity` must equal this resolved (mode-tagged)
+evaluation universe identity -- these are two already identity-bearing
+authorities and this runner never leaves them silently contradictory.
+Callers register a factor already declaring the universe (and mode) it
+will be evaluated against; this is never silently rewritten here.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -42,8 +66,47 @@ from .diagnostics import (
     observations_content_hash,
 )
 from .registry import begin_factor_evaluation, finalize_factor_evaluation, register_factor
+from .universe import UniverseSpec, assert_observations_within_universe, universe_identity_binding
 
-__all__ = ["RegisteredFactorDiagnosticsResult", "run_registered_factor_diagnostics"]
+# Authoritative, server-resolved universe-mode tag folded into the bound
+# evaluation universe_identity -- never accepted verbatim from a caller
+# (see module docstring). A fixed-ex-ante and a point-in-time evaluation of
+# otherwise-identical universe content therefore always mint different
+# evaluation identities.
+UNIVERSE_MODE_FIXED_EX_ANTE = "fixed_ex_ante"
+UNIVERSE_MODE_POINT_IN_TIME = "point_in_time"
+
+__all__ = [
+    "UNIVERSE_MODE_FIXED_EX_ANTE",
+    "UNIVERSE_MODE_POINT_IN_TIME",
+    "RegisteredFactorDiagnosticsResult",
+    "run_registered_factor_diagnostics",
+]
+
+
+def _parse_ts(value: str) -> datetime:
+    return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+
+
+def _assert_window_within_universe_coverage(
+    pit_universe: UniverseSpec, evaluation_window_start_utc: str, evaluation_window_end_utc: str
+) -> None:
+    """Fail closed unless the DECLARED evaluation window lies entirely
+    within `pit_universe`'s declared PIT coverage window -- membership is
+    UNKNOWN outside that window, so a wider evaluation window is never
+    proven PIT authority no matter which rows the caller happened to
+    supply."""
+    window_start = _parse_ts(evaluation_window_start_utc)
+    window_end = _parse_ts(evaluation_window_end_utc)
+    coverage_start = _parse_ts(pit_universe.coverage_start_utc)
+    coverage_end = _parse_ts(pit_universe.coverage_end_utc)
+    if window_start < coverage_start or window_end > coverage_end:
+        raise ValueError(
+            f"evaluation window [{evaluation_window_start_utc}, {evaluation_window_end_utc}] exceeds "
+            f"universe {pit_universe.universe_name!r}'s declared PIT coverage "
+            f"[{pit_universe.coverage_start_utc}, {pit_universe.coverage_end_utc}) -- membership is "
+            "unproven outside declared coverage"
+        )
 
 
 @dataclass(frozen=True)
@@ -67,10 +130,11 @@ def run_registered_factor_diagnostics(
     *,
     factor_spec: FactorSpec,
     observations: pd.DataFrame,
-    universe_identity: Dict[str, Any],
     evaluation_window_start_utc: str,
     evaluation_window_end_utc: str,
     label_protocol_version: str,
+    universe_identity: Optional[Dict[str, Any]] = None,
+    pit_universe: Optional[UniverseSpec] = None,
     n_quantiles: int = 5,
     min_cross_section: Optional[int] = None,
     min_periods: int = 2,
@@ -103,6 +167,18 @@ def run_registered_factor_diagnostics(
     checked in addition to, and independently of, any PIT universe
     membership check.
 
+    Exactly one of `universe_identity` or `pit_universe` is required. Pass
+    `universe_identity` for a fixed, ex-ante declared universe (legal, but
+    it is the caller's responsibility to label it truthfully). Pass
+    `pit_universe` (a real `UniverseSpec`) for a proven point-in-time
+    evaluation: its `universe_identity_binding` becomes part of this
+    evaluation's bound identity, the declared evaluation window must lie
+    entirely within its coverage window, and every observation row is
+    proven an active member at its own period before the diagnostic runs.
+    Either way, `factor_spec.universe_identity` must already equal the
+    resolved (mode-tagged) evaluation universe identity -- this is never
+    silently reconciled.
+
     There is deliberately no free-form `evaluation_protocol_version`
     parameter here: every knob capable of changing the diagnostic result
     (direction, n_quantiles, min_cross_section, min_periods) is bound into
@@ -121,6 +197,33 @@ def run_registered_factor_diagnostics(
     registry_db = Path(registry_db)
     out_dir = Path(out_dir)
 
+    if (universe_identity is None) == (pit_universe is None):
+        raise ValueError(
+            "run_registered_factor_diagnostics requires exactly one of universe_identity "
+            "(a fixed, ex-ante declared universe) or pit_universe (a real point-in-time "
+            "UniverseSpec) -- never both, never neither"
+        )
+    actual_universe_mode = UNIVERSE_MODE_POINT_IN_TIME if pit_universe is not None else UNIVERSE_MODE_FIXED_EX_ANTE
+    declared_universe_identity = (
+        universe_identity_binding(pit_universe) if pit_universe is not None else universe_identity
+    )
+    # The resolved mode is baked directly into the bound universe_identity
+    # (last, so it always wins) -- PIT and fixed-ex-ante can never collide
+    # under the same evaluation_id merely because the underlying universe
+    # content happens to match.
+    resolved_universe_identity = {**declared_universe_identity, "universe_mode": actual_universe_mode}
+    if factor_spec.universe_identity != resolved_universe_identity:
+        raise ValueError(
+            "run_registered_factor_diagnostics requires factor_spec.universe_identity to already equal "
+            f"the resolved (mode-tagged) evaluation universe identity; factor_spec.universe_identity="
+            f"{factor_spec.universe_identity!r} but the resolved evaluation universe identity is "
+            f"{resolved_universe_identity!r} -- these are never silently reconciled"
+        )
+    # universe_mode is authoritative, server-resolved diagnostic metadata --
+    # never accepted from a caller-supplied value, so a fixed-ex-ante run can
+    # never be labeled "point_in_time" in durable attempt metadata either.
+    resolved_metadata = {**(metadata or {}), "universe_mode": actual_universe_mode}
+
     factor_id = register_factor(registry_db, factor_spec)
     resolved_direction = factor_spec.direction
 
@@ -133,18 +236,30 @@ def run_registered_factor_diagnostics(
 
     eval_spec = FactorEvaluationSpec(
         factor_id=factor_id,
-        universe_identity=universe_identity,
+        universe_identity=resolved_universe_identity,
         evaluation_window_start_utc=evaluation_window_start_utc,
         evaluation_window_end_utc=evaluation_window_end_utc,
         label_protocol_version=label_protocol_version,
         evaluation_protocol_version=protocol_spec.evaluation_protocol_version(),
     )
-    attempt_metadata = {**(metadata or {}), "diagnostic_protocol": protocol_spec.identity_payload()}
+    attempt_metadata = {**resolved_metadata, "diagnostic_protocol": protocol_spec.identity_payload()}
     attempt_id, evaluation_id, attempt_index = begin_factor_evaluation(
         registry_db, eval_spec, origin=origin, metadata=attempt_metadata
     )
 
     try:
+        if pit_universe is not None:
+            # The DECLARED window must lie entirely within the universe's
+            # proven PIT coverage -- checked before any row, since a window
+            # that exceeds membership coverage is not proven PIT authority
+            # regardless of which specific rows happen to fall inside it.
+            _assert_window_within_universe_coverage(
+                pit_universe, evaluation_window_start_utc, evaluation_window_end_utc
+            )
+            # Fail closed on any row whose symbol was not an active
+            # universe member at its own period -- no survivorship
+            # shortcut, no fallback to current/most-recent membership.
+            assert_observations_within_universe(observations, pit_universe)
         # The declared evaluation window is a component of evaluation_id
         # (FactorEvaluationSpec.identity_payload()) -- every row actually
         # consumed below must be proven to belong to it, or the identity is

@@ -33,11 +33,12 @@ from mqk_research.factors.horizon_decay import (
     build_factor_horizon_decay_report,
 )
 from mqk_research.factors.registry import begin_factor_evaluation, list_factor_evaluation_attempts, register_factor
-from mqk_research.factors.runner import run_registered_factor_diagnostics
+from mqk_research.factors.runner import UNIVERSE_MODE_FIXED_EX_ANTE, run_registered_factor_diagnostics
 
 N_SYMBOLS = 6
 N_PERIODS = 8
 _FAR_FUTURE_LABEL_END = "2099-01-01T00:00:00+00:00"
+_UNIVERSE_IDENTITY = {"universe_id": "sp500_pit_v1", "universe_mode": UNIVERSE_MODE_FIXED_EX_ANTE}
 
 
 def _periods():
@@ -101,7 +102,7 @@ def _spec(**overrides) -> FactorSpec:
         horizon_periods=21,
         normalization=NORMALIZATION_CROSS_SECTIONAL_RANK,
         direction=DIRECTION_HIGHER_IS_BETTER,
-        universe_identity={"universe_id": "sp500_pit_v1"},
+        universe_identity=_UNIVERSE_IDENTITY,
         data_provenance_identity={"provider": "alpaca"},
         timing_convention=TIMING_NEXT_BAR_TRADABLE,
         information_lag_periods=1,
@@ -114,7 +115,7 @@ def _run(registry_db, out_dir, *, observations, spec, **overrides):
     kwargs = dict(
         factor_spec=spec,
         observations=observations,
-        universe_identity={"universe_id": "sp500_pit_v1"},
+        universe_identity=_UNIVERSE_IDENTITY,
         evaluation_window_start_utc="2024-01-01T00:00:00+00:00",
         evaluation_window_end_utc="2024-06-01T00:00:00+00:00",
         label_protocol_version="fwd_ret_label_v1",
@@ -273,7 +274,7 @@ def test_in_flight_attempt_is_not_authoritative_and_leaves_report_incomplete(tmp
     factor_id = register_factor(registry_db, spec63)
     eval_spec = FactorEvaluationSpec(
         factor_id=factor_id,
-        universe_identity={"universe_id": "sp500_pit_v1"},
+        universe_identity=_UNIVERSE_IDENTITY,
         evaluation_window_start_utc="2024-01-01T00:00:00+00:00",
         evaluation_window_end_utc="2024-06-01T00:00:00+00:00",
         label_protocol_version="fwd_ret_label_v1",
@@ -315,21 +316,29 @@ def test_different_evaluation_window_leaves_member_incomplete(tmp_path):
     assert all(h["horizon_periods"] != 63 for h in report["horizons"])
 
 
-def test_different_universe_leaves_member_incomplete(tmp_path):
+def test_different_universe_is_a_different_family_not_an_incomplete_member(tmp_path):
+    """universe_identity is bound into FactorSpec identity itself (the
+    runner requires factor_spec.universe_identity to already equal the
+    resolved evaluation universe identity) -- a genuinely different
+    universe therefore produces a genuinely different factor_id, which
+    falls outside the anchor's horizon family entirely, exactly like an
+    unrelated factor identity. It can never masquerade as a same-family
+    "incomplete" member."""
     registry_db = tmp_path / "registry.sqlite3"
     r21 = _run(registry_db, tmp_path / "h21", observations=_monotonic_dataset(), spec=_spec(horizon_periods=21))
+    different_universe_identity = {"universe_id": "different_universe_v1", "universe_mode": UNIVERSE_MODE_FIXED_EX_ANTE}
     _run(
         registry_db,
         tmp_path / "h63",
         observations=_monotonic_dataset(),
-        spec=_spec(horizon_periods=63),
-        universe_identity={"universe_id": "different_universe_v1"},
+        spec=_spec(horizon_periods=63, universe_identity=different_universe_identity),
+        universe_identity=different_universe_identity,
     )
 
     report = build_factor_horizon_decay_report(
         registry_db, anchor_factor_id=r21.factor_id, anchor_evaluation_id=r21.evaluation_id
     )
-    assert report["status"] == HORIZON_STATUS_INCOMPLETE
+    assert report["status"] == HORIZON_STATUS_COMPLETE
     assert all(h["horizon_periods"] != 63 for h in report["horizons"])
 
 
