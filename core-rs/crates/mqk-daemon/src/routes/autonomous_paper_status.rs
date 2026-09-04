@@ -104,7 +104,14 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
                     live_routing_enabled,
                     runtime_status: "unavailable".to_string(),
                     arm_state: "unavailable".to_string(),
-                    kill_switch_active: false,
+                    // KILL-SWITCH-AUTONOMOUS-PAPER-STATUS-FAIL-CLOSED-01: the
+                    // durable kill-switch truth is UNKNOWN here (the status
+                    // snapshot read itself failed), never a confirmed-clear
+                    // reading -- mirrors RiskSummaryResponse's fail-closed
+                    // `kill_switch_active=true` when `truth_state != "active"`
+                    // (OPERATOR-RISK-UNKNOWN-TRUTH-01). Unavailable truth must
+                    // never be represented as a known-inactive kill switch.
+                    kill_switch_active: true,
                     deadman_status: "unavailable".to_string(),
                     ws_continuity: st.alpaca_ws_continuity().await.as_status_str().to_string(),
                     reconcile_status: "unavailable".to_string(),

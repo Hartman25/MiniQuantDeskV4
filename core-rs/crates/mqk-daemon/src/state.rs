@@ -1426,6 +1426,31 @@ fn calendar_spec_for_deployment(
     }
 }
 
+/// KILL-SWITCH-FAIL-CLOSED-READ-ERROR-VERIFY-01: forces a `StatusSnapshot`'s
+/// kill-switch truth closed when the durable arm-state read failed, no
+/// matter which lifecycle-branch classification (running/unknown/halted/
+/// idle, from an in-flight local loop OR a durable run's own status)
+/// produced `snapshot`. `GET /api/v1/system/status` derives
+/// `kill_switch_active` as `state == "halted"`, so `state` itself -- not
+/// only `integrity_armed` -- must fail closed here.
+///
+/// `active_run_id`/`deadman_status`/`deadman_last_heartbeat_utc` are left
+/// exactly as classified: a genuinely active durable run is never pretended
+/// to have vanished merely to make `state` say "halted". `read_failed_note`
+/// is `None` on the success path (including the legitimate `Ok(None)` "no
+/// durable arm row yet" case), in which case `snapshot` passes through
+/// unchanged.
+fn apply_arm_state_read_failure_override(
+    mut snapshot: StatusSnapshot,
+    read_failed_note: Option<&str>,
+) -> StatusSnapshot {
+    if let Some(note) = read_failed_note {
+        snapshot.state = "halted".to_string();
+        snapshot.notes = Some(note.to_string());
+    }
+    snapshot
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None)
@@ -4556,12 +4581,35 @@ operator_reconcile_or_repair_required"
         let mut locally_halted = integrity.halted;
         drop(integrity);
 
+        // KILL-SWITCH-FAIL-CLOSED-READ-ERROR-VERIFY-01: a durable-state read
+        // failure must never be represented to callers as inactive/safe/not
+        // halted. `Ok(None)` (no durable row yet) is a legitimate EMPTY --
+        // the in-memory integrity state stands. `Err(_)` is UNAVAILABLE, and
+        // must fail closed rather than silently keeping whatever the
+        // in-memory value happened to be a moment ago (which could easily be
+        // stale/wrong, e.g. right after a restart racing a transient DB
+        // blip) -- mirrors `risk_summary`'s `query_failed -> blocked=true`
+        // (OPERATOR-RISK-UNKNOWN-TRUTH-01) and `try_autonomous_arm_typed`'s
+        // refuse-on-error handling of this identical read.
+        let mut arm_state_read_failed = false;
         if let Some(db) = self.db.as_ref() {
-            if let Ok(Some((state, reason))) = mqk_db::load_arm_state(db).await {
-                integrity_armed = state == "ARMED";
-                locally_halted = matches!(reason.as_deref(), Some("OperatorHalt"));
+            match mqk_db::load_arm_state(db).await {
+                Ok(Some((state, reason))) => {
+                    integrity_armed = state == "ARMED";
+                    locally_halted = matches!(reason.as_deref(), Some("OperatorHalt"));
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    integrity_armed = false;
+                    locally_halted = true;
+                    arm_state_read_failed = true;
+                }
             }
         }
+        let arm_state_read_failed_note = arm_state_read_failed.then(|| {
+            "durable arm-state read failed; kill switch status is failing closed (halted)"
+                .to_string()
+        });
         let cached_notes = self.status.read().await.notes.clone();
 
         let snapshot = match self.db.as_ref() {
@@ -4671,7 +4719,7 @@ operator_reconcile_or_repair_required"
                                     .to_string(),
                             )
                         } else {
-                            reaped_note.clone().or(cached_notes)
+                            reaped_note.or(cached_notes)
                         },
                         integrity_armed,
                         deadman_status: "inactive".to_string(),
@@ -4699,6 +4747,14 @@ operator_reconcile_or_repair_required"
                 deadman_last_heartbeat_utc: None,
             },
         };
+
+        // KILL-SWITCH-FAIL-CLOSED-READ-ERROR-VERIFY-01: applied AFTER every
+        // lifecycle-branch classification above, regardless of which one
+        // produced `snapshot` (running/unknown/halted/idle) -- a durable
+        // arm-state read failure must fail closed no matter what the
+        // DURABLE RUN's own status happened to be, not only the no-run
+        // branches that used to check it inline.
+        let snapshot = apply_arm_state_read_failure_override(snapshot, arm_state_read_failed_note.as_deref());
 
         self.publish_status(snapshot.clone()).await;
         Ok(snapshot)
@@ -5825,6 +5881,74 @@ fn autonomous_truth_event_parts(
 mod tests {
     use super::*;
     use mqk_execution::ReconcileGate;
+
+    // KILL-SWITCH-FAIL-CLOSED-READ-ERROR-VERIFY-01: mutation-tests the pure
+    // override seam directly, rather than requiring a full DB-backed active
+    // durable run fixture -- proves an arm-state read failure forces
+    // `state="halted"` regardless of which lifecycle classification
+    // (running/unknown) the branches above it produced, and that
+    // `active_run_id`/deadman evidence is never fabricated away.
+    fn sentinel_running_snapshot() -> StatusSnapshot {
+        StatusSnapshot {
+            daemon_uptime_secs: 1,
+            active_run_id: Some(Uuid::nil()),
+            state: "running".to_string(),
+            notes: Some("daemon owns active execution loop".to_string()),
+            integrity_armed: true,
+            deadman_status: "ok".to_string(),
+            deadman_last_heartbeat_utc: Some("2026-01-01T00:00:00Z".to_string()),
+        }
+    }
+
+    fn sentinel_unknown_snapshot() -> StatusSnapshot {
+        StatusSnapshot {
+            daemon_uptime_secs: 1,
+            active_run_id: Some(Uuid::nil()),
+            state: "unknown".to_string(),
+            notes: Some(
+                "durable run is active but this daemon does not own a live execution loop"
+                    .to_string(),
+            ),
+            integrity_armed: true,
+            deadman_status: "ok".to_string(),
+            deadman_last_heartbeat_utc: Some("2026-01-01T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn arm_read_failure_override_forces_halted_from_running_classification() {
+        let snapshot = apply_arm_state_read_failure_override(
+            sentinel_running_snapshot(),
+            Some("durable arm-state read failed; kill switch status is failing closed (halted)"),
+        );
+        assert_eq!(snapshot.state, "halted");
+        assert!(snapshot.notes.as_deref().unwrap().contains("durable arm-state read failed"));
+        // Active-run evidence is preserved, never pretended to have vanished.
+        assert_eq!(snapshot.active_run_id, Some(Uuid::nil()));
+        assert_eq!(snapshot.deadman_status, "ok");
+    }
+
+    #[test]
+    fn arm_read_failure_override_forces_halted_from_unknown_classification() {
+        let snapshot = apply_arm_state_read_failure_override(
+            sentinel_unknown_snapshot(),
+            Some("durable arm-state read failed; kill switch status is failing closed (halted)"),
+        );
+        assert_eq!(snapshot.state, "halted");
+        assert_eq!(snapshot.active_run_id, Some(Uuid::nil()));
+    }
+
+    #[test]
+    fn arm_read_failure_override_is_a_noop_when_read_did_not_fail() {
+        // Ok(None) (no durable arm row yet) is a legitimate EMPTY, distinct
+        // from Err -- must never be treated as a read failure.
+        let snapshot = apply_arm_state_read_failure_override(sentinel_running_snapshot(), None);
+        assert_eq!(snapshot.state, "running");
+        assert_eq!(
+            snapshot.notes.as_deref(),
+            Some("daemon owns active execution loop")
+        );
+    }
 
     #[test]
     fn runtime_selection_defaults_to_paper_paper_blocked() {
