@@ -157,6 +157,14 @@ pub enum OrderStatus {
     /// rejected it once the future fill price became known); no fill was
     /// produced.
     Rejected,
+    /// BKT-BAR-VOLUME-PARTICIPATION-CAP-01: the order was refused
+    /// specifically because it would have exceeded
+    /// `LiquidityConfig.max_participation_rate_bps` of the resolving bar's
+    /// own reported volume. Distinct from the generic [`OrderStatus::Rejected`]
+    /// (risk or allocation-cap refusal) so capacity analysis can attribute
+    /// rejections to market-liquidity constraints specifically, rather than
+    /// to risk/exposure policy.
+    RejectedLiquidityCapacity,
     /// This order triggered (or was caught by) a risk halt. No fill for
     /// the intent itself, but a flatten-all sequence may follow.
     HaltTriggered,
@@ -305,6 +313,44 @@ impl CommissionModel {
 }
 
 // ---------------------------------------------------------------------------
+// LiquidityConfig
+// ---------------------------------------------------------------------------
+
+/// Resolving-bar volume participation cap for fill admission.
+///
+/// # BKT-BAR-VOLUME-PARTICIPATION-CAP-01
+///
+/// An order whose quantity would require consuming more than
+/// `max_participation_rate_bps` of the *resolving bar's own reported
+/// volume* is refused outright — never partially filled, never silently
+/// assumed fillable. This is deliberately NOT an average-daily-volume (ADV)
+/// or any other multi-bar/lookback capacity model: the denominator is
+/// exactly one bar's own `volume` field, nothing more. True trailing ADV
+/// capacity is a separate, not-yet-designed capability
+/// (`BKT-TRUE-ADV-CAPACITY-AUTHORITY`).
+///
+/// Unknown/non-positive bar volume is treated as zero capacity while the
+/// cap is active (fail closed), matching the existing allocation-cap
+/// precedent of atomic accept/reject with no partial fill.
+///
+/// `0` (the default) disables the cap entirely, preserving pre-existing
+/// engine behavior for every backtest that does not opt in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiquidityConfig {
+    /// Maximum fraction of the resolving bar's own `volume` a single order
+    /// may consume, in basis points (`10_000` = 100% of that bar's
+    /// volume). `0` = disabled. Valid range: `0..=10_000`.
+    pub max_participation_rate_bps: i64,
+}
+
+impl LiquidityConfig {
+    /// No cap (pre-existing engine behavior).
+    pub const DISABLED: Self = Self {
+        max_participation_rate_bps: 0,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // StrategySizingConfig
 // ---------------------------------------------------------------------------
 
@@ -407,6 +453,15 @@ pub struct BacktestConfig {
     /// `conservative_defaults` uses a realistic flat-per-share commission.
     pub commission: CommissionModel,
 
+    /// BKT-BAR-VOLUME-PARTICIPATION-CAP-01 — resolving-bar volume
+    /// participation cap.
+    ///
+    /// Defaults to [`LiquidityConfig::DISABLED`] in both `test_defaults` and
+    /// `conservative_defaults`: this is opt-in capacity analysis, not a
+    /// standing risk gate, and existing fixtures/promotion baselines carry
+    /// no expectation of bar-volume-driven rejections.
+    pub liquidity: LiquidityConfig,
+
     // --- PATCH 22: Integrity gate ---
     /// If true, enable integrity checks per bar (stale/gap/disagreement).
     /// When integrity disarms or halts, execution is blocked.
@@ -471,6 +526,8 @@ impl BacktestConfig {
             },
             // BKT-03P: zero commission for unit tests (predictable P&L)
             commission: CommissionModel::ZERO,
+            // BKT-BAR-VOLUME-PARTICIPATION-CAP-01: no cap for unit tests
+            liquidity: LiquidityConfig::DISABLED,
             // PATCH 22: integrity off by default (backwards compat)
             integrity_enabled: false,
             integrity_stale_threshold_ticks: 0,
@@ -542,6 +599,9 @@ impl BacktestConfig {
                 per_share_micros: 5_000,
                 bps_of_notional: 0,
             },
+            // BKT-BAR-VOLUME-PARTICIPATION-CAP-01: opt-in capacity analysis,
+            // not a standing conservative-defaults gate (see field doc comment).
+            liquidity: LiquidityConfig::DISABLED,
             // Integrity ON — mirrors runtime.stale_data_threshold_seconds: 120
             integrity_enabled: true,
             integrity_stale_threshold_ticks: 120,
@@ -590,7 +650,7 @@ impl BacktestConfig {
         let canonical = format!(
             "v2|ts={ts}|hist={hist}|cash={cash}|shadow={shadow}|dll={dll}|mdd={mdd}|\
              rs={rs}|pdt={pdt}|ks={ks}|exp={exp}|slip={slip}|vol={vol}|\
-             comm_ps={comm_ps}|comm_bps={comm_bps}|\
+             comm_ps={comm_ps}|comm_bps={comm_bps}|liq={liq}|\
              int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}|{sz}",
             ts = self.timeframe_secs,
             hist = self.bar_history_len,
@@ -606,6 +666,7 @@ impl BacktestConfig {
             vol = self.stress.volatility_mult_bps,
             comm_ps = self.commission.per_share_micros,
             comm_bps = self.commission.bps_of_notional,
+            liq = self.liquidity.max_participation_rate_bps,
             int = self.integrity_enabled as u8,
             stale = self.integrity_stale_threshold_ticks,
             gap = self.integrity_gap_tolerance_bars,

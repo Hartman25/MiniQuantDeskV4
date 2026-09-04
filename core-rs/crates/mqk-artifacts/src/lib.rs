@@ -1084,6 +1084,7 @@ pub fn write_backtest_report(
             mqk_backtest::OrderStatus::HaltTriggered => "HALT_TRIGGERED",
             mqk_backtest::OrderStatus::UnfilledEndOfData => "UNFILLED_END_OF_DATA",
             mqk_backtest::OrderStatus::CanceledOnHalt => "CANCELED_ON_HALT",
+            mqk_backtest::OrderStatus::RejectedLiquidityCapacity => "REJECTED_LIQUIDITY_CAPACITY",
         };
         // 9 columns: ts_utc,order_id,symbol,side,qty,order_type,limit_price,stop_price,status
         // Backtest orders are always MARKET with no limit or stop price (both empty).

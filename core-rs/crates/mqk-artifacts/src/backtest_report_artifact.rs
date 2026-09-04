@@ -99,6 +99,7 @@ enum OrderStatusDto {
     HaltTriggered,
     UnfilledEndOfData,
     CanceledOnHalt,
+    RejectedLiquidityCapacity,
 }
 
 impl From<&OrderStatus> for OrderStatusDto {
@@ -109,6 +110,7 @@ impl From<&OrderStatus> for OrderStatusDto {
             OrderStatus::HaltTriggered => OrderStatusDto::HaltTriggered,
             OrderStatus::UnfilledEndOfData => OrderStatusDto::UnfilledEndOfData,
             OrderStatus::CanceledOnHalt => OrderStatusDto::CanceledOnHalt,
+            OrderStatus::RejectedLiquidityCapacity => OrderStatusDto::RejectedLiquidityCapacity,
         }
     }
 }
@@ -121,6 +123,7 @@ impl From<OrderStatusDto> for OrderStatus {
             OrderStatusDto::HaltTriggered => OrderStatus::HaltTriggered,
             OrderStatusDto::UnfilledEndOfData => OrderStatus::UnfilledEndOfData,
             OrderStatusDto::CanceledOnHalt => OrderStatus::CanceledOnHalt,
+            OrderStatusDto::RejectedLiquidityCapacity => OrderStatus::RejectedLiquidityCapacity,
         }
     }
 }

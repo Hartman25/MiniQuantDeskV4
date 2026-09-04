@@ -100,6 +100,13 @@ pub enum BacktestError {
     /// Matches [`crate::market_frame::MarketFrameError::DuplicateBar`]'s
     /// contract.
     DuplicateBar { symbol: String, end_ts: i64 },
+    /// BKT-BAR-VOLUME-PARTICIPATION-CAP-01 -- `max_participation_rate_bps`
+    /// must satisfy `0 <= value <= 10_000`. A negative value has no
+    /// coherent capacity meaning and would silently disable the cap (the
+    /// enforcement check only activates when the field is strictly
+    /// positive) rather than being rejected; a value above `10_000` would
+    /// claim more than 100% of a bar's own volume as admissible.
+    InvalidLiquidityConfig { value_bps: i64 },
 }
 
 impl core::fmt::Display for BacktestError {
@@ -135,6 +142,11 @@ impl core::fmt::Display for BacktestError {
                 f,
                 "duplicate bar for symbol={} end_ts={}: ambiguous data provenance, refusing to guess a winner",
                 symbol, end_ts
+            ),
+            BacktestError::InvalidLiquidityConfig { value_bps } => write!(
+                f,
+                "invalid liquidity config rejected: max_participation_rate_bps = {} (must satisfy 0 <= value <= 10_000)",
+                value_bps
             ),
         }
     }
@@ -370,10 +382,25 @@ impl BacktestEngine {
         Ok(())
     }
 
+    /// BKT-BAR-VOLUME-PARTICIPATION-CAP-01 -- Validate the bar-volume
+    /// participation cap before executing any bars. `0` disables the cap;
+    /// any other value must fall within `0..=10_000` (a value above
+    /// `10_000` would claim more than 100% of a bar's own volume).
+    fn validate_liquidity_config(&self) -> Result<(), BacktestError> {
+        let rate_bps = self.config.liquidity.max_participation_rate_bps;
+        if !(0..=10_000).contains(&rate_bps) {
+            return Err(BacktestError::InvalidLiquidityConfig {
+                value_bps: rate_bps,
+            });
+        }
+        Ok(())
+    }
+
     /// Run the backtest on a sequence of bars.
     pub fn run(&mut self, bars: &[BacktestBar]) -> Result<BacktestReport, BacktestError> {
         self.validate_stress_profile()?;
         self.validate_economics()?;
+        self.validate_liquidity_config()?;
 
         // BKT-PROV-01: hash the full bar sequence before processing any bars so the
         // run identity encodes the actual input data, not just strategy + config.
@@ -981,6 +1008,18 @@ impl BacktestEngine {
     /// ledger are only ever touched on a successful fill -- never at signal
     /// time, never for a rejected order.
     ///
+    /// BKT-BAR-VOLUME-PARTICIPATION-CAP-01: unlike the allocation cap below
+    /// (which exempts purely risk-reducing orders because it is a
+    /// portfolio-risk/exposure gate), the bar-volume participation cap
+    /// applies to every order this function resolves, risk-reducing or not
+    /// -- a large closing SELL consumes the resolving bar's own liquidity
+    /// exactly as a large opening BUY would. It is a physical market-
+    /// capacity constraint, orthogonal to portfolio risk direction.
+    ///
+    /// Emergency forced-flatten (`flatten_all`) resolves fills through its
+    /// own code path, not this one, and is deliberately unaffected by
+    /// either cap.
+    ///
     /// FINAL-WAVE-2-REPAIR (mission Section 3F, defect B): a reversal order
     /// (e.g. current +40, target -100 -> SELL 140) is NOT wholly
     /// risk-reducing merely because its side opposes a nonzero current
@@ -1001,6 +1040,41 @@ impl BacktestEngine {
     /// bypass admission for the risk-increasing shares that ride along with
     /// them.
     fn resolve_one_pending_order(&mut self, pending: PendingBacktestOrder, bar: &BacktestBar) {
+        // BKT-BAR-VOLUME-PARTICIPATION-CAP-01: a pure market-capacity gate,
+        // independent of the allocation-cap's risk/exposure math below -- a
+        // large risk-REDUCING order consumes just as much of the resolving
+        // bar's own liquidity as a risk-increasing one, so this check runs
+        // on the whole `pending.qty` before any risk-reducing/increasing
+        // decomposition. (Forced risk flatten does not route through this
+        // function at all -- see `flatten_all` -- so it is unaffected.)
+        // Atomic accept/reject, no partial fill, mirroring the allocation
+        // cap's own no-partial-fill precedent. Non-positive or unknown bar
+        // volume is treated as zero capacity while the cap is active (fail
+        // closed) rather than silently assumed unlimited.
+        let rate_bps = self.config.liquidity.max_participation_rate_bps;
+        if rate_bps > 0 {
+            let cap_qty: i64 = if bar.volume <= 0 {
+                0
+            } else {
+                // rate_bps is validated to 0..=10_000 at run() start, so
+                // cap_qty <= bar.volume <= i64::MAX -- the i128 intermediate
+                // is defensive clarity, not a required overflow guard.
+                let cap_i128 = (bar.volume as i128) * (rate_bps as i128) / 10_000i128;
+                cap_i128.min(i64::MAX as i128) as i64
+            };
+            if pending.qty > cap_qty {
+                self.orders.push(BacktestOrder {
+                    order_id: pending.order_id,
+                    signal_ts: pending.signal_ts,
+                    symbol: pending.symbol,
+                    side: pending.side,
+                    qty: pending.qty,
+                    status: OrderStatus::RejectedLiquidityCapacity,
+                });
+                return;
+            }
+        }
+
         let exec_side = match pending.side {
             BacktestOrderSide::Buy => ExecSide::Buy,
             BacktestOrderSide::Sell => ExecSide::Sell,
