@@ -28,8 +28,16 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\Export-ResearchEvidence
 
 Store `manifest.json` alongside the run directory (or wherever your archive
 process keeps sidecar metadata) before copying the run elsewhere for
-retention. The manifest records each file's relative path, byte count, and
-SHA-256 — never file contents, environment variables, or credentials.
+retention. The manifest records a schema version, a file count, and each
+file's relative path, byte count, and SHA-256 — never file contents,
+environment variables, or credentials, and never the absolute path the
+evidence happened to be created from (so byte-identical evidence produces a
+byte-identical manifest regardless of where on disk it is stored).
+
+Reparse points (symlinks/junctions) anywhere under `EvidenceRoot` are
+unsupported and cause creation to refuse outright — this tool's exact-
+evidence-set contract cannot be honored for content that may not be a plain
+on-disk file.
 
 ## Verify a run directory (e.g. after a restore)
 
@@ -42,9 +50,21 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\Export-ResearchEvidence
 
 Exit code `0` means every file the manifest declares exists at the exact
 declared byte count and hash, **and** no undeclared extra file is present
-under the evidence root (verification is strict). Exit code `1` means the
-evidence set should not be trusted — missing file, altered content, wrong
-size, an unexpected extra file, or a malformed/tampered manifest.
+under the evidence root (verification is strict). This proves the files on
+disk match the supplied manifest — it does **not** prove the manifest itself
+was never maliciously replaced; the manifest is a checksum sidecar, not a
+self-authenticating signed artifact (see "What this does NOT do" below).
+
+Exit code `1` means the supplied manifest should not be trusted against the
+evidence set it was compared to. Causes include:
+
+- the manifest is malformed, carries an unsupported `schema_version`, or is
+  otherwise internally inconsistent (e.g. `file_count` does not match the
+  number of declared file entries);
+- evidence relative to the manifest was altered, is missing, or has an
+  unexpected extra file;
+- a reparse point (symlink/junction) is present under `EvidenceRoot` or
+  along a declared file's path.
 
 ## What this does NOT do
 
@@ -54,8 +74,16 @@ size, an unexpected extra file, or a malformed/tampered manifest.
 - Does not infer economic or statistical meaning from the evidence — a
   passing hash proves the bytes are unchanged, not that the research
   conclusions they represent are correct.
+- A passing verification proves the files on disk match the *supplied*
+  manifest. It does **not** prove the manifest itself is the manifest an
+  operator originally generated — a checksum sidecar is not self-
+  authenticating. If an attacker can replace both the evidence and its
+  manifest together, this tool cannot detect that on its own; it is not a
+  signing/PKI mechanism and this patch does not add one.
 
 See `tests/script_guards/test_export_research_evidence_manifest.ps1` for the
-disposable-fixture proof (create/verify round trip plus the negative
-controls: mutated content, deleted/added/renamed files, wrong byte count,
-malformed manifest, path traversal, and deterministic re-run).
+disposable-fixture proof (create/verify round trip; negative controls for
+mutated content, deleted/added/renamed files, wrong byte count, malformed
+manifest, path traversal, unsupported/missing `schema_version`, wrong/missing
+`file_count`, and reparse points under `EvidenceRoot`; deterministic re-run;
+cross-directory byte-identical manifest content; and no-BOM UTF-8 output).

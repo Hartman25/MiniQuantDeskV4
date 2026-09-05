@@ -29,8 +29,11 @@
 # inferred economic/statistical meaning. A hash proves integrity, not
 # authority -- this tool makes no claim about data provenance or correctness.
 #
-# Reparse points (symlinks/junctions) are never followed during enumeration,
-# in either mode, to avoid escaping EvidenceRoot or looping.
+# Reparse points (symlinks/junctions) beneath EvidenceRoot are unsupported by
+# this tool and cause a fail-closed refusal in BOTH create and verify mode --
+# they are never silently skipped and never followed, so a reparse point can
+# neither escape the manifest's exact-evidence-set contract nor be used to
+# smuggle content into or out of EvidenceRoot undetected.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Export-ResearchEvidenceManifest.ps1 `
@@ -65,9 +68,13 @@ function Write-Sect { param([string]$M) Write-Host ''; Write-Host "=== $M ===" -
 $ManifestSchemaVersion = 'mqk-research-evidence-manifest-v1'
 
 # -----------------------------------------------------------------------------
-# Enumerate regular files under $RootFull without ever descending into or
-# returning a reparse point (symlink/junction) -- Get-ChildItem -Recurse alone
-# does not guarantee that on Windows, so recursion is done manually here.
+# Enumerate regular files under $RootFull. Any reparse point (symlink/
+# junction) encountered anywhere beneath the root -- as a directory or as a
+# file -- is a fail-closed refusal, not a silent skip: this tool's exact-
+# evidence-set contract cannot be honored for content that may not be a plain
+# on-disk file. Recursion is done manually (rather than Get-ChildItem
+# -Recurse) so each entry's reparse-point attribute can be checked before it
+# is ever descended into.
 # -----------------------------------------------------------------------------
 function Get-EvidenceFiles {
     param([Parameter(Mandatory = $true)][string]$RootFull)
@@ -82,7 +89,7 @@ function Get-EvidenceFiles {
         foreach ($entry in $entries) {
             $isReparse = (([int]$entry.Attributes) -band ([int][System.IO.FileAttributes]::ReparsePoint)) -ne 0
             if ($isReparse) {
-                continue
+                throw "Reparse point (symlink/junction) is unsupported beneath EvidenceRoot: $($entry.FullName)"
             }
             if ($entry.PSIsContainer) {
                 $stack.Push($entry.FullName)
@@ -99,6 +106,34 @@ function Get-RelativePath {
     return $FullPath.Substring($RootFull.Length).TrimStart('\')
 }
 
+# -----------------------------------------------------------------------------
+# Walk every path component of a manifest-declared relative path, from
+# EvidenceRoot down to the leaf, and refuse if any intermediate component is
+# itself a reparse point. This is checked independently of Get-EvidenceFiles
+# because the per-declared-entry verification path resolves and hashes a
+# candidate file directly -- it must not be possible for a declared path to
+# traverse a reparse-point component (e.g. a directory replaced by a
+# junction) to reach content outside, or elsewhere on, disk.
+# -----------------------------------------------------------------------------
+function Assert-NoReparseInPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootFull,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+    $current = $RootFull
+    foreach ($part in ($RelativePath -split '[\\/]')) {
+        if ([string]::IsNullOrEmpty($part)) { continue }
+        $current = Join-Path $current $part
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            $isReparse = (([int]$item.Attributes) -band ([int][System.IO.FileAttributes]::ReparsePoint)) -ne 0
+            if ($isReparse) {
+                throw "Reparse point (symlink/junction) is unsupported beneath EvidenceRoot: $current"
+            }
+        }
+    }
+}
+
 if (-not (Test-Path -LiteralPath $EvidenceRoot -PathType Container)) {
     Write-Fail "EvidenceRoot not found or not a directory: $EvidenceRoot"
     exit 1
@@ -112,7 +147,13 @@ if (-not $Verify) {
     # -------------------------------------------------------------------
     Write-Sect 'Create manifest'
 
-    $files = Get-EvidenceFiles -RootFull $rootFull
+    $files = $null
+    try {
+        $files = Get-EvidenceFiles -RootFull $rootFull
+    } catch {
+        Write-Fail "Refusing to create manifest: $($_.Exception.Message)"
+        exit 1
+    }
     $entries = New-Object 'System.Collections.Generic.List[object]'
     foreach ($f in $files) {
         if ($f.FullName -ieq $manifestFullTarget) {
@@ -132,9 +173,12 @@ if (-not $Verify) {
     $sortedEntries = $entries.ToArray()
     [Array]::Sort($sortedEntries, [Comparison[object]] { param($a, $b) [string]::CompareOrdinal($a.relative_path, $b.relative_path) })
 
+    # evidence_root is deliberately NOT recorded: it is a caller-supplied
+    # execution parameter, not evidence content, and including an absolute
+    # path here would make byte-identical evidence stored at different
+    # filesystem locations produce different manifest bytes.
     $manifest = [ordered]@{
         schema_version = $ManifestSchemaVersion
-        evidence_root  = $rootFull
         file_count     = $sortedEntries.Count
         files          = $sortedEntries
     }
@@ -143,7 +187,13 @@ if (-not $Verify) {
     if ($manifestDir -and -not (Test-Path -LiteralPath $manifestDir)) {
         New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
     }
-    ($manifest | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $manifestFullTarget -Encoding UTF8 -NoNewline
+    # Explicit no-BOM UTF-8 via .NET, independent of whether this script runs
+    # under Windows PowerShell 5.1 or pwsh -- their `-Encoding UTF8` BOM
+    # defaults are not identical, and the operator runbook invokes
+    # `powershell` while CI guards run under `pwsh`.
+    $manifestJson = $manifest | ConvertTo-Json -Depth 8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($manifestFullTarget, $manifestJson, $utf8NoBom)
 
     Write-Ok "Manifest written: $manifestFullTarget ($($sortedEntries.Count) file(s))"
     exit 0
@@ -168,11 +218,33 @@ try {
     exit 1
 }
 
+$schemaVersion = $null
+try { $schemaVersion = [string]$manifestObj.schema_version } catch {}
+if ([string]::IsNullOrWhiteSpace($schemaVersion) -or ($schemaVersion -ne $ManifestSchemaVersion)) {
+    Write-Fail "Manifest schema_version is missing or unsupported (expected '$ManifestSchemaVersion', got '$schemaVersion') -- refusing to trust an unknown schema."
+    exit 1
+}
+
 if ($null -eq $manifestObj.files) {
     Write-Fail "Manifest has no 'files' array -- refusing to trust a malformed manifest."
     exit 1
 }
 $declaredFiles = @($manifestObj.files)
+
+$fileCountRaw = $null
+try { $fileCountRaw = $manifestObj.file_count } catch {}
+$fileCountWellFormed = ($null -ne $fileCountRaw) -and ($fileCountRaw -is [int] -or $fileCountRaw -is [long] -or $fileCountRaw -is [double]) `
+    -and -not [double]::IsNaN([double]$fileCountRaw) -and -not [double]::IsInfinity([double]$fileCountRaw) `
+    -and ([double]$fileCountRaw -ge 0) -and ([double]$fileCountRaw -le [long]::MaxValue) `
+    -and ([double]$fileCountRaw -eq [math]::Floor([double]$fileCountRaw))
+if (-not $fileCountWellFormed) {
+    Write-Fail "Manifest file_count is missing or not a well-formed nonnegative integer -- refusing to trust a malformed manifest."
+    exit 1
+}
+if ([int64]$fileCountRaw -ne $declaredFiles.Count) {
+    Write-Fail "Manifest file_count ($([int64]$fileCountRaw)) does not match the number of declared 'files' entries ($($declaredFiles.Count)) -- refusing to trust an internally inconsistent manifest."
+    exit 1
+}
 
 $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 $verifiedRelPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -205,6 +277,14 @@ foreach ($entry in $declaredFiles) {
 
     if (-not $seenPaths.Add($relPath)) {
         Write-Fail "Manifest lists duplicate path -- refusing to trust an ambiguous manifest: $relPath"
+        $failed = $true
+        continue
+    }
+
+    try {
+        Assert-NoReparseInPath -RootFull $rootFull -RelativePath $relPath
+    } catch {
+        Write-Fail "Reparse point in manifest-declared path -- refusing: $relPath ($($_.Exception.Message))"
         $failed = $true
         continue
     }
@@ -253,7 +333,14 @@ foreach ($entry in $declaredFiles) {
 # declared in the manifest also fails the run (covers silent additions and
 # the "new name" half of a rename).
 $manifestFullSelf = [System.IO.Path]::GetFullPath($ManifestPath)
-$actualFiles = Get-EvidenceFiles -RootFull $rootFull
+$actualFiles = $null
+try {
+    $actualFiles = Get-EvidenceFiles -RootFull $rootFull
+} catch {
+    Write-Fail "Refusing to trust evidence set: $($_.Exception.Message)"
+    $failed = $true
+    $actualFiles = @()
+}
 foreach ($f in $actualFiles) {
     if ($f.FullName -ieq $manifestFullSelf) {
         continue
