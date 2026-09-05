@@ -4602,10 +4602,13 @@ pub struct StrategyPerformanceRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyRiskVisibility {
     /// Closed vocabulary, in precedence order:
-    /// - `"unavailable"` -- upstream P3 performance authority is not active
-    ///   (structurally unreachable today since a row only exists when the
-    ///   response's own `truth_state == "active"`; included for completeness
-    ///   of the precedence rule).
+    /// - `"unavailable"` -- EITHER upstream P3 performance authority is not
+    ///   active (structurally unreachable today since a row only exists when
+    ///   the response's own `truth_state == "active"`; included for
+    ///   completeness of the precedence rule), OR the durable suppression
+    ///   read itself failed (`suppression_truth_state == "query_failed"`) --
+    ///   an unreadable suppression truth must never be silently treated as
+    ///   "no suppression" (WAVE05-P5-SUPPRESSION-READ-FAIL-CLOSED-REPAIR-01).
     /// - `"suppressed"` -- an active durable strategy suppression exists for
     ///   this `strategy_id` (suppression is keyed by `strategy_id`, NOT
     ///   fingerprint -- see `active_strategy_suppression`'s doc).
@@ -4623,14 +4626,28 @@ pub struct StrategyRiskVisibility {
     /// `"observational_high_volatility_context"` (informational ONLY -- this
     /// flag alone never changes `risk_visibility_state`).
     pub risk_flags: Vec<String>,
-    /// `true` when a durable `sys_strategy_suppressions` row is currently
-    /// `active` for this exact `strategy_id`. Suppression is keyed by
-    /// `strategy_id`, NOT `(strategy_id, strategy_semantic_fingerprint)` --
-    /// an active suppression for strategy A applies operationally to EVERY
-    /// semantic version (fingerprint) of A under the current admission gate,
-    /// and this field is `true` on every one of that strategy_id's rows,
-    /// never fingerprint-specific.
-    pub active_strategy_suppression: bool,
+    /// WAVE05-P5-SUPPRESSION-READ-FAIL-CLOSED-REPAIR-01: the exact,
+    /// distinguishable truth of the durable `sys_strategy_suppressions` read
+    /// this row is built from -- closed vocabulary:
+    /// - `"active"` -- the query succeeded and found an active suppression.
+    /// - `"not_active"` -- the query succeeded and found none.
+    /// - `"query_failed"` -- the durable suppression truth could not be read
+    ///   at all. This is NEVER collapsed into `"not_active"` (that would be
+    ///   fail-open visibility) -- it instead forces `risk_visibility_state ==
+    ///   "unavailable"`; see `active_strategy_suppression`'s doc for how this
+    ///   maps onto that field.
+    pub suppression_truth_state: String,
+    /// `Some(true)` when `suppression_truth_state == "active"`, `Some(false)`
+    /// when `"not_active"`, `None` when `"query_failed"` -- the query failure
+    /// is NEVER reported as `Some(false)` ("not_active"), which would be
+    /// fail-open visibility hiding an unreadable suppression truth behind an
+    /// apparently-clean state. Suppression is keyed by `strategy_id`, NOT
+    /// `(strategy_id, strategy_semantic_fingerprint)` -- an active
+    /// suppression for strategy A applies operationally to EVERY semantic
+    /// version (fingerprint) of A under the current admission gate, and this
+    /// field is `Some(true)` on every one of that strategy_id's rows, never
+    /// fingerprint-specific.
+    pub active_strategy_suppression: Option<bool>,
     pub active_suppression_id: Option<String>,
     pub active_suppression_trigger_domain: Option<String>,
     pub active_suppression_trigger_reason: Option<String>,

@@ -649,20 +649,27 @@ fn compute_attribution_coverage(fragments: &[ClosureFragment]) -> Vec<StrategyPe
 // one suppression lookup the caller performs and passes in).
 // ---------------------------------------------------------------------------
 
-/// P5.3 closed-vocabulary precedence: `unavailable` > `suppressed` >
-/// `insufficient_data` > `watch` > `normal`. `upstream_active` is always
-/// `true` at the one call site in this file today (a row only exists when
-/// the response's own `truth_state == "active"`) -- the parameter exists so
-/// this pure function's full precedence order stays independently testable.
+/// WAVE05-P5-SUPPRESSION-READ-FAIL-CLOSED-REPAIR-01 / P5.3 closed-vocabulary
+/// precedence: `unavailable` (upstream inactive OR suppression query failed)
+/// > `suppressed` > `insufficient_data` > `watch` > `normal`.
+/// `upstream_active` is always `true` at the one call site in this file today
+/// (a row only exists when the response's own `truth_state == "active"`) --
+/// the parameter exists so this pure function's full precedence order stays
+/// independently testable. `suppression_truth_state` must be exactly one of
+/// `"active"`, `"not_active"`, or `"query_failed"` -- a query failure fails
+/// closed to `"unavailable"`, never silently treated as `"not_active"`.
 fn classify_risk_visibility_state(
     upstream_active: bool,
-    suppression_active: bool,
+    suppression_truth_state: &str,
     decay_state: &str,
 ) -> &'static str {
     if !upstream_active {
         return "unavailable";
     }
-    if suppression_active {
+    if suppression_truth_state == "query_failed" {
+        return "unavailable";
+    }
+    if suppression_truth_state == "active" {
         return "suppressed";
     }
     if decay_state == "insufficient_data" {
@@ -749,20 +756,29 @@ async fn resolve_risk_visibility(
     coverage_has_manual_mixed: bool,
     regime_kind_is_high_volatility: bool,
 ) -> StrategyRiskVisibility {
-    let suppression = match mqk_db::fetch_active_suppression_for_strategy(db, strategy_id).await {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::warn!(
-                error = %err, strategy_id,
-                "strategy_performance_suppression_query_failed"
-            );
-            None
-        }
-    };
-    let suppression_active = suppression.is_some();
+    // WAVE05-P5-SUPPRESSION-READ-FAIL-CLOSED-REPAIR-01: distinguish
+    // "the query succeeded and found none" from "the query failed" -- an
+    // unreadable suppression truth must never be collapsed into `None`
+    // (fail-open "no active suppression"). `suppression` stays `None` on a
+    // query failure (no id/domain/reason to surface), but
+    // `suppression_truth_state` records the failure distinctly so the
+    // precedence classifier can fail closed to `"unavailable"`.
+    let (suppression_truth_state, suppression) =
+        match mqk_db::fetch_active_suppression_for_strategy(db, strategy_id).await {
+            Ok(Some(s)) => ("active", Some(s)),
+            Ok(None) => ("not_active", None),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err, strategy_id,
+                    "strategy_performance_suppression_query_failed"
+                );
+                ("query_failed", None)
+            }
+        };
+    let suppression_active = suppression_truth_state == "active";
 
     let risk_visibility_state =
-        classify_risk_visibility_state(true, suppression_active, decay_state);
+        classify_risk_visibility_state(true, suppression_truth_state, decay_state);
     let recommended_operator_action = recommended_operator_action(risk_visibility_state);
     let risk_flags = compute_risk_flags(
         suppression_active,
@@ -774,10 +790,19 @@ async fn resolve_risk_visibility(
         regime_kind_is_high_volatility,
     );
 
+    // Never report `Some(false)` ("not_active") on a query failure -- that
+    // would be exactly the fail-open behavior this repair closes.
+    let active_strategy_suppression = match suppression_truth_state {
+        "active" => Some(true),
+        "not_active" => Some(false),
+        _ => None,
+    };
+
     StrategyRiskVisibility {
         risk_visibility_state: risk_visibility_state.to_string(),
         risk_flags,
-        active_strategy_suppression: suppression_active,
+        suppression_truth_state: suppression_truth_state.to_string(),
+        active_strategy_suppression,
         active_suppression_id: suppression.as_ref().map(|s| s.suppression_id.to_string()),
         active_suppression_trigger_domain: suppression.as_ref().map(|s| s.trigger_domain.clone()),
         active_suppression_trigger_reason: suppression.as_ref().map(|s| s.trigger_reason.clone()),
@@ -958,11 +983,11 @@ mod tests {
     #[test]
     fn risk_visibility_state_unavailable_when_upstream_not_active() {
         assert_eq!(
-            classify_risk_visibility_state(false, true, "decay_observed"),
+            classify_risk_visibility_state(false, "active", "decay_observed"),
             "unavailable"
         );
         assert_eq!(
-            classify_risk_visibility_state(false, false, "no_expectancy_sign_flip"),
+            classify_risk_visibility_state(false, "not_active", "no_expectancy_sign_flip"),
             "unavailable"
         );
     }
@@ -972,27 +997,43 @@ mod tests {
         // Even a decay_observed strategy must report "suppressed", not "watch",
         // once an active suppression exists.
         assert_eq!(
-            classify_risk_visibility_state(true, true, "decay_observed"),
+            classify_risk_visibility_state(true, "active", "decay_observed"),
             "suppressed"
+        );
+    }
+
+    /// SUP-R3 (unit level): a suppression query failure fails closed to
+    /// `"unavailable"` -- never `"not_active"`'s ordinary decay precedence,
+    /// even when decay/suppression would otherwise report "normal".
+    #[test]
+    fn risk_visibility_state_query_failed_is_unavailable_not_normal() {
+        assert_eq!(
+            classify_risk_visibility_state(true, "query_failed", "no_expectancy_sign_flip"),
+            "unavailable"
+        );
+        assert_eq!(
+            classify_risk_visibility_state(true, "query_failed", "insufficient_data"),
+            "unavailable",
+            "query_failed must outrank insufficient_data too"
         );
     }
 
     #[test]
     fn risk_visibility_state_insufficient_data_and_watch_and_normal() {
         assert_eq!(
-            classify_risk_visibility_state(true, false, "insufficient_data"),
+            classify_risk_visibility_state(true, "not_active", "insufficient_data"),
             "insufficient_data"
         );
         assert_eq!(
-            classify_risk_visibility_state(true, false, "decay_observed"),
+            classify_risk_visibility_state(true, "not_active", "decay_observed"),
             "watch"
         );
         assert_eq!(
-            classify_risk_visibility_state(true, false, "no_expectancy_sign_flip"),
+            classify_risk_visibility_state(true, "not_active", "no_expectancy_sign_flip"),
             "normal"
         );
         assert_eq!(
-            classify_risk_visibility_state(true, false, "improvement_observed"),
+            classify_risk_visibility_state(true, "not_active", "improvement_observed"),
             "normal"
         );
     }

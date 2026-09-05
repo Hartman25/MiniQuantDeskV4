@@ -341,6 +341,7 @@ async fn p5_01_active_suppression_is_suppressed() {
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
         assert_eq!(row["risk_visibility"]["risk_visibility_state"], "suppressed", "row={row}");
+        assert_eq!(row["risk_visibility"]["suppression_truth_state"], "active", "row={row}");
         assert_eq!(row["risk_visibility"]["active_strategy_suppression"], true);
         assert_eq!(row["risk_visibility"]["active_suppression_id"], suppression_id.to_string());
         assert_eq!(row["risk_visibility"]["active_suppression_trigger_domain"], "risk");
@@ -466,6 +467,8 @@ async fn p5_05_no_sign_flip_no_suppression_is_normal() {
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
         assert_eq!(row["decay_monitor"]["decay_state"], "no_expectancy_sign_flip");
         assert_eq!(row["risk_visibility"]["risk_visibility_state"], "normal", "row={row}");
+        assert_eq!(row["risk_visibility"]["suppression_truth_state"], "not_active", "row={row}");
+        assert_eq!(row["risk_visibility"]["active_strategy_suppression"], false);
         assert_eq!(row["risk_visibility"]["recommended_operator_action"], "none");
         assert_eq!(row["risk_visibility"]["risk_flags"], serde_json::json!([]));
     })
@@ -577,6 +580,52 @@ async fn p5_07_08_09_coverage_flags_surface_on_every_row() {
 // ---------------------------------------------------------------------------
 // See routes::strategy_performance::tests::recommended_action_mapping_is_exact
 // in-crate for the exhaustive pure mapping proof.
+
+// ---------------------------------------------------------------------------
+// SUP-R3 -- a real suppression-query FAILURE (not merely "none found") must
+// fail closed through the actual GET route: unavailable / query_failed /
+// insufficient_evidence, and NEVER normal/watch/not_active.
+//
+// WAVE05-P5-SUPPRESSION-READ-FAIL-CLOSED-REPAIR-01: the prior behavior
+// collapsed `fetch_active_suppression_for_strategy(...) -> Err` into `None`
+// ("no active suppression"), which could report normal/watch/insufficient_data
+// when suppression truth was actually unreadable. This drives the failure
+// through the real route rather than unit-testing the pure classifier alone.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sup_r3_suppression_query_failure_fails_closed_through_real_route() {
+    mqk_db::run_isolated("sup_r3_query_failed", |pool| async move {
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let run_id = seed_run(&st).await;
+        let sid = unique_id("strat");
+        let fp = fingerprint('z');
+        // Otherwise-valid P3/P4 evidence -- upstream authority IS active.
+        round_trip(&pool, run_id, 0, "AAPL", &sid, &fp, 10, at()).await;
+        seed_accounting_state(&pool, run_id, 10).await;
+
+        // Make ONLY the suppression lookup fail, inside this disposable DB.
+        sqlx::query("ALTER TABLE sys_strategy_suppressions RENAME TO sys_strategy_suppressions_test_dropped")
+            .execute(&pool)
+            .await
+            .expect("rename suppression table for test");
+
+        let perf = fetch_performance(&st, run_id).await;
+        assert_eq!(perf["truth_state"], "active", "upstream P3 authority must still be active; perf={perf}");
+        let row = find_row(&perf, &sid, &fp).expect("row must exist");
+        assert_eq!(row["risk_visibility"]["suppression_truth_state"], "query_failed", "row={row}");
+        assert_eq!(row["risk_visibility"]["active_strategy_suppression"], serde_json::Value::Null, "row={row}");
+        assert_eq!(row["risk_visibility"]["risk_visibility_state"], "unavailable", "row={row}");
+        assert_eq!(row["risk_visibility"]["recommended_operator_action"], "insufficient_evidence", "row={row}");
+        assert_eq!(row["risk_visibility"]["active_suppression_id"], serde_json::Value::Null);
+        for forbidden in ["normal", "watch", "not_active"] {
+            assert_ne!(row["risk_visibility"]["risk_visibility_state"], forbidden, "row={row}");
+        }
+    })
+    .await;
+}
 
 // ---------------------------------------------------------------------------
 // P5-12 -- route call produces zero mutation
