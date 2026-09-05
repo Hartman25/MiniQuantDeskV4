@@ -4238,18 +4238,103 @@ pub struct PaperJournalAdmissionRow {
     pub provenance_ref: String,
 }
 
+/// One fill row in the paper journal, with durable strategy lineage attached.
+///
+/// WAVE05-PAPER-JOURNAL-STRATEGY-LINEAGE-01: `strategy_id` and
+/// `strategy_semantic_fingerprint` are recovered from the EXACT originating
+/// outbox row via `fill_quality_telemetry.internal_order_id ==
+/// oms_outbox.idempotency_key` (unique index `uq_outbox_idempotency`) —
+/// never inferred by symbol, timestamp proximity, current strategy
+/// assignment, or current registry/promotion state. See
+/// `strategy_attribution_state` for why a field is `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalFillRow {
+    pub telemetry_id: Uuid,
+    pub run_id: Uuid,
+    pub internal_order_id: String,
+    pub broker_order_id: Option<String>,
+    pub broker_fill_id: Option<String>,
+    pub broker_message_id: String,
+    pub symbol: String,
+    /// `"buy"` or `"sell"`
+    pub side: String,
+    pub ordered_qty: i64,
+    pub fill_qty: i64,
+    pub fill_price_micros: i64,
+    /// `None` for market orders.
+    pub reference_price_micros: Option<i64>,
+    /// `None` when reference_price_micros is absent.
+    pub slippage_bps: Option<i64>,
+    pub submit_ts_utc: Option<String>,
+    pub fill_received_at_utc: String,
+    pub submit_to_fill_ms: Option<i64>,
+    /// `"partial_fill"` or `"final_fill"`
+    pub fill_kind: String,
+    pub provenance_ref: String,
+    pub created_at_utc: String,
+    /// Durable `order_json.strategy_id` from the originating outbox row.
+    /// `None` for manual/non-strategy orders and when
+    /// `strategy_attribution_state == "lineage_missing"`.
+    pub strategy_id: Option<String>,
+    /// Durable `order_json.strategy_semantic_fingerprint` from the
+    /// originating decision. `None` for manual orders, for legacy strategy
+    /// orders persisted before fingerprint capture, and when
+    /// `strategy_attribution_state == "lineage_missing"`. Never re-derived
+    /// from current registry/promotion state.
+    pub strategy_semantic_fingerprint: Option<String>,
+    /// - `"attributed"` — originating outbox row found, run-coherent, and
+    ///   carries a well-formed `strategy_id`.
+    /// - `"unattributed_manual"` — originating outbox row found, run-coherent,
+    ///   but carries no `strategy_id` and no strategy signal provenance;
+    ///   genuine absence, not corruption.
+    /// - `"lineage_missing"` — `internal_order_id` does not resolve to any
+    ///   `oms_outbox` row. A contradiction between fill and outbox truth;
+    ///   distinct from `"unattributed_manual"` so it is never mistaken for
+    ///   a genuine non-strategy order.
+    /// - `"lineage_invalid"` — the originating outbox row was found but its
+    ///   lineage is not trustworthy (cross-run mismatch, or malformed/
+    ///   contradictory durable attribution fields). See
+    ///   `strategy_attribution_reason` for the specific cause. Never
+    ///   collapsed into `"unattributed_manual"` or `"attributed"`.
+    pub strategy_attribution_state: String,
+    /// Bounded machine-readable reason code, set only when
+    /// `strategy_attribution_state == "lineage_invalid"`:
+    /// - `"run_mismatch"` — the originating outbox row belongs to a
+    ///   different run than the fill.
+    /// - `"strategy_id_malformed"` — `strategy_id` is present but is JSON
+    ///   `null`, a non-string type, or a blank string.
+    /// - `"strategy_id_missing_for_strategy_source"` — `signal_source`
+    ///   indicates a strategy-originated order but `strategy_id` is absent.
+    /// - `"fingerprint_without_strategy_id"` — `strategy_semantic_fingerprint`
+    ///   is present and well-formed but `strategy_id` is absent.
+    /// - `"fingerprint_malformed"` — `strategy_semantic_fingerprint` is
+    ///   present but is JSON `null`, a non-string type, or a blank string.
+    ///
+    /// `None` for every other `strategy_attribution_state`. Never carries
+    /// unbounded raw JSON/error text.
+    pub strategy_attribution_reason: Option<String>,
+}
+
 /// Fill evidence lane of the paper journal.
 ///
 /// `truth_state`:
 /// - `"active"` — DB + active run; `rows` is authoritative fill history.
-///   Empty `rows` = no fills yet recorded for this run.
+///   Empty `rows` = no fills yet recorded for this run. A row's own
+///   `strategy_attribution_state` may still be `"lineage_missing"` or
+///   `"lineage_invalid"` — those are authoritative row-level truths, not
+///   lane-level failures.
 /// - `"no_active_run"` — DB present but no active run; rows empty; not authoritative.
 /// - `"no_db"` — no DB pool; rows empty; not authoritative.
+/// - `"query_failed"` — DB + active run present but the fills query or a
+///   per-row strategy-lineage lookup errored (a genuine DB/query failure,
+///   not a lineage-integrity finding); rows empty; not authoritative. A
+///   per-row lineage DB error degrades the whole lane rather than surfacing
+///   a partially-attributed row set as if it were authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperJournalFillsLane {
     pub truth_state: String,
     pub backend: String,
-    pub rows: Vec<FillQualityTelemetryRow>,
+    pub rows: Vec<PaperJournalFillRow>,
 }
 
 /// Signal-admission history lane of the paper journal.

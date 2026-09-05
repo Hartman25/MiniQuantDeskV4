@@ -210,6 +210,12 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
         "time_in_force":  d.time_in_force.trim().to_ascii_lowercase(),
         "limit_price":    d.limit_price,
         "strategy_id":    d.strategy_id.trim(),
+        // WAVE05-PAPER-JOURNAL-STRATEGY-LINEAGE-01: the exact semantic
+        // fingerprint the promotion gate already validated this decision
+        // against (never re-resolved from current registry/promotion state)
+        // so a later fill can recover the identity of the order that
+        // actually produced it, not "whatever config is current now".
+        "strategy_semantic_fingerprint": d.strategy_semantic_fingerprint.trim(),
         "signal_source":  "internal_strategy_decision",
     })
 }

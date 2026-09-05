@@ -955,6 +955,165 @@ pub async fn outbox_fetch_by_idempotency_key(
     }))
 }
 
+/// Durable strategy identity recovered from the EXACT originating outbox row
+/// for a fill, joined on
+/// `fill_quality_telemetry.internal_order_id == oms_outbox.idempotency_key`
+/// (unique via `uq_outbox_idempotency` — the join is unambiguous by schema).
+///
+/// WAVE05-PAPER-JOURNAL-STRATEGY-LINEAGE-01: identity must come from the
+/// order that actually produced the fill. Never inferred by symbol,
+/// timestamp proximity, or current strategy/registry/promotion state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FillStrategyLineage {
+    /// The originating outbox row was found, its `run_id` matches the fill's
+    /// durable `run_id`, and its durable attribution fields parsed as
+    /// unambiguously well-formed. `strategy_id` /
+    /// `strategy_semantic_fingerprint` are `None` when genuinely absent from
+    /// that row's `order_json` (manual/non-strategy order, or a legacy
+    /// strategy order persisted before fingerprint capture) — never invented
+    /// from current config.
+    Resolved {
+        strategy_id: Option<String>,
+        strategy_semantic_fingerprint: Option<String>,
+    },
+    /// `internal_order_id` does not resolve to any `oms_outbox` row — a
+    /// contradiction between fill telemetry and outbox truth. Callers must
+    /// surface this distinctly and must never collapse it into "no strategy"
+    /// (that would hide corruption).
+    OriginatingOrderMissing,
+    /// The originating outbox row exists but its lineage is not trustworthy:
+    /// either it belongs to a different run than the fill (`run_mismatch`),
+    /// or its durable attribution fields are malformed/contradictory
+    /// (bounded `reason_code`s: `strategy_id_malformed`,
+    /// `strategy_id_missing_for_strategy_source`,
+    /// `fingerprint_without_strategy_id`, `fingerprint_malformed`). Callers
+    /// must never surface `strategy_id`/`strategy_semantic_fingerprint` as
+    /// trusted, and must never collapse this into `Resolved { strategy_id:
+    /// None, .. }` (that would hide corruption as ordinary manual-order
+    /// truth).
+    Invalid { reason_code: String },
+}
+
+/// Parsed state of one durable string-typed attribution field
+/// (`strategy_id` / `strategy_semantic_fingerprint`) read from `order_json`.
+///
+/// A present-but-blank (empty or whitespace-only) string is deliberately
+/// `Malformed`, not `Absent` — genuine absence means the key is missing from
+/// the JSON object entirely, never a value that merely looks empty.
+enum LineageField {
+    /// The key is not present in the `order_json` object at all.
+    Absent,
+    /// The key is present but is JSON `null`, a non-string type, or a
+    /// blank/whitespace-only string.
+    Malformed,
+    /// The key is present, is a JSON string, and is non-blank after
+    /// trimming.
+    Value(String),
+}
+
+fn parse_lineage_field(order_json: &Value, key: &str) -> LineageField {
+    match order_json.get(key) {
+        None => LineageField::Absent,
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                LineageField::Malformed
+            } else {
+                LineageField::Value(trimmed.to_string())
+            }
+        }
+        Some(_) => LineageField::Malformed,
+    }
+}
+
+/// Recover [`FillStrategyLineage`] for one fill via the exact
+/// `internal_order_id` → `idempotency_key` join. Reuses
+/// [`outbox_fetch_by_idempotency_key`] — no new SQL join needed since the
+/// key is unique.
+///
+/// `fill_run_id` is the fill's own durable `run_id`
+/// (`fill_quality_telemetry.run_id`). Unique idempotency makes the
+/// `internal_order_id -> idempotency_key` join unambiguous, but it does NOT
+/// prove the resolved outbox row belongs to the same run as the fill —
+/// `internal_order_id` values are not guaranteed unique across runs in every
+/// fixture/legacy path, so a mismatch here is treated as a lineage-integrity
+/// contradiction ([`FillStrategyLineage::Invalid`] with
+/// `reason_code = "run_mismatch"`), never inferred or silently repaired.
+pub async fn fetch_fill_strategy_lineage(
+    pool: &PgPool,
+    fill_run_id: Uuid,
+    internal_order_id: &str,
+) -> Result<FillStrategyLineage> {
+    match outbox_fetch_by_idempotency_key(pool, internal_order_id).await? {
+        Some(outbox) => {
+            if outbox.run_id != fill_run_id {
+                return Ok(FillStrategyLineage::Invalid {
+                    reason_code: "run_mismatch".to_string(),
+                });
+            }
+
+            let signal_source = outbox
+                .order_json
+                .get("signal_source")
+                .and_then(|v| v.as_str());
+            let is_strategy_source = matches!(
+                signal_source,
+                Some("internal_strategy_decision") | Some("external_signal_ingestion")
+            );
+
+            let sid_field = parse_lineage_field(&outbox.order_json, "strategy_id");
+            let fp_field =
+                parse_lineage_field(&outbox.order_json, "strategy_semantic_fingerprint");
+
+            // Malformed values are refused unconditionally: a present-but-
+            // corrupt value must never collapse into "genuinely absent".
+            if matches!(sid_field, LineageField::Malformed) {
+                return Ok(FillStrategyLineage::Invalid {
+                    reason_code: "strategy_id_malformed".to_string(),
+                });
+            }
+            if matches!(fp_field, LineageField::Malformed) {
+                return Ok(FillStrategyLineage::Invalid {
+                    reason_code: "fingerprint_malformed".to_string(),
+                });
+            }
+
+            match (sid_field, fp_field) {
+                (LineageField::Absent, _) if is_strategy_source => {
+                    Ok(FillStrategyLineage::Invalid {
+                        reason_code: "strategy_id_missing_for_strategy_source".to_string(),
+                    })
+                }
+                (LineageField::Absent, LineageField::Value(_)) => {
+                    Ok(FillStrategyLineage::Invalid {
+                        reason_code: "fingerprint_without_strategy_id".to_string(),
+                    })
+                }
+                (LineageField::Absent, LineageField::Absent) => Ok(FillStrategyLineage::Resolved {
+                    strategy_id: None,
+                    strategy_semantic_fingerprint: None,
+                }),
+                (LineageField::Value(sid), LineageField::Absent) => {
+                    Ok(FillStrategyLineage::Resolved {
+                        strategy_id: Some(sid),
+                        strategy_semantic_fingerprint: None,
+                    })
+                }
+                (LineageField::Value(sid), LineageField::Value(fp)) => {
+                    Ok(FillStrategyLineage::Resolved {
+                        strategy_id: Some(sid),
+                        strategy_semantic_fingerprint: Some(fp),
+                    })
+                }
+                (LineageField::Malformed, _) | (_, LineageField::Malformed) => {
+                    unreachable!("Malformed fields are refused above before this match")
+                }
+            }
+        }
+        None => Ok(FillStrategyLineage::OriginatingOrderMissing),
+    }
+}
+
 /// Atomically persist `internal_id → broker_id` and transition the outbox row
 /// to `SENT`.
 ///

@@ -33,7 +33,7 @@ use axum::{
 use sqlx::Row;
 
 use crate::api_types::{
-    FillQualityTelemetryRow, PaperJournalAdmissionRow, PaperJournalAdmissionsLane,
+    PaperJournalAdmissionRow, PaperJournalAdmissionsLane, PaperJournalFillRow,
     PaperJournalFillsLane, PaperJournalResponse,
 };
 use crate::state::AppState;
@@ -88,9 +88,68 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
     let (fills_truth_state, fills_backend, api_fills) =
         match mqk_db::fetch_fill_quality_telemetry_recent(db, run_id, 100).await {
             Ok(rows) => {
-                let mapped: Vec<FillQualityTelemetryRow> = rows
-                    .into_iter()
-                    .map(|r| FillQualityTelemetryRow {
+                // WAVE05-PAPER-JOURNAL-STRATEGY-LINEAGE-01: recover durable
+                // strategy identity per fill from the exact originating
+                // outbox row (internal_order_id -> idempotency_key), proven
+                // run-coherent (outbox.run_id == fill.run_id) and parsed with
+                // explicit field-level validation. A lineage LOOKUP error
+                // (DB failure) is a transient failure, not a "no strategy"
+                // fact — it degrades the whole lane to query_failed rather
+                // than emitting a row with a silently omitted or invented
+                // attribution alongside otherwise-active rows. Row-level
+                // `lineage_missing` (join resolves to no outbox row) and
+                // `lineage_invalid` (cross-run mismatch or malformed
+                // attribution fields) are distinct, non-transient truths and
+                // are kept as authoritative "active" rows rather than
+                // failing the lane, per this route's existing truth_state
+                // contract of fabricating nothing while still surfacing
+                // genuine query failures at the lane level.
+                let mut mapped: Vec<PaperJournalFillRow> = Vec::with_capacity(rows.len());
+                let mut lineage_lookup_failed = false;
+                for r in rows {
+                    let lineage = match mqk_db::fetch_fill_strategy_lineage(
+                        db,
+                        r.run_id,
+                        &r.internal_order_id,
+                    )
+                    .await
+                    {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::warn!(
+                                "paper_journal strategy-lineage lookup failed for \
+                                 internal_order_id={} (non-fatal, degrades lane): {e}",
+                                r.internal_order_id
+                            );
+                            lineage_lookup_failed = true;
+                            break;
+                        }
+                    };
+                    let (
+                        strategy_id,
+                        strategy_semantic_fingerprint,
+                        strategy_attribution_state,
+                        strategy_attribution_reason,
+                    ) = match lineage {
+                        mqk_db::FillStrategyLineage::Resolved {
+                            strategy_id,
+                            strategy_semantic_fingerprint,
+                        } => {
+                            let state = if strategy_id.is_some() {
+                                "attributed"
+                            } else {
+                                "unattributed_manual"
+                            };
+                            (strategy_id, strategy_semantic_fingerprint, state, None)
+                        }
+                        mqk_db::FillStrategyLineage::OriginatingOrderMissing => {
+                            (None, None, "lineage_missing", None)
+                        }
+                        mqk_db::FillStrategyLineage::Invalid { reason_code } => {
+                            (None, None, "lineage_invalid", Some(reason_code))
+                        }
+                    };
+                    mapped.push(PaperJournalFillRow {
                         telemetry_id: r.telemetry_id,
                         run_id: r.run_id,
                         internal_order_id: r.internal_order_id,
@@ -110,9 +169,17 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
                         fill_kind: r.fill_kind,
                         provenance_ref: r.provenance_ref,
                         created_at_utc: r.created_at_utc.to_rfc3339(),
-                    })
-                    .collect();
-                ("active", "postgres.fill_quality_telemetry", mapped)
+                        strategy_id,
+                        strategy_semantic_fingerprint,
+                        strategy_attribution_state: strategy_attribution_state.to_string(),
+                        strategy_attribution_reason,
+                    });
+                }
+                if lineage_lookup_failed {
+                    ("query_failed", "postgres.fill_quality_telemetry", vec![])
+                } else {
+                    ("active", "postgres.fill_quality_telemetry", mapped)
+                }
             }
             Err(e) => {
                 tracing::warn!("paper_journal fills query failed (non-fatal): {e}");
