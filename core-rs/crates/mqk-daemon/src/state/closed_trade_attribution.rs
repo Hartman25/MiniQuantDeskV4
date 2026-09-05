@@ -26,6 +26,9 @@ use uuid::Uuid;
 
 use super::snapshot::{recover_oms_and_portfolio_traced, CanonicalAppliedFill};
 use super::types::RuntimeLifecycleError;
+use crate::routes::portfolio_provenance::{
+    classify_portfolio_provenance, validate_run_scoped_snapshot_authority, PortfolioProvenanceState,
+};
 
 /// Durable strategy identity resolved for one canonical fill, collapsed from
 /// [`mqk_db::FillStrategyLineage`] into the coarser categories a closure
@@ -439,4 +442,369 @@ pub(crate) async fn build_closed_trade_projection(
         canonical_realized_pnl_micros: portfolio.realized_pnl_micros,
         canonical_last_applied_inbox_id,
     })
+}
+
+// ---------------------------------------------------------------------------
+// WAVE05-STRATEGY-PERFORMANCE-ANALYTICS-01 (P3.1): shared closed-trade
+// authority resolution.
+//
+// This is the SAME authority computation `routes/paper_journal.rs`'s
+// `closed_trades_lane` and `routes/strategy_performance.rs` both consume --
+// a narrow, behavior-preserving extraction of what was previously inlined
+// only in `paper_journal`. Neither caller may hand-roll a second provenance
+// classifier, snapshot-authority validator, canonical replay, or
+// durable-accounting comparison: both call `resolve_authoritative_closed_trade_view`
+// and map the SAME result into their own response shape.
+// ---------------------------------------------------------------------------
+
+/// Pure decision for the closed-trades authority's exposed `truth_state` plus
+/// the bounded `accounting_watermark_state` label, given the shared portfolio
+/// provenance verdict and the same-watermark / durable-realized-P&L parity
+/// checks. No I/O -- fully unit-testable (WAVE05-STRATEGY-CLOSED-TRADE-
+/// READ-MODEL-01-REPAIR-01).
+///
+/// `truth_state` is `"active"` only when ALL of the following hold:
+/// - `provenance == Active` (shared classifier: run-scoped snapshot exists,
+///   passes independent authority validation, and the durable accounting
+///   row's `source_snapshot_id` matches it with `accounting_epoch ==
+///   "complete"`);
+/// - the durable accounting watermark exactly equals the canonical replay
+///   watermark (Defect 2 repair -- a stale accounting row must never be
+///   treated as same-watermark current merely because realized P&L happens
+///   to still match);
+/// - the durable `realized_pnl_micros` exactly equals the canonical
+///   projection's summed gross realized P&L.
+///
+/// Any other `provenance` value fails closed to `"query_failed"` (when the
+/// classifier itself reports a query failure) or `"incomplete"` (every other
+/// non-active state -- `fill_history_incomplete`, `not_found`,
+/// `accounting_epoch_unavailable`, `accounting_snapshot_mismatch`,
+/// `unsupported_source`, `invalid_snapshot`) -- the exact classification is
+/// still exposed separately via `accounting_provenance_state`, never hidden
+/// behind this coarser label.
+pub(crate) struct ClosedTradesAuthority {
+    pub(crate) truth_state: &'static str,
+    /// `Some("same_watermark" | "accounting_watermark_mismatch")` only when
+    /// `provenance == Active` -- a same-watermark comparison is only
+    /// meaningful once the shared classifier has already proven the
+    /// snapshot/accounting relationship current. `None` otherwise.
+    pub(crate) accounting_watermark_state: Option<&'static str>,
+    /// `true` when the durable `realized_pnl_micros` contradicted the
+    /// canonical projection's sum despite matching watermarks -- distinct
+    /// from an ordinary watermark mismatch, which is never called
+    /// "parity_failed" (a fresher, unpersisted accounting refresh is
+    /// expected/benign, not a contradiction).
+    pub(crate) durable_pnl_mismatch: bool,
+}
+
+pub(crate) fn classify_closed_trades_authority(
+    provenance: PortfolioProvenanceState,
+    canonical_last_applied_inbox_id: i64,
+    accounting_last_applied_inbox_id: Option<i64>,
+    canonical_sum_realized_pnl_micros: i64,
+    accounting_realized_pnl_micros: Option<i64>,
+) -> ClosedTradesAuthority {
+    if provenance != PortfolioProvenanceState::Active {
+        return ClosedTradesAuthority {
+            truth_state: if provenance == PortfolioProvenanceState::QueryFailed {
+                "query_failed"
+            } else {
+                "incomplete"
+            },
+            accounting_watermark_state: None,
+            durable_pnl_mismatch: false,
+        };
+    }
+
+    // `provenance == Active` guarantees (by `classify_portfolio_provenance`'s
+    // own contract) that a durable accounting row exists, so both `Option`s
+    // below are `Some` in practice -- compared via `Option` equality anyway
+    // so a hypothetical `None` fails closed (mismatch) rather than panicking.
+    if accounting_last_applied_inbox_id != Some(canonical_last_applied_inbox_id) {
+        return ClosedTradesAuthority {
+            truth_state: "incomplete",
+            accounting_watermark_state: Some("accounting_watermark_mismatch"),
+            durable_pnl_mismatch: false,
+        };
+    }
+
+    if accounting_realized_pnl_micros != Some(canonical_sum_realized_pnl_micros) {
+        return ClosedTradesAuthority {
+            truth_state: "parity_failed",
+            accounting_watermark_state: Some("same_watermark"),
+            durable_pnl_mismatch: true,
+        };
+    }
+
+    ClosedTradesAuthority {
+        truth_state: "active",
+        accounting_watermark_state: Some("same_watermark"),
+        durable_pnl_mismatch: false,
+    }
+}
+
+/// The single authoritative closed-trade result for one run -- everything a
+/// caller needs to either surface the Paper Journal `closed_trades_lane` or
+/// build strategy-performance analytics on top of `fragments`, without
+/// re-deriving any of the provenance/parity classification itself.
+#[allow(clippy::type_complexity)]
+pub(crate) struct AuthoritativeClosedTradeView {
+    pub(crate) truth_state: &'static str,
+    pub(crate) accounting_epoch: Option<String>,
+    pub(crate) accounting_epoch_reason: Option<String>,
+    /// `Some` only when `truth_state` is `"active"` or `"incomplete"`.
+    pub(crate) sum_gross_realized_pnl_micros: Option<i64>,
+    /// The exact shared `classify_portfolio_provenance` verdict string.
+    /// `None` only when the projection itself never got far enough to
+    /// classify it (top-level projection-vs-canonical-replay parity
+    /// failure, run lookup failure, or projection build failure).
+    pub(crate) accounting_provenance_state: Option<&'static str>,
+    pub(crate) canonical_last_applied_inbox_id: Option<i64>,
+    pub(crate) accounting_last_applied_inbox_id: Option<i64>,
+    pub(crate) accounting_watermark_state: Option<&'static str>,
+    /// FIFO closure fragments. Populated only when `truth_state` is
+    /// `"active"` or `"incomplete"` -- empty otherwise (never fabricated).
+    pub(crate) fragments: Vec<ClosureFragment>,
+}
+
+
+/// Resolve the single authoritative closed-trade view for `run_id`. Pure
+/// read-only: performs no writes. This is the ONLY place that combines
+/// [`build_closed_trade_projection`], the shared portfolio-provenance
+/// classifier, and [`classify_closed_trades_authority`] -- every caller
+/// (Paper Journal, strategy performance analytics) must resolve through this
+/// function rather than re-implementing any part of it.
+pub(crate) async fn resolve_authoritative_closed_trade_view(
+    db: &PgPool,
+    run_id: Uuid,
+) -> AuthoritativeClosedTradeView {
+    let unavailable = |truth_state: &'static str| AuthoritativeClosedTradeView {
+        truth_state,
+        accounting_epoch: None,
+        accounting_epoch_reason: None,
+        sum_gross_realized_pnl_micros: None,
+        accounting_provenance_state: None,
+        canonical_last_applied_inbox_id: None,
+        accounting_last_applied_inbox_id: None,
+        accounting_watermark_state: None,
+        fragments: vec![],
+    };
+
+    let run_record = mqk_db::fetch_run(db, run_id).await;
+    if let Err(e) = &run_record {
+        tracing::warn!("closed_trades run lookup failed (non-fatal): {e}");
+        return unavailable("query_failed");
+    }
+    let is_paper_mode = run_record
+        .as_ref()
+        .map(|r| r.mode == "PAPER")
+        .unwrap_or(false);
+
+    let proj = match build_closed_trade_projection(db, run_id).await {
+        Ok(proj) => proj,
+        Err(e) => {
+            tracing::warn!("closed_trades projection failed (non-fatal): {e}");
+            return unavailable("query_failed");
+        }
+    };
+
+    if proj.sum_gross_realized_pnl_micros != proj.canonical_realized_pnl_micros {
+        tracing::error!(
+            "closed_trades parity failure: projection_sum={} canonical_replay_realized_pnl={} run_id={run_id}",
+            proj.sum_gross_realized_pnl_micros,
+            proj.canonical_realized_pnl_micros,
+        );
+        return unavailable("parity_failed");
+    }
+
+    let snapshot_result = mqk_db::fetch_latest_paper_portfolio_snapshot_for_run(
+        db,
+        "paper",
+        mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        run_id,
+    )
+    .await;
+    if let Err(err) = &snapshot_result {
+        tracing::warn!(error = %err, run_id = %run_id, "closed_trades_snapshot_query_failed");
+    }
+    let accounting_result = mqk_db::fetch_paper_portfolio_accounting_state(db, run_id).await;
+    if let Err(err) = &accounting_result {
+        tracing::warn!(error = %err, run_id = %run_id, "closed_trades_accounting_query_failed");
+    }
+
+    let snapshot_query_failed = snapshot_result.is_err();
+    let accounting_query_failed = accounting_result.is_err();
+    let snapshot_invalid = snapshot_result
+        .as_ref()
+        .ok()
+        .and_then(|s| s.as_ref())
+        .is_some_and(|s| validate_run_scoped_snapshot_authority(s, run_id).is_err());
+    let snapshot_id = snapshot_result
+        .as_ref()
+        .ok()
+        .and_then(|s| s.as_ref())
+        .map(|s| s.snapshot.snapshot_id);
+    let accounting = accounting_result.as_ref().ok().and_then(|a| a.clone());
+
+    let provenance = classify_portfolio_provenance(
+        is_paper_mode,
+        snapshot_query_failed,
+        accounting_query_failed,
+        snapshot_id,
+        snapshot_invalid,
+        accounting.as_ref(),
+    );
+
+    let epoch = accounting.as_ref().map(|a| a.accounting_epoch.clone());
+    let epoch_reason = accounting
+        .as_ref()
+        .and_then(|a| a.accounting_epoch_reason.clone());
+    let accounting_watermark = accounting.as_ref().map(|a| a.last_applied_inbox_id);
+    let accounting_realized_pnl = accounting.as_ref().map(|a| a.realized_pnl_micros);
+
+    let authority = classify_closed_trades_authority(
+        provenance,
+        proj.canonical_last_applied_inbox_id,
+        accounting_watermark,
+        proj.sum_gross_realized_pnl_micros,
+        accounting_realized_pnl,
+    );
+
+    if authority.durable_pnl_mismatch {
+        tracing::error!(
+            "closed_trades durable parity failure: projection_sum={} durable_realized_pnl={accounting_realized_pnl:?} run_id={run_id}",
+            proj.sum_gross_realized_pnl_micros,
+        );
+    }
+
+    let (sum, epoch_out, epoch_reason_out, fragments) =
+        if matches!(authority.truth_state, "active" | "incomplete") {
+            (
+                Some(proj.sum_gross_realized_pnl_micros),
+                epoch,
+                epoch_reason,
+                proj.fragments,
+            )
+        } else {
+            (None, None, None, vec![])
+        };
+
+    AuthoritativeClosedTradeView {
+        truth_state: authority.truth_state,
+        accounting_epoch: epoch_out,
+        accounting_epoch_reason: epoch_reason_out,
+        sum_gross_realized_pnl_micros: sum,
+        accounting_provenance_state: Some(provenance.as_str()),
+        canonical_last_applied_inbox_id: Some(proj.canonical_last_applied_inbox_id),
+        accounting_last_applied_inbox_id: accounting_watermark,
+        accounting_watermark_state: authority.accounting_watermark_state,
+        fragments,
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::{classify_closed_trades_authority, PortfolioProvenanceState};
+
+    #[test]
+    fn active_provenance_with_matching_watermark_and_pnl_is_active() {
+        let authority = classify_closed_trades_authority(
+            PortfolioProvenanceState::Active,
+            5,
+            Some(5),
+            100,
+            Some(100),
+        );
+        assert_eq!(authority.truth_state, "active");
+        assert_eq!(authority.accounting_watermark_state, Some("same_watermark"));
+        assert!(!authority.durable_pnl_mismatch);
+    }
+
+    /// RED6 target: CT15's exact counterexample -- realized P&L still
+    /// matches, but the durable accounting watermark is stale relative to
+    /// the canonical replay. Must never be "active" or "parity_failed".
+    #[test]
+    fn active_provenance_with_stale_watermark_and_matching_pnl_is_incomplete_not_active() {
+        let authority = classify_closed_trades_authority(
+            PortfolioProvenanceState::Active,
+            6, // canonical watermark advanced past accounting's
+            Some(5),
+            100,
+            Some(100),
+        );
+        assert_eq!(authority.truth_state, "incomplete");
+        assert_eq!(
+            authority.accounting_watermark_state,
+            Some("accounting_watermark_mismatch")
+        );
+        assert!(
+            !authority.durable_pnl_mismatch,
+            "a stale watermark with unchanged realized P&L must never be reported as a P&L contradiction"
+        );
+    }
+
+    #[test]
+    fn active_provenance_with_matching_watermark_but_mismatched_pnl_is_parity_failed() {
+        let authority = classify_closed_trades_authority(
+            PortfolioProvenanceState::Active,
+            5,
+            Some(5),
+            100,
+            Some(999),
+        );
+        assert_eq!(authority.truth_state, "parity_failed");
+        assert_eq!(authority.accounting_watermark_state, Some("same_watermark"));
+        assert!(authority.durable_pnl_mismatch);
+    }
+
+    /// RED5 target: CT14's exact counterexample -- the shared classifier
+    /// reports a stale-snapshot mismatch; realized-P&L equality must not
+    /// bypass it.
+    #[test]
+    fn non_active_provenance_never_reaches_active_regardless_of_watermark_or_pnl_equality() {
+        let authority = classify_closed_trades_authority(
+            PortfolioProvenanceState::AccountingSnapshotMismatch,
+            5,
+            Some(5),
+            100,
+            Some(100),
+        );
+        assert_eq!(authority.truth_state, "incomplete");
+        assert_eq!(authority.accounting_watermark_state, None);
+        assert!(!authority.durable_pnl_mismatch);
+    }
+
+    #[test]
+    fn query_failed_provenance_maps_to_query_failed_not_incomplete() {
+        let authority = classify_closed_trades_authority(
+            PortfolioProvenanceState::QueryFailed,
+            5,
+            None,
+            100,
+            None,
+        );
+        assert_eq!(authority.truth_state, "query_failed");
+        assert_eq!(authority.accounting_watermark_state, None);
+    }
+
+    #[test]
+    fn every_other_non_active_state_is_incomplete() {
+        for provenance in [
+            PortfolioProvenanceState::FillHistoryIncomplete,
+            PortfolioProvenanceState::AccountingEpochUnavailable,
+            PortfolioProvenanceState::NotFound,
+            PortfolioProvenanceState::UnsupportedSource,
+            PortfolioProvenanceState::InvalidSnapshot,
+        ] {
+            let authority = classify_closed_trades_authority(provenance, 5, None, 100, None);
+            assert_eq!(
+                authority.truth_state, "incomplete",
+                "provenance={provenance:?}"
+            );
+            assert_eq!(
+                authority.accounting_watermark_state, None,
+                "provenance={provenance:?}"
+            );
+        }
+    }
 }

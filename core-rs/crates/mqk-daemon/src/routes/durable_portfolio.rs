@@ -122,7 +122,7 @@ pub(crate) async fn resolve_run(db: &sqlx::PgPool, explicit_run_id: Option<Uuid>
 /// the caller-supplied raw value back onto the wire.
 pub(crate) const INVALID_RUN_ID_MESSAGE: &str = "run_id query parameter is not a valid UUID";
 
-fn parse_explicit_run_id(raw: Option<&str>) -> Result<Option<Uuid>, &'static str> {
+pub(crate) fn parse_explicit_run_id(raw: Option<&str>) -> Result<Option<Uuid>, &'static str> {
     match raw {
         Some(s) => s
             .parse::<Uuid>()

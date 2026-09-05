@@ -55,6 +55,7 @@ pub(crate) mod repair;
 pub(crate) mod required_market_data;
 pub(crate) mod strategy;
 pub(crate) mod strategy_conflict;
+pub(crate) mod strategy_performance;
 pub(crate) mod strategy_promotions;
 pub(crate) mod strategy_scans;
 pub(crate) mod system;
@@ -327,6 +328,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use strategy_conflict::{
         strategy_conflict_plan_by_id, strategy_conflict_plans, strategy_conflict_status,
     };
+    use strategy_performance::strategy_performance;
     use strategy_promotions::{
         strategy_promotion_check, strategy_promotion_history, strategy_promotion_transition,
         strategy_promotions,
@@ -551,6 +553,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/system/config-diffs", get(system_config_diffs))
         .route("/api/v1/strategy/summary", get(strategy_summary))
+        // WAVE05-STRATEGY-PERFORMANCE-ANALYTICS-01: read-only exact
+        // semantic-strategy performance analytics (public, no auth). GET-only
+        // -- no DB write, no order/broker/OMS path, no promotion/suppression
+        // state read or written.
+        .route(
+            "/api/v1/strategy/performance",
+            get(strategy_performance),
+        )
         .route(
             "/api/v1/broker/assets/:symbol/shortable-preflight",
             get(broker_asset_shortable_preflight),

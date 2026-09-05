@@ -159,7 +159,9 @@ pub use session_controller::{
     run_session_controller_tick, session_window_from_env, spawn_autonomous_session_controller,
     AutonomousSessionSchedule, SessionWindow, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
 };
-pub(crate) use closed_trade_attribution::{build_closed_trade_projection, ClosureFragment};
+pub(crate) use closed_trade_attribution::{
+    resolve_authoritative_closed_trade_view, ClosureAttribution, ClosureFragment,
+};
 pub(crate) use snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
     recover_oms_and_portfolio,

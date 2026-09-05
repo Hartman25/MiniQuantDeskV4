@@ -4510,6 +4510,115 @@ pub struct PaperJournalResponse {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/strategy/performance — WAVE05-STRATEGY-PERFORMANCE-ANALYTICS-01
+// ---------------------------------------------------------------------------
+
+/// One attribution-state coverage bucket: a deterministic fragment count and
+/// gross realized P&L total for every P2 `attribution_state`, proving no
+/// economic P&L silently disappears even when it cannot be attributed to one
+/// exact semantic strategy. `sum(gross_realized_pnl_micros)` across every
+/// bucket in a response always equals the upstream closed-trade authority's
+/// total gross realized P&L for the resolved run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyPerformanceCoverageBucket {
+    /// One of P2's frozen `ClosureAttribution` states: `"attributed"`,
+    /// `"cross_strategy"`, `"semantic_identity_changed"`, `"manual_or_mixed"`,
+    /// `"lineage_incomplete"`, `"lineage_invalid"`, or `"lineage_missing"`.
+    pub attribution_state: String,
+    pub fragment_count: i64,
+    pub gross_realized_pnl_micros: i64,
+}
+
+/// One exact semantic-strategy performance row, keyed by
+/// `(strategy_id, strategy_semantic_fingerprint)`. Built ONLY from P2
+/// `"attributed"` closure fragments grouped into `AttributedCloseEvent`s
+/// (fragments sharing the same closing economic fill collapse into one
+/// event). All P&L fields are GROSS trading P&L before fees — see the
+/// response's `pnl_basis`/`fee_allocation_state`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyPerformanceRow {
+    pub strategy_id: String,
+    pub strategy_semantic_fingerprint: String,
+    /// Raw P2 FIFO closure fragment count (before close-event grouping).
+    pub attributed_fragment_count: i64,
+    /// Count of distinct closing economic fills (`close_inbox_id` +
+    /// `close_internal_order_id`) — the unit every other metric here is
+    /// computed over, NOT the raw fragment count.
+    pub attributed_close_event_count: i64,
+    pub attributed_closed_qty: i64,
+    pub gross_realized_pnl_micros: i64,
+    /// Sum of positive close-event gross P&L.
+    pub gross_profit_micros: i64,
+    /// Absolute sum of negative close-event gross P&L (always `>= 0`).
+    pub gross_loss_abs_micros: i64,
+    pub winning_close_event_count: i64,
+    pub losing_close_event_count: i64,
+    pub flat_close_event_count: i64,
+    /// `winning / (winning + losing)`. Flat events are excluded from the
+    /// denominator. `None` when that denominator is `0`.
+    pub hit_rate: Option<f64>,
+    /// Total gross P&L divided by close-event count. `None` when there are
+    /// zero close events.
+    pub gross_expectancy_micros_per_close_event: Option<f64>,
+    /// `None` when there are zero winning close events.
+    pub average_win_micros: Option<f64>,
+    /// `None` when there are zero losing close events.
+    pub average_loss_abs_micros: Option<f64>,
+    /// `gross_profit_micros / gross_loss_abs_micros`. `None` when
+    /// `gross_loss_abs_micros == 0` — NEVER infinity, NaN, or a fabricated
+    /// sentinel value.
+    pub profit_factor: Option<f64>,
+    /// Maximum drawdown of the REALIZED closed-P&L cumulative curve across
+    /// this strategy's ordered attributed close events (peak-to-trough,
+    /// always `>= 0`). This is NOT account-equity drawdown, mark-to-market
+    /// drawdown, intratrade drawdown, or MAE.
+    pub max_realized_pnl_drawdown_micros: i64,
+}
+
+/// Response for `GET /api/v1/strategy/performance`.
+///
+/// `truth_state`:
+/// - `"active"` — the upstream closed-trade authority (shared with the Paper
+///   Journal `closed_trades_lane`) is fully proven current; `rows` and
+///   `attribution_coverage` are authoritative. Zero rows is a valid
+///   authoritative zero, distinguishable from every unavailable state below.
+/// - `"incomplete"` | `"parity_failed"` | `"query_failed"` — the upstream
+///   closed-trade authority is not fully active; `rows` and
+///   `attribution_coverage` are always empty (never a fabricated zero-valued
+///   performance row) — see `accounting_provenance_state` for the exact
+///   upstream reason.
+/// - `"not_found"` — no run resolved (explicit `run_id` not found, or no
+///   durable PAPER run exists yet for this engine).
+/// - `"unsupported_source"` — the resolved run is not PAPER mode.
+/// - `"db_unavailable"` — no DB pool configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyPerformanceResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub run_id: Option<String>,
+    /// The exact shared `classify_portfolio_provenance` verdict for the
+    /// upstream closed-trade authority, when it got far enough to classify
+    /// one. `None` when run resolution itself failed/was unsupported.
+    pub accounting_provenance_state: Option<String>,
+    /// Always `"gross_realized_before_fees"` — every P&L field in this
+    /// response is gross trading P&L; fees are never netted in.
+    pub pnl_basis: String,
+    /// Always `"not_allocated_to_strategy_close_events"` — fees are not
+    /// currently allocated deterministically across FIFO closure fragments,
+    /// so no `net_pnl`/`net_expectancy`/`after_cost_expectancy` field exists
+    /// anywhere in this response.
+    pub fee_allocation_state: String,
+    pub rows: Vec<StrategyPerformanceRow>,
+    /// Deterministic coverage across every P2 attribution state — proves no
+    /// economic P&L silently disappears. Always empty when `truth_state`
+    /// is not `"active"`.
+    pub attribution_coverage: Vec<StrategyPerformanceCoverageBucket>,
+    /// `sum(attribution_coverage[].gross_realized_pnl_micros)`. `Some` only
+    /// when `truth_state == "active"`.
+    pub total_gross_realized_pnl_micros: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/execution/outbox — OPS-08 / EXEC-06: paper execution timeline
 // ---------------------------------------------------------------------------
 
