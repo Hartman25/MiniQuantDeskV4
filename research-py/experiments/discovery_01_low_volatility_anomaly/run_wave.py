@@ -240,11 +240,13 @@ START_UTC = pd.Timestamp("2016-01-01T00:00:00Z")
 # gate (mqk_research.data.alpaca_historical): three symbols (CCL, RKLB, XOM)
 # carry unresolved 2025-2026 "name_change" corporate-action events (CUSIP
 # relabelings) not covered by adjustment="all" semantics. This is a DATA
-# PROVENANCE boundary discovered before any bars were fetched/persisted and
-# before any strategy result was computed -- not a reaction to an economic
-# outcome -- so END_UTC is narrowed here to strictly before the earliest such
-# event (RKLB, 2025-05-27) rather than attempting to patch the shared
-# corporate-action resolver (out of scope for this predeclaration). Still
+# PROVENANCE boundary discovered before bars were returned to/persisted by
+# this experiment driver, before features/targets were built, and before any
+# prediction/model outcome or economic strategy result was observed -- not a
+# reaction to an economic outcome -- so END_UTC is narrowed here to strictly
+# before the earliest such event (RKLB, 2025-05-27) rather than attempting to
+# patch the shared corporate-action resolver (out of scope for this
+# predeclaration). Still
 # ~16 months fresher than every prior experiment's 2024-01-01 cutoff.
 END_UTC = pd.Timestamp("2025-05-01T00:00:00Z")
 ASOF = "2025-05-01"

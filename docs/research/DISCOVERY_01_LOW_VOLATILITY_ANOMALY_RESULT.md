@@ -4,7 +4,7 @@ Part of `POST-WAVE05-ALPHA-DISCOVERY-AND-PAPER-VALIDATION-01-CONTROLLER-V2`.
 Development-stage Research only. Does not authorize Paper or Live trading.
 No production Paper/runtime/broker/risk/portfolio/scheduler behavior was
 modified. Closed out by `DISCOVERY-01-TRUTH-CLOSEOUT-REPAIR-01` after
-independent review of the committed `runs/run_01` registry/artifacts.
+independent review of the local generated `runs/run_01` registry/artifacts.
 
 ## 1. Hypothesis (RISK-01)
 
@@ -26,7 +26,7 @@ Seed universe: `SEED_UNIVERSE.json` (SHA-256
 non-point-in-time current-registry snapshot — same caveat as SHORT-WAVE-03,
 see `docs/research/BROAD_RESEARCH_UNIVERSE_CURRENT_TRUTH_AUDIT.md`).
 
-## 2. Identity (from the committed `runs/run_01/registry/research.sqlite3`)
+## 2. Identity (from the local generated `runs/run_01/registry/research.sqlite3`)
 
 | Field | Value |
 |---|---|
