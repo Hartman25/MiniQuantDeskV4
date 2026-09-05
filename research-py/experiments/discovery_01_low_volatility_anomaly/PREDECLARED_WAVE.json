@@ -1,0 +1,169 @@
+{
+  "mission_id": "POST-WAVE05-ALPHA-DISCOVERY-AND-PAPER-VALIDATION-01-CONTROLLER-V2",
+  "predeclaration_patch": "DISCOVERY-01-LOW-VOLATILITY-ANOMALY-PREDECLARATION-01",
+  "base_head": "45fa89ecdda2e8f3d7c0d35141ae57e53c3255d7",
+  "wave_classification": "NEW_MECHANISM_DEVELOPMENT_STUDY_NON_POINT_IN_TIME_UNIVERSE",
+  "wave_classification_reasons": [
+    "vol_rank_20 (cross-sectional percentile rank of 20-day rolling realized volatility of daily log returns) has never been used as a ranking/classifier feature in any prior MiniQuantDesk experiment (ALPHA-01 used momentum_score, SHORT-01 used slope_60, SHORT-WAVE-02/03 used ret_rank_20/ret_5/gap_pct_1) -- it is a genuinely untested, risk-based mechanism with no definitional overlap with any previously tested return/price-direction feature",
+    "the economic rationale (low-volatility / defensive anomaly) is grounded in primary peer-reviewed literature, not retuned from an observed result: Ang, Hodrick, Xing & Zhang (2006), 'The Cross-Section of Volatility and Expected Returns', Journal of Finance 61(1):259-299; Frazzini & Pedersen (2014), 'Betting Against Beta', Journal of Financial Economics 111(1):1-25",
+    "the seed universe reused here is the SAME current-registry, non-point-in-time 88-symbol snapshot used by SHORT-WAVE-03 (see docs/research/BROAD_RESEARCH_UNIVERSE_CURRENT_TRUTH_AUDIT.md) -- carrying the identical survivorship-bias caveat forward unchanged, not a fresh point-in-time-clean universe"
+  ],
+  "allowed_verdicts": [
+    "REJECTED_NOT_ADVANCED",
+    "INCONCLUSIVE",
+    "DEVELOPMENT_PROMISING_REQUIRES_FRESH_CONFIRMATION"
+  ],
+  "forbidden_verdicts": ["PROVEN_ALPHA", "PROMOTION_READY"],
+  "real_experiment_id": "DISCOVERY-01-LOW-VOLATILITY-ANOMALY-REAL-V1",
+  "placebo_experiment_id": "DISCOVERY-01-LOW-VOLATILITY-ANOMALY-PLACEBOS-V1",
+  "seed_universe": {
+    "path": "SEED_UNIVERSE.json",
+    "source": "mqk_research.universe.snapshot.build_current_enabled_equity_registry_snapshot(config/instruments/equities.json)",
+    "universe_source_kind": "current_enabled_equity_registry_snapshot_v1",
+    "universe_id": "f25e8ec952c1429af7ac3bb58169408e",
+    "symbol_count": 88,
+    "point_in_time_membership": false,
+    "survivorship_classification": "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME",
+    "note": "Identical, byte-for-byte reuse of SHORT-WAVE-03's own frozen SEED_UNIVERSE.json (same universe_id) -- not regenerated, not re-derived from a possibly-changed live registry. Frozen BEFORE any DISCOVERY-01 result is observed. NOT historical point-in-time membership -- see docs/research/BROAD_RESEARCH_UNIVERSE_CURRENT_TRUTH_AUDIT.md."
+  },
+  "dynamic_cross_section": {
+    "policy": "RANKABLE_SET(T) = seed-universe symbols with a valid OOS ml_score at exact decision timestamp T",
+    "no_stale_carry_forward": true,
+    "no_future_backfill": true,
+    "no_full_seed_coverage_required_per_symbol": true,
+    "note": "Identical policy to SHORT-WAVE-03. A symbol need not have OOS coverage on every historical date."
+  },
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2026-09-05T00:00:00Z",
+    "asof": "2026-09-05",
+    "freshness_note": "Extends END_UTC well past every prior experiment's 2024-01-01 cutoff (ALPHA-01/SHORT-01/SHORT-WAVE-02/03 all stopped at 2024-01-01). A live, read-only, single-symbol (SPY) Alpaca /v2/stocks/bars check performed during Phase C of the controlling mission (before this predeclaration was frozen, and touching no strategy-outcome data) confirmed bars are actually available through 2026-09-04. Most of the resulting development window (2024-01-01..2026-03-ish) is therefore genuinely fresh evidence never used in any prior MiniQuantDesk experiment, and WF_HOLDOUT_MONTHS=6 reserves a genuinely untouched final holdout (~2026-03-05..2026-09-05) never evaluated by this campaign."
+  },
+  "cache_safety": {
+    "policy": "Reuse a cache ONLY after fail-closed verification that manifest/content exactly matches: provider, feed, adjustment, asof, requested window, seed universe, corporate-action evidence, canonical semantic bars hash. If exact verification is unavailable, fetch fresh. No existence-only cache reuse (identical policy to SHORT-WAVE-03, reused verbatim in run_wave.py's verify_wave03_bars_cache_authority)."
+  },
+  "label": {
+    "horizon_bars": 10,
+    "ret_threshold": 0.0,
+    "definition": "fwd_ret = log(close[t+10]/close[t]); target = 1 iff fwd_ret > 0"
+  },
+  "walk_forward": {
+    "train_years": 3,
+    "test_months": 3,
+    "step_months": 3,
+    "holdout_months": 6,
+    "min_rows_per_fold": 300,
+    "purge_enabled": true,
+    "embargo_seconds": 0
+  },
+  "model": {
+    "l2": 0.001,
+    "lr": 0.05,
+    "steps": 300,
+    "standardize": true,
+    "clip_z": 8.0
+  },
+  "cost_model": {
+    "commission_bps_per_side": 10.0,
+    "slippage_bps_per_side": 0.0,
+    "note": "CONSERVATIVE RESEARCH COST ASSUMPTION, not actual Alpaca commission. Identical to SHORT-WAVE-03/SHORT-WAVE-02."
+  },
+  "execution_pricing": {
+    "pricing_model_id": "rust_conservative_bar_range_v1",
+    "slippage_bps": 5,
+    "volatility_mult_bps": 0
+  },
+  "weight_to_share": {
+    "equity_usd": 100000.0,
+    "max_gross_exposure": 1.0
+  },
+  "rank_side_count": 5,
+  "long_only_rank_weight_rule": "top 5 scored names, each desired weight = +0.20",
+  "long_short_rank_weight_rule": "top 5 LONG each +0.10, bottom 5 SHORT each -0.10; gross=1.0, net=0.0",
+  "long_short_min_rankable_symbols": 10,
+  "borrow_model": "research_assumed_shortable_universe_v1",
+  "boundary_tie_policy": "fail_closed_boundary_ties_v1",
+  "signal_policies": {
+    "rank_long_only": {
+      "direction_policy": "cross_sectional_rank_long_only_v1",
+      "long_only": true,
+      "rank_side_count": 5,
+      "entry_threshold": 0.5,
+      "max_gross_exposure": 1.0
+    },
+    "rank_long_short": {
+      "direction_policy": "cross_sectional_rank_long_short_v1",
+      "long_only": false,
+      "rank_side_count": 5,
+      "entry_threshold": 0.5,
+      "max_gross_exposure": 1.0,
+      "borrow_model": "research_assumed_shortable_universe_v1"
+    }
+  },
+  "placebo_seed": 4242,
+  "hypotheses": {
+    "RISK-01": {
+      "name": "single-feature OOS classifier-score cross-sectional rank, low-volatility (defensive) anomaly predictor",
+      "feature_columns": ["vol_rank_20"],
+      "strategy_id": "pooled_single_feature_xs_low_volatility_direct_rank_v1",
+      "hypothesis_id_long_only": "discovery01_risk01_low_volatility_anomaly_long_only_v1",
+      "hypothesis_id_long_short": "discovery01_risk01_low_volatility_anomaly_long_short_v1",
+      "hypothesis_id_placebo": "discovery01_risk01_low_volatility_anomaly_placebo_v1",
+      "primary_references": [
+        "Ang, Hodrick, Xing & Zhang (2006), 'The Cross-Section of Volatility and Expected Returns', Journal of Finance 61(1):259-299",
+        "Frazzini & Pedersen (2014), 'Betting Against Beta', Journal of Financial Economics 111(1):1-25"
+      ],
+      "economic_rationale": "Leverage-constrained investors who cannot use leverage to reach a target return bid up high-beta/high-volatility names for their embedded implicit leverage instead, compressing those names' risk-adjusted (and per BAB, sometimes raw) forward returns relative to low-volatility names. The classifier's OOS score is trained per fold using vol_rank_20 as its sole input feature against the SAME fwd_ret>0 binary label used by every prior single-feature family in this repo; the fold-trained logistic regression learns the empirical sign of the vol/forward-return relationship from training data itself -- no direction is hand-asserted here.",
+      "falsification_condition": "REJECTED_NOT_ADVANCED if the candidate's risk-adjusted economic performance does not exceed the matched placebo by a non-negligible margin, and/or the candidate materially underperforms the dynamic rankable benchmark, and/or the long-short candidate does not meaningfully outperform its own long-only control."
+    }
+  },
+  "distinctness_from_prior_mechanisms": "vol_rank_20 (a volatility-LEVEL statistic) is definitionally unrelated to ret_rank_20 (20-day cross-sectional momentum), ret_5 (5-day reversal), gap_pct_1 (overnight-gap reversal), slope_60 (trend/regression slope), and momentum_score (a momentum/slope blend) -- all five prior features are return/price-DIRECTION statistics. This is not a retuned parameter variant of any prior family.",
+  "real_candidate_population": [
+    "discovery01_risk01_low_volatility_anomaly_long_only_v1",
+    "discovery01_risk01_low_volatility_anomaly_long_short_v1"
+  ],
+  "diagnostic_placebo_population": [
+    "discovery01_risk01_low_volatility_anomaly_placebo_v1"
+  ],
+  "benchmark": {
+    "kind": "family_specific_dynamic_equal_weight_causally_rankable_v1",
+    "definition": "At each economic decision date, equal-weight the SAME causally rankable symbol set available to this family at that date (RANKABLE_SET(T)) -- no future membership, no holdout. Fold-reset semantics identical to SHORT-WAVE-03's build_fold_reset_benchmark convention.",
+    "not_a_fixed_12_symbol_benchmark": true,
+    "predeclared_before_results": true,
+    "implementation_status": "Already implemented and previously exercised by SHORT-WAVE-03's run_01 (benchmark_type=dynamic_equal_weight_causally_rankable_fold_reset_v1); reused verbatim unchanged in this experiment's run_wave.py (build_dynamic_rankable_benchmark), not reimplemented, not invented after seeing returns."
+  },
+  "required_future_run_recording_fields": [
+    "seed_universe_count", "seed_universe_id",
+    "per_date_rankable_cross_section_min_median_max", "dates_below_rank_minimum",
+    "symbols_ever_rankable", "symbols_never_rankable",
+    "first_last_rankable_date_per_symbol_if_practical",
+    "target_long_symbol_days", "target_short_symbol_days",
+    "executed_long_symbol_days", "executed_short_symbol_days",
+    "max_concurrent_longs", "max_concurrent_shorts",
+    "desired_gross_exposure", "actual_gross_exposure",
+    "desired_net_exposure", "actual_net_exposure",
+    "turnover", "cost_drag", "net_return", "sharpe", "max_drawdown",
+    "long_short_minus_long_only_paired_deltas",
+    "matched_placebo_comparison", "fold_concentration"
+  ],
+  "no_standalone_short_leg_pnl_without_exact_attribution": true,
+  "prohibited_after_predeclaration": [
+    "adaptive rank_side_count/window/universe/horizon retuning based on observed results",
+    "mixing placebo trials into the real-candidate experiment id",
+    "changing the seed universe after seeing any trial result",
+    "inventing or adjusting the benchmark definition after seeing returns",
+    "adding RISK-02/RISK-03 variants after seeing this result without a new, separately-reviewed predeclaration",
+    "claiming PROVEN_ALPHA or PROMOTION_READY for this development study",
+    "consuming the reserved final 6-month holdout in this campaign"
+  ],
+  "execution_guard": {
+    "check_mode_stages": ["check"],
+    "execute_required_stages": ["risk01", "judge"],
+    "explicit_flag_required": "--execute",
+    "network_contact_in_check_mode": false,
+    "note": "run_wave.py's main() refuses any network-touching stage unless the literal --execute flag is present in argv."
+  }
+}
