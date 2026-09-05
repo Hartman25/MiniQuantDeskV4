@@ -535,6 +535,23 @@ pub(crate) fn seed_portfolio_from_baseline(
     }
 }
 
+/// One economically-effective fill applied to the portfolio during
+/// [`recover_oms_and_portfolio_traced`], in durable replay (`inbox_id asc`)
+/// order.
+///
+/// WAVE05-STRATEGY-CLOSED-TRADE-READ-MODEL-01: this is the exact same
+/// `Fill` the canonical replay fed to `mqk_portfolio::apply_entry` — never a
+/// second re-derivation from raw `BrokerEvent.delta_qty`. A duplicate/no-op
+/// broker event or a terminal raw-overfill correction never produces one of
+/// these (see `effective_portfolio_fill`); a caller building a read
+/// projection over these records inherits that correction for free.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalAppliedFill {
+    pub(crate) inbox_id: i64,
+    pub(crate) internal_order_id: String,
+    pub(crate) fill: Fill,
+}
+
 /// Recover OMS orders, side cache, and portfolio from durable DB truth.
 pub(crate) async fn recover_oms_and_portfolio(
     db: &sqlx::PgPool,
@@ -545,6 +562,42 @@ pub(crate) async fn recover_oms_and_portfolio(
         BTreeMap<String, OmsOrder>,
         BTreeMap<String, mqk_reconcile::Side>,
         PortfolioState,
+    ),
+    super::types::RuntimeLifecycleError,
+> {
+    let (oms_orders, sides, portfolio, _canonical_fills, _last_applied_inbox_id) =
+        recover_oms_and_portfolio_traced(db, run_id, initial_equity_micros).await?;
+    Ok((oms_orders, sides, portfolio))
+}
+
+/// Same durable replay as [`recover_oms_and_portfolio`], additionally
+/// returning the ordered sequence of economically-effective fills it applied
+/// to the portfolio, and the exact replay watermark (`max(inbox_id)` across
+/// ALL applied rows, not merely fill events) this replay consumed.
+///
+/// WAVE05-STRATEGY-CLOSED-TRADE-READ-MODEL-01: `recover_oms_and_portfolio`
+/// is a thin wrapper around this function so both the daemon's restart/
+/// accounting path and the closed-trade attribution read model consume the
+/// identical canonical replay -- there is exactly one raw `oms_inbox` replay
+/// loop in this codebase. Do not add a second one.
+///
+/// WAVE05-STRATEGY-CLOSED-TRADE-READ-MODEL-01-REPAIR-01: the returned
+/// watermark is derived from the SAME `applied` vector this function already
+/// loaded -- never a second raw `oms_inbox` replay/query -- so a caller can
+/// prove same-watermark parity against
+/// `sys_paper_portfolio_accounting_state.last_applied_inbox_id` without
+/// re-deriving it independently.
+pub(crate) async fn recover_oms_and_portfolio_traced(
+    db: &sqlx::PgPool,
+    run_id: uuid::Uuid,
+    initial_equity_micros: i64,
+) -> Result<
+    (
+        BTreeMap<String, OmsOrder>,
+        BTreeMap<String, mqk_reconcile::Side>,
+        PortfolioState,
+        Vec<CanonicalAppliedFill>,
+        i64,
     ),
     super::types::RuntimeLifecycleError,
 > {
@@ -575,6 +628,7 @@ pub(crate) async fn recover_oms_and_portfolio(
     }
 
     let mut portfolio = PortfolioState::new(initial_equity_micros);
+    let mut canonical_fills: Vec<CanonicalAppliedFill> = Vec::new();
 
     for row in &applied {
         // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect #2): an
@@ -678,6 +732,11 @@ pub(crate) async fn recover_oms_and_portfolio(
         // `None` and no portfolio mutation occurs.
         if is_fill {
             if let Some(fill) = effective_portfolio_fill(&event, pre_qty, post_qty) {
+                canonical_fills.push(CanonicalAppliedFill {
+                    inbox_id: row.inbox_id,
+                    internal_order_id: internal_id.clone(),
+                    fill: fill.clone(),
+                });
                 apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
             }
         }
@@ -686,7 +745,20 @@ pub(crate) async fn recover_oms_and_portfolio(
     oms_orders.retain(|_, o| !o.state.is_terminal());
     sides.retain(|order_id, _| oms_orders.contains_key(order_id));
 
-    Ok((oms_orders, sides, portfolio))
+    // WAVE05-STRATEGY-CLOSED-TRADE-READ-MODEL-01-REPAIR-01: the durable
+    // accounting watermark is the max inbox_id across ALL applied rows, not
+    // merely the ones that produced a `CanonicalAppliedFill` (acks/cancels/
+    // rejects advance the watermark too) -- computed from the same `applied`
+    // vector already loaded above, never a second raw replay.
+    let last_applied_inbox_id = applied.iter().map(|r| r.inbox_id).max().unwrap_or(0);
+
+    Ok((
+        oms_orders,
+        sides,
+        portfolio,
+        canonical_fills,
+        last_applied_inbox_id,
+    ))
 }
 
 // ---------------------------------------------------------------------------

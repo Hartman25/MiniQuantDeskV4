@@ -4353,29 +4353,160 @@ pub struct PaperJournalAdmissionsLane {
     pub rows: Vec<PaperJournalAdmissionRow>,
 }
 
+/// One deterministic FIFO closed-trade fragment: an opposite-side canonical
+/// effective fill fully or partially closed an open FIFO lot.
+///
+/// WAVE05-STRATEGY-CLOSED-TRADE-READ-MODEL-01: derived from the SAME
+/// canonical effective-fill replay that feeds `mqk_portfolio`'s FIFO
+/// accounting (never a second raw `oms_inbox` replay, never raw
+/// `BrokerEvent.delta_qty`). `gross_realized_pnl_micros` is GROSS trading
+/// P&L — the same semantic as `mqk_portfolio::PortfolioState::
+/// realized_pnl_micros` — fees are never netted into it here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalClosedTradeRow {
+    pub run_id: Uuid,
+    pub symbol: String,
+    /// Direction of the LOT THAT WAS CLOSED: `"long"` (closed by a sell) or
+    /// `"short"` (closed by a buy) — not the closing fill's own side.
+    pub direction: String,
+    pub qty: i64,
+    pub entry_price_micros: i64,
+    pub exit_price_micros: i64,
+    pub gross_realized_pnl_micros: i64,
+    /// `oms_inbox.inbox_id` / `internal_order_id` of the fill that opened
+    /// this lot.
+    pub open_inbox_id: i64,
+    pub open_internal_order_id: String,
+    /// `oms_inbox.inbox_id` / `internal_order_id` of the fill that closed
+    /// this lot.
+    pub close_inbox_id: i64,
+    pub close_internal_order_id: String,
+    /// Durable opening-side strategy identity. `None` for manual orders,
+    /// legacy orders missing a fingerprint, or when lineage is
+    /// missing/invalid — never fabricated. See `attribution_state`.
+    pub open_strategy_id: Option<String>,
+    pub open_strategy_semantic_fingerprint: Option<String>,
+    /// Durable closing-side strategy identity. Same absence rules as
+    /// `open_strategy_id`.
+    pub close_strategy_id: Option<String>,
+    pub close_strategy_semantic_fingerprint: Option<String>,
+    /// - `"attributed"` — open and close share the same `strategy_id` AND
+    ///   the same `strategy_semantic_fingerprint`.
+    /// - `"cross_strategy"` — open and close resolve to different
+    ///   `strategy_id`s. Gross closure P&L is still shown; never assigned to
+    ///   either strategy's analytics.
+    /// - `"semantic_identity_changed"` — same `strategy_id` on both sides
+    ///   but a different `strategy_semantic_fingerprint`; not the same
+    ///   semantic strategy.
+    /// - `"manual_or_mixed"` — at least one side is a genuine manual/
+    ///   non-strategy order.
+    /// - `"lineage_incomplete"` — at least one side is a legacy strategy
+    ///   fill missing its fingerprint; gross math is visible but exact
+    ///   semantic attribution cannot be proven.
+    /// - `"lineage_invalid"` — at least one side's originating outbox row
+    ///   lineage is malformed/contradictory.
+    /// - `"lineage_missing"` — at least one side's originating outbox row
+    ///   does not exist.
+    pub attribution_state: String,
+}
+
+/// Closed-trade attribution lane of the paper journal.
+///
+/// `truth_state`:
+/// - `"active"` — DB + active run + accounting epoch `"complete"` +
+///   `sum_gross_realized_pnl_micros` proven equal to both the canonical
+///   replay's `realized_pnl_micros` and (when present) the durable
+///   `sys_paper_portfolio_accounting_state.realized_pnl_micros`; `rows` is
+///   authoritative.
+/// - `"incomplete"` — DB + active run present, projection math is
+///   internally proven consistent, but the run's durable accounting epoch
+///   is `"incomplete"` (see `accounting_epoch_reason`) or no durable
+///   accounting-state row exists yet. `rows` still reflects observed fills
+///   but must not be read as complete strategy P&L for the account —
+///   inherited/adopted positions this run's fill history cannot explain may
+///   be missing their opening lot.
+/// - `"parity_failed"` — FAIL CLOSED: the projection's summed gross P&L
+///   contradicted canonical account replay or durable accounting truth.
+///   `rows` is empty; never returns apparently-authoritative strategy
+///   metrics on a proven contradiction.
+/// - `"query_failed"` — a DB query or lineage lookup errored; `rows` empty.
+/// - `"no_active_run"` — DB present but no active run; `rows` empty.
+/// - `"no_db"` — no DB pool; `rows` empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalClosedTradesLane {
+    pub truth_state: String,
+    pub backend: String,
+    /// Durable `sys_paper_portfolio_accounting_state.accounting_epoch`
+    /// (`"complete"` | `"incomplete"`) when known. `None` when no durable
+    /// accounting-state row exists for this run yet, or the lane is not
+    /// `"active"`/`"incomplete"`.
+    pub accounting_epoch: Option<String>,
+    pub accounting_epoch_reason: Option<String>,
+    /// Sum of `gross_realized_pnl_micros` across `rows`. `Some` only when
+    /// `truth_state` is `"active"` or `"incomplete"`.
+    pub sum_gross_realized_pnl_micros: Option<i64>,
+    /// WAVE05-STRATEGY-CLOSED-TRADE-READ-MODEL-01-REPAIR-01: the exact
+    /// shared `classify_portfolio_provenance` verdict for this run's
+    /// snapshot/accounting relationship (the same closed vocabulary
+    /// `routes/durable_portfolio.rs` and `routes/paper_lifecycle.rs`
+    /// expose) — `"active"`, `"fill_history_incomplete"`,
+    /// `"accounting_epoch_unavailable"`, `"accounting_snapshot_mismatch"`,
+    /// `"not_found"`, `"query_failed"`, `"unsupported_source"`, or
+    /// `"invalid_snapshot"`. Never collapsed into a generic `"incomplete"`
+    /// without this field naming the exact defect. `None` only when the
+    /// projection itself never got far enough to classify it (top-level
+    /// projection-vs-canonical-replay parity failure, run lookup failure, or
+    /// projection build failure).
+    pub accounting_provenance_state: Option<String>,
+    /// The canonical `recover_oms_and_portfolio_traced` replay watermark
+    /// (`max(inbox_id)` across all applied rows) this projection was built
+    /// from.
+    pub canonical_last_applied_inbox_id: Option<i64>,
+    /// Durable `sys_paper_portfolio_accounting_state.last_applied_inbox_id`
+    /// for this run, when an accounting row exists.
+    pub accounting_last_applied_inbox_id: Option<i64>,
+    /// `"same_watermark"` | `"accounting_watermark_mismatch"`. `Some` only
+    /// when `accounting_provenance_state == "active"` (the only case where a
+    /// same-watermark comparison is meaningful) — `None` otherwise. A
+    /// mismatch here means the durable accounting row's replay watermark is
+    /// stale relative to the canonical projection even though its
+    /// `source_snapshot_id` and `accounting_epoch` otherwise look current;
+    /// `truth_state` must never be `"active"` when this is
+    /// `"accounting_watermark_mismatch"`.
+    pub accounting_watermark_state: Option<String>,
+    pub rows: Vec<PaperJournalClosedTradeRow>,
+}
+
 /// Response for `GET /api/v1/paper/journal`.
 ///
 /// Unified paper-trading evidence surface for operator review.  Separates
 /// fill evidence (what executed) from signal-admission history (what was
-/// submitted and accepted into the outbox).
+/// submitted and accepted into the outbox) and attributed closed-trade
+/// history (what FIFO lots closed, and which exact strategy identity they
+/// attribute to).
 ///
-/// Both lanes carry independent `truth_state` values.  An operator can
+/// Every lane carries an independent `truth_state` value.  An operator can
 /// answer:
 /// - What fills were produced by this run? → `fills_lane`
 /// - What signals were admitted for dispatch? → `admissions_lane`
+/// - What FIFO trades closed, and were they attributable to one exact
+///   strategy semantic identity? → `closed_trades_lane`
 ///
-/// Neither lane fabricates history.  If a lane is unavailable its `rows`
+/// No lane fabricates history.  If a lane is unavailable its `rows`
 /// are empty and `truth_state` says so explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperJournalResponse {
     /// Self-identifying canonical route.
     pub canonical_route: String,
-    /// Active run ID when both lanes are `"active"`.  `None` otherwise.
+    /// Active run ID when lanes are `"active"`.  `None` otherwise.
     pub run_id: Option<String>,
     /// Fill evidence sourced from `postgres.fill_quality_telemetry`.
     pub fills_lane: PaperJournalFillsLane,
     /// Signal-admission history sourced from `postgres.audit_events`.
     pub admissions_lane: PaperJournalAdmissionsLane,
+    /// Attributed FIFO closed-trade history — see
+    /// [`PaperJournalClosedTradesLane`].
+    pub closed_trades_lane: PaperJournalClosedTradesLane,
 }
 
 // ---------------------------------------------------------------------------
