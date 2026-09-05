@@ -222,10 +222,63 @@ def test_advancement_policy_numeric_thresholds_are_real_numbers() -> None:
     assert isinstance(policy["matched_diagnostic_placebo_requirement"]["min_excess"], (int, float))
     assert isinstance(policy["primary_vs_control_requirement"]["min_excess"], (int, float))
     assert isinstance(policy["dsr_requirement"]["min_value"], (int, float))
+    assert policy["dsr_requirement"]["min_value"] == 0.5  # Finding 1: DSR's own probability midpoint, not 0.0
     assert isinstance(policy["pbo_requirement"]["max_value"], (int, float))
     assert isinstance(policy["p7a_p7b_economic_replay_stress_requirement"]["max_drawdown_ceiling"], (int, float))
-    assert isinstance(policy["robustness_gauntlet_requirement"]["sweep_entry_thresholds"], list)
-    assert len(policy["robustness_gauntlet_requirement"]["sweep_entry_thresholds"]) >= 3
+    sensitivity = policy["dsr_pbo_block_count_sensitivity_requirement"]
+    assert isinstance(sensitivity["block_counts"], list)
+    assert len(sensitivity["block_counts"]) >= 2
+    assert len(set(sensitivity["block_counts"])) == len(sensitivity["block_counts"]), "block_counts must be distinct"
+    for bc in sensitivity["block_counts"]:
+        assert isinstance(bc, int) and bc >= 4 and bc % 2 == 0
+    assert isinstance(sensitivity["dsr_max_sensitivity_range"], (int, float))
+    assert isinstance(sensitivity["pbo_max_sensitivity_range"], (int, float))
+    assert 0.0 <= sensitivity["pbo_max_sensitivity_range"] <= 1.0
+
+
+def test_dsr_pbo_sensitivity_matches_real_accepted_cli_shape() -> None:
+    """Finding 2: dsr_pbo_sensitivity_cli varies ONLY block_counts (via
+    --block-counts) -- there is no entry_threshold sweep anywhere in the
+    accepted API, so none may survive in this policy."""
+    policy = _campaign()["advancement_policy"]
+    sensitivity = policy["dsr_pbo_block_count_sensitivity_requirement"]
+    assert "block_counts" in sensitivity
+    blob = json.dumps(policy).lower()
+    assert "sweep_entry_thresholds" not in blob
+    assert "entry_threshold=0.5" not in blob
+    assert "\"entry_threshold\"" not in json.dumps(sensitivity).lower()
+
+
+def test_canonical_p9_gauntlet_requires_the_complete_real_scenario_set() -> None:
+    """Finding 3: the Wave06 policy names the REAL current
+    bkt_robustness_gauntlet_v2 required scenario set, not a Wave06-specific
+    substitute."""
+    policy = _campaign()["advancement_policy"]
+    gauntlet = policy["canonical_p9_robustness_gauntlet_requirement"]
+    assert gauntlet["required_protocol_version"] == "bkt_robustness_gauntlet_v2"
+    assert set(gauntlet["required_scenario_names"]) == {
+        "execution_delay_stress",
+        "symbol_leave_one_out",
+        "month_year_regime_concentration",
+        "parameter_neighborhood_execution",
+        "placebo_temporal_offset",
+        "conservative_capacity_stress",
+        "dsr_pbo_sensitivity",
+        "p7a_p7b_economic_replay_stress",
+        "genuine_shuffled_placebo",
+    }
+
+
+def test_p7a_p7b_stress_uses_only_real_cli_compatible_fields() -> None:
+    """Finding 4: no nonexistent stress_max_target_qty_multiplier field, and
+    the declared notional cap is genuinely tighter than the uncapped
+    baseline sizing."""
+    policy = _campaign()["advancement_policy"]
+    stress = policy["p7a_p7b_economic_replay_stress_requirement"]
+    assert "stress_max_target_qty_multiplier" not in stress
+    assert "stress_max_position_notional_usd" in stress
+    assert isinstance(stress["stress_max_position_notional_usd"], (int, float))
+    assert stress["stress_max_position_notional_usd"] > 0
 
 
 def test_advancement_policy_verdict_definitions_cover_exactly_the_allowed_verdicts() -> None:

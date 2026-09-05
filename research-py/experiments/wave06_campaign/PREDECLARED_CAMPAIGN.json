@@ -110,16 +110,16 @@
       "rationale": "The long_short primary must strictly outperform its own long_only control net of costs, or the short leg adds no value and the frozen falsification_condition's 'long-short does not meaningfully outperform long-only' branch is satisfied."
     },
     "dsr_requirement": {
-      "metric": "deflated_sharpe_ratio (mqk_research.ml.multiple_testing_stats, primary trial, frozen entry_threshold=0.5 baseline)",
-      "min_value": 0.0,
+      "metric": "deflated_sharpe_ratio (mqk_research.ml.multiple_testing_stats, primary trial, JudgeSpec default cscv_target_block_count=10 baseline -- the accepted module default, and the midpoint of the frozen dsr_pbo_block_count_sensitivity_requirement.block_counts grid below; there is no 'entry_threshold' field on JudgeSpec)",
+      "min_value": 0.5,
       "evaluable_required": true,
-      "rationale": "Reuses DSR's own literature-standard natural decision boundary (Bailey & Lopez de Prado 2014): DSR >= 0 means the deflated probability the true Sharpe exceeds zero is >= 50%. The metric's own defined midpoint, not an invented number."
+      "rationale": "deflated_sharpe_ratio is itself defined (mqk_research.ml.multiple_testing_stats, Bailey & Lopez de Prado 2014) as a probability in [0,1] that the true Sharpe ratio exceeds zero after deflating for the number of trials tested. 0.0 is that probability's lower bound, not its midpoint; 0.5 IS the midpoint (deflated probability >= 50%). This is a NEW, fixed, pre-outcome Wave06 development-stage bar frozen now precisely because it reuses the metric's own defined midpoint -- it is not itself a claim that 0.5 is a canonical production promotion threshold (see not_a_promotion_bypass below)."
     },
     "pbo_requirement": {
-      "metric": "pbo (Probability of Backtest Overfitting, CSCV, mqk_research.ml.multiple_testing_stats)",
+      "metric": "pbo (Probability of Backtest Overfitting, CSCV, mqk_research.ml.multiple_testing_stats, same JudgeSpec default cscv_target_block_count=10 baseline as dsr_requirement)",
       "max_value": 0.5,
       "evaluable_required": true,
-      "rationale": "Reuses PBO's own literature-standard natural interpretation boundary (Bailey, Borwein, Lopez de Prado & Zhu 2017): PBO > 0.5 means the candidate is more likely than not an overfit artifact of the selection process. The metric's own defined midpoint, not an invented number."
+      "rationale": "Reuses PBO's own literature-standard natural interpretation boundary (Bailey, Borwein, Lopez de Prado & Zhu 2017): PBO > 0.5 means the candidate is more likely than not an overfit artifact of the selection process. This is a NEW, fixed, pre-outcome Wave06 development-stage bar that happens to reuse PBO's own defined midpoint -- the literature establishes PBO's own interpretation, not that 0.5 is mandated as production promotion policy; production promotion remains governed solely by the canonical gate named in not_a_promotion_bypass below."
     },
     "genuine_shuffled_placebo_requirement": {
       "evaluator": "mqk_research.ml.genuine_shuffled_placebo_cli (FINAL-P9-ROBUSTNESS-SEMANTICS-01, BKT-ROBUSTNESS-GAUNTLET-01)",
@@ -127,28 +127,71 @@
       "on_not_evaluable": "REJECTED_NOT_ADVANCED",
       "rationale": "Reuses the evaluator's own already-accepted pass/fail semantics directly -- no new threshold invented."
     },
-    "robustness_gauntlet_requirement": {
-      "definition": "BKT-ROBUSTNESS-GAUNTLET-01 (P9): genuine_shuffled_placebo_requirement above, AND dsr_pbo_sensitivity_cli's full --entry-thresholds sweep must report dsr_min >= 0.0 and pbo_max <= 0.5 across the ENTIRE swept set below, not only the single frozen entry_threshold=0.5 point.",
-      "sweep_entry_thresholds": [0.3, 0.4, 0.5, 0.6, 0.7],
-      "on_not_evaluable_at_any_swept_point": "REJECTED_NOT_ADVANCED",
-      "rationale": "Reuses dsr_pbo_sensitivity_cli (already accepted for P9) directly rather than inventing a new robustness mechanism; the swept set is fixed and symmetric around the frozen 0.5 baseline, chosen before any result exists."
+    "dsr_pbo_block_count_sensitivity_requirement": {
+      "definition": "mqk_research.ml.dsr_pbo_sensitivity_cli (P9's dsr_pbo_sensitivity scenario) varies ONLY JudgeSpec.cscv_target_block_count via its required --block-counts argument -- it has no entry_threshold to sweep (the Wave06 rank signal policies' own entry_threshold is not a dsr_pbo_sensitivity_cli parameter at all). mqk_backtest::dsr_pbo_sensitivity_scenario likewise requires block_counts, dsr_max_sensitivity_range, and pbo_max_sensitivity_range with no hidden in-crate default.",
+      "block_counts": [8, 10, 12],
+      "block_counts_note": "Three distinct even integers >= 4, symmetric around the dsr_requirement/pbo_requirement JudgeSpec default of 10, chosen now (before any Wave06 result exists) and newly authorized by this pre-outcome predeclaration as Wave06 policy -- not inherited as a Rust or CLI default.",
+      "dsr_max_sensitivity_range": 0.15,
+      "pbo_max_sensitivity_range": 0.15,
+      "sensitivity_range_rationale": "Both DSR and PBO are probabilities in [0,1]; 0.15 is a fixed, round, conservative pre-outcome ceiling on how far either statistic may move across this +/-2-block perturbation around the baseline block count -- chosen before any Wave06 result exists, not tuned to either candidate's mechanism.",
+      "on_not_evaluable_at_any_block_count": "REJECTED_NOT_ADVANCED",
+      "on_range_exceeded": "REJECTED_NOT_ADVANCED"
+    },
+    "canonical_p9_robustness_gauntlet_requirement": {
+      "definition": "The REAL, complete canonical production robustness protocol (mqk_backtest::robustness_gauntlet), not a Wave06-specific substitute gauntlet. dsr_pbo_block_count_sensitivity_requirement and p7a_p7b_economic_replay_stress_requirement and genuine_shuffled_placebo_requirement above are additional explicit Wave06 evidence checks -- they never substitute for this complete artifact.",
+      "required_protocol_version": "bkt_robustness_gauntlet_v2",
+      "required_scenario_names": [
+        "execution_delay_stress",
+        "symbol_leave_one_out",
+        "month_year_regime_concentration",
+        "parameter_neighborhood_execution",
+        "placebo_temporal_offset",
+        "conservative_capacity_stress",
+        "dsr_pbo_sensitivity",
+        "p7a_p7b_economic_replay_stress",
+        "genuine_shuffled_placebo"
+      ],
+      "required_scenario_names_source": "core-rs/crates/mqk-backtest/src/robustness_gauntlet.rs REQUIRED_ROBUSTNESS_SCENARIO_NAMES, frozen here as the exact current accepted set at predeclaration time",
+      "requirement": "artifact.protocol_version == required_protocol_version AND artifact.is_complete() == true AND artifact.all_applicable_passed() == true AND every required_scenario_names entry is present in the artifact's own scenario set",
+      "on_incomplete_or_wrong_protocol_or_missing_scenario": "REJECTED_NOT_ADVANCED",
+      "rationale": "A partial artifact containing only a subset of required scenarios (e.g. only dsr_pbo_sensitivity + p7a_p7b_economic_replay_stress + genuine_shuffled_placebo) must never satisfy this gate -- those three are Research-registry-anchored scenarios merged in via RobustnessGauntletOutput::merge_dsr_pbo_sensitivity, not a replacement for the six pure-engine scenarios the canonical protocol also requires."
     },
     "p7a_p7b_economic_replay_stress_requirement": {
       "evaluator": "mqk_research.ml.p7a_p7b_economic_replay_stress_cli (P7A-P7B-ECONOMIC-REPLAY-STRESS-01)",
+      "cli_argument_mapping": "stress_execution_slippage_bps -> --stress-execution-slippage-bps (required int); stress_execution_volatility_mult_bps -> --stress-execution-volatility-mult-bps (required int); stress_max_position_notional_usd -> --stress-max-position-notional-usd (optional float, absolute USD notional cap, not a multiplier). No accepted CLI argument named stress_max_target_qty_multiplier or any other multiplier-of-baseline field exists.",
       "stress_execution_slippage_bps": 15,
       "stress_execution_volatility_mult_bps": 10,
-      "stress_max_target_qty_multiplier": 0.5,
+      "stress_max_position_notional_usd": 10000.0,
+      "stress_max_position_notional_usd_rationale": "Baseline WeightToShareSpec (equity_usd=100000.0) declares no max_target_qty/max_position_notional_usd cap at all (an uncapped baseline), and the primary long_short rank_side_count=5 equal-weight sizing already produces a natural per-position notional of weight(0.20) * equity_usd(100000) = $20,000 at baseline. $10,000 is a fixed, pre-outcome absolute USD cap equal to half that natural per-position notional -- strictly tighter than the uncapped baseline (mqk_research.ml.p7a_p7b_economic_replay_stress_cli._classify_cap_transition classifies baseline=None/stress=finite as 'tighter', and this value is additionally genuinely binding, not a vacuous cap chosen only to pass the CLI's own genuineness check) and chosen this way rather than as an absolute share quantity because this is a mixed-price 88-symbol universe where a single share-count cap would not apply uniformly across symbols.",
       "max_drawdown_ceiling": 0.40,
       "requirement": "evaluator's own reported passed == true under the frozen stress knobs above",
-      "rationale": "Reuses the evaluator's own already-accepted pass/fail semantics (max_drawdown >= -max_drawdown_ceiling). Stress knobs are fixed genuinely-adverse values (per the evaluator's own adversity validation) chosen before any result exists; max_drawdown_ceiling=0.40 is a round, conservative, pre-registered risk bound."
+      "rationale": "Reuses the evaluator's own already-accepted pass/fail semantics (max_drawdown >= -max_drawdown_ceiling) and its own _validate_genuine_p7a_p7b_adversity check. Stress knobs are fixed genuinely-adverse values chosen before any result exists; max_drawdown_ceiling=0.40 is a round, conservative, pre-registered risk bound."
     },
     "fail_closed_not_evaluable": "any required metric reporting a not_evaluable (or equivalent) status at any required evaluation point is treated as REJECTED_NOT_ADVANCED -- never skipped, never defaulted to pass.",
-    "fail_closed_gross_wealth_insolvency": "a RuntimeError gross-wealth-insolvency failure in any real candidate attempt is treated as REJECTED_NOT_ADVANCED.",
-    "early_rejection_semantics": "REJECTED_NOT_ADVANCED may be assigned as soon as any single required gate above fails or is not_evaluable, without evaluating every remaining gate (short-circuit, matching the frozen falsification_condition's 'and/or' phrasing) -- but the closeout record must name every gate actually evaluated and its outcome, never only the first failure.",
+    "gross_wealth_insolvency_terminal_classification": {
+      "definition": "A POLICY-TERMINAL ECONOMIC FAILURE, distinct from an OPERATIONAL/PROVIDER/IO/UNKNOWN failure. Only an attempt whose recorded failure_reason is EXACTLY one of the recognized strings below is a policy-terminal economic failure; every other failed or crashed attempt (a generic RuntimeError, a provider/network error, or any failed attempt with no recognized policy-terminal cause) leaves the candidate incomplete/BLOCKED and never authorizes closeout or the next candidate.",
+      "recognized_failure_reason_strings": [
+        "RuntimeError: Fail-closed: discrete gross wealth ledger equity is <= 0 -- cannot compute a further return fraction"
+      ],
+      "recognized_failure_reason_source": "mqk_research.ml.economic_walkforward's discrete-return fail-closed gross-wealth-ledger check, and economic_registry_integration.run_registered_economic_walkforward_eval's own f'{type(exc).__name__}: {exc}' failure_reason formatting -- both already-accepted, unmodified production code. Byte-for-byte matches the precedent already realized in docs/research/DISCOVERY_01_LOW_VOLATILITY_ANOMALY_RESULT.md Section 4/5.",
+      "on_match": "REJECTED_NOT_ADVANCED for the absolute_economic_requirement gate; every downstream gate that a genuinely insolvent real attempt could never have produced evidence for is recorded honestly as NOT_RUN_AFTER_DETERMINISTIC_REJECTION, never fabricated as passed or not_evaluable.",
+      "on_no_match": "the candidate closeout is refused (returns incomplete/BLOCKED, not a terminal verdict) -- an unrecognized failure never authorizes REJECTED_NOT_ADVANCED or the next candidate."
+    },
+    "early_rejection_semantics": "REJECTED_NOT_ADVANCED may be assigned as soon as any single required gate above fails or is not_evaluable, without evaluating every remaining gate (short-circuit, matching the frozen falsification_condition's 'and/or' phrasing) -- but the closeout record must name every gate actually evaluated and its outcome (or NOT_RUN_AFTER_DETERMINISTIC_REJECTION for a gate a terminal rejection genuinely made impossible to run), never only the first failure and never a fabricated outcome for an unrun gate.",
     "verdict_definitions": {
-      "REJECTED_NOT_ADVANCED": "At least one required gate (absolute economic solvency, benchmark-relative, matched-placebo, primary-vs-control, DSR, PBO, genuine shuffled placebo, robustness gauntlet, P7A/P7B stress) fails or is not_evaluable.",
-      "INCONCLUSIVE": "Every required gate is evaluable and none fails outright, but the benchmark-relative excess falls in the dead-zone band [0.0, 0.05) -- too close to the minimum bar to distinguish from measurement noise at this sample size -- while every other gate passes with margin.",
-      "DEVELOPMENT_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION": "Every required gate passes strictly, including the benchmark-relative excess exceeding the INCONCLUSIVE dead-zone (>= 0.05). This is the maximum possible verdict for this non-point-in-time development study; it does NOT authorize PROMOTION_READY or PROVEN_ALPHA and does NOT itself authorize Paper/Live -- it requires a NEW, separately-predeclared, fresh point-in-time-clean confirmation mission before any promotion verification may begin."
+      "REJECTED_NOT_ADVANCED": "At least one required gate (absolute economic solvency, benchmark-relative, matched-placebo, primary-vs-control, DSR, PBO, genuine shuffled placebo, dsr_pbo_block_count_sensitivity, canonical P9 robustness gauntlet, P7A/P7B stress) fails or is not_evaluable. benchmark-relative fails exactly when benchmark_excess <= 0.0.",
+      "INCONCLUSIVE": "Every required gate is evaluable and none fails outright (per REJECTED_NOT_ADVANCED's own partition above), and the benchmark-relative excess falls in the dead-zone band 0.0 < benchmark_excess < 0.05 -- too close to the minimum bar to distinguish from measurement noise at this sample size -- while every other gate passes with margin.",
+      "DEVELOPMENT_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION": "Every required gate passes strictly, including the benchmark-relative excess reaching or exceeding the INCONCLUSIVE dead-zone's upper edge (benchmark_excess >= 0.05). This is the maximum possible verdict for this non-point-in-time development study; it does NOT authorize PROMOTION_READY or PROVEN_ALPHA and does NOT itself authorize Paper/Live -- it requires a NEW, separately-predeclared, fresh point-in-time-clean confirmation mission before any promotion verification may begin."
+    },
+    "benchmark_relative_verdict_partition": {
+      "definition": "Non-overlapping, gap-free partition of benchmark_excess = net_sharpe(primary) - net_sharpe(benchmark) used by verdict_definitions above.",
+      "rejected": "benchmark_excess <= 0.0",
+      "inconclusive_band": "0.0 < benchmark_excess < 0.05",
+      "gate_cleared": "benchmark_excess >= 0.05"
+    },
+    "closeout_verdict_authority": {
+      "module": "wave06_campaign/campaign_advancement_authority.py",
+      "policy": "The verdict written into CANDIDATE_CLOSEOUT_STATUS.json is COMPUTED by classify_verdict() from a caller-supplied evidence dict binding each gate above to real measured values/artifact identity -- no public writer accepts a caller-authored verdict string as authority-bearing. campaign_order_guard.load_verified_closeout() independently recomputes the verdict from the closeout's own stored evidence and refuses (returns None) on any mismatch, on any evidence-hash mismatch, or on evidence that fails classify_verdict()'s own internal validation -- a hand-edited verdict or hand-edited evidence field is never trusted over this recomputation."
     },
     "forbidden_verdicts_for_this_non_pit_study": ["PROVEN_ALPHA", "PROMOTION_READY", "PAPER_ENTRY_ELIGIBLE"],
     "not_a_promotion_bypass": "This development advancement policy governs ONLY whether this non-point-in-time development study continues investing research effort in a mechanism. It never weakens, substitutes for, or bypasses the canonical production promotion gate (mqk_research.ml.real_research_promotion_e2e_cli and mqk-promotion's Rust verifier), which remains the sole authority for PROMOTION_READY under its own, separately-frozen, point-in-time-clean evidence requirements."

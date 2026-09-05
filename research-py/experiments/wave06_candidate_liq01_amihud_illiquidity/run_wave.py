@@ -1016,8 +1016,11 @@ def add_cross_sectional_rank(feats: pd.DataFrame, *, source_column: str, rank_co
 
 def ensure_full_features(bars: pd.DataFrame) -> pd.DataFrame:
     """DEFAULT FeatureSetV1Spec already produces illiquidity_amihud
-    (unranked Amihud (2002) ratio, |1-day log return| / 20-day average
-    dollar volume) -- no spec customization required. This candidate's own
+    (unranked Amihud (2002)-inspired ratio, |1-day log return| / same-day
+    dollar volume -- NOT a 20-day average dollar volume; feature_set_v1.py
+    computes dolvol = close * vol, illiquidity_amihud = r1.abs() / dolvol,
+    and a separate dolvol_20 rolling column exists but is not the divisor
+    here) -- no spec customization required. This candidate's own
     feature, FEATURE_COLUMN (the cross-sectional rank of that existing
     column), is added locally via add_cross_sectional_rank; see module
     docstring. R2: see ensure_real_targets -- always recomputed from the
