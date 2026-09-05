@@ -8,6 +8,10 @@
 #
 #   gui-contract - GUI truth tests, build gate, and daemon/GUI contract gate.
 #
+#   research  - Canonical research-py pytest suite (no provider/network calls,
+#               no Postgres). Provider/DB-backed proofs stay opt-in via
+#               operator-set env vars and are skipped here.
+#
 #   guards    - Deterministic pattern guard (check_unsafe_patterns.sh).
 #               Fails if Uuid::new_v4() appears in production src/, or if
 #               Utc::now() appears in mqk-db/src/ (enforcement scope).
@@ -88,6 +92,30 @@ jobs:
 
       - name: Daemon/GUI contract gate (authoritative endpoints)
         run: cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate
+
+  research:
+    name: "Python Research (pytest)"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./research-py
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install research package and test extras
+        run: python -m pip install -e ".[test]"
+
+      - name: Run canonical research test suite
+        run: python -m pytest tests -q
+
   guards:
     name: "Safety Guards (P0-1)"
     runs-on: ubuntu-latest
