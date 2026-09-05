@@ -1,0 +1,100 @@
+{
+  "mission_id": "WAVE06-LANE-A-ALPHA-CANDIDATE-DISCOVERY-PROMOTION-PAPER-ENTRY-01-CONTROLLER",
+  "campaign_id": "WAVE06-ALPHA-CANDIDATE-CAMPAIGN-01",
+  "predeclaration_patch": "W06-A-CAMPAIGN-PREDECLARATION-01",
+  "base_head": "e381a402481d4e704180199d9175a770d50ddfa6",
+  "origin_main_at_mission_start": "e381a402481d4e704180199d9175a770d50ddfa6",
+
+  "tested_hypothesis_exclusion_matrix": {
+    "ALPHA-01": {
+      "feature": "momentum_score",
+      "verdict": "INCONCLUSIVE",
+      "note": "20-day cross-sectional momentum; no useful activation at declared thresholds."
+    },
+    "SHORT-01": {
+      "feature": "slope_60",
+      "verdict": "REJECTED_NOT_ADVANCED",
+      "note": "ETF trend classifier."
+    },
+    "SHORT-WAVE-02": {
+      "features": ["ret_rank_20", "ret_5", "gap_pct_1"],
+      "verdict": "REJECTED_NOT_ADVANCED",
+      "note": "All three feature variants rejected."
+    },
+    "SHORT-WAVE-03-RANK01": {
+      "feature": "ret_rank_20",
+      "verdict": "VALID_NEGATIVE_LOCAL_EVIDENCE",
+      "note": "Direct rank implementation. RANK02/RANK03 not completed -- not misrepresented as tested."
+    },
+    "DISCOVERY-01-RISK-01": {
+      "feature": "vol_rank_20",
+      "verdict": "REJECTED_NOT_ADVANCED",
+      "note": "Single-feature OOS classifier-score direct-rank low-volatility anomaly implementation."
+    }
+  },
+
+  "campaign_order": ["LIQ-01", "VOL-01"],
+  "campaign_order_immutable_after_this_commit": true,
+  "max_candidates": 3,
+  "predeclared_candidate_count": 2,
+
+  "candidates": {
+    "LIQ-01": {
+      "order_position": 1,
+      "directory": "../wave06_candidate_liq01_amihud_illiquidity",
+      "feature_column": "illiquidity_amihud_rank_20",
+      "mechanism": "Amihud (2002) illiquidity risk premium",
+      "real_experiment_id": "WAVE06-LIQ01-AMIHUD-ILLIQUIDITY-REAL-V1",
+      "placebo_experiment_id": "WAVE06-LIQ01-AMIHUD-ILLIQUIDITY-PLACEBOS-V1"
+    },
+    "VOL-01": {
+      "order_position": 2,
+      "directory": "../wave06_candidate_vol01_volume_surprise",
+      "feature_column": "vol_ratio_rank_20",
+      "mechanism": "Gervais-Kaniel-Mingelgrin (2001) high-volume / investor-attention return premium",
+      "real_experiment_id": "WAVE06-VOL01-VOLUME-SURPRISE-REAL-V1",
+      "placebo_experiment_id": "WAVE06-VOL01-VOLUME-SURPRISE-PLACEBOS-V1"
+    }
+  },
+
+  "stopping_rule": {
+    "text": "Execute candidates strictly in campaign_order. If a candidate fails its own predeclared advancement criteria, do NOT tune it -- proceed to the next predeclared candidate. If a candidate honestly satisfies every required advancement gate, STOP the remaining candidate campaign and proceed to promotion verification for that candidate only. Do not substitute a fourth candidate. Do not invent a new candidate after seeing any result.",
+    "no_retuning_on_failure": true,
+    "no_fourth_candidate": true,
+    "no_post_hoc_candidate_substitution": true,
+    "stop_on_first_advancing_candidate": true
+  },
+
+  "candidate_selection_constraints": [
+    "materially different from every previously tested return-trend/short-horizon-return/gap/volatility mechanism in tested_hypothesis_exclusion_matrix",
+    "not a threshold, K, rank-band, turnover, rebalance-interval, cost-assumption, lookback, or universe tweak of any previously tested mechanism",
+    "executable using current causal next-bar economic_walk_forward_v1 machinery",
+    "daily-bar compatible",
+    "economically interpretable and supported by a primary peer-reviewed reference",
+    "no reliance on inaccessible proprietary data (no fundamentals, no earnings calendar, no shares-outstanding)",
+    "no future information / no lookahead",
+    "no result-driven parameter choice",
+    "no requirement for Live",
+    "no requirement for new multi-asset infrastructure",
+    "no requirement to weaken production/backtest conservatism"
+  ],
+
+  "universe_reuse_rationale": "Both candidates reuse the SAME already-committed, already-exercised-twice (SHORT-WAVE-03, DISCOVERY-01) 88-symbol current-registry-snapshot universe (universe_id=f25e8ec952c1429af7ac3bb58169408e), not a fresh point-in-time universe. LIQ-01's mechanism (illiquidity risk premium) specifically requires genuine cross-sectional variation in liquidity, which a fixed liquid-ETF-only universe would suppress by construction -- the broader mixed equity+ETF snapshot is the scientifically appropriate choice for that mechanism, and reusing the identical universe for VOL-01 keeps the only varying factor between this campaign's two candidates the feature itself. This is not a fresh PIT universe manufactured to enlarge the campaign.",
+
+  "holdout_reservation": {
+    "policy": "Each candidate reserves its own final holdout window (2024-11-01..2025-05-01, WF_HOLDOUT_MONTHS=6) via mqk_research.ml.holdout_ledger.reserve_holdout. holdout_id is content-bound to that candidate's own feature/bars dataset identity (compute_holdout_id), so LIQ-01, VOL-01, and DISCOVERY-01's own reserved holdout are three structurally distinct ledger entries even though the calendar window is identical for all three. No candidate in this campaign may call consume_holdout.",
+    "consumed_in_this_campaign": false
+  },
+
+  "prohibited_after_this_commit": [
+    "adding a third or fourth candidate to campaign_order without a new, separately-reviewed predeclaration",
+    "reordering campaign_order after seeing any candidate's result",
+    "retuning LIQ-01 or VOL-01 (window/threshold/universe/horizon) after seeing its own result",
+    "relabeling a previously tested mechanism (see tested_hypothesis_exclusion_matrix) as a new candidate",
+    "claiming PROVEN_ALPHA or PROMOTION_READY for either candidate",
+    "consuming the reserved final holdout for either candidate",
+    "starting Paper, arming Paper, starting the daemon, or submitting any broker order from this campaign's Lane-A work"
+  ],
+
+  "no_result_or_pnl_field_in_this_document": true
+}

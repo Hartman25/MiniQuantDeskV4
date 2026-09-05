@@ -1,0 +1,175 @@
+{
+  "mission_id": "WAVE06-LANE-A-ALPHA-CANDIDATE-DISCOVERY-PROMOTION-PAPER-ENTRY-01-CONTROLLER",
+  "predeclaration_patch": "W06-A-CAMPAIGN-PREDECLARATION-01",
+  "campaign_id": "WAVE06-ALPHA-CANDIDATE-CAMPAIGN-01",
+  "campaign_order_position": 2,
+  "base_head": "e381a402481d4e704180199d9175a770d50ddfa6",
+  "wave_classification": "NEW_MECHANISM_DEVELOPMENT_STUDY_NON_POINT_IN_TIME_UNIVERSE",
+  "wave_classification_reasons": [
+    "vol_ratio_rank_20 (cross-sectional percentile rank of current-day volume relative to its own trailing 20-day average volume) has never been used as a ranking/classifier feature in any prior MiniQuantDesk experiment (ALPHA-01 used momentum_score, SHORT-01 used slope_60, SHORT-WAVE-02/03 used ret_rank_20/ret_5/gap_pct_1, DISCOVERY-01 used vol_rank_20, WAVE06 LIQ-01 uses illiquidity_amihud_rank_20) -- it is a genuinely untested, attention/visibility-based mechanism with no definitional overlap with any previously tested return, price-level, volatility, or illiquidity-level statistic",
+    "the economic rationale (investor-attention / high-volume return premium) is grounded in primary peer-reviewed literature, not retuned from an observed result: Gervais, Kaniel & Mingelgrin (2001), 'The High-Volume Return Premium', Journal of Finance 56(3):877-919; Barber & Odean (2008), 'All That Glitters: The Effect of Attention and News on the Buying Behavior of Individual and Institutional Investors', Review of Financial Studies 21(2):785-818",
+    "vol_ratio_rank_20 is definitionally distinct from LIQ-01's illiquidity_amihud_rank_20: illiquidity_amihud is a LEVEL statistic (price impact per dollar traded, i.e. |return|/dollar_volume, a cross-sectional and time-varying illiquidity COST), while vol_ratio is a temporally-RELATIVE own-history statistic (today's volume divided by that SAME symbol's trailing 20-day average volume, a volume SURPRISE/demand-shock signal) -- both happen to use volume data, but they measure different economic constructs (a compensation-for-trading-cost risk premium vs. an attention-driven demand shock) and are evaluated as two separately falsifiable candidates in this campaign, never conflated",
+    "the underlying vol_ratio statistic is NOT new code -- it is already unconditionally computed (unranked) by the existing, unmodified mqk_research.features.feature_set_v1.build_feature_set_v1; only the cross-sectional rank transform (identical formula to that same module's own vol_rank_20/atr_rank_14 ranking, applied locally in run_wave.py) is new, and it is a mechanical transform, not new statistical methodology",
+    "the seed universe reused here is the SAME current-registry, non-point-in-time 88-symbol snapshot used by SHORT-WAVE-03, DISCOVERY-01, and WAVE06 LIQ-01 (see docs/research/BROAD_RESEARCH_UNIVERSE_CURRENT_TRUTH_AUDIT.md) -- carrying the identical survivorship-bias caveat forward unchanged, not a fresh point-in-time-clean universe, and kept identical across this campaign's candidates so the only varying factor between LIQ-01 and VOL-01 is the feature itself"
+  ],
+  "allowed_verdicts": [
+    "REJECTED_NOT_ADVANCED",
+    "INCONCLUSIVE",
+    "DEVELOPMENT_PROMISING_REQUIRES_FRESH_CONFIRMATION"
+  ],
+  "forbidden_verdicts": ["PROVEN_ALPHA", "PROMOTION_READY"],
+  "real_experiment_id": "WAVE06-VOL01-VOLUME-SURPRISE-REAL-V1",
+  "placebo_experiment_id": "WAVE06-VOL01-VOLUME-SURPRISE-PLACEBOS-V1",
+  "seed_universe": {
+    "path": "SEED_UNIVERSE.json",
+    "source": "mqk_research.universe.snapshot.build_current_enabled_equity_registry_snapshot(config/instruments/equities.json)",
+    "universe_source_kind": "current_enabled_equity_registry_snapshot_v1",
+    "universe_id": "f25e8ec952c1429af7ac3bb58169408e",
+    "symbol_count": 88,
+    "point_in_time_membership": false,
+    "survivorship_classification": "CURRENT_REGISTRY_SNAPSHOT_NOT_POINT_IN_TIME",
+    "note": "Identical, byte-for-byte reuse of SHORT-WAVE-03's / DISCOVERY-01's / WAVE06 LIQ-01's own frozen SEED_UNIVERSE.json (same universe_id) -- not regenerated, not re-derived from a possibly-changed live registry. Frozen BEFORE any Wave06 trial result is observed."
+  },
+  "dynamic_cross_section": {
+    "policy": "RANKABLE_SET(T) = seed-universe symbols with a valid OOS ml_score at exact decision timestamp T",
+    "no_stale_carry_forward": true,
+    "no_future_backfill": true,
+    "no_full_seed_coverage_required_per_symbol": true,
+    "note": "Identical policy to SHORT-WAVE-03/DISCOVERY-01/WAVE06 LIQ-01. A symbol need not have OOS coverage on every historical date."
+  },
+  "data": {
+    "path": "mqk_research.data.alpaca_historical.extract_research_bars_with_provenance",
+    "feed": "sip",
+    "timeframe": "1Day",
+    "start_utc": "2016-01-01T00:00:00Z",
+    "end_utc": "2025-05-01T00:00:00Z",
+    "asof": "2025-05-01",
+    "freshness_note": "Byte-for-byte reuse of DISCOVERY-01's / WAVE06 LIQ-01's own frozen data window. DISCOVERY-01 (commit 3cf711cf) already discovered, PRE-OUTCOME, that this exact 88-symbol universe's shared bars pipeline fail-closed CorporateActionReviewRequired gate refuses any end_utc at or after 2025-05-27 (unresolved 2025-2026 'name_change' corporate-action events on CCL, RKLB, XOM). Reusing the already-established safe boundary is the correct pre-outcome choice for this candidate too. WF_HOLDOUT_MONTHS=6 reserves a final holdout window (~2024-11-01..2025-05-01) that is structurally distinct per-candidate (holdout_id is content-bound to this candidate's own feature/bars dataset identity, per mqk_research.ml.holdout_ledger.compute_holdout_id) from DISCOVERY-01's and LIQ-01's own reserved holdouts even though the calendar window is identical -- no campaign's holdout can satisfy or consume another's reservation."
+  },
+  "cache_safety": {
+    "policy": "Reuse a cache ONLY after fail-closed verification that manifest/content exactly matches: provider, feed, adjustment, asof, requested window, seed universe, corporate-action evidence, canonical semantic bars hash. If exact verification is unavailable, fetch fresh. No existence-only cache reuse (identical policy to SHORT-WAVE-03/DISCOVERY-01/WAVE06 LIQ-01, reused verbatim in run_wave.py's verify_wave03_bars_cache_authority)."
+  },
+  "label": {
+    "horizon_bars": 10,
+    "ret_threshold": 0.0,
+    "definition": "fwd_ret = log(close[t+10]/close[t]); target = 1 iff fwd_ret > 0"
+  },
+  "walk_forward": {
+    "train_years": 3,
+    "test_months": 3,
+    "step_months": 3,
+    "holdout_months": 6,
+    "min_rows_per_fold": 300,
+    "purge_enabled": true,
+    "embargo_seconds": 0
+  },
+  "model": {
+    "l2": 0.001,
+    "lr": 0.05,
+    "steps": 300,
+    "standardize": true,
+    "clip_z": 8.0
+  },
+  "cost_model": {
+    "commission_bps_per_side": 10.0,
+    "slippage_bps_per_side": 0.0,
+    "note": "CONSERVATIVE RESEARCH COST ASSUMPTION, not actual Alpaca commission. Identical to SHORT-WAVE-02/03/DISCOVERY-01/WAVE06 LIQ-01."
+  },
+  "execution_pricing": {
+    "pricing_model_id": "rust_conservative_bar_range_v1",
+    "slippage_bps": 5,
+    "volatility_mult_bps": 0
+  },
+  "weight_to_share": {
+    "equity_usd": 100000.0,
+    "max_gross_exposure": 1.0
+  },
+  "rank_side_count": 5,
+  "long_only_rank_weight_rule": "top 5 scored names, each desired weight = +0.20",
+  "long_short_rank_weight_rule": "top 5 LONG each +0.10, bottom 5 SHORT each -0.10; gross=1.0, net=0.0",
+  "long_short_min_rankable_symbols": 10,
+  "borrow_model": "research_assumed_shortable_universe_v1",
+  "boundary_tie_policy": "fail_closed_boundary_ties_v1",
+  "signal_policies": {
+    "rank_long_only": {
+      "direction_policy": "cross_sectional_rank_long_only_v1",
+      "long_only": true,
+      "rank_side_count": 5,
+      "entry_threshold": 0.5,
+      "max_gross_exposure": 1.0
+    },
+    "rank_long_short": {
+      "direction_policy": "cross_sectional_rank_long_short_v1",
+      "long_only": false,
+      "rank_side_count": 5,
+      "entry_threshold": 0.5,
+      "max_gross_exposure": 1.0,
+      "borrow_model": "research_assumed_shortable_universe_v1"
+    }
+  },
+  "placebo_seed": 60602,
+  "hypotheses": {
+    "VOL-01": {
+      "name": "single-feature OOS classifier-score cross-sectional rank, high-volume/attention return premium predictor",
+      "feature_columns": ["vol_ratio_rank_20"],
+      "source_production_column": "vol_ratio",
+      "strategy_id": "pooled_single_feature_xs_volume_surprise_direct_rank_v1",
+      "hypothesis_id_long_only": "wave06_vol01_volume_surprise_long_only_v1",
+      "hypothesis_id_long_short": "wave06_vol01_volume_surprise_long_short_v1",
+      "hypothesis_id_placebo": "wave06_vol01_volume_surprise_placebo_v1",
+      "primary_references": [
+        "Gervais, Kaniel & Mingelgrin (2001), 'The High-Volume Return Premium', Journal of Finance 56(3):877-919",
+        "Barber & Odean (2008), 'All That Glitters: The Effect of Attention and News on the Buying Behavior of Individual and Institutional Investors', Review of Financial Studies 21(2):785-818"
+      ],
+      "economic_rationale": "A stock trading at unusually high volume relative to its own recent history draws disproportionate investor attention (the 'visibility hypothesis'); attention-driven buying pressure from investors who otherwise only choose among a small attention-constrained set of names has been documented to produce a subsequent short-horizon return premium. The classifier's OOS score is trained per fold using vol_ratio_rank_20 as its sole input feature against the SAME fwd_ret>0 binary label used by every prior single-feature family in this repo; the fold-trained logistic regression learns the empirical sign of the volume-surprise/forward-return relationship from training data itself -- no direction is hand-asserted here.",
+      "falsification_condition": "REJECTED_NOT_ADVANCED if the candidate's risk-adjusted economic performance does not exceed the matched placebo by a non-negligible margin, and/or the candidate materially underperforms the dynamic rankable benchmark, and/or the long-short candidate does not meaningfully outperform its own long-only control."
+    }
+  },
+  "distinctness_from_prior_mechanisms": "vol_ratio_rank_20 requires trading VOLUME data (a symbol's own current volume relative to its own trailing 20-day average volume) -- no previously tested feature (momentum_score, slope_60, ret_rank_20, ret_5, gap_pct_1, vol_rank_20) uses volume at all; every one of those is a pure price-return or price-level statistic. It is also distinct from this same campaign's LIQ-01 candidate (illiquidity_amihud_rank_20): LIQ-01 is a cross-sectional LEVEL statistic (price impact per dollar traded), while vol_ratio_rank_20 is a temporally-RELATIVE own-history statistic (today's volume vs. that symbol's own recent average) -- a demand-shock/attention signal, not a trading-cost/liquidity-risk signal. The economic mechanism (investor attention, Gervais-Kaniel-Mingelgrin 2001 / Barber-Odean 2008) is a fundamentally different behavioral/microstructure family from momentum/reversal, the low-volatility/leverage-constraint mechanism (DISCOVERY-01, REJECTED_NOT_ADVANCED), or the illiquidity risk-premium mechanism (this campaign's own LIQ-01). This is not a retuned parameter variant of any prior family -- it is not a different lookback, threshold, K, universe, or rebalance interval applied to a previously tested statistic.",
+  "real_candidate_population": [
+    "wave06_vol01_volume_surprise_long_only_v1",
+    "wave06_vol01_volume_surprise_long_short_v1"
+  ],
+  "diagnostic_placebo_population": [
+    "wave06_vol01_volume_surprise_placebo_v1"
+  ],
+  "benchmark": {
+    "kind": "family_specific_dynamic_equal_weight_causally_rankable_v1",
+    "definition": "At each economic decision date, equal-weight the SAME causally rankable symbol set available to this family at that date (RANKABLE_SET(T)) -- no future membership, no holdout. Fold-reset semantics identical to SHORT-WAVE-03's/DISCOVERY-01's/WAVE06 LIQ-01's build_dynamic_rankable_benchmark convention.",
+    "not_a_fixed_12_symbol_benchmark": true,
+    "predeclared_before_results": true,
+    "implementation_status": "Already implemented and previously exercised by SHORT-WAVE-03's run_01 and DISCOVERY-01's RISK-01 family (benchmark_type=dynamic_equal_weight_causally_rankable_fold_reset_v1); reused verbatim unchanged in this experiment's run_wave.py (build_dynamic_rankable_benchmark), not reimplemented, not invented after seeing returns."
+  },
+  "required_future_run_recording_fields": [
+    "seed_universe_count", "seed_universe_id",
+    "per_date_rankable_cross_section_min_median_max", "dates_below_rank_minimum",
+    "symbols_ever_rankable", "symbols_never_rankable",
+    "first_last_rankable_date_per_symbol_if_practical",
+    "target_long_symbol_days", "target_short_symbol_days",
+    "executed_long_symbol_days", "executed_short_symbol_days",
+    "max_concurrent_longs", "max_concurrent_shorts",
+    "desired_gross_exposure", "actual_gross_exposure",
+    "desired_net_exposure", "actual_net_exposure",
+    "turnover", "cost_drag", "net_return", "sharpe", "max_drawdown",
+    "long_short_minus_long_only_paired_deltas",
+    "matched_placebo_comparison", "fold_concentration"
+  ],
+  "no_standalone_short_leg_pnl_without_exact_attribution": true,
+  "prohibited_after_predeclaration": [
+    "adaptive rank_side_count/window/universe/horizon retuning based on observed results",
+    "mixing placebo trials into the real-candidate experiment id",
+    "changing the seed universe after seeing any trial result",
+    "inventing or adjusting the benchmark definition after seeing returns",
+    "adding VOL-02/VOL-03 variants after seeing this result without a new, separately-reviewed predeclaration",
+    "claiming PROVEN_ALPHA or PROMOTION_READY for this development study",
+    "consuming the reserved final holdout in this campaign",
+    "executing this candidate out of the campaign order frozen in ../wave06_campaign/PREDECLARED_CAMPAIGN.json"
+  ],
+  "execution_guard": {
+    "check_mode_stages": ["check"],
+    "execute_required_stages": ["vol01", "judge"],
+    "explicit_flag_required": "--execute",
+    "network_contact_in_check_mode": false,
+    "note": "run_wave.py's main() refuses any network-touching stage unless the literal --execute flag is present in argv."
+  }
+}
