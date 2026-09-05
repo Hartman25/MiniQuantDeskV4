@@ -159,13 +159,16 @@ def test_data_feed_frozen_to_sip() -> None:
 
 def test_date_range_frozen_and_extends_past_every_prior_experiment() -> None:
     """REQUIRED TEST 14: start_utc unchanged from SHORT-WAVE-03 (2016-01-01),
-    but end_utc/asof extend well past every prior experiment's 2024-01-01
-    cutoff -- this is the fresh-data predeclaration, frozen before any
-    result was observed."""
+    but end_utc/asof extend past every prior experiment's 2024-01-01 cutoff
+    -- this is the fresh-data predeclaration, frozen before any strategy
+    result was observed (narrowed once, from an initially-predeclared
+    2026-09-05, purely in reaction to a DATA provenance boundary --see
+    PREDECLARED_WAVE.json "data".freshness_note -- never in reaction to an
+    economic/strategy result)."""
     decl = _decl()
     assert decl["data"]["start_utc"] == "2016-01-01T00:00:00Z"
-    assert decl["data"]["end_utc"] == "2026-09-05T00:00:00Z"
-    assert decl["data"]["asof"] == "2026-09-05"
+    assert decl["data"]["end_utc"] == "2025-05-01T00:00:00Z"
+    assert decl["data"]["asof"] == "2025-05-01"
     end_ts = __import__("pandas").Timestamp(decl["data"]["end_utc"])
     prior_experiments_cutoff = __import__("pandas").Timestamp("2024-01-01T00:00:00Z")
     assert end_ts > prior_experiments_cutoff
