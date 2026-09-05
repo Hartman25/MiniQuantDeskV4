@@ -141,14 +141,14 @@ def test_only_new_direct_rank_policies_used() -> None:
 
 def test_feature_is_new_and_distinct_from_every_prior_family() -> None:
     """REQUIRED TEST 12: the single predeclared feature
-    (illiquidity_amihud_rank_20) is not any of the six feature columns
+    (illiquidity_amihud_daily_xs_rank) is not any of the six feature columns
     already tested by ALPHA-01/SHORT-01/SHORT-WAVE-02/03/DISCOVERY-01
     (momentum_score, slope_60, ret_rank_20, ret_5, gap_pct_1, vol_rank_20)
     -- guards against silently relabeling a retuned variant of a
     REJECTED_NOT_ADVANCED / INCONCLUSIVE mechanism as a new discovery."""
     decl = _decl()
     feature_columns = decl["hypotheses"]["LIQ-01"]["feature_columns"]
-    assert feature_columns == ["illiquidity_amihud_rank_20"]
+    assert feature_columns == ["illiquidity_amihud_daily_xs_rank"]
     already_tested = {
         "momentum_score", "slope_60", "ret_rank_20", "ret_5", "gap_pct_1", "vol_rank_20",
     }
@@ -165,7 +165,7 @@ def test_source_production_column_is_existing_unmodified_feature() -> None:
     source_column = decl["hypotheses"]["LIQ-01"]["source_production_column"]
     assert source_column == "illiquidity_amihud"
     assert run_wave.SOURCE_FEATURE_COLUMN == source_column
-    assert run_wave.FEATURE_COLUMN == "illiquidity_amihud_rank_20"
+    assert run_wave.FEATURE_COLUMN == "illiquidity_amihud_daily_xs_rank"
 
     import numpy as np
     import pandas as pd
@@ -189,12 +189,12 @@ def test_source_production_column_is_existing_unmodified_feature() -> None:
     bars = pd.DataFrame(rows)
     feats = build_feature_set_v1(bars)
     assert source_column in feats.columns  # already computed by unmodified production code
-    assert "illiquidity_amihud_rank_20" not in feats.columns  # NOT ranked by production code
+    assert "illiquidity_amihud_daily_xs_rank" not in feats.columns  # NOT ranked by production code
 
     ranked = run_wave.add_cross_sectional_rank(
-        feats, source_column=source_column, rank_column="illiquidity_amihud_rank_20"
+        feats, source_column=source_column, rank_column="illiquidity_amihud_daily_xs_rank"
     )
-    valid = ranked["illiquidity_amihud_rank_20"].dropna()
+    valid = ranked["illiquidity_amihud_daily_xs_rank"].dropna()
     assert len(valid) > 0
     assert float(valid.min()) >= 0.0
     assert float(valid.max()) <= 1.0

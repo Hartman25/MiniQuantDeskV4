@@ -37,32 +37,130 @@
   "campaign_order_immutable_after_this_commit": true,
   "max_candidates": 3,
   "predeclared_candidate_count": 2,
+  "controller_candidate_ceiling": 3,
+  "frozen_campaign_candidate_count": 2,
+  "additional_candidate_after_predeclaration": "forbidden",
 
   "candidates": {
     "LIQ-01": {
       "order_position": 1,
       "directory": "../wave06_candidate_liq01_amihud_illiquidity",
-      "feature_column": "illiquidity_amihud_rank_20",
-      "mechanism": "Amihud (2002) illiquidity risk premium",
-      "real_experiment_id": "WAVE06-LIQ01-AMIHUD-ILLIQUIDITY-REAL-V1",
-      "placebo_experiment_id": "WAVE06-LIQ01-AMIHUD-ILLIQUIDITY-PLACEBOS-V1"
+      "feature_column": "illiquidity_amihud_daily_xs_rank",
+      "mechanism": "Amihud-inspired daily illiquidity / price-impact proxy",
+      "real_experiment_id": "WAVE06-CAMPAIGN-ALPHA-CANDIDATE-REAL-V1",
+      "placebo_experiment_id": "WAVE06-CAMPAIGN-ALPHA-CANDIDATE-PLACEBOS-V1"
     },
     "VOL-01": {
       "order_position": 2,
       "directory": "../wave06_candidate_vol01_volume_surprise",
       "feature_column": "vol_ratio_rank_20",
-      "mechanism": "Gervais-Kaniel-Mingelgrin (2001) high-volume / investor-attention return premium",
-      "real_experiment_id": "WAVE06-VOL01-VOLUME-SURPRISE-REAL-V1",
-      "placebo_experiment_id": "WAVE06-VOL01-VOLUME-SURPRISE-PLACEBOS-V1"
+      "mechanism": "Gervais-Kaniel-Mingelgrin-inspired high-relative-volume / investor-attention evidence",
+      "real_experiment_id": "WAVE06-CAMPAIGN-ALPHA-CANDIDATE-REAL-V1",
+      "placebo_experiment_id": "WAVE06-CAMPAIGN-ALPHA-CANDIDATE-PLACEBOS-V1"
     }
   },
 
+  "shared_campaign_registry": {
+    "resolution_module": "wave06_campaign/campaign_identity.py",
+    "registry_db_relative_path": "runs/run_01/registry/research.sqlite3",
+    "real_experiment_id": "WAVE06-CAMPAIGN-ALPHA-CANDIDATE-REAL-V1",
+    "placebo_experiment_id": "WAVE06-CAMPAIGN-ALPHA-CANDIDATE-PLACEBOS-V1",
+    "population_semantics": "Both candidate drivers import CAMPAIGN_REGISTRY_DB/CAMPAIGN_REAL_EXPERIMENT_ID/CAMPAIGN_PLACEBO_EXPERIMENT_ID directly from campaign_identity.py -- neither driver may redeclare its own copy of these values. The judge population for the campaign's REAL experiment_id is therefore always the union of every campaign_order candidate that has actually registered real trials (see wave06_campaign/run_campaign_judge.py), never one candidate's family alone. A candidate that has registered only SOME of its own frozen hypothesis ids (partial family attempt) fails the judge closed rather than being silently included or excluded. Retrying an already-registered candidate never creates a second registered candidate or changes this population -- only a new attempt of the same one. A placebo hypothesis can never enter the real population -- it is registered under the structurally distinct placebo experiment_id in the same shared registry.",
+    "no_hand_written_registry_rows": true,
+    "registration_authority": "mqk_research.ml.economic_registry_integration.run_registered_economic_walkforward_eval only"
+  },
+
+  "campaign_order_guard": {
+    "module": "wave06_campaign/campaign_order_guard.py",
+    "policy": "LIQ-01 (order_position=1) is the only candidate eligible to execute at campaign start. Any later candidate is refused execution unless every earlier campaign_order candidate has a registry-VERIFIED closeout status artifact (CANDIDATE_CLOSEOUT_STATUS.json, written only by campaign_order_guard.write_closeout_status) whose verdict is in {REJECTED_NOT_ADVANCED, INCONCLUSIVE}. A missing, malformed, crashed, or incomplete prior attempt never authorizes the next candidate -- absence of a verified closeout is refused, not treated as an implicit pass. A closeout verdict of DEVELOPMENT_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION permanently refuses every later candidate (the campaign has stopped). Order is never inferred from filesystem directory existence -- every closeout claim is cross-checked against real registered/succeeded trials in the shared registry before it is trusted.",
+    "not_inferred_from_filesystem": true
+  },
+
+  "advancement_policy": {
+    "policy_id": "WAVE06-DEVELOPMENT-ADVANCEMENT-POLICY-01",
+    "frozen_before_any_result": true,
+    "authoritative_threshold_source_note": "Inspected before writing this policy: mqk_research.ml.multiple_testing_judge's own module docstring states this judge 'does NOT invent a promotion threshold'; dsr_pbo_sensitivity_cli.py, genuine_shuffled_placebo_cli.py, and p7a_p7b_economic_replay_stress_cli.py all compute/report values (dsr, pbo, passed) without asserting a caller-independent accept/reject bar. No authoritative numeric development-stage acceptance threshold exists anywhere in the committed repo. Every numeric threshold below is therefore a NEW, fixed, conservative, pre-outcome development-stage threshold chosen now with documented rationale -- never derived from or reactive to any Wave06 result (none exists at predeclaration time). Where a metric already has its own literature-standard natural decision boundary (DSR, PBO), that natural boundary is reused rather than inventing a new number.",
+    "primary_candidate_direction_control_relationship": {
+      "definition": "For each family, the LONG_SHORT trial (rank_long_short) is the PRIMARY development candidate; LONG_ONLY (rank_long_only) is its CONTROL, isolating whether any edge survives without the short leg. The matched causal-placebo trial (same seed/turnover profile, shuffled labels) is the NEGATIVE CONTROL for the primary candidate.",
+      "primary": "long_short",
+      "control": "long_only",
+      "negative_control": "causal_placebo"
+    },
+    "absolute_economic_requirement": {
+      "requirement": "no RuntimeError gross-wealth-insolvency failure in either the long_only or long_short real attempt",
+      "on_insolvency": "REJECTED_NOT_ADVANCED",
+      "precedent": "docs/research/DISCOVERY_01_LOW_VOLATILITY_ANOMALY_RESULT.md Section 4/5"
+    },
+    "benchmark_relative_requirement": {
+      "metric": "net_sharpe(primary) - net_sharpe(family_dynamic_rankable_benchmark)",
+      "min_excess": 0.0,
+      "comparison": "strict_greater_than",
+      "rationale": "Any candidate that fails to strictly exceed a naive dynamic equal-weight causally-rankable benchmark net of realistic costs provides no basis for further development investment -- the loosest defensible bar, not one tuned to an observed result."
+    },
+    "matched_diagnostic_placebo_requirement": {
+      "metric": "net_sharpe(primary) - net_sharpe(matched_causal_placebo)",
+      "min_excess": 0.20,
+      "comparison": "strict_greater_than",
+      "rationale": "0.20 Sharpe units is a fixed, round, pre-registered separation margin from a same-turnover/same-cost-profile shuffled-label negative control -- large enough that placebo noise under realistic cost drag could not satisfy it by chance, fixed before any Wave06 result exists and not tuned to either candidate's mechanism."
+    },
+    "primary_vs_control_requirement": {
+      "metric": "net_sharpe(long_short) - net_sharpe(long_only)",
+      "min_excess": 0.0,
+      "comparison": "strict_greater_than",
+      "rationale": "The long_short primary must strictly outperform its own long_only control net of costs, or the short leg adds no value and the frozen falsification_condition's 'long-short does not meaningfully outperform long-only' branch is satisfied."
+    },
+    "dsr_requirement": {
+      "metric": "deflated_sharpe_ratio (mqk_research.ml.multiple_testing_stats, primary trial, frozen entry_threshold=0.5 baseline)",
+      "min_value": 0.0,
+      "evaluable_required": true,
+      "rationale": "Reuses DSR's own literature-standard natural decision boundary (Bailey & Lopez de Prado 2014): DSR >= 0 means the deflated probability the true Sharpe exceeds zero is >= 50%. The metric's own defined midpoint, not an invented number."
+    },
+    "pbo_requirement": {
+      "metric": "pbo (Probability of Backtest Overfitting, CSCV, mqk_research.ml.multiple_testing_stats)",
+      "max_value": 0.5,
+      "evaluable_required": true,
+      "rationale": "Reuses PBO's own literature-standard natural interpretation boundary (Bailey, Borwein, Lopez de Prado & Zhu 2017): PBO > 0.5 means the candidate is more likely than not an overfit artifact of the selection process. The metric's own defined midpoint, not an invented number."
+    },
+    "genuine_shuffled_placebo_requirement": {
+      "evaluator": "mqk_research.ml.genuine_shuffled_placebo_cli (FINAL-P9-ROBUSTNESS-SEMANTICS-01, BKT-ROBUSTNESS-GAUNTLET-01)",
+      "requirement": "evaluator's own reported passed == true",
+      "on_not_evaluable": "REJECTED_NOT_ADVANCED",
+      "rationale": "Reuses the evaluator's own already-accepted pass/fail semantics directly -- no new threshold invented."
+    },
+    "robustness_gauntlet_requirement": {
+      "definition": "BKT-ROBUSTNESS-GAUNTLET-01 (P9): genuine_shuffled_placebo_requirement above, AND dsr_pbo_sensitivity_cli's full --entry-thresholds sweep must report dsr_min >= 0.0 and pbo_max <= 0.5 across the ENTIRE swept set below, not only the single frozen entry_threshold=0.5 point.",
+      "sweep_entry_thresholds": [0.3, 0.4, 0.5, 0.6, 0.7],
+      "on_not_evaluable_at_any_swept_point": "REJECTED_NOT_ADVANCED",
+      "rationale": "Reuses dsr_pbo_sensitivity_cli (already accepted for P9) directly rather than inventing a new robustness mechanism; the swept set is fixed and symmetric around the frozen 0.5 baseline, chosen before any result exists."
+    },
+    "p7a_p7b_economic_replay_stress_requirement": {
+      "evaluator": "mqk_research.ml.p7a_p7b_economic_replay_stress_cli (P7A-P7B-ECONOMIC-REPLAY-STRESS-01)",
+      "stress_execution_slippage_bps": 15,
+      "stress_execution_volatility_mult_bps": 10,
+      "stress_max_target_qty_multiplier": 0.5,
+      "max_drawdown_ceiling": 0.40,
+      "requirement": "evaluator's own reported passed == true under the frozen stress knobs above",
+      "rationale": "Reuses the evaluator's own already-accepted pass/fail semantics (max_drawdown >= -max_drawdown_ceiling). Stress knobs are fixed genuinely-adverse values (per the evaluator's own adversity validation) chosen before any result exists; max_drawdown_ceiling=0.40 is a round, conservative, pre-registered risk bound."
+    },
+    "fail_closed_not_evaluable": "any required metric reporting a not_evaluable (or equivalent) status at any required evaluation point is treated as REJECTED_NOT_ADVANCED -- never skipped, never defaulted to pass.",
+    "fail_closed_gross_wealth_insolvency": "a RuntimeError gross-wealth-insolvency failure in any real candidate attempt is treated as REJECTED_NOT_ADVANCED.",
+    "early_rejection_semantics": "REJECTED_NOT_ADVANCED may be assigned as soon as any single required gate above fails or is not_evaluable, without evaluating every remaining gate (short-circuit, matching the frozen falsification_condition's 'and/or' phrasing) -- but the closeout record must name every gate actually evaluated and its outcome, never only the first failure.",
+    "verdict_definitions": {
+      "REJECTED_NOT_ADVANCED": "At least one required gate (absolute economic solvency, benchmark-relative, matched-placebo, primary-vs-control, DSR, PBO, genuine shuffled placebo, robustness gauntlet, P7A/P7B stress) fails or is not_evaluable.",
+      "INCONCLUSIVE": "Every required gate is evaluable and none fails outright, but the benchmark-relative excess falls in the dead-zone band [0.0, 0.05) -- too close to the minimum bar to distinguish from measurement noise at this sample size -- while every other gate passes with margin.",
+      "DEVELOPMENT_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION": "Every required gate passes strictly, including the benchmark-relative excess exceeding the INCONCLUSIVE dead-zone (>= 0.05). This is the maximum possible verdict for this non-point-in-time development study; it does NOT authorize PROMOTION_READY or PROVEN_ALPHA and does NOT itself authorize Paper/Live -- it requires a NEW, separately-predeclared, fresh point-in-time-clean confirmation mission before any promotion verification may begin."
+    },
+    "forbidden_verdicts_for_this_non_pit_study": ["PROVEN_ALPHA", "PROMOTION_READY", "PAPER_ENTRY_ELIGIBLE"],
+    "not_a_promotion_bypass": "This development advancement policy governs ONLY whether this non-point-in-time development study continues investing research effort in a mechanism. It never weakens, substitutes for, or bypasses the canonical production promotion gate (mqk_research.ml.real_research_promotion_e2e_cli and mqk-promotion's Rust verifier), which remains the sole authority for PROMOTION_READY under its own, separately-frozen, point-in-time-clean evidence requirements."
+  },
+
   "stopping_rule": {
-    "text": "Execute candidates strictly in campaign_order. If a candidate fails its own predeclared advancement criteria, do NOT tune it -- proceed to the next predeclared candidate. If a candidate honestly satisfies every required advancement gate, STOP the remaining candidate campaign and proceed to promotion verification for that candidate only. Do not substitute a fourth candidate. Do not invent a new candidate after seeing any result.",
+    "text": "Execute candidates strictly in campaign_order, gated by campaign_order_guard. If a candidate's registry-verified closeout classifies it REJECTED_NOT_ADVANCED or INCONCLUSIVE per the frozen advancement_policy, do NOT tune it -- proceed to the next predeclared candidate. If a candidate's registry-verified closeout classifies it DEVELOPMENT_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION, STOP the remaining candidate campaign; this non-point-in-time development study never itself proceeds to promotion verification -- a positive result requires a NEW, separately-predeclared, fresh point-in-time-clean confirmation mission before any promotion verification may begin. Do not substitute a fourth candidate. Do not invent a new candidate after seeing any result.",
     "no_retuning_on_failure": true,
     "no_fourth_candidate": true,
     "no_post_hoc_candidate_substitution": true,
-    "stop_on_first_advancing_candidate": true
+    "stop_on_first_advancing_candidate": true,
+    "advancing_candidate_never_proceeds_directly_to_promotion": true
   },
 
   "candidate_selection_constraints": [

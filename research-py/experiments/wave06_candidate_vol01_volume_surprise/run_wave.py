@@ -32,21 +32,36 @@ defect-repair patch IDs and are preserved verbatim as accurate provenance --
 they describe where this exact logic came from, not this experiment.
 
 The underlying statistic (`vol_ratio`, a symbol's own current-day volume
-divided by that SAME symbol's trailing 20-day average volume) is NOT new
-code -- it is already unconditionally computed by the existing, unmodified
-mqk_research.features.feature_set_v1.build_feature_set_v1, but has never
-been used, in any form, as a ranking/classifier feature in ALPHA-01
-(momentum_score), SHORT-01 (slope_60), SHORT-WAVE-02/03 (ret_rank_20, ret_5,
-gap_pct_1), DISCOVERY-01 (vol_rank_20), or this campaign's own LIQ-01
-(illiquidity_amihud_rank_20) -- vol_ratio is a temporally-RELATIVE own-history
-statistic (demand-shock/attention signal), definitionally distinct from
-LIQ-01's cross-sectional LEVEL statistic (price-impact cost) even though
-both use volume data. Only the cross-sectional percentile-rank transform
-(`vol_ratio_rank_20`, computed locally by `add_cross_sectional_rank` below
-using the exact same groupby(end_ts).rank(pct=True, method="average")
-formula feature_set_v1.py itself already uses for vol_rank_20/atr_rank_14) is
-new in this file -- a mechanical transform of an existing statistic, not new
-statistical methodology, and not a modification of research-py/src.
+divided by that SAME symbol's own current-bar-INCLUSIVE trailing 20-day
+rolling-mean volume -- feature_set_v1.py computes this via pandas
+`vol.rolling(20, min_periods=20).mean()`, whose window includes the current
+row) is NOT new code -- it is already unconditionally computed by the
+existing, unmodified mqk_research.features.feature_set_v1.build_feature_set_v1,
+but has never been used, in any form, as a ranking/classifier feature in any
+prior REGISTERED MiniQuantDesk research experiment: ALPHA-01 (momentum_score),
+SHORT-01 (slope_60), SHORT-WAVE-02/03 (ret_rank_20, ret_5, gap_pct_1),
+DISCOVERY-01 (vol_rank_20), or this campaign's own LIQ-01
+(illiquidity_amihud_daily_xs_rank) -- vol_ratio is a temporally-RELATIVE
+own-history statistic (demand-shock/attention signal), definitionally
+distinct from LIQ-01's cross-sectional LEVEL statistic (price-impact cost)
+even though both use volume data. (The separate, non-registered
+research-py/experiments/exp_penny screener already uses volume/ADV data
+outside this hypothesis-registration lineage, so this is not the first use
+of volume data in the repository's history overall.) Only the
+cross-sectional percentile-rank transform (`vol_ratio_rank_20`, computed
+locally by `add_cross_sectional_rank` below using the exact same
+groupby(end_ts).rank(pct=True, method="average") formula feature_set_v1.py
+itself already uses for vol_rank_20/atr_rank_14) is new in this file -- a
+mechanical transform of an existing statistic, not new statistical
+methodology, and not a modification of research-py/src.
+
+LITERATURE SCOPE: Gervais, Kaniel & Mingelgrin (2001) report unusually
+high/low trading volume over a day/week followed by subsequent return
+differences over roughly the next month. This exact candidate uses current
+volume / current-inclusive rolling-20-day mean volume, then a same-date
+cross-sectional rank and classifier -- label it a
+Gervais-Kaniel-Mingelgrin-inspired implementation, not a literal
+reproduction of the paper's portfolio construction.
 
 All experiment identity, seed universe, data window, label definition,
 walk-forward spec, model hyperparameters, cost model, execution model,
@@ -59,8 +74,17 @@ over a non-point-in-time, fixed_ex_ante, current-registry-snapshot universe
 (see docs/research/BROAD_RESEARCH_UNIVERSE_CURRENT_TRUTH_AUDIT.md) --
 genuinely untested feature, but still a post-hoc-universe development study,
 not a point-in-time-clean alpha proof. Maximum possible positive verdict:
-DEVELOPMENT_PROMISING_REQUIRES_FRESH_CONFIRMATION. Never PROVEN_ALPHA or
-PROMOTION_READY.
+DEVELOPMENT_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION, which does
+NOT itself proceed to promotion verification -- it requires a new, fresh,
+separately-predeclared point-in-time confirmation mission first. Never
+PROVEN_ALPHA, PROMOTION_READY, or PAPER_ENTRY_ELIGIBLE.
+
+CAMPAIGN ORDER: this candidate is order_position=2 in
+../wave06_campaign/PREDECLARED_CAMPAIGN.json. main() calls
+campaign_order_guard.require_authorized_to_execute("VOL-01", ...) before
+any real execution -- this refuses to run unless LIQ-01 already has a
+registry-verified closeout classified REJECTED_NOT_ADVANCED or INCONCLUSIVE
+under the frozen advancement_policy. See wave06_campaign/campaign_order_guard.py.
 
 HARD EXECUTION GUARD: no stage in EXECUTE_REQUIRED_STAGES may run unless
 the literal string "--execute" is present in argv (see main()). The `check`
@@ -160,6 +184,17 @@ if not _wave03_resolved_mqk_research.is_relative_to(WAVE03_LOCAL_SRC):
         f"src/ ({WAVE03_LOCAL_SRC}); got {_wave03_resolved_mqk_research}"
     )
 
+# W06-A-CAMPAIGN-PREDECLARATION-AUTHORITY-REPAIR-01 (Finding 1/4): the shared
+# campaign registry/experiment identity and the campaign-order execution
+# guard live in the sibling wave06_campaign/ directory -- imported directly,
+# never redeclared, so both candidate drivers resolve identically.
+CAMPAIGN_DIR = Path(__file__).resolve().parents[1] / "wave06_campaign"
+if str(CAMPAIGN_DIR) not in sys.path:
+    sys.path.insert(0, str(CAMPAIGN_DIR))
+import campaign_identity  # noqa: E402
+import campaign_order_guard  # noqa: E402
+import run_campaign_judge as campaign_judge  # noqa: E402
+
 import numpy as np
 import pandas as pd
 
@@ -186,8 +221,6 @@ from mqk_research.ml.execution_pricing import (
     EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
     ExecutionPricingSpec,
 )
-from mqk_research.exp_distributed.storage import ResearchResultStore
-from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge
 from mqk_research.ml.schema import generate_feature_schema
 from mqk_research.ml.weight_to_share import WeightToShareSpec
 
@@ -229,8 +262,12 @@ def build_causal_placebo_targets(targets: pd.DataFrame, *, seed: int) -> pd.Data
 
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parent
+# RUN_ROOT stays per-candidate (bars/features/targets caches, judge-artifact
+# copy) -- only the durable trial REGISTRY is shared campaign-wide (Finding
+# 1: a shared registry/experiment_id is what makes the multiple-testing
+# judge population automatically the union of every attempted candidate).
 RUN_ROOT = EXPERIMENT_ROOT / "runs" / "run_01"
-REGISTRY_DB = RUN_ROOT / "registry" / "research.sqlite3"
+REGISTRY_DB = campaign_identity.CAMPAIGN_REGISTRY_DB
 PREDECLARATION_PATH = EXPERIMENT_ROOT / "PREDECLARED_WAVE.json"
 SEED_UNIVERSE_PATH = EXPERIMENT_ROOT / "SEED_UNIVERSE.json"
 
@@ -240,8 +277,8 @@ PRIMARY_PAPER_REPO = Path(r"C:\Users\Zacha\Desktop\MiniQuantDeskV4")
 # authoritative repo HEAD this predeclaration was performed against.
 PRIMARY_PAPER_HEAD_EXPECTED = "e381a402481d4e704180199d9175a770d50ddfa6"
 
-REAL_EXPERIMENT_ID = "WAVE06-VOL01-VOLUME-SURPRISE-REAL-V1"
-PLACEBO_EXPERIMENT_ID = "WAVE06-VOL01-VOLUME-SURPRISE-PLACEBOS-V1"
+REAL_EXPERIMENT_ID = campaign_identity.CAMPAIGN_REAL_EXPERIMENT_ID
+PLACEBO_EXPERIMENT_ID = campaign_identity.CAMPAIGN_PLACEBO_EXPERIMENT_ID
 
 START_UTC = pd.Timestamp("2016-01-01T00:00:00Z")
 # NOTE: byte-for-byte reuse of DISCOVERY-01's / LIQ-01's own frozen
@@ -1574,78 +1611,17 @@ def run_family(family_key: str) -> dict:
     return result
 
 
-def _hypothesis_to_unique_trial_ids(store: ResearchResultStore, experiment_id: str) -> dict[str, set[str]]:
-    by_hypothesis: dict[str, set[str]] = {}
-    for t in store.list_trials(experiment_id=experiment_id):
-        by_hypothesis.setdefault(t["hypothesis_id"], set()).add(t["trial_id"])
-    return by_hypothesis
-
-
-def _require_exact_frozen_population(
-    store: ResearchResultStore, *, experiment_id: str, expected_hypothesis_ids: list[str], population_label: str,
-) -> None:
-    """R3 (WAVE03-FROZEN-JUDGE-POPULATION-REPAIR-01): fail closed BEFORE any
-    judge/closeout call unless the durable registry holds EXACTLY the
-    frozen hypothesis population for `experiment_id` -- no missing
-    candidate, no extra/unexpected hypothesis (including a placebo
-    hypothesis leaking into the real experiment, or vice versa), and no
-    duplicated semantic trial (more than one distinct trial_id) under a
-    single expected hypothesis. Retries/attempts on the SAME trial_id are
-    unaffected -- they never create a second entry in this hypothesis's
-    trial-id set."""
-    by_hypothesis = _hypothesis_to_unique_trial_ids(store, experiment_id)
-    expected = set(expected_hypothesis_ids)
-    actual = set(by_hypothesis.keys())
-    missing = expected - actual
-    unexpected = actual - expected
-    if missing or unexpected:
-        raise RuntimeError(
-            f"Fail-closed: {population_label} population for experiment_id={experiment_id!r} does not "
-            f"exactly match the frozen hypothesis set -- missing={sorted(missing)!r} "
-            f"unexpected={sorted(unexpected)!r}"
-        )
-    duplicated = {h: sorted(ids) for h, ids in by_hypothesis.items() if len(ids) != 1}
-    if duplicated:
-        raise RuntimeError(
-            f"Fail-closed: {population_label} population for experiment_id={experiment_id!r} has more "
-            f"than one distinct trial registered under a single frozen hypothesis id -- {duplicated!r}"
-        )
-
-
 def run_family_judge() -> dict:
-    """Adapted from SHORT-WAVE-03's WAVE03-FAMILY-JUDGE-01 (R3-repaired,
-    WAVE03-FROZEN-JUDGE-POPULATION-REPAIR-01): run build_multiple_testing_judge
-    over the REAL_EXPERIMENT_ID population only (hypothesis_id=None -> full
-    experiment population -- exactly the 2 frozen real-candidate hypothesis
-    IDs (long_only, long_short) for this single VOL-01 family, since
-    run_family only ever registers real trials under REAL_EXPERIMENT_ID and
-    the matched placebo under the structurally distinct PLACEBO_EXPERIMENT_ID
-    -- see run_family's own experiment_id routing).
-
-    BEFORE calling build_multiple_testing_judge, the durable registry is
-    inspected and required to hold EXACTLY the frozen 2-candidate real
-    population and EXACTLY the frozen 1-hypothesis diagnostic placebo
-    population -- see _require_exact_frozen_population. No placebo trial can
-    ALSO enter the judge's population even if this precheck passed:
-    build_multiple_testing_judge's own registry query is scoped by
-    experiment_id, and a placebo trial is never registered under
-    REAL_EXPERIMENT_ID in the first place."""
-    store = ResearchResultStore(REGISTRY_DB)
-    _require_exact_frozen_population(
-        store, experiment_id=REAL_EXPERIMENT_ID, expected_hypothesis_ids=REAL_CANDIDATE_HYPOTHESIS_IDS,
-        population_label="real candidate",
-    )
-    _require_exact_frozen_population(
-        store, experiment_id=PLACEBO_EXPERIMENT_ID, expected_hypothesis_ids=DIAGNOSTIC_PLACEBO_HYPOTHESIS_IDS,
-        population_label="diagnostic placebo",
-    )
-
-    judge = build_multiple_testing_judge(experiment_id=REAL_EXPERIMENT_ID, registry_db=REGISTRY_DB)
-    RUN_ROOT.mkdir(parents=True, exist_ok=True)
-    (RUN_ROOT / "judge_artifact.json").write_text(
-        json.dumps(judge, sort_keys=True, indent=2, default=str), encoding="utf-8"
-    )
-    return judge
+    """W06-A-CAMPAIGN-PREDECLARATION-AUTHORITY-REPAIR-01 (Finding 1):
+    delegates entirely to the shared Wave06 campaign judge
+    (wave06_campaign/run_campaign_judge.py) rather than computing a
+    family-only population. This candidate's driver no longer assumes it is
+    the only registrant under REAL_EXPERIMENT_ID -- the campaign judge
+    always inspects the FULL frozen campaign_order and includes every
+    candidate that has legitimately registered real trials in the shared
+    registry, so a judge run from this driver can never silently omit an
+    already-attempted LIQ-01 (or vice versa)."""
+    return campaign_judge.run_campaign_judge(registry_db=REGISTRY_DB)
 
 
 EXECUTE_REQUIRED_STAGES = frozenset({"vol01", "judge"})
@@ -1676,6 +1652,11 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(3)
         stage_key = {"vol01": "VOL-01"}
         if stage in stage_key:
+            try:
+                campaign_order_guard.require_authorized_to_execute(stage_key[stage], registry_db=REGISTRY_DB)
+            except campaign_order_guard.CampaignOrderRefusal as exc:
+                print(str(exc), file=sys.stderr)
+                raise SystemExit(4)
             run_family(stage_key[stage])
             return
         if stage == "judge":

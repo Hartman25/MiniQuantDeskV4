@@ -118,11 +118,30 @@ def test_holdout_not_consumed_and_no_consume_holdout_call_in_any_candidate_drive
 
 
 def test_no_result_or_pnl_field_in_campaign_predeclaration() -> None:
+    """`advancement_policy` legitimately references metric NAMES (e.g.
+    "net_sharpe(primary) - net_sharpe(benchmark)") as part of its frozen,
+    pre-outcome gate DEFINITIONS -- exactly analogous to how each
+    candidate's own `required_future_run_recording_fields` legitimately
+    names result fields without populating them (see each candidate's own
+    test 18). Popped before the scan for the same reason; every OTHER key
+    in this document must still contain no result/P&L VALUE."""
     camp = dict(_campaign())
+    camp.pop("advancement_policy", None)
     blob = json.dumps(camp).lower()
     for forbidden in ("sharpe", "net_total_return", "gross_total_return", "trial_id", "economic_eval_id"):
         assert forbidden not in blob
     assert camp["no_result_or_pnl_field_in_this_document"] is True
+
+
+def test_advancement_policy_has_no_populated_result_value() -> None:
+    """The popped-out advancement_policy block itself must contain metric
+    NAMES and frozen thresholds only -- never an actual populated result
+    number for net_sharpe/net_total_return/etc (which would only exist
+    after a real trial ran)."""
+    policy = _campaign()["advancement_policy"]
+    blob = json.dumps(policy).lower()
+    for forbidden in ("trial_id", "economic_eval_id"):
+        assert forbidden not in blob
 
 
 def test_universe_reused_identically_across_both_candidates() -> None:
@@ -132,3 +151,159 @@ def test_universe_reused_identically_across_both_candidates() -> None:
         decl = _candidate_decl(camp["candidates"][key]["directory"])
         universe_ids.add(decl["seed_universe"]["universe_id"])
     assert universe_ids == {"f25e8ec952c1429af7ac3bb58169408e"}
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 (W06-A-CAMPAIGN-PREDECLARATION-AUTHORITY-REPAIR-01): both
+# candidate drivers must resolve the literal same shared registry and
+# REAL/PLACEBO experiment_id -- proven here by importing BOTH run_wave.py
+# modules under distinct module names (they share a basename) and comparing
+# the actual resolved module-level constants, not just the JSON text.
+# ---------------------------------------------------------------------------
+
+
+def _import_run_wave(candidate_dir: str, unique_name: str):
+    import importlib.util
+
+    path = (EXPERIMENTS_ROOT / candidate_dir / "run_wave.py").resolve()
+    spec = importlib.util.spec_from_file_location(unique_name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_both_candidate_drivers_import_the_same_shared_registry_module() -> None:
+    """Finding 1 requirement A: both drivers resolve the same registry --
+    proven by importing both and comparing their REGISTRY_DB constants,
+    which each driver assigns directly from campaign_identity.py."""
+    liq = _import_run_wave("wave06_candidate_liq01_amihud_illiquidity", "wave06_liq_run_wave_test")
+    vol = _import_run_wave("wave06_candidate_vol01_volume_surprise", "wave06_vol_run_wave_test")
+    assert liq.REGISTRY_DB == vol.REGISTRY_DB
+    assert liq.campaign_identity is vol.campaign_identity  # literally the same imported module object
+    camp = _campaign()
+    assert str(liq.REGISTRY_DB).replace("\\", "/").endswith(camp["shared_campaign_registry"]["registry_db_relative_path"])
+
+
+def test_both_candidate_drivers_resolve_the_same_real_and_placebo_experiment_id() -> None:
+    """Finding 1 requirement B."""
+    liq = _import_run_wave("wave06_candidate_liq01_amihud_illiquidity", "wave06_liq_run_wave_test2")
+    vol = _import_run_wave("wave06_candidate_vol01_volume_surprise", "wave06_vol_run_wave_test2")
+    assert liq.REAL_EXPERIMENT_ID == vol.REAL_EXPERIMENT_ID
+    assert liq.PLACEBO_EXPERIMENT_ID == vol.PLACEBO_EXPERIMENT_ID
+    camp = _campaign()
+    assert liq.REAL_EXPERIMENT_ID == camp["shared_campaign_registry"]["real_experiment_id"]
+    assert liq.PLACEBO_EXPERIMENT_ID == camp["shared_campaign_registry"]["placebo_experiment_id"]
+    for key in camp["campaign_order"]:
+        assert camp["candidates"][key]["real_experiment_id"] == liq.REAL_EXPERIMENT_ID
+        assert camp["candidates"][key]["placebo_experiment_id"] == liq.PLACEBO_EXPERIMENT_ID
+        decl = _candidate_decl(camp["candidates"][key]["directory"])
+        assert decl["real_experiment_id"] == liq.REAL_EXPERIMENT_ID
+        assert decl["placebo_experiment_id"] == liq.PLACEBO_EXPERIMENT_ID
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: machine-readable, versioned advancement_policy -- every
+# threshold is a real number or a reused literature-standard boundary, no
+# banned vague words survive in the operative falsification_condition text.
+# ---------------------------------------------------------------------------
+
+_BANNED_VAGUE_WORDS = ("non-negligible", "materially", "meaningfully", "material", "strong", "acceptable")
+
+
+def test_advancement_policy_is_present_and_versioned() -> None:
+    policy = _campaign()["advancement_policy"]
+    assert policy["policy_id"] == "WAVE06-DEVELOPMENT-ADVANCEMENT-POLICY-01"
+    assert policy["frozen_before_any_result"] is True
+
+
+def test_advancement_policy_numeric_thresholds_are_real_numbers() -> None:
+    policy = _campaign()["advancement_policy"]
+    assert isinstance(policy["benchmark_relative_requirement"]["min_excess"], (int, float))
+    assert isinstance(policy["matched_diagnostic_placebo_requirement"]["min_excess"], (int, float))
+    assert isinstance(policy["primary_vs_control_requirement"]["min_excess"], (int, float))
+    assert isinstance(policy["dsr_requirement"]["min_value"], (int, float))
+    assert isinstance(policy["pbo_requirement"]["max_value"], (int, float))
+    assert isinstance(policy["p7a_p7b_economic_replay_stress_requirement"]["max_drawdown_ceiling"], (int, float))
+    assert isinstance(policy["robustness_gauntlet_requirement"]["sweep_entry_thresholds"], list)
+    assert len(policy["robustness_gauntlet_requirement"]["sweep_entry_thresholds"]) >= 3
+
+
+def test_advancement_policy_verdict_definitions_cover_exactly_the_allowed_verdicts() -> None:
+    policy = _campaign()["advancement_policy"]
+    verdicts = set(policy["verdict_definitions"].keys())
+    assert verdicts == {
+        "REJECTED_NOT_ADVANCED", "INCONCLUSIVE",
+        "DEVELOPMENT_PROMISING_REQUIRES_FRESH_POINT_IN_TIME_CONFIRMATION",
+    }
+    for key in ("LIQ-01", "VOL-01"):
+        decl = _candidate_decl(_campaign()["candidates"][key]["directory"])
+        assert set(decl["allowed_verdicts"]) == verdicts
+
+
+def test_advancement_policy_forbids_promotion_and_paper_entry() -> None:
+    policy = _campaign()["advancement_policy"]
+    assert set(policy["forbidden_verdicts_for_this_non_pit_study"]) == {
+        "PROVEN_ALPHA", "PROMOTION_READY", "PAPER_ENTRY_ELIGIBLE",
+    }
+    for key in ("LIQ-01", "VOL-01"):
+        decl = _candidate_decl(_campaign()["candidates"][key]["directory"])
+        assert set(decl["forbidden_verdicts"]) == {"PROVEN_ALPHA", "PROMOTION_READY", "PAPER_ENTRY_ELIGIBLE"}
+
+
+def test_no_banned_vague_words_in_falsification_conditions() -> None:
+    """Every candidate's falsification_condition must point at the frozen,
+    machine-checkable advancement_policy rather than using an undefined
+    qualitative word as the operative test."""
+    camp = _campaign()
+    for key in camp["campaign_order"]:
+        decl = _candidate_decl(camp["candidates"][key]["directory"])
+        for hyp in decl["hypotheses"].values():
+            text = hyp["falsification_condition"].lower()
+            for banned in _BANNED_VAGUE_WORDS:
+                assert banned not in text, f"{key} falsification_condition still contains {banned!r}"
+            assert "advancement_policy" in hyp["falsification_condition"]
+
+
+def test_advancement_policy_not_a_promotion_bypass() -> None:
+    policy = _campaign()["advancement_policy"]
+    assert "not_a_promotion_bypass" in policy
+    assert "real_research_promotion_e2e_cli" in policy["not_a_promotion_bypass"]
+
+
+# ---------------------------------------------------------------------------
+# Additional truth repair B: controller ceiling vs frozen campaign count
+# vocabulary is explicit and internally consistent; no third candidate is
+# possible after this repair.
+# ---------------------------------------------------------------------------
+
+
+def test_controller_ceiling_vocabulary_is_explicit_and_consistent() -> None:
+    camp = _campaign()
+    assert camp["controller_candidate_ceiling"] == 3 == camp["max_candidates"]
+    assert camp["frozen_campaign_candidate_count"] == 2 == camp["predeclared_candidate_count"]
+    assert camp["additional_candidate_after_predeclaration"] == "forbidden"
+    assert camp["frozen_campaign_candidate_count"] < camp["controller_candidate_ceiling"]
+    assert len(camp["campaign_order"]) == camp["frozen_campaign_candidate_count"]
+
+
+def test_stopping_rule_never_proceeds_directly_to_promotion() -> None:
+    camp = _campaign()
+    rule = camp["stopping_rule"]
+    assert rule["advancing_candidate_never_proceeds_directly_to_promotion"] is True
+    assert "promotion" not in rule["text"].lower() or "fresh" in rule["text"].lower()
+    assert "fresh point-in-time-clean confirmation mission" in rule["text"]
+
+
+# ---------------------------------------------------------------------------
+# Additional truth repair A: the "first hypothesis in this repo's history to
+# use trading volume data at all" overclaim must not survive anywhere in the
+# frozen predeclaration text.
+# ---------------------------------------------------------------------------
+
+
+def test_overclaimed_first_volume_use_in_repo_history_is_not_present() -> None:
+    camp = _campaign()
+    for key in camp["campaign_order"]:
+        decl = _candidate_decl(camp["candidates"][key]["directory"])
+        blob = json.dumps(decl).lower()
+        assert "first hypothesis in this repo's history to use trading volume data at all" not in blob
