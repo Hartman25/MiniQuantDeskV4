@@ -216,6 +216,13 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
         // so a later fill can recover the identity of the order that
         // actually produced it, not "whatever config is current now".
         "strategy_semantic_fingerprint": d.strategy_semantic_fingerprint.trim(),
+        // WAVE05-P4-DURABLE-TIMEFRAME-PROVENANCE-REPAIR-01: the exact
+        // timeframe this decision was evaluated under (already validated
+        // positive at Gate 0) -- durable provenance only, never re-derived
+        // from current config/registry state. Read back by
+        // `mqk_db::fetch_order_symbol_timeframe_context` for P4's
+        // observational regime context.
+        "timeframe_secs": d.timeframe_secs,
         "signal_source":  "internal_strategy_decision",
     })
 }
