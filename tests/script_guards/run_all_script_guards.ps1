@@ -84,7 +84,8 @@ $Guards = @(
     'test_heavy_lock_atomic_01.ps1',
     'test_ci_local_toolchain_convergence.ps1',
     'test_canonical_safe_ignored_matrix.ps1',
-    'test_dev_shell_dsn_mask.ps1'
+    'test_dev_shell_dsn_mask.ps1',
+    'test_export_research_evidence_manifest.ps1'
 )
 
 # FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01 Part 4: never hard-code a legacy
