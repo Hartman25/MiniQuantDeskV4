@@ -1114,6 +1114,53 @@ pub async fn fetch_fill_strategy_lineage(
     }
 }
 
+/// WAVE05-STRATEGY-DECAY-AND-REGIME-MONITOR-01 (P4.6): recover the EXACT
+/// durable `(symbol, timeframe_secs)` context for one closing order, via the
+/// same `internal_order_id -> idempotency_key` join `fetch_fill_strategy_lineage`
+/// uses. Never infers symbol/timeframe from current config, current registry
+/// state, or symbol-latest lookup.
+///
+/// `Some((symbol, timeframe_secs))` only when:
+/// - the originating outbox row exists and is run-coherent
+///   (`outbox.run_id == fill_run_id`);
+/// - `order_json.symbol` is present, a JSON string, and non-blank after
+///   trimming;
+/// - `order_json.timeframe_secs` is present, a JSON integer, and strictly
+///   positive.
+///
+/// `None` for every other case (missing row, run mismatch, missing/malformed
+/// field) -- callers must surface this as `context_unavailable`, never a
+/// guessed label. `timeframe_secs` is not currently written by any
+/// production order-construction path, so `None` is the expected common case
+/// today; that is a correct fail-closed result, not a bug in this helper.
+pub async fn fetch_order_symbol_timeframe_context(
+    pool: &PgPool,
+    fill_run_id: Uuid,
+    internal_order_id: &str,
+) -> Result<Option<(String, i64)>> {
+    let Some(outbox) = outbox_fetch_by_idempotency_key(pool, internal_order_id).await? else {
+        return Ok(None);
+    };
+    if outbox.run_id != fill_run_id {
+        return Ok(None);
+    }
+    let symbol = outbox
+        .order_json
+        .get("symbol")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let timeframe_secs = outbox
+        .order_json
+        .get("timeframe_secs")
+        .and_then(|v| v.as_i64())
+        .filter(|&t| t > 0);
+    match (symbol, timeframe_secs) {
+        (Some(s), Some(t)) => Ok(Some((s.to_string(), t))),
+        _ => Ok(None),
+    }
+}
+
 /// Atomically persist `internal_id → broker_id` and transition the outbox row
 /// to `SENT`.
 ///

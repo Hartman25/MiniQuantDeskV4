@@ -4573,6 +4573,90 @@ pub struct StrategyPerformanceRow {
     /// always `>= 0`). This is NOT account-equity drawdown, mark-to-market
     /// drawdown, intratrade drawdown, or MAE.
     pub max_realized_pnl_drawdown_micros: i64,
+    /// WAVE05-STRATEGY-DECAY-AND-REGIME-MONITOR-01 (P4): conservative
+    /// forward Paper performance-decay monitoring over this strategy's exact
+    /// attributed close-event series. Observational only -- never demotes,
+    /// suppresses, or otherwise changes trading behavior.
+    pub decay_monitor: StrategyDecayMonitor,
+    /// P4: current market-regime CONTEXT for this strategy's most recent
+    /// exact durable (symbol, timeframe) -- research-only observational
+    /// context, never an execution or risk-gate authority.
+    pub regime_context: StrategyRegimeContext,
+}
+
+/// P4.3: aggregate metrics over one decay-monitor window (baseline or
+/// recent) of attributed close events. Same GROSS-before-fees P&L basis as
+/// the parent row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyDecayWindowMetrics {
+    pub event_count: i64,
+    pub gross_realized_pnl_micros: i64,
+    /// `None` only when `event_count == 0` (never occurs for a populated
+    /// baseline/recent window, since both are exactly 10/5 events).
+    pub gross_expectancy_micros_per_close_event: Option<f64>,
+    /// Flat events excluded from the denominator; `None` when winning+losing == 0.
+    pub hit_rate: Option<f64>,
+    pub gross_profit_micros: i64,
+    pub gross_loss_abs_micros: i64,
+    pub max_realized_pnl_drawdown_micros: i64,
+}
+
+/// P4.2/P4.4: deterministic, conservative decay monitor over a strategy's
+/// most recent 15 attributed close events (baseline = the 10 immediately
+/// preceding the most recent 5; recent = the newest 5). Detects only a
+/// strong gross-expectancy sign reversal -- `decay_observed` is a
+/// deterministic monitoring flag, NOT proof that the strategy's true alpha
+/// has disappeared.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyDecayMonitor {
+    /// `"insufficient_data"` (fewer than 15 attributed close events) |
+    /// `"decay_observed"` (baseline expectancy > 0, recent expectancy < 0) |
+    /// `"improvement_observed"` (baseline <= 0, recent > 0) |
+    /// `"no_expectancy_sign_flip"` (same-sign / no reversal).
+    pub decay_state: String,
+    /// `None` only when `decay_state == "insufficient_data"`.
+    pub baseline: Option<StrategyDecayWindowMetrics>,
+    /// `None` only when `decay_state == "insufficient_data"`.
+    pub recent: Option<StrategyDecayWindowMetrics>,
+    /// `recent.gross_expectancy... - baseline.gross_expectancy...`. `None`
+    /// when either window is unavailable.
+    pub expectancy_delta_micros: Option<f64>,
+    /// `recent.hit_rate - baseline.hit_rate`. `None` when either side is
+    /// unavailable (including when either window's own hit_rate is `None`).
+    pub hit_rate_delta: Option<f64>,
+}
+
+/// P4.5-P4.7: current market-regime CONTEXT for a strategy's most recent
+/// exact durable (symbol, timeframe_secs), resolved ONLY from the exact
+/// originating order (`fetch_order_symbol_timeframe_context`) -- never from
+/// current config, current registry state, or a symbol-latest lookup.
+/// `regime_authority` is always `"research_only_observational"`: this MUST
+/// NEVER gate execution, risk, promotion, or suppression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyRegimeContext {
+    /// `"active_observational"` | `"insufficient_data"` (too few completed
+    /// bars for the detector) | `"context_unavailable"` (most recent
+    /// attributed close event's exact symbol/timeframe cannot be proven) |
+    /// `"context_ambiguous"` (multiple distinct exact timeframes exist for
+    /// the same strategy+symbol among its attributed close events) |
+    /// `"query_failed"` (a bar/order query errored).
+    pub regime_truth_state: String,
+    /// Always `"research_only_observational"` -- never execution or
+    /// risk-gate authority. See `REGIME_CAN_AFFECT_EXECUTION`/
+    /// `REGIME_CAN_AFFECT_RISK_GATE` in the Wave05 spec (always `NO`).
+    pub regime_authority: String,
+    /// The exact durable symbol this context resolved to. `None` when
+    /// `regime_truth_state` is `"context_unavailable"` or `"context_ambiguous"`.
+    pub symbol: Option<String>,
+    pub timeframe_secs: Option<i64>,
+    /// One of `mqk_backtest::regime::MarketRegimeKind`'s codes (e.g.
+    /// `"bull_trend"`, `"high_volatility"`, `"insufficient_data"`). `None`
+    /// unless a detection was actually run.
+    pub regime_kind: Option<String>,
+    pub confidence: Option<f64>,
+    pub reason_codes: Vec<String>,
+    pub input_bar_count: Option<i64>,
+    pub valid_bar_count: Option<i64>,
 }
 
 /// Response for `GET /api/v1/strategy/performance`.

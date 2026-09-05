@@ -28,11 +28,18 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use mqk_backtest::regime::{
+    detect_market_regime, MarketRegimeInput, MarketRegimeKind, MarketRegimePolicy,
+};
+use sqlx::PgPool;
+use uuid::Uuid;
 
 use super::durable_portfolio::{parse_explicit_run_id, resolve_run, RunIdParam, RunResolution};
 use crate::api_types::{
-    StrategyPerformanceCoverageBucket, StrategyPerformanceResponse, StrategyPerformanceRow,
+    StrategyDecayMonitor, StrategyDecayWindowMetrics, StrategyPerformanceCoverageBucket,
+    StrategyPerformanceResponse, StrategyPerformanceRow, StrategyRegimeContext,
 };
+use crate::dynamic_selection_dispatch_authority::timeframe_secs_to_db_label;
 use crate::state::{resolve_authoritative_closed_trade_view, AppState, ClosureAttribution, ClosureFragment};
 
 const CANONICAL: &str = "/api/v1/strategy/performance";
@@ -45,6 +52,20 @@ const PNL_BASIS: &str = "gross_realized_before_fees";
 /// fragments/close events. No `net_pnl`/`net_expectancy`/`after_cost_*`
 /// field exists anywhere in this response.
 const FEE_ALLOCATION_STATE: &str = "not_allocated_to_strategy_close_events";
+
+/// P4.2: fixed deterministic decay monitor windows.
+const BASELINE_EVENT_COUNT_REQUIRED: usize = 10;
+const RECENT_EVENT_COUNT_REQUIRED: usize = 5;
+const TOTAL_EVENT_COUNT_REQUIRED: usize = BASELINE_EVENT_COUNT_REQUIRED + RECENT_EVENT_COUNT_REQUIRED;
+
+/// P4.5: this route's regime detection is ALWAYS research-only observational
+/// context -- it must never gate execution, risk, promotion, or suppression.
+const REGIME_AUTHORITY: &str = "research_only_observational";
+
+/// P4.7: bounded recent completed-bar window handed to the regime detector.
+/// Comfortably above `MarketRegimePolicy::conservative_defaults().min_bars`
+/// (8) without being unbounded.
+const REGIME_BAR_WINDOW: i64 = 20;
 
 fn unavailable_response(
     status: StatusCode,
@@ -103,6 +124,11 @@ struct AttributedCloseEvent {
     /// fragments closed by one economic close order -> `fragment_count = 2`,
     /// but this is still exactly one close event).
     fragment_count: i64,
+    /// The exact closing order this event's fragments share. P4.6 resolves
+    /// each event's durable symbol/timeframe context from this field via
+    /// `mqk_db::fetch_order_symbol_timeframe_context` -- never from current
+    /// config or a symbol-latest lookup.
+    close_internal_order_id: String,
 }
 
 /// Group `fragments` into ordered `AttributedCloseEvent` series per exact
@@ -139,7 +165,7 @@ fn build_attributed_close_events(
     }
 
     let mut by_strategy: BTreeMap<(String, String), Vec<AttributedCloseEvent>> = BTreeMap::new();
-    for ((strategy_id, fingerprint, _close_inbox_id, _close_internal_order_id), (qty, pnl, frag_count)) in
+    for ((strategy_id, fingerprint, _close_inbox_id, close_internal_order_id), (qty, pnl, frag_count)) in
         event_map
     {
         by_strategy
@@ -149,6 +175,7 @@ fn build_attributed_close_events(
                 qty,
                 gross_pnl_micros: pnl,
                 fragment_count: frag_count,
+                close_internal_order_id,
             });
     }
     by_strategy
@@ -176,32 +203,39 @@ fn compute_max_realized_pnl_drawdown(event_pnls_in_order: &[i64]) -> i64 {
     max_drawdown
 }
 
-/// Build one exact semantic-strategy performance row (P3.5) from its ordered
-/// attributed close-event series.
-fn compute_performance_row(
-    strategy_id: String,
-    strategy_semantic_fingerprint: String,
-    events: &[AttributedCloseEvent],
-) -> StrategyPerformanceRow {
-    let attributed_fragment_count: i64 = events.iter().map(|e| e.fragment_count).sum();
-    let attributed_close_event_count: i64 = events.len() as i64;
-    let attributed_closed_qty: i64 = events.iter().map(|e| e.qty).sum();
-    let gross_realized_pnl_micros: i64 = events
-        .iter()
-        .fold(0i64, |acc, e| acc.saturating_add(e.gross_pnl_micros));
+/// Shared aggregate over a slice of close-event gross P&Ls -- the common
+/// core [`compute_performance_row`] (P3.5, full series) and the P4 decay
+/// monitor (baseline/recent windows) both need. No I/O.
+struct EventPnlAggregate {
+    event_count: i64,
+    gross_realized_pnl_micros: i64,
+    gross_profit_micros: i64,
+    gross_loss_abs_micros: i64,
+    winning_close_event_count: i64,
+    losing_close_event_count: i64,
+    flat_close_event_count: i64,
+    hit_rate: Option<f64>,
+    gross_expectancy_micros_per_close_event: Option<f64>,
+    max_realized_pnl_drawdown_micros: i64,
+}
 
-    let gross_profit_micros: i64 = events
+fn aggregate_event_pnls(event_pnls_in_order: &[i64]) -> EventPnlAggregate {
+    let event_count = event_pnls_in_order.len() as i64;
+    let gross_realized_pnl_micros = event_pnls_in_order
         .iter()
-        .filter(|e| e.gross_pnl_micros > 0)
-        .fold(0i64, |acc, e| acc.saturating_add(e.gross_pnl_micros));
-    let gross_loss_abs_micros: i64 = events
+        .fold(0i64, |acc, &p| acc.saturating_add(p));
+    let gross_profit_micros = event_pnls_in_order
         .iter()
-        .filter(|e| e.gross_pnl_micros < 0)
-        .fold(0i64, |acc, e| acc.saturating_add(e.gross_pnl_micros.unsigned_abs() as i64));
+        .filter(|&&p| p > 0)
+        .fold(0i64, |acc, &p| acc.saturating_add(p));
+    let gross_loss_abs_micros = event_pnls_in_order
+        .iter()
+        .filter(|&&p| p < 0)
+        .fold(0i64, |acc, &p| acc.saturating_add(p.unsigned_abs() as i64));
 
-    let winning_close_event_count = events.iter().filter(|e| e.gross_pnl_micros > 0).count() as i64;
-    let losing_close_event_count = events.iter().filter(|e| e.gross_pnl_micros < 0).count() as i64;
-    let flat_close_event_count = events.iter().filter(|e| e.gross_pnl_micros == 0).count() as i64;
+    let winning_close_event_count = event_pnls_in_order.iter().filter(|&&p| p > 0).count() as i64;
+    let losing_close_event_count = event_pnls_in_order.iter().filter(|&&p| p < 0).count() as i64;
+    let flat_close_event_count = event_pnls_in_order.iter().filter(|&&p| p == 0).count() as i64;
 
     let hit_rate_denominator = winning_close_event_count + losing_close_event_count;
     let hit_rate = if hit_rate_denominator == 0 {
@@ -210,40 +244,16 @@ fn compute_performance_row(
         Some(winning_close_event_count as f64 / hit_rate_denominator as f64)
     };
 
-    let gross_expectancy_micros_per_close_event = if attributed_close_event_count == 0 {
+    let gross_expectancy_micros_per_close_event = if event_count == 0 {
         None
     } else {
-        Some(gross_realized_pnl_micros as f64 / attributed_close_event_count as f64)
+        Some(gross_realized_pnl_micros as f64 / event_count as f64)
     };
 
-    let average_win_micros = if winning_close_event_count == 0 {
-        None
-    } else {
-        Some(gross_profit_micros as f64 / winning_close_event_count as f64)
-    };
-    let average_loss_abs_micros = if losing_close_event_count == 0 {
-        None
-    } else {
-        Some(gross_loss_abs_micros as f64 / losing_close_event_count as f64)
-    };
+    let max_realized_pnl_drawdown_micros = compute_max_realized_pnl_drawdown(event_pnls_in_order);
 
-    // NEVER infinity/NaN/a fabricated sentinel: `None` when there is no loss
-    // to divide by.
-    let profit_factor = if gross_loss_abs_micros == 0 {
-        None
-    } else {
-        Some(gross_profit_micros as f64 / gross_loss_abs_micros as f64)
-    };
-
-    let event_pnls: Vec<i64> = events.iter().map(|e| e.gross_pnl_micros).collect();
-    let max_realized_pnl_drawdown_micros = compute_max_realized_pnl_drawdown(&event_pnls);
-
-    StrategyPerformanceRow {
-        strategy_id,
-        strategy_semantic_fingerprint,
-        attributed_fragment_count,
-        attributed_close_event_count,
-        attributed_closed_qty,
+    EventPnlAggregate {
+        event_count,
         gross_realized_pnl_micros,
         gross_profit_micros,
         gross_loss_abs_micros,
@@ -252,10 +262,318 @@ fn compute_performance_row(
         flat_close_event_count,
         hit_rate,
         gross_expectancy_micros_per_close_event,
+        max_realized_pnl_drawdown_micros,
+    }
+}
+
+/// Build one exact semantic-strategy performance row (P3.5) from its ordered
+/// attributed close-event series.
+fn compute_performance_row(
+    strategy_id: String,
+    strategy_semantic_fingerprint: String,
+    events: &[AttributedCloseEvent],
+    decay_monitor: StrategyDecayMonitor,
+    regime_context: StrategyRegimeContext,
+) -> StrategyPerformanceRow {
+    let attributed_fragment_count: i64 = events.iter().map(|e| e.fragment_count).sum();
+    let attributed_closed_qty: i64 = events.iter().map(|e| e.qty).sum();
+    let event_pnls: Vec<i64> = events.iter().map(|e| e.gross_pnl_micros).collect();
+    let agg = aggregate_event_pnls(&event_pnls);
+
+    let average_win_micros = if agg.winning_close_event_count == 0 {
+        None
+    } else {
+        Some(agg.gross_profit_micros as f64 / agg.winning_close_event_count as f64)
+    };
+    let average_loss_abs_micros = if agg.losing_close_event_count == 0 {
+        None
+    } else {
+        Some(agg.gross_loss_abs_micros as f64 / agg.losing_close_event_count as f64)
+    };
+
+    // NEVER infinity/NaN/a fabricated sentinel: `None` when there is no loss
+    // to divide by.
+    let profit_factor = if agg.gross_loss_abs_micros == 0 {
+        None
+    } else {
+        Some(agg.gross_profit_micros as f64 / agg.gross_loss_abs_micros as f64)
+    };
+
+    StrategyPerformanceRow {
+        strategy_id,
+        strategy_semantic_fingerprint,
+        attributed_fragment_count,
+        attributed_close_event_count: agg.event_count,
+        attributed_closed_qty,
+        gross_realized_pnl_micros: agg.gross_realized_pnl_micros,
+        gross_profit_micros: agg.gross_profit_micros,
+        gross_loss_abs_micros: agg.gross_loss_abs_micros,
+        winning_close_event_count: agg.winning_close_event_count,
+        losing_close_event_count: agg.losing_close_event_count,
+        flat_close_event_count: agg.flat_close_event_count,
+        hit_rate: agg.hit_rate,
+        gross_expectancy_micros_per_close_event: agg.gross_expectancy_micros_per_close_event,
         average_win_micros,
         average_loss_abs_micros,
         profit_factor,
-        max_realized_pnl_drawdown_micros,
+        max_realized_pnl_drawdown_micros: agg.max_realized_pnl_drawdown_micros,
+        decay_monitor,
+        regime_context,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4.2 - P4.4: decay monitor (pure, no I/O)
+// ---------------------------------------------------------------------------
+
+/// P4.2: split an ordered attributed close-event series into
+/// `(baseline, recent)` slices when `events.len() >= 15` -- `recent` is the
+/// newest 5, `baseline` is the 10 immediately preceding (never overlapping).
+/// `None` when there are fewer than 15 events (`decay_state ==
+/// "insufficient_data"`). Events older than the 15-event window are ignored
+/// by this comparison (still visible in the row's own lifetime metrics).
+fn split_decay_windows(events: &[AttributedCloseEvent]) -> Option<(&[AttributedCloseEvent], &[AttributedCloseEvent])> {
+    let n = events.len();
+    if n < TOTAL_EVENT_COUNT_REQUIRED {
+        return None;
+    }
+    let recent = &events[n - RECENT_EVENT_COUNT_REQUIRED..];
+    let baseline = &events[n - TOTAL_EVENT_COUNT_REQUIRED..n - RECENT_EVENT_COUNT_REQUIRED];
+    Some((baseline, recent))
+}
+
+/// P4.4: closed-vocabulary conservative decay classifier. Detects ONLY a
+/// strong gross-expectancy sign reversal -- never an arbitrary percentage
+/// threshold. `decay_observed` is a deterministic monitoring flag, NOT proof
+/// that the strategy's true alpha has disappeared.
+fn classify_decay_state(
+    baseline_expectancy: Option<f64>,
+    recent_expectancy: Option<f64>,
+) -> &'static str {
+    match (baseline_expectancy, recent_expectancy) {
+        (Some(baseline), Some(recent)) if baseline > 0.0 && recent < 0.0 => "decay_observed",
+        (Some(baseline), Some(recent)) if baseline <= 0.0 && recent > 0.0 => "improvement_observed",
+        (Some(_), Some(_)) => "no_expectancy_sign_flip",
+        _ => "insufficient_data",
+    }
+}
+
+fn window_metrics_from_aggregate(agg: EventPnlAggregate) -> StrategyDecayWindowMetrics {
+    StrategyDecayWindowMetrics {
+        event_count: agg.event_count,
+        gross_realized_pnl_micros: agg.gross_realized_pnl_micros,
+        gross_expectancy_micros_per_close_event: agg.gross_expectancy_micros_per_close_event,
+        hit_rate: agg.hit_rate,
+        gross_profit_micros: agg.gross_profit_micros,
+        gross_loss_abs_micros: agg.gross_loss_abs_micros,
+        max_realized_pnl_drawdown_micros: agg.max_realized_pnl_drawdown_micros,
+    }
+}
+
+/// Build the P4 decay monitor for one strategy's ordered attributed
+/// close-event series. Pure/no I/O -- reuses P3's exact event series,
+/// counting close events (never raw FIFO fragments) toward the 15-event
+/// sample size, and never mixes events from a different semantic-strategy
+/// identity (each `(strategy_id, fingerprint)` gets its own independent
+/// series upstream in `build_attributed_close_events`).
+fn compute_decay_monitor(events: &[AttributedCloseEvent]) -> StrategyDecayMonitor {
+    let Some((baseline_events, recent_events)) = split_decay_windows(events) else {
+        return StrategyDecayMonitor {
+            decay_state: "insufficient_data".to_string(),
+            baseline: None,
+            recent: None,
+            expectancy_delta_micros: None,
+            hit_rate_delta: None,
+        };
+    };
+
+    let baseline_pnls: Vec<i64> = baseline_events.iter().map(|e| e.gross_pnl_micros).collect();
+    let recent_pnls: Vec<i64> = recent_events.iter().map(|e| e.gross_pnl_micros).collect();
+    let baseline_agg = aggregate_event_pnls(&baseline_pnls);
+    let recent_agg = aggregate_event_pnls(&recent_pnls);
+
+    let decay_state = classify_decay_state(
+        baseline_agg.gross_expectancy_micros_per_close_event,
+        recent_agg.gross_expectancy_micros_per_close_event,
+    );
+    let expectancy_delta_micros = match (
+        recent_agg.gross_expectancy_micros_per_close_event,
+        baseline_agg.gross_expectancy_micros_per_close_event,
+    ) {
+        (Some(r), Some(b)) => Some(r - b),
+        _ => None,
+    };
+    let hit_rate_delta = match (recent_agg.hit_rate, baseline_agg.hit_rate) {
+        (Some(r), Some(b)) => Some(r - b),
+        _ => None,
+    };
+
+    StrategyDecayMonitor {
+        decay_state: decay_state.to_string(),
+        baseline: Some(window_metrics_from_aggregate(baseline_agg)),
+        recent: Some(window_metrics_from_aggregate(recent_agg)),
+        expectancy_delta_micros,
+        hit_rate_delta,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4.5 - P4.7: observational current market-regime context
+// ---------------------------------------------------------------------------
+
+fn unavailable_regime_context(regime_truth_state: &str) -> StrategyRegimeContext {
+    StrategyRegimeContext {
+        regime_truth_state: regime_truth_state.to_string(),
+        regime_authority: REGIME_AUTHORITY.to_string(),
+        symbol: None,
+        timeframe_secs: None,
+        regime_kind: None,
+        confidence: None,
+        reason_codes: vec![],
+        input_bar_count: None,
+        valid_bar_count: None,
+    }
+}
+
+/// Convert one canonical `md_bars` row into the engine's `BacktestBar` shape.
+/// Mirrors `routes/backtests.rs::md_bar_row_to_backtest_bar`. `day_id`/
+/// `reject_window_id` are deterministically derived, bounded fields the
+/// regime detector's own feature calculation does not consume.
+fn md_bar_row_to_backtest_bar(r: mqk_db::MdBarRow) -> mqk_backtest::BacktestBar {
+    let day_id = epoch_secs_to_yyyymmdd(r.end_ts);
+    let reject_window_id = r.end_ts.div_euclid(60).try_into().unwrap_or(u32::MAX);
+    mqk_backtest::BacktestBar {
+        symbol: r.symbol,
+        end_ts: r.end_ts,
+        open_micros: r.open_micros,
+        high_micros: r.high_micros,
+        low_micros: r.low_micros,
+        close_micros: r.close_micros,
+        volume: r.volume,
+        is_complete: r.is_complete,
+        day_id,
+        reject_window_id,
+    }
+}
+
+fn epoch_secs_to_yyyymmdd(epoch_secs: i64) -> u32 {
+    let days = epoch_secs.div_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let y = y as i64;
+    let m = m as i64;
+    let d = d as i64;
+    (y * 10_000 + m * 100 + d).try_into().unwrap_or(19700101)
+}
+
+/// civil_from_days (public domain; Howard Hinnant)
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096).div_euclid(365);
+    let y = (yoe as i32) + (era as i32) * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// P4.6/P4.7: resolve the current observational market-regime context for
+/// one strategy's ordered attributed close-event series. The "current"
+/// symbol is the MOST RECENT event's exact durable symbol; every OTHER event
+/// sharing that exact symbol must resolve to the exact same `timeframe_secs`
+/// or the whole context fails closed to `"context_ambiguous"`. Never selects
+/// a symbol/timeframe arbitrarily, never reads current config/registry
+/// state, never calls a provider/broker/network API -- completed `md_bars`
+/// only.
+async fn resolve_strategy_regime_context(
+    db: &PgPool,
+    run_id: Uuid,
+    events: &[AttributedCloseEvent],
+) -> StrategyRegimeContext {
+    if events.is_empty() {
+        return unavailable_regime_context("context_unavailable");
+    }
+
+    let mut resolved: Vec<Option<(String, i64)>> = Vec::with_capacity(events.len());
+    for e in events {
+        match mqk_db::fetch_order_symbol_timeframe_context(db, run_id, &e.close_internal_order_id)
+            .await
+        {
+            Ok(ctx) => resolved.push(ctx),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err, run_id = %run_id,
+                    "strategy_performance_regime_context_query_failed"
+                );
+                return unavailable_regime_context("query_failed");
+            }
+        }
+    }
+
+    let Some((current_symbol, current_timeframe_secs)) = resolved.last().cloned().flatten() else {
+        return unavailable_regime_context("context_unavailable");
+    };
+
+    for other in resolved.iter().flatten() {
+        if other.0 == current_symbol && other.1 != current_timeframe_secs {
+            return unavailable_regime_context("context_ambiguous");
+        }
+    }
+
+    let Some(db_timeframe_label) = timeframe_secs_to_db_label(current_timeframe_secs) else {
+        return unavailable_regime_context("context_unavailable");
+    };
+
+    let rows = match mqk_db::fetch_recent_completed_bars_for_strategy(
+        db,
+        &current_symbol,
+        db_timeframe_label,
+        REGIME_BAR_WINDOW,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(
+                error = %err, run_id = %run_id, symbol = %current_symbol,
+                "strategy_performance_regime_bars_query_failed"
+            );
+            return unavailable_regime_context("query_failed");
+        }
+    };
+
+    let bars: Vec<mqk_backtest::BacktestBar> =
+        rows.into_iter().map(md_bar_row_to_backtest_bar).collect();
+    let input = MarketRegimeInput::from_bars(
+        bars,
+        Some(current_symbol.clone()),
+        Some(db_timeframe_label.to_string()),
+    );
+    let classification = detect_market_regime(&input, &MarketRegimePolicy::conservative_defaults());
+
+    let regime_truth_state = if classification.kind == MarketRegimeKind::InsufficientData {
+        "insufficient_data"
+    } else {
+        "active_observational"
+    };
+
+    StrategyRegimeContext {
+        regime_truth_state: regime_truth_state.to_string(),
+        regime_authority: REGIME_AUTHORITY.to_string(),
+        symbol: Some(current_symbol),
+        timeframe_secs: Some(current_timeframe_secs),
+        regime_kind: Some(classification.kind.code().to_string()),
+        confidence: Some(classification.confidence.score),
+        reason_codes: classification
+            .reason_codes
+            .iter()
+            .map(|r| r.code().to_string())
+            .collect(),
+        input_bar_count: Some(classification.features.input_bar_count as i64),
+        valid_bar_count: Some(classification.features.valid_bar_count as i64),
     }
 }
 
@@ -344,12 +662,22 @@ pub(crate) async fn strategy_performance(
         .fold(0i64, |acc, b| acc.saturating_add(b.gross_realized_pnl_micros));
 
     let events_by_strategy = build_attributed_close_events(&view.fragments);
-    let rows = events_by_strategy
-        .into_iter()
-        .map(|((strategy_id, fingerprint), events)| {
-            compute_performance_row(strategy_id, fingerprint, &events)
-        })
-        .collect();
+    let mut rows = Vec::with_capacity(events_by_strategy.len());
+    for ((strategy_id, fingerprint), events) in events_by_strategy {
+        // P4: decay monitoring is pure/no I/O; regime context resolution is
+        // read-only DB (never provider/broker/network) and is awaited
+        // sequentially -- this route is observational, not hot-path, and row
+        // counts are bounded by distinct exact semantic-strategy identities.
+        let decay_monitor = compute_decay_monitor(&events);
+        let regime_context = resolve_strategy_regime_context(db, run.run_id, &events).await;
+        rows.push(compute_performance_row(
+            strategy_id,
+            fingerprint,
+            &events,
+            decay_monitor,
+            regime_context,
+        ));
+    }
 
     (
         StatusCode::OK,
