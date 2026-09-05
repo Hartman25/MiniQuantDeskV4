@@ -82,12 +82,21 @@ evidence's benchmark_type="dynamic_equal_weight_causally_rankable_fold_reset_v1"
 reused verbatim unchanged.
 
 DATA FRESHNESS: unlike ALPHA-01/SHORT-01/SHORT-WAVE-02/03 (all windowed to
-2016-01-01..2024-01-01), this experiment extends END_UTC through the most
-recently available Alpaca daily bar as of predeclaration (confirmed live via
-a read-only single-symbol check during Phase C of the controlling mission),
-so most of the development window (2024-2026) is genuinely fresh evidence
-never used in any prior experiment, and the final WF_HOLDOUT_MONTHS=6 window
-is a genuinely untouched, never-before-seen reserved holdout.
+2016-01-01..2024-01-01), this experiment's FINAL frozen END_UTC is
+2025-05-01 (ASOF=2025-05-01), still well past every prior experiment's
+2024-01-01 cutoff. Development evidence (used to fit/select folds) ends at
+the reserved holdout's own start; the reserved final holdout window is
+2024-11-01..2025-05-01 (WF_HOLDOUT_MONTHS=6) and remains genuinely
+untouched, never-before-seen.
+
+The originally predeclared END_UTC=2026-09-05 endpoint was superseded,
+BEFORE any trial result was observed, by a pre-outcome data-authority
+amendment (commit 3cf711cf) that narrowed END_UTC to strictly before the
+earliest unresolved 2025-2026 corporate-action "name_change" event (RKLB,
+2025-05-27) -- see the END_UTC assignment below for the full provenance
+account. No claim is made, and none should be inferred, that any 2026 bar,
+feature, prediction, or economic result was ever computed or evaluated by
+this campaign.
 """
 
 from __future__ import annotations
