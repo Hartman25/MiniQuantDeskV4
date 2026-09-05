@@ -595,20 +595,48 @@ async fn resolve_strategy_regime_context(
     }
 }
 
+/// WAVE05-P3-COVERAGE-CLOSED-VOCAB-REPAIR-01: the frozen, exhaustive public
+/// `attribution_state` vocabulary, in this exact emission order. This is the
+/// ONLY place that decides the vocabulary -- `ClosureAttribution::as_str()`
+/// must never gain a variant this list does not also carry. Order is fixed
+/// and explicit; callers must never depend on `BTreeMap`/hashmap iteration
+/// order to reconstruct it.
+const ATTRIBUTION_COVERAGE_STATES: [&str; 7] = [
+    "attributed",
+    "cross_strategy",
+    "semantic_identity_changed",
+    "manual_or_mixed",
+    "lineage_incomplete",
+    "lineage_invalid",
+    "lineage_missing",
+];
+
 /// P3.6 attribution coverage: deterministic fragment count + gross realized
-/// P&L total per P2 attribution state, across ALL fragments (not just
-/// `attributed`). `sum(bucket.gross_realized_pnl_micros)` always equals the
-/// upstream projection's total gross realized P&L.
+/// P&L total per P2 attribution state. Every one of the seven frozen
+/// [`ATTRIBUTION_COVERAGE_STATES`] is ALWAYS present in the returned vector,
+/// even when zero fragments were observed for it (`fragment_count = 0`,
+/// `gross_realized_pnl_micros = 0`) -- a closed public vocabulary, never a
+/// dynamic/encountered-only set (WAVE05-P3-COVERAGE-CLOSED-VOCAB-REPAIR-01).
+/// `sum(bucket.gross_realized_pnl_micros)` always equals the upstream
+/// projection's total gross realized P&L.
 fn compute_attribution_coverage(fragments: &[ClosureFragment]) -> Vec<StrategyPerformanceCoverageBucket> {
-    let mut buckets: BTreeMap<&'static str, (i64, i64)> = BTreeMap::new();
+    let mut counts = [(0i64, 0i64); ATTRIBUTION_COVERAGE_STATES.len()];
     for f in fragments {
-        let entry = buckets.entry(f.attribution.as_str()).or_insert((0, 0));
-        entry.0 = entry.0.saturating_add(1);
-        entry.1 = entry.1.saturating_add(f.gross_realized_pnl_micros);
+        let state = f.attribution.as_str();
+        let idx = ATTRIBUTION_COVERAGE_STATES
+            .iter()
+            .position(|&s| s == state)
+            .expect(
+                "ClosureAttribution::as_str() must return one of the frozen \
+                 ATTRIBUTION_COVERAGE_STATES",
+            );
+        counts[idx].0 = counts[idx].0.saturating_add(1);
+        counts[idx].1 = counts[idx].1.saturating_add(f.gross_realized_pnl_micros);
     }
-    buckets
-        .into_iter()
-        .map(|(state, (count, pnl))| StrategyPerformanceCoverageBucket {
+    ATTRIBUTION_COVERAGE_STATES
+        .iter()
+        .zip(counts.iter())
+        .map(|(&state, &(count, pnl))| StrategyPerformanceCoverageBucket {
             attribution_state: state.to_string(),
             fragment_count: count,
             gross_realized_pnl_micros: pnl,
@@ -822,10 +850,16 @@ pub(crate) async fn strategy_performance(
 
     // P5.4: response-wide attribution-coverage facts, computed once and
     // applied identically to every row (see `compute_risk_flags`'s doc).
+    // WAVE05-P3-COVERAGE-CLOSED-VOCAB-REPAIR-01: since every one of the seven
+    // frozen states now ALWAYS appears as a bucket (possibly zero-valued),
+    // mere bucket existence can no longer signal real evidence -- this must
+    // require `fragment_count > 0`. Deliberately NOT `gross_realized_pnl_micros
+    // != 0`: a real zero-P&L closure in a non-attributed state is still
+    // genuine evidence that must raise its flag.
     let has_coverage_bucket = |state: &str| {
         attribution_coverage
             .iter()
-            .any(|b| b.attribution_state == state)
+            .any(|b| b.attribution_state == state && b.fragment_count > 0)
     };
     let coverage_has_semantic_identity_changed = has_coverage_bucket("semantic_identity_changed");
     let coverage_has_cross_strategy = has_coverage_bucket("cross_strategy");

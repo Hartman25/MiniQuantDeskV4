@@ -978,3 +978,286 @@ async fn p3_not_found_run_is_not_found() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// WAVE05-P3-COVERAGE-CLOSED-VOCAB-REPAIR-01
+//
+// The frozen public `attribution_state` vocabulary is exactly these seven
+// states, and every one of them must ALWAYS be present in
+// `attribution_coverage` when `truth_state == "active"` -- never only the
+// states actually encountered in the run.
+// ---------------------------------------------------------------------------
+
+const ALL_ATTRIBUTION_STATES: [&str; 7] = [
+    "attributed",
+    "cross_strategy",
+    "semantic_identity_changed",
+    "manual_or_mixed",
+    "lineage_incomplete",
+    "lineage_invalid",
+    "lineage_missing",
+];
+
+// ---------------------------------------------------------------------------
+// COV-R1 -- only attributed closures: all 7 states present, attributed
+// nonzero, other six explicit zero.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cov_r1_only_attributed_still_emits_all_seven_states() {
+    mqk_db::run_isolated("cov_r1_all_seven", |pool| async move {
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let run_id = seed_run(&st).await;
+        let sid = unique_id("strat_covr1");
+        let fp = fingerprint('r');
+
+        let buy_id = unique_id("covr1buy");
+        let sell_id = unique_id("covr1sell");
+        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
+            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
+            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+
+        seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
+
+        let perf = fetch_performance(&st, run_id).await;
+        assert_eq!(perf["truth_state"], "active", "perf={perf}");
+        let buckets = coverage_buckets(&perf);
+        assert_eq!(buckets.len(), 7, "all seven frozen states must always be present; buckets={buckets:?}");
+        let present: std::collections::BTreeSet<&str> = buckets
+            .iter()
+            .filter_map(|b| b["attribution_state"].as_str())
+            .collect();
+        for state in ALL_ATTRIBUTION_STATES {
+            assert!(present.contains(state), "missing frozen state '{state}'; buckets={buckets:?}");
+        }
+        let attributed = find_bucket(&perf, "attributed").expect("attributed bucket must exist");
+        assert_eq!(attributed["fragment_count"], 1);
+        assert_eq!(attributed["gross_realized_pnl_micros"], 100_000_000);
+        for state in ALL_ATTRIBUTION_STATES.iter().filter(|&&s| s != "attributed") {
+            let bucket = find_bucket(&perf, state).expect("zero bucket must still exist");
+            assert_eq!(bucket["fragment_count"], 0, "state={state} bucket={bucket}");
+            assert_eq!(bucket["gross_realized_pnl_micros"], 0, "state={state} bucket={bucket}");
+        }
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// COV-R2 -- manual/mixed evidence: all 7 still present, manual_or_mixed
+// nonzero, others zero as appropriate.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cov_r2_manual_or_mixed_still_emits_all_seven_states() {
+    mqk_db::run_isolated("cov_r2_manual_all_seven", |pool| async move {
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let run_id = seed_run(&st).await;
+        let sid = unique_id("strat_covr2");
+        let fp = fingerprint('s');
+
+        let buy_id = unique_id("covr2buy");
+        let sell_id = unique_id("covr2sell");
+        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
+            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
+            StrategyShape::Manual, at()).await;
+
+        seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
+
+        let perf = fetch_performance(&st, run_id).await;
+        assert_eq!(perf["truth_state"], "active", "perf={perf}");
+        let buckets = coverage_buckets(&perf);
+        assert_eq!(buckets.len(), 7, "buckets={buckets:?}");
+        let manual = find_bucket(&perf, "manual_or_mixed").expect("bucket must exist");
+        assert_eq!(manual["fragment_count"], 1);
+        assert_eq!(manual["gross_realized_pnl_micros"], 100_000_000);
+        for state in ALL_ATTRIBUTION_STATES.iter().filter(|&&s| s != "manual_or_mixed") {
+            let bucket = find_bucket(&perf, state).expect("zero bucket must still exist");
+            assert_eq!(bucket["fragment_count"], 0, "state={state} bucket={bucket}");
+            assert_eq!(bucket["gross_realized_pnl_micros"], 0, "state={state} bucket={bucket}");
+        }
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// COV-R3 -- sum of all seven bucket P&Ls equals canonical closure P&L (with
+// every state simultaneously populated, not just two).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cov_r3_seven_bucket_sum_equals_canonical_closure_pnl() {
+    mqk_db::run_isolated("cov_r3_sum", |pool| async move {
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let run_id = seed_run(&st).await;
+
+        // attributed: +100
+        let sid_att = unique_id("strat_att");
+        let fp_att = fingerprint('t');
+        place_and_fill(&pool, run_id, &unique_id("b1"), "AAPL", Side::Buy, 10, 100_000_000,
+            StrategyShape::Full { strategy_id: &sid_att, strategy_semantic_fingerprint: &fp_att }, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("s1"), "AAPL", Side::Sell, 10, 110_000_000,
+            StrategyShape::Full { strategy_id: &sid_att, strategy_semantic_fingerprint: &fp_att }, at()).await;
+
+        // cross_strategy: +20
+        let sid_a = unique_id("strat_a");
+        let sid_b = unique_id("strat_b");
+        place_and_fill(&pool, run_id, &unique_id("b2"), "MSFT", Side::Buy, 5, 50_000_000,
+            StrategyShape::Full { strategy_id: &sid_a, strategy_semantic_fingerprint: &fingerprint('u') }, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("s2"), "MSFT", Side::Sell, 5, 54_000_000,
+            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fingerprint('v') }, at()).await;
+
+        // semantic_identity_changed: +30
+        let sid_drift = unique_id("strat_drift");
+        place_and_fill(&pool, run_id, &unique_id("b3"), "GOOG", Side::Buy, 1, 1_000_000_000,
+            StrategyShape::Full { strategy_id: &sid_drift, strategy_semantic_fingerprint: &fingerprint('w') }, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("s3"), "GOOG", Side::Sell, 1, 1_000_000_030,
+            StrategyShape::Full { strategy_id: &sid_drift, strategy_semantic_fingerprint: &fingerprint('x') }, at()).await;
+
+        // manual_or_mixed: +40
+        place_and_fill(&pool, run_id, &unique_id("b4"), "TSLA", Side::Buy, 1, 1_000_000_000, StrategyShape::Manual, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("s4"), "TSLA", Side::Sell, 1, 1_000_000_040, StrategyShape::Manual, at()).await;
+
+        // lineage_incomplete: +50 (legacy open, full close)
+        let sid_leg = unique_id("strat_leg");
+        place_and_fill(&pool, run_id, &unique_id("b5"), "NFLX", Side::Buy, 1, 1_000_000_000,
+            StrategyShape::Legacy { strategy_id: &sid_leg }, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("s5"), "NFLX", Side::Sell, 1, 1_000_000_050,
+            StrategyShape::Full { strategy_id: &sid_leg, strategy_semantic_fingerprint: &fingerprint('y') }, at()).await;
+
+        // lineage_invalid: +60 (malformed open, full close)
+        let sid_inv = unique_id("strat_inv");
+        place_and_fill(&pool, run_id, &unique_id("b6"), "AMZN", Side::Buy, 1, 1_000_000_000,
+            StrategyShape::MalformedStrategyId, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("s6"), "AMZN", Side::Sell, 1, 1_000_000_060,
+            StrategyShape::Full { strategy_id: &sid_inv, strategy_semantic_fingerprint: &fingerprint('z') }, at()).await;
+
+        let expected_total = 100_000_000 + 20_000_000 + 30 + 40 + 50 + 60;
+        seed_accounting_state(&pool, run_id, expected_total, "complete", None).await;
+
+        let perf = fetch_performance(&st, run_id).await;
+        assert_eq!(perf["truth_state"], "active", "perf={perf}");
+        let buckets = coverage_buckets(&perf);
+        assert_eq!(buckets.len(), 7, "buckets={buckets:?}");
+        let coverage_sum: i64 = buckets
+            .iter()
+            .filter_map(|b| b["gross_realized_pnl_micros"].as_i64())
+            .sum();
+        assert_eq!(coverage_sum, expected_total, "coverage must reconcile exactly; buckets={buckets:?}");
+        assert_eq!(perf["total_gross_realized_pnl_micros"], expected_total);
+        // lineage_missing genuinely has zero evidence in this scenario.
+        let missing = find_bucket(&perf, "lineage_missing").expect("bucket must still exist");
+        assert_eq!(missing["fragment_count"], 0);
+        assert_eq!(missing["gross_realized_pnl_micros"], 0);
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// COV-R4 -- zero-valued buckets must NOT create P5 excluded-evidence flags.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cov_r4_zero_buckets_do_not_trigger_p5_coverage_flags() {
+    mqk_db::run_isolated("cov_r4_no_false_flags", |pool| async move {
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let run_id = seed_run(&st).await;
+        let sid = unique_id("strat_covr4");
+        let fp = fingerprint('1');
+
+        // Only an attributed closure -- every other bucket is a genuine zero.
+        place_and_fill(&pool, run_id, &unique_id("covr4buy"), "AAPL", Side::Buy, 10, 100_000_000,
+            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("covr4sell"), "AAPL", Side::Sell, 10, 110_000_000,
+            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+
+        seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
+
+        let perf = fetch_performance(&st, run_id).await;
+        assert_eq!(coverage_buckets(&perf).len(), 7, "perf={perf}");
+        let row = find_row(&perf, &sid, &fp).expect("row must exist");
+        let flags: Vec<String> = row["risk_visibility"]["risk_flags"]
+            .as_array()
+            .expect("risk_flags must be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for forbidden in [
+            "semantic_identity_change_excluded_pnl",
+            "cross_strategy_closure_pnl",
+            "incomplete_lineage_pnl",
+            "manual_mixed_closure_pnl",
+        ] {
+            assert!(
+                !flags.contains(&forbidden.to_string()),
+                "zero-valued coverage bucket must never raise '{forbidden}'; flags={flags:?}"
+            );
+        }
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// COV-R5 -- a real zero-P&L cross_strategy fragment still has fragment_count
+// > 0 and DOES raise cross_strategy_closure_pnl.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cov_r5_real_zero_pnl_cross_strategy_still_raises_flag() {
+    mqk_db::run_isolated("cov_r5_zero_pnl_real_evidence", |pool| async move {
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let run_id = seed_run(&st).await;
+
+        // Attributed row we inspect for the flag.
+        let sid = unique_id("strat_covr5");
+        let fp = fingerprint('2');
+        place_and_fill(&pool, run_id, &unique_id("covr5buy"), "AAPL", Side::Buy, 10, 100_000_000,
+            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("covr5sell"), "AAPL", Side::Sell, 10, 110_000_000,
+            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+
+        // cross_strategy closure with EXACTLY zero gross P&L (open == close price).
+        let sid_a = unique_id("strat_cxa");
+        let sid_b = unique_id("strat_cxb");
+        place_and_fill(&pool, run_id, &unique_id("covr5xbuy"), "MSFT", Side::Buy, 5, 50_000_000,
+            StrategyShape::Full { strategy_id: &sid_a, strategy_semantic_fingerprint: &fingerprint('3') }, at()).await;
+        place_and_fill(&pool, run_id, &unique_id("covr5xsell"), "MSFT", Side::Sell, 5, 50_000_000,
+            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fingerprint('4') }, at()).await;
+
+        seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
+
+        let perf = fetch_performance(&st, run_id).await;
+        let cross_bucket = find_bucket(&perf, "cross_strategy").expect("bucket must exist");
+        assert_eq!(cross_bucket["fragment_count"], 1, "real zero-pnl evidence must still count; bucket={cross_bucket}");
+        assert_eq!(cross_bucket["gross_realized_pnl_micros"], 0);
+
+        let row = find_row(&perf, &sid, &fp).expect("row must exist");
+        let flags: Vec<String> = row["risk_visibility"]["risk_flags"]
+            .as_array()
+            .expect("risk_flags must be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            flags.contains(&"cross_strategy_closure_pnl".to_string()),
+            "a real (even zero-pnl) cross_strategy fragment must raise the flag; flags={flags:?}"
+        );
+    })
+    .await;
+}
