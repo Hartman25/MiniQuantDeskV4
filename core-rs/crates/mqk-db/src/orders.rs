@@ -1130,9 +1130,13 @@ pub async fn fetch_fill_strategy_lineage(
 ///
 /// `None` for every other case (missing row, run mismatch, missing/malformed
 /// field) -- callers must surface this as `context_unavailable`, never a
-/// guessed label. `timeframe_secs` is not currently written by any
-/// production order-construction path, so `None` is the expected common case
-/// today; that is a correct fail-closed result, not a bug in this helper.
+/// guessed label. New internal native strategy decisions persist an exact
+/// positive `timeframe_secs` into `order_json` at construction time (see
+/// `mqk_daemon::decision::build_order_json`); historical/legacy rows written
+/// before that provenance existed may still lack the field. Either way this
+/// helper never reconstructs or backfills `timeframe_secs` from current
+/// config/registry state -- a missing, malformed, or wrong-run value simply
+/// returns `None`.
 pub async fn fetch_order_symbol_timeframe_context(
     pool: &PgPool,
     fill_run_id: Uuid,

@@ -85,10 +85,18 @@ authority is not active. Zero attributed closures with `truth_state ==
 "active"` is a valid authoritative zero, distinguishable by `truth_state`
 alone, never by an empty `rows` with no other signal.
 
-`attribution_coverage` is a response-wide bucket per attribution state
-(fragment count + gross realized P&L), always summing to the same total the
+`attribution_coverage` always exposes exactly seven frozen buckets —
+`attributed`, `cross_strategy`, `semantic_identity_changed`,
+`manual_or_mixed`, `lineage_incomplete`, `lineage_invalid`,
+`lineage_missing` — a closed public vocabulary, never a dynamic or
+encountered-only set. A bucket with no observed fragments is an explicit
+`fragment_count = 0` / `gross_realized_pnl_micros = 0`, not an absent entry.
+`sum(bucket.gross_realized_pnl_micros)` always equals the same total the
 closed-trade authority reports — no economic P&L silently disappears from
 the response, even when it can't be attributed to one exact strategy.
+Coverage-derived risk flags (P5) key off `fragment_count > 0`, never bucket
+presence or `gross_realized_pnl_micros != 0` — a bucket can hold real
+fragments that net to zero P&L.
 
 ## P4 — decay monitor and observational regime context
 
@@ -108,7 +116,14 @@ no p-value, no arbitrary percentage threshold.
 EXACT durable `(symbol, timeframe_secs)` via
 `mqk_db::fetch_order_symbol_timeframe_context` (same
 `internal_order_id -> idempotency_key` join P1 uses) — never from current
-config or registry state. Conflicting exact timeframes for the same
+config or registry state. New internal native strategy decisions persist
+their exact positive `timeframe_secs` into `oms_outbox.order_json` at
+construction time (`mqk_daemon::decision::build_order_json`); P4 reads that
+durable value back, and current config/promotion drift can never rewrite a
+historical order's recorded context. Legacy rows persisted before this
+provenance existed may still lack the field and remain `context_unavailable`
+— there is no current-config reconstruction or backfill for them. Conflicting
+exact timeframes for the same
 strategy+symbol fail closed to `context_ambiguous`; missing/malformed
 context fails closed to `context_unavailable`. Loads only completed
 `md_bars` (no provider/network call) and classifies via
@@ -129,13 +144,21 @@ alone — matching the real admission-gate semantics: an active suppression
 for a `strategy_id` applies to EVERY semantic fingerprint of that strategy,
 never fingerprint-specific.
 
+`suppression_truth_state` is a closed vocabulary of exactly `active`,
+`not_active`, or `query_failed`. `active_strategy_suppression` is
+`Option<bool>`: `Some(true)` / `Some(false)` / `None` respectively — a query
+failure is never collapsed into `Some(false)` ("not_active"), which would be
+fail-open. `query_failed` forces `risk_visibility_state = "unavailable"` and
+`recommended_operator_action = "insufficient_evidence"`.
+
 `risk_visibility_state` closed-vocabulary precedence: `unavailable` >
 `suppressed` > `insufficient_data` > `watch` > `normal`. Observational
 `high_volatility` regime context is informational only
 (`observational_high_volatility_context` flag) and never by itself changes
 `risk_visibility_state`. `recommended_operator_action` is text/visibility
 only — this route never calls `insert_strategy_suppression` or
-`clear_strategy_suppression`.
+`clear_strategy_suppression`; no automated suppression or automated clearing
+was added by this chain.
 
 ## P&L basis (frozen, all of P3/P4/P5)
 
