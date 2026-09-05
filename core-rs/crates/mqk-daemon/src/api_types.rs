@@ -4381,14 +4381,21 @@ pub struct PaperJournalClosedTradeRow {
     /// this lot.
     pub close_inbox_id: i64,
     pub close_internal_order_id: String,
-    /// Durable opening-side strategy identity. `None` for manual orders,
-    /// legacy orders missing a fingerprint, or when lineage is
-    /// missing/invalid — never fabricated. See `attribution_state`.
+    /// Durable opening-side `strategy_id`. `None` for manual orders or when
+    /// lineage is missing/invalid — never fabricated. A LEGACY strategy
+    /// order (persisted before fingerprint capture) still carries a real,
+    /// non-`None` `strategy_id` here; only `open_strategy_semantic_fingerprint`
+    /// is `None` for that case. See `attribution_state`.
     pub open_strategy_id: Option<String>,
+    /// `None` for manual orders, for LEGACY strategy orders persisted before
+    /// fingerprint capture, or when lineage is missing/invalid — never
+    /// re-derived from current registry/promotion state.
     pub open_strategy_semantic_fingerprint: Option<String>,
-    /// Durable closing-side strategy identity. Same absence rules as
-    /// `open_strategy_id`.
+    /// Durable closing-side `strategy_id`. Same absence rules as
+    /// `open_strategy_id` (legacy orders still carry a real `strategy_id`
+    /// here).
     pub close_strategy_id: Option<String>,
+    /// Same absence rules as `open_strategy_semantic_fingerprint`.
     pub close_strategy_semantic_fingerprint: Option<String>,
     /// - `"attributed"` — open and close share the same `strategy_id` AND
     ///   the same `strategy_semantic_fingerprint`.

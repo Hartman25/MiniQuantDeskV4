@@ -1,7 +1,7 @@
 //! Paper trading journal and evidence surface (JOUR-01).
 //!
 //! `GET /api/v1/paper/journal` — unified paper-trading evidence endpoint for
-//! operator review.  Surfaces two independent evidence lanes:
+//! operator review.  Surfaces THREE independent evidence lanes:
 //!
 //! - **fills_lane** — fill-quality telemetry for the active run
 //!   (`postgres.fill_quality_telemetry`).  Answers "what executed?"
@@ -9,18 +9,33 @@
 //!   strategy-signal route at Gate 7 `Ok(true)`
 //!   (`postgres.audit_events[topic=signal_ingestion]`).
 //!   Answers "what signals were submitted and accepted for dispatch?"
+//! - **closed_trades_lane** — attributed FIFO closed-trade history
+//!   (`mqk_daemon.closed_trade_attribution`, WAVE05-STRATEGY-CLOSED-TRADE-
+//!   READ-MODEL-01), resolved through the shared
+//!   `resolve_authoritative_closed_trade_view` also consumed by
+//!   `routes/strategy_performance.rs`.  Answers "what FIFO trades closed,
+//!   and were they attributable to one exact strategy semantic identity?"
 //!
-//! Both lanes carry explicit `truth_state` values.  No history is fabricated.
-//! If a lane is unavailable its `rows` is always empty and `truth_state`
-//! says so explicitly.
+//! Every lane carries an explicit `truth_state` value.  No history is
+//! fabricated.  If a lane is unavailable its `rows` is always empty and
+//! `truth_state` says so explicitly.
 //!
 //! # Truth state semantics
 //!
-//! | State          | Meaning                                                |
-//! |----------------|--------------------------------------------------------|
-//! | `"active"`     | DB + active run present; rows are authoritative.       |
-//! | `"no_active_run"` | DB present but no active run; rows empty, not auth. |
-//! | `"no_db"`      | No DB pool; rows empty, not authoritative.             |
+//! `fills_lane`/`admissions_lane` (route-level gate, applies to both):
+//!
+//! | State              | Meaning                                            |
+//! |--------------------|-----------------------------------------------------|
+//! | `"active"`         | DB + active run present; rows are authoritative.   |
+//! | `"no_active_run"`  | DB present but no active run; rows empty, not auth.|
+//! | `"no_db"`          | No DB pool; rows empty, not authoritative.         |
+//! | `"query_failed"`   | DB + active run present but the lane's own query (or, for `fills_lane`, a per-row strategy-lineage lookup) errored; rows empty, not authoritative. |
+//!
+//! `closed_trades_lane` uses a distinct, wider vocabulary reflecting the
+//! shared closed-trade authority's provenance/parity contract —
+//! `"active"` | `"incomplete"` | `"parity_failed"` | `"query_failed"`; see
+//! [`crate::state::resolve_authoritative_closed_trade_view`] for the full
+//! contract.
 
 use std::sync::Arc;
 
