@@ -4582,6 +4582,56 @@ pub struct StrategyPerformanceRow {
     /// exact durable (symbol, timeframe) -- research-only observational
     /// context, never an execution or risk-gate authority.
     pub regime_context: StrategyRegimeContext,
+    /// WAVE05-STRATEGY-RISK-VISIBILITY-01 (P5): deterministic, VISIBILITY-
+    /// ONLY strategy-level risk surface built from P3/P4 read models plus
+    /// the existing durable strategy-suppression read seam. Never mutates
+    /// suppression, promotion, accounting, or trading state.
+    pub risk_visibility: StrategyRiskVisibility,
+}
+
+/// P5.2-P5.5: read-only strategy risk visibility. No mutation fields or
+/// buttons anywhere in this type -- this route never calls
+/// `insert_strategy_suppression`/`clear_strategy_suppression`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyRiskVisibility {
+    /// Closed vocabulary, in precedence order:
+    /// - `"unavailable"` -- upstream P3 performance authority is not active
+    ///   (structurally unreachable today since a row only exists when the
+    ///   response's own `truth_state == "active"`; included for completeness
+    ///   of the precedence rule).
+    /// - `"suppressed"` -- an active durable strategy suppression exists for
+    ///   this `strategy_id` (suppression is keyed by `strategy_id`, NOT
+    ///   fingerprint -- see `active_strategy_suppression`'s doc).
+    /// - `"insufficient_data"` -- P4 `decay_state == "insufficient_data"`.
+    /// - `"watch"` -- P4 `decay_state == "decay_observed"`.
+    /// - `"normal"` -- otherwise.
+    pub risk_visibility_state: String,
+    /// At least: `"active_strategy_suppression"`,
+    /// `"gross_expectancy_sign_flip_negative"` (P4 `decay_observed`),
+    /// `"semantic_identity_change_excluded_pnl"`, `"cross_strategy_closure_pnl"`,
+    /// `"incomplete_lineage_pnl"`, `"manual_mixed_closure_pnl"` (the last
+    /// four are response-wide attribution-coverage facts, not scoped to this
+    /// one row -- attributing a cross-strategy or manual closure to a single
+    /// exact strategy row would be arbitrary), and
+    /// `"observational_high_volatility_context"` (informational ONLY -- this
+    /// flag alone never changes `risk_visibility_state`).
+    pub risk_flags: Vec<String>,
+    /// `true` when a durable `sys_strategy_suppressions` row is currently
+    /// `active` for this exact `strategy_id`. Suppression is keyed by
+    /// `strategy_id`, NOT `(strategy_id, strategy_semantic_fingerprint)` --
+    /// an active suppression for strategy A applies operationally to EVERY
+    /// semantic version (fingerprint) of A under the current admission gate,
+    /// and this field is `true` on every one of that strategy_id's rows,
+    /// never fingerprint-specific.
+    pub active_strategy_suppression: bool,
+    pub active_suppression_id: Option<String>,
+    pub active_suppression_trigger_domain: Option<String>,
+    pub active_suppression_trigger_reason: Option<String>,
+    /// Closed vocabulary, text/visibility only -- never invokes a mutation:
+    /// `"insufficient_evidence"` (unavailable/insufficient_data) |
+    /// `"already_suppressed"` (suppressed) | `"review"` (watch) |
+    /// `"none"` (normal).
+    pub recommended_operator_action: String,
 }
 
 /// P4.3: aggregate metrics over one decay-monitor window (baseline or

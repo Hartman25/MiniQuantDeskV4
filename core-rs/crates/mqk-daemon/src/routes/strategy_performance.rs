@@ -4,20 +4,35 @@
 // exact-semantic-strategy performance analytics built on top of the P2
 // closed-trade authority (`resolve_authoritative_closed_trade_view`).
 //
+// WAVE05-STRATEGY-DECAY-AND-REGIME-MONITOR-01 (P4): additively extends each
+// row with a conservative forward performance-decay monitor and observational
+// research-only current market-regime context.
+//
+// WAVE05-STRATEGY-RISK-VISIBILITY-01 (P5): additively extends each row with
+// deterministic, VISIBILITY-ONLY strategy-level risk visibility built from
+// P3/P4 plus the existing durable strategy-suppression READ seam
+// (`mqk_db::fetch_active_suppression_for_strategy`). No automated
+// suppression, no automated clearing, no order/promotion/accounting change --
+// this route never calls `insert_strategy_suppression`/
+// `clear_strategy_suppression`.
+//
 // GET /api/v1/strategy/performance?run_id=<uuid>
 //
-// Read-only: no DB write, no order/broker/OMS path touched, no promotion or
-// suppression state read or written. Reuses the exact run-resolution seam
-// `routes/durable_portfolio.rs` defines (`resolve_run`/`parse_explicit_run_id`)
-// and the exact shared closed-trade authority `routes/paper_journal.rs`'s
-// `closed_trades_lane` also consumes -- this route never hand-rolls a second
-// provenance classifier, snapshot-authority validator, canonical replay, or
-// durable-accounting comparison.
+// Read-only overall: no DB write anywhere in this file, no order/broker/OMS
+// path touched, no promotion-state write, no suppression write. Reuses the
+// exact run-resolution seam `routes/durable_portfolio.rs` defines
+// (`resolve_run`/`parse_explicit_run_id`) and the exact shared closed-trade
+// authority `routes/paper_journal.rs`'s `closed_trades_lane` also consumes --
+// this route never hand-rolls a second provenance classifier, snapshot-
+// authority validator, canonical replay, or durable-accounting comparison.
 //
 // Analytics identity is `(strategy_id, strategy_semantic_fingerprint)` --
 // never `strategy_id` alone. Only P2 `"attributed"` closure fragments ever
 // contribute to a performance row; every other attribution state is visible
 // only via `attribution_coverage`, never folded into exact strategy metrics.
+// Suppression (P5) is the one exception: it is keyed by `strategy_id` alone,
+// matching the real admission-gate semantics -- see
+// `StrategyRiskVisibility::active_strategy_suppression`'s doc.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -38,6 +53,7 @@ use super::durable_portfolio::{parse_explicit_run_id, resolve_run, RunIdParam, R
 use crate::api_types::{
     StrategyDecayMonitor, StrategyDecayWindowMetrics, StrategyPerformanceCoverageBucket,
     StrategyPerformanceResponse, StrategyPerformanceRow, StrategyRegimeContext,
+    StrategyRiskVisibility,
 };
 use crate::dynamic_selection_dispatch_authority::timeframe_secs_to_db_label;
 use crate::state::{resolve_authoritative_closed_trade_view, AppState, ClosureAttribution, ClosureFragment};
@@ -274,6 +290,7 @@ fn compute_performance_row(
     events: &[AttributedCloseEvent],
     decay_monitor: StrategyDecayMonitor,
     regime_context: StrategyRegimeContext,
+    risk_visibility: StrategyRiskVisibility,
 ) -> StrategyPerformanceRow {
     let attributed_fragment_count: i64 = events.iter().map(|e| e.fragment_count).sum();
     let attributed_closed_qty: i64 = events.iter().map(|e| e.qty).sum();
@@ -319,6 +336,7 @@ fn compute_performance_row(
         max_realized_pnl_drawdown_micros: agg.max_realized_pnl_drawdown_micros,
         decay_monitor,
         regime_context,
+        risk_visibility,
     }
 }
 
@@ -599,6 +617,147 @@ fn compute_attribution_coverage(fragments: &[ClosureFragment]) -> Vec<StrategyPe
 }
 
 // ---------------------------------------------------------------------------
+// P5.1 - P5.5: read-only strategy risk visibility (pure, no I/O beyond the
+// one suppression lookup the caller performs and passes in).
+// ---------------------------------------------------------------------------
+
+/// P5.3 closed-vocabulary precedence: `unavailable` > `suppressed` >
+/// `insufficient_data` > `watch` > `normal`. `upstream_active` is always
+/// `true` at the one call site in this file today (a row only exists when
+/// the response's own `truth_state == "active"`) -- the parameter exists so
+/// this pure function's full precedence order stays independently testable.
+fn classify_risk_visibility_state(
+    upstream_active: bool,
+    suppression_active: bool,
+    decay_state: &str,
+) -> &'static str {
+    if !upstream_active {
+        return "unavailable";
+    }
+    if suppression_active {
+        return "suppressed";
+    }
+    if decay_state == "insufficient_data" {
+        return "insufficient_data";
+    }
+    if decay_state == "decay_observed" {
+        return "watch";
+    }
+    "normal"
+}
+
+/// P5.5: text/visibility only -- NEVER invokes a mutation.
+fn recommended_operator_action(risk_visibility_state: &str) -> &'static str {
+    match risk_visibility_state {
+        "suppressed" => "already_suppressed",
+        "watch" => "review",
+        "normal" => "none",
+        // "unavailable" | "insufficient_data" | any unrecognized state fails
+        // closed to the same conservative recommendation.
+        _ => "insufficient_evidence",
+    }
+}
+
+/// P5.4 required risk flags. The four attribution-coverage flags
+/// (`semantic_identity_change_excluded_pnl`, `cross_strategy_closure_pnl`,
+/// `incomplete_lineage_pnl`, `manual_mixed_closure_pnl`) are response-wide
+/// facts about the resolved run's closures, not scoped to one exact
+/// strategy row -- a cross-strategy or manual closure by definition cannot
+/// be attributed to a single exact semantic-strategy identity without being
+/// arbitrary, so these flags surface identically on every row.
+/// `observational_high_volatility_context` is informational ONLY -- it must
+/// never by itself change `risk_visibility_state` (see
+/// `classify_risk_visibility_state`, which never reads regime context at
+/// all).
+#[allow(clippy::too_many_arguments)]
+fn compute_risk_flags(
+    suppression_active: bool,
+    decay_state: &str,
+    coverage_has_semantic_identity_changed: bool,
+    coverage_has_cross_strategy: bool,
+    coverage_has_incomplete_lineage: bool,
+    coverage_has_manual_mixed: bool,
+    regime_kind_is_high_volatility: bool,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if suppression_active {
+        flags.push("active_strategy_suppression".to_string());
+    }
+    if decay_state == "decay_observed" {
+        flags.push("gross_expectancy_sign_flip_negative".to_string());
+    }
+    if coverage_has_semantic_identity_changed {
+        flags.push("semantic_identity_change_excluded_pnl".to_string());
+    }
+    if coverage_has_cross_strategy {
+        flags.push("cross_strategy_closure_pnl".to_string());
+    }
+    if coverage_has_incomplete_lineage {
+        flags.push("incomplete_lineage_pnl".to_string());
+    }
+    if coverage_has_manual_mixed {
+        flags.push("manual_mixed_closure_pnl".to_string());
+    }
+    if regime_kind_is_high_volatility {
+        flags.push("observational_high_volatility_context".to_string());
+    }
+    flags
+}
+
+/// Resolve the P5 risk-visibility surface for one exact semantic-strategy
+/// row. The suppression lookup is the ONLY I/O this function performs, keyed
+/// by `strategy_id` alone (never fingerprint) -- matching the real
+/// admission-gate semantics; see `StrategyRiskVisibility::
+/// active_strategy_suppression`'s doc. Never calls
+/// `insert_strategy_suppression`/`clear_strategy_suppression`.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_risk_visibility(
+    db: &PgPool,
+    strategy_id: &str,
+    decay_state: &str,
+    coverage_has_semantic_identity_changed: bool,
+    coverage_has_cross_strategy: bool,
+    coverage_has_incomplete_lineage: bool,
+    coverage_has_manual_mixed: bool,
+    regime_kind_is_high_volatility: bool,
+) -> StrategyRiskVisibility {
+    let suppression = match mqk_db::fetch_active_suppression_for_strategy(db, strategy_id).await {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(
+                error = %err, strategy_id,
+                "strategy_performance_suppression_query_failed"
+            );
+            None
+        }
+    };
+    let suppression_active = suppression.is_some();
+
+    let risk_visibility_state =
+        classify_risk_visibility_state(true, suppression_active, decay_state);
+    let recommended_operator_action = recommended_operator_action(risk_visibility_state);
+    let risk_flags = compute_risk_flags(
+        suppression_active,
+        decay_state,
+        coverage_has_semantic_identity_changed,
+        coverage_has_cross_strategy,
+        coverage_has_incomplete_lineage,
+        coverage_has_manual_mixed,
+        regime_kind_is_high_volatility,
+    );
+
+    StrategyRiskVisibility {
+        risk_visibility_state: risk_visibility_state.to_string(),
+        risk_flags,
+        active_strategy_suppression: suppression_active,
+        active_suppression_id: suppression.as_ref().map(|s| s.suppression_id.to_string()),
+        active_suppression_trigger_domain: suppression.as_ref().map(|s| s.trigger_domain.clone()),
+        active_suppression_trigger_reason: suppression.as_ref().map(|s| s.trigger_reason.clone()),
+        recommended_operator_action: recommended_operator_action.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/strategy/performance
 // ---------------------------------------------------------------------------
 
@@ -661,21 +820,49 @@ pub(crate) async fn strategy_performance(
         .iter()
         .fold(0i64, |acc, b| acc.saturating_add(b.gross_realized_pnl_micros));
 
+    // P5.4: response-wide attribution-coverage facts, computed once and
+    // applied identically to every row (see `compute_risk_flags`'s doc).
+    let has_coverage_bucket = |state: &str| {
+        attribution_coverage
+            .iter()
+            .any(|b| b.attribution_state == state)
+    };
+    let coverage_has_semantic_identity_changed = has_coverage_bucket("semantic_identity_changed");
+    let coverage_has_cross_strategy = has_coverage_bucket("cross_strategy");
+    let coverage_has_incomplete_lineage = has_coverage_bucket("lineage_incomplete")
+        || has_coverage_bucket("lineage_invalid")
+        || has_coverage_bucket("lineage_missing");
+    let coverage_has_manual_mixed = has_coverage_bucket("manual_or_mixed");
+
     let events_by_strategy = build_attributed_close_events(&view.fragments);
     let mut rows = Vec::with_capacity(events_by_strategy.len());
     for ((strategy_id, fingerprint), events) in events_by_strategy {
-        // P4: decay monitoring is pure/no I/O; regime context resolution is
-        // read-only DB (never provider/broker/network) and is awaited
-        // sequentially -- this route is observational, not hot-path, and row
-        // counts are bounded by distinct exact semantic-strategy identities.
+        // P4: decay monitoring is pure/no I/O; regime context resolution and
+        // the P5 suppression lookup are read-only DB (never provider/broker/
+        // network) and are awaited sequentially -- this route is
+        // observational, not hot-path, and row counts are bounded by
+        // distinct exact semantic-strategy identities.
         let decay_monitor = compute_decay_monitor(&events);
         let regime_context = resolve_strategy_regime_context(db, run.run_id, &events).await;
+        let regime_kind_is_high_volatility = regime_context.regime_kind.as_deref() == Some("high_volatility");
+        let risk_visibility = resolve_risk_visibility(
+            db,
+            &strategy_id,
+            &decay_monitor.decay_state,
+            coverage_has_semantic_identity_changed,
+            coverage_has_cross_strategy,
+            coverage_has_incomplete_lineage,
+            coverage_has_manual_mixed,
+            regime_kind_is_high_volatility,
+        )
+        .await;
         rows.push(compute_performance_row(
             strategy_id,
             fingerprint,
             &events,
             decay_monitor,
             regime_context,
+            risk_visibility,
         ));
     }
 
@@ -698,7 +885,9 @@ pub(crate) async fn strategy_performance(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_max_realized_pnl_drawdown;
+    use super::{
+        classify_risk_visibility_state, compute_max_realized_pnl_drawdown, recommended_operator_action,
+    };
 
     /// P3-11: event pnl sequence +100, -40, -80, +20 must produce exact
     /// deterministic max realized-P&L drawdown.
@@ -727,5 +916,61 @@ mod tests {
     #[test]
     fn drawdown_never_recovers_max_is_final_trough() {
         assert_eq!(compute_max_realized_pnl_drawdown(&[50, -10, -10, -10]), 30);
+    }
+
+    /// P5-10: upstream P3 performance authority not active -> unavailable,
+    /// unconditionally -- suppression/decay state must never override this
+    /// top-priority precedence rule.
+    #[test]
+    fn risk_visibility_state_unavailable_when_upstream_not_active() {
+        assert_eq!(
+            classify_risk_visibility_state(false, true, "decay_observed"),
+            "unavailable"
+        );
+        assert_eq!(
+            classify_risk_visibility_state(false, false, "no_expectancy_sign_flip"),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn risk_visibility_state_precedence_suppressed_beats_decay() {
+        // Even a decay_observed strategy must report "suppressed", not "watch",
+        // once an active suppression exists.
+        assert_eq!(
+            classify_risk_visibility_state(true, true, "decay_observed"),
+            "suppressed"
+        );
+    }
+
+    #[test]
+    fn risk_visibility_state_insufficient_data_and_watch_and_normal() {
+        assert_eq!(
+            classify_risk_visibility_state(true, false, "insufficient_data"),
+            "insufficient_data"
+        );
+        assert_eq!(
+            classify_risk_visibility_state(true, false, "decay_observed"),
+            "watch"
+        );
+        assert_eq!(
+            classify_risk_visibility_state(true, false, "no_expectancy_sign_flip"),
+            "normal"
+        );
+        assert_eq!(
+            classify_risk_visibility_state(true, false, "improvement_observed"),
+            "normal"
+        );
+    }
+
+    /// P5-11: recommended-action mapping is exact and exhaustive over the
+    /// closed `risk_visibility_state` vocabulary.
+    #[test]
+    fn recommended_action_mapping_is_exact() {
+        assert_eq!(recommended_operator_action("unavailable"), "insufficient_evidence");
+        assert_eq!(recommended_operator_action("insufficient_data"), "insufficient_evidence");
+        assert_eq!(recommended_operator_action("suppressed"), "already_suppressed");
+        assert_eq!(recommended_operator_action("watch"), "review");
+        assert_eq!(recommended_operator_action("normal"), "none");
     }
 }
