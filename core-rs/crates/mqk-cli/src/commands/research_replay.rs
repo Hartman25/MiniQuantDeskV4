@@ -1299,9 +1299,11 @@ mod tests {
     /// invocations) -- run explicitly with `cargo test -p mqk-cli --bin
     /// mqk-cli -- --ignored r3_5_full_canonical_completion_synthetic_e2e_proof`.
     ///
-    /// NOT asserting `all_applicable_passed() == true`. Two genuine,
-    /// deterministic findings were originally discovered while constructing
-    /// this exact fixture, both since resolved:
+    /// Asserts `all_applicable_passed() == true`: every one of the 9
+    /// required scenarios genuinely passes for this fixture through the
+    /// real production path. Two genuine, deterministic findings were
+    /// originally discovered while constructing this exact fixture, both
+    /// since resolved:
     ///   1. `p7a_p7b_economic_replay_stress`/`genuine_shuffled_placebo`'s
     ///      `_reconstruct_baseline_spec` could not even round-trip a
     ///      cross_sectional_rank_* (LIQ-01/VOL-01's own family) trial's
@@ -1331,17 +1333,39 @@ mod tests {
     ///      `applicable: true, passed: true` for this fixture (asserted
     ///      below), proving the repair on the real production path.
     ///
-    /// `all_applicable_passed()` is still, separately, and correctly
-    /// `false` for this fixture: five OTHER stress-family scenarios
-    /// (`execution_delay_stress`, `symbol_leave_one_out`,
-    /// `parameter_neighborhood_execution`, `placebo_temporal_offset`,
-    /// `conservative_capacity_stress`) fail this fixture's synthetic
-    /// signal against an 18% max-drawdown ceiling -- a genuine, deterministic,
-    /// but OUT-OF-SCOPE-for-this-wave finding about this fixture's own
-    /// synthetic economics under stress permutations, unrelated to the two
-    /// findings above and to trial identity/data integrity. Reported here
-    /// per mission instruction rather than weakened, fabricated, or silently
-    /// fixed -- a candidate for a future, separately-scoped mission.
+    /// W06-R3-FULL-POSITIVE-P9-PROOF-01 (Patch C): the ORIGINAL version of
+    /// this fixture's synthetic bars were pure per-symbol noise around a
+    /// fixed price level with NO relationship whatsoever to the traded
+    /// signal, so five OTHER stress-family scenarios (`execution_delay_stress`,
+    /// `symbol_leave_one_out`, `parameter_neighborhood_execution`,
+    /// `placebo_temporal_offset`, `conservative_capacity_stress`) could
+    /// never clear the 18% max-drawdown ceiling / edge-collapse check on
+    /// noise-level P&L -- a truthful but PLUMBING-obscuring weakness of the
+    /// fixture itself, not a production defect (independently confirmed:
+    /// once `W06-REPLAY-NO-DECISION-SEMANTICS-01` (Patch A) landed, four of
+    /// the five started passing even on the untouched original fixture).
+    /// `build_r3_e2e_fixture.py::_build_bars` now derives each period's
+    /// return from that SAME symbol's own prior-period `FEATURE_COL` rank
+    /// (never same-period/lookahead) -- a genuine, deterministic, if
+    /// synthetic, predictive relationship for the fold-trained classifier to
+    /// capture (it already learns `FEATURE_COL` -> `target`, and price now
+    /// moves with `FEATURE_COL` the same way) -- and `_build_dataset` rotates
+    /// WHICH symbol currently satisfies that relationship every ~63 days,
+    /// spreading genuine edge across many periods/regimes rather than
+    /// concentrating it in one persistently-winning symbol. No production
+    /// threshold, scenario semantics, or protocol was touched -- this proves
+    /// PLUMBING (a real signal CAN clear every robustness gate through the
+    /// real production path end to end), not alpha; no claim beyond this
+    /// exact synthetic fixture is made anywhere in this repo.
+    ///
+    /// Negative control: the gauntlet's own OUT-OF-SCOPE-for-this-wave
+    /// production logic (drawdown ceiling, edge-collapse check, placebo
+    /// comparison, concentration ceiling, CSCV block-count sensitivity --
+    /// none weakened or touched by this patch) is independently proven to
+    /// still genuinely FAIL weak/adversarial candidates by the large,
+    /// unmodified `mqk-backtest` scenario suite (e.g.
+    /// `scenario_robustness_gauntlet_01.rs`'s `rg01b`/`rg01f`/`rg01o`/`rg01p`
+    /// and siblings), which remains green and untouched by this patch.
     #[test]
     #[ignore = "needs a working python + research-py deps on PATH; real subprocess E2E, run explicitly"]
     fn r3_5_full_canonical_completion_synthetic_e2e_proof() {
@@ -1429,34 +1453,25 @@ mod tests {
              after the placebo repair; failed scenarios: {failed:?}"
         );
 
-        // See this test's own doc comment: a SEPARATE, out-of-scope-for-
-        // this-wave finding (this fixture's own synthetic economics
-        // breaching an 18% max-drawdown ceiling under five stress-family
-        // scenarios) still makes `all_applicable_passed() == true`
-        // infeasible for an honest synthetic fixture -- the truthful value
-        // is asserted here, not fabricated. Pinned to the exact expected
-        // failure set (not just "some failure") so this test fails loudly,
-        // rather than silently, on either a further regression or a genuine
-        // resolution of one of these five.
-        assert!(!gauntlet.all_applicable_passed());
-        let mut failed_names: Vec<&str> = failed
-            .iter()
-            .map(|d| d.split(':').next().unwrap_or(d.as_str()))
-            .collect();
-        failed_names.sort_unstable();
+        // W06-R3-FULL-POSITIVE-P9-PROOF-01 (Patch C): the honest, positive
+        // proof this patch exists to establish -- see this test's own doc
+        // comment. Asserted as an empty failure set (not just "passed ==
+        // true") so this test fails loudly, with the exact offending
+        // scenario(s) named, on any regression.
         assert_eq!(
-            failed_names,
-            vec![
-                "conservative_capacity_stress",
-                "execution_delay_stress",
-                "parameter_neighborhood_execution",
-                "placebo_temporal_offset",
-                "symbol_leave_one_out",
-            ],
-            "expected exactly these five out-of-scope stress-family failures (see doc comment); \
-             if this now fails, either a real regression was introduced, or one of these five has \
-             genuinely been resolved and this assertion (and its doc comment) should be updated"
+            failed,
+            Vec::<String>::new(),
+            "every one of the 9 required scenarios must genuinely pass for this fixture through \
+             the real production path (see doc comment); if this fails, either a real regression \
+             was introduced, or this fixture's own synthetic economics need re-tuning -- never \
+             weaken production thresholds/semantics to compensate"
         );
+        assert!(gauntlet.all_applicable_passed());
+        // No duplicate/extra scenario names: `scenarios_run() ==
+        // REQUIRED_ROBUSTNESS_SCENARIO_NAMES.len()` (asserted above) together
+        // with `is_complete()` (every required name present in the scenario
+        // NAME SET) mathematically forces the 9 scenario entries to be
+        // exactly the 9 required names, each exactly once.
 
         // R3.5: resolve_backtest_evidence consumes the resulting artifact
         // tree end-to-end through the REAL production evidence-resolution
@@ -1464,7 +1479,7 @@ mod tests {
         let evidence = mqk_promotion::resolve_backtest_evidence(&dir.join("artifacts"), summary.run_id)
             .expect("resolve_backtest_evidence failed");
         assert_eq!(evidence.robustness_evidence.is_complete, true);
-        assert_eq!(evidence.robustness_evidence.all_applicable_passed, false);
+        assert_eq!(evidence.robustness_evidence.all_applicable_passed, true);
 
         // R3.6: no Paper/Live/OMS/broker call is reachable from this
         // command -- structurally true by this module's own dependency

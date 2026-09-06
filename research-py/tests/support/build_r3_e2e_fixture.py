@@ -73,14 +73,33 @@ WF_SPEC_KW = dict(
 )
 
 
-def _build_dataset(periods_days: int = 900, horizon_days: int = 5, seed: int = 0) -> pd.DataFrame:
+def _build_dataset(periods_days: int = 1250, horizon_days: int = 5, seed: int = 0) -> pd.DataFrame:
+    # W06-R3-FULL-POSITIVE-P9-PROOF-01 (Patch C): 900 days from 2018-01-01
+    # left OOS trading (after the 1-year train window) covering all of 2019
+    # (12 months) but only ~5 partial months of 2020 -- a pure sample-size
+    # imbalance (not a genuine regime-concentration defect) that made 2019
+    # structurally dominate `month_year_regime_concentration`'s year
+    # dimension. 1100 days gives 2019 and 2020 comparable OOS month counts.
     dates = pd.date_range("2018-01-01", periods=periods_days, freq="D", tz="UTC")
     rng = np.random.default_rng(seed)
     label_rng = np.random.default_rng(seed + 1)
+    n = len(SYMBOLS)
     rows = []
-    for d in dates:
-        for i, sym in enumerate(SYMBOLS):
-            raw = float(i) + rng.normal(scale=0.01)
+    for day_idx, d in enumerate(dates):
+        # W06-R3-FULL-POSITIVE-P9-PROOF-01 (Patch C): rotate which symbol
+        # occupies which rank slot every ~63 calendar days (roughly one
+        # walk-forward test fold) instead of pinning each symbol to a fixed
+        # rank for the whole 900-day fixture. The underlying rank->future-
+        # return relationship (see `_build_bars`) stays constant; only WHICH
+        # symbol currently satisfies it rotates. Spreads genuine edge across
+        # many distinct periods/regimes rather than concentrating the whole
+        # fixture's profit in one persistently-winning symbol, which
+        # previously destabilized `dsr_pbo_sensitivity` (CSCV block-count
+        # sensitivity) and failed `month_year_regime_concentration`.
+        shift = (day_idx // 63) % n
+        rank_slot = {sym: (i + shift) % n for i, sym in enumerate(SYMBOLS)}
+        for sym in SYMBOLS:
+            raw = float(rank_slot[sym]) + rng.normal(scale=0.01)
             rows.append({"symbol": sym, "end_ts": d, "raw": raw})
     df = pd.DataFrame(rows)
     df[FEATURE_COL] = df.groupby("end_ts")["raw"].rank(pct=True, method="average")
@@ -106,16 +125,41 @@ def _write_run_dir(run_dir: Path, df: pd.DataFrame) -> None:
 
 
 def _build_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """W06-R3-FULL-POSITIVE-P9-PROOF-01 (Patch C): the price path now carries
+    a genuine (if synthetic) predictive relationship to `FEATURE_COL` -- each
+    period's return drifts in proportion to that SAME symbol's feature rank
+    from the PRIOR period (never same-period/lookahead), so a classifier that
+    has actually learned the `FEATURE_COL` -> `target` relationship (which it
+    does, by `_build_dataset`'s own construction) captures a real, sustained
+    directional edge strong enough to survive execution-delay/capacity/
+    parameter-neighborhood stress and to clearly beat its own temporally-
+    decorrelated placebo. Previously the price path was pure per-symbol noise
+    around a fixed level with zero relationship to the traded signal, so
+    whatever P&L resulted was noise-level and could not survive any stress
+    permutation -- this proves PLUMBING (a real signal CAN clear every
+    robustness gate through the real production path), not alpha.
+    """
     rows = []
     base = {sym: 100.0 + 10.0 * i for i, sym in enumerate(SYMBOLS)}
     rng = np.random.default_rng(123)
-    for ts in sorted(df["end_ts"].unique()):
+    dates = sorted(df["end_ts"].unique())
+    feat = df.set_index(["end_ts", "symbol"])[FEATURE_COL]
+
+    price = dict(base)
+    prev_ts = None
+    for ts in dates:
+        if prev_ts is not None:
+            for sym in SYMBOLS:
+                prior_rank = float(feat.loc[(prev_ts, sym)])
+                drift = 0.0012 * (prior_rank - 0.5)
+                price[sym] = price[sym] * (1.0 + drift + rng.normal(scale=0.0007))
         for sym in SYMBOLS:
-            px = base[sym] * (1.0 + rng.normal(scale=0.001))
+            px = price[sym]
             rows.append({
                 "symbol": sym, "end_ts": pd.Timestamp(ts).isoformat(),
                 "open": px, "high": px * 1.001, "low": px * 0.999, "close": px, "volume": 100_000,
             })
+        prev_ts = ts
     return pd.DataFrame(rows)
 
 
