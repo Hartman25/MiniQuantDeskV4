@@ -90,37 +90,56 @@ require_authorized_to_execute` — confirmed programmatically).
 | | long_only | long_short (primary) |
 |---|---|---|
 | net_total_return | -0.99999999999750 | -0.99999999999999996 |
-| net_sharpe | -10.139 | -15.255 |
+| net_sharpe | -10.139 | -15.255081358511292 |
 | max_drawdown | -0.99999999999755 | -1.0 (rounding) |
 | cost_drag | 3.4445 (344% of equity) | 1.0127 |
 | total_turnover | 84,148,210.71 | 84,274,835.36 |
 
 Dynamic rankable benchmark (long_short) net_sharpe ≈ 0.766 → benchmark
-excess ≈ **-16.02** — the same catastrophic, unambiguous failure pattern as
-LIQ-01.
+excess = **-16.021184928699608** — the same catastrophic, unambiguous
+failure pattern as LIQ-01.
 
-**Closeout mechanism, honestly reported as BLOCKED (not a fabricated
-verdict):** the shared multiple-testing judge (`build_multiple_testing_judge`)
-groups candidates by their EXACT OOS return-series date set and admits only
-the largest such group; LIQ-01's long_only/long_short share one date set,
-VOL-01's long_only/long_short share a different one (both size 2 — a tie
-broken deterministically by `canonical_json(dates)` ordering), so VOL-01's
-trials are excluded from the admitted comparison group with reason
-`return_series_date_misalignment`. `campaign_closeout_authority.
-resolve_authoritative_evidence` therefore raises `AuthorityRefusal` when
-resolving `dsr_requirement`/`pbo_requirement` for VOL-01 — correctly
-refusing rather than fabricating DSR/PBO evidence VOL-01 was never part of.
-This is the multi-testing judge's frozen, by-design fail-closed behavior
-(never compare misaligned return series), not a defect, and this controller's
-one authorized emergent-repair commit was already spent on the LIQ-01
-`family_result.json` shape gap above — no further production change was made.
+**Prior closeout attempt (historical, superseded below):** the shared
+multiple-testing judge (`build_multiple_testing_judge`) groups candidates by
+their EXACT OOS return-series date set and admits only the largest such
+group; LIQ-01's long_only/long_short share one date set, VOL-01's
+long_only/long_short share a different one (both size 2 — a tie broken
+deterministically by `canonical_json(dates)` ordering), so VOL-01's trials
+are excluded from the admitted comparison group with reason
+`return_series_date_misalignment`. The resolver as it existed at the time
+eagerly required `dsr_requirement`/`pbo_requirement` judge authority for
+every candidate regardless of whether the frozen early-rejection cascade had
+already terminally rejected it earlier, so it raised `AuthorityRefusal` for
+VOL-01 even though `benchmark_relative_requirement` (excess -16.02) had
+already deterministically rejected the candidate — a real resolver defect,
+not the judge's fail-closed behavior working as intended.
+**W06-FINAL-CLOSEOUT-LAZY-AUTHORITY-REPAIR-01**
+(`research: honor campaign early-rejection authority cascade`) fixed
+`campaign_closeout_authority.resolve_authoritative_evidence` to honor the
+same frozen early-rejection cascade `classify_verdict` itself applies: a
+downstream evidence authority (judge DSR/PBO, genuine shuffled placebo,
+DSR/PBO sensitivity) is required only once the cascade genuinely reaches a
+gate that needs it, generalizing the pre-existing insolvency short-circuit.
+The judge's `return_series_date_misalignment` exclusion is now only
+historical diagnostic context for the repaired resolver — VOL-01 never
+needed judge authority in the first place, since
+`benchmark_relative_requirement` alone already terminally decided it.
 
-No `CANDIDATE_CLOSEOUT_STATUS.json` exists for VOL-01 (correctly — the sole
-authorized writer refuses rather than hand-authoring one). VOL-01's real,
-registered economics are unambiguous and independently confirm it would fail
-the same `benchmark_relative_requirement` gate LIQ-01 failed, had the cascade
-been able to reach a stored verdict. Holdout status: `reserved_not_evaluated`
-(untouched; never reached).
+**Terminal verdict: `REJECTED_NOT_ADVANCED`** — machine-computed by the
+repaired resolver from VOL-01's existing, previously-registered real
+trials/attempts (no rerun, no new attempt, no provider call) and
+independently re-verified via `campaign_order_guard.load_verified_closeout`.
+Written through the sole authorized writer
+(`campaign_order_guard.write_closeout_status`) to
+`research-py/experiments/wave06_candidate_vol01_volume_surprise/CANDIDATE_CLOSEOUT_STATUS.json`
+(untracked local evidence, per this repo's existing `runs/`-directory
+convention; sha256
+`e16ba0c83cc32d7bf81e9767a123d1c24bfbd2ca7fbf21c3d87c6e8f0277db84`). Every
+gate at/after `matched_diagnostic_placebo_requirement` is stored as
+`NOT_RUN_AFTER_DETERMINISTIC_REJECTION` with no fabricated DSR/PBO value —
+`dsr_requirement`/`pbo_requirement` were never resolved, because the cascade
+never reached them. Holdout status: `reserved_not_evaluated` (untouched;
+never reached).
 
 ## 4. Systemic context (not reopened here)
 
@@ -146,14 +165,12 @@ zero Live orders, zero broker/runtime touches by this controller.
 ## 6. Wave06 status
 
 `WAVE06_LOCALLY_CLOSED_NO_CANDIDATE_ADVANCED` — both frozen campaign
-candidates received truthful, evidence-bound terminal findings; neither
-advanced past the frozen `benchmark_relative_requirement` gate; zero candidates
-advancing is an explicitly valid, successful Wave06 outcome per this
-controller's own mission. VOL-01's terminal finding required documenting the
-closeout-mechanism limitation above rather than a stored
-`CANDIDATE_CLOSEOUT_STATUS.json`, since its real economics make the
-substantive result unambiguous even though the automated writer could not
-produce a hash-verified artifact for it.
+candidates received a machine-computed, hash-verified, independently
+re-verified `CANDIDATE_CLOSEOUT_STATUS.json` with terminal verdict
+`REJECTED_NOT_ADVANCED`; neither advanced past the frozen
+`benchmark_relative_requirement` gate; zero candidates advancing is an
+explicitly valid, successful Wave06 outcome per this controller's own
+mission.
 
 Active production ledger remains **43** — no row is decremented by this
 closeout; Wave06 infrastructure/bridge work does not itself close a ledger
