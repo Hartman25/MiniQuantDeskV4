@@ -12,11 +12,22 @@ frames -- this is the exact load-bearing pair the mission's confirmed defect
 lives in, and avoids the cost of a full registered walk-forward run (already
 exercised end-to-end, for this same candidate family, by
 `research-py/tests/support/build_r3_e2e_fixture.py` via mqk-cli's R3.5 test).
+
+W06-GENUINE-PLACEBO-SCORE-NONTRIVIALITY-REPAIR-01: independent review found
+that the identity check above compared PERMUTED ROW INDICES, not SCORE
+ASSIGNMENT -- with duplicate score values away from the selection boundary, a
+nonidentity row permutation can leave every symbol's score unchanged
+(deterministic repro: trial_93, scores=[0.9, 0.7, 0.5, 0.5], row permutation
+[0, 1, 3, 2] swaps only the two equal 0.5 rows). The tests below added by
+that repair prove the score-level identity check and its no-meaningful-null
+fail-closed behavior.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -24,6 +35,7 @@ from mqk_research.ml.economic_walkforward import _resolve_rank_direction_for_fra
 from mqk_research.ml.genuine_shuffled_placebo_cli import (
     _SHUFFLE_MODE_CROSS_SECTIONAL_WITHIN_DECISION_TS,
     _SHUFFLE_MODE_WITHIN_FOLD_ROWS,
+    _placebo_seed,
     _shuffle_oos_predictions,
 )
 
@@ -270,3 +282,246 @@ def test_shuffle_result_is_independent_of_input_row_order(tmp_path, is_rank):
         ["fold", "symbol", "decision_ts"], kind="mergesort"
     ).reset_index(drop=True)[canonical_cols]
     pd.testing.assert_frame_equal(out_forward, out_reversed)
+
+
+# ---------------------------------------------------------------------------
+# W06-GENUINE-PLACEBO-SCORE-NONTRIVIALITY-REPAIR-01 -- score-level identity
+# defect regression (mission A5/A6).
+# ---------------------------------------------------------------------------
+
+# Deterministically established (see this file's module docstring):
+# `_placebo_seed("trial_93")` permutes idx=[0,1,2,3] into [0,1,3,2] --
+# swapping only the two rows carrying the tail duplicate value.
+_TRIAL_93 = "trial_93"
+
+
+def _trial_93_frame(fold: int = 0) -> pd.DataFrame:
+    ts = "2020-01-01T00:00:00+00:00"
+    rows = [
+        {"fold": fold, "symbol": sym, "decision_ts": ts, "ml_score": score}
+        for sym, score in zip(["A", "B", "C", "D"], [0.9, 0.7, 0.5, 0.5])
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_trial_93_row_permutation_preserves_assignment_row_index_check_would_miss_it():
+    """Confirms the CONFIRMED DEFECT precondition itself: the deterministic
+    row permutation for trial_93 against idx=[0,1,2,3] is [0,1,3,2] -- a
+    nonidentity row permutation (fails a `permuted_idx != idx` check) that
+    nonetheless swaps only the two equal-valued (0.5) rows, so the SCORE
+    ASSIGNMENT is unchanged. This is the exact silent-passthrough the old
+    row-index identity check missed."""
+    seed = _placebo_seed(_TRIAL_93)
+    rng = np.random.default_rng(seed)
+    idx = np.array([0, 1, 2, 3])
+    permuted_idx = rng.permutation(idx)
+    assert not np.array_equal(permuted_idx, idx), "precondition: row permutation is nonidentity"
+    scores = np.array([0.9, 0.7, 0.5, 0.5])
+    assert np.array_equal(scores[permuted_idx], scores), (
+        "precondition: the nonidentity row permutation leaves the score assignment unchanged"
+    )
+
+
+def test_trial_93_repaired_result_changes_a_real_score_assignment(tmp_path):
+    oos_path = _write(_trial_93_frame(), tmp_path / "oos.csv")
+    info = _shuffle_oos_predictions(oos_path, _TRIAL_93, tmp_path / "out.csv", is_rank=True)
+    original = pd.read_csv(oos_path)
+    shuffled = pd.read_csv(tmp_path / "out.csv")
+
+    # At least one symbol must receive a different ml_score.
+    merged = original.merge(shuffled, on=["fold", "symbol", "decision_ts"], suffixes=("_orig", "_shuf"))
+    assert (merged["ml_score_orig"] != merged["ml_score_shuf"]).any()
+
+    # The exact score multiset for the group is preserved exactly.
+    assert sorted(shuffled["ml_score"].tolist()) == pytest.approx(sorted(original["ml_score"].tolist()))
+
+    # The fallback path was exercised, and the group is reported as both
+    # meaningfully permutable and successfully changed.
+    assert info["identity_groups_corrected"] == 1
+    assert info["groups_meaningfully_permutable"] == 1
+    assert info["groups_score_changed"] == 1
+
+    # The real rank boundary resolver still accepts the repaired frame (top
+    # score 0.9 is unique -- never a manufactured tie at the boundary).
+    scores_by_symbol = dict(zip(shuffled["symbol"], shuffled["ml_score"]))
+    direction = _resolve_rank_direction_for_frame(scores_by_symbol, rank_side_count=1, long_only=True)
+    assert sum(1 for v in direction.values() if v == 1) == 1
+
+
+def test_all_distinct_frame_score_change_is_deterministic(tmp_path):
+    oos_path = _write(_clean_fold_frame(), tmp_path / "oos.csv")
+    info_1 = _shuffle_oos_predictions(oos_path, "trial_a", tmp_path / "out_1.csv", is_rank=True)
+    info_2 = _shuffle_oos_predictions(oos_path, "trial_a", tmp_path / "out_2.csv", is_rank=True)
+    assert info_1 == info_2
+    assert info_1["groups_meaningfully_permutable"] == len(_DECISION_TS)
+    assert info_1["groups_score_changed"] == len(_DECISION_TS)
+
+
+def test_duplicate_value_away_from_boundary_remains_valid_after_repair(tmp_path):
+    """Two symbols tied at rank 2/3 (0.5), well away from the rank-1
+    selection boundary (unique 0.9) -- the repair must preserve the
+    multiset, still change the assignment, and the real boundary resolver
+    must still accept the frame (no tie at the actual selection boundary)."""
+    ts = "2020-01-01T00:00:00+00:00"
+    df = pd.DataFrame([
+        {"fold": 0, "symbol": sym, "decision_ts": ts, "ml_score": score}
+        for sym, score in zip(["A", "B", "C", "D"], [0.9, 0.5, 0.5, 0.1])
+    ])
+    oos_path = _write(df, tmp_path / "oos.csv")
+    info = _shuffle_oos_predictions(oos_path, "trial_dup", tmp_path / "out.csv", is_rank=True)
+    shuffled = pd.read_csv(tmp_path / "out.csv")
+
+    assert sorted(shuffled["ml_score"].tolist()) == pytest.approx([0.1, 0.5, 0.5, 0.9])
+    assert info["groups_meaningfully_permutable"] == 1
+    assert info["groups_score_changed"] == 1
+
+    scores_by_symbol = dict(zip(shuffled["symbol"], shuffled["ml_score"]))
+    direction = _resolve_rank_direction_for_frame(scores_by_symbol, rank_side_count=1, long_only=True)
+    assert sum(1 for v in direction.values() if v == 1) == 1
+
+
+def test_every_meaningfully_permutable_group_has_a_changed_score_assignment(tmp_path):
+    """Property check across several fixtures/trial_ids: `groups_score_changed`
+    must always equal `groups_meaningfully_permutable` -- never less."""
+    fixtures = [
+        _clean_fold_frame(),
+        _trial_93_frame(),
+        pd.concat([_clean_fold_frame(fold=0), _clean_fold_frame(fold=1)], ignore_index=True),
+    ]
+    trial_ids = ["trial_a", "trial_93", "trial_zzz", "trial_1"]
+    for i, df in enumerate(fixtures):
+        for trial_id in trial_ids:
+            oos_path = _write(df, tmp_path / f"oos_{i}_{trial_id}.csv")
+            info = _shuffle_oos_predictions(
+                oos_path, trial_id, tmp_path / f"out_{i}_{trial_id}.csv", is_rank=True
+            )
+            assert info["groups_score_changed"] == info["groups_meaningfully_permutable"], (
+                f"fixture {i} trial_id {trial_id}: a meaningfully permutable group left its "
+                "score assignment unchanged"
+            )
+
+
+def test_all_equal_scores_group_is_not_meaningfully_permutable(tmp_path):
+    """A2: a group with >=2 rows but a single distinct ml_score value has no
+    assignment that could ever change, so it must not be counted as
+    meaningfully permutable, and its scores must pass through unchanged."""
+    ts = "2020-01-01T00:00:00+00:00"
+    df = pd.DataFrame([
+        {"fold": 0, "symbol": sym, "decision_ts": ts, "ml_score": 0.5}
+        for sym in ["A", "B", "C", "D"]
+    ])
+    oos_path = _write(df, tmp_path / "oos.csv")
+    info = _shuffle_oos_predictions(oos_path, "trial_a", tmp_path / "out.csv", is_rank=True)
+    shuffled = pd.read_csv(tmp_path / "out.csv")
+
+    assert info["groups_seen"] == 1
+    assert info["groups_meaningfully_permutable"] == 0
+    assert info["groups_score_changed"] == 0
+    assert info["identity_groups_corrected"] == 0
+    assert (shuffled["ml_score"] == 0.5).all()
+
+
+def test_all_equal_rank_scores_produce_not_evaluable_through_production_wrapper(tmp_path, monkeypatch):
+    """Mission A3, exercised through the REAL `_run_shuffled_placebo`
+    production wrapper (a real registered rank trial/artifact, real
+    registry/hash-binding checks) -- only the shuffle step itself is
+    monkeypatched to deterministically simulate the zero-meaningfully-
+    permutable-groups case, since forcing a real trained classifier to emit
+    exactly-tied floating-point scores would be fragile/flaky."""
+    import sys as _sys
+
+    _tests_dir = str(Path(__file__).resolve().parent)
+    if _tests_dir not in _sys.path:
+        _sys.path.insert(0, _tests_dir)
+
+    import mqk_research.ml.genuine_shuffled_placebo_cli as placebo_cli
+    from mqk_research.ml.economic_registry_integration import run_registered_economic_walkforward_eval
+    from mqk_research.ml.economic_walkforward import (
+        SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+        AnnualizationSpec,
+        CostModelSpec,
+        EconomicWalkForwardSpec,
+        SignalPolicySpec,
+    )
+    from mqk_research.ml.eval_walkforward import WalkForwardSpec
+    from mqk_research.ml.execution_pricing import ExecutionPricingSpec
+    from mqk_research.ml.weight_to_share import WeightToShareSpec
+
+    from test_genuine_shuffled_placebo import (
+        BASE_SPEC_KW,
+        _build_edge_bars,
+        _build_full_dataset,
+        _synthetic_bars_provenance,
+        _write_full_run_dir,
+    )
+
+    registry_db = tmp_path / "registry.sqlite3"
+    run_dir = tmp_path / "rank_run"
+    df = _build_full_dataset(periods_days=560, seed=0)
+    _write_full_run_dir(run_dir, df)
+    bars_path = run_dir / "bars.csv"
+    _build_edge_bars(df).to_csv(bars_path, index=False)
+
+    rank_spec = EconomicWalkForwardSpec(
+        signal_policy=SignalPolicySpec(
+            direction_policy=SIGNAL_DIRECTION_POLICY_CROSS_SECTIONAL_RANK_LONG_ONLY_V1,
+            long_only=True,
+            rank_side_count=1,
+            max_gross_exposure=1.0,
+        ),
+        cost_model=CostModelSpec(commission_bps_per_side=1.0, slippage_bps_per_side=0.0),
+        execution_pricing=ExecutionPricingSpec(),
+        weight_to_share=WeightToShareSpec(equity_usd=100_000.0),
+        annualization=AnnualizationSpec(),
+    )
+    out_path = run_registered_economic_walkforward_eval(
+        run_dir,
+        experiment_id="genuine_placebo_rank.test",
+        hypothesis_id="genuine_placebo_rank.hyp",
+        strategy_id="research.placebo_rank",
+        bars_csv=bars_path,
+        economic_spec=rank_spec,
+        bars_provenance=_synthetic_bars_provenance(bars_path),
+        registry_db=registry_db,
+        wf_spec=WalkForwardSpec(**BASE_SPEC_KW),
+        steps=200,
+    )
+    out = json.loads(out_path.read_text(encoding="utf-8"))
+    trial_id = out["registry"]["trial_id"]
+    eval_id = out["ids"]["economic_eval_id"]
+
+    def _fake_shuffle(oos_path, trial_id_, out_path_, *, is_rank):
+        assert is_rank is True
+        pd.read_csv(oos_path).to_csv(out_path_, index=False)
+        return {
+            "seed": 0,
+            "rows_shuffled": 0,
+            "distinct_folds": 0,
+            "shuffle_mode": _SHUFFLE_MODE_CROSS_SECTIONAL_WITHIN_DECISION_TS,
+            "groups_permuted": 0,
+            "rows_permuted": 0,
+            "identity_groups_corrected": 0,
+            "groups_seen": 5,
+            "groups_meaningfully_permutable": 0,
+            "groups_score_changed": 0,
+        }
+
+    monkeypatch.setattr(placebo_cli, "_shuffle_oos_predictions", _fake_shuffle)
+
+    result = placebo_cli._run_shuffled_placebo(
+        registry_db=registry_db, trial_id=trial_id, economic_eval_id=eval_id,
+        placebo_out_dir=tmp_path / "placebo",
+    )
+    assert result["status"] == "not_evaluable"
+    assert "meaningfully permutable" in result["reason"]
+
+
+def test_non_rank_returned_diagnostics_contract_is_unchanged(tmp_path):
+    """A4: non-rank output must remain frozen -- the returned info dict must
+    carry exactly its original 7 keys, never the new rank-only diagnostics."""
+    oos_path = _write(_clean_fold_frame(), tmp_path / "oos.csv")
+    info = _shuffle_oos_predictions(oos_path, "trial_a", tmp_path / "out.csv", is_rank=False)
+    assert set(info.keys()) == {
+        "seed", "rows_shuffled", "distinct_folds", "shuffle_mode",
+        "groups_permuted", "rows_permuted", "identity_groups_corrected",
+    }

@@ -168,10 +168,14 @@ def _shuffle_oos_predictions(
     groups_permuted = 0
     rows_permuted = 0
     identity_groups_corrected = 0
+    groups_seen = 0
+    groups_meaningfully_permutable = 0
+    groups_score_changed = 0
 
     if is_rank:
         shuffle_mode = _SHUFFLE_MODE_CROSS_SECTIONAL_WITHIN_DECISION_TS
         for _, group in df.groupby(["fold", "decision_ts"], sort=True):
+            groups_seen += 1
             # A8#11: canonicalize row order by `symbol` (unique within one
             # (fold, decision_ts) cross-section -- duplicate rows there are
             # already rejected upstream) so the resulting permutation is a
@@ -179,21 +183,42 @@ def _shuffle_oos_predictions(
             # never of the input CSV's incidental row order.
             idx = group.sort_values("symbol", kind="mergesort").index.to_numpy()
             n = len(idx)
-            if n < 2:
-                # A single-row cross-section has no other row to swap with --
-                # its own score is the only member of its own multiset.
+            original_scores = df.loc[idx, "ml_score"].to_numpy()
+            # A2: a cross-section is only meaningfully permutable if it has
+            # >=2 rows AND >=2 distinct ml_score values -- a single row, or a
+            # group where every row shares the same score, has no assignment
+            # that could ever change.
+            if n < 2 or len(np.unique(original_scores)) < 2:
                 continue
+            groups_meaningfully_permutable += 1
             permuted_idx = rng.permutation(idx)
-            if np.array_equal(permuted_idx, idx):
-                # A1/A3: a placebo must not silently become the original
-                # signal -- a deterministic nonzero cyclic rotation replaces
-                # an identity draw. Never crosses this same (fold,
-                # decision_ts) group's own boundary.
-                permuted_idx = np.roll(idx, 1)
+            candidate_scores = df.loc[permuted_idx, "ml_score"].to_numpy()
+            if np.array_equal(candidate_scores, original_scores):
+                # A1: the defect this repairs -- comparing PERMUTED ROW
+                # INDICES against the original indices (`permuted_idx !=
+                # idx`) is not sufficient: with duplicate score values away
+                # from the selection boundary (e.g. trial_93's
+                # scores=[0.9, 0.7, 0.5, 0.5] under permutation [0,1,3,2]),
+                # a nonidentity row permutation can swap only equal-valued
+                # rows and leave the entire SCORE ASSIGNMENT unchanged --
+                # silently turning the placebo into the original signal.
+                # Compare score assignment directly, and if it didn't
+                # change, fall back to a deterministic nonzero cyclic
+                # rotation of the SCORE VECTOR itself (never numeric noise,
+                # never a value not already in this group's own multiset).
+                # Guaranteed to terminate with a changed assignment because
+                # this group has >=2 distinct values (A2).
+                for shift in range(1, n):
+                    rotated = np.roll(original_scores, shift)
+                    if not np.array_equal(rotated, original_scores):
+                        candidate_scores = rotated
+                        break
                 identity_groups_corrected += 1
-            shuffled.loc[idx, "ml_score"] = df.loc[permuted_idx, "ml_score"].to_numpy()
+            shuffled.loc[idx, "ml_score"] = candidate_scores
             groups_permuted += 1
             rows_permuted += n
+            if not np.array_equal(candidate_scores, original_scores):
+                groups_score_changed += 1
     else:
         shuffle_mode = _SHUFFLE_MODE_WITHIN_FOLD_ROWS
         for fold_value in sorted(df["fold"].unique()):
@@ -210,7 +235,7 @@ def _shuffle_oos_predictions(
             rows_permuted += len(idx)
 
     shuffled.to_csv(out_path, index=False)
-    return {
+    info: Dict[str, Any] = {
         "seed": seed,
         "rows_shuffled": int(len(df)),
         "distinct_folds": int(df["fold"].nunique()),
@@ -219,6 +244,13 @@ def _shuffle_oos_predictions(
         "rows_permuted": int(rows_permuted),
         "identity_groups_corrected": int(identity_groups_corrected),
     }
+    if is_rank:
+        # A2 diagnostics -- rank-path only (A4: non-rank semantics/output
+        # untouched, so these are not meaningful for the legacy branch).
+        info["groups_seen"] = int(groups_seen)
+        info["groups_meaningfully_permutable"] = int(groups_meaningfully_permutable)
+        info["groups_score_changed"] = int(groups_score_changed)
+    return info
 
 
 def _run_shuffled_placebo(
@@ -303,9 +335,24 @@ def _run_shuffled_placebo(
 
     placebo_out_dir.mkdir(parents=True, exist_ok=True)
     shuffled_oos_path = placebo_out_dir / "shuffled_oos_predictions.csv"
-    shuffle_info = _shuffle_oos_predictions(
-        oos_path, trial_id, shuffled_oos_path, is_rank=baseline_spec.signal_policy.is_rank
-    )
+    is_rank = baseline_spec.signal_policy.is_rank
+    shuffle_info = _shuffle_oos_predictions(oos_path, trial_id, shuffled_oos_path, is_rank=is_rank)
+
+    if is_rank and shuffle_info["groups_meaningfully_permutable"] == 0:
+        # A3: fail closed rather than running (and calling "evaluated") a
+        # placebo economic evaluation against a shuffle that could not
+        # meaningfully permute any (fold, decision_ts) rank cross-section --
+        # every group had <2 rows or a single distinct ml_score value.
+        return {
+            "status": "not_evaluable",
+            "strategy_id": strategy_id,
+            "reason": (
+                f"genuine_shuffled_placebo_v1: all {shuffle_info['groups_seen']} "
+                "(fold, decision_ts) rank cross-sections have fewer than 2 rows or a single "
+                "distinct ml_score value -- no meaningfully permutable cross-section exists, "
+                "so a rank placebo control cannot be constructed for this trial"
+            ),
+        }
 
     placebo_path = run_economic_walkforward(
         placebo_out_dir,
