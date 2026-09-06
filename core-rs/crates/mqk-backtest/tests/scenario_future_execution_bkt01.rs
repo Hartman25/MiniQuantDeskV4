@@ -154,14 +154,25 @@ fn test3_correct_symbol_pricing_never_uses_other_symbol_price() {
         bar("AAPL", 1_060, 999_000_000, 999_000_000, 999_000_000, 999_000_000),
         bar("AMD", 1_060, 260_000_000, 260_000_000, 260_000_000, 260_000_000),
     ];
-    // BUY AMD signalled at tick 2 (the AMD@1000 bar); AMD's only order fills
-    // on the last bar of the run, so no restate is ever needed.
+    // BUY AMD signalled at tick 2 (the AMD@1000 bar). The batch-1060 resolve
+    // step (which runs BEFORE either of that batch's two physical rows
+    // dispatch) fills that order using AMD's own later bar -- so by ticks 3
+    // and 4 (AAPL@1060, AMD@1060) AMD's ACTUAL position is already 5, not
+    // pending. Per this file's own doc comment above, omitting AMD from
+    // those two ticks' target lists would each independently compute the
+    // same spurious "flatten AMD" delta against that now-actual position --
+    // and, since both rows share the same signal_ts/symbol/side/intent_seq,
+    // the second occurrence would collide on order identity with the first
+    // (W06-BACKTEST-ORDER-IDENTITY-UNIQUENESS-01 Patch B's fence correctly
+    // fails closed on exactly this). Reasserting AMD:5 (unchanged, zero
+    // delta) on both rows is the doc-prescribed safe pattern.
     let mut engine = BacktestEngine::new(wide_cfg());
     engine
-        .add_strategy(Box::new(TickScript::new(vec![(
-            2,
-            vec![TargetPosition::new("AMD", 5)],
-        )])))
+        .add_strategy(Box::new(TickScript::new(vec![
+            (2, vec![TargetPosition::new("AMD", 5)]),
+            (3, vec![TargetPosition::new("AMD", 5)]),
+            (4, vec![TargetPosition::new("AMD", 5)]),
+        ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
 

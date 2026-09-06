@@ -23,8 +23,8 @@
 
 use mqk_backtest::{
     derive_input_data_hash, derive_run_id_with_economics, derive_run_id_with_execution_model,
-    BacktestBar, BacktestConfig, BacktestEngine, BacktestInstrumentEconomics, BacktestOrderSide,
-    OrderStatus, BACKTEST_EXECUTION_MODEL_ID,
+    BacktestBar, BacktestConfig, BacktestEngine, BacktestFill, BacktestInstrumentEconomics,
+    BacktestOrderSide, OrderStatus, BACKTEST_EXECUTION_MODEL_ID,
 };
 use mqk_execution::{StrategyOutput, TargetPosition};
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
@@ -76,6 +76,31 @@ fn wide_cfg() -> BacktestConfig {
     cfg
 }
 
+/// W06-BACKTEST-ORDER-IDENTITY-UNIQUENESS-01 (Patch B): the fill-timestamp
+/// batch's TWO physical rows (AAPL and AMD) each independently dispatch
+/// `TickScript::on_bar` against the SAME pre-batch position book (fills
+/// from this very batch's own resolution settle before either row
+/// dispatches, but a row's own newly-generated intent never does) -- so any
+/// tick left unscripted after the original signal computes an implicit
+/// "target: hold nothing" delta against whatever ACTUALLY settled, and a
+/// second unscripted row in the same batch reproduces the identical delta
+/// (same signal_ts/symbol/side/intent_seq), which Patch B's fence now
+/// correctly refuses as a duplicate order identity. Reasserting the
+/// deterministic tie-break winner's own (already-filled, zero-delta) target
+/// on both of those rows keeps this fixture zero-delta-safe regardless of
+/// row order, mirroring the engine's own real allocation-cap resolution
+/// order (`resolve_pending_orders_for_batch`'s `(signal_ts, order_id)`
+/// sort) rather than hardcoding an assumed winner.
+fn tiebreak_winner_symbol(signal_ts: i64) -> &'static str {
+    let aapl_id = BacktestFill::make_order_id(signal_ts, "AAPL", true, 0);
+    let amd_id = BacktestFill::make_order_id(signal_ts, "AMD", true, 0);
+    if aapl_id <= amd_id {
+        "AAPL"
+    } else {
+        "AMD"
+    }
+}
+
 /// Canonical (symbol -> (price, signal_ts, fill_ts, status)) view of a
 /// report's fills, keyed so row-order permutations can be compared without
 /// caring about `Vec` iteration order.
@@ -124,10 +149,19 @@ fn cap_binding_same_timestamp_permutation_produces_identical_result() {
     let fill_aapl = bar("AAPL", 1_000, 100_000_000, 100_000_000, 100_000_000, 100_000_000);
     let fill_amd = bar("AMD", 1_000, 200_000_000, 200_000_000, 200_000_000, 200_000_000);
 
+    // The allocation cap admits exactly one of the two -- the deterministic
+    // tie-break winner (see `tiebreak_winner_symbol`). Ticks 3/4 (the
+    // fill-batch's two physical rows) reassert only the winner's own,
+    // already-filled target: zero delta for the winner, and safely omitted
+    // for the loser (whose actual filled position is genuinely zero).
+    let winner = tiebreak_winner_symbol(940);
+    let winner_qty = if winner == "AAPL" { 550 } else { 275 };
     let schedule = || {
         vec![
             (1, vec![TargetPosition::new("AAPL", 550)]),
             (2, vec![TargetPosition::new("AMD", 275)]),
+            (3, vec![TargetPosition::new(winner, winner_qty)]),
+            (4, vec![TargetPosition::new(winner, winner_qty)]),
         ]
     };
 
@@ -215,10 +249,15 @@ fn non_binding_cap_same_timestamp_permutation_both_fill_identically() {
     let fill_aapl = bar("AAPL", 1_000, 100_000_000, 100_000_000, 100_000_000, 100_000_000);
     let fill_amd = bar("AMD", 1_000, 200_000_000, 200_000_000, 200_000_000, 200_000_000);
 
+    // Generous cap: both orders fill, so ticks 3/4 (the fill batch's two
+    // physical rows) safely reassert BOTH already-filled targets -- zero
+    // delta for both symbols, regardless of row order.
     let schedule = || {
         vec![
             (1, vec![TargetPosition::new("AAPL", 550)]),
             (2, vec![TargetPosition::new("AMD", 275)]),
+            (3, vec![TargetPosition::new("AAPL", 550), TargetPosition::new("AMD", 275)]),
+            (4, vec![TargetPosition::new("AAPL", 550), TargetPosition::new("AMD", 275)]),
         ]
     };
 

@@ -22,9 +22,11 @@
 //!   `merge_dsr_pbo_sensitivity`, then `true`.
 
 use mqk_backtest::{
-    run_robustness_gauntlet, BacktestBar, BacktestConfig, BacktestEngine, BacktestReport,
+    run_robustness_gauntlet, run_robustness_gauntlet_with_symbol_loo_factory, BacktestBar,
+    BacktestConfig, BacktestEngine, BacktestReport,
 };
 use mqk_strategy::{Strategy, StrategyContext, StrategyOutput, StrategySpec, TargetPosition};
+use std::collections::HashMap;
 
 const M: i64 = 1_000_000;
 
@@ -71,12 +73,62 @@ impl Strategy for SingleSymbolBuyHoldSell {
     }
 }
 
-/// Buys `qty` of BOTH symbols on bar 1, holds, sells both starting bar
-/// `sell_at_idx`.
+/// Buys `qty` of every symbol PRESENT in the bars it was constructed from
+/// (see `new`) on batch 1, holds, sells starting batch `sell_at_idx`
+/// (`sell_at_idx` counts distinct TIMESTAMPS/batches, not physical rows).
+///
+/// W06-BACKTEST-ORDER-IDENTITY-UNIQUENESS-01 (Patch B): two physical rows
+/// of the SAME same-`end_ts` batch (e.g. ES then SPY) dispatch independently
+/// against the SAME pre-batch position book (neither row's own newly
+/// admitted order settles before the other row of the same batch runs). A
+/// naive per-physical-row target computation therefore re-derives the exact
+/// same `(signal_ts, symbol, side, intent_seq)` tuple on every row of a
+/// batch whenever the decision doesn't change between them, which Patch B's
+/// fence now correctly refuses as a duplicate order identity. This strategy
+/// instead derives each `end_ts`'s expected physical-row count from the
+/// EXACT bars slice it is constructed with -- mirroring
+/// `ResearchOosReplayStrategy::new`'s own technique, and required here for
+/// the same reason: `symbol_leave_one_out_scenario_with_factory` reruns
+/// this strategy against a FILTERED (single-symbol) bars slice, where every
+/// batch has only ONE row, so a hardcoded row count would silently never
+/// fire the leave-one-out run's own decision. Only a batch's own final row
+/// carries a new target; every earlier row reasserts `held` (the
+/// already-settled state carried in from the previous batch), which is
+/// zero-delta and therefore contributes no intent at all.
 struct TwoSymbolBuyHoldSell {
-    bar_idx: u64,
+    expected_calls: HashMap<i64, usize>,
+    present_symbols: Vec<&'static str>,
+    current_end_ts: Option<i64>,
+    calls_seen_for_current: usize,
+    day_idx: u64,
+    held: i64,
     qty: i64,
     sell_at_idx: u64,
+}
+
+impl TwoSymbolBuyHoldSell {
+    fn new(qty: i64, sell_at_idx: u64, bars: &[BacktestBar]) -> Self {
+        let mut expected_calls: HashMap<i64, usize> = HashMap::new();
+        for bar in bars {
+            *expected_calls.entry(bar.end_ts).or_insert(0) += 1;
+        }
+        let symbols_in_bars: std::collections::BTreeSet<&str> =
+            bars.iter().map(|b| b.symbol.as_str()).collect();
+        let present_symbols = ["ES", "SPY"]
+            .into_iter()
+            .filter(|s| symbols_in_bars.contains(*s))
+            .collect();
+        Self {
+            expected_calls,
+            present_symbols,
+            current_end_ts: None,
+            calls_seen_for_current: 0,
+            day_idx: 0,
+            held: 0,
+            qty,
+            sell_at_idx,
+        }
+    }
 }
 
 impl Strategy for TwoSymbolBuyHoldSell {
@@ -84,13 +136,35 @@ impl Strategy for TwoSymbolBuyHoldSell {
         StrategySpec::new("Rg01TwoSymbol", 60)
     }
 
-    fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-        self.bar_idx += 1;
-        let target = if self.bar_idx < self.sell_at_idx { self.qty } else { 0 };
-        StrategyOutput::new(vec![
-            TargetPosition::new("ES", target),
-            TargetPosition::new("SPY", target),
-        ])
+    fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
+        let end_ts = ctx
+            .recent
+            .last()
+            .expect("BacktestEngine always pushes the current bar before calling on_bar")
+            .end_ts;
+        if self.current_end_ts != Some(end_ts) {
+            self.current_end_ts = Some(end_ts);
+            self.calls_seen_for_current = 0;
+            self.day_idx += 1;
+        }
+        self.calls_seen_for_current += 1;
+
+        let expected = *self.expected_calls.get(&end_ts).unwrap_or(&1);
+        let qty_for_this_call = if self.calls_seen_for_current < expected {
+            // Not yet this batch's final row -- reassert the already-settled
+            // state so this row contributes zero delta.
+            self.held
+        } else {
+            let target = if self.day_idx < self.sell_at_idx { self.qty } else { 0 };
+            self.held = target;
+            target
+        };
+        StrategyOutput::new(
+            self.present_symbols
+                .iter()
+                .map(|s| TargetPosition::new(*s, qty_for_this_call))
+                .collect(),
+        )
     }
 }
 
@@ -203,11 +277,23 @@ fn rg01a_healthy_single_symbol_candidate_reports_leave_one_out_not_applicable() 
 #[test]
 fn rg01b_result_dependent_on_one_symbol_fails_leave_one_out() {
     let bars = dependent_on_one_symbol_bars();
-    let (report, config) = run(&bars, Box::new(TwoSymbolBuyHoldSell { bar_idx: 0, qty: 100, sell_at_idx: 3 }));
+    let (report, config) = run(&bars, Box::new(TwoSymbolBuyHoldSell::new(100, 3, &bars)));
 
-    let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(TwoSymbolBuyHoldSell { bar_idx: 0, qty: 100, sell_at_idx: 3 })
-    });
+    // Bars-aware factory: `symbol_leave_one_out_scenario_with_factory`
+    // reruns the strategy against a FILTERED (single-symbol) bars slice, so
+    // each rerun's own expected-row-count table must be derived from that
+    // filtered slice, not the full 2-symbol baseline bars (see
+    // `TwoSymbolBuyHoldSell` docs).
+    let make_for_bars = |filtered: &[BacktestBar]| -> Box<dyn Strategy> {
+        Box::new(TwoSymbolBuyHoldSell::new(100, 3, filtered))
+    };
+    let output = run_robustness_gauntlet_with_symbol_loo_factory(
+        &report,
+        &config,
+        &bars,
+        || Box::new(TwoSymbolBuyHoldSell::new(100, 3, &bars)),
+        make_for_bars,
+    );
 
     let leave_one_out = output
         .scenarios
@@ -411,7 +497,7 @@ fn rg01o_leave_one_out_removes_positive_result_fails_even_when_flat() {
         flat_bar("SPY", 1_700_000_240, 500),
     ];
     let bars = interleave(es, spy);
-    let make = || -> Box<dyn Strategy> { Box::new(TwoSymbolBuyHoldSell { bar_idx: 0, qty: 10, sell_at_idx: 100 }) };
+    let make = || -> Box<dyn Strategy> { Box::new(TwoSymbolBuyHoldSell::new(10, 100, &bars)) };
     let (report, config) = run(&bars, make());
     let baseline_final = report.equity_curve.last().unwrap().1;
     assert!(
@@ -419,7 +505,15 @@ fn rg01o_leave_one_out_removes_positive_result_fails_even_when_flat() {
         "fixture precondition: baseline (ES+SPY) must be genuinely profitable"
     );
 
-    let output = run_robustness_gauntlet(&report, &config, &bars, make);
+    // Bars-aware factory: `symbol_leave_one_out_scenario_with_factory`
+    // reruns the strategy against a FILTERED (single-symbol) bars slice, so
+    // each rerun's own expected-row-count table must be derived from that
+    // filtered slice, not the full 2-symbol baseline bars (see
+    // `TwoSymbolBuyHoldSell` docs).
+    let make_for_bars =
+        |filtered: &[BacktestBar]| -> Box<dyn Strategy> { Box::new(TwoSymbolBuyHoldSell::new(10, 100, filtered)) };
+    let output =
+        run_robustness_gauntlet_with_symbol_loo_factory(&report, &config, &bars, make, make_for_bars);
     let leave_one_out = output.scenarios.iter().find(|s| s.name == "symbol_leave_one_out").unwrap();
     assert!(
         !leave_one_out.passed,

@@ -19,7 +19,7 @@
 //! - Deterministic iteration order where possible; input bars must be
 //!   non-decreasing by `end_ts` (see `BacktestError::UnsortedInput`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use uuid::Uuid;
 
@@ -108,6 +108,23 @@ pub enum BacktestError {
     /// positive) rather than being rejected; a value above `10_000` would
     /// claim more than 100% of a bar's own volume as admissible.
     InvalidLiquidityConfig { value_bps: i64 },
+    /// W06-BACKTEST-ORDER-IDENTITY-UNIQUENESS-01 (Patch B): the deterministic
+    /// UUIDv5 order identity (`BacktestFill::make_order_id`) for a
+    /// newly-generated intent collided with one already seen earlier in this
+    /// run. `order_id` is derived only from `(signal_ts, symbol, side,
+    /// intent_seq)` -- qty is NOT identity-bearing -- so a real collision
+    /// here means either the identity formula's inputs repeated (a strategy
+    /// bug) or the SAME logical order was about to be double-applied
+    /// (economic double-counting). Fails closed before any risk side effect,
+    /// pending-queue insertion, fill, or portfolio/economics mutation for
+    /// the colliding intent.
+    DuplicateOrderId {
+        order_id: Uuid,
+        signal_ts: i64,
+        symbol: String,
+        side: BacktestOrderSide,
+        intent_seq: usize,
+    },
 }
 
 impl core::fmt::Display for BacktestError {
@@ -148,6 +165,17 @@ impl core::fmt::Display for BacktestError {
                 f,
                 "invalid liquidity config rejected: max_participation_rate_bps = {} (must satisfy 0 <= value <= 10_000)",
                 value_bps
+            ),
+            BacktestError::DuplicateOrderId {
+                order_id,
+                signal_ts,
+                symbol,
+                side,
+                intent_seq,
+            } => write!(
+                f,
+                "duplicate order identity rejected: order_id={} signal_ts={} symbol={} side={:?} intent_seq={} (already seen earlier in this run)",
+                order_id, signal_ts, symbol, side, intent_seq
             ),
         }
     }
@@ -196,6 +224,11 @@ pub struct BacktestEngine {
     /// have not yet found an eligible future bar for their own symbol.
     /// FIFO by insertion (signal) order within a symbol.
     pending_orders: Vec<PendingBacktestOrder>,
+    /// W06-BACKTEST-ORDER-IDENTITY-UNIQUENESS-01 (Patch B): every strategy-
+    /// generated order identity seen so far this run -- the fence
+    /// `run()` checks (and inserts into) before any intent's risk
+    /// evaluation, pending-queue insertion, or economic application.
+    seen_order_ids: HashSet<Uuid>,
     /// Equity curve: (end_ts, equity_micros).
     equity_curve: Vec<(i64, i64)>,
     /// Whether the engine has halted.
@@ -278,6 +311,7 @@ impl BacktestEngine {
             orders: Vec::new(),
             fills: Vec::new(),
             pending_orders: Vec::new(),
+            seen_order_ids: HashSet::new(),
             equity_curve: Vec::new(),
             halted: false,
             halt_reason: None,
@@ -639,6 +673,23 @@ impl BacktestEngine {
                 } else {
                     BacktestOrderSide::Sell
                 };
+
+                // W06-BACKTEST-ORDER-IDENTITY-UNIQUENESS-01 (Patch B): fail
+                // closed BEFORE this intent can cause any risk side effect,
+                // pending-queue insertion, fill, or portfolio/economics
+                // mutation. Does not change the identity formula itself
+                // (still `(signal_ts, symbol, side, intent_seq)`, qty
+                // excluded) -- a genuine collision here means the same
+                // logical order was about to be double-applied.
+                if !self.seen_order_ids.insert(order_id) {
+                    return Err(BacktestError::DuplicateOrderId {
+                        order_id,
+                        signal_ts: bar.end_ts,
+                        symbol: intent.symbol.clone(),
+                        side: bkt_side,
+                        intent_seq,
+                    });
+                }
 
                 let is_risk_reducing = self.is_intent_risk_reducing(intent);
 
