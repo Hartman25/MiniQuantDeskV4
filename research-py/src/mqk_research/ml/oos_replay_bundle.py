@@ -30,6 +30,11 @@ from mqk_research.ml.eval_walkforward import (
     make_folds,
     train_purge_masks,
 )
+from mqk_research.ml.replay_authority import (
+    ReplayAuthorityError,
+    recompute_economic_eval_id,
+    verify_recorded_input,
+)
 from mqk_research.ml.util_hash import file_record
 from mqk_research.ml.weight_to_share import (
     WEIGHT_TO_SHARE_PROTOCOL_ID_V1,
@@ -106,6 +111,56 @@ FEATURE_TRANSFORM_CROSS_SECTIONAL_PERCENTILE_RANK_V1 = (
     "cross_sectional_percentile_rank_rerank_of_authenticated_feature_v1"
 )
 
+# R1.3 -- FEATURE-TRANSFORM SEMANTIC BINDING (mission Finding D).
+#
+# This module's LOO feature recomputation (`recompute_loo_feature_frame`) is
+# valid ONLY because the trial's sole feature is itself already a
+# cross-sectional percentile rank (`groupby(end_ts).rank(pct=True,
+# method="average")`) -- re-ranking survivors' own already-ranked values
+# reproduces what re-ranking the raw statistic would have produced (see
+# module docstring "THE LOO FEATURE RECOMPUTATION SEAM"). A generic
+# "one feature + cross-sectional rank signal policy" is NOT sufficient
+# evidence of that fact (Finding D) -- it must be bound to the exact,
+# committed, pre-outcome candidate declaration.
+#
+# This is that narrowest available result-independent binding: the exact
+# `strategy_id` -> `feature_column` pair frozen, BEFORE any Wave06 result
+# existed, in each candidate's own committed PREDECLARED_WAVE.json
+# (`hypotheses.<ID>.strategy_id` / `hypotheses.<ID>.feature_columns[0]`),
+# whose own `run_wave.py` computes that exact column via
+# `add_cross_sectional_rank` (`rank(pct=True, method="average")`) -- never a
+# caller-supplied flag, and never inferred from a suggestive column name
+# alone.
+WAVE06_FEATURE_TRANSFORM_AUTHORITY: Dict[str, str] = {
+    # research-py/experiments/wave06_candidate_liq01_amihud_illiquidity/PREDECLARED_WAVE.json#/hypotheses/LIQ-01
+    "pooled_single_feature_xs_amihud_illiquidity_direct_rank_v1": "illiquidity_amihud_daily_xs_rank",
+    # research-py/experiments/wave06_candidate_vol01_volume_surprise/PREDECLARED_WAVE.json#/hypotheses/VOL-01
+    "pooled_single_feature_xs_volume_surprise_direct_rank_v1": "vol_ratio_rank_20",
+}
+
+
+def verify_feature_transform_authority(*, strategy_id: str, feature_col: str) -> None:
+    """Fail closed (`ReplayBundleError`, `FEATURE_TRANSFORM_AUTHORITY =
+    MISSING`) unless `strategy_id` is one of the frozen, committed Wave06
+    candidate declarations AND its authenticated single feature column is
+    EXACTLY the column that declaration's own generation code computes as a
+    cross-sectional percentile rank. Never a caller flag; never a generic
+    "one feature implies percentile rank" assumption (Finding D)."""
+    authorized_feature_column = WAVE06_FEATURE_TRANSFORM_AUTHORITY.get(strategy_id)
+    if authorized_feature_column is None:
+        raise ReplayBundleError(
+            f"Fail-closed: FEATURE_TRANSFORM_AUTHORITY = MISSING for strategy_id={strategy_id!r} "
+            f"-- {REPLAY_PROTOCOL_ID_V1} is authorized only for the frozen Wave06 candidate "
+            f"declarations in WAVE06_FEATURE_TRANSFORM_AUTHORITY"
+        )
+    if authorized_feature_column != feature_col:
+        raise ReplayBundleError(
+            f"Fail-closed: strategy_id={strategy_id!r}'s frozen candidate declaration authorizes "
+            f"feature column {authorized_feature_column!r}, but the trial's authenticated "
+            f"feature_schema declares {feature_col!r} -- refusing an unauthorized "
+            "feature-transform binding"
+        )
+
 
 class ReplayBundleError(RuntimeError):
     """Fail-closed error for every refusal in this module -- always prefixed
@@ -165,14 +220,39 @@ def resolve_registered_economic_attempt(
     return {"trial": trial, "attempt": attempt, "identity": identity}
 
 
-def load_recorded_artifacts(resolved: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Path]:
-    """Load the attempt's own recorded walk_forward_eval.json /
-    economic_walk_forward.json (paths come from the attempt's OWN
+def load_recorded_artifacts(
+    resolved: Dict[str, Any], *, economic_eval_id: str
+) -> Tuple[Dict[str, Any], Dict[str, Any], Path]:
+    """Load and AUTHENTICATE the attempt's own recorded walk_forward_eval.json
+    / economic_walk_forward.json (paths come from the attempt's OWN
     artifact_paths_json, written by finalize_attempt at registration time --
     never a caller-supplied path). `run_dir` is derived structurally from the
     recorded walk_forward_eval path (`<run_dir>/eval/walk_forward_eval.json`),
     matching economic_registry_integration.run_registered_economic_walkforward_eval's
-    own fixed layout -- never re-derived from any caller input."""
+    own fixed layout -- never re-derived from any caller input.
+
+    Mission R1.1/R1.2 (Findings A/B): the attempt's DB-recorded
+    `artifact_paths_json` proves a path was recorded at finalize_attempt
+    time -- it does NOT prove the file's CURRENT on-disk content is still
+    what was finalized. Neither does a matching `result_id` alone (that is
+    the durable registry's claim about identity, not a claim about today's
+    bytes). This function therefore:
+      1. recomputes `economic_eval_id` from economic_walk_forward.json's
+         CURRENT content and requires it equal the durable registry
+         `result_id` (`economic_eval_id`) -- refusing a mutated economic
+         artifact even if every file it references still hashes correctly;
+      2. requires the artifact's own declared `ids.economic_eval_id` also
+         equal that same durable authority;
+      3. authenticates walk_forward_eval.json itself against economic_out's
+         OWN (now-authenticated) recorded `inputs.walk_forward_eval` record
+         BEFORE trusting anything walk_forward_eval.json says about its own
+         features/targets/schema hashes -- closing the self-attestation gap
+         where a caller could otherwise trust wf_out's internal hashes
+         without ever proving wf_out itself is the file economic_out was
+         actually computed from;
+      4. authenticates economic_out's own recorded `inputs.oos_predictions_csv`
+         record, if present, the same way.
+    No mutable artifact may authenticate itself."""
     artifact_paths = json.loads(resolved["attempt"]["artifact_paths_json"] or "{}")
     wf_path = artifact_paths.get("walk_forward_eval")
     econ_path = artifact_paths.get("economic_walk_forward")
@@ -188,8 +268,49 @@ def load_recorded_artifacts(resolved: Dict[str, Any]) -> Tuple[Dict[str, Any], D
             f"Fail-closed: recorded artifact path missing on disk (wf={wf_path.exists()}, "
             f"econ={econ_path.exists()})"
         )
-    wf_out = json.loads(wf_path.read_text(encoding="utf-8"))
     economic_out = json.loads(econ_path.read_text(encoding="utf-8"))
+
+    recomputed_economic_eval_id = recompute_economic_eval_id(economic_out)
+    if recomputed_economic_eval_id != economic_eval_id:
+        raise ReplayBundleError(
+            "Fail-closed: economic_walk_forward.json content hash disagrees with durable "
+            f"registry authority: recomputed economic_eval_id={recomputed_economic_eval_id!r} "
+            f"!= required economic_eval_id={economic_eval_id!r} -- the artifact was mutated "
+            "after the attempt was finalized; refusing to treat it as replay authority"
+        )
+    declared_economic_eval_id = (economic_out.get("ids") or {}).get("economic_eval_id")
+    if declared_economic_eval_id != economic_eval_id:
+        raise ReplayBundleError(
+            "Fail-closed: economic_walk_forward.json's own declared ids.economic_eval_id "
+            f"{declared_economic_eval_id!r} disagrees with the durable registry authority "
+            f"{economic_eval_id!r} -- refusing to treat it as replay authority"
+        )
+
+    wf_record = (economic_out.get("inputs") or {}).get("walk_forward_eval")
+    if not wf_record:
+        raise ReplayBundleError(
+            "Fail-closed: authenticated economic_walk_forward.json has no recorded "
+            "inputs.walk_forward_eval -- predates the registered replay-authority contract"
+        )
+    try:
+        verified_wf_path = verify_recorded_input("inputs.walk_forward_eval", wf_record)
+    except ReplayAuthorityError as exc:
+        raise ReplayBundleError(f"Fail-closed: {exc}") from exc
+    if verified_wf_path.resolve() != wf_path.resolve():
+        raise ReplayBundleError(
+            f"Fail-closed: attempt's recorded walk_forward_eval artifact path {wf_path} does not "
+            "match economic_walk_forward.json's own authenticated inputs.walk_forward_eval path "
+            f"{verified_wf_path} -- refusing an inconsistent lineage"
+        )
+    wf_out = json.loads(wf_path.read_text(encoding="utf-8"))
+
+    oos_record = (economic_out.get("inputs") or {}).get("oos_predictions_csv")
+    if oos_record:
+        try:
+            verify_recorded_input("inputs.oos_predictions_csv", oos_record)
+        except ReplayAuthorityError as exc:
+            raise ReplayBundleError(f"Fail-closed: {exc}") from exc
+
     run_dir = wf_path.parent.parent
     return wf_out, economic_out, run_dir
 
@@ -540,7 +661,9 @@ def build_replay_bundle(
     resolved = resolve_registered_economic_attempt(
         registry_db, trial_id=trial_id, economic_eval_id=economic_eval_id
     )
-    wf_out, economic_out, run_dir = load_recorded_artifacts(resolved)
+    wf_out, economic_out, run_dir = load_recorded_artifacts(
+        resolved, economic_eval_id=economic_eval_id
+    )
     verified = verify_recorded_source_inputs(run_dir, wf_out, economic_out)
 
     signal_policy = economic_out["signal_policy"]
@@ -610,6 +733,10 @@ def build_replay_bundle(
     holdout_start_utc = wf_out["holdout"]["start_utc"]
     feature_col = verified["schema"]["feature_columns"][0]
     end_ts_col = evaluation_spec["end_ts_col"]
+
+    verify_feature_transform_authority(
+        strategy_id=resolved["trial"]["strategy_id"], feature_col=feature_col
+    )
 
     # Fold-of-date authority + per-fold symbol universe, both derived
     # strictly from the RECORDED (authenticated) OOS predictions -- never

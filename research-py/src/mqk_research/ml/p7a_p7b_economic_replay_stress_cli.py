@@ -91,111 +91,24 @@ from mqk_research.ml.execution_pricing import (
     EXECUTION_PRICING_MODEL_ID_RUST_CONSERVATIVE_V1,
     ExecutionPricingSpec,
 )
+from mqk_research.ml.replay_authority import (
+    ReplayAuthorityError,
+    recompute_economic_eval_id as _recompute_economic_eval_id,
+    resolve_trial_economic_artifact as _resolve_trial_economic_artifact,
+    verify_recorded_input as _verify_recorded_input,
+)
 from mqk_research.ml.util_hash import file_record, sha256_file, sha256_json
 from mqk_research.ml.weight_to_share import WEIGHT_TO_SHARE_PROTOCOL_ID_V1, WeightToShareSpec
 
 STRESS_PROTOCOL_ID = "p7a_p7b_economic_replay_stress_v1"
 
-# Keys `run_economic_walkforward` writes into `economic_walk_forward.json`
-# AFTER computing `economic_eval_id = sha256_json(out)` (see
-# economic_walkforward.py, `out["ids"] = ...`) or that a later caller
-# (`economic_registry_integration.run_registered_economic_walkforward_eval`)
-# appends to the file post-hoc (`out["registry"] = {...}`) -- neither was
-# part of the original hash basis, so both must be excluded when
-# recomputing that hash from the file as it exists on disk today.
-_ECONOMIC_EVAL_ID_EXCLUDED_KEYS = frozenset({"ids", "registry"})
-
-
-class ReplayAuthorityError(Exception):
-    """A recorded input's path/bytes/sha256 could not be re-verified, the
-    economic artifact's content hash disagrees with its durable registry
-    authority, or the reconstructed baseline spec's protocol identity does
-    not round-trip -- fail closed, never refetch-and-assume-identical or
-    trust a self-declared id."""
-
-
-def _recompute_economic_eval_id(econ: Dict[str, Any]) -> str:
-    """Recompute `economic_eval_id` exactly as `run_economic_walkforward`
-    originally did, from the artifact's CURRENT on-disk content -- never
-    trusting the file's own self-declared `ids.economic_eval_id` field,
-    which could be forged/mutated independently of the surrounding content
-    it is supposed to attest to."""
-    basis = {k: v for k, v in econ.items() if k not in _ECONOMIC_EVAL_ID_EXCLUDED_KEYS}
-    return sha256_json(basis)
-
-
-def _verify_recorded_input(name: str, record: Dict[str, Any]) -> Path:
-    path_str = record.get("path")
-    if not path_str:
-        raise ReplayAuthorityError(f"{name}: no path recorded in economic_walk_forward.json")
-    path = Path(path_str)
-    if not path.exists():
-        raise ReplayAuthorityError(
-            f"{name}: recorded input no longer exists at {path} -- refusing to refetch or "
-            "substitute; the exact original file is required"
-        )
-    actual_bytes = path.stat().st_size
-    if record.get("bytes") != actual_bytes:
-        raise ReplayAuthorityError(
-            f"{name}: byte count changed since the original run (recorded {record.get('bytes')}, "
-            f"actual {actual_bytes}) -- refusing to replay against a mutated input"
-        )
-    actual_sha256 = sha256_file(path)
-    if record.get("sha256") != actual_sha256:
-        raise ReplayAuthorityError(
-            f"{name}: sha256 changed since the original run (recorded {record.get('sha256')!r}, "
-            f"actual {actual_sha256!r}) -- refusing to replay against a mutated input"
-        )
-    return path
-
-
-def _resolve_trial_economic_artifact(
-    store: ResearchResultStore, trial_id: str, economic_eval_id: str
-) -> Path:
-    """Resolve the EXACT succeeded attempt where `trial_id == T` and the
-    durable registry's own `result_id == economic_eval_id` (the
-    P7C-authorized `E`) -- never "the latest successful attempt". `result_id`
-    is written once, atomically, by `ResearchResultStore.finalize_attempt`
-    at the time this attempt originally succeeded, and a terminal attempt can
-    never be reopened or refinalized (see `finalize_attempt`'s own fail-closed
-    contract) -- so `result_id` is durable, external authority, independent
-    of whatever the `economic_walk_forward.json` file on disk says about
-    itself today. A trial with zero or more-than-one succeeded attempt
-    matching `economic_eval_id` fails closed (ambiguity is never resolved by
-    guessing)."""
-    trial = store.get_trial(trial_id)  # raises KeyError if unknown
-    matching = [
-        a
-        for a in store.list_attempts(trial_id)
-        if a["status"] == "succeeded" and a["result_id"] == economic_eval_id
-    ]
-    if not matching:
-        raise ReplayAuthorityError(
-            f"trial_id {trial_id!r} (strategy_id={trial['strategy_id']!r}) has no succeeded "
-            f"attempt whose registered result_id equals economic_eval_id {economic_eval_id!r} "
-            "-- refusing to guess which attempt to replay"
-        )
-    if len(matching) > 1:
-        raise ReplayAuthorityError(
-            f"trial_id {trial_id!r} has {len(matching)} succeeded attempts registered under "
-            f"the SAME economic_eval_id {economic_eval_id!r} -- ambiguous, refusing to guess "
-            "which one to replay"
-        )
-    attempt = matching[0]
-    artifact_paths = json.loads(attempt["artifact_paths_json"] or "{}")
-    economic_path_str = artifact_paths.get("economic_walk_forward")
-    if not economic_path_str:
-        raise ReplayAuthorityError(
-            f"trial_id {trial_id!r}'s matching succeeded attempt has no recorded "
-            "'economic_walk_forward' artifact path"
-        )
-    economic_path = Path(economic_path_str)
-    if not economic_path.exists():
-        raise ReplayAuthorityError(
-            f"trial_id {trial_id!r}'s recorded economic_walk_forward.json no longer exists "
-            f"at {economic_path}"
-        )
-    return economic_path
+# `ReplayAuthorityError`, `_recompute_economic_eval_id`,
+# `_resolve_trial_economic_artifact`, `_verify_recorded_input` are re-exported
+# here for backward compatibility (`genuine_shuffled_placebo_cli.py` imports
+# them from THIS module). Canonical implementation now lives in
+# `mqk_research.ml.replay_authority`
+# (W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02, Patch R1) -- behavior is
+# byte-for-byte unchanged; see that module's docstring.
 
 
 def _classify_cap_transition(baseline: Optional[float], stress: Optional[float]) -> str:

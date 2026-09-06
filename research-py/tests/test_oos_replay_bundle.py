@@ -35,18 +35,22 @@ from mqk_research.ml.economic_walkforward import (
 )
 from mqk_research.ml.eval_walkforward import WalkForwardSpec
 from mqk_research.ml.oos_replay_bundle import (
+    WAVE06_FEATURE_TRANSFORM_AUTHORITY,
     ReplayBundleError,
     _assert_no_holdout_rows,
     assert_no_duplicate_schedule_rows,
     build_replay_bundle,
     build_schedule_rows,
+    load_recorded_artifacts,
     recompute_loo_feature_frame,
     resolve_registered_economic_attempt,
+    verify_feature_transform_authority,
 )
 from mqk_research.ml.schema import generate_feature_schema
 from mqk_research.ml.weight_to_share import WeightToShareSpec
 
-FEATURE_COL = "test_xs_rank"
+FEATURE_COL = "illiquidity_amihud_daily_xs_rank"
+STRATEGY_ID = "pooled_single_feature_xs_amihud_illiquidity_direct_rank_v1"
 SYMBOLS = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
 WF_SPEC_KW = dict(train_years=1, test_months=1, step_months=1, holdout_months=1, min_rows_per_fold=200)
 RANK_SIDE_COUNT = 2
@@ -128,7 +132,9 @@ def _bars_provenance(bars_path: Path, symbols=SYMBOLS) -> Dict[str, Any]:
     )
 
 
-def _register_trial(tmp_path: Path, *, trial_label: str, seed: int = 0, l2: float = 1e-3) -> Dict[str, Any]:
+def _register_trial(
+    tmp_path: Path, *, trial_label: str, seed: int = 0, l2: float = 1e-3, strategy_id: str = STRATEGY_ID
+) -> Dict[str, Any]:
     registry_db = tmp_path / "registry.sqlite3"
     run_dir = tmp_path / f"run_{trial_label}"
     df = _build_dataset(seed=seed)
@@ -150,7 +156,7 @@ def _register_trial(tmp_path: Path, *, trial_label: str, seed: int = 0, l2: floa
         run_dir,
         experiment_id="w06.p9.replay.test",
         hypothesis_id=f"w06.p9.replay.hyp.{trial_label}",
-        strategy_id="test_single_feature_xs_rank_direct_rank_v1",
+        strategy_id=strategy_id,
         bars_csv=bars_path,
         economic_spec=spec,
         bars_provenance=manifest,
@@ -424,3 +430,198 @@ def test_result_values_absent_from_replay_semantic_identity(tmp_path: Path) -> N
     # excluded_symbol / result identity live only in lineage / per-symbol
     # LOO keys, never inside the result-independent semantic spec itself.
     assert "excluded_symbol" not in semantic_blob
+
+
+# ---------------------------------------------------------------------------
+# R1.6 -- W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02 negative controls.
+# ---------------------------------------------------------------------------
+
+
+def _artifact_paths(reg: Dict[str, Any]) -> Dict[str, str]:
+    resolved = resolve_registered_economic_attempt(
+        reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"]
+    )
+    return json.loads(resolved["attempt"]["artifact_paths_json"] or "{}")
+
+
+def test_mutated_economic_walk_forward_aggregate_refused(tmp_path: Path) -> None:
+    """R1.6 test 1: mutating economic_walk_forward.json's aggregate/result
+    content while leaving the durable registry result_id unchanged must be
+    refused -- the artifact's CURRENT content no longer recomputes to the
+    required economic_eval_id (Finding A)."""
+    reg = _register_trial(tmp_path, trial_label="a")
+    econ_path = Path(_artifact_paths(reg)["economic_walk_forward"])
+    econ = json.loads(econ_path.read_text(encoding="utf-8"))
+    econ["aggregate"]["net_total_return"] = (econ["aggregate"]["net_total_return"] or 0.0) + 1.0
+    econ_path.write_text(json.dumps(econ, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    with pytest.raises(ReplayBundleError, match="content hash disagrees"):
+        build_replay_bundle(
+            reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"],
+            out_dir=tmp_path / "bundle", excluded_symbols=[],
+        )
+
+
+def test_mutated_economic_walk_forward_forged_declared_id_refused(tmp_path: Path) -> None:
+    """R1.6 test 2: mutating economic_walk_forward.json AND forging its own
+    declared ids.economic_eval_id to match the mutated content's recomputed
+    hash still fails -- the recomputed hash no longer equals the durable
+    registry authority (the ORIGINAL economic_eval_id), so forging the
+    file's self-declared id can never help (Finding A)."""
+    reg = _register_trial(tmp_path, trial_label="a")
+    econ_path = Path(_artifact_paths(reg)["economic_walk_forward"])
+    econ = json.loads(econ_path.read_text(encoding="utf-8"))
+    econ["aggregate"]["net_total_return"] = (econ["aggregate"]["net_total_return"] or 0.0) + 1.0
+    from mqk_research.ml.replay_authority import recompute_economic_eval_id
+
+    forged_id = recompute_economic_eval_id(econ)
+    econ["ids"]["economic_eval_id"] = forged_id
+    econ_path.write_text(json.dumps(econ, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    with pytest.raises(ReplayBundleError, match="content hash disagrees"):
+        build_replay_bundle(
+            reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"],
+            out_dir=tmp_path / "bundle", excluded_symbols=[],
+        )
+
+
+def test_mutated_walk_forward_eval_refused_even_with_internal_hashes_updated(tmp_path: Path) -> None:
+    """R1.6 test 3: mutating walk_forward_eval.json (and updating its own
+    internal feature/target/schema hashes to stay self-consistent) is
+    refused because walk_forward_eval.json itself is no longer the exact
+    file economic_walk_forward.json's authenticated inputs.walk_forward_eval
+    record points to (Finding B) -- closing the self-attestation gap where
+    only wf_out's OWN internal hashes were previously checked."""
+    reg = _register_trial(tmp_path, trial_label="a")
+    wf_path = Path(_artifact_paths(reg)["walk_forward_eval"])
+    wf_out = json.loads(wf_path.read_text(encoding="utf-8"))
+    wf_out["holdout"] = dict(wf_out["holdout"])
+    wf_out["some_new_diagnostic_field_injected_by_attacker"] = True
+    wf_path.write_text(json.dumps(wf_out, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    with pytest.raises(ReplayBundleError, match="changed since the original run"):
+        build_replay_bundle(
+            reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"],
+            out_dir=tmp_path / "bundle", excluded_symbols=[],
+        )
+
+
+def test_mutated_features_csv_with_forged_walk_forward_eval_hash_refused(tmp_path: Path) -> None:
+    """R1.6 test 4: mutating features.csv AND updating walk_forward_eval.json's
+    own internal inputs.features_csv hash record to match (so wf_out's
+    self-consistency check alone would pass) is STILL refused: rewriting
+    walk_forward_eval.json changes ITS bytes/hash, which no longer matches
+    economic_walk_forward.json's authenticated inputs.walk_forward_eval
+    record (Finding B) -- the mutation cannot be laundered through wf_out's
+    own internal hash bookkeeping."""
+    reg = _register_trial(tmp_path, trial_label="a")
+    features_path = reg["run_dir"] / "features.csv"
+    features_path.write_text(
+        features_path.read_text(encoding="utf-8") + "\n# mutated after registration\n",
+        encoding="utf-8",
+    )
+    wf_path = Path(_artifact_paths(reg)["walk_forward_eval"])
+    wf_out = json.loads(wf_path.read_text(encoding="utf-8"))
+    from mqk_research.ml.util_hash import file_record
+
+    wf_out["inputs"]["features_csv"] = file_record(features_path)
+    wf_path.write_text(json.dumps(wf_out, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    with pytest.raises(ReplayBundleError, match="changed since the original run"):
+        build_replay_bundle(
+            reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"],
+            out_dir=tmp_path / "bundle", excluded_symbols=[],
+        )
+
+
+def test_wrong_feature_transform_binding_refused() -> None:
+    """R1.6 test 5: an unrecognized strategy_id, or a recognized strategy_id
+    whose authenticated feature column disagrees with its frozen candidate
+    declaration, is refused (FEATURE_TRANSFORM_AUTHORITY = MISSING /
+    mismatch) -- Finding D forbids inferring the transform from a suggestive
+    column name alone."""
+    with pytest.raises(ReplayBundleError, match="FEATURE_TRANSFORM_AUTHORITY = MISSING"):
+        verify_feature_transform_authority(
+            strategy_id="some_unregistered_strategy_v1", feature_col="anything_xs_rank"
+        )
+    known_strategy_id, authorized_col = next(iter(WAVE06_FEATURE_TRANSFORM_AUTHORITY.items()))
+    with pytest.raises(ReplayBundleError, match="unauthorized feature-transform binding"):
+        verify_feature_transform_authority(
+            strategy_id=known_strategy_id, feature_col=authorized_col + "_wrong"
+        )
+
+
+def test_same_trial_different_economic_eval_id_semantic_spec_unaffected(tmp_path: Path) -> None:
+    """R1.6 test 6: `replay_semantic_spec` is a pure function of the trial's
+    result-independent methodology fields and structurally excludes
+    `economic_eval_id` (see REQUIRED TEST 12) -- so for any two attempts
+    that would ever share one trial_id but differ in economic_eval_id, the
+    resulting `replay_semantic_spec` is necessarily byte-identical. Proven
+    here as an idempotency check: two independent bundle builds of the SAME
+    real attempt produce byte-identical replay_semantic_spec content,
+    composed with TEST 12's structural exclusion proof."""
+    reg = _register_trial(tmp_path, trial_label="a")
+    manifest_path_1 = build_replay_bundle(
+        reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"],
+        out_dir=tmp_path / "bundle1", excluded_symbols=[],
+    )
+    manifest_path_2 = build_replay_bundle(
+        reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"],
+        out_dir=tmp_path / "bundle2", excluded_symbols=[],
+    )
+    m1 = json.loads(manifest_path_1.read_text(encoding="utf-8"))
+    m2 = json.loads(manifest_path_2.read_text(encoding="utf-8"))
+    assert m1["replay_semantic_spec"] == m2["replay_semantic_spec"]
+    assert "economic_eval_id" not in json.dumps(m1["replay_semantic_spec"])
+
+
+def test_different_model_spec_changes_trial_id_not_replay_semantic_spec(tmp_path: Path) -> None:
+    """R1.6 test 7: a different trial (here, differing ONLY in model_spec.l2,
+    which `build_economic_trial_identity` folds into trial_id) produces a
+    different lineage.trial_id -- the distinguishing identity Rust's R2.2
+    semantic fingerprint relies on -- while `replay_semantic_spec` (strategy/
+    feature/policy methodology only) stays identical, since neither depends
+    on model hyperparameters."""
+    reg_a = _register_trial(tmp_path, trial_label="a", l2=1e-3)
+    reg_b = _register_trial(tmp_path, trial_label="b", l2=5e-3)
+    assert reg_a["trial_id"] != reg_b["trial_id"]
+    manifest_a = json.loads(
+        build_replay_bundle(
+            reg_a["registry_db"], trial_id=reg_a["trial_id"], economic_eval_id=reg_a["economic_eval_id"],
+            out_dir=tmp_path / "bundle_a", excluded_symbols=[],
+        ).read_text(encoding="utf-8")
+    )
+    manifest_b = json.loads(
+        build_replay_bundle(
+            reg_b["registry_db"], trial_id=reg_b["trial_id"], economic_eval_id=reg_b["economic_eval_id"],
+            out_dir=tmp_path / "bundle_b", excluded_symbols=[],
+        ).read_text(encoding="utf-8")
+    )
+    assert manifest_a["lineage"]["trial_id"] != manifest_b["lineage"]["trial_id"]
+    assert manifest_a["replay_semantic_spec"] == manifest_b["replay_semantic_spec"]
+
+
+def test_different_training_data_identity_changes_trial_id(tmp_path: Path) -> None:
+    """R1.6 test 8: a different authenticated training dataset (different
+    seed -> different features.csv/targets.csv content) changes trial_id,
+    since `build_economic_trial_identity` folds `data_identity` (content
+    hashes of features/targets/schema) into trial_id -- distinct training
+    data can never collide onto the same trial_id."""
+    reg_a = _register_trial(tmp_path, trial_label="a", seed=0)
+    reg_b = _register_trial(tmp_path, trial_label="b", seed=1)
+    assert reg_a["trial_id"] != reg_b["trial_id"]
+
+
+def test_manifest_content_mutation_changes_manifest_sha256(tmp_path: Path) -> None:
+    """R1.6 test 9: mutating the written manifest.json's bytes changes its
+    sha256 -- the machine-readable authority seam (R1.5) a caller (Rust R3)
+    anchors to."""
+    reg = _register_trial(tmp_path, trial_label="a")
+    manifest_path = build_replay_bundle(
+        reg["registry_db"], trial_id=reg["trial_id"], economic_eval_id=reg["economic_eval_id"],
+        out_dir=tmp_path / "bundle", excluded_symbols=[],
+    )
+    from mqk_research.ml.util_hash import file_record
+
+    original_sha256 = file_record(manifest_path)["sha256"]
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8") + " ", encoding="utf-8"
+    )
+    mutated_sha256 = file_record(manifest_path)["sha256"]
+    assert original_sha256 != mutated_sha256
