@@ -453,3 +453,148 @@ def test_mutated_genuine_placebo_artifact_binding_fails(tmp_path: Path) -> None:
 # never produce, which is precisely the caller-assertion pattern this
 # repair exists to close off.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# W06-FINAL-CLOSEOUT-LAZY-AUTHORITY-REPAIR-01 -- resolve_authoritative_
+# evidence must honor the SAME frozen early-rejection cascade
+# classify_verdict() itself applies: a downstream evidence authority must
+# never be REQUIRED after an earlier required gate has already
+# deterministically terminally rejected the candidate. This is the VOL-01
+# regression (benchmark rejects at excess <= 0, but the shared judge
+# excludes VOL-01 via return_series_date_misalignment) reproduced with
+# disposable fixtures.
+# ---------------------------------------------------------------------------
+
+
+def _register_benchmark_rejecting_family(
+    store: ResearchResultStore, tmp_path: Path, candidate_key: str,
+    *, long_short_net_sharpe: float = 0.5, benchmark_sharpe: float = 5.0,
+) -> dict:
+    """A real, succeeded long_only/long_short family whose benchmark_excess
+    is deterministically <= 0 (rejected) -- long_short_net_sharpe far below
+    benchmark_sharpe. No placebo trial, judge artifact, genuine-placebo
+    artifact, or sensitivity artifact is registered at all: this is the
+    load-bearing proof that none of them are needed once benchmark alone has
+    already terminally rejected."""
+    hyps = fx.candidate_hypothesis_ids(candidate_key)
+    lo = fx.register_succeeded_economic_trial(
+        store, tmp_path, experiment_id=fx.REAL_EXPERIMENT_ID, hypothesis_id=hyps["long_only"],
+        trial_id=f"trial_{candidate_key}_lo", net_sharpe=0.1,
+    )
+    ls = fx.register_succeeded_economic_trial(
+        store, tmp_path, experiment_id=fx.REAL_EXPERIMENT_ID, hypothesis_id=hyps["long_short"],
+        trial_id=f"trial_{candidate_key}_ls", net_sharpe=long_short_net_sharpe,
+    )
+    family_path = fx.write_family_result_artifact(
+        tmp_path / f"{candidate_key}_family.json", long_short_trial_id=ls["trial_id"],
+        long_short_hypothesis_id=hyps["long_short"], long_short_experiment_id=fx.REAL_EXPERIMENT_ID,
+        long_short_economic_eval_id=ls["economic_eval_id"], benchmark_sharpe=benchmark_sharpe,
+    )
+    return {"long_only": lo, "long_short": ls, "benchmark_artifact_path": family_path}
+
+
+def test_benchmark_terminal_reject_ignores_downstream_absence(tmp_path: Path) -> None:
+    """TEST 1: a real registered family whose benchmark_excess <= 0 resolves
+    successfully with NO judge/genuine-placebo/sensitivity authority
+    supplied at all -- the load-bearing VOL-01 regression."""
+    root = fx.fake_campaign_root(tmp_path)
+    store = _store(tmp_path)
+    fixture = _register_benchmark_rejecting_family(store, tmp_path, "A")
+    evidence, _, _ = _resolve(
+        root, tmp_path, "A", benchmark_artifact_path=fixture["benchmark_artifact_path"],
+        judge_artifact_sha256=None, genuine_placebo_artifact_path=None,
+        dsr_pbo_sensitivity_artifact_path=None,
+    )
+    result = classify_verdict(evidence, _policy(root))
+    assert result["verdict"] == "REJECTED_NOT_ADVANCED"
+    assert result["gates"]["benchmark_relative_requirement"] == "REJECTED_NOT_ADVANCED"
+    for gate in (
+        "matched_diagnostic_placebo_requirement", "primary_vs_control_requirement",
+        "dsr_requirement", "pbo_requirement", "genuine_shuffled_placebo_requirement",
+        "dsr_pbo_block_count_sensitivity_requirement", "canonical_p9_robustness_gauntlet_requirement",
+        "p7a_p7b_economic_replay_stress_requirement",
+    ):
+        assert result["gates"][gate] == "NOT_RUN_AFTER_DETERMINISTIC_REJECTION"
+
+
+def test_downstream_garbage_cannot_block_prior_benchmark_reject(tmp_path: Path) -> None:
+    """TEST 2: the same terminal benchmark rejection occurs even when the
+    caller supplies deliberately invalid/nonexistent downstream identity --
+    the resolver must never touch it."""
+    root = fx.fake_campaign_root(tmp_path)
+    store = _store(tmp_path)
+    fixture = _register_benchmark_rejecting_family(store, tmp_path, "A")
+    evidence, _, _ = _resolve(
+        root, tmp_path, "A", benchmark_artifact_path=fixture["benchmark_artifact_path"],
+        judge_artifact_sha256="0" * 64,
+        genuine_placebo_artifact_path=tmp_path / "does_not_exist_placebo.json",
+        dsr_pbo_sensitivity_artifact_path=tmp_path / "does_not_exist_sens.json",
+    )
+    result = classify_verdict(evidence, _policy(root))
+    assert result["verdict"] == "REJECTED_NOT_ADVANCED"
+    assert result["gates"]["benchmark_relative_requirement"] == "REJECTED_NOT_ADVANCED"
+    assert result["gates"]["dsr_requirement"] == "NOT_RUN_AFTER_DETERMINISTIC_REJECTION"
+
+
+def test_benchmark_clears_downstream_authority_still_required(tmp_path: Path) -> None:
+    """TEST 3: once the cascade genuinely REACHES a downstream gate, missing
+    authority for it is still refused -- the repair must not make real
+    evidence optional for a gate that is actually reached."""
+    root = fx.fake_campaign_root(tmp_path)
+    store = _store(tmp_path)
+    fixture = _register_clearing_family(store, tmp_path, "A")
+    try:
+        _resolve(
+            root, tmp_path, "A", benchmark_artifact_path=fixture["benchmark_artifact_path"],
+            judge_artifact_sha256=None, genuine_placebo_artifact_path=None,
+            dsr_pbo_sensitivity_artifact_path=None,
+        )
+        assert False, "expected AuthorityRefusal: benchmark cleared, judge authority genuinely required"
+    except cca.AuthorityRefusal:
+        pass
+
+
+def test_matched_placebo_early_rejection_skips_judge_authority(tmp_path: Path) -> None:
+    """TEST 4: a representative later pre-judge gate (matched_diagnostic_
+    placebo_requirement) terminally rejects even though benchmark itself
+    CLEARED -- judge authority must not be required, and every later gate
+    must come back NOT_RUN, proving the invariant generalizes beyond
+    benchmark alone."""
+    root = fx.fake_campaign_root(tmp_path)
+    store = _store(tmp_path)
+    hyps = fx.candidate_hypothesis_ids("A")
+    lo = fx.register_succeeded_economic_trial(
+        store, tmp_path, experiment_id=fx.REAL_EXPERIMENT_ID, hypothesis_id=hyps["long_only"],
+        trial_id="trial_a_lo", net_sharpe=0.5,
+    )
+    ls = fx.register_succeeded_economic_trial(
+        store, tmp_path, experiment_id=fx.REAL_EXPERIMENT_ID, hypothesis_id=hyps["long_short"],
+        trial_id="trial_a_ls", net_sharpe=0.9,
+    )
+    # Placebo net_sharpe == long_short net_sharpe -> matched-placebo excess
+    # == 0.0, which is <= the policy's min_excess (0.20) -> terminal reject.
+    fx.register_succeeded_economic_trial(
+        store, tmp_path, experiment_id=fx.PLACEBO_EXPERIMENT_ID, hypothesis_id=hyps["placebo"],
+        trial_id="trial_a_pb", net_sharpe=0.9,
+    )
+    family_path = fx.write_family_result_artifact(
+        tmp_path / "family.json", long_short_trial_id=ls["trial_id"],
+        long_short_hypothesis_id=hyps["long_short"], long_short_experiment_id=fx.REAL_EXPERIMENT_ID,
+        long_short_economic_eval_id=ls["economic_eval_id"], benchmark_sharpe=0.3,
+    )
+    evidence, _, _ = _resolve(
+        root, tmp_path, "A", benchmark_artifact_path=family_path,
+        judge_artifact_sha256=None, genuine_placebo_artifact_path=None,
+        dsr_pbo_sensitivity_artifact_path=None,
+    )
+    result = classify_verdict(evidence, _policy(root))
+    assert result["verdict"] == "REJECTED_NOT_ADVANCED"
+    assert result["gates"]["benchmark_relative_requirement"] == "CLEARED"
+    assert result["gates"]["matched_diagnostic_placebo_requirement"] == "NOT_EVALUABLE_OR_FAILED"
+    for gate in (
+        "primary_vs_control_requirement", "dsr_requirement", "pbo_requirement",
+        "genuine_shuffled_placebo_requirement", "dsr_pbo_block_count_sensitivity_requirement",
+        "canonical_p9_robustness_gauntlet_requirement", "p7a_p7b_economic_replay_stress_requirement",
+    ):
+        assert result["gates"][gate] == "NOT_RUN_AFTER_DETERMINISTIC_REJECTION"

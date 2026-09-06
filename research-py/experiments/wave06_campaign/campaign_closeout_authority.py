@@ -75,7 +75,7 @@ CAMPAIGN_ROOT = Path(__file__).resolve().parent
 if str(CAMPAIGN_ROOT) not in sys.path:
     sys.path.insert(0, str(CAMPAIGN_ROOT))
 
-from campaign_advancement_authority import NOT_RUN, EvidenceRefusal, classify_verdict  # noqa: E402
+from campaign_advancement_authority import _ALL_GATES, NOT_RUN, EvidenceRefusal, classify_verdict  # noqa: E402
 from campaign_identity import load_campaign, load_candidate_declaration, resolve_local_src  # noqa: E402
 
 _LOCAL_SRC = resolve_local_src(Path(__file__))
@@ -378,12 +378,26 @@ def resolve_authoritative_evidence(
     `genuine_placebo_artifact_path`/`dsr_pbo_sensitivity_artifact_path`
     location inputs are only REQUIRED once the cascade genuinely reaches a
     gate that needs them -- an insolvency-terminal candidate needs none of
-    them."""
+    them.
+
+    W06-FINAL-CLOSEOUT-LAZY-AUTHORITY-REPAIR-01: this is honored generally,
+    not only for the insolvency gate. After each real gate is resolved, the
+    resolver probes classify_verdict with every not-yet-resolved gate filled
+    with a guaranteed-fail placeholder (the same pattern the canonical_p9
+    gate below already used) and checks whether the NEXT gate in _ALL_GATES
+    order comes back NOT_RUN_AFTER_DETERMINISTIC_REJECTION -- if so, an
+    earlier REAL gate has already terminally decided the candidate, and this
+    function returns immediately rather than demanding downstream authority
+    the frozen classifier will never inspect. A downstream gate that IS
+    genuinely reached (the placeholder itself gets evaluated, not skipped)
+    still fails closed exactly as before -- this never makes real evidence
+    optional for a gate the cascade actually reaches."""
     campaign = load_campaign(campaign_root)
     registry = campaign["shared_campaign_registry"]
     experiment_id = registry["real_experiment_id"]
     placebo_experiment_id = registry["placebo_experiment_id"]
     store = ResearchResultStore(Path(registry_db))
+    policy = campaign["advancement_policy"]
 
     hyp_lo, hyp_ls, hyp_pb = resolve_family_hypothesis_ids(candidate_key, campaign_root)
     hypothesis_ids = sorted([hyp_lo, hyp_ls])
@@ -416,6 +430,25 @@ def resolve_authoritative_evidence(
             "p7a_p7b_economic_replay_stress_requirement": {"evaluable": False, "passed": None},
         }
 
+    def _tail_from(start_index: int) -> Dict[str, Any]:
+        """Guaranteed-fail placeholders for every gate at/after
+        _ALL_GATES[start_index] -- used both for a genuine early return and
+        to probe whether classify_verdict actually reaches that gate."""
+        remaining = set(_ALL_GATES[start_index:])
+        return {k: v for k, v in _not_evaluable_tail().items() if k in remaining}
+
+    def _cascade_already_terminated(evidence_prefix: Dict[str, Any], next_index: int) -> bool:
+        """True if the frozen early-rejection cascade would already
+        terminate before ever inspecting _ALL_GATES[next_index], using only
+        the REAL evidence resolved so far. A guaranteed-fail placeholder
+        fills every not-yet-resolved gate; if classify_verdict genuinely
+        reaches _ALL_GATES[next_index] it evaluates (and fails) the
+        placeholder rather than marking it NOT_RUN, which is exactly how
+        this distinguishes "not reached" from "reached and would fail"."""
+        probe_evidence = {**evidence_prefix, **_tail_from(next_index)}
+        probe = classify_verdict(probe_evidence, policy)
+        return probe["gates"][_ALL_GATES[next_index]] == NOT_RUN
+
     econ_gate = {
         "long_only_failure_reason": (
             GROSS_WEALTH_INSOLVENCY_FAILURE_REASON if outcome_lo["status"] == "gross_insolvency_failed" else None
@@ -431,6 +464,9 @@ def resolve_authoritative_evidence(
     econ_lo = resolve_succeeded_economic_evidence(store, trial_lo, outcome_lo["attempt"])
     econ_ls = resolve_succeeded_economic_evidence(store, trial_ls, outcome_ls["attempt"])
 
+    # benchmark_relative_requirement is _ALL_GATES[1], immediately after
+    # absolute_economic_requirement which has just PASSED -- it is
+    # unconditionally reached, so its authority is unconditionally required.
     if benchmark_artifact_path is None:
         raise MissingAuthoritativeSeam(
             "benchmark_relative_requirement has no ResearchResultStore-anchored authority for the "
@@ -467,6 +503,17 @@ def resolve_authoritative_evidence(
         raise AuthorityRefusal(f"family_result.json at {benchmark_artifact_path} has no benchmark_long_short.sharpe")
     benchmark_excess = econ_ls["net_sharpe"] - float(benchmark_sharpe)
 
+    evidence_prefix: Dict[str, Any] = {
+        "absolute_economic_requirement": econ_gate,
+        "benchmark_relative_requirement": {"evaluable": True, "excess": benchmark_excess},
+    }
+    # matched_diagnostic_placebo_requirement is _ALL_GATES[2]: if benchmark
+    # already terminally rejected (or was NOT_EVALUABLE), the cascade never
+    # reaches it -- return now rather than resolving placebo/control at all.
+    if _cascade_already_terminated(evidence_prefix, 2):
+        evidence = {**evidence_prefix, **_tail_from(2)}
+        return evidence, hypothesis_ids, verified_trial_ids
+
     trial_pb = resolve_optional_trial(store, experiment_id=placebo_experiment_id, hypothesis_id=hyp_pb)
     outcome_pb = resolve_attempt_outcome(store, trial_pb["trial_id"]) if trial_pb is not None else {"status": "incomplete"}
     if outcome_pb["status"] != "succeeded":
@@ -477,6 +524,15 @@ def resolve_authoritative_evidence(
 
     control_excess = econ_ls["net_sharpe"] - econ_lo["net_sharpe"]
 
+    evidence_prefix["matched_diagnostic_placebo_requirement"] = placebo_gate_evidence
+    evidence_prefix["primary_vs_control_requirement"] = {"evaluable": True, "excess": control_excess}
+    # dsr_requirement is _ALL_GATES[4]: if matched-placebo or control already
+    # terminally rejected, the cascade never reaches dsr_requirement/
+    # pbo_requirement -- judge authority is not required.
+    if _cascade_already_terminated(evidence_prefix, 4):
+        evidence = {**evidence_prefix, **_tail_from(4)}
+        return evidence, hypothesis_ids, verified_trial_ids
+
     if judge_artifact_sha256 is None:
         raise AuthorityRefusal(
             "dsr_requirement/pbo_requirement require judge_artifact_sha256 (a real, already-registered "
@@ -486,6 +542,13 @@ def resolve_authoritative_evidence(
         store, judge_artifact_sha256=judge_artifact_sha256, experiment_id=experiment_id,
         primary_trial_id=trial_ls["trial_id"],
     )
+    evidence_prefix["dsr_requirement"] = {"evaluable": dsr_pbo["dsr_evaluable"], "value": dsr_pbo["dsr_value"]}
+    evidence_prefix["pbo_requirement"] = {"evaluable": dsr_pbo["pbo_evaluable"], "value": dsr_pbo["pbo_value"]}
+    # genuine_shuffled_placebo_requirement is _ALL_GATES[6]: if dsr or pbo
+    # already terminally rejected, the cascade never reaches it.
+    if _cascade_already_terminated(evidence_prefix, 6):
+        evidence = {**evidence_prefix, **_tail_from(6)}
+        return evidence, hypothesis_ids, verified_trial_ids
 
     if genuine_placebo_artifact_path is None:
         raise AuthorityRefusal(
@@ -498,6 +561,13 @@ def resolve_authoritative_evidence(
         expected_economic_eval_id=econ_ls["economic_eval_id"],
         expected_economic_artifact_sha256=econ_ls_artifact_sha256,
     )
+    evidence_prefix["genuine_shuffled_placebo_requirement"] = genuine_placebo_gate
+    # dsr_pbo_block_count_sensitivity_requirement is _ALL_GATES[7]: if the
+    # genuine shuffled placebo already terminally rejected, the cascade
+    # never reaches it.
+    if _cascade_already_terminated(evidence_prefix, 7):
+        evidence = {**evidence_prefix, **_tail_from(7)}
+        return evidence, hypothesis_ids, verified_trial_ids
 
     if dsr_pbo_sensitivity_artifact_path is None:
         raise AuthorityRefusal(
@@ -507,8 +577,9 @@ def resolve_authoritative_evidence(
     sensitivity_gate = resolve_dsr_pbo_sensitivity_evidence(
         artifact_path=dsr_pbo_sensitivity_artifact_path, primary_trial_id=trial_ls["trial_id"],
         judge_artifact_sha256=judge_artifact_sha256,
-        policy=campaign["advancement_policy"]["dsr_pbo_block_count_sensitivity_requirement"],
+        policy=policy["dsr_pbo_block_count_sensitivity_requirement"],
     )
+    evidence_prefix["dsr_pbo_block_count_sensitivity_requirement"] = sensitivity_gate
 
     # Every real, resolvable gate has now been computed from actual
     # registry/artifact authority. canonical_p9_robustness_gauntlet_
@@ -528,21 +599,8 @@ def resolve_authoritative_evidence(
     # p7a_p7b_economic_replay_stress_requirement is evaluated strictly
     # after canonical_p9 in gate order, so it is likewise never reached
     # unless P9 itself would have passed, and needs no real artifact here.
-    evidence = {
-        "absolute_economic_requirement": econ_gate,
-        "benchmark_relative_requirement": {"evaluable": True, "excess": benchmark_excess},
-        "matched_diagnostic_placebo_requirement": placebo_gate_evidence,
-        "primary_vs_control_requirement": {"evaluable": True, "excess": control_excess},
-        "dsr_requirement": {"evaluable": dsr_pbo["dsr_evaluable"], "value": dsr_pbo["dsr_value"]},
-        "pbo_requirement": {"evaluable": dsr_pbo["pbo_evaluable"], "value": dsr_pbo["pbo_value"]},
-        "genuine_shuffled_placebo_requirement": genuine_placebo_gate,
-        "dsr_pbo_block_count_sensitivity_requirement": sensitivity_gate,
-        "canonical_p9_robustness_gauntlet_requirement": {
-            "protocol_version": None, "is_complete": False, "all_applicable_passed": False, "scenario_names": [],
-        },
-        "p7a_p7b_economic_replay_stress_requirement": {"evaluable": False, "passed": None},
-    }
-    probe = classify_verdict(evidence, campaign["advancement_policy"])
+    evidence = {**evidence_prefix, **_tail_from(8)}
+    probe = classify_verdict(evidence, policy)
     if probe["gates"]["canonical_p9_robustness_gauntlet_requirement"] == NOT_RUN:
         return evidence, hypothesis_ids, verified_trial_ids
 
