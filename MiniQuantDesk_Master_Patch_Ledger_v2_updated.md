@@ -3228,3 +3228,66 @@ RESEARCH_BACKTEST_V1_FINAL_ACCEPTANCE_INTEGRATION_01.zip`.
 ---
 
 *End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-AUTONOMOUS-STARTUP-THREE-DEFECT-CLOSURE-01, updated by MASTER-LEDGER-CONSOLIDATION-01 (2026-08-17), updated by LEDGER-CLOSURE-CONSOLIDATION-01-CONTROLLER (2026-08-24), updated by LEDGER-CLOSURE-PAPER-REPAIR-INTEGRATION-01-CONTROLLER (2026-08-24), updated by PAPER-BACKEND-LEDGER-CLOSURE-WAVE-01-CONTROLLER (2026-08-25), updated by PAPER-BACKEND-LEDGER-WAVE-01-INDEPENDENT-REVIEW-REPAIR-01 (2026-08-25), updated by PAPER-BACKEND-WAVE-01-INTEGRATION-TEST-CLOSURE-REPAIR-01 (2026-08-25), updated by PAPER-BACKEND-WAVE-01-INDEPENDENT-ACCEPTANCE-FINALIZER-01 (2026-08-25).*
+
+---
+
+# DEFERRED DESIGN IDEAS
+
+Non-required architecture ideas surfaced during `W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02` (2026-09-05). Preserved for future reference only.
+
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.** Every entry below carries this same status individually; do not treat any entry as scheduled, prioritized, or authorized work. Do not alter active patch status/count based on this section.
+
+### Persist per-fold trained model state
+A future artifact version may durably store coefficients/intercept/standardization state for stronger long-term replay.
+Deferred because deterministic refit is sufficient for current Wave06.
+Revisit if library/version drift or repeated replay needs justify it.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Generic ResearchReplayBundle protocol
+Generalize authenticated Research replay beyond LIQ/VOL.
+Deferred until multiple real candidate families require it.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Generic Research -> Backtest candidate adapter
+Standard interface for non-builtin Research candidates through Backtest.
+Deferred until repeated real usage proves the abstraction.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Batch-level cross-sectional decision source
+Explicit Backtest batch-decision interface for future strategies that cannot safely use the replay Strategy seam.
+Deferred because current replay strategy should remain narrower.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Canonical read-only evidence authority CLI
+One machine-readable surface exposing verified Research + Backtest + P9 authority.
+Deferred until current Wave06 authority path is complete.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Point-in-time research universe snapshots
+Durable historical constituent/delistings/corporate-action universe data.
+Deferred until operational readiness is finished and fresh broad-universe alpha confirmation begins.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Replay compatibility/version audit
+Read-only check that HEAD can still reproduce old accepted Research runs.
+Deferred until durable replay artifacts exist across multiple versions.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Research/Paper equivalence proof harness
+Compare promoted Research decisions, canonical Backtest targets, and Paper shadow decisions on the same completed bars.
+Deferred until a strategy actually earns Paper entry.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Generic candidate-family API
+Common feature/model/rank/replay/falsification interface for future research families.
+Deferred until repeated successful families justify abstraction.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### Automatic temporary-artifact ownership/retention metadata
+Tag generated artifacts as temporary/review/durable/protected.
+Deferred because explicit per-wave cleanup is currently safer/simpler.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
+
+### genuine_shuffled_placebo / cross-sectional-percentile-rank tie incompatibility (investigation, not a design idea)
+A genuine, reproducible, deterministic finding (not a design idea to build, but recorded here since it surfaced from this wave and needs a dedicated future investigation): `genuine_shuffled_placebo_cli.py`'s fold-wide score shuffle is structurally incompatible with any cross-sectional-percentile-rank feature transform (LIQ-01/VOL-01's own feature family) whenever a walk-forward fold spans more than one decision date, per `_resolve_rank_direction_for_frame`'s exact boundary-tie fail-closed check. See the dedicated follow-up task spawned from this wave (`W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02`, Patch R3) for full analysis.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
