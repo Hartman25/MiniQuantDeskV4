@@ -257,3 +257,93 @@ def test_dsr_pbo_sensitivity_not_evaluable_is_rejected() -> None:
     }
     result = classify_verdict(evidence, _policy())
     assert result["verdict"] == REJECTED
+
+
+# ---------------------------------------------------------------------------
+# Finding 4: NaN/Inf at any evaluable numeric gate must fail closed
+# (EvidenceRefusal) rather than silently ADVANCE -- Python's NaN comparisons
+# (`nan < x`, `nan > x`, ...) are always False, so a naive `<=`/`>=` gate
+# check would otherwise let a fabricated NaN slip straight through to
+# ADVANCED.
+# ---------------------------------------------------------------------------
+
+import math  # noqa: E402
+
+_NON_FINITE_VALUES = [math.nan, math.inf, -math.inf]
+
+_NUMERIC_GATE_FIELDS = [
+    ("benchmark_relative_requirement", "excess"),
+    ("matched_diagnostic_placebo_requirement", "excess"),
+    ("primary_vs_control_requirement", "excess"),
+    ("dsr_requirement", "value"),
+    ("pbo_requirement", "value"),
+]
+
+
+def test_nan_at_every_numeric_gate_fails_closed() -> None:
+    for gate, field in _NUMERIC_GATE_FIELDS:
+        evidence = _clearing_evidence(0.5)
+        evidence[gate][field] = math.nan
+        try:
+            classify_verdict(evidence, _policy())
+            assert False, f"expected EvidenceRefusal for NaN at {gate}.{field}"
+        except EvidenceRefusal:
+            pass
+
+
+def test_positive_and_negative_infinity_at_every_numeric_gate_fails_closed() -> None:
+    for gate, field in _NUMERIC_GATE_FIELDS:
+        for bad in (math.inf, -math.inf):
+            evidence = _clearing_evidence(0.5)
+            evidence[gate][field] = bad
+            try:
+                classify_verdict(evidence, _policy())
+                assert False, f"expected EvidenceRefusal for {bad!r} at {gate}.{field}"
+            except EvidenceRefusal:
+                pass
+
+
+def test_nan_and_inf_at_dsr_pbo_sensitivity_ranges_fail_closed() -> None:
+    for field in ("dsr_range", "pbo_range"):
+        for bad in _NON_FINITE_VALUES:
+            evidence = _clearing_evidence(0.5)
+            evidence["dsr_pbo_block_count_sensitivity_requirement"] = {
+                "evaluable": True,
+                "dsr_range": bad if field == "dsr_range" else 0.05,
+                "pbo_range": bad if field == "pbo_range" else 0.05,
+            }
+            try:
+                classify_verdict(evidence, _policy())
+                assert False, f"expected EvidenceRefusal for {bad!r} at dsr_pbo_block_count_sensitivity.{field}"
+            except EvidenceRefusal:
+                pass
+
+
+def test_dsr_value_outside_zero_one_domain_fails_closed_even_if_finite() -> None:
+    evidence = _clearing_evidence(0.5)
+    evidence["dsr_requirement"]["value"] = 1.5
+    try:
+        classify_verdict(evidence, _policy())
+        assert False, "expected EvidenceRefusal for a DSR value outside [0,1]"
+    except EvidenceRefusal:
+        pass
+
+
+def test_pbo_value_outside_zero_one_domain_fails_closed_even_if_finite() -> None:
+    evidence = _clearing_evidence(0.5)
+    evidence["pbo_requirement"]["value"] = -0.1
+    try:
+        classify_verdict(evidence, _policy())
+        assert False, "expected EvidenceRefusal for a PBO value outside [0,1]"
+    except EvidenceRefusal:
+        pass
+
+
+def test_evidence_hash_refuses_nan_even_if_a_caller_bypasses_classify_verdict() -> None:
+    evidence = _clearing_evidence(0.5)
+    evidence["dsr_requirement"]["value"] = math.nan
+    try:
+        evidence_hash(evidence)
+        assert False, "expected ValueError from allow_nan=False"
+    except ValueError:
+        pass

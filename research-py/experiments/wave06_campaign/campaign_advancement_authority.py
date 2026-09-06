@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any, Dict, List, Optional
 
 NOT_RUN = "NOT_RUN_AFTER_DETERMINISTIC_REJECTION"
@@ -80,9 +81,36 @@ def evidence_hash(evidence: Dict[str, Any]) -> str:
     """Deterministic content hash of an evidence dict -- canonical
     (sort_keys) JSON, sha256. Used by campaign_order_guard to detect a
     hand-edited evidence field even when the recomputed verdict happens to
-    still match."""
-    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"), default=str)
+    still match.
+
+    Finding 4 (NaN/Inf fail-open): `allow_nan=False` is defense-in-depth --
+    classify_verdict() itself already refuses (EvidenceRefusal) any
+    evaluable numeric gate value that is NaN/Inf before this is ever called,
+    but a NaN/Inf must never be permitted to reach a JSON artifact even if
+    some future caller path skips classify_verdict."""
+    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _require_finite(label: str, value: Any, *, lo: Optional[float] = None, hi: Optional[float] = None) -> float:
+    """Finding 4: an evaluable numeric evidence value must be a real,
+    finite number before it may enter any policy comparison. Python's NaN
+    comparisons (`nan < x`, `nan > x`, ...) are always False, which would
+    otherwise let a fabricated NaN silently slip past every `<=`/`>=`/`<`/`>`
+    gate check below and reach ADVANCED. Raises EvidenceRefusal -- never
+    silently coerces, clamps, or defaults -- on NaN, +-Inf, or a non-numeric
+    value, and on a value outside an explicit required domain."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise EvidenceRefusal(f"{label} is not a real number: {value!r}")
+    if math.isnan(f) or math.isinf(f):
+        raise EvidenceRefusal(f"{label} must be finite -- refusing to classify a NaN/Inf evidence value: {value!r}")
+    if lo is not None and f < lo:
+        raise EvidenceRefusal(f"{label}={f!r} is below its required domain minimum {lo!r}")
+    if hi is not None and f > hi:
+        raise EvidenceRefusal(f"{label}={f!r} is above its required domain maximum {hi!r}")
+    return f
 
 
 def _classify_gross_wealth_insolvency(
@@ -155,7 +183,8 @@ def classify_verdict(evidence: Dict[str, Any], policy: Dict[str, Any]) -> Dict[s
         for g in _ALL_GATES[2:]:
             gates[g] = NOT_RUN
         return {"verdict": REJECTED, "gates": gates}
-    bench_classification = _benchmark_partition(policy, float(bench["excess"]))
+    benchmark_excess = _require_finite("benchmark_relative_requirement.excess", bench["excess"])
+    bench_classification = _benchmark_partition(policy, benchmark_excess)
     if bench_classification == REJECTED:
         gates["benchmark_relative_requirement"] = REJECTED
         for g in _ALL_GATES[2:]:
@@ -165,7 +194,13 @@ def classify_verdict(evidence: Dict[str, Any], policy: Dict[str, Any]) -> Dict[s
 
     placebo = evidence["matched_diagnostic_placebo_requirement"]
     min_excess = policy["matched_diagnostic_placebo_requirement"]["min_excess"]
-    if not placebo.get("evaluable") or placebo.get("excess") is None or float(placebo["excess"]) <= min_excess:
+    if not placebo.get("evaluable") or placebo.get("excess") is None:
+        gates["matched_diagnostic_placebo_requirement"] = "NOT_EVALUABLE_OR_FAILED"
+        for g in _ALL_GATES[3:]:
+            gates[g] = NOT_RUN
+        return {"verdict": REJECTED, "gates": gates}
+    placebo_excess = _require_finite("matched_diagnostic_placebo_requirement.excess", placebo["excess"])
+    if placebo_excess <= min_excess:
         gates["matched_diagnostic_placebo_requirement"] = "NOT_EVALUABLE_OR_FAILED"
         for g in _ALL_GATES[3:]:
             gates[g] = NOT_RUN
@@ -174,7 +209,13 @@ def classify_verdict(evidence: Dict[str, Any], policy: Dict[str, Any]) -> Dict[s
 
     control = evidence["primary_vs_control_requirement"]
     min_excess = policy["primary_vs_control_requirement"]["min_excess"]
-    if not control.get("evaluable") or control.get("excess") is None or float(control["excess"]) <= min_excess:
+    if not control.get("evaluable") or control.get("excess") is None:
+        gates["primary_vs_control_requirement"] = "NOT_EVALUABLE_OR_FAILED"
+        for g in _ALL_GATES[4:]:
+            gates[g] = NOT_RUN
+        return {"verdict": REJECTED, "gates": gates}
+    control_excess = _require_finite("primary_vs_control_requirement.excess", control["excess"])
+    if control_excess <= min_excess:
         gates["primary_vs_control_requirement"] = "NOT_EVALUABLE_OR_FAILED"
         for g in _ALL_GATES[4:]:
             gates[g] = NOT_RUN
@@ -183,7 +224,13 @@ def classify_verdict(evidence: Dict[str, Any], policy: Dict[str, Any]) -> Dict[s
 
     dsr = evidence["dsr_requirement"]
     min_value = policy["dsr_requirement"]["min_value"]
-    if not dsr.get("evaluable") or dsr.get("value") is None or float(dsr["value"]) < min_value:
+    if not dsr.get("evaluable") or dsr.get("value") is None:
+        gates["dsr_requirement"] = "NOT_EVALUABLE_OR_FAILED"
+        for g in _ALL_GATES[5:]:
+            gates[g] = NOT_RUN
+        return {"verdict": REJECTED, "gates": gates}
+    dsr_value = _require_finite("dsr_requirement.value", dsr["value"], lo=0.0, hi=1.0)
+    if dsr_value < min_value:
         gates["dsr_requirement"] = "NOT_EVALUABLE_OR_FAILED"
         for g in _ALL_GATES[5:]:
             gates[g] = NOT_RUN
@@ -192,7 +239,13 @@ def classify_verdict(evidence: Dict[str, Any], policy: Dict[str, Any]) -> Dict[s
 
     pbo = evidence["pbo_requirement"]
     max_value = policy["pbo_requirement"]["max_value"]
-    if not pbo.get("evaluable") or pbo.get("value") is None or float(pbo["value"]) > max_value:
+    if not pbo.get("evaluable") or pbo.get("value") is None:
+        gates["pbo_requirement"] = "NOT_EVALUABLE_OR_FAILED"
+        for g in _ALL_GATES[6:]:
+            gates[g] = NOT_RUN
+        return {"verdict": REJECTED, "gates": gates}
+    pbo_value = _require_finite("pbo_requirement.value", pbo["value"], lo=0.0, hi=1.0)
+    if pbo_value > max_value:
         gates["pbo_requirement"] = "NOT_EVALUABLE_OR_FAILED"
         for g in _ALL_GATES[6:]:
             gates[g] = NOT_RUN
@@ -211,12 +264,20 @@ def classify_verdict(evidence: Dict[str, Any], policy: Dict[str, Any]) -> Dict[s
     sens_policy = policy["dsr_pbo_block_count_sensitivity_requirement"]
     dsr_range = sens.get("dsr_range")
     pbo_range = sens.get("pbo_range")
+    if not sens.get("evaluable") or dsr_range is None or pbo_range is None:
+        gates["dsr_pbo_block_count_sensitivity_requirement"] = "NOT_EVALUABLE_OR_FAILED"
+        for g in _ALL_GATES[8:]:
+            gates[g] = NOT_RUN
+        return {"verdict": REJECTED, "gates": gates}
+    dsr_range_value = _require_finite(
+        "dsr_pbo_block_count_sensitivity_requirement.dsr_range", dsr_range, lo=0.0, hi=1.0
+    )
+    pbo_range_value = _require_finite(
+        "dsr_pbo_block_count_sensitivity_requirement.pbo_range", pbo_range, lo=0.0, hi=1.0
+    )
     if (
-        not sens.get("evaluable")
-        or dsr_range is None
-        or pbo_range is None
-        or float(dsr_range) > sens_policy["dsr_max_sensitivity_range"]
-        or float(pbo_range) > sens_policy["pbo_max_sensitivity_range"]
+        dsr_range_value > sens_policy["dsr_max_sensitivity_range"]
+        or pbo_range_value > sens_policy["pbo_max_sensitivity_range"]
     ):
         gates["dsr_pbo_block_count_sensitivity_requirement"] = "NOT_EVALUABLE_OR_FAILED"
         for g in _ALL_GATES[8:]:

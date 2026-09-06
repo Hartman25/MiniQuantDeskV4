@@ -19,6 +19,23 @@ independently recomputes the verdict from the closeout's own stored
 evidence, refusing on any mismatch (Finding 6's gross-wealth-insolvency
 terminal classification lives in that module, not here).
 
+W06-A-CAMPAIGN-CLOSEOUT-AUTHORITY-REPAIR-03 (Finding 1): REPAIR-02 closed
+the verdict-computation gap but left the `evidence` dict itself entirely
+caller-supplied -- a fabricated all-pass dict could still compute an
+ADVANCED verdict with no real Research/P9 artifact ever having produced its
+values, and hashing that dict only proved internal self-consistency, never
+authority. write_closeout_status() no longer accepts `evidence`,
+`hypothesis_ids`, or `verified_trial_ids` from the caller at all -- it
+derives all three itself, via campaign_closeout_authority.
+resolve_authoritative_evidence(), from real ResearchResultStore trials/
+attempts, real registered judge artifacts, and real evaluator-CLI output
+files (see that module's own docstring for exactly which authority each
+gate is bound to, and its one explicit, reported gap:
+canonical_p9_robustness_gauntlet_requirement). load_verified_closeout()
+also now derives its expected hypothesis population from the candidate's
+own frozen PREDECLARED_WAVE.json (Finding 3) rather than merely checking
+that the closeout's cited hypothesis_ids exist somewhere in the registry.
+
 This module is the ONLY sanctioned execution-order gate. It never infers
 order from filesystem directory existence, never fabricates a result, and
 never trusts a closeout claim without independently re-verifying it against
@@ -29,13 +46,7 @@ refuses the next candidate -- it never silently authorizes it.
 
 CANDIDATE_CLOSEOUT_STATUS.json is the only artifact this guard trusts, and
 write_closeout_status() is the only sanctioned way to produce one -- no
-other code path may hand-author this file. Writing one still requires the
-caller to have independently applied PREDECLARED_CAMPAIGN.json's
-advancement_policy's gate evidence to a real, already-registered,
-already-succeeded trial pair; this module does not itself compute
-DSR/PBO/placebo/stress evidence -- that is a separate, later mission's
-scope (see CLAUDE.md Section 30: this predeclaration-authority repair only
-builds the gate, it does not run any real evaluation).
+other code path may hand-author this file.
 """
 from __future__ import annotations
 
@@ -53,7 +64,17 @@ from campaign_advancement_authority import (  # noqa: E402
     classify_verdict,
     evidence_hash,
 )
-from campaign_identity import CAMPAIGN_REAL_EXPERIMENT_ID, load_campaign, resolve_local_src  # noqa: E402
+from campaign_closeout_authority import (  # noqa: E402
+    AuthorityRefusal,
+    resolve_attempt_outcome,
+    resolve_authoritative_evidence,
+)
+from campaign_identity import (  # noqa: E402
+    CAMPAIGN_REAL_EXPERIMENT_ID,
+    load_campaign,
+    load_candidate_declaration,
+    resolve_local_src,
+)
 
 _LOCAL_SRC = resolve_local_src(Path(__file__))
 if str(_LOCAL_SRC) not in sys.path:
@@ -139,6 +160,19 @@ def load_verified_closeout(
     if not isinstance(trial_ids, dict) or set(trial_ids.keys()) != set(hypothesis_ids):
         return None
 
+    # Finding 3: the closeout's own cited hypothesis_ids must be EXACTLY
+    # this candidate's own frozen real_candidate_population -- never merely
+    # "some hypothesis ids that happen to be registered somewhere" (which
+    # would let, e.g., a LIQ-01 closeout be satisfied by VOL-01's own
+    # trials/hypothesis ids).
+    try:
+        decl = load_candidate_declaration(candidate_key, campaign_root)
+    except (OSError, ValueError, KeyError):
+        return None
+    expected_hypothesis_ids = decl.get("real_candidate_population")
+    if not isinstance(expected_hypothesis_ids, list) or set(expected_hypothesis_ids) != set(hypothesis_ids):
+        return None
+
     from mqk_research.exp_distributed.storage import ResearchResultStore
 
     store = ResearchResultStore(Path(registry_db))
@@ -150,8 +184,18 @@ def load_verified_closeout(
         ]
         if len(matching) != 1:
             return None
-        attempts = store.list_attempts(trial_id)
-        if not any(a["status"] == "succeeded" for a in attempts):
+        # Finding 2: a cited trial's real authority is either a genuinely
+        # succeeded attempt OR a real registry attempt whose failure_reason
+        # is EXACTLY the recognized gross-wealth-insolvency string -- never
+        # only "succeeded" (that would make the frozen policy-terminal
+        # economic-failure path unverifiable), and never a generic/
+        # operational failure (resolve_attempt_outcome's own "incomplete"
+        # classification, which never authorizes a terminal verdict).
+        try:
+            outcome = resolve_attempt_outcome(store, trial_id)
+        except AuthorityRefusal:
+            return None
+        if outcome["status"] not in ("succeeded", "gross_insolvency_failed"):
             return None
     return status
 
@@ -159,22 +203,44 @@ def load_verified_closeout(
 def write_closeout_status(
     candidate_key: str,
     *,
-    evidence: Dict[str, Any],
-    hypothesis_ids: list[str],
-    verified_trial_ids: dict[str, str],
+    registry_db: Path,
+    benchmark_artifact_path: Optional[Path] = None,
+    judge_artifact_sha256: Optional[str] = None,
+    genuine_placebo_artifact_path: Optional[Path] = None,
+    dsr_pbo_sensitivity_artifact_path: Optional[Path] = None,
     campaign_root: Path = CAMPAIGN_ROOT,
 ) -> Path:
-    """The ONLY sanctioned writer of CANDIDATE_CLOSEOUT_STATUS.json. The
-    verdict is COMPUTED here by classify_verdict() from the caller-supplied
-    `evidence` and the frozen advancement_policy -- callers never supply a
-    verdict string directly (Finding 5, item 1). Fails closed (raises,
-    writes nothing) on a hypothesis/trial-id mismatch, on evidence
-    classify_verdict() cannot evaluate, or if the computed verdict is
-    somehow non-terminal (defensive; classify_verdict() only ever returns a
-    TERMINAL_VERDICTS member)."""
+    """The ONLY sanctioned writer of CANDIDATE_CLOSEOUT_STATUS.json.
+
+    Finding 1 (W06-A-CAMPAIGN-CLOSEOUT-AUTHORITY-REPAIR-03): the caller no
+    longer supplies `evidence`, `hypothesis_ids`, or `verified_trial_ids` --
+    every one of those is DERIVED by
+    campaign_closeout_authority.resolve_authoritative_evidence() from real
+    ResearchResultStore trials/attempts and real registered/artifact
+    authority. The caller supplies only IDENTITY/LOCATION inputs (a
+    registered judge's sha256, real evaluator-CLI output file paths) needed
+    to resolve those real authorities -- never a gate result. The verdict
+    is then COMPUTED by classify_verdict() from that resolved evidence and
+    the frozen advancement_policy, exactly as before (Finding 5, item 1).
+    Fails closed (raises, writes nothing) on any authority resolution
+    failure (AuthorityRefusal, including its MissingAuthoritativeSeam
+    subclass -- see that module's docstring for the one gate this repo
+    cannot yet resolve at all), on evidence classify_verdict() cannot
+    evaluate, or if the computed verdict is somehow non-terminal
+    (defensive; classify_verdict() only ever returns a TERMINAL_VERDICTS
+    member)."""
+    campaign = load_campaign(campaign_root)
+    evidence, hypothesis_ids, verified_trial_ids = resolve_authoritative_evidence(
+        candidate_key,
+        registry_db=registry_db,
+        campaign_root=campaign_root,
+        benchmark_artifact_path=benchmark_artifact_path,
+        judge_artifact_sha256=judge_artifact_sha256,
+        genuine_placebo_artifact_path=genuine_placebo_artifact_path,
+        dsr_pbo_sensitivity_artifact_path=dsr_pbo_sensitivity_artifact_path,
+    )
     if set(verified_trial_ids.keys()) != set(hypothesis_ids):
         raise ValueError("verified_trial_ids must have exactly one entry per declared hypothesis_id")
-    campaign = load_campaign(campaign_root)
     result = classify_verdict(evidence, campaign["advancement_policy"])
     verdict = result["verdict"]
     if verdict not in TERMINAL_VERDICTS:
@@ -191,7 +257,7 @@ def write_closeout_status(
     }
     path = candidate_closeout_status_path(candidate_key, campaign, campaign_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(status, sort_keys=True, indent=2, default=str), encoding="utf-8")
+    path.write_text(json.dumps(status, sort_keys=True, indent=2, default=str, allow_nan=False), encoding="utf-8")
     return path
 
 
