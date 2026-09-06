@@ -76,7 +76,7 @@
 //!   (never silently absent) and [`RobustnessGauntletOutput::is_complete`]
 //!   reports `false`.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use chrono::Datelike;
 use mqk_execution::StrategyOutput;
@@ -283,6 +283,132 @@ impl Strategy for DelayedStrategy {
 }
 
 // ---------------------------------------------------------------------------
+// TimestampBatchDelayedStrategy — W06-P9-REPLAY-IDENTITY-AND-BATCH-DELAY-REPAIR-01
+// (R2.3/R2.4): logical timestamp-BATCH execution-lag decorator for the
+// Research replay path.
+// ---------------------------------------------------------------------------
+
+/// Like [`DelayedStrategy`], but delays by whole distinct `end_ts`
+/// CROSS-SECTIONAL BATCHES rather than physical `on_bar` CALL count.
+///
+/// `DelayedStrategy` is correct for a strategy that makes one independent
+/// decision per physical `on_bar` call. [`crate::research_replay_strategy::ResearchOosReplayStrategy`]
+/// is not that: it emits ONE complete cross-sectional vector on the LAST
+/// physical row of a same-`end_ts` batch (every earlier row of that batch is
+/// an empty "not yet" output). Wrapping it in `DelayedStrategy(delay_bars=1)`
+/// would therefore re-emit that complete vector on the FIRST physical row of
+/// the NEXT timestamp batch -- before every symbol at that later timestamp
+/// has updated its own current mark, and dependent on that batch's own
+/// physical row count/order.
+///
+/// This type instead tracks batch completion the same way
+/// `ResearchOosReplayStrategy` does (an `expected_calls` map derived from
+/// the EXACT bars slice this instance will be run against, never a
+/// caller-declared count): it always drives the inner strategy's own
+/// `on_bar` on every physical call (so the inner strategy's internal state
+/// evolves exactly as it would unwrapped), but only treats a call as a
+/// "batch decision" when it is that batch's OWN final physical row, and only
+/// ever emits a buffered batch's decision on the FINAL physical row of a
+/// LATER batch, once `delay_batches` complete batches have elapsed. Never
+/// touches `DelayedStrategy` itself -- existing builtin-strategy P9 delay
+/// semantics are completely unchanged.
+struct TimestampBatchDelayedStrategy {
+    inner: Box<dyn Strategy>,
+    delay_batches: usize,
+    /// `end_ts` -> expected physical row count, derived from the EXACT bars
+    /// slice this instance will be run against (mirrors
+    /// `ResearchOosReplayStrategy::new`'s own technique).
+    expected_calls: HashMap<i64, usize>,
+    current_end_ts: Option<i64>,
+    calls_seen_for_current: usize,
+    /// FIFO of completed-batch outputs awaiting their delayed emission slot,
+    /// oldest first. Pushed exactly once per distinct `end_ts`, on that
+    /// batch's own final physical row; popped (and returned) on the final
+    /// physical row of a later batch once `delay_batches` batches have
+    /// accumulated.
+    buffer: VecDeque<StrategyOutput>,
+}
+
+impl TimestampBatchDelayedStrategy {
+    fn new(inner: Box<dyn Strategy>, delay_batches: usize, bars: &[BacktestBar]) -> Self {
+        let mut expected_calls: HashMap<i64, usize> = HashMap::new();
+        for bar in bars {
+            *expected_calls.entry(bar.end_ts).or_insert(0) += 1;
+        }
+        Self {
+            inner,
+            delay_batches,
+            expected_calls,
+            current_end_ts: None,
+            calls_seen_for_current: 0,
+            buffer: VecDeque::with_capacity(delay_batches + 1),
+        }
+    }
+}
+
+impl Strategy for TimestampBatchDelayedStrategy {
+    fn spec(&self) -> StrategySpec {
+        self.inner.spec()
+    }
+
+    /// See `DelayedStrategy::semantic_fingerprint` -- same
+    /// STRESS-TRANSFORM-SEMANTIC-IDENTITY-01 rationale (an effective-semantics
+    /// fingerprint distinct from the wrapped candidate's, never hashing any
+    /// result value), using a distinct schema name so this wrapper's
+    /// fingerprint can never collide with `DelayedStrategy`'s for the same
+    /// inner candidate and delay count.
+    fn semantic_fingerprint(&self) -> String {
+        SemanticIdentityBuilder::new(
+            SEMANTIC_IDENTITY_SCHEMA_V1,
+            "robustness_timestamp_batch_delayed_strategy",
+            "v1",
+        )
+        .push_str(&self.inner.semantic_fingerprint())
+        .push_i64(self.delay_batches as i64)
+        .finish()
+    }
+
+    fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
+        let real = self.inner.on_bar(ctx);
+
+        let end_ts = ctx
+            .recent
+            .last()
+            .expect("BacktestEngine always pushes the current bar before calling on_bar")
+            .end_ts;
+        if self.current_end_ts != Some(end_ts) {
+            self.current_end_ts = Some(end_ts);
+            self.calls_seen_for_current = 0;
+        }
+        self.calls_seen_for_current += 1;
+
+        let expected = *self.expected_calls.get(&end_ts).unwrap_or_else(|| {
+            panic!(
+                "TimestampBatchDelayedStrategy: end_ts={end_ts} was never present in the bars \
+                 slice this instance was constructed from -- constructed-vs-run bars mismatch"
+            )
+        });
+        if self.calls_seen_for_current < expected {
+            // Not yet this batch's final physical row -- never emit a
+            // decision early, whatever `real` was.
+            return StrategyOutput::new(Vec::new());
+        }
+
+        // This IS the batch's final physical row: `real` is that batch's
+        // complete decision (possibly an intentionally empty one -- "no
+        // scheduled decision this timestamp" is itself a real decision, not
+        // a partial-batch placeholder). Enqueue it, then emit whatever
+        // batch has now aged past `delay_batches`, if any.
+        self.buffer.push_back(real);
+        if self.buffer.len() > self.delay_batches {
+            self.buffer.pop_front().expect("just checked len > delay_batches >= 0")
+        } else {
+            StrategyOutput::new(Vec::new())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Output types
 // ---------------------------------------------------------------------------
 
@@ -476,6 +602,67 @@ fn execution_delay_scenario(
         };
     }
     let delayed = DelayedStrategy::new(inner, 1);
+    match run_engine(base_config.clone(), bars, Box::new(delayed)) {
+        Ok(report) => {
+            let (bar_passed, bar_detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
+            let (edge_passed, edge_detail) =
+                clears_economic_edge(baseline_final, initial_cash, &report.equity_curve);
+            let passed = bar_passed && edge_passed;
+            RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed,
+                reason: if passed {
+                    None
+                } else if !bar_passed {
+                    Some(bar_detail.clone())
+                } else {
+                    Some(edge_detail.clone())
+                },
+                detail: format!("{bar_detail}; {edge_detail}"),
+                research_trial_id: None,
+                evidence: None,
+            }
+        }
+        Err(e) => RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(e.clone()),
+            detail: e,
+            research_trial_id: None,
+            evidence: None,
+        },
+    }
+}
+
+/// R2.4: `execution_delay_stress` for the Research replay path, using
+/// [`TimestampBatchDelayedStrategy`] (one whole distinct-timestamp batch of
+/// logical delay) instead of [`DelayedStrategy`]'s physical-row count.
+/// Otherwise byte-for-byte identical judgment logic to
+/// [`execution_delay_scenario`].
+fn execution_delay_scenario_batch_aware(
+    baseline: &BacktestReport,
+    base_config: &BacktestConfig,
+    bars: &[BacktestBar],
+    make_strategy: &impl Fn() -> Box<dyn Strategy>,
+) -> RobustnessScenarioOutcome {
+    let name = "execution_delay_stress".to_string();
+    let initial_cash = base_config.initial_cash_micros;
+    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
+    let inner = make_strategy();
+    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(e.clone()),
+            detail: e,
+            research_trial_id: None,
+            evidence: None,
+        };
+    }
+    let delayed = TimestampBatchDelayedStrategy::new(inner, 1, bars);
     match run_engine(base_config.clone(), bars, Box::new(delayed)) {
         Ok(report) => {
             let (bar_passed, bar_detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
@@ -955,6 +1142,90 @@ fn placebo_temporal_offset_scenario(
     }
 }
 
+/// R2.4: `placebo_temporal_offset` for the Research replay path, using
+/// [`TimestampBatchDelayedStrategy`] (a logical whole-batch offset, derived
+/// from the count of DISTINCT `end_ts` batches rather than physical bar
+/// rows) instead of [`DelayedStrategy`]'s physical-row count. Preserves the
+/// canonical scenario intent of a roughly half-run temporal displacement --
+/// only the unit of measurement changes (batches, not rows). Otherwise
+/// byte-for-byte identical judgment logic to [`placebo_temporal_offset_scenario`].
+fn placebo_temporal_offset_scenario_batch_aware(
+    baseline: &BacktestReport,
+    base_config: &BacktestConfig,
+    bars: &[BacktestBar],
+    make_strategy: &impl Fn() -> Box<dyn Strategy>,
+) -> RobustnessScenarioOutcome {
+    let name = "placebo_temporal_offset".to_string();
+    let initial_cash = base_config.initial_cash_micros;
+    let distinct_batches = bars.iter().map(|b| b.end_ts).collect::<BTreeSet<_>>().len();
+    let delay_batches = (distinct_batches / 2).max(1);
+
+    let baseline_final = baseline
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial_cash);
+
+    let inner = make_strategy();
+    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+        return RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(e.clone()),
+            detail: e,
+            research_trial_id: None,
+            evidence: None,
+        };
+    }
+    let delayed = TimestampBatchDelayedStrategy::new(inner, delay_batches, bars);
+
+    match run_engine(base_config.clone(), bars, Box::new(delayed)) {
+        Ok(report) => {
+            let placebo_final = report
+                .equity_curve
+                .last()
+                .map(|(_, eq)| *eq)
+                .unwrap_or(initial_cash);
+            // Per the ledger's explicit hard stop: if the placebo performs
+            // as well as or better than the real signal, that is a genuine
+            // finding to report -- never tuned away.
+            let passed = placebo_final < baseline_final;
+            RobustnessScenarioOutcome {
+                name,
+                applicable: true,
+                passed,
+                reason: if passed {
+                    None
+                } else {
+                    Some(format!(
+                        "placebo (delay={delay_batches} timestamp batches) \
+                         final_equity_micros={placebo_final} is NOT worse than the real signal's \
+                         baseline_final_equity_micros={baseline_final} -- this candidate's real \
+                         signal may not be distinguishable from a temporally-decorrelated one; \
+                         reported as found, not adjusted away"
+                    ))
+                },
+                detail: format!(
+                    "delay_batches={delay_batches}, baseline_final_equity_micros={baseline_final}, \
+                     placebo_final_equity_micros={placebo_final}"
+                ),
+                research_trial_id: None,
+                evidence: None,
+            }
+        }
+        Err(e) => RobustnessScenarioOutcome {
+            name,
+            applicable: true,
+            passed: false,
+            reason: Some(e.clone()),
+            detail: e,
+            research_trial_id: None,
+            evidence: None,
+        },
+    }
+}
+
 /// Build the `conservative_capacity_stress` adversarial config: the SAME
 /// accepted conservative daily-loss/max-drawdown ratios
 /// `stress_suite::conservative_risk_limits_config` uses, combined with a
@@ -1097,11 +1368,19 @@ pub fn run_robustness_gauntlet_with_symbol_loo_factory(
     make_strategy_for_bars: impl Fn(&[BacktestBar]) -> Box<dyn Strategy>,
 ) -> RobustnessGauntletOutput {
     let scenarios = vec![
-        execution_delay_scenario(baseline, base_config, bars, &make_strategy),
+        // R2.4: batch-aware execution-delay/placebo-offset for the Research
+        // replay path -- `ResearchOosReplayStrategy` emits one complete
+        // decision per TIMESTAMP BATCH (potentially many physical rows),
+        // never one per physical row, so the physical-row-counting
+        // `DelayedStrategy` these two scenarios use everywhere else would
+        // emit a delayed decision mid-batch (see `TimestampBatchDelayedStrategy`
+        // module docs). `run_robustness_gauntlet` (the builtin-strategy
+        // entry point) is completely untouched.
+        execution_delay_scenario_batch_aware(baseline, base_config, bars, &make_strategy),
         symbol_leave_one_out_scenario_with_factory(baseline, base_config, bars, &make_strategy_for_bars),
         month_year_regime_concentration_scenario(baseline, bars),
         parameter_neighborhood_scenario(baseline, base_config, bars, &make_strategy),
-        placebo_temporal_offset_scenario(baseline, base_config, bars, &make_strategy),
+        placebo_temporal_offset_scenario_batch_aware(baseline, base_config, bars, &make_strategy),
         conservative_capacity_stress_scenario(baseline, base_config, bars, &make_strategy),
     ];
 
@@ -1182,6 +1461,7 @@ mod research_oos_replay_integration_tests {
             equity_usd: 100_000.0,
             max_target_qty: None,
             max_position_notional_usd: None,
+            trial_id: "test-trial-0001".to_string(),
         }
     }
 
@@ -1309,6 +1589,179 @@ mod research_oos_replay_integration_tests {
         );
         assert!(outcome.applicable);
         assert!(outcome.passed, "{:?}", outcome.reason);
+    }
+
+    // -----------------------------------------------------------------------
+    // W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02 (Patch R2) required
+    // tests: R2.1 strategy_name contract, R2.5 batch-delay order-independence.
+    // -----------------------------------------------------------------------
+
+    /// R2.1 (gauntlet-level companion to `spec_name_is_research_strategy_id`):
+    /// the REAL `RobustnessGauntletOutput` produced through the actual
+    /// entry point carries the Research `strategy_id` as `strategy_name`,
+    /// since it is copied verbatim from `baseline.strategy_name` (itself
+    /// `Strategy::spec().name`).
+    #[test]
+    fn gauntlet_strategy_name_is_research_strategy_id() {
+        let bars = two_symbol_bars(3);
+        let schedule = schedule_for(&bars, 10);
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule.clone(), &bars);
+        let config = daily_config();
+        let baseline_report = run_engine(config.clone(), &bars, Box::new(strategy)).unwrap();
+        assert_eq!(baseline_report.strategy_name, "test_strategy_v1");
+
+        let make_strategy = || -> Box<dyn Strategy> {
+            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule.clone(), &bars))
+        };
+        let make_strategy_for_bars = |filtered: &[BacktestBar]| -> Box<dyn Strategy> {
+            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(filtered, 10), filtered))
+        };
+        let gauntlet = run_robustness_gauntlet_with_symbol_loo_factory(
+            &baseline_report,
+            &config,
+            &bars,
+            make_strategy,
+            make_strategy_for_bars,
+        );
+        assert_eq!(gauntlet.strategy_name, "test_strategy_v1");
+    }
+
+    /// Same two symbols/schedule/config as [`two_symbol_bars`]/[`schedule_for`],
+    /// but with each timestamp batch's two physical rows in the OPPOSITE
+    /// order -- `schedule_for` keys only on `end_ts`, so the schedule content
+    /// is identical either way; only physical row order within each batch
+    /// differs.
+    fn two_symbol_bars_swapped_order(days: i64) -> Vec<BacktestBar> {
+        let mut out = Vec::new();
+        for d in 0..days {
+            let ts = DAY * (d + 1);
+            out.push(BacktestBar::new("BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000));
+            out.push(BacktestBar::new("AAA", ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000));
+        }
+        out
+    }
+
+    /// R2.5 test 1: permuting all symbols within each timestamp under
+    /// BASELINE replay produces an identical final report (equity, order
+    /// count, fill count) -- `ResearchOosReplayStrategy` never inspects bar
+    /// CONTENT, only counts calls, so a same-`end_ts` physical row
+    /// permutation can never change its output.
+    #[test]
+    fn baseline_replay_is_order_independent_under_symbol_permutation() {
+        let bars_a = two_symbol_bars(3);
+        let bars_b = two_symbol_bars_swapped_order(3);
+        let strat_a = ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_a, 10), &bars_a);
+        let strat_b = ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_b, 10), &bars_b);
+        let report_a = run_engine(daily_config(), &bars_a, Box::new(strat_a)).unwrap();
+        let report_b = run_engine(daily_config(), &bars_b, Box::new(strat_b)).unwrap();
+        assert_eq!(
+            report_a.equity_curve.last().map(|(_, eq)| *eq),
+            report_b.equity_curve.last().map(|(_, eq)| *eq),
+        );
+        assert_eq!(report_a.orders.len(), report_b.orders.len());
+        assert_eq!(report_a.fills.len(), report_b.fills.len());
+    }
+
+    /// R2.5 test 2: the same permutation invariance holds under
+    /// `execution_delay_stress` once it uses [`TimestampBatchDelayedStrategy`]
+    /// (`execution_delay_scenario_batch_aware`) -- proven by comparing the
+    /// REAL scenario's own `detail` string (which embeds the resulting
+    /// final-equity value) across both physical row orderings.
+    #[test]
+    fn execution_delay_stress_is_order_independent_under_symbol_permutation() {
+        let bars_a = two_symbol_bars(4);
+        let bars_b = two_symbol_bars_swapped_order(4);
+        let config = daily_config();
+
+        let baseline_a =
+            run_engine(config.clone(), &bars_a, Box::new(ResearchOosReplayStrategy::new(
+                semantic(), schedule_for(&bars_a, 10), &bars_a,
+            )))
+            .unwrap();
+        let baseline_b =
+            run_engine(config.clone(), &bars_b, Box::new(ResearchOosReplayStrategy::new(
+                semantic(), schedule_for(&bars_b, 10), &bars_b,
+            )))
+            .unwrap();
+
+        let make_a = || -> Box<dyn Strategy> {
+            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_a, 10), &bars_a))
+        };
+        let make_b = || -> Box<dyn Strategy> {
+            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_b, 10), &bars_b))
+        };
+
+        let outcome_a = execution_delay_scenario_batch_aware(&baseline_a, &config, &bars_a, &make_a);
+        let outcome_b = execution_delay_scenario_batch_aware(&baseline_b, &config, &bars_b, &make_b);
+        assert_eq!(outcome_a.passed, outcome_b.passed);
+        assert_eq!(outcome_a.detail, outcome_b.detail);
+    }
+
+    /// R2.5 test 3: the same permutation invariance holds under
+    /// `placebo_temporal_offset` once it uses [`TimestampBatchDelayedStrategy`]
+    /// (`placebo_temporal_offset_scenario_batch_aware`).
+    #[test]
+    fn placebo_temporal_offset_is_order_independent_under_symbol_permutation() {
+        let bars_a = two_symbol_bars(6);
+        let bars_b = two_symbol_bars_swapped_order(6);
+        let config = daily_config();
+
+        let baseline_a =
+            run_engine(config.clone(), &bars_a, Box::new(ResearchOosReplayStrategy::new(
+                semantic(), schedule_for(&bars_a, 10), &bars_a,
+            )))
+            .unwrap();
+        let baseline_b =
+            run_engine(config.clone(), &bars_b, Box::new(ResearchOosReplayStrategy::new(
+                semantic(), schedule_for(&bars_b, 10), &bars_b,
+            )))
+            .unwrap();
+
+        let make_a = || -> Box<dyn Strategy> {
+            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_a, 10), &bars_a))
+        };
+        let make_b = || -> Box<dyn Strategy> {
+            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_b, 10), &bars_b))
+        };
+
+        let outcome_a = placebo_temporal_offset_scenario_batch_aware(&baseline_a, &config, &bars_a, &make_a);
+        let outcome_b = placebo_temporal_offset_scenario_batch_aware(&baseline_b, &config, &bars_b, &make_b);
+        assert_eq!(outcome_a.passed, outcome_b.passed);
+        assert_eq!(outcome_a.detail, outcome_b.detail);
+    }
+
+    /// R2.5 test 4: the delayed target vector never appears before the FINAL
+    /// physical row of the delayed-to timestamp -- proven directly against
+    /// [`TimestampBatchDelayedStrategy`] (not `DelayedStrategy`, which this
+    /// mission explicitly forbids using for the multi-row-per-timestamp
+    /// replay case): with `delay_batches=1` and a 2-row batch, the FIRST row
+    /// of the second timestamp must still emit empty; only the SECOND
+    /// (final) row of the second timestamp emits the first batch's decision.
+    #[test]
+    fn timestamp_batch_delay_never_emits_before_final_row_of_delayed_to_batch() {
+        let bars = two_symbol_bars(2);
+        let inner = ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars, 10), &bars);
+        let mut delayed = TimestampBatchDelayedStrategy::new(Box::new(inner), 1, &bars);
+
+        let ctx = |end_ts: i64| -> StrategyContext {
+            let recent = mqk_strategy::RecentBarsWindow::new(
+                10,
+                vec![mqk_strategy::BarStub::with_ohlcv(
+                    end_ts, true, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000,
+                )],
+            );
+            StrategyContext::new(DAY, 1, recent)
+        };
+
+        // Batch 1 (end_ts=DAY), both rows: buffering, nothing emitted yet.
+        assert!(delayed.on_bar(&ctx(DAY)).targets.is_empty());
+        assert!(delayed.on_bar(&ctx(DAY)).targets.is_empty());
+        // Batch 2 (end_ts=2*DAY), FIRST row: must still be empty -- batch 2
+        // is not yet complete, so batch 1's decision must not leak early.
+        assert!(delayed.on_bar(&ctx(2 * DAY)).targets.is_empty());
+        // Batch 2's FINAL row: batch 1's decision is emitted now.
+        let emitted = delayed.on_bar(&ctx(2 * DAY));
+        assert!(!emitted.targets.is_empty(), "batch 1's decision must emit on batch 2's final row");
     }
 }
 

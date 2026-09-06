@@ -64,6 +64,18 @@ pub struct ReplaySemanticSpec {
     pub equity_usd: f64,
     pub max_target_qty: Option<i64>,
     pub max_position_notional_usd: Option<f64>,
+    /// W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02 (R1.4/R2.2): the
+    /// authenticated Research `trial_id` this replay schedule was computed
+    /// from -- LINEAGE, distinct from the methodology fields above, but
+    /// itself RESULT-INDEPENDENT (`build_economic_trial_identity` excludes
+    /// every evaluation-output field: AUC/logloss/returns/eval_ids/artifact
+    /// paths -- see research-py/src/mqk_research/ml/economic_registry_integration.py).
+    /// Included in [`Self`]'s semantic fingerprint so two trials sharing
+    /// identical strategy/feature/policy methodology but differing training
+    /// data/model hyperparameters can never collide onto the same replay
+    /// candidate identity. `economic_eval_id` (a RESULT) must never be added
+    /// here -- see module/fingerprint docs.
+    pub trial_id: String,
 }
 
 /// Converts an f64 to a deterministic fixed-point i64 for semantic hashing
@@ -142,15 +154,24 @@ fn timeframe_secs_from_semantic(semantic: &ReplaySemanticSpec) -> i64 {
 }
 
 impl Strategy for ResearchOosReplayStrategy {
+    /// W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02 (R2.1): the exact
+    /// Research `strategy_id`, never a fixed replay-protocol literal --
+    /// `evaluate_backtest_evidence_gate`'s cross-candidate promotion
+    /// authority requires `BacktestReport.strategy_name ==
+    /// <promotion strategy_id>`.
     fn spec(&self) -> StrategySpec {
-        StrategySpec::new("research_oos_replay_v1", self.timeframe_secs)
+        StrategySpec::new(self.semantic.strategy_id.clone(), self.timeframe_secs)
     }
 
-    /// Mission B4: built ONLY from `self.semantic` -- identical for the
+    /// Mission B4/R2.2: built ONLY from `self.semantic` -- identical for the
     /// baseline strategy and every symbol-leave-one-out variant sharing the
     /// same candidate methodology, since `semantic` never varies by
-    /// excluded symbol or by result. `trial_id`/`economic_eval_id`/excluded
-    /// symbol/P&L/artifact paths never participate.
+    /// excluded symbol or by result. Includes the authenticated,
+    /// result-independent `trial_id` (see `ReplaySemanticSpec::trial_id`
+    /// docs) so two trials sharing identical methodology but differing
+    /// training data/model hyperparameters can never collide onto the same
+    /// identity. `economic_eval_id`/excluded symbol/P&L/artifact paths never
+    /// participate.
     fn semantic_fingerprint(&self) -> String {
         let s = &self.semantic;
         let mut b = SemanticIdentityBuilder::new(
@@ -160,6 +181,7 @@ impl Strategy for ResearchOosReplayStrategy {
         );
         b.push_str(&s.replay_protocol_version)
             .push_str(&s.strategy_id)
+            .push_str(&s.trial_id)
             .push_i64(s.feature_columns.len() as i64);
         for col in &s.feature_columns {
             b.push_str(col);
@@ -245,6 +267,7 @@ mod tests {
             equity_usd: 100_000.0,
             max_target_qty: None,
             max_position_notional_usd: None,
+            trial_id: "test-trial-0001".to_string(),
         }
     }
 
@@ -383,6 +406,57 @@ mod tests {
         let a = ResearchOosReplayStrategy::new(semantic(), schedule.clone(), &bars);
         let mut mutated = semantic();
         mutated.rank_side_count = 3;
+        let b = ResearchOosReplayStrategy::new(mutated, schedule, &bars);
+        assert_ne!(a.semantic_fingerprint(), b.semantic_fingerprint());
+    }
+
+    // -----------------------------------------------------------------------
+    // W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02 (Patch R2) required tests
+    // -----------------------------------------------------------------------
+
+    /// R2.1: `spec().name` is the exact Research `strategy_id`, never a
+    /// fixed replay-protocol literal -- required by
+    /// `evaluate_backtest_evidence_gate`'s cross-candidate promotion
+    /// authority (`BacktestReport.strategy_name == promotion strategy_id`).
+    #[test]
+    fn spec_name_is_research_strategy_id() {
+        let bars = two_symbol_two_day_bars();
+        let schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        let strat = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        assert_eq!(strat.spec().name, "test_strategy_v1");
+    }
+
+    /// R2.2: same trial (`trial_id` unchanged) but hypothetically differing
+    /// `economic_eval_id` (a RESULT, not even a field on
+    /// `ReplaySemanticSpec`/this fingerprint) never changes the fingerprint
+    /// -- proven structurally, composed with `fingerprint_identical_for_
+    /// baseline_and_loo_schedule_variant` above (same trial/semantic, only
+    /// the schedule/excluded-symbol content differs, fingerprint identical).
+    #[test]
+    fn same_trial_id_same_fingerprint_regardless_of_schedule_content() {
+        let bars = two_symbol_two_day_bars();
+        let mut schedule_a: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule_a.insert(1_000, vec![TargetPosition::new("AAA", 5)]);
+        let mut schedule_b: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule_b.insert(1_000, vec![TargetPosition::new("AAA", -5), TargetPosition::new("BBB", 5)]);
+
+        let a = ResearchOosReplayStrategy::new(semantic(), schedule_a, &bars);
+        let b = ResearchOosReplayStrategy::new(semantic(), schedule_b, &bars);
+        assert_eq!(a.semantic_fingerprint(), b.semantic_fingerprint());
+    }
+
+    /// R2.2: a different, authenticated `trial_id` (distinct training data/
+    /// model identity per `build_economic_trial_identity`) DOES change the
+    /// fingerprint -- two trials sharing identical strategy/feature/policy
+    /// methodology must never collide onto the same replay candidate
+    /// identity.
+    #[test]
+    fn different_trial_id_changes_fingerprint() {
+        let bars = two_symbol_two_day_bars();
+        let schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        let a = ResearchOosReplayStrategy::new(semantic(), schedule.clone(), &bars);
+        let mut mutated = semantic();
+        mutated.trial_id = "test-trial-0002".to_string();
         let b = ResearchOosReplayStrategy::new(mutated, schedule, &bars);
         assert_ne!(a.semantic_fingerprint(), b.semantic_fingerprint());
     }

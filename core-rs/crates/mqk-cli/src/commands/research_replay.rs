@@ -96,22 +96,28 @@ struct ReplaySemanticSpecDto {
     weight_to_share: ReplayWeightToShareDto,
 }
 
-impl From<ReplaySemanticSpecDto> for ReplaySemanticSpec {
-    fn from(d: ReplaySemanticSpecDto) -> Self {
+impl ReplaySemanticSpecDto {
+    /// `trial_id` is deliberately NOT a field of `ReplaySemanticSpecDto`
+    /// (mirrors Python's `replay_semantic_spec` JSON section, which
+    /// structurally excludes it -- see oos_replay_bundle.py's TEST 12) --
+    /// the caller must supply it from `manifest.lineage.trial_id`
+    /// (R1.4/R2.2).
+    fn into_semantic(self, trial_id: String) -> ReplaySemanticSpec {
         ReplaySemanticSpec {
-            replay_protocol_version: d.replay_protocol_version,
-            strategy_id: d.strategy_id,
-            feature_columns: d.feature_columns,
-            feature_transform: d.feature_transform,
-            direction_policy: d.direction_policy,
-            rank_side_count: d.rank_side_count,
-            long_only: d.long_only,
-            borrow_model: d.borrow_model,
-            max_gross_exposure: d.max_gross_exposure,
-            timeframe: d.timeframe,
-            equity_usd: d.weight_to_share.equity_usd,
-            max_target_qty: d.weight_to_share.max_target_qty,
-            max_position_notional_usd: d.weight_to_share.max_position_notional_usd,
+            replay_protocol_version: self.replay_protocol_version,
+            strategy_id: self.strategy_id,
+            feature_columns: self.feature_columns,
+            feature_transform: self.feature_transform,
+            direction_policy: self.direction_policy,
+            rank_side_count: self.rank_side_count,
+            long_only: self.long_only,
+            borrow_model: self.borrow_model,
+            max_gross_exposure: self.max_gross_exposure,
+            timeframe: self.timeframe,
+            equity_usd: self.weight_to_share.equity_usd,
+            max_target_qty: self.weight_to_share.max_target_qty,
+            max_position_notional_usd: self.weight_to_share.max_position_notional_usd,
+            trial_id,
         }
     }
 }
@@ -255,12 +261,13 @@ pub fn resolve_replay_bundle(
         loo_schedules.insert(symbol.clone(), load_schedule_csv(&path)?);
     }
 
+    let trial_id = manifest.lineage.trial_id;
     Ok(ResolvedReplayBundle {
         bundle_dir: bundle_dir.to_path_buf(),
-        trial_id: manifest.lineage.trial_id,
+        trial_id: trial_id.clone(),
         strategy_id: manifest.lineage.strategy_id,
         economic_eval_id: manifest.lineage.economic_eval_id,
-        semantic: manifest.replay_semantic_spec.into(),
+        semantic: manifest.replay_semantic_spec.into_semantic(trial_id),
         bars_csv_path,
         baseline_schedule,
         loo_schedules,
@@ -822,6 +829,7 @@ mod tests {
             equity_usd: 100_000.0,
             max_target_qty: None,
             max_position_notional_usd: None,
+            trial_id: "trial-1".to_string(),
         };
         let bundle = ResolvedReplayBundle {
             bundle_dir: bundle_dir.clone(),
