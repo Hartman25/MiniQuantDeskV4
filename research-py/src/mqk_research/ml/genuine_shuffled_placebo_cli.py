@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import json
 import sys
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -83,7 +84,14 @@ _MIN_OOS_ROWS_FOR_SHUFFLE = 20
 
 
 def _reconstruct_baseline_spec(econ: Dict[str, Any]) -> EconomicWalkForwardSpec:
-    signal_policy = SignalPolicySpec(**econ["signal_policy"])
+    # See identical fix/comment in p7a_p7b_economic_replay_stress_cli.py's
+    # own `_reconstruct_baseline_spec`: `tie_policy` is persisted into
+    # `signal_policy` for cross_sectional_rank_* direction policies but is
+    # not a `SignalPolicySpec.__init__` parameter.
+    signal_policy_fields = {f.name for f in fields(SignalPolicySpec)}
+    signal_policy = SignalPolicySpec(
+        **{k: v for k, v in econ["signal_policy"].items() if k in signal_policy_fields}
+    )
     cost_model = CostModelSpec(**econ["cost_model"])
     execution_pricing = ExecutionPricingSpec(**econ["execution_pricing"])
     annualization = AnnualizationSpec(**econ["annualization"])

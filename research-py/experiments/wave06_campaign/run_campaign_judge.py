@@ -45,6 +45,7 @@ _LOCAL_SRC = resolve_local_src(Path(__file__))
 if str(_LOCAL_SRC) not in sys.path:
     sys.path.insert(0, str(_LOCAL_SRC))
 
+from mqk_research.exp_distributed.hashing import canonical_json, sha256_bytes  # noqa: E402
 from mqk_research.exp_distributed.storage import ResearchResultStore  # noqa: E402
 from mqk_research.ml.multiple_testing_judge import build_multiple_testing_judge  # noqa: E402
 
@@ -158,16 +159,65 @@ def run_campaign_judge(*, registry_db: Path = CAMPAIGN_REGISTRY_DB) -> dict:
     return judge
 
 
-def main(argv: list[str] | None = None) -> None:
+def compute_judge_artifact_sha256(judge: dict) -> str:
+    """Recomputes `judge_artifact_sha256` from an already-produced judge dict
+    using the EXACT SAME formula `build_multiple_testing_judge` used to
+    register it (`sha256_bytes(canonical_json(judge_artifact))`) -- never a
+    second interpretation. Used by `main()`'s machine-readable output so a
+    caller (e.g. the Wave06 canonical replay CLI, R3.4) can resolve the
+    canonical baseline judge's authority without itself accepting an
+    operator-supplied SHA."""
+    return sha256_bytes(canonical_json(judge).encode("utf-8"))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """W06-A-P9-CANONICAL-CLI-AUTHORITY-REPAIR-01 (R3.4): `--json` emits one
+    machine-readable JSON object on stdout (`{"status": "ok",
+    "judge_artifact_sha256": ..., "judge_id": ...}` or
+    `{"status": "error", "reason": ...}`) instead of relying on side-effect
+    return values only -- the seam a Rust caller resolves the canonical
+    Wave06 campaign judge through, rather than accepting an arbitrary
+    caller-supplied judge_artifact_sha256 (Finding H). `--registry-db`
+    overrides the default campaign registry (tests / non-production
+    invocations); omit it to use the real campaign registry."""
     argv = sys.argv[1:] if argv is None else argv
     if "--execute" not in argv:
         print(
             "REFUSED: the campaign judge requires the explicit --execute flag (hard execution guard).",
             file=sys.stderr,
         )
-        raise SystemExit(3)
-    run_campaign_judge()
+        return 3
+
+    registry_db = CAMPAIGN_REGISTRY_DB
+    if "--registry-db" in argv:
+        registry_db = Path(argv[argv.index("--registry-db") + 1])
+
+    emit_json = "--json" in argv
+    if not emit_json:
+        run_campaign_judge(registry_db=registry_db)
+        return 0
+
+    try:
+        judge = run_campaign_judge(registry_db=registry_db)
+    except Exception as exc:  # noqa: BLE001 -- deliberate catch-all: fail closed with
+        # structured JSON, never a raw Python traceback for a Rust caller to fail to
+        # parse (mirrors this repo's other cross-language CLI wrappers).
+        json.dump({"status": "error", "reason": str(exc)}, sys.stdout)
+        return 1
+
+    judge_artifact_sha256 = compute_judge_artifact_sha256(judge)
+    json.dump(
+        {
+            "status": "ok",
+            "judge_artifact_sha256": judge_artifact_sha256,
+            "judge_id": judge["ids"]["judge_id"],
+            "judge_status": judge["judge_status"],
+            "experiment_id": judge["scope"]["experiment_id"],
+        },
+        sys.stdout,
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

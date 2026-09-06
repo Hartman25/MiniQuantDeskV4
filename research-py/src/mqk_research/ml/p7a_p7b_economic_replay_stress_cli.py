@@ -74,7 +74,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -197,7 +197,20 @@ def _validate_genuine_p7a_p7b_adversity(
 
 
 def _reconstruct_baseline_spec(econ: Dict[str, Any]) -> EconomicWalkForwardSpec:
-    signal_policy = SignalPolicySpec(**econ["signal_policy"])
+    # `run_economic_walkforward` persists `signal_policy` with an additional
+    # `tie_policy` key for cross_sectional_rank_* direction policies
+    # (identity-bearing there, but not a `SignalPolicySpec.__init__`
+    # parameter -- see economic_walkforward.py's own comment at the
+    # `tie_policy` assignment site). Filtering to the dataclass's own field
+    # names reconstructs the exact same spec `SignalPolicySpec(**econ[...])`
+    # would for every OTHER direction policy (which never has that extra
+    # key) while no longer crashing on this one -- discovered while
+    # constructing W06-A-P9-CANONICAL-CLI-AUTHORITY-REPAIR-01's synthetic
+    # E2E fixture (Wave06 LIQ-01/VOL-01 are cross_sectional_rank_* trials).
+    signal_policy_fields = {f.name for f in fields(SignalPolicySpec)}
+    signal_policy = SignalPolicySpec(
+        **{k: v for k, v in econ["signal_policy"].items() if k in signal_policy_fields}
+    )
     cost_model = CostModelSpec(**econ["cost_model"])
     execution_pricing = ExecutionPricingSpec(**econ["execution_pricing"])
     annualization = AnnualizationSpec(**econ["annualization"])

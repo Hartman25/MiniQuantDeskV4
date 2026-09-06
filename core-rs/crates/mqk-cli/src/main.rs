@@ -753,10 +753,13 @@ enum BacktestCmd {
         #[arg(long)]
         economic_eval_id: String,
 
-        /// Directory containing W06-P9-REPLAY-AUTHORITY-01's manifest.json
-        /// + schedule CSVs for this trial/economic_eval_id.
+        /// Fresh/empty destination directory this command builds its own
+        /// W06-P9-REPLAY-AUTHORITY-01 replay bundle into (via the Research
+        /// Python builder) -- NEVER a pre-existing bundle directory to
+        /// trust (W06-A-P9-CANONICAL-CLI-AUTHORITY-REPAIR-01, R3.1). Must
+        /// not already contain a manifest.json.
         #[arg(long)]
-        replay_bundle_dir: String,
+        replay_work_dir: String,
 
         /// Artifact root directory (same meaning as `backtest csv/db
         /// --out-dir`) -- the run directory is `{out_dir}/{run_id}/`.
@@ -771,49 +774,12 @@ enum BacktestCmd {
         #[arg(long, default_value = "python")]
         python: String,
 
-        /// The exact, already-registered P7C-authorized judge_artifact_sha256
-        /// for the dsr_pbo_sensitivity finalization.
-        #[arg(long)]
-        judge_artifact_sha256: String,
-
-        /// Comma-separated CSCV block-count grid (each value even, >= 4).
-        #[arg(long)]
-        block_counts: String,
-
-        /// Maximum allowed DSR spread across `block_counts`.
-        #[arg(long)]
-        dsr_max_sensitivity_range: f64,
-
-        /// Maximum allowed PBO spread across `block_counts`.
-        #[arg(long)]
-        pbo_max_sensitivity_range: f64,
-
         /// Output directory for the P7A/P7B stress re-evaluation's own
-        /// artifacts.
+        /// artifacts. (P7A/P7B stress knobs and the max-drawdown ceiling
+        /// are frozen Wave06 campaign policy, sourced internally from
+        /// PREDECLARED_CAMPAIGN.json -- never a CLI flag; R3.3.)
         #[arg(long)]
         stress_out_dir: String,
-
-        /// P7A stress knob: slippage_bps.
-        #[arg(long)]
-        stress_execution_slippage_bps: u32,
-
-        /// P7A stress knob: volatility_mult_bps.
-        #[arg(long)]
-        stress_execution_volatility_mult_bps: u32,
-
-        /// P7B stress knob: max_target_qty (optional -- omit for uncapped).
-        #[arg(long)]
-        stress_max_target_qty: Option<u32>,
-
-        /// P7B stress knob: max_position_notional_usd (optional -- omit for
-        /// uncapped).
-        #[arg(long)]
-        stress_max_position_notional_usd: Option<f64>,
-
-        /// Maximum allowed max-drawdown fraction for the P7A/P7B stress
-        /// replay.
-        #[arg(long)]
-        max_drawdown_ceiling: f64,
 
         /// Output directory for the genuine shuffled placebo's own
         /// artifacts.
@@ -1835,20 +1801,11 @@ async fn run_cli() -> Result<()> {
                 trial_id,
                 strategy_id,
                 economic_eval_id,
-                replay_bundle_dir,
+                replay_work_dir,
                 out_dir,
                 research_py_root,
                 python,
-                judge_artifact_sha256,
-                block_counts,
-                dsr_max_sensitivity_range,
-                pbo_max_sensitivity_range,
                 stress_out_dir,
-                stress_execution_slippage_bps,
-                stress_execution_volatility_mult_bps,
-                stress_max_target_qty,
-                stress_max_position_notional_usd,
-                max_drawdown_ceiling,
                 placebo_out_dir,
             } => {
                 let summary = run_research_replay_backtest(ResearchReplayArgs {
@@ -1856,20 +1813,11 @@ async fn run_cli() -> Result<()> {
                     trial_id,
                     strategy_id,
                     economic_eval_id,
-                    replay_bundle_dir,
+                    replay_work_dir,
                     out_dir,
                     research_py_root,
                     python,
-                    judge_artifact_sha256,
-                    block_counts,
-                    dsr_max_sensitivity_range,
-                    pbo_max_sensitivity_range,
                     stress_out_dir,
-                    stress_execution_slippage_bps,
-                    stress_execution_volatility_mult_bps,
-                    stress_max_target_qty,
-                    stress_max_position_notional_usd,
-                    max_drawdown_ceiling,
                     placebo_out_dir,
                 })?;
                 println!("trial_id={}", summary.trial_id);

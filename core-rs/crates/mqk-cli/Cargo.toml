@@ -64,3 +64,9 @@ predicates = "3"
 # CLI-DAEMON-CONTROL-PASSTHROUGH-01: same hermetic HTTP-mock seam mqk-md
 # already uses (crates/mqk-md/Cargo.toml) for provider-adapter tests.
 httpmock = "0.7"
+# W06-A-P9-CANONICAL-CLI-AUTHORITY-REPAIR-01 (R3.5): the synthetic E2E proof
+# test consumes resolve_backtest_evidence to prove the canonical replay
+# command's own artifact tree is consumable by the real production
+# evidence-resolution seam -- test-only, no production code in this crate
+# calls into mqk-promotion.
+mqk-promotion = { path = "../mqk-promotion" }

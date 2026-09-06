@@ -1824,6 +1824,7 @@ dependencies = [
  "mqk-integrity",
  "mqk-md",
  "mqk-portfolio",
+ "mqk-promotion",
  "mqk-reconcile",
  "mqk-runtime",
  "mqk-strategy",

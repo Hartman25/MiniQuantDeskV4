@@ -17,10 +17,21 @@
 //! A/B deliberately do none) -- a wrong/mutated/missing bundle file, a wrong
 //! trial/strategy/economic_eval_id, or a replay schedule that does not match
 //! the resolved bars all fail closed here, before any engine run.
+//!
+//! W06-A-P9-CANONICAL-CLI-AUTHORITY-REPAIR-01 (Patch R3): the replay bundle
+//! is never a caller-selected pre-existing directory -- this module invokes
+//! the R1 Python builder (`mqk_research.ml.oos_replay_bundle_cli`) itself
+//! into a fresh, command-controlled work directory, anchors to the
+//! builder's own machine-readable `manifest_sha256`, and sources every
+//! Wave06 campaign policy value (block counts, sensitivity ranges, P7A/P7B
+//! stress knobs, max-drawdown ceiling, the comparison judge) from the
+//! committed, frozen `PREDECLARED_CAMPAIGN.json` / the existing campaign
+//! judge path -- never an operator-tunable outcome input.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use chrono::DateTime;
@@ -156,6 +167,247 @@ fn require_hash_match(label: &str, path: &Path, expected_sha256: &str) -> Result
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// R3.1 -- build the replay bundle from durable Research authority ourselves.
+// ---------------------------------------------------------------------------
+
+/// Machine-readable result of `mqk_research.ml.oos_replay_bundle_cli`
+/// (R1.5) -- the authority seam this command anchors to instead of trusting
+/// a caller-selected bundle directory.
+#[derive(Debug, Clone, Deserialize)]
+struct ReplayBuilderResult {
+    status: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    manifest_path: Option<String>,
+    #[serde(default)]
+    manifest_sha256: Option<String>,
+    #[serde(default)]
+    trial_id: Option<String>,
+    #[serde(default)]
+    strategy_id: Option<String>,
+    #[serde(default)]
+    economic_eval_id: Option<String>,
+}
+
+/// R3.1 (Finding C): invokes the R1 Python builder
+/// (`mqk_research.ml.oos_replay_bundle_cli`) itself, into a fresh,
+/// command-controlled `work_dir` -- a caller may choose WHERE the bundle is
+/// built, but never hand this command a pre-existing `manifest.json` and
+/// have it trusted as evidence. Returns the builder's own parsed
+/// machine-readable report; the caller (`run_research_replay_backtest`)
+/// still independently anchors to `manifest_sha256` via
+/// [`resolve_replay_bundle`] before trusting any bundle content.
+fn build_replay_bundle_via_python(
+    python: &str,
+    research_py_root: &Path,
+    registry_db: &Path,
+    trial_id: &str,
+    economic_eval_id: &str,
+    work_dir: &Path,
+) -> Result<ReplayBuilderResult> {
+    if work_dir.join("manifest.json").exists() {
+        bail!(
+            "Fail-closed: replay work_dir {} already contains a manifest.json -- this command \
+             builds its own bundle from durable Research authority every run; a caller-seeded \
+             manifest is never trusted as evidence",
+            work_dir.display()
+        );
+    }
+    fs::create_dir_all(work_dir)
+        .with_context(|| format!("failed to create replay work_dir {}", work_dir.display()))?;
+
+    let src_dir = research_py_root.join("src");
+    let output = Command::new(python)
+        .env("PYTHONPATH", &src_dir)
+        .args([
+            "-m",
+            "mqk_research.ml.oos_replay_bundle_cli",
+            "--registry-db",
+            &registry_db.display().to_string(),
+            "--trial-id",
+            trial_id,
+            "--economic-eval-id",
+            economic_eval_id,
+            "--out-dir",
+            &work_dir.display().to_string(),
+        ])
+        .output()
+        .with_context(|| {
+            format!("failed to spawn {python} -m mqk_research.ml.oos_replay_bundle_cli")
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: ReplayBuilderResult = serde_json::from_str(stdout.trim()).with_context(|| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        format!(
+            "oos_replay_bundle_cli produced unparseable output (exit={:?}): stdout={stdout:?} \
+             stderr={stderr:?}",
+            output.status.code()
+        )
+    })?;
+    if result.status != "ok" {
+        bail!(
+            "Fail-closed: oos_replay_bundle_cli refused: {}",
+            result.reason.as_deref().unwrap_or("unknown reason")
+        );
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// R3.3 -- frozen Wave06 campaign policy, never an operator-tunable knob.
+// ---------------------------------------------------------------------------
+
+const PREDECLARED_CAMPAIGN_RELATIVE_PATH: &str = "experiments/wave06_campaign/PREDECLARED_CAMPAIGN.json";
+
+/// R3.3: `block_counts`/`dsr_max_sensitivity_range`/`pbo_max_sensitivity_range`/
+/// P7A-P7B stress knobs/`max_drawdown_ceiling` are PREDECLARED Wave06
+/// campaign policy, frozen BEFORE any Wave06 result -- never
+/// operator-tunable outcome inputs. Sourced here from the committed,
+/// git-tracked `PREDECLARED_CAMPAIGN.json`, never a CLI flag (Finding H).
+#[derive(Debug, Clone)]
+struct Wave06CampaignPolicy {
+    block_counts: Vec<u32>,
+    dsr_max_sensitivity_range: f64,
+    pbo_max_sensitivity_range: f64,
+    stress_execution_slippage_bps: u32,
+    stress_execution_volatility_mult_bps: u32,
+    stress_max_target_qty: Option<u32>,
+    stress_max_position_notional_usd: Option<f64>,
+    max_drawdown_ceiling: f64,
+}
+
+impl Wave06CampaignPolicy {
+    fn load(research_py_root: &Path) -> Result<Self> {
+        let path = research_py_root.join(PREDECLARED_CAMPAIGN_RELATIVE_PATH);
+        let text = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "Fail-closed: cannot read frozen Wave06 campaign policy at {}",
+                path.display()
+            )
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&text).with_context(|| {
+            format!("Fail-closed: malformed Wave06 campaign policy at {}", path.display())
+        })?;
+        let policy = value
+            .get("advancement_policy")
+            .context("Fail-closed: PREDECLARED_CAMPAIGN.json missing advancement_policy")?;
+        let sensitivity = policy
+            .get("dsr_pbo_block_count_sensitivity_requirement")
+            .context(
+                "Fail-closed: PREDECLARED_CAMPAIGN.json missing \
+                 dsr_pbo_block_count_sensitivity_requirement",
+            )?;
+        let block_counts: Vec<u32> = sensitivity
+            .get("block_counts")
+            .and_then(|v| v.as_array())
+            .context("Fail-closed: missing/malformed block_counts")?
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .map(|n| n as u32)
+                    .context("Fail-closed: block_counts entry is not a non-negative integer")
+            })
+            .collect::<Result<Vec<u32>>>()?;
+        let dsr_max_sensitivity_range = sensitivity
+            .get("dsr_max_sensitivity_range")
+            .and_then(|v| v.as_f64())
+            .context("Fail-closed: missing/malformed dsr_max_sensitivity_range")?;
+        let pbo_max_sensitivity_range = sensitivity
+            .get("pbo_max_sensitivity_range")
+            .and_then(|v| v.as_f64())
+            .context("Fail-closed: missing/malformed pbo_max_sensitivity_range")?;
+
+        let stress = policy.get("p7a_p7b_economic_replay_stress_requirement").context(
+            "Fail-closed: PREDECLARED_CAMPAIGN.json missing p7a_p7b_economic_replay_stress_requirement",
+        )?;
+        let stress_execution_slippage_bps = stress
+            .get("stress_execution_slippage_bps")
+            .and_then(|v| v.as_u64())
+            .context("Fail-closed: missing/malformed stress_execution_slippage_bps")?
+            as u32;
+        let stress_execution_volatility_mult_bps = stress
+            .get("stress_execution_volatility_mult_bps")
+            .and_then(|v| v.as_u64())
+            .context("Fail-closed: missing/malformed stress_execution_volatility_mult_bps")?
+            as u32;
+        let stress_max_target_qty =
+            stress.get("stress_max_target_qty").and_then(|v| v.as_u64()).map(|n| n as u32);
+        let stress_max_position_notional_usd =
+            stress.get("stress_max_position_notional_usd").and_then(|v| v.as_f64());
+        let max_drawdown_ceiling = stress
+            .get("max_drawdown_ceiling")
+            .and_then(|v| v.as_f64())
+            .context("Fail-closed: missing/malformed max_drawdown_ceiling")?;
+
+        Ok(Self {
+            block_counts,
+            dsr_max_sensitivity_range,
+            pbo_max_sensitivity_range,
+            stress_execution_slippage_bps,
+            stress_execution_volatility_mult_bps,
+            stress_max_target_qty,
+            stress_max_position_notional_usd,
+            max_drawdown_ceiling,
+        })
+    }
+
+    fn block_counts_csv(&self) -> String {
+        self.block_counts.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R3.4 -- canonical Wave06 campaign judge authority, never a caller-selected
+// judge_artifact_sha256.
+// ---------------------------------------------------------------------------
+
+const RUN_CAMPAIGN_JUDGE_RELATIVE_PATH: &str = "experiments/wave06_campaign/run_campaign_judge.py";
+
+/// R3.4 (Finding H): resolves the canonical Wave06 campaign judge's
+/// `judge_artifact_sha256` by invoking the EXISTING, already-accepted
+/// campaign judge path (`wave06_campaign/run_campaign_judge.py`) itself --
+/// never accepts an operator-supplied SHA identifying an arbitrary
+/// registered judge. That script's own population logic already enforces
+/// the canonical judge protocol/schema, the exact campaign comparison
+/// population (union of every ACTUALLY-attempted campaign_order candidate's
+/// complete real/placebo hypothesis families), and the accepted
+/// `cscv_target_block_count=10` `JudgeSpec` default this function never
+/// overrides.
+fn resolve_campaign_judge_artifact_sha256(
+    python: &str,
+    research_py_root: &Path,
+    registry_db: &Path,
+) -> Result<String> {
+    let script = research_py_root.join(RUN_CAMPAIGN_JUDGE_RELATIVE_PATH);
+    let output = Command::new(python)
+        .arg(&script)
+        .args(["--execute", "--json", "--registry-db", &registry_db.display().to_string()])
+        .output()
+        .with_context(|| format!("failed to spawn {python} {}", script.display()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).with_context(|| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        format!(
+            "run_campaign_judge.py produced unparseable output (exit={:?}): stdout={stdout:?} \
+             stderr={stderr:?}",
+            output.status.code()
+        )
+    })?;
+    if value.get("status").and_then(|v| v.as_str()) != Some("ok") {
+        let reason = value.get("reason").and_then(|v| v.as_str()).unwrap_or("unknown reason");
+        bail!("Fail-closed: run_campaign_judge.py refused/failed: {reason}");
+    }
+    value
+        .get("judge_artifact_sha256")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .context("Fail-closed: run_campaign_judge.py JSON missing judge_artifact_sha256")
+}
+
 /// Resolved, re-verified replay bundle -- every file's content has already
 /// been checked against `manifest.json`'s own recorded hashes.
 #[derive(Debug)]
@@ -176,13 +428,33 @@ pub struct ResolvedReplayBundle {
 /// caller's expected `trial_id`/`strategy_id`/`economic_eval_id` against the
 /// manifest's own lineage, and load + hash-verify the baseline and every
 /// leave-one-out schedule CSV. Fails closed on any mismatch (mission C4/C6).
+///
+/// R3.1/R3.2: `expected_manifest_sha256` anchors this manifest to
+/// independent authority (the R1 Python builder's own machine-readable
+/// report -- see [`build_replay_bundle_via_python`]) BEFORE any of its
+/// content is trusted. Without this anchor, a caller could mutate a
+/// schedule CSV and consistently rewrite the manifest's own recorded child
+/// hash for it, and every check below would still pass (the manifest would
+/// remain internally self-consistent) -- this is precisely the
+/// self-attestation gap Finding C identified.
 pub fn resolve_replay_bundle(
     bundle_dir: &Path,
     expected_trial_id: &str,
     expected_strategy_id: &str,
     expected_economic_eval_id: &str,
+    expected_manifest_sha256: &str,
 ) -> Result<ResolvedReplayBundle> {
     let manifest_path = bundle_dir.join("manifest.json");
+    let actual_manifest_sha256 = sha256_hex_of_file(&manifest_path)
+        .with_context(|| format!("missing replay bundle manifest: {}", manifest_path.display()))?;
+    if actual_manifest_sha256 != expected_manifest_sha256 {
+        bail!(
+            "Fail-closed: replay bundle manifest.json at {} does not match the replay builder's \
+             own reported manifest_sha256 (expected {expected_manifest_sha256}, got \
+             {actual_manifest_sha256}) -- refusing a mutated/inconsistent replay bundle",
+            manifest_path.display()
+        );
+    }
     let manifest_text = fs::read_to_string(&manifest_path)
         .with_context(|| format!("missing replay bundle manifest: {}", manifest_path.display()))?;
     let manifest: ReplayManifestDto = serde_json::from_str(&manifest_text)
@@ -388,26 +660,26 @@ pub fn load_research_bars_csv(path: &Path) -> Result<Vec<BacktestBar>> {
 // Top-level orchestration
 // ---------------------------------------------------------------------------
 
+/// R3.3: no `judge_artifact_sha256`/`block_counts`/`dsr_max_sensitivity_range`/
+/// `pbo_max_sensitivity_range`/P7A-P7B stress knobs/`max_drawdown_ceiling`
+/// fields -- those are frozen Wave06 campaign policy, resolved internally
+/// from `PREDECLARED_CAMPAIGN.json` (see [`Wave06CampaignPolicy::load`]) and
+/// the canonical campaign judge path (see
+/// [`resolve_campaign_judge_artifact_sha256`]), never operator-tunable
+/// outcome inputs (Finding H). `replay_work_dir` is a fresh/empty
+/// destination directory this command builds its own replay bundle into
+/// (R3.1) -- never a pre-existing bundle directory to trust.
 #[allow(clippy::too_many_arguments)]
 pub struct ResearchReplayArgs {
     pub registry_db: String,
     pub trial_id: String,
     pub strategy_id: String,
     pub economic_eval_id: String,
-    pub replay_bundle_dir: String,
+    pub replay_work_dir: String,
     pub out_dir: String,
     pub research_py_root: String,
     pub python: String,
-    pub judge_artifact_sha256: String,
-    pub block_counts: String,
-    pub dsr_max_sensitivity_range: f64,
-    pub pbo_max_sensitivity_range: f64,
     pub stress_out_dir: String,
-    pub stress_execution_slippage_bps: u32,
-    pub stress_execution_volatility_mult_bps: u32,
-    pub stress_max_target_qty: Option<u32>,
-    pub stress_max_position_notional_usd: Option<f64>,
-    pub max_drawdown_ceiling: f64,
     pub placebo_out_dir: String,
 }
 
@@ -453,15 +725,81 @@ fn strategy_for(
     )))
 }
 
-/// C2/C3/C4/C5: end-to-end canonical Backtest/stress/P9 production for one
-/// registered Wave06 Research trial, entirely via existing production
-/// artifact/finalizer seams.
+/// C2/C3/C4/C5/R3: end-to-end canonical Backtest/stress/P9 production for
+/// one registered Wave06 Research trial, entirely via existing production
+/// artifact/finalizer seams. R3.1: builds the replay bundle itself (never a
+/// caller-selected pre-existing directory); R3.3/R3.4: sources every
+/// campaign policy value and the comparison judge from frozen, existing
+/// authority, never a caller-supplied outcome-affecting flag.
 pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<ResearchReplaySummary> {
+    let research_py_root = Path::new(&args.research_py_root);
+    let registry_db = Path::new(&args.registry_db);
+
+    let builder = build_replay_bundle_via_python(
+        &args.python,
+        research_py_root,
+        registry_db,
+        &args.trial_id,
+        &args.economic_eval_id,
+        Path::new(&args.replay_work_dir),
+    )
+    .context("build_replay_bundle_via_python failed")?;
+
+    let builder_trial_id = builder
+        .trial_id
+        .context("Fail-closed: oos_replay_bundle_cli JSON missing trial_id")?;
+    let builder_strategy_id = builder
+        .strategy_id
+        .context("Fail-closed: oos_replay_bundle_cli JSON missing strategy_id")?;
+    let builder_economic_eval_id = builder
+        .economic_eval_id
+        .context("Fail-closed: oos_replay_bundle_cli JSON missing economic_eval_id")?;
+    let manifest_path: PathBuf = builder
+        .manifest_path
+        .context("Fail-closed: oos_replay_bundle_cli JSON missing manifest_path")?
+        .into();
+    let manifest_sha256 = builder
+        .manifest_sha256
+        .context("Fail-closed: oos_replay_bundle_cli JSON missing manifest_sha256")?;
+
+    if builder_trial_id != args.trial_id {
+        bail!(
+            "Fail-closed: replay builder resolved trial_id {builder_trial_id:?} != requested \
+             {:?}",
+            args.trial_id
+        );
+    }
+    if builder_strategy_id != args.strategy_id {
+        bail!(
+            "Fail-closed: replay builder resolved strategy_id {builder_strategy_id:?} != \
+             requested {:?}",
+            args.strategy_id
+        );
+    }
+    if builder_economic_eval_id != args.economic_eval_id {
+        bail!(
+            "Fail-closed: replay builder resolved economic_eval_id {builder_economic_eval_id:?} \
+             != requested {:?}",
+            args.economic_eval_id
+        );
+    }
+    if !manifest_path.exists() {
+        bail!(
+            "Fail-closed: replay builder reported manifest_path {} but it does not exist",
+            manifest_path.display()
+        );
+    }
+    let bundle_dir = manifest_path
+        .parent()
+        .context("Fail-closed: replay builder's manifest_path has no parent directory")?
+        .to_path_buf();
+
     let bundle = resolve_replay_bundle(
-        Path::new(&args.replay_bundle_dir),
+        &bundle_dir,
         &args.trial_id,
         &args.strategy_id,
         &args.economic_eval_id,
+        &manifest_sha256,
     )
     .context("resolve_replay_bundle failed")?;
 
@@ -537,6 +875,14 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .context("write_canonical_robustness_gauntlet failed")?;
 
+    // R3.3/R3.4: frozen Wave06 campaign policy + canonical campaign judge --
+    // resolved from existing authority, never a caller-supplied flag.
+    let policy = Wave06CampaignPolicy::load(research_py_root)
+        .context("Wave06CampaignPolicy::load failed")?;
+    let judge_artifact_sha256 =
+        resolve_campaign_judge_artifact_sha256(&args.python, research_py_root, registry_db)
+            .context("resolve_campaign_judge_artifact_sha256 failed")?;
+
     // The three EXISTING deferred cross-language scenario finalizers --
     // called exactly as any other backtest candidate would call them.
     run_finalize_robustness_sensitivity(
@@ -544,12 +890,12 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
         run_id.to_string(),
         args.registry_db.clone(),
         args.trial_id.clone(),
-        args.judge_artifact_sha256.clone(),
+        judge_artifact_sha256,
         args.research_py_root.clone(),
         args.python.clone(),
-        args.block_counts.clone(),
-        args.dsr_max_sensitivity_range,
-        args.pbo_max_sensitivity_range,
+        policy.block_counts_csv(),
+        policy.dsr_max_sensitivity_range,
+        policy.pbo_max_sensitivity_range,
     )
     .context("run_finalize_robustness_sensitivity failed")?;
 
@@ -562,11 +908,11 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
         args.research_py_root.clone(),
         args.python.clone(),
         args.stress_out_dir.clone(),
-        args.stress_execution_slippage_bps,
-        args.stress_execution_volatility_mult_bps,
-        args.stress_max_target_qty,
-        args.stress_max_position_notional_usd,
-        args.max_drawdown_ceiling,
+        policy.stress_execution_slippage_bps,
+        policy.stress_execution_volatility_mult_bps,
+        policy.stress_max_target_qty,
+        policy.stress_max_position_notional_usd,
+        policy.max_drawdown_ceiling,
     )
     .context("run_finalize_p7a_p7b_replay_stress failed")?;
 
@@ -655,7 +1001,7 @@ mod tests {
         bars_path: &Path,
         baseline_path: &Path,
         loo: &[(&str, PathBuf)],
-    ) {
+    ) -> String {
         let mut loo_obj = serde_json::Map::new();
         for (sym, path) in loo {
             loo_obj.insert(
@@ -698,7 +1044,9 @@ mod tests {
             },
             "symbol_loo_schedules": loo_obj,
         });
-        fs::write(dir.join("manifest.json"), serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        let manifest_path = dir.join("manifest.json");
+        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        sha256_hex_of_file(&manifest_path).unwrap()
     }
 
     /// REQUIRED TEST 2: wrong trial_id -> refusal.
@@ -707,8 +1055,8 @@ mod tests {
         let dir = unique_dir("wrong_trial");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        write_manifest(&dir, "trial-real", "strat-1", "econ-1", &bars, &baseline, &[]);
-        let err = resolve_replay_bundle(&dir, "trial-WRONG", "strat-1", "econ-1").unwrap_err();
+        let sha = write_manifest(&dir, "trial-real", "strat-1", "econ-1", &bars, &baseline, &[]);
+        let err = resolve_replay_bundle(&dir, "trial-WRONG", "strat-1", "econ-1", &sha).unwrap_err();
         assert!(err.to_string().contains("trial_id"), "{err}");
     }
 
@@ -718,8 +1066,8 @@ mod tests {
         let dir = unique_dir("wrong_econ");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        write_manifest(&dir, "trial-1", "strat-1", "econ-real", &bars, &baseline, &[]);
-        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-WRONG").unwrap_err();
+        let sha = write_manifest(&dir, "trial-1", "strat-1", "econ-real", &bars, &baseline, &[]);
+        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-WRONG", &sha).unwrap_err();
         assert!(err.to_string().contains("economic_eval_id"), "{err}");
     }
 
@@ -729,8 +1077,8 @@ mod tests {
         let dir = unique_dir("wrong_strategy");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        write_manifest(&dir, "trial-1", "strat-real", "econ-1", &bars, &baseline, &[]);
-        let err = resolve_replay_bundle(&dir, "trial-1", "strat-WRONG", "econ-1").unwrap_err();
+        let sha = write_manifest(&dir, "trial-1", "strat-real", "econ-1", &bars, &baseline, &[]);
+        let err = resolve_replay_bundle(&dir, "trial-1", "strat-WRONG", "econ-1", &sha).unwrap_err();
         assert!(err.to_string().contains("strategy_id"), "{err}");
     }
 
@@ -740,10 +1088,10 @@ mod tests {
         let dir = unique_dir("mutated_bars");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
+        let sha = write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
         let original = fs::read_to_string(&bars).unwrap();
         fs::write(&bars, original + "MUTATED,9999999999,1,1,1,1,1\n").unwrap();
-        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1").unwrap_err();
+        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1", &sha).unwrap_err();
         assert!(err.to_string().contains("no longer matches"), "{err}");
     }
 
@@ -753,10 +1101,36 @@ mod tests {
         let dir = unique_dir("missing_schedule");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
+        let sha = write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
         fs::remove_file(&baseline).unwrap();
-        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1").unwrap_err();
+        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1", &sha).unwrap_err();
         assert!(format!("{err:#}").to_lowercase().contains("read failed"), "{err:#}");
+    }
+
+    /// R3.2 (Finding C): the missing negative control -- alter a schedule
+    /// AND consistently rewrite the manifest's own recorded child hash for
+    /// it (so the manifest stays internally self-consistent). Refused
+    /// because the manifest's OWN bytes no longer match the anchor the
+    /// caller (the replay builder) originally reported.
+    #[test]
+    fn manifest_mutation_with_consistent_child_hash_rewrite_refused() {
+        let dir = unique_dir("manifest_mutation");
+        let bars = write_bars(&dir, &["AAA", "BBB"], 2);
+        let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
+        let original_sha = write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
+
+        // Mutate the schedule CSV...
+        let original = fs::read_to_string(&baseline).unwrap();
+        fs::write(&baseline, original + "9999999999,ZZZ,999\n").unwrap();
+        // ...and consistently rewrite the manifest's own recorded hash for
+        // it, so the manifest is internally self-consistent (every
+        // per-file check inside `resolve_replay_bundle` would otherwise
+        // pass) -- but its own bytes are now different from what
+        // `original_sha` anchors to.
+        write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
+
+        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1", &original_sha).unwrap_err();
+        assert!(err.to_string().contains("does not match the replay builder's own reported manifest_sha256"), "{err}");
     }
 
     /// Bars CSV round-trip: ISO8601 -> epoch seconds, float prices -> micros.
@@ -904,5 +1278,163 @@ mod tests {
         let loaded = mqk_artifacts::load_canonical_robustness_gauntlet(&init_result.run_dir).unwrap();
         assert!(!loaded.is_complete());
         assert_eq!(loaded.scenarios_run(), 6);
+    }
+
+    // -------------------------------------------------------------------
+    // R3.5 -- full canonical completion synthetic E2E proof.
+    // -------------------------------------------------------------------
+
+    /// R3.5: a load-bearing synthetic end-to-end proof using REAL production
+    /// wrappers throughout -- a real Research registry trial (registered via
+    /// the real `run_registered_economic_walkforward_eval`, through
+    /// `research-py/tests/support/build_r3_e2e_fixture.py`, never a
+    /// hand-authored registry row), the real R1 Python replay-bundle
+    /// builder, the real canonical judge path, and the real
+    /// `run_research_replay_backtest` production command -- no hand-authored
+    /// `BacktestReport`, no hand-written canonical robustness JSON, no
+    /// bypass of any production finalizer.
+    ///
+    /// `#[ignore]`d by default (needs a working `python` + research-py deps
+    /// on PATH and takes real wall-clock time for five real subprocess
+    /// invocations) -- run explicitly with `cargo test -p mqk-cli --bin
+    /// mqk-cli -- --ignored r3_5_full_canonical_completion_synthetic_e2e_proof`.
+    ///
+    /// NOT asserting `all_applicable_passed() == true`: two genuine,
+    /// deterministic, OUT-OF-SCOPE-for-this-wave findings, both discovered
+    /// while constructing this exact fixture and confirmed independent of
+    /// this fixture's own parameters, make an honest "every scenario
+    /// passes" synthetic candidate infeasible within this wave's scope:
+    ///   1. `p7a_p7b_economic_replay_stress`/`genuine_shuffled_placebo`'s
+    ///      `_reconstruct_baseline_spec` could not even round-trip a
+    ///      cross_sectional_rank_* (LIQ-01/VOL-01's own family) trial's
+    ///      persisted `signal_policy` before this wave's fix (a genuine,
+    ///      narrow, already-fixed bug: `tie_policy` is persisted as an
+    ///      identity-only field for that direction-policy family but was
+    ///      never a `SignalPolicySpec.__init__` parameter) -- now fixed as
+    ///      part of this same patch, and `p7a_p7b_economic_replay_stress`
+    ///      genuinely evaluates and passes for this fixture.
+    ///   2. `genuine_shuffled_placebo`'s fold-wide score shuffle combined
+    ///      with `_resolve_rank_direction_for_frame`'s exact
+    ///      (`tie_tol=1e-9`) boundary-tie refusal is structurally
+    ///      incompatible with ANY cross_sectional_percentile_rank feature
+    ///      (LIQ-01/VOL-01's own feature-transform family, R1.3): that
+    ///      transform always maps a decision date's cross-section onto the
+    ///      SAME small, fixed value set (`{1/N, ..., N/N}`); a fold spanning
+    ///      more than one decision date therefore shuffles many EXACT
+    ///      repeats of that fixed set, making a boundary-adjacent exact
+    ///      duplicate on some shuffled date combinatorially near-certain --
+    ///      while a fold spanning exactly one decision date (the only way to
+    ///      avoid the collision) leaves no later bar for economic_walk_forward_v1's
+    ///      causal next-bar execution to fill any order against, making
+    ///      every position size zero. This is a genuine, reproducible,
+    ///      deterministic finding, NOT a fixture defect -- reported here per
+    ///      mission instruction ("if an all-pass synthetic fixture cannot
+    ///      honestly make every scenario pass ... report the exact
+    ///      deterministic reason") rather than weakened or fabricated.
+    ///      `genuine_shuffled_placebo` therefore genuinely, honestly reports
+    ///      `applicable: true, passed: false` for this fixture, which is
+    ///      sufficient for `is_complete()` (evidence coverage) but not for
+    ///      `all_applicable_passed()`.
+    #[test]
+    #[ignore = "needs a working python + research-py deps on PATH; real subprocess E2E, run explicitly"]
+    fn r3_5_full_canonical_completion_synthetic_e2e_proof() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let research_py_root = repo_root.join("research-py");
+        let fixture_script = research_py_root.join("tests/support/build_r3_e2e_fixture.py");
+        assert!(fixture_script.exists(), "{}", fixture_script.display());
+
+        let dir = unique_dir("r3_5_e2e");
+        let registry_db = dir.join("registry.sqlite3");
+        let run_root = dir.join("fixture_runs");
+
+        let python = "python";
+        let output = std::process::Command::new(python)
+            .arg(&fixture_script)
+            .arg(&registry_db)
+            .arg(&run_root)
+            .output()
+            .expect("failed to spawn build_r3_e2e_fixture.py");
+        assert!(
+            output.status.success(),
+            "fixture build failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("fixture builder produced invalid JSON");
+        assert_eq!(fixture["status"], "ok");
+        let strategy_id = fixture["strategy_id"].as_str().unwrap().to_string();
+        let trial_id = fixture["primary"]["trial_id"].as_str().unwrap().to_string();
+        let economic_eval_id =
+            fixture["primary"]["economic_eval_id"].as_str().unwrap().to_string();
+
+        let summary = run_research_replay_backtest(ResearchReplayArgs {
+            registry_db: registry_db.display().to_string(),
+            trial_id: trial_id.clone(),
+            strategy_id: strategy_id.clone(),
+            economic_eval_id: economic_eval_id.clone(),
+            replay_work_dir: dir.join("replay_work").display().to_string(),
+            out_dir: dir.join("artifacts").display().to_string(),
+            research_py_root: research_py_root.display().to_string(),
+            python: python.to_string(),
+            stress_out_dir: dir.join("stress").display().to_string(),
+            placebo_out_dir: dir.join("placebo").display().to_string(),
+        })
+        .expect("run_research_replay_backtest failed");
+
+        assert_eq!(summary.trial_id, trial_id);
+        assert_eq!(summary.strategy_id, strategy_id);
+        assert_eq!(summary.economic_eval_id, economic_eval_id);
+
+        let report = mqk_artifacts::load_canonical_backtest_report(&summary.run_dir)
+            .expect("load_canonical_backtest_report failed");
+        assert_eq!(report.strategy_name, strategy_id, "R2.1: strategy_name == Research strategy_id");
+
+        let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&summary.run_dir)
+            .expect("load_canonical_robustness_gauntlet failed");
+        assert_eq!(gauntlet.protocol_version, mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION);
+        assert!(gauntlet.is_complete(), "every required scenario must be present");
+        assert_eq!(
+            gauntlet.scenarios_run(),
+            mqk_backtest::REQUIRED_ROBUSTNESS_SCENARIO_NAMES.len(),
+            "exactly the 9 required scenarios, no duplicates, no extras"
+        );
+
+        // Research-registry-anchored scenarios bind to the SAME trial this
+        // fixture registered -- never a different/unrelated trial.
+        assert_eq!(gauntlet.dsr_pbo_sensitivity_research_trial_id(), Some(trial_id.as_str()));
+        assert_eq!(
+            gauntlet.p7a_p7b_economic_replay_stress_research_trial_id(),
+            Some(trial_id.as_str())
+        );
+        assert_eq!(
+            gauntlet.p7a_p7b_economic_replay_stress_baseline_economic_eval_id(),
+            Some(economic_eval_id.as_str())
+        );
+
+        // See this test's own doc comment: two genuine, deterministic,
+        // out-of-scope findings make `all_applicable_passed() == true`
+        // infeasible for an honest synthetic fixture in this wave -- the
+        // truthful value is asserted here, not fabricated.
+        assert!(
+            !gauntlet.all_applicable_passed(),
+            "expected NOT all-applicable-passed for this fixture (see doc comment); if this now \
+             fails, either a real regression was introduced, or the two documented findings have \
+             genuinely been resolved and this assertion (and its doc comment) should be updated"
+        );
+
+        // R3.5: resolve_backtest_evidence consumes the resulting artifact
+        // tree end-to-end through the REAL production evidence-resolution
+        // seam (never itself requiring all_applicable_passed()).
+        let evidence = mqk_promotion::resolve_backtest_evidence(&dir.join("artifacts"), summary.run_id)
+            .expect("resolve_backtest_evidence failed");
+        assert_eq!(evidence.robustness_evidence.is_complete, true);
+        assert_eq!(evidence.robustness_evidence.all_applicable_passed, false);
+
+        // R3.6: no Paper/Live/OMS/broker call is reachable from this
+        // command -- structurally true by this module's own dependency
+        // graph (research_replay.rs never imports mqk-broker-*/mqk-runtime/
+        // mqk-portfolio), verified here by construction rather than by a
+        // runtime probe.
     }
 }
