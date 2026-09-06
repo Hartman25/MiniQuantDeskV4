@@ -516,6 +516,27 @@ fn symbol_leave_one_out_scenario(
     bars: &[BacktestBar],
     make_strategy: &impl Fn() -> Box<dyn Strategy>,
 ) -> RobustnessScenarioOutcome {
+    // W06-P9-RUST-REPLAY-STRATEGY-01 (B5): zero-behavior-change delegation
+    // -- the bar argument is ignored, exactly reproducing this function's
+    // own pre-existing behavior (every prior caller's `make_strategy` never
+    // depended on the filtered bars either).
+    symbol_leave_one_out_scenario_with_factory(baseline, base_config, bars, &|_filtered| make_strategy())
+}
+
+/// W06-P9-RUST-REPLAY-STRATEGY-01 (B5): bar-aware counterpart used by
+/// [`run_robustness_gauntlet_with_symbol_loo_factory`]. Identical logic to
+/// [`symbol_leave_one_out_scenario`], except the strategy for each excluded-
+/// symbol rerun is built from `make_strategy_for_bars(&filtered)` -- letting
+/// a caller (e.g. `ResearchOosReplayStrategy`) construct a strategy instance
+/// whose own precomputed per-symbol schedule and expected-row-count table
+/// are correct for THAT filtered universe, rather than reusing whatever a
+/// single no-argument factory produced for the baseline's full universe.
+fn symbol_leave_one_out_scenario_with_factory(
+    baseline: &BacktestReport,
+    base_config: &BacktestConfig,
+    bars: &[BacktestBar],
+    make_strategy_for_bars: &impl Fn(&[BacktestBar]) -> Box<dyn Strategy>,
+) -> RobustnessScenarioOutcome {
     let name = "symbol_leave_one_out".to_string();
     let symbols: BTreeSet<&str> = bars.iter().map(|b| b.symbol.as_str()).collect();
     if symbols.len() < 2 {
@@ -541,7 +562,7 @@ fn symbol_leave_one_out_scenario(
         let report = match run_with_strategy(
             base_config.clone(),
             &filtered,
-            make_strategy(),
+            make_strategy_for_bars(&filtered),
             &baseline.strategy_semantic_fingerprint,
         ) {
             Ok(r) => r,
@@ -1058,9 +1079,238 @@ pub fn run_robustness_gauntlet(
     }
 }
 
+/// W06-P9-RUST-REPLAY-STRATEGY-01 (B5): additive counterpart to
+/// [`run_robustness_gauntlet`] for candidates (e.g. `ResearchOosReplayStrategy`)
+/// whose `symbol_leave_one_out` rerun needs a strategy built FROM the exact
+/// filtered bars slice for that exclusion, not from a single no-argument
+/// factory. Every OTHER scenario is byte-for-byte identical to
+/// `run_robustness_gauntlet` (same six pure-engine scenarios via
+/// `make_strategy`, same three deferred Research-registry-anchored
+/// placeholders) -- only `symbol_leave_one_out` differs, via
+/// `make_strategy_for_bars`. `run_robustness_gauntlet` itself is completely
+/// unchanged and continues to work for every existing built-in strategy.
+pub fn run_robustness_gauntlet_with_symbol_loo_factory(
+    baseline: &BacktestReport,
+    base_config: &BacktestConfig,
+    bars: &[BacktestBar],
+    make_strategy: impl Fn() -> Box<dyn Strategy>,
+    make_strategy_for_bars: impl Fn(&[BacktestBar]) -> Box<dyn Strategy>,
+) -> RobustnessGauntletOutput {
+    let scenarios = vec![
+        execution_delay_scenario(baseline, base_config, bars, &make_strategy),
+        symbol_leave_one_out_scenario_with_factory(baseline, base_config, bars, &make_strategy_for_bars),
+        month_year_regime_concentration_scenario(baseline, bars),
+        parameter_neighborhood_scenario(baseline, base_config, bars, &make_strategy),
+        placebo_temporal_offset_scenario(baseline, base_config, bars, &make_strategy),
+        conservative_capacity_stress_scenario(baseline, base_config, bars, &make_strategy),
+    ];
+
+    let deferred = vec![
+        DeferredScenario {
+            name: crate::dsr_pbo_sensitivity::DSR_PBO_SENSITIVITY_SCENARIO_NAME.to_string(),
+            reason: "requires subprocess/filesystem I/O (Python executable, research-py root, \
+                 registry path) this pure, engine-only function does not accept as input -- \
+                 call crate::dsr_pbo_sensitivity::dsr_pbo_sensitivity_scenario separately and \
+                 merge it in via RobustnessGauntletOutput::merge_dsr_pbo_sensitivity before \
+                 treating this artifact as complete (see RobustnessGauntletOutput::is_complete)"
+                .to_string(),
+        },
+        DeferredScenario {
+            name: crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME
+                .to_string(),
+            reason: "requires a completed, registered Research trial plus subprocess/filesystem \
+                 I/O this pure, engine-only function does not accept as input -- call \
+                 crate::p7a_p7b_economic_replay_stress::p7a_p7b_economic_replay_stress_scenario \
+                 separately and merge it in via \
+                 RobustnessGauntletOutput::merge_dsr_pbo_sensitivity (name-agnostic) before \
+                 treating this artifact as complete (see RobustnessGauntletOutput::is_complete)"
+                .to_string(),
+        },
+        DeferredScenario {
+            name: crate::genuine_shuffled_placebo::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME.to_string(),
+            reason: "requires a completed, registered Research trial plus subprocess/filesystem \
+                 I/O this pure, engine-only function does not accept as input -- call \
+                 crate::genuine_shuffled_placebo::genuine_shuffled_placebo_scenario separately \
+                 and merge it in via RobustnessGauntletOutput::merge_dsr_pbo_sensitivity \
+                 (name-agnostic) before treating this artifact as complete (see \
+                 RobustnessGauntletOutput::is_complete)"
+                .to_string(),
+        },
+    ];
+
+    RobustnessGauntletOutput {
+        protocol_version: ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION.to_string(),
+        run_id: baseline.run_id,
+        config_id: baseline.config_id,
+        strategy_name: baseline.strategy_name.clone(),
+        scenarios,
+        deferred,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // STRESS-TRANSFORM-SEMANTIC-IDENTITY-01 negative controls
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// W06-P9-RUST-REPLAY-STRATEGY-01 (Patch B) integration tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod research_oos_replay_integration_tests {
+    use super::*;
+    use crate::corporate_actions::{CorporateActionPolicy, ForbidEntry};
+    use crate::research_replay_strategy::{ReplaySemanticSpec, ResearchOosReplayStrategy};
+    use crate::types::BacktestConfig;
+    use mqk_execution::TargetPosition;
+
+    const DAY: i64 = 86_400;
+
+    fn semantic() -> ReplaySemanticSpec {
+        ReplaySemanticSpec {
+            replay_protocol_version: "research_oos_replay_bundle_v1".to_string(),
+            strategy_id: "test_strategy_v1".to_string(),
+            feature_columns: vec!["test_xs_rank".to_string()],
+            feature_transform: "cross_sectional_percentile_rank_rerank_of_authenticated_feature_v1"
+                .to_string(),
+            direction_policy: "cross_sectional_rank_long_only_v1".to_string(),
+            rank_side_count: 1,
+            long_only: true,
+            borrow_model: None,
+            max_gross_exposure: 1.0,
+            timeframe: "1D".to_string(),
+            equity_usd: 100_000.0,
+            max_target_qty: None,
+            max_position_notional_usd: None,
+        }
+    }
+
+    fn daily_config() -> BacktestConfig {
+        BacktestConfig {
+            timeframe_secs: DAY,
+            ..BacktestConfig::test_defaults()
+        }
+    }
+
+    fn two_symbol_bars(days: i64) -> Vec<BacktestBar> {
+        let mut out = Vec::new();
+        for d in 0..days {
+            let ts = DAY * (d + 1);
+            out.push(BacktestBar::new("AAA", ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000));
+            out.push(BacktestBar::new("BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000));
+        }
+        out
+    }
+
+    fn schedule_for(bars: &[BacktestBar], qty_aaa: i64) -> BTreeMap<i64, Vec<TargetPosition>> {
+        let mut schedule = BTreeMap::new();
+        for ts in bars.iter().map(|b| b.end_ts).collect::<BTreeSet<_>>() {
+            schedule.insert(ts, vec![TargetPosition::new("AAA", qty_aaa), TargetPosition::new("BBB", 0)]);
+        }
+        schedule
+    }
+
+    /// REQUIRED TEST 1: baseline replay reaches the real BacktestEngine and
+    /// produces a real report.
+    #[test]
+    fn baseline_replay_reaches_real_engine() {
+        let bars = two_symbol_bars(3);
+        let schedule = schedule_for(&bars, 10);
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+        assert!(!report.equity_curve.is_empty());
+    }
+
+    /// REQUIRED TEST 6: a corporate-action halt before Strategy dispatch
+    /// produces no partial target emission -- the strategy never even sees
+    /// on_bar for the halted batch (existing, unmodified engine behavior),
+    /// so it cannot have emitted a partial vector for that timestamp.
+    #[test]
+    fn corporate_action_halt_before_dispatch_produces_no_partial_emission() {
+        let bars = two_symbol_bars(3);
+        let halt_ts = DAY * 2;
+        let schedule = schedule_for(&bars, 10);
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let config = BacktestConfig {
+            corporate_action_policy: CorporateActionPolicy::ForbidPeriods(vec![ForbidEntry::new(
+                "AAA", halt_ts, halt_ts,
+            )]),
+            ..daily_config()
+        };
+        let report = run_engine(config, &bars, Box::new(strategy)).expect("engine run succeeds");
+        assert!(report.halted, "engine must halt on the forbidden corporate-action period");
+        // Day 1's full 2-bar batch reaches the strategy and records one
+        // equity_curve entry per row; day 2's batch halts on its FIRST bar
+        // (before any dispatch), so it contributes zero entries -- the
+        // engine never even calls on_bar for the halted batch.
+        assert_eq!(report.equity_curve.len(), 2);
+    }
+
+    /// REQUIRED TEST 7: signal-time pre-sized qty remains identical through
+    /// `DelayedStrategy` -- wrapping only shifts WHEN the already-frozen
+    /// target vector is emitted, never its content.
+    #[test]
+    fn signal_time_qty_survives_delayed_strategy_wrapper() {
+        let bars = two_symbol_bars(4);
+        let schedule = schedule_for(&bars, 7);
+        let inner = ResearchOosReplayStrategy::new(semantic(), schedule.clone(), &bars);
+        let plain_report =
+            run_engine(daily_config(), &bars, Box::new(inner)).expect("plain run succeeds");
+
+        let delayed_inner = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let delayed = DelayedStrategy::new(Box::new(delayed_inner), 1);
+        let delayed_report =
+            run_engine(daily_config(), &bars, Box::new(delayed)).expect("delayed run succeeds");
+
+        // The delayed run's FINAL equity must match the plain run's -- the
+        // same qty=7 target is eventually reached in both, only later in
+        // the delayed case, never a different value.
+        assert_eq!(
+            plain_report.equity_curve.last().map(|(_, eq)| *eq),
+            delayed_report.equity_curve.last().map(|(_, eq)| *eq),
+        );
+    }
+
+    /// REQUIRED TEST 11: the symbol-leave-one-out scenario uses the schedule
+    /// derived for the ACTUAL filtered bars, not the naive full-universe
+    /// frozen schedule -- proven by a bar-aware factory that fails closed
+    /// (via `run_with_strategy`'s own semantic-fingerprint check) whenever
+    /// it is NOT given the correctly-filtered bars slice for that exclusion.
+    #[test]
+    fn symbol_loo_uses_schedule_derived_for_actual_filtered_bars() {
+        let bars = two_symbol_bars(3);
+        let baseline_schedule = schedule_for(&bars, 10);
+        let baseline_strategy = ResearchOosReplayStrategy::new(semantic(), baseline_schedule, &bars);
+        let baseline_config = daily_config();
+        let baseline_report = run_engine(baseline_config.clone(), &bars, Box::new(baseline_strategy))
+            .expect("baseline run succeeds");
+
+        // The bar-aware factory asserts its `bars` argument really is the
+        // filtered (1-symbol) slice for THIS exclusion -- constructing the
+        // strategy from the wrong (unfiltered) bars would silently use the
+        // wrong expected-row-count table and panic on the very first on_bar
+        // call for this scenario, which would surface as a scenario
+        // failure below rather than a passing false positive.
+        let make_strategy_for_bars = |filtered: &[BacktestBar]| -> Box<dyn Strategy> {
+            let distinct: BTreeSet<&str> = filtered.iter().map(|b| b.symbol.as_str()).collect();
+            assert_eq!(distinct.len(), 1, "leave-one-out must be called with exactly one symbol removed");
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(filtered, 10),
+                filtered,
+            ))
+        };
+
+        let outcome = symbol_leave_one_out_scenario_with_factory(
+            &baseline_report,
+            &baseline_config,
+            &bars,
+            &make_strategy_for_bars,
+        );
+        assert!(outcome.applicable);
+        assert!(outcome.passed, "{:?}", outcome.reason);
+    }
+}
 
 #[cfg(test)]
 mod stress_transform_semantic_identity_tests {

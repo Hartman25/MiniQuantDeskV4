@@ -23,6 +23,7 @@ pub mod loader;
 pub mod market_frame; // BKT-MULTISYMBOL-MARKET-FRAME-01
 pub mod p7a_p7b_economic_replay_stress; // P9 BKT-ROBUSTNESS-GAUNTLET-01 / P7A-P7B-ECONOMIC-REPLAY-STRESS-01
 pub mod regime;
+pub mod research_replay_strategy; // W06-P9-RUST-REPLAY-STRATEGY-01
 pub mod robustness_gauntlet; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub mod strategy_lab;
 pub mod strategy_scan_review;
@@ -74,9 +75,10 @@ pub use p7a_p7b_economic_replay_stress::{
     p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
     P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
 };
+pub use research_replay_strategy::{ReplaySemanticSpec, ResearchOosReplayStrategy}; // W06-P9-RUST-REPLAY-STRATEGY-01
 pub use robustness_gauntlet::{
-    run_robustness_gauntlet, DeferredScenario, RobustnessGauntletOutput,
-    RobustnessScenarioOutcome, REQUIRED_ROBUSTNESS_SCENARIO_NAMES,
+    run_robustness_gauntlet, run_robustness_gauntlet_with_symbol_loo_factory, DeferredScenario,
+    RobustnessGauntletOutput, RobustnessScenarioOutcome, REQUIRED_ROBUSTNESS_SCENARIO_NAMES,
     ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION,
 }; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub use stress_suite::{
