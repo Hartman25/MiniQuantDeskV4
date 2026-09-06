@@ -75,7 +75,9 @@ def _register_full_clearing_family(store: ResearchResultStore, tmp_path: Path, c
 def _write_benchmark(tmp_path: Path, candidate_key: str, ls: dict, *, benchmark_sharpe: float) -> Path:
     return fx.write_family_result_artifact(
         tmp_path / f"{candidate_key}_family.json", long_short_trial_id=ls["trial_id"],
-        long_short_attempt_id=ls["attempt_id"], benchmark_sharpe=benchmark_sharpe,
+        long_short_hypothesis_id=fx.candidate_hypothesis_ids(candidate_key)["long_short"],
+        long_short_experiment_id=fx.REAL_EXPERIMENT_ID, long_short_economic_eval_id=ls["economic_eval_id"],
+        benchmark_sharpe=benchmark_sharpe,
     )
 
 

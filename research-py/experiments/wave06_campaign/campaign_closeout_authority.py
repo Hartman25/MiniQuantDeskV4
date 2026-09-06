@@ -438,16 +438,29 @@ def resolve_authoritative_evidence(
             "candidate's own family_result.json, produced only by run_family()'s --execute path)"
         )
     family_result = _load_json(Path(benchmark_artifact_path))
-    fr_ls_registry = (family_result.get("long_short") or {}).get("registry") or {}
+    # W06-A-CAMPAIGN-CLOSEOUT-AUTHORITY-REPAIR-04 (emergent repair): the real
+    # run_wave.py::run_family()/run_one_trial() output binds identity via
+    # FLAT trial_id/hypothesis_id/experiment_id/economic_eval_id fields on
+    # family_result["long_short"] itself -- there is no nested "registry"
+    # sub-object anywhere in that file (confirmed against a real --execute
+    # family_result.json; only economic_walk_forward.json, a SEPARATE file,
+    # carries a "registry" block). economic_eval_id is itself a content-bound
+    # identity already cross-verified against the resolved trial/attempt by
+    # resolve_succeeded_economic_evidence (econ_ls, above) -- checking it here
+    # is at least as strong a binding as the attempt_id/status pair this
+    # replaces, and matches what real production output actually contains.
+    fr_ls = family_result.get("long_short") or {}
     if (
-        fr_ls_registry.get("trial_id") != trial_ls["trial_id"]
-        or fr_ls_registry.get("attempt_id") != outcome_ls["attempt"]["attempt_id"]
-        or fr_ls_registry.get("status") != "succeeded"
+        fr_ls.get("trial_id") != trial_ls["trial_id"]
+        or fr_ls.get("hypothesis_id") != trial_ls["hypothesis_id"]
+        or fr_ls.get("experiment_id") != trial_ls["experiment_id"]
+        or fr_ls.get("economic_eval_id") != econ_ls["economic_eval_id"]
     ):
         raise AuthorityRefusal(
-            f"family_result.json at {benchmark_artifact_path} long_short.registry identity does not match "
+            f"family_result.json at {benchmark_artifact_path} long_short identity does not match "
             f"the resolved trial/attempt (trial_id={trial_ls['trial_id']!r} "
-            f"attempt_id={outcome_ls['attempt']['attempt_id']!r})"
+            f"hypothesis_id={trial_ls['hypothesis_id']!r} experiment_id={trial_ls['experiment_id']!r} "
+            f"economic_eval_id={econ_ls['economic_eval_id']!r})"
         )
     benchmark_sharpe = (family_result.get("benchmark_long_short") or {}).get("sharpe")
     if benchmark_sharpe is None:

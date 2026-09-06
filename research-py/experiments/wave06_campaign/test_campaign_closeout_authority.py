@@ -68,7 +68,8 @@ def _register_clearing_family(store: ResearchResultStore, tmp_path: Path, candid
     )
     family_path = fx.write_family_result_artifact(
         tmp_path / f"{candidate_key}_family.json", long_short_trial_id=ls["trial_id"],
-        long_short_attempt_id=ls["attempt_id"], benchmark_sharpe=0.3,
+        long_short_hypothesis_id=hyps["long_short"], long_short_experiment_id=fx.REAL_EXPERIMENT_ID,
+        long_short_economic_eval_id=ls["economic_eval_id"], benchmark_sharpe=0.3,
     )
     return {
         "long_only": lo, "long_short": ls,
@@ -294,8 +295,9 @@ def test_resolver_rejects_non_finite_net_sharpe_in_a_real_artifact(tmp_path: Pat
     econ["aggregate"]["net_sharpe"] = float("nan")
     ls["economic_walk_forward_path"].write_text(json.dumps(econ, allow_nan=True), encoding="utf-8")
     family_path = fx.write_family_result_artifact(
-        tmp_path / "family.json", long_short_trial_id=ls["trial_id"], long_short_attempt_id=ls["attempt_id"],
-        benchmark_sharpe=0.3,
+        tmp_path / "family.json", long_short_trial_id=ls["trial_id"],
+        long_short_hypothesis_id="hyp_a_long_short", long_short_experiment_id=fx.REAL_EXPERIMENT_ID,
+        long_short_economic_eval_id=ls["economic_eval_id"], benchmark_sharpe=0.3,
     )
     judge_sha = fx.register_judge_artifact(
         store, experiment_id=fx.REAL_EXPERIMENT_ID, included_trial_ids=[ls["trial_id"]],
@@ -372,6 +374,49 @@ def test_mutated_economic_artifact_fails_registry_identity_check(tmp_path: Path)
     try:
         _resolve(root, tmp_path, "A")
         assert False, "expected AuthorityRefusal: mutated ids.economic_eval_id disagrees with registry result_id"
+    except cca.AuthorityRefusal:
+        pass
+
+
+def test_family_result_economic_eval_id_mismatch_fails_closed(tmp_path: Path) -> None:
+    """W06-A-CAMPAIGN-CLOSEOUT-AUTHORITY-REPAIR-04 (emergent repair):
+    family_result.json's own long_short.economic_eval_id must match the
+    resolved trial/attempt's real economic_eval_id -- a family_result.json
+    that names a DIFFERENT (even if otherwise well-formed) economic_eval_id
+    must never be silently accepted as this candidate's benchmark authority."""
+    root = fx.fake_campaign_root(tmp_path)
+    store = _store(tmp_path)
+    fx.register_succeeded_economic_trial(
+        store, tmp_path, experiment_id=fx.REAL_EXPERIMENT_ID, hypothesis_id="hyp_a_long_only",
+        trial_id="trial_a_lo", net_sharpe=0.5,
+    )
+    ls = fx.register_succeeded_economic_trial(
+        store, tmp_path, experiment_id=fx.REAL_EXPERIMENT_ID, hypothesis_id="hyp_a_long_short",
+        trial_id="trial_a_ls", net_sharpe=0.9,
+    )
+    family_path = fx.write_family_result_artifact(
+        tmp_path / "family.json", long_short_trial_id=ls["trial_id"],
+        long_short_hypothesis_id="hyp_a_long_short", long_short_experiment_id=fx.REAL_EXPERIMENT_ID,
+        long_short_economic_eval_id="some_other_economic_eval_id", benchmark_sharpe=0.3,
+    )
+    judge_sha = fx.register_judge_artifact(
+        store, experiment_id=fx.REAL_EXPERIMENT_ID, included_trial_ids=[ls["trial_id"]],
+        dsr_by_trial={ls["trial_id"]: 0.75}, pbo_value=0.2,
+    )
+    placebo_path = fx.write_genuine_placebo_artifact(
+        tmp_path / "placebo.json", trial_id=ls["trial_id"], economic_eval_id=ls["economic_eval_id"],
+        economic_artifact_sha256=ls["economic_walk_forward_sha256"],
+    )
+    sens_path = fx.write_sensitivity_artifact(
+        tmp_path / "sens.json", trial_id=ls["trial_id"], judge_artifact_sha256=judge_sha, dsr_range=0.05,
+        pbo_range=0.05,
+    )
+    try:
+        _resolve(
+            root, tmp_path, "A", benchmark_artifact_path=family_path, judge_artifact_sha256=judge_sha,
+            genuine_placebo_artifact_path=placebo_path, dsr_pbo_sensitivity_artifact_path=sens_path,
+        )
+        assert False, "expected AuthorityRefusal: family_result.json economic_eval_id disagrees with the resolved trial/attempt"
     except cca.AuthorityRefusal:
         pass
 

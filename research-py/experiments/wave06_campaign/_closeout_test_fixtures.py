@@ -253,12 +253,25 @@ def write_sensitivity_artifact(
 
 
 def write_family_result_artifact(
-    path: Path, *, long_short_trial_id: str, long_short_attempt_id: str, benchmark_sharpe: float,
+    path: Path,
+    *,
+    long_short_trial_id: str,
+    long_short_hypothesis_id: str,
+    long_short_experiment_id: str,
+    long_short_economic_eval_id: str,
+    benchmark_sharpe: float,
 ) -> Path:
+    """Mirrors the REAL shape run_wave.py::run_family() actually writes:
+    FLAT trial_id/hypothesis_id/experiment_id/economic_eval_id fields on
+    family_result["long_short"] -- no nested "registry" sub-object (that only
+    exists in the SEPARATE economic_walk_forward.json file)."""
     path.write_text(
         json.dumps({
             "long_short": {
-                "registry": {"trial_id": long_short_trial_id, "attempt_id": long_short_attempt_id, "status": "succeeded"},
+                "trial_id": long_short_trial_id,
+                "hypothesis_id": long_short_hypothesis_id,
+                "experiment_id": long_short_experiment_id,
+                "economic_eval_id": long_short_economic_eval_id,
             },
             "benchmark_long_short": {"sharpe": benchmark_sharpe},
         }),
