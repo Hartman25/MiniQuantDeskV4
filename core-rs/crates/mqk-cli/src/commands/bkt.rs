@@ -1503,7 +1503,7 @@ fn parse_u32_list(s: &str) -> Result<Vec<u32>> {
 // ---------------------------------------------------------------------------
 
 /// Best-effort short git hash of the running binary.
-fn bkt_git_hash() -> String {
+pub(crate) fn bkt_git_hash() -> String {
     use std::process::Command;
     Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -1517,7 +1517,7 @@ fn bkt_git_hash() -> String {
 }
 
 /// Best-effort host fingerprint for the artifact manifest.
-fn bkt_host_fingerprint() -> String {
+pub(crate) fn bkt_host_fingerprint() -> String {
     let hostname = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "UNKNOWN_HOST".to_string());

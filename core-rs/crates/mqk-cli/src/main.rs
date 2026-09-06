@@ -15,6 +15,7 @@ use commands::{
     },
     daemon::{daemon_arm, daemon_clear_halted_run, daemon_disarm, daemon_halt, daemon_status},
     load_payload,
+    research_replay::{run_research_replay_backtest, ResearchReplayArgs},
     md::{
         md_coinlore_latest_mark, md_crypto_registry_readiness, md_ingest_csv, md_ingest_provider,
         md_kraken_ohlc_dry_run, md_kraken_ohlc_ingest, md_kraken_ohlc_sync,
@@ -721,6 +722,101 @@ enum BacktestCmd {
         /// Directory to write the placebo re-evaluation's own output
         /// artifacts into (never the original candidate's evidence
         /// directory).
+        #[arg(long)]
+        placebo_out_dir: String,
+    },
+
+    /// W06-P9-CANONICAL-RESEARCH-REPLAY-CLI-01: produce a REAL canonical
+    /// Backtest/stress/P9 artifact tree for a registered Wave06 Research
+    /// trial, using `ResearchOosReplayStrategy` (the trial's own
+    /// authenticated OOS replay bundle, W06-P9-REPLAY-AUTHORITY-01) as the
+    /// actual Backtest candidate. Runs the real engine, the real stress
+    /// suite, the real canonical robustness gauntlet (with the bar-aware
+    /// symbol-leave-one-out factory), and the three existing deferred
+    /// cross-language P9 scenarios in one command -- no Paper/Live/OMS/
+    /// broker call, ever.
+    ResearchReplay {
+        /// Path to the Research SQLite registry database.
+        #[arg(long)]
+        registry_db: String,
+
+        /// The Research trial_id this replay must resolve to.
+        #[arg(long)]
+        trial_id: String,
+
+        /// The Research strategy_id this replay must resolve to.
+        #[arg(long)]
+        strategy_id: String,
+
+        /// The exact P7C-authorized economic_eval_id this replay must bind
+        /// to -- never "the latest successful attempt".
+        #[arg(long)]
+        economic_eval_id: String,
+
+        /// Directory containing W06-P9-REPLAY-AUTHORITY-01's manifest.json
+        /// + schedule CSVs for this trial/economic_eval_id.
+        #[arg(long)]
+        replay_bundle_dir: String,
+
+        /// Artifact root directory (same meaning as `backtest csv/db
+        /// --out-dir`) -- the run directory is `{out_dir}/{run_id}/`.
+        #[arg(long)]
+        out_dir: String,
+
+        /// Path to the research-py project root.
+        #[arg(long)]
+        research_py_root: String,
+
+        /// Python executable to invoke.
+        #[arg(long, default_value = "python")]
+        python: String,
+
+        /// The exact, already-registered P7C-authorized judge_artifact_sha256
+        /// for the dsr_pbo_sensitivity finalization.
+        #[arg(long)]
+        judge_artifact_sha256: String,
+
+        /// Comma-separated CSCV block-count grid (each value even, >= 4).
+        #[arg(long)]
+        block_counts: String,
+
+        /// Maximum allowed DSR spread across `block_counts`.
+        #[arg(long)]
+        dsr_max_sensitivity_range: f64,
+
+        /// Maximum allowed PBO spread across `block_counts`.
+        #[arg(long)]
+        pbo_max_sensitivity_range: f64,
+
+        /// Output directory for the P7A/P7B stress re-evaluation's own
+        /// artifacts.
+        #[arg(long)]
+        stress_out_dir: String,
+
+        /// P7A stress knob: slippage_bps.
+        #[arg(long)]
+        stress_execution_slippage_bps: u32,
+
+        /// P7A stress knob: volatility_mult_bps.
+        #[arg(long)]
+        stress_execution_volatility_mult_bps: u32,
+
+        /// P7B stress knob: max_target_qty (optional -- omit for uncapped).
+        #[arg(long)]
+        stress_max_target_qty: Option<u32>,
+
+        /// P7B stress knob: max_position_notional_usd (optional -- omit for
+        /// uncapped).
+        #[arg(long)]
+        stress_max_position_notional_usd: Option<f64>,
+
+        /// Maximum allowed max-drawdown fraction for the P7A/P7B stress
+        /// replay.
+        #[arg(long)]
+        max_drawdown_ceiling: f64,
+
+        /// Output directory for the genuine shuffled placebo's own
+        /// artifacts.
         #[arg(long)]
         placebo_out_dir: String,
     },
@@ -1733,6 +1829,60 @@ async fn run_cli() -> Result<()> {
                     python,
                     placebo_out_dir,
                 )?;
+            }
+            BacktestCmd::ResearchReplay {
+                registry_db,
+                trial_id,
+                strategy_id,
+                economic_eval_id,
+                replay_bundle_dir,
+                out_dir,
+                research_py_root,
+                python,
+                judge_artifact_sha256,
+                block_counts,
+                dsr_max_sensitivity_range,
+                pbo_max_sensitivity_range,
+                stress_out_dir,
+                stress_execution_slippage_bps,
+                stress_execution_volatility_mult_bps,
+                stress_max_target_qty,
+                stress_max_position_notional_usd,
+                max_drawdown_ceiling,
+                placebo_out_dir,
+            } => {
+                let summary = run_research_replay_backtest(ResearchReplayArgs {
+                    registry_db,
+                    trial_id,
+                    strategy_id,
+                    economic_eval_id,
+                    replay_bundle_dir,
+                    out_dir,
+                    research_py_root,
+                    python,
+                    judge_artifact_sha256,
+                    block_counts,
+                    dsr_max_sensitivity_range,
+                    pbo_max_sensitivity_range,
+                    stress_out_dir,
+                    stress_execution_slippage_bps,
+                    stress_execution_volatility_mult_bps,
+                    stress_max_target_qty,
+                    stress_max_position_notional_usd,
+                    max_drawdown_ceiling,
+                    placebo_out_dir,
+                })?;
+                println!("trial_id={}", summary.trial_id);
+                println!("strategy_id={}", summary.strategy_id);
+                println!("economic_eval_id={}", summary.economic_eval_id);
+                println!("run_id={}", summary.run_id);
+                println!("run_dir={}", summary.run_dir.display());
+                println!(
+                    "canonical_robustness_artifact_sha256={}",
+                    summary.canonical_robustness_artifact_sha256
+                );
+                println!("is_complete={}", summary.is_complete);
+                println!("all_applicable_passed={}", summary.all_applicable_passed);
             }
         },
 

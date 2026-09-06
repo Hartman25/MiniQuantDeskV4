@@ -6,6 +6,7 @@
 pub mod bkt;
 pub mod daemon;
 pub mod md;
+pub mod research_replay; // W06-P9-CANONICAL-RESEARCH-REPLAY-CLI-01
 pub mod run;
 
 use anyhow::{Context, Result};
