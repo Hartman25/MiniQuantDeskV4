@@ -1299,42 +1299,49 @@ mod tests {
     /// invocations) -- run explicitly with `cargo test -p mqk-cli --bin
     /// mqk-cli -- --ignored r3_5_full_canonical_completion_synthetic_e2e_proof`.
     ///
-    /// NOT asserting `all_applicable_passed() == true`: two genuine,
-    /// deterministic, OUT-OF-SCOPE-for-this-wave findings, both discovered
-    /// while constructing this exact fixture and confirmed independent of
-    /// this fixture's own parameters, make an honest "every scenario
-    /// passes" synthetic candidate infeasible within this wave's scope:
+    /// NOT asserting `all_applicable_passed() == true`. Two genuine,
+    /// deterministic findings were originally discovered while constructing
+    /// this exact fixture, both since resolved:
     ///   1. `p7a_p7b_economic_replay_stress`/`genuine_shuffled_placebo`'s
     ///      `_reconstruct_baseline_spec` could not even round-trip a
     ///      cross_sectional_rank_* (LIQ-01/VOL-01's own family) trial's
-    ///      persisted `signal_policy` before this wave's fix (a genuine,
-    ///      narrow, already-fixed bug: `tie_policy` is persisted as an
+    ///      persisted `signal_policy` (`tie_policy` was persisted as an
     ///      identity-only field for that direction-policy family but was
-    ///      never a `SignalPolicySpec.__init__` parameter) -- now fixed as
-    ///      part of this same patch, and `p7a_p7b_economic_replay_stress`
-    ///      genuinely evaluates and passes for this fixture.
+    ///      never a `SignalPolicySpec.__init__` parameter) -- fixed prior to
+    ///      this wave; `p7a_p7b_economic_replay_stress` genuinely evaluates
+    ///      and passes for this fixture.
     ///   2. `genuine_shuffled_placebo`'s fold-wide score shuffle combined
     ///      with `_resolve_rank_direction_for_frame`'s exact
-    ///      (`tie_tol=1e-9`) boundary-tie refusal is structurally
+    ///      (`tie_tol=1e-9`) boundary-tie refusal was structurally
     ///      incompatible with ANY cross_sectional_percentile_rank feature
     ///      (LIQ-01/VOL-01's own feature-transform family, R1.3): that
     ///      transform always maps a decision date's cross-section onto the
-    ///      SAME small, fixed value set (`{1/N, ..., N/N}`); a fold spanning
-    ///      more than one decision date therefore shuffles many EXACT
-    ///      repeats of that fixed set, making a boundary-adjacent exact
-    ///      duplicate on some shuffled date combinatorially near-certain --
-    ///      while a fold spanning exactly one decision date (the only way to
-    ///      avoid the collision) leaves no later bar for economic_walk_forward_v1's
-    ///      causal next-bar execution to fill any order against, making
-    ///      every position size zero. This is a genuine, reproducible,
-    ///      deterministic finding, NOT a fixture defect -- reported here per
-    ///      mission instruction ("if an all-pass synthetic fixture cannot
-    ///      honestly make every scenario pass ... report the exact
-    ///      deterministic reason") rather than weakened or fabricated.
-    ///      `genuine_shuffled_placebo` therefore genuinely, honestly reports
-    ///      `applicable: true, passed: false` for this fixture, which is
-    ///      sufficient for `is_complete()` (evidence coverage) but not for
-    ///      `all_applicable_passed()`.
+    ///      SAME small, fixed value set (`{1/N, ..., N/N}`); a fold-wide
+    ///      permutation could therefore collect duplicate score values onto
+    ///      one decision timestamp, manufacturing a boundary tie the direct-
+    ///      rank evaluator correctly refused. FIXED by
+    ///      W06-A-P9-GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR-01:
+    ///      `genuine_shuffled_placebo_cli._shuffle_oos_predictions` now
+    ///      scopes the permutation to each `(fold, decision_ts)` cross-
+    ///      section for rank-family signal policies, preserving every real
+    ///      decision frame's exact score multiset (so it can never
+    ///      manufacture a tie absent from the original frame) while non-rank
+    ///      policies keep the legacy fold-wide shuffle unchanged.
+    ///      `genuine_shuffled_placebo` now genuinely reports
+    ///      `applicable: true, passed: true` for this fixture (asserted
+    ///      below), proving the repair on the real production path.
+    ///
+    /// `all_applicable_passed()` is still, separately, and correctly
+    /// `false` for this fixture: five OTHER stress-family scenarios
+    /// (`execution_delay_stress`, `symbol_leave_one_out`,
+    /// `parameter_neighborhood_execution`, `placebo_temporal_offset`,
+    /// `conservative_capacity_stress`) fail this fixture's synthetic
+    /// signal against an 18% max-drawdown ceiling -- a genuine, deterministic,
+    /// but OUT-OF-SCOPE-for-this-wave finding about this fixture's own
+    /// synthetic economics under stress permutations, unrelated to the two
+    /// findings above and to trial identity/data integrity. Reported here
+    /// per mission instruction rather than weakened, fabricated, or silently
+    /// fixed -- a candidate for a future, separately-scoped mission.
     #[test]
     #[ignore = "needs a working python + research-py deps on PATH; real subprocess E2E, run explicitly"]
     fn r3_5_full_canonical_completion_synthetic_e2e_proof() {
@@ -1412,14 +1419,42 @@ mod tests {
             Some(economic_eval_id.as_str())
         );
 
-        // See this test's own doc comment: two genuine, deterministic,
-        // out-of-scope findings make `all_applicable_passed() == true`
-        // infeasible for an honest synthetic fixture in this wave -- the
-        // truthful value is asserted here, not fabricated.
+        // W06-A-P9-GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR-01: the
+        // specific finding this repair targets is resolved -- proven here on
+        // the real production path, not merely by unit test.
+        let failed = gauntlet.failed_scenario_descriptions();
         assert!(
-            !gauntlet.all_applicable_passed(),
-            "expected NOT all-applicable-passed for this fixture (see doc comment); if this now \
-             fails, either a real regression was introduced, or the two documented findings have \
+            !failed.iter().any(|d| d.starts_with("genuine_shuffled_placebo:")),
+            "genuine_shuffled_placebo must genuinely pass for this cross-sectional-rank fixture \
+             after the placebo repair; failed scenarios: {failed:?}"
+        );
+
+        // See this test's own doc comment: a SEPARATE, out-of-scope-for-
+        // this-wave finding (this fixture's own synthetic economics
+        // breaching an 18% max-drawdown ceiling under five stress-family
+        // scenarios) still makes `all_applicable_passed() == true`
+        // infeasible for an honest synthetic fixture -- the truthful value
+        // is asserted here, not fabricated. Pinned to the exact expected
+        // failure set (not just "some failure") so this test fails loudly,
+        // rather than silently, on either a further regression or a genuine
+        // resolution of one of these five.
+        assert!(!gauntlet.all_applicable_passed());
+        let mut failed_names: Vec<&str> = failed
+            .iter()
+            .map(|d| d.split(':').next().unwrap_or(d.as_str()))
+            .collect();
+        failed_names.sort_unstable();
+        assert_eq!(
+            failed_names,
+            vec![
+                "conservative_capacity_stress",
+                "execution_delay_stress",
+                "parameter_neighborhood_execution",
+                "placebo_temporal_offset",
+                "symbol_leave_one_out",
+            ],
+            "expected exactly these five out-of-scope stress-family failures (see doc comment); \
+             if this now fails, either a real regression was introduced, or one of these five has \
              genuinely been resolved and this assertion (and its doc comment) should be updated"
         );
 

@@ -25,12 +25,18 @@ inherently needs a well-defined, reproducible permutation): the shuffle seed
 is derived ENTIRELY from `trial_id` via
 `int.from_bytes(sha256(f"genuine_shuffled_placebo_v1:{trial_id}"...)[:8])` --
 the SAME trial always produces the SAME permutation, with no wall-clock or
-process-state dependency. The permutation is applied independently within
-each `fold` (grouping by the OOS predictions' own `fold` column), so a
-fold's placebo scores are exactly a permutation of that fold's own real
-scores -- the marginal score distribution is preserved exactly (it is the
-same multiset of values), only the (symbol, decision_ts) <-> score
-association is destroyed.
+process-state dependency. For non-rank signal policies, the permutation is
+applied independently within each `fold` (grouping by the OOS predictions'
+own `fold` column), so a fold's placebo scores are exactly a permutation of
+that fold's own real scores. For cross-sectional-rank signal policies
+(W06-A-P9-GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR-01), the
+permutation is instead scoped to each `(fold, decision_ts)` cross-section --
+a fold-wide permutation can otherwise collect duplicate score values (as
+naturally produced by a cross-sectional-percentile-rank feature) onto one
+decision timestamp and manufacture a boundary tie the accepted direct-rank
+evaluator correctly refuses. In both cases the marginal score distribution
+within the permuted group is preserved exactly (it is the same multiset of
+values); only the symbol <-> score association is destroyed.
 
 Never calls `ResearchResultStore.register_trial`/`register_hypothesis` --
 this is an EVALUATION SLICE of trial T, never a new trial. Never touches
@@ -121,12 +127,34 @@ def _placebo_seed(trial_id: str) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
-def _shuffle_oos_predictions(oos_path: Path, trial_id: str, out_path: Path) -> Dict[str, Any]:
-    """Deterministically permute `ml_score` within each `fold` group -- the
-    exact same multiset of scores, reassigned to different (symbol,
-    decision_ts) rows within that fold. Never shuffles ACROSS folds (a fold
-    boundary is itself part of the frozen walk-forward chronology, never
-    something a placebo control should cross)."""
+_SHUFFLE_MODE_WITHIN_FOLD_ROWS = "within_fold_rows"
+_SHUFFLE_MODE_CROSS_SECTIONAL_WITHIN_DECISION_TS = "cross_sectional_within_decision_ts"
+
+
+def _shuffle_oos_predictions(
+    oos_path: Path, trial_id: str, out_path: Path, *, is_rank: bool
+) -> Dict[str, Any]:
+    """Deterministically permute `ml_score` -- the exact same multiset of
+    scores, reassigned to different rows -- and never across a `fold`
+    boundary (a fold boundary is itself part of the frozen walk-forward
+    chronology, never something a placebo control should cross).
+
+    For NON-RANK signal policies (`is_rank=False`), this is the original,
+    unchanged fold-wide row permutation: every row in a `fold` is eligible
+    to receive any other row's score within that fold.
+
+    For cross-sectional-rank signal policies (`is_rank=True`,
+    W06-A-P9-GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR-01), the
+    permutation is instead scoped to each individual `(fold, decision_ts)`
+    cross-section: a fold-wide row permutation can collect duplicate score
+    values (naturally produced by a cross-sectional-percentile-rank feature)
+    onto one decision timestamp, manufacturing a boundary tie that never
+    existed in the real decision frame -- the accepted direct-rank evaluator
+    (`_resolve_rank_direction_for_frame`) then correctly refuses it. Scoping
+    the permutation to one decision timestamp at a time preserves that exact
+    frame's own score multiset (so any real boundary tie is preserved
+    unchanged, and no new one is manufactured) while still fully decoupling
+    which symbol receives which score."""
     df = pd.read_csv(oos_path)
     required = {"fold", "symbol", "decision_ts", "ml_score"}
     missing = required - set(df.columns)
@@ -136,17 +164,60 @@ def _shuffle_oos_predictions(oos_path: Path, trial_id: str, out_path: Path) -> D
     seed = _placebo_seed(trial_id)
     rng = np.random.default_rng(seed)
     shuffled = df.copy()
-    for fold_value in sorted(df["fold"].unique()):
-        mask = df["fold"] == fold_value
-        idx = df.index[mask].to_numpy()
-        permuted_idx = rng.permutation(idx)
-        shuffled.loc[idx, "ml_score"] = df.loc[permuted_idx, "ml_score"].to_numpy()
+
+    groups_permuted = 0
+    rows_permuted = 0
+    identity_groups_corrected = 0
+
+    if is_rank:
+        shuffle_mode = _SHUFFLE_MODE_CROSS_SECTIONAL_WITHIN_DECISION_TS
+        for _, group in df.groupby(["fold", "decision_ts"], sort=True):
+            # A8#11: canonicalize row order by `symbol` (unique within one
+            # (fold, decision_ts) cross-section -- duplicate rows there are
+            # already rejected upstream) so the resulting permutation is a
+            # function only of (trial_id, the group's own score multiset),
+            # never of the input CSV's incidental row order.
+            idx = group.sort_values("symbol", kind="mergesort").index.to_numpy()
+            n = len(idx)
+            if n < 2:
+                # A single-row cross-section has no other row to swap with --
+                # its own score is the only member of its own multiset.
+                continue
+            permuted_idx = rng.permutation(idx)
+            if np.array_equal(permuted_idx, idx):
+                # A1/A3: a placebo must not silently become the original
+                # signal -- a deterministic nonzero cyclic rotation replaces
+                # an identity draw. Never crosses this same (fold,
+                # decision_ts) group's own boundary.
+                permuted_idx = np.roll(idx, 1)
+                identity_groups_corrected += 1
+            shuffled.loc[idx, "ml_score"] = df.loc[permuted_idx, "ml_score"].to_numpy()
+            groups_permuted += 1
+            rows_permuted += n
+    else:
+        shuffle_mode = _SHUFFLE_MODE_WITHIN_FOLD_ROWS
+        for fold_value in sorted(df["fold"].unique()):
+            mask = df["fold"] == fold_value
+            # A8#11: canonicalize by (symbol, decision_ts) -- matches the
+            # production OOS writer's own sort order exactly (see
+            # eval_walkforward.py), so this is a no-op on any real input and
+            # only affects order-independence for an adversarially reordered
+            # CSV.
+            idx = df.loc[mask].sort_values(["symbol", "decision_ts"], kind="mergesort").index.to_numpy()
+            permuted_idx = rng.permutation(idx)
+            shuffled.loc[idx, "ml_score"] = df.loc[permuted_idx, "ml_score"].to_numpy()
+            groups_permuted += 1
+            rows_permuted += len(idx)
 
     shuffled.to_csv(out_path, index=False)
     return {
         "seed": seed,
         "rows_shuffled": int(len(df)),
         "distinct_folds": int(df["fold"].nunique()),
+        "shuffle_mode": shuffle_mode,
+        "groups_permuted": int(groups_permuted),
+        "rows_permuted": int(rows_permuted),
+        "identity_groups_corrected": int(identity_groups_corrected),
     }
 
 
@@ -232,7 +303,9 @@ def _run_shuffled_placebo(
 
     placebo_out_dir.mkdir(parents=True, exist_ok=True)
     shuffled_oos_path = placebo_out_dir / "shuffled_oos_predictions.csv"
-    shuffle_info = _shuffle_oos_predictions(oos_path, trial_id, shuffled_oos_path)
+    shuffle_info = _shuffle_oos_predictions(
+        oos_path, trial_id, shuffled_oos_path, is_rank=baseline_spec.signal_policy.is_rank
+    )
 
     placebo_path = run_economic_walkforward(
         placebo_out_dir,
@@ -271,6 +344,12 @@ def _run_shuffled_placebo(
         "shuffle_seed": shuffle_info["seed"],
         "shuffle_rows": shuffle_info["rows_shuffled"],
         "shuffle_distinct_folds": shuffle_info["distinct_folds"],
+        # Non-authoritative diagnostics only (A7) -- never part of candidate/
+        # trial identity.
+        "shuffle_mode": shuffle_info["shuffle_mode"],
+        "shuffle_groups_permuted": shuffle_info["groups_permuted"],
+        "shuffle_rows_permuted": shuffle_info["rows_permuted"],
+        "shuffle_identity_groups_corrected": shuffle_info["identity_groups_corrected"],
         "baseline_net_total_return": baseline_net_total_return,
         "placebo_net_total_return": placebo_net_total_return,
     }
