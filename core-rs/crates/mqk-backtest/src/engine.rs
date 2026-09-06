@@ -575,19 +575,34 @@ impl BacktestEngine {
                 continue;
             }
 
-            // 5. Convert targets to order intents
-            let position_book = self.build_position_book();
-            let decision =
-                targets_to_order_intents(&bar_result.intents.output.targets, &position_book);
+            // 5. Convert targets to order intents. W06-REPLAY-NO-DECISION-
+            // SEMANTICS-01 (Patch A): an empty target vector from a strategy
+            // that declares `empty_output_is_noop()` means "no new decision
+            // this bar" -- existing positions carry forward untouched,
+            // skipping translation entirely. Every other strategy keeps the
+            // unchanged complete-target contract, where an empty vector
+            // still means "target: hold nothing" (see
+            // `mqk_execution::targets_to_order_intents`).
+            let no_new_decision =
+                bar_result.intents.output.targets.is_empty() && self.host.empty_output_is_noop();
 
             // PATCH C: handle HaltAndDisarm
-            let intents = match decision {
-                mqk_execution::ExecutionDecision::Noop => Vec::new(),
-                mqk_execution::ExecutionDecision::PlaceOrders(intents) => intents,
-                mqk_execution::ExecutionDecision::HaltAndDisarm { reason } => {
-                    self.halted = true;
-                    self.halt_reason = Some(reason);
-                    Vec::new()
+            let intents = if no_new_decision {
+                Vec::new()
+            } else {
+                let position_book = self.build_position_book();
+                let decision = targets_to_order_intents(
+                    &bar_result.intents.output.targets,
+                    &position_book,
+                );
+                match decision {
+                    mqk_execution::ExecutionDecision::Noop => Vec::new(),
+                    mqk_execution::ExecutionDecision::PlaceOrders(intents) => intents,
+                    mqk_execution::ExecutionDecision::HaltAndDisarm { reason } => {
+                        self.halted = true;
+                        self.halt_reason = Some(reason);
+                        Vec::new()
+                    }
                 }
             };
 

@@ -163,6 +163,20 @@ pub trait Strategy: Send + Sync {
         .push_i64(spec.timeframe_secs)
         .finish()
     }
+
+    /// W06-REPLAY-NO-DECISION-SEMANTICS-01 (Patch A): whether an empty
+    /// `StrategyOutput` from this strategy means "no new decision this bar —
+    /// carry existing positions forward" rather than the ordinary
+    /// complete-target-portfolio contract ("target: hold nothing"; see
+    /// `mqk_execution::targets_to_order_intents`). Default `false` preserves
+    /// the existing Paper/Live/backtest complete-target semantics for every
+    /// strategy that does not explicitly opt in — only a strategy whose
+    /// `on_bar` contract genuinely emits "not yet decided" on some calls
+    /// (e.g. a replay strategy driven by an external clock) should override
+    /// this to `true`.
+    fn empty_output_is_noop(&self) -> bool {
+        false
+    }
 }
 
 /// Host-level policy errors (Tier A).

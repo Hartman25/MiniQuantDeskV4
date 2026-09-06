@@ -368,6 +368,17 @@ impl Strategy for TimestampBatchDelayedStrategy {
         .finish()
     }
 
+    /// W06-REPLAY-NO-DECISION-SEMANTICS-01 (Patch A): forwards the wrapped
+    /// candidate's own no-decision declaration. This wrapper's `on_bar`
+    /// itself only ever emits an empty output on a non-final physical row of
+    /// the CURRENT batch (never yet decided) or while `delay_batches` have
+    /// not yet elapsed (a real, possibly-empty inner decision still sitting
+    /// in `buffer`) — both cases are "no decision" iff the wrapped candidate
+    /// says an empty output means that.
+    fn empty_output_is_noop(&self) -> bool {
+        self.inner.empty_output_is_noop()
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         let real = self.inner.on_bar(ctx);
 
@@ -1762,6 +1773,247 @@ mod research_oos_replay_integration_tests {
         // Batch 2's FINAL row: batch 1's decision is emitted now.
         let emitted = delayed.on_bar(&ctx(2 * DAY));
         assert!(!emitted.targets.is_empty(), "batch 1's decision must emit on batch 2's final row");
+    }
+
+    // -----------------------------------------------------------------------
+    // W06-REPLAY-NO-DECISION-SEMANTICS-01 (Patch A) required tests A1-A8.
+    // -----------------------------------------------------------------------
+
+    fn three_symbol_bars(days: i64) -> Vec<BacktestBar> {
+        let mut out = Vec::new();
+        for d in 0..days {
+            let ts = DAY * (d + 1);
+            out.push(BacktestBar::new("AAA", ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000));
+            out.push(BacktestBar::new("BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000));
+            out.push(BacktestBar::new("CCC", ts, 25_000_000, 25_000_000, 25_000_000, 25_000_000, 1_000));
+        }
+        out
+    }
+
+    fn single_symbol_bars(days: i64) -> Vec<BacktestBar> {
+        (0..days)
+            .map(|d| {
+                BacktestBar::new(
+                    "AAA", DAY * (d + 1), 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000,
+                )
+            })
+            .collect()
+    }
+
+    /// A1: a 2-symbol same-`end_ts` batch's NON-final physical row (the
+    /// strategy's own "not yet decided" empty output) must never be
+    /// translated into a flatten of a position already established on an
+    /// earlier day. Days 2-3 have NO schedule entry at all (see A5 for the
+    /// "no entry" case isolated from any intermediate-row effect); this
+    /// test additionally proves the INTERMEDIATE physical row within each
+    /// of those batches contributes no order either.
+    #[test]
+    fn a1_intermediate_row_of_batch_with_held_position_creates_no_spurious_flatten() {
+        let bars = two_symbol_bars(3);
+        let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        // Day 2 (2*DAY) and day 3 (3*DAY) have no entry at all.
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+
+        assert_eq!(
+            report.orders.len(),
+            1,
+            "days 2-3 (schedule entry absent) must not fabricate any flatten/adjustment order \
+             for the day-1 AAA position -- found: {:?}",
+            report.orders,
+        );
+        assert_eq!(report.orders[0].symbol, "AAA");
+        assert_eq!(report.orders[0].side, crate::types::BacktestOrderSide::Buy);
+    }
+
+    /// A2: same proof as A1, generalized to a 3-symbol batch -- no
+    /// intermediate row (1st or 2nd of 3 physical rows) produces a
+    /// duplicate/partial flatten order, only the single day-1 decision.
+    #[test]
+    fn a2_three_symbol_batch_produces_no_duplicate_intermediate_flatten_orders() {
+        let bars = three_symbol_bars(2);
+        let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule.insert(
+            DAY,
+            vec![
+                TargetPosition::new("AAA", 10),
+                TargetPosition::new("BBB", 5),
+                TargetPosition::new("CCC", 0),
+            ],
+        );
+        // Day 2 (2*DAY) has no entry: three physical rows, two of them
+        // intermediate, one final-but-absent -- none may emit an order.
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+
+        let day2_orders: Vec<_> = report.orders.iter().filter(|o| o.signal_ts == 2 * DAY).collect();
+        assert!(
+            day2_orders.is_empty(),
+            "day 2's 3-row batch (schedule entry absent) must produce zero orders, found: {:?}",
+            day2_orders,
+        );
+        assert_eq!(report.orders.len(), 2, "day 1 must emit exactly one order per non-zero-delta symbol");
+    }
+
+    /// A3: a batch's own FINAL, actually-scheduled decision executes
+    /// exactly once -- not once per physical row of the batch.
+    #[test]
+    fn a3_scheduled_batch_decision_executes_exactly_once_not_once_per_row() {
+        let bars = two_symbol_bars(1);
+        let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 5)]);
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+
+        // Exactly one order per symbol with a non-zero delta -- 2 physical
+        // rows in this batch must not produce 4 orders.
+        assert_eq!(report.orders.len(), 2, "found: {:?}", report.orders);
+        let aaa_orders: Vec<_> = report.orders.iter().filter(|o| o.symbol == "AAA").collect();
+        assert_eq!(aaa_orders.len(), 1, "AAA must receive exactly one order, not one per physical row");
+    }
+
+    /// A4: an EXPLICIT complete-target zero (`TargetPosition(symbol, 0)`
+    /// present under a real schedule entry) still causes a genuine causal
+    /// flatten -- this must never be swallowed by the no-decision seam,
+    /// which only applies to a wholly EMPTY output.
+    #[test]
+    fn a4_explicit_complete_zero_target_still_causally_flattens() {
+        let bars = two_symbol_bars(2);
+        let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        schedule.insert(2 * DAY, vec![TargetPosition::new("AAA", 0), TargetPosition::new("BBB", 0)]);
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+
+        let day2_orders: Vec<_> = report.orders.iter().filter(|o| o.signal_ts == 2 * DAY).collect();
+        assert_eq!(
+            day2_orders.len(),
+            1,
+            "an explicit complete-target zero must still flatten AAA on day 2: {:?}",
+            report.orders,
+        );
+        assert_eq!(day2_orders[0].symbol, "AAA");
+        assert_eq!(day2_orders[0].side, crate::types::BacktestOrderSide::Sell);
+    }
+
+    /// A5: a schedule-absent replay timestamp (isolated from any
+    /// intermediate-row effect via single-symbol-per-timestamp bars)
+    /// carries the position forward -- no fabricated flatten.
+    #[test]
+    fn a5_schedule_absent_timestamp_carries_position_forward() {
+        let bars = single_symbol_bars(3);
+        let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10)]);
+        // 2*DAY and 3*DAY: no entry.
+        let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+
+        assert_eq!(report.orders.len(), 1, "found: {:?}", report.orders);
+        assert_eq!(report.orders[0].signal_ts, DAY);
+    }
+
+    /// A6: a same-`end_ts` physical row permutation, under a schedule that
+    /// mixes a real decision day with a schedule-absent day, produces an
+    /// identical result -- proving the no-decision seam does not reach into
+    /// bar CONTENT (only call counts), same as the strategy's existing
+    /// content-blind design.
+    #[test]
+    fn a6_permutation_of_physical_rows_produces_identical_result_with_absent_day() {
+        let bars_a = two_symbol_bars(3);
+        let bars_b = two_symbol_bars_swapped_order(3);
+        let mut schedule_a: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule_a.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        // day 2 absent for both.
+        let schedule_b = schedule_a.clone();
+
+        let strat_a = ResearchOosReplayStrategy::new(semantic(), schedule_a, &bars_a);
+        let strat_b = ResearchOosReplayStrategy::new(semantic(), schedule_b, &bars_b);
+        let report_a = run_engine(daily_config(), &bars_a, Box::new(strat_a)).unwrap();
+        let report_b = run_engine(daily_config(), &bars_b, Box::new(strat_b)).unwrap();
+
+        assert_eq!(report_a.orders.len(), report_b.orders.len());
+        assert_eq!(
+            report_a.equity_curve.last().map(|(_, eq)| *eq),
+            report_b.equity_curve.last().map(|(_, eq)| *eq),
+        );
+    }
+
+    /// A7: the no-decision declaration survives `TimestampBatchDelayedStrategy`
+    /// wrapping -- an absent-schedule day produces no spurious flatten
+    /// through the wrapper either, and the delayed complete decision still
+    /// executes exactly once.
+    #[test]
+    fn a7_no_decision_survives_timestamp_batch_delayed_strategy_wrapper() {
+        let bars = two_symbol_bars(3);
+        let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
+        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        // day 2 absent; day 3 repeats the same complete target (no delta).
+        schedule.insert(3 * DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        let inner = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
+        let delayed = TimestampBatchDelayedStrategy::new(Box::new(inner), 1, &bars);
+        let report = run_engine(daily_config(), &bars, Box::new(delayed)).expect("engine run succeeds");
+
+        // Delayed by one batch: whichever later batch the single real BUY
+        // AAA=10 decision lands on once delayed, no batch (including the
+        // schedule-absent day 2, wherever its own empty decision ends up
+        // buffered/emitted) may ever contribute a spurious flatten order.
+        assert_eq!(
+            report.orders.len(),
+            1,
+            "only the single real BUY AAA decision may ever execute, whichever batch it lands \
+             on once delayed: {:?}",
+            report.orders,
+        );
+        assert_eq!(report.orders[0].symbol, "AAA");
+        assert_eq!(report.orders[0].side, crate::types::BacktestOrderSide::Buy);
+    }
+
+    /// A8 (MUTATION CONTROL): an ORDINARY, non-replay strategy that returns
+    /// an empty `StrategyOutput` (the trait default `empty_output_is_noop`
+    /// == `false`) must keep the existing, unmodified complete-target
+    /// contract -- an empty vector still means "target: hold nothing" and
+    /// DOES flatten. Proves Patch A did not weaken shared
+    /// `targets_to_order_intents` semantics for any strategy that did not
+    /// explicitly opt in.
+    #[test]
+    fn a8_ordinary_strategy_empty_output_still_flattens_mutation_control() {
+        struct OnceThenEmptyStrategy {
+            emitted: bool,
+        }
+        impl Strategy for OnceThenEmptyStrategy {
+            fn spec(&self) -> StrategySpec {
+                StrategySpec::new("once_then_empty", DAY)
+            }
+            fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+                if !self.emitted {
+                    self.emitted = true;
+                    StrategyOutput::new(vec![TargetPosition::new("AAA", 10)])
+                } else {
+                    StrategyOutput::new(Vec::new())
+                }
+            }
+            // empty_output_is_noop left at the trait default (false).
+        }
+
+        let bars = single_symbol_bars(2);
+        let mut engine = BacktestEngine::new(daily_config());
+        engine
+            .add_strategy(Box::new(OnceThenEmptyStrategy { emitted: false }))
+            .unwrap();
+        let report = engine.run(&bars).unwrap();
+
+        let day2_orders: Vec<_> = report.orders.iter().filter(|o| o.signal_ts == 2 * DAY).collect();
+        assert_eq!(
+            day2_orders.len(),
+            1,
+            "an ordinary strategy's empty output on day 2 must still be translated as a \
+             complete-target flatten of the day-1 AAA position (unchanged pre-Patch-A behavior): \
+             {:?}",
+            report.orders,
+        );
+        assert_eq!(day2_orders[0].symbol, "AAA");
+        assert_eq!(day2_orders[0].side, crate::types::BacktestOrderSide::Sell);
     }
 }
 

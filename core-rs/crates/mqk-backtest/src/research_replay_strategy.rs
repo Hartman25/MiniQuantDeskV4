@@ -202,6 +202,19 @@ impl Strategy for ResearchOosReplayStrategy {
         b.finish()
     }
 
+    /// W06-REPLAY-NO-DECISION-SEMANTICS-01 (Patch A): `on_bar` genuinely
+    /// emits an empty `StrategyOutput` on every non-final physical row of a
+    /// same-`end_ts` batch, and on a final row whose `end_ts` has no
+    /// scheduled entry — both mean "no new decision yet", never "target:
+    /// hold nothing". The schedule CSV loader (`mqk-cli`) only ever inserts
+    /// an `end_ts` entry alongside at least one `TargetPosition` row, so a
+    /// genuinely scheduled complete-flatten decision is always represented
+    /// by explicit zero-qty `TargetPosition` rows, never by an empty vector
+    /// under a present entry — this override cannot mask a real decision.
+    fn empty_output_is_noop(&self) -> bool {
+        true
+    }
+
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         let end_ts = ctx
             .recent

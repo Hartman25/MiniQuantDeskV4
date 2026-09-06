@@ -57,6 +57,18 @@ impl StrategyHost {
             .ok_or(StrategyHostError::NoStrategyRegistered)
     }
 
+    /// W06-REPLAY-NO-DECISION-SEMANTICS-01 (Patch A): the registered
+    /// strategy's `Strategy::empty_output_is_noop()` declaration. `false`
+    /// (the universal safe default) if no strategy is registered — callers
+    /// that care have already errored out of `on_bar`/`spec` before this
+    /// could matter.
+    pub fn empty_output_is_noop(&self) -> bool {
+        self.strategy
+            .as_ref()
+            .map(|s| s.empty_output_is_noop())
+            .unwrap_or(false)
+    }
+
     /// Run one bar evaluation. Validates timeframe and returns LIVE/SHADOW intents.
     pub fn on_bar(
         &mut self,
