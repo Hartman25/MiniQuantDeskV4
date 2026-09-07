@@ -728,8 +728,11 @@ async fn fetch_kraken_ohlc_body_from(
 /// host (tests use `httpmock`).
 #[derive(Debug, Clone)]
 pub struct KrakenHistoricalProvider {
-    http: reqwest::Client,
     base_url: String,
+    /// Seconds to sleep between retries when no valid `Retry-After` response
+    /// header is present. Production: `KRAKEN_FETCH_RETRY_FALLBACK_SLEEP_SECS`
+    /// (2). Tests: 0 (instant, no real sleep) via [`Self::new_for_test`].
+    retry_sleep_secs: u64,
 }
 
 impl Default for KrakenHistoricalProvider {
@@ -745,13 +748,18 @@ impl KrakenHistoricalProvider {
 
     pub fn new_with_base_url(base_url: String) -> Self {
         Self {
-            http: reqwest::Client::new(),
             base_url,
+            retry_sleep_secs: KRAKEN_FETCH_RETRY_FALLBACK_SLEEP_SECS,
         }
     }
 
-    fn ohlc_url(&self) -> String {
-        format!("{}/0/public/OHLC", self.base_url.trim_end_matches('/'))
+    /// Test-only constructor: zero sleep so retry tests complete instantly.
+    #[cfg(test)]
+    fn new_for_test(base_url: String) -> Self {
+        Self {
+            base_url,
+            retry_sleep_secs: 0,
+        }
     }
 }
 
@@ -777,24 +785,16 @@ impl crate::HistoricalProvider for KrakenHistoricalProvider {
                 )
             })?;
 
-            let resp = self
-                .http
-                .get(self.ohlc_url())
-                .query(&[("pair", query_pair), ("interval", "1440")])
-                .send()
-                .await
-                .map_err(|err| anyhow::anyhow!("kraken ohlc request failed: {err}"))?;
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("kraken ohlc http error status={}: {body}", status.as_u16());
-            }
-
-            let body = resp
-                .text()
-                .await
-                .map_err(|err| anyhow::anyhow!("kraken ohlc response read failed: {err}"))?;
+            // Reuse the already-proven bounded-retry/backoff seam (transient
+            // 429/5xx, connect/timeout, Retry-After honored within budget)
+            // instead of a second, unretried HTTP call path.
+            let body = fetch_kraken_ohlc_body_from(
+                &self.base_url,
+                query_pair,
+                KRAKEN_FETCH_RETRY_MAX_ATTEMPTS,
+                self.retry_sleep_secs,
+            )
+            .await?;
 
             let parsed = parse_kraken_ohlc_response(&body, query_pair, KRAKEN_INTERVAL_1D_SECONDS)
                 .map_err(|err| anyhow::anyhow!("kraken ohlc parse failed for {symbol}: {err}"))?;
@@ -1279,6 +1279,122 @@ mod tests {
         use crate::HistoricalProvider;
         let provider = KrakenHistoricalProvider::new();
         assert_eq!(provider.source_name(), "kraken");
+    }
+
+    // Per-test call counter for KH-05's "fails once then succeeds" httpmock
+    // pattern (see the KF-01 comment above for why this must be a static).
+    static KH05_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    // KH-05 (MD-KRAKEN-FETCH-RETRY-BACKOFF-01): fetch_bars itself -- not just
+    // the underlying fetch_kraken_ohlc_body_from helper in isolation -- must
+    // retry a transient 429 and return the correctly parsed bars from the
+    // successful retry. Proves the retry seam is actually wired into the
+    // production HistoricalProvider entry point, not merely proven in
+    // isolation and left orphaned.
+    #[tokio::test]
+    async fn kh05_fetch_bars_retries_transient_429_then_succeeds() {
+        use crate::HistoricalProvider;
+        use httpmock::prelude::*;
+        use std::sync::atomic::Ordering;
+
+        KH05_CALL.store(0, Ordering::SeqCst);
+        let server = MockServer::start();
+
+        let mock_429 = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD")
+                .matches(|_req: &HttpMockRequest| KH05_CALL.fetch_add(1, Ordering::SeqCst) < 1);
+            then.status(429).body("rate limited");
+        });
+        let mock_ok = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(200).body(BTC_FIXTURE);
+        });
+
+        let provider = KrakenHistoricalProvider::new_for_test(server.base_url());
+        let req = FetchBarsRequest {
+            symbols: vec!["BTC/USD".to_string()],
+            timeframe: crate::Timeframe::D1,
+            start: chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 7, 5).unwrap(),
+        };
+
+        let bars = provider.fetch_bars(req).await.unwrap();
+        assert_eq!(
+            bars.len(),
+            2,
+            "must return the completed bars from the successful retry"
+        );
+        assert_eq!(
+            KH05_CALL.load(Ordering::SeqCst),
+            2,
+            "must have made exactly two requests: the initial 429 and the retry that succeeded"
+        );
+        let _ = (&mock_ok, &mock_429);
+    }
+
+    // KH-06 (MD-KRAKEN-FETCH-RETRY-BACKOFF-01): a permanent (non-retryable)
+    // 4xx reaches fetch_bars unmodified -- exactly one request is made, no
+    // retry is attempted, and the error is truthful.
+    #[tokio::test]
+    async fn kh06_fetch_bars_permanent_error_never_retries() {
+        use crate::HistoricalProvider;
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(400).body("bad request");
+        });
+
+        let provider = KrakenHistoricalProvider::new_for_test(server.base_url());
+        let req = FetchBarsRequest {
+            symbols: vec!["BTC/USD".to_string()],
+            timeframe: crate::Timeframe::D1,
+            start: chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 7, 5).unwrap(),
+        };
+
+        let err = provider.fetch_bars(req).await.unwrap_err();
+        assert!(err.to_string().contains("400"));
+        mock.assert_hits(1);
+    }
+
+    // KH-07 (MD-KRAKEN-FETCH-RETRY-BACKOFF-01): a persistently transient
+    // 503 exhausts the bounded retry budget and fails closed with a
+    // truthful, non-hanging error -- fetch_bars never retries indefinitely.
+    #[tokio::test]
+    async fn kh07_fetch_bars_persistent_5xx_exhausts_retry_budget() {
+        use crate::HistoricalProvider;
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/0/public/OHLC")
+                .query_param("pair", "XBTUSD");
+            then.status(503).body("service unavailable");
+        });
+
+        let provider = KrakenHistoricalProvider::new_for_test(server.base_url());
+        let req = FetchBarsRequest {
+            symbols: vec!["BTC/USD".to_string()],
+            timeframe: crate::Timeframe::D1,
+            start: chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 7, 5).unwrap(),
+        };
+
+        let err = provider.fetch_bars(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("persisted after"),
+            "error must truthfully state retry exhaustion: {err}"
+        );
+        mock.assert_hits((KRAKEN_FETCH_RETRY_MAX_ATTEMPTS + 1) as usize);
     }
 
     // -----------------------------------------------------------------------
