@@ -947,11 +947,17 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
+    // Process id + a per-process atomic counter: unique across concurrent
+    // test processes (pid) and across concurrent calls within one process
+    // (counter), with no wall-clock dependence
+    // (CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01).
     fn unique_dir(label: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("mqk_cli_research_replay_test_{label}_{nanos}"));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("mqk_cli_research_replay_test_{label}_{pid}_{seq}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
