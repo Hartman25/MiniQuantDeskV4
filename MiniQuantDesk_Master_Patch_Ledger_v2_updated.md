@@ -410,10 +410,9 @@ the mission's own rule, so that row stays `PENDING_INDEPENDENT_REVIEW`.
 **Canonical normalized table — every one of the 73 rows in exactly one
 bucket:**
 
-#### ACTIVE_IMPLEMENTATION = 20
+#### ACTIVE_IMPLEMENTATION = 18
 
-`INSTRUMENT-UNIVERSE-REFRESH-01`, `RISK-AUTHORITY-DOC-NOTE-01`,
-`PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01`,
+`INSTRUMENT-UNIVERSE-REFRESH-01`,
 `BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
 `MD-KRAKEN-FETCH-RETRY-BACKOFF-01`, `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`,
 `STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`,
@@ -428,15 +427,23 @@ bucket:**
 `DISCORD-CHANNEL-ROUTING-01`, `DISCORD-DATA-STALENESS-ALERT-01`,
 `DISCORD-DAILY-SUMMARY-PUSH-01`
 
-**Mechanical check:** 20 row IDs listed above == declared count 20. MATCH.
+**Mechanical check:** 18 row IDs listed above == declared count 18. MATCH.
 
-**Burn-phase update (2026-09-07):** `BROKER-ALPACA-DEAD-CODE-CLEANUP-01`
-normalized `ACTIVE_IMPLEMENTATION -> CLOSED` — this session's own fresh
-harness pass (`git merge-base --is-ancestor 39b4395f HEAD`, directory
-listing, `cargo build -p mqk-broker-alpaca`) confirmed the row's own
-pre-recorded L0 `ALREADY_CLOSED_LEDGER_STALE` truth-up was accurate; see the
-row's own ledger entry for full evidence. `ACTIVE_IMPLEMENTATION` was 21 at
-the moment of the Phase N commit above and is 20 as of this update.
+**Burn-phase updates (2026-09-07):**
+- `BROKER-ALPACA-DEAD-CODE-CLEANUP-01` normalized `ACTIVE_IMPLEMENTATION ->
+  CLOSED` — this session's own fresh harness pass (`git merge-base
+  --is-ancestor 39b4395f HEAD`, directory listing, `cargo build -p
+  mqk-broker-alpaca`) confirmed the row's own pre-recorded L0
+  `ALREADY_CLOSED_LEDGER_STALE` truth-up was accurate.
+- `RISK-AUTHORITY-DOC-NOTE-01` normalized `ACTIVE_IMPLEMENTATION -> CLOSED`
+  — the required doc comment already exists at HEAD (commit `82317377`,
+  confirmed ancestor).
+- `PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01` normalized
+  `ACTIVE_IMPLEMENTATION -> CLOSED` — `grep -in placeholder` on both named
+  files returns zero hits at HEAD.
+
+See each row's own ledger entry for full evidence. `ACTIVE_IMPLEMENTATION`
+was 21 at the moment of the Phase N commit and is 18 as of this update.
 
 #### PENDING_INDEPENDENT_REVIEW = 8
 
@@ -486,10 +493,11 @@ pending ledger cleanup.)
 without explicit separate operator authorization per the controlling
 mission).
 
-#### CLOSED (this normalization pass, updated through the burn phase) = 26
+#### CLOSED (this normalization pass, updated through the burn phase) = 28
 
-`BROKER-ALPACA-DEAD-CODE-CLEANUP-01` (burn-phase closure, 2026-09-07 — see
-above),
+`BROKER-ALPACA-DEAD-CODE-CLEANUP-01`, `RISK-AUTHORITY-DOC-NOTE-01`,
+`PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01` (all three: burn-phase closures,
+2026-09-07 — see above),
 `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`,
 `MARKET-DATA-PROVIDER-PROVENANCE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`,
 `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`,
@@ -510,11 +518,11 @@ disposed under the same commit as the row above),
 `MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
 `MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`
 
-**Sum check (as of the burn-phase update above):** 20 + 8 + 0 + 3 + 4 + 4 + 7
-+ 1 + 26 = **73**. Matches the `04-active-row-table.csv` row count exactly —
+**Sum check (as of the burn-phase update above):** 18 + 8 + 0 + 3 + 4 + 4 + 7
++ 1 + 28 = **73**. Matches the `04-active-row-table.csv` row count exactly —
 every row accounted for in exactly one bucket, no hidden subset counts.
 
-**`ACTIVE_IMPLEMENTATION_LEDGER = 20`** is the operative denominator as of the
+**`ACTIVE_IMPLEMENTATION_LEDGER = 18`** is the operative denominator as of the
 burn-phase update above (21 at the moment of the Phase N commit itself),
 superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
 `IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED` (3),
@@ -963,7 +971,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### RISK-AUTHORITY-DOC-NOTE-01 — Clarify risk-crate authority boundary in docs
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-risk
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — already implemented at this session's HEAD: `mqk-risk/src/lib.rs`'s `## Authority boundary` doc comment (commit `82317377`, confirmed ancestor of HEAD via `git merge-base --is-ancestor`) already states exactly this split. `cargo fmt -p mqk-risk -- --check` passes. No code changed by this session — a stale-row correction, not new work. · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-risk
 **Current Source Truth:** `mqk-risk/src/engine.rs:76-257` implements kill-switch/PDT/loss-limit/drawdown gates; per-symbol position caps and order-rate caps actually live in `mqk-daemon/src/state/loop_runner.rs:1221-1275`, not in `mqk-risk`.
 **Problem:** `mqk-risk/src/lib.rs` has no doc note explaining this split, inviting future audits to mistake it for a gap.
 **Why This Matters:** Prevents wasted future-session investigation cycles.
@@ -983,7 +991,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01 — Remove false-positive "placeholder" wording
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-daemon portfolio routes
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — already implemented at this session's HEAD: `grep -in placeholder` on `routes/portfolio.rs` and `routes/paper_lifecycle.rs` returns zero hits. No code changed by this session — a stale-row correction, not new work. · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-daemon portfolio routes
 **Current Source Truth:** `routes/portfolio.rs:1136,1288` and `routes/paper_lifecycle.rs:577` contain the literal word "placeholder" in comments describing complete, non-stub logic (aggregator-routing internal name; an HTTP status-code choice).
 **Problem:** These comments false-positive-match every future `grep placeholder` audit sweep.
 **Dependencies:** NONE.
