@@ -257,6 +257,31 @@ Two categories are tracked separately from `ACTIVE_IMPLEMENTATION_LEDGER` and mu
 
 **Side effects this phase:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Paper validation = NOT RUN. Smoke/soak = NOT RUN. Scheduler activation = NOT RUN. Holdout consumption = 0. `smoke_logs/` untouched. No push to `origin`.
 
+### MQK-LEDGER-BURN-CONTROLLER-02 — Phase W3 Results (2026-09-06)
+
+| Row | Result |
+|---|---|
+| W3-A `DOCS-TRACKER-RETIREMENT-01` | Narrowed, not closed. `v2.md` sub-blocker resolved by clarification (it is permanently retained by policy, not pending deletion — the guard dependency on it is fine as-is). `ACTIVE_PATCH_LEDGER_20260425.md`'s §2/§3 confirmed fully redundant; its §1 (18 items) remains genuinely unverified and is the row's one real remaining sub-task. `GUI_PATCH_TRACKER.md` confirmed already correctly scoped. No file deleted, no guard changed. |
+| W3-B `PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01` + `-REPAIR-01` | Both reclassified `IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED`. Re-ran `test_paper_preopen_scheduler.ps1` (non-mutating) against current HEAD — 0 violations, including REPAIR-01's own Section 7. No Task Scheduler mutation, no `-Enable`, no unattended run performed. |
+
+**Recomputation:**
+
+```text
+ACTIVE_IMPLEMENTATION_LEDGER (start of W3) = 19
+
+W3-A DOCS-TRACKER-RETIREMENT-01                  OPEN -> OPEN (narrowed)       0
+W3-B PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01        IMPLEMENTED_PENDING_REVIEW
+                                    -> IMPLEMENTATION_COMPLETE_OPERATOR_
+                                       VALIDATION_DEFERRED (removed)         -1
+W3-B PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01-REPAIR-01  same disposition        -1
+                                                            ---------------------
+ACTIVE_IMPLEMENTATION_LEDGER (after W3) = 17
+```
+
+**W3_OPERATOR_VALIDATION_DEFERRED (new this phase):** `PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01` + `-REPAIR-01` (real Task Scheduler `-Enable` + genuine unattended run).
+
+**Side effects this phase:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Paper validation = NOT RUN. Smoke/soak = NOT RUN. Scheduler activation = NOT RUN (no `-Enable`, no task mutation). Holdout consumption = 0. `smoke_logs/` untouched. No push to `origin`.
+
 ---
 
 ## 1. Paper-Soak Protection Rule
@@ -1114,17 +1139,12 @@ git diff --check
 
 #### DOCS-TRACKER-RETIREMENT-01 — Finish retiring redundant historical tracker documents
 
-**Status:** OPEN · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Documentation / repository hygiene
+**Status:** OPEN — narrowed (`MQK-LEDGER-BURN-CONTROLLER-02` W3-A, 2026-09-06); one sub-blocker resolved by clarification, one sub-blocker narrowed, one confirmed already correctly scoped; no file deleted this session (deletion is a one-way action this session deliberately did not rush) · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Documentation / repository hygiene
 
-**Context (added 2026-08-17, `MASTER-LEDGER-TRUTH-REPAIR-01`):** A prior `DOCS-TRACKER-CLEANUP-01` session safely deleted zero documents because real blockers were found — a correct fail-closed deletion decision, not a defect. That session's original cleanup objective remains partially open and is tracked here so it is not lost.
-
-**Purpose:** Finish retiring redundant historical tracker documents once their remaining dependencies/content are safely migrated.
-
-**Confirmed current blockers:**
-
-1. `MiniQuantDesk_Master_Patch_Ledger_v2.md` — cannot currently be deleted because `scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1` reads that exact path and checks historical status content. Future retirement work must: inspect that guard's actual historical-proof requirement; move the durable proof to an appropriate retained technical/spec/evidence source, OR intentionally update the guard to the new authoritative ledger only if semantically truthful; prove the guard still fails on the intended negative controls; only then remove the hard path dependency and consider deleting the old ledger. Do NOT weaken or simply delete the guard to enable cleanup.
-2. `ACTIVE_PATCH_LEDGER_20260425.md` — not deleted because full migration/deduplication of its backlog-derived content was not proven. Future retirement work must: inventory its unique actionable items; compare against current repo truth/master ledger; migrate only genuinely remaining items; preserve required technical history elsewhere if necessary; then delete if fully redundant.
-3. `core-rs/mqk-gui/GUI_PATCH_TRACKER.md` — intentionally retained as a narrow GUI-specific detailed tracker. Its authority must remain scoped to GUI patch detail only; overall backlog/status remains master-ledger authoritative.
+**W3-A findings (2026-09-06):**
+1. `MiniQuantDesk_Master_Patch_Ledger_v2.md` — **this sub-blocker is resolved, not by a code/guard change, but by recognizing the premise was stale.** This ledger's own precedence text (top of this file) already states `MiniQuantDesk_Master_Patch_Ledger_v2.md` is "kept as historical archive — not deleted" — a permanent-retention policy, not a pending-deletion one. `validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`'s dependency on it (checking for the literal historical status lines `"PHASE G"` / `"BUNDLE 3: ACCEPTED — COMPLETE"`, confirmed present in v2.md, confirmed ABSENT from `v2_updated.md` — repointing the guard would break it, not fix it) is therefore not actually a blocker to anything: the document it depends on was never going to be deleted. No guard change needed or made.
+2. `ACTIVE_PATCH_LEDGER_20260425.md` — **narrowed, not resolved.** §2 ("Backlog-Derived Patch Ledger") is confirmed fully redundant: its own banner already states it is drawn from `miniquantdesk_future_backlog_brainstorm.md`, which still exists as its own separately-retained file — §2 duplicates, rather than uniquely holds, that content. §3 ("Prompt Grouping Plan") is confirmed obsolete process meta-content (a batching scheme for a manual single-prompt workflow this repo no longer uses, per the current multi-agent controller-driven process). **§1 ("Immediate Active Ledger", 18 items: `SEC-SNAPSHOT-01`, `BRK-GAP-01`, `BRK-REST-02`, `CTRL-ARM-01`, `EXEC-CANCEL-01`, `EXEC-RETRY-01`, `EXEC-CONT-01`, `OPS-REPAIR-01`, `CI-DB-01`, `DOC-READY-01`, `OBS-TIME-01`, `OPTR-LABEL-01`, `BRK-BLOCKING-01`, `BRK-PRICE-01`, `ARCH-SINK-01`, `ASSET-SCOPE-01`, `DOC-COMMENT-01`, `HOLD-MIG-01`) remains genuinely unverified against current repo truth** — `docs/audits/multi_asset_completion_audit.md` (the doc this file's own banner cites as having superseded it) does not reference any of these 18 IDs by name, so that supersession claim was not independently confirmed at the per-item level. Auditing 18 four-month-old hardening items against everything that has landed since is a real, standalone task in its own right, not a rubber-stamp — deliberately not attempted in this pass (would risk either falsely closing a real `Critical`/`AP,LIVE` item or producing a shallow, low-confidence audit). File not deleted.
+3. `core-rs/mqk-gui/GUI_PATCH_TRACKER.md` — confirmed already correctly scoped (its own `DOCS-TRACKER-CLEANUP-01` banner already states its authority is GUI-patch-detail-only, overall status remaining master-ledger-authoritative). No action needed.
 
 **In Scope:** The three retirement sub-tasks above, executed only once their stated blockers are genuinely cleared. **Out of Scope:** Weakening any guard; deleting any tracker before its blocker is proven cleared; performing the retirement work itself as part of this ledger-truth-repair patch (this entry only records the open item).
 **Likely Files:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `ACTIVE_PATCH_LEDGER_20260425.md`, `scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`, `core-rs/mqk-gui/GUI_PATCH_TRACKER.md`.
@@ -1288,7 +1308,8 @@ One methodological note preserved for future investigators: the first attempt at
 
 #### PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01 — Windows Task Scheduler registration for unattended Paper start
 
-**Status:** IMPLEMENTED_PENDING_REVIEW · **Priority:** P2 · **Paper Impact:** GREEN (additive scheduling only) · **Subsystem:** Ops tooling
+**Status:** IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED (`MQK-LEDGER-BURN-CONTROLLER-02` W3-B, 2026-09-06) · **Priority:** P2 · **Paper Impact:** GREEN (additive scheduling only) · **Subsystem:** Ops tooling
+**W3-B finding:** Re-ran `scripts\windows\tests\test_paper_preopen_scheduler.ps1` (non-mutating, static source-guard only) against current HEAD — all sections including Section 7 (the REPAIR-01 transient-enable race repair) pass, 0 violations. No new defect found; no code changed. The only remaining acceptance step is real Task Scheduler activation (`-Enable`) and a genuine unattended (locked-session) run, which per the controlling operator instruction for this session is explicitly not performed — moved to `DEFERRED_OPERATOR_VALIDATION`, not left in `ACTIVE_IMPLEMENTATION_LEDGER` merely because that validation was postponed.
 **Current Source Truth:** `scripts\windows\Register-PaperStartupTask.ps1` (new) registers/reconciles a permanent Windows Scheduled Task `MiniQuantDesk-Paper-Preopen-Startup` in the `\MiniQuantDesk\` folder whose single action invokes exactly `Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled` (no other launcher argument), Monday-Friday 02:00 local time by default, Interactive/Limited principal as the current Windows identity, `MultipleInstances=IgnoreNew`/`RestartCount=2`/`RestartInterval=10m`/`ExecutionTimeLimit=1h`/`StartWhenAvailable`/`WakeToRun`, working directory the canonical repo root. Idempotent create-or-update via `Set-ScheduledTask`/`Register-ScheduledTask`; no `Unregister-ScheduledTask`/`Stop-ScheduledTask` call exists in the helper. A post-registration self-check re-reads the task and fails closed if the action count, executable, arguments, working directory, or activation state do not match intent.
 **Problem:** No Windows Scheduled Task existed that invokes `Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled` at the correct pre-open boundary.
 **Dependencies:** `OFFICIAL-DUAL-MODE-LAUNCHER-01` CLOSED (satisfied — the `-Scheduled -Mode Paper` contract this patch registers against is stable).
@@ -1301,7 +1322,8 @@ One methodological note preserved for future investigators: the first attempt at
 
 #### PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01-REPAIR-01 — Register/reconcile the permanent task disabled atomically (transient-enable race repair)
 
-**Status:** IMPLEMENTED_PENDING_REVIEW · **Priority:** P2 · **Paper Impact:** GREEN (additive scheduling only, same task as parent patch) · **Subsystem:** Ops tooling
+**Status:** IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED (`MQK-LEDGER-BURN-CONTROLLER-02` W3-B, 2026-09-06) · **Priority:** P2 · **Paper Impact:** GREEN (additive scheduling only, same task as parent patch) · **Subsystem:** Ops tooling
+**W3-B finding:** Same re-run as the parent patch entry above — Section 7's 12 assertions (this repair's own transient-enable-race fix) all pass at current HEAD, 0 violations. Same disposition: engineering complete, real `-Enable`/unattended-run proof deferred to `DEFERRED_OPERATOR_VALIDATION`.
 **Current Source Truth:** `scripts\windows\Register-PaperStartupTask.ps1` now resolves `$existingTask`/`$taskExistedBefore`/`$priorEnabledState`/`$desiredEnabled` before constructing the `ScheduledTaskSettings` object, and builds that object with `-Disable` whenever `$desiredEnabled` is `$false`. `Register-ScheduledTask` (create path) and `Set-ScheduledTask` (reconcile path) both consume this already-correctly-activation-stated settings object. The post-registration/update call to flip activation state now only exists for the `$desiredEnabled=$true` case (`Enable-ScheduledTask`, retained as defense-in-depth); the prior unconditional post-registration `Disable-ScheduledTask` call for the false case has been removed entirely — the definition is already disabled at registration/update time, so there is nothing left to fall back on. The `ScheduledTasks` module-availability check was also moved to before the first `New-ScheduledTask*`/`Get-ScheduledTask` cmdlet use in this same section (previously it ran after `$settings`/`$principal` had already been constructed).
 **Problem:** The original `PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01` implementation (`3d45045a`) built a single `ScheduledTaskSettings` object without `-Disable`, called `Register-ScheduledTask`/`Set-ScheduledTask` (which — per Task Scheduler's own default — leaves a brand-new task `Enabled`), and only afterward called `Disable-ScheduledTask` for the `$desiredEnabled=$false` case. For a brand-new task this left a real, non-hypothetical window in which the task existed registered and **Enabled**, with `StartWhenAvailable=true` and `WakeToRun=true` already in effect, before the separate `Disable-ScheduledTask` call landed. Because `StartWhenAvailable=true` means Task Scheduler can fire a missed/available run without an active trigger tick, this transient enabled window was not acceptable for a task whose default/desired state is DISABLED (temporary-soak coexistence).
 **Fix:** Resolve `$desiredEnabled` before any settings object is built, and encode the disabled state directly into the `ScheduledTaskSettings` definition passed to `Register-ScheduledTask`/`Set-ScheduledTask`, so there is no register/update-then-disable window — the task is disabled (or enabled) atomically as part of the same definition that creates/reconciles it.
