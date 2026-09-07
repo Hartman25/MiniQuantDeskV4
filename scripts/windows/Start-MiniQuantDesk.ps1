@@ -61,6 +61,14 @@ param(
     [string]$Mode,
     [switch]$CheckOnly,
     [switch]$Scheduled,
+    # R1B (MQK-LIVESHADOW-R1B-FINAL): opaque, non-secret caller-supplied
+    # invocation identity. Written verbatim into this run's launch_*.json log
+    # entry (LiveShadow only) so a wrapper such as Start-LiveShadowSmoke.ps1
+    # can later bind evidence to the EXACT invocation it started -- causal
+    # ownership, not "the newest new log file". Optional: '' means no caller
+    # identity was supplied (e.g. a manual/interactive launch), and the log
+    # entry's invocation_id field is then '' too -- never fabricated.
+    [string]$InvocationId = '',
     [switch]$ArmPaper,
     [switch]$SkipGui,
     [switch]$Rebuild,
@@ -1387,18 +1395,24 @@ function Invoke-LiveShadowStartup {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][bool]$CheckOnlyFlag,
-        [Parameter(Mandatory = $true)][string]$LogPath
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [string]$InvocationId = ''
     )
 
     $launchScript  = Join-Path $RepoRoot 'scripts\windows\Launch-VeritasLedger.ps1'
     $daemonBaseUrl = 'http://127.0.0.1:8899'
 
+    # R1B: recorded verbatim, always present (possibly ''), regardless of
+    # CheckOnly/full-run -- a caller-bound resolver (Resolve-LiveShadowRunEvidence
+    # in Start-LiveShadowSmoke.ps1) matches on this field exactly; it is never
+    # inferred from file timestamps or "newest new file".
     $logEntry = @{
-        timestamp  = (Get-Date).ToUniversalTime().ToString('o')
-        mode       = 'live-shadow'
-        check_only = $CheckOnlyFlag
-        repo_head  = (Get-RepoHeadShort -RepoRoot $RepoRoot)
-        stages     = @()
+        timestamp      = (Get-Date).ToUniversalTime().ToString('o')
+        mode           = 'live-shadow'
+        check_only     = $CheckOnlyFlag
+        repo_head      = (Get-RepoHeadShort -RepoRoot $RepoRoot)
+        invocation_id  = $InvocationId
+        stages         = @()
     }
 
     if (-not (Test-Path $launchScript)) {
@@ -1582,7 +1596,7 @@ try {
         # LiveShadow can never inherit LiveCapital's Read-Host confirmation
         # or resolve into the LiveCapital preflight chain.
         $logPath = New-LauncherLog -RepoRoot $RepoRoot -ModeLabel 'live-shadow'
-        $code = Invoke-LiveShadowStartup -RepoRoot $RepoRoot -CheckOnlyFlag $CheckOnly.IsPresent -LogPath $logPath
+        $code = Invoke-LiveShadowStartup -RepoRoot $RepoRoot -CheckOnlyFlag $CheckOnly.IsPresent -LogPath $logPath -InvocationId $InvocationId
         exit $code
     }
     else {

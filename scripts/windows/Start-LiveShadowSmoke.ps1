@@ -56,11 +56,9 @@
 #      simply the newest launch_*.json under the launcher's log directory. A
 #      failed/no-op current invocation could therefore silently consume a
 #      stale prior LiveShadow launcher log and attribute its evidence to this
-#      run. Fixed: Resolve-LiveShadowRunEvidence takes the exact SET of
-#      pre-existing log paths and computes this run's log as the (post minus
-#      pre) set difference. Evidence is derived ONLY from that exact new log;
-#      zero or more-than-one new logs both fail closed to 'not_observed' with
-#      an explicit reason -- "newest file" is never used as evidence identity.
+#      run. Fixed (later superseded by R1B below): Resolve-LiveShadowRunEvidence
+#      took the exact SET of pre-existing log paths and computed this run's
+#      log as the (post minus pre) set difference.
 #   5. real_daemon_start_performed was inferred from safety_guard.ok, which
 #      only proves this invocation re-verified a reachable, correctly-postured
 #      daemon -- not that THIS invocation started it (the canonical launcher
@@ -70,6 +68,32 @@
 #      Started/attached fact, via its deterministic stdout) as a field
 #      distinct from daemon_reachable_and_verified (the safety-guard fact).
 #      This wrapper consumes both, never conflates them.
+#
+# R1B EXACT-INVOCATION-IDENTITY REPAIR (MQK-LIVESHADOW-R1B-FINAL): independent
+# review found that R1's "set difference since pre-run snapshot" only proves
+# TEMPORAL novelty (a log that is new since this invocation started), not
+# CAUSAL ownership (that log was written by THIS invocation's own child, not
+# some concurrent foreign invocation). Deterministic failure case: this
+# wrapper's own child produces no evidence, while a concurrent foreign
+# LiveShadow invocation writes one otherwise-valid new launch_*.json log --
+# the old set-difference resolver accepted that foreign log as if it were
+# this run's own evidence (proven by LS-EV-08's pre-fix RED run). Fixed:
+#   - This script now generates an opaque GUID before delegating and passes
+#     it to Start-MiniQuantDesk.ps1 via the non-secret -InvocationId
+#     parameter (never a secret, never printed as sensitive -- it is a random
+#     identifier with no meaning outside this evidence-binding purpose).
+#   - Start-MiniQuantDesk.ps1 writes that exact value into its own launch
+#     JSON's invocation_id field (Invoke-LiveShadowStartup), regardless of
+#     CheckOnly/full-run.
+#   - Resolve-LiveShadowRunEvidence no longer looks at "new since a pre-run
+#     snapshot" at all. It scans every launch_*.json under the launcher log
+#     directory and accepts ONLY a log whose invocation_id field exactly
+#     equals the GUID this invocation generated. Zero exact matches or more
+#     than one exact match both fail closed to 'not_observed', with an
+#     explicit reason. A foreign invocation's log -- however new, however
+#     otherwise-valid -- is never even a candidate unless its invocation_id
+#     happens to equal this run's GUID (practically impossible). "Newest
+#     file", timestamps, and new-file-count heuristics are never consulted.
 #
 # Usage:
 #   Start-LiveShadowSmoke.ps1                              (same as -CheckOnly)
@@ -150,24 +174,27 @@ function Assert-NotSecret {
 }
 
 # ---------------------------------------------------------------------------
-# R1 (MQK-LEDGER-BURN-CONTROLLER-04): pure, dot-sourceable evidence-resolution
+# R1B (MQK-LIVESHADOW-R1B-FINAL): pure, dot-sourceable evidence-resolution
 # function -- factored out so tests\script_guards\test_live_shadow_smoke.ps1
-# can prove the stale-log-rejection and started-vs-attached distinction with
-# hermetic fixture JSON files, without spawning a real daemon. Never called
-# for the CheckOnly path (that stays the unconditional 'not_run' evidence
-# below -- CheckOnly performs no daemon stage at all, so there is no log to
-# resolve).
+# can prove exact-invocation-identity binding with hermetic fixture JSON
+# files, without spawning a real daemon. Never called for the CheckOnly path
+# (that stays the unconditional 'not_run' evidence below -- CheckOnly
+# performs no daemon stage at all, so there is no log to resolve).
 #
-# -PreExistingLogPaths is the EXACT SET of launch_*.json full paths that
-# existed under -LauncherLogDir before this invocation's child launcher ran.
-# "This run's own log" is defined ONLY as (current set) minus (that exact
-# pre-existing set) -- never "the newest file by timestamp", which a stale
-# prior LiveShadow log could satisfy on a failed/no-op current invocation.
+# -ExpectedInvocationId is the opaque GUID this wrapper generated for its own
+# invocation and passed to Start-MiniQuantDesk.ps1 via -InvocationId. "This
+# run's own log" is defined ONLY as: a launch_*.json under -LauncherLogDir
+# whose own invocation_id field is an EXACT string match for that GUID.
+# Every other log -- regardless of when it was written, how new it is, or
+# whether it is otherwise a perfectly valid live-shadow log -- is a foreign
+# log and is never a candidate. Zero exact matches or more than one exact
+# match both fail closed to 'not_observed' with an explicit reason. Neither
+# file timestamps, "newest file", nor new-file counts are ever consulted.
 # ---------------------------------------------------------------------------
 function Resolve-LiveShadowRunEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$LauncherLogDir,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$PreExistingLogPaths
+        [Parameter(Mandatory = $true)][string]$ExpectedInvocationId
     )
 
     $result = [ordered]@{
@@ -177,36 +204,44 @@ function Resolve-LiveShadowRunEvidence {
         reason                            = $null
     }
 
+    if ([string]::IsNullOrWhiteSpace($ExpectedInvocationId)) {
+        $result.reason = 'no expected invocation id was supplied -- refusing to resolve evidence'
+        return [pscustomobject]$result
+    }
+
     if (-not (Test-Path $LauncherLogDir)) {
         $result.reason = 'launcher log directory does not exist'
         return [pscustomobject]$result
     }
 
-    $currentPaths = @(Get-ChildItem -Path $LauncherLogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue |
+    $candidatePaths = @(Get-ChildItem -Path $LauncherLogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty FullName)
-    $preSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$PreExistingLogPaths)
-    $newPaths = @($currentPaths | Where-Object { -not $preSet.Contains($_) })
 
-    if ($newPaths.Count -eq 0) {
-        $result.reason = 'no new launcher log produced by this invocation (pre-existing logs are never consumed as evidence)'
+    $exactMatches = @()
+    foreach ($p in $candidatePaths) {
+        $entry = $null
+        try { $entry = Get-Content -Path $p -Raw | ConvertFrom-Json } catch { continue }
+        if ($null -eq $entry) { continue }
+        if ($entry.mode -ne 'live-shadow') { continue }
+        $idProp = $entry.PSObject.Properties['invocation_id']
+        if ($null -eq $idProp) { continue }
+        if ([string]::IsNullOrWhiteSpace([string]$entry.invocation_id)) { continue }
+        if ([string]$entry.invocation_id -eq $ExpectedInvocationId) { $exactMatches += $p }
+    }
+
+    if ($exactMatches.Count -eq 0) {
+        $result.reason = "no launcher log with invocation_id=$ExpectedInvocationId found -- foreign/unrelated logs are never accepted as this invocation's evidence"
         return [pscustomobject]$result
     }
-    if ($newPaths.Count -gt 1) {
-        $result.reason = "ambiguous: $($newPaths.Count) new launcher logs found; refusing to guess which one belongs to this invocation"
+    if ($exactMatches.Count -gt 1) {
+        $result.reason = "ambiguous: $($exactMatches.Count) launcher logs claim invocation_id=$ExpectedInvocationId; refusing to guess which is authoritative"
         return [pscustomobject]$result
     }
 
-    $sourceLog = $newPaths[0]
+    $sourceLog = $exactMatches[0]
     $result.source_log = $sourceLog
 
-    $entry = $null
-    try { $entry = Get-Content -Path $sourceLog -Raw | ConvertFrom-Json } catch {}
-
-    if ($null -eq $entry -or $entry.mode -ne 'live-shadow') {
-        $result.reason = 'this run''s own launcher log is missing or not mode=live-shadow'
-        return [pscustomobject]$result
-    }
-
+    $entry = Get-Content -Path $sourceLog -Raw | ConvertFrom-Json
     if ($null -ne $entry.PSObject.Properties['daemon_started_by_this_invocation']) {
         $result.daemon_started_by_this_invocation = $entry.daemon_started_by_this_invocation
     }
@@ -270,14 +305,16 @@ Write-Ok "Evidence folder: $evDir"
 # ---------------------------------------------------------------------------
 Write-Section "Delegating to Start-MiniQuantDesk.ps1 -Mode LiveShadow$(if ($effectiveCheckOnly) { ' -CheckOnly' } else { '' })"
 
-$launcherArgs = @('-Mode', 'LiveShadow')
+# R1B: opaque, non-secret invocation identity for THIS wrapper invocation.
+# Passed to the canonical launcher via -InvocationId; it writes this exact
+# value into its own launch_*.json log entry. Evidence is later bound to
+# this GUID, never to "the newest new log file" (see this file's header).
+$invocationId = [guid]::NewGuid().ToString()
+
+$launcherArgs = @('-Mode', 'LiveShadow', '-InvocationId', $invocationId)
 if ($effectiveCheckOnly) { $launcherArgs += '-CheckOnly' }
 
 $launcherLogDir = Join-Path $RepoRoot 'smoke_logs\launcher\live-shadow'
-$launcherLogBefore = if (Test-Path $launcherLogDir) {
-    @(Get-ChildItem -Path $launcherLogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty FullName)
-} else { @() }
 
 $launcherExitCode = 0
 try {
@@ -291,12 +328,13 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# R1: derive OBSERVED runtime evidence from EXACTLY this run's own launcher
-# log (Resolve-LiveShadowRunEvidence above) -- never a new network call from
-# this script, and never "the newest file" (see this file's header, defect
-# 4). daemon_started_by_this_invocation and daemon_reachable_and_verified are
-# two distinct facts the canonical launcher itself now records (defect 5) --
-# an attach to an already-running daemon reports started=observed_false,
+# R1B: derive OBSERVED runtime evidence from EXACTLY the launcher log whose
+# invocation_id matches this wrapper's own GUID (Resolve-LiveShadowRunEvidence
+# above) -- never a new network call from this script, and never "the newest
+# file" or "the only new file since a snapshot" (see this file's header).
+# daemon_started_by_this_invocation and daemon_reachable_and_verified are two
+# distinct facts the canonical launcher itself records -- an attach to an
+# already-running daemon reports started=observed_false,
 # reachable_and_verified=observed_true, never a fabricated "real start".
 # ---------------------------------------------------------------------------
 $observedDaemonStarted = 'not_run'
@@ -308,7 +346,7 @@ if (-not $effectiveCheckOnly) {
     $observedBrokerCall = 'not_observed'
     $observedOrderSubmitted = 'not_observed'
 
-    $evidence = Resolve-LiveShadowRunEvidence -LauncherLogDir $launcherLogDir -PreExistingLogPaths $launcherLogBefore
+    $evidence = Resolve-LiveShadowRunEvidence -LauncherLogDir $launcherLogDir -ExpectedInvocationId $invocationId
     $observedDaemonStarted = $evidence.daemon_started_by_this_invocation
     $observedDaemonVerified = $evidence.daemon_reachable_and_verified
     if ($null -ne $evidence.reason) {
@@ -321,12 +359,13 @@ if (-not $effectiveCheckOnly) {
 }
 
 $manifest = [ordered]@{
-    schema_version         = 'live-shadow-smoke-manifest-v3'
+    schema_version         = 'live-shadow-smoke-manifest-v4'
     checked_at_utc         = [DateTime]::UtcNow.ToString('o')
     deployment_mode_forced = 'live-shadow'
     check_only             = $effectiveCheckOnly
     canonical_launcher     = 'scripts\windows\Start-MiniQuantDesk.ps1'
     canonical_launcher_mode = 'LiveShadow'
+    invocation_id          = $invocationId
     launcher_args          = $launcherArgs
     launcher_exit_code     = $launcherExitCode
     # WRAPPER STATIC CONTRACT: provable facts about THIS FILE's own source,
@@ -337,17 +376,18 @@ $manifest = [ordered]@{
     wrapper_direct_order_submission = $false
     # OBSERVED RUNTIME EVIDENCE: 'not_run' (this action category was never
     # attempted -- CheckOnly), 'observed_true'/'observed_false' (this run's
-    # own launcher log directly proves the outcome), or 'not_observed' (a
-    # full run was attempted but no exact single new log could be resolved,
+    # own launcher log directly proves the outcome, bound by exact
+    # invocation_id match -- R1B), or 'not_observed' (a full run was
+    # attempted but no exact single invocation_id match could be resolved,
     # or the log has no instrumentation for this specific fact yet).
     # daemon_started_by_this_invocation and daemon_reachable_and_verified are
-    # deliberately distinct fields (R1) -- an attach to an already-running
-    # daemon is started=observed_false, reachable_and_verified=observed_true.
+    # deliberately distinct fields -- an attach to an already-running daemon
+    # is started=observed_false, reachable_and_verified=observed_true.
     daemon_started_by_this_invocation = $observedDaemonStarted
     daemon_reachable_and_verified     = $observedDaemonVerified
     real_broker_call_performed        = $observedBrokerCall
     real_order_submitted              = $observedOrderSubmitted
-    note = 'wrapper_* fields are provable-by-construction facts about this script''s own source. daemon_*/real_* fields are observed runtime evidence derived from EXACTLY this invocation''s own launcher JSON log (never a value this script invents, never "the newest file") -- see this file''s header for the full truth-repair rationale (MQK-LEDGER-BURN-CONTROLLER-03 A3B, MQK-LEDGER-BURN-CONTROLLER-04 R1).'
+    note = 'wrapper_* fields are provable-by-construction facts about this script''s own source. daemon_*/real_* fields are observed runtime evidence derived ONLY from the launcher JSON log whose invocation_id field exactly equals this invocation''s own GUID (never a value this script invents, never "the newest file", never a foreign invocation''s log) -- see this file''s header for the full truth-repair rationale (MQK-LEDGER-BURN-CONTROLLER-03 A3B, MQK-LEDGER-BURN-CONTROLLER-04 R1, MQK-LIVESHADOW-R1B-FINAL R1B).'
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding ASCII
 Write-Ok "Manifest written: $manifestPath"

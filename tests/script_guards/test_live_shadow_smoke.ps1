@@ -30,21 +30,38 @@
 #           runtime-evidence field, separately from the always-$false
 #           wrapper-static-contract fields
 #
-# MQK-LEDGER-BURN-CONTROLLER-04 R1 -- hermetic fixture tests for
-# Resolve-LiveShadowRunEvidence (dot-sourced from the target script, no real
-# daemon/child-process invocation):
-#   LS-EV-01 — pre-existing stale matching log + no new log this run -> the
-#              stale log MUST NOT be consumed as this run's evidence
-#   LS-EV-02 — two pre-existing logs + one exact new current log -> only the
-#              new log is used
-#   LS-EV-03 — already-running verified daemon fixture -> reachable=true,
-#              started_by_this_invocation=false (never conflated)
-#   LS-EV-04 — new daemon start fixture -> started_by_this_invocation=true
-#   LS-EV-05 — wrong-mode log cannot satisfy LiveShadow evidence
+# MQK-LEDGER-BURN-CONTROLLER-04 R1 / MQK-LIVESHADOW-R1B-FINAL -- hermetic
+# fixture tests for Resolve-LiveShadowRunEvidence (dot-sourced from the
+# target script, no real daemon/child-process invocation). R1B replaced the
+# resolver's identity concept from "the one new file since a pre-run
+# snapshot" (temporal novelty) to "the log whose own invocation_id field
+# exactly equals this invocation's GUID" (causal ownership) -- the fixtures
+# below reflect that:
+#   LS-EV-01 — a log with a DIFFERENT invocation_id (foreign/stale) is never
+#              consumed as this run's evidence when no log for the expected
+#              id exists
+#   LS-EV-02 — two logs with foreign invocation_ids + one log with the exact
+#              expected invocation_id -> only the exact-id log is used
+#   LS-EV-03 — already-running verified daemon fixture (exact id match) ->
+#              reachable=true, started_by_this_invocation=false (never
+#              conflated)
+#   LS-EV-04 — new daemon start fixture (exact id match) ->
+#              started_by_this_invocation=true
+#   LS-EV-05 — wrong-mode log cannot satisfy LiveShadow evidence even with
+#              the exact expected invocation_id
 #   LS-EV-06 — CheckOnly reports 'not_run' for both daemon fields and never
 #              calls Resolve-LiveShadowRunEvidence (real safe -CheckOnly run)
 #   LS-EV-07 — no secret value appears in the manifest produced by the real
 #              -CheckOnly run
+#   LS-EV-08 — FOREIGN-ONLY: expected id A, no log claims A, one otherwise-
+#              valid new LiveShadow log claims foreign id B -> B can never
+#              satisfy A; stays 'not_observed' (this is the exact defect a
+#              pre-fix RED run against the OLD set-difference resolver
+#              proved: it accepted B purely because it was the only new file)
+#   LS-EV-09 — foreign B + exact A both present -> only A is authoritative;
+#              B is ignored regardless of file timestamps
+#   LS-EV-10 — two logs both claim exact id A -> fail closed as ambiguous,
+#              never guesses which one is authoritative
 #
 # No live daemon, no broker call, no order, in any of the above -- LSS08's
 # real invocation only exercises Start-MiniQuantDesk.ps1 -Mode LiveShadow
@@ -122,11 +139,25 @@ if ($text) {
     # (MQK-LEDGER-BURN-CONTROLLER-03 A3A/A3B) -- specifically 'LiveShadow',
     # not merely a substring match that 'Live' alone would also satisfy
     # against 'LiveShadow' or against the old '-Mode Live' (LiveCapital).
+    # R1B: $launcherArgs also carries -InvocationId <guid>, so this only
+    # anchors on the leading '-Mode','LiveShadow' pair, not an exact-length
+    # array literal.
     if ($text -match [regex]::Escape('Start-MiniQuantDesk.ps1') -and
-        $text -match "\`$launcherArgs\s*=\s*@\('-Mode',\s*'LiveShadow'\)") {
+        $text -match "\`$launcherArgs\s*=\s*@\('-Mode',\s*'LiveShadow',") {
         Pass 'LSS06' "Delegates to Start-MiniQuantDesk.ps1 -Mode LiveShadow (the real daemon-bootstrap path, not LiveCapital's read-only preflight)"
     } else {
         Fail 'LSS06' "Does not appear to delegate to Start-MiniQuantDesk.ps1 -Mode LiveShadow"
+    }
+
+    # LSS11 (R1B): the wrapper generates its own opaque invocation GUID and
+    # passes it to the canonical launcher via the non-secret -InvocationId
+    # parameter -- exact-invocation-identity binding, not a generic -Force/
+    # -Yes style flag.
+    if ($codeText -match "\`$invocationId\s*=\s*\[guid\]::NewGuid\(\)\.ToString\(\)" -and
+        $codeText -match "'-InvocationId',\s*\`$invocationId") {
+        Pass 'LSS11' "Wrapper generates an opaque invocation GUID and passes it to the canonical launcher via -InvocationId"
+    } else {
+        Fail 'LSS11' "Could not confirm invocation-GUID generation and -InvocationId pass-through"
     }
 
     # A3B: never delegates to -Mode Live (LiveCapital) IN CODE anywhere in
@@ -172,6 +203,7 @@ if ($text) {
     Fail 'LSS04' "skipped -- target file missing"
     Fail 'LSS05' "skipped -- target file missing"
     Fail 'LSS06' "skipped -- target file missing"
+    Fail 'LSS11' "skipped -- target file missing"
     Fail 'LSS06b' "skipped -- target file missing"
     Fail 'LSS07' "skipped -- target file missing"
     Fail 'LSS09' "skipped -- target file missing"
@@ -218,7 +250,8 @@ if (Test-Path $Target) {
                 # daemon_reachable_and_verified are the R1-repaired,
                 # separately-tracked observed-evidence fields (schema v3).
                 if ($manifest.check_only -eq $true -and
-                    $manifest.schema_version -eq 'live-shadow-smoke-manifest-v3' -and
+                    $manifest.schema_version -eq 'live-shadow-smoke-manifest-v4' -and
+                    -not [string]::IsNullOrWhiteSpace($manifest.invocation_id) -and
                     $manifest.deployment_mode_forced -eq 'live-shadow' -and
                     $manifest.canonical_launcher_mode -eq 'LiveShadow' -and
                     $manifest.wrapper_direct_broker_call -eq $false -and
@@ -271,10 +304,11 @@ if ($null -ne $script:CheckOnlyManifest) {
 }
 
 # ---------------------------------------------------------------------------
-# LS-EV-01..05: hermetic Resolve-LiveShadowRunEvidence fixture tests. Dot-
-# source the target script (its own dot-source guard returns immediately
-# after defining functions -- no daemon, no network, no evidence folder) and
-# drive the function directly against constructed launch_*.json fixtures.
+# LS-EV-01..05, LS-EV-08..10: hermetic Resolve-LiveShadowRunEvidence fixture
+# tests (R1B: exact invocation_id matching). Dot-source the target script
+# (its own dot-source guard returns immediately after defining functions --
+# no daemon, no network, no evidence folder) and drive the function directly
+# against constructed launch_*.json fixtures.
 # ---------------------------------------------------------------------------
 if (Test-Path $Target) {
     try {
@@ -284,12 +318,13 @@ if (Test-Path $Target) {
         New-Item -ItemType Directory -Force -Path $fixtureRoot | Out-Null
 
         function New-EvFixtureLog {
-            param([string]$Dir, [string]$Name, [string]$Mode, $Started, $Verified)
+            param([string]$Dir, [string]$Name, [string]$Mode, [string]$InvocationId, $Started, $Verified)
             $p = Join-Path $Dir $Name
             $obj = [ordered]@{
-                timestamp = (Get-Date).ToUniversalTime().ToString('o')
-                mode      = $Mode
-                stages    = @()
+                timestamp     = (Get-Date).ToUniversalTime().ToString('o')
+                mode          = $Mode
+                invocation_id = $InvocationId
+                stages        = @()
             }
             if ($null -ne $Started)  { $obj.daemon_started_by_this_invocation = $Started }
             if ($null -ne $Verified) { $obj.daemon_reachable_and_verified = $Verified }
@@ -297,62 +332,107 @@ if (Test-Path $Target) {
             return $p
         }
 
-        # LS-EV-01: one stale pre-existing log, no new log produced this run.
+        $idA = [guid]::NewGuid().ToString()
+        $idB = [guid]::NewGuid().ToString()
+        $idForeignOld1 = [guid]::NewGuid().ToString()
+        $idForeignOld2 = [guid]::NewGuid().ToString()
+
+        # LS-EV-01: a log exists but claims a DIFFERENT (foreign) invocation_id
+        # -- no log claims the expected id A at all.
         $d1 = Join-Path $fixtureRoot 'ev01'
         New-Item -ItemType Directory -Force -Path $d1 | Out-Null
-        $stale1 = New-EvFixtureLog -Dir $d1 -Name 'launch_stale.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
-        $r1 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d1 -PreExistingLogPaths @($stale1)
+        New-EvFixtureLog -Dir $d1 -Name 'launch_stale.json' -Mode 'live-shadow' -InvocationId $idForeignOld1 -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        $r1 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d1 -ExpectedInvocationId $idA
         if ($r1.daemon_started_by_this_invocation -eq 'not_observed' -and $r1.daemon_reachable_and_verified -eq 'not_observed' -and $null -eq $r1.source_log) {
-            Pass 'LS-EV-01' "Stale pre-existing log with no new log this run is never consumed -- stays 'not_observed'"
+            Pass 'LS-EV-01' "A log claiming a foreign invocation_id is never consumed as this run's evidence -- stays 'not_observed'"
         } else {
-            Fail 'LS-EV-01' "Stale log was incorrectly consumed as this run's evidence: $($r1 | ConvertTo-Json -Compress)"
+            Fail 'LS-EV-01' "Foreign-id log was incorrectly consumed as this run's evidence: $($r1 | ConvertTo-Json -Compress)"
         }
 
-        # LS-EV-02: two pre-existing logs, one exact new log -> only new used.
+        # LS-EV-02: two foreign-id logs + one log with the exact expected id -> only the exact-id log is used.
         $d2 = Join-Path $fixtureRoot 'ev02'
         New-Item -ItemType Directory -Force -Path $d2 | Out-Null
-        $old2a = New-EvFixtureLog -Dir $d2 -Name 'launch_old_a.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
-        $old2b = New-EvFixtureLog -Dir $d2 -Name 'launch_old_b.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
-        Start-Sleep -Milliseconds 50
-        $new2 = New-EvFixtureLog -Dir $d2 -Name 'launch_new.json' -Mode 'live-shadow' -Started 'observed_false' -Verified 'observed_true'
-        $r2 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d2 -PreExistingLogPaths @($old2a, $old2b)
+        New-EvFixtureLog -Dir $d2 -Name 'launch_old_a.json' -Mode 'live-shadow' -InvocationId $idForeignOld1 -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        New-EvFixtureLog -Dir $d2 -Name 'launch_old_b.json' -Mode 'live-shadow' -InvocationId $idForeignOld2 -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        $new2 = New-EvFixtureLog -Dir $d2 -Name 'launch_new.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_false' -Verified 'observed_true'
+        $r2 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d2 -ExpectedInvocationId $idA
         if ($r2.source_log -eq $new2 -and $r2.daemon_started_by_this_invocation -eq 'observed_false' -and $r2.daemon_reachable_and_verified -eq 'observed_true') {
-            Pass 'LS-EV-02' "Exactly the new log is used as evidence source; the two pre-existing logs are ignored"
+            Pass 'LS-EV-02' "Exactly the log whose invocation_id matches is used as evidence source; the two foreign-id logs are ignored"
         } else {
-            Fail 'LS-EV-02' "Did not select the exact new log: $($r2 | ConvertTo-Json -Compress)"
+            Fail 'LS-EV-02' "Did not select the exact-id log: $($r2 | ConvertTo-Json -Compress)"
         }
 
-        # LS-EV-03: already-running verified daemon -> reachable=true, started=false.
+        # LS-EV-03: already-running verified daemon (exact id match) -> reachable=true, started=false.
         $d3 = Join-Path $fixtureRoot 'ev03'
         New-Item -ItemType Directory -Force -Path $d3 | Out-Null
-        $new3 = New-EvFixtureLog -Dir $d3 -Name 'launch_new.json' -Mode 'live-shadow' -Started 'observed_false' -Verified 'observed_true'
-        $r3 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d3 -PreExistingLogPaths @()
+        New-EvFixtureLog -Dir $d3 -Name 'launch_new.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_false' -Verified 'observed_true' | Out-Null
+        $r3 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d3 -ExpectedInvocationId $idA
         if ($r3.daemon_started_by_this_invocation -eq 'observed_false' -and $r3.daemon_reachable_and_verified -eq 'observed_true') {
             Pass 'LS-EV-03' "Attach-to-already-running fixture: reachable_and_verified=true, started_by_this_invocation=false (never conflated)"
         } else {
             Fail 'LS-EV-03' "Attach fixture did not distinguish started vs reachable: $($r3 | ConvertTo-Json -Compress)"
         }
 
-        # LS-EV-04: new daemon start -> started=true.
+        # LS-EV-04: new daemon start (exact id match) -> started=true.
         $d4 = Join-Path $fixtureRoot 'ev04'
         New-Item -ItemType Directory -Force -Path $d4 | Out-Null
-        $new4 = New-EvFixtureLog -Dir $d4 -Name 'launch_new.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
-        $r4 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d4 -PreExistingLogPaths @()
+        New-EvFixtureLog -Dir $d4 -Name 'launch_new.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        $r4 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d4 -ExpectedInvocationId $idA
         if ($r4.daemon_started_by_this_invocation -eq 'observed_true' -and $r4.daemon_reachable_and_verified -eq 'observed_true') {
             Pass 'LS-EV-04' "New daemon-start fixture: started_by_this_invocation=true"
         } else {
             Fail 'LS-EV-04' "New-start fixture did not report started=true: $($r4 | ConvertTo-Json -Compress)"
         }
 
-        # LS-EV-05: wrong-mode log cannot satisfy LiveShadow evidence.
+        # LS-EV-05: wrong-mode log cannot satisfy LiveShadow evidence, even with the exact expected invocation_id.
         $d5 = Join-Path $fixtureRoot 'ev05'
         New-Item -ItemType Directory -Force -Path $d5 | Out-Null
-        $new5 = New-EvFixtureLog -Dir $d5 -Name 'launch_new.json' -Mode 'paper' -Started 'observed_true' -Verified 'observed_true'
-        $r5 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d5 -PreExistingLogPaths @()
+        New-EvFixtureLog -Dir $d5 -Name 'launch_new.json' -Mode 'paper' -InvocationId $idA -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        $r5 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d5 -ExpectedInvocationId $idA
         if ($r5.daemon_started_by_this_invocation -eq 'not_observed' -and $r5.daemon_reachable_and_verified -eq 'not_observed') {
-            Pass 'LS-EV-05' "A wrong-mode (paper) log can never satisfy LiveShadow evidence, even though it is this run's only new log"
+            Pass 'LS-EV-05' "A wrong-mode (paper) log can never satisfy LiveShadow evidence, even with a matching invocation_id"
         } else {
             Fail 'LS-EV-05' "Wrong-mode log was incorrectly accepted as LiveShadow evidence: $($r5 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-08 (R1B, the mission's negative control): FOREIGN-ONLY.
+        # Expected id A; no log claims A; one otherwise-valid new LiveShadow
+        # log claims foreign id B. Must stay 'not_observed' -- this is exactly
+        # the scenario a pre-fix RED run against the OLD set-difference
+        # resolver failed (it accepted B purely because it was the only new
+        # file since the pre-run snapshot, with no identity check at all).
+        $d8 = Join-Path $fixtureRoot 'ev08'
+        New-Item -ItemType Directory -Force -Path $d8 | Out-Null
+        New-EvFixtureLog -Dir $d8 -Name 'launch_foreign_b.json' -Mode 'live-shadow' -InvocationId $idB -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        $r8 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d8 -ExpectedInvocationId $idA
+        if ($r8.daemon_started_by_this_invocation -eq 'not_observed' -and $r8.daemon_reachable_and_verified -eq 'not_observed' -and $null -eq $r8.source_log) {
+            Pass 'LS-EV-08' "FOREIGN-ONLY: a concurrent foreign invocation's log (id B) can never satisfy expected id A -- stays 'not_observed' (this is the exact defect R1B fixed)"
+        } else {
+            Fail 'LS-EV-08' "Foreign invocation B's log was incorrectly accepted as evidence for A: $($r8 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-09: foreign B + exact A both present -> only A is authoritative.
+        $d9 = Join-Path $fixtureRoot 'ev09'
+        New-Item -ItemType Directory -Force -Path $d9 | Out-Null
+        New-EvFixtureLog -Dir $d9 -Name 'launch_foreign_b.json' -Mode 'live-shadow' -InvocationId $idB -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        $exactA9 = New-EvFixtureLog -Dir $d9 -Name 'launch_exact_a.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_false' -Verified 'observed_true'
+        $r9 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d9 -ExpectedInvocationId $idA
+        if ($r9.source_log -eq $exactA9 -and $r9.daemon_started_by_this_invocation -eq 'observed_false' -and $r9.daemon_reachable_and_verified -eq 'observed_true') {
+            Pass 'LS-EV-09' "Foreign B + exact A both present: only A is authoritative, B is ignored"
+        } else {
+            Fail 'LS-EV-09' "Did not select exact-id A as sole authoritative source: $($r9 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-10: two logs BOTH claim exact id A -> fail closed as ambiguous.
+        $d10 = Join-Path $fixtureRoot 'ev10'
+        New-Item -ItemType Directory -Force -Path $d10 | Out-Null
+        New-EvFixtureLog -Dir $d10 -Name 'launch_a_first.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        New-EvFixtureLog -Dir $d10 -Name 'launch_a_second.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_false' -Verified 'observed_true' | Out-Null
+        $r10 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d10 -ExpectedInvocationId $idA
+        if ($r10.daemon_started_by_this_invocation -eq 'not_observed' -and $r10.daemon_reachable_and_verified -eq 'not_observed' -and $null -eq $r10.source_log -and $r10.reason -match 'ambiguous') {
+            Pass 'LS-EV-10' "Two logs both claiming exact id A fail closed as ambiguous -- never guesses which is authoritative"
+        } else {
+            Fail 'LS-EV-10' "Did not fail closed on ambiguous duplicate-id logs: $($r10 | ConvertTo-Json -Compress)"
         }
 
         Remove-Item -Path $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -362,6 +442,9 @@ if (Test-Path $Target) {
         Fail 'LS-EV-03' "skipped -- harness error"
         Fail 'LS-EV-04' "skipped -- harness error"
         Fail 'LS-EV-05' "skipped -- harness error"
+        Fail 'LS-EV-08' "skipped -- harness error"
+        Fail 'LS-EV-09' "skipped -- harness error"
+        Fail 'LS-EV-10' "skipped -- harness error"
     }
 } else {
     Fail 'LS-EV-01' "skipped -- target file missing"
@@ -369,6 +452,9 @@ if (Test-Path $Target) {
     Fail 'LS-EV-03' "skipped -- target file missing"
     Fail 'LS-EV-04' "skipped -- target file missing"
     Fail 'LS-EV-05' "skipped -- target file missing"
+    Fail 'LS-EV-08' "skipped -- target file missing"
+    Fail 'LS-EV-09' "skipped -- target file missing"
+    Fail 'LS-EV-10' "skipped -- target file missing"
 }
 
 Write-Host ""
