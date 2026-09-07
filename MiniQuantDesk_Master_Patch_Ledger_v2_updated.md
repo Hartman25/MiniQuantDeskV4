@@ -362,6 +362,163 @@ neither changes `ACTIVE_IMPLEMENTATION_LEDGER`.
 
 **Side effects this phase:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Real Paper DB verification = 0 (hermetic disposable-test-DB rows only). Paper validation = NOT RUN. Paper smoke = NOT RUN. Paper soak = NOT RUN. Real LiveShadow smoke = NOT RUN. LiveCapital = NEVER ENABLED. Scheduler activation = NOT RUN. Holdout consumption = 0. `smoke_logs/` untouched. No push to `origin`.
 
+### MQK-LEDGER-BURN-CONTROLLER-04 — Phase N: Canonical Ledger Normalization (2026-09-07, one-time)
+
+**This is a one-time normalization pass, not another broad reconciliation.** It
+uses exactly three inputs, per the controlling mission: (1) the Controller-03
+review bundle's `04-active-row-table.csv` (73 rows, SHA256-verified,
+`52B36787...`) as the bounded navigation inventory; (2) the authoritative
+commit history of this exact branch (`git merge-base --is-ancestor` against
+current HEAD — never a broader repo search); (3) the independent-review
+acceptances already recorded above (Controller-02/03 W2/W3/Phase-A-D,
+Controller-04 R1/R2, and the mission's own explicit Wave01 acceptances for
+`LIVE-ACCOUNT-TRUTH-01`/`LIVE-SECRETS-CONSOLIDATION-01`).
+
+**The prior `ACTIVE_IMPLEMENTATION_LEDGER = 13` figure is RETIRED.** It was a
+controller-local delta tally (`25 → 23 → 21 → 19 → 17 → 14 → 13`) carried
+forward session to session, not an independently-reproducible count of the
+full 73-row inventory. The count below is not "13 minus N" — it is a direct
+count of literal row IDs in one bucket, mechanically checked against the
+bucket's own listing.
+
+**Narrow HEAD-ancestry check (per-mission-required) for the 6
+`ACCEPTED_PENDING_INTEGRATION` rows:** each row's own accepted commit(s), from
+the separate worktree/branch where the work was originally done, were checked
+directly with `git merge-base --is-ancestor <commit> HEAD`. All 6 are already
+ancestors of this branch's current HEAD (confirming an earlier, unlogged merge
+— `1a9c4b8f integrate: unify paper launcher data authority` plus the
+`9a4c6048`/`6af413ec` L0 rebaseline commits, all themselves ancestors of
+HEAD, are the integration point):
+
+| Row | Accepted commit(s) | Ancestor of HEAD? |
+|---|---|---|
+| `MARKET-DATA-PROVIDER-PROVENANCE-01` | `dae446b3`, `4bc78c70` | YES |
+| `AUTONOMOUS-DAILY-OPERATOR-RETRY-01` | `035cabf0` | YES |
+| `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01` | `732f8895` | YES |
+| `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-01` | `fde6e227` | YES |
+| `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-02` | `aae1e3b8` | YES |
+| `MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01` | `d75d2ac0` | YES |
+
+All 6 are therefore normalized `ACCEPTED_PENDING_INTEGRATION -> CLOSED`
+(integration is complete, not merely accepted). This is a distinct check from
+`MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01` (row 3, `IMPLEMENTED_PENDING_
+REVIEW`): its own commit is *also* an ancestor of HEAD, but presence at HEAD
+only resolves an *accepted-but-unintegrated* row — it cannot substitute for
+the independent review an `IMPLEMENTED_PENDING_REVIEW` row still requires per
+the mission's own rule, so that row stays `PENDING_INDEPENDENT_REVIEW`.
+
+**Canonical normalized table — every one of the 73 rows in exactly one
+bucket:**
+
+#### ACTIVE_IMPLEMENTATION = 21
+
+`INSTRUMENT-UNIVERSE-REFRESH-01`, `RISK-AUTHORITY-DOC-NOTE-01`,
+`PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01`,
+`BROKER-ALPACA-DEAD-CODE-CLEANUP-01`, `BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
+`MD-KRAKEN-FETCH-RETRY-BACKOFF-01`, `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`,
+`STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`,
+`STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01`,
+`DYNAMIC-SELECTION-MODULE-DOC-STALENESS-01`,
+`MULTI-SYMBOL-DISPATCH-DOC-CONCURRENCY-CLARITY-01`,
+`CLI-DAEMON-CONTROL-PASSTHROUGH-01`,
+`CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01`,
+`GUI-OPERATOR-ACTION-409-BODY-SURFACE-01`,
+`BROKER-ALPACA-RATE-LIMIT-RETRY-AFTER-01`, `DB-OUTBOX-SCHEMA-VERSION-01`,
+`MD-ALPACA-FETCH-RETRY-BACKOFF-01`, `MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01`,
+`DISCORD-CHANNEL-ROUTING-01`, `DISCORD-DATA-STALENESS-ALERT-01`,
+`DISCORD-DAILY-SUMMARY-PUSH-01`
+
+**Mechanical check:** 21 row IDs listed above == declared count 21. MATCH.
+
+#### PENDING_INDEPENDENT_REVIEW = 8
+
+`MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01`,
+`PROMOTION-WALKFORWARD-GATE-WIRING-01`, `BKT-PROMOTION-ARTIFACT-AUTHORITY-01`,
+`PROMOTION-STRESS-SUITE-AUTHORITY-01`, `PROMOTION-BACKTEST-EVIDENCE-SEAM-01`,
+`OFFICIAL-DUAL-MODE-LAUNCHER-01`,
+`PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01`,
+`PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01-REPAIR-01`
+
+#### PENDING_INTEGRATION = 0
+
+(none — all 6 rows previously carrying `ACCEPTED_PENDING_INTEGRATION` are
+normalized `CLOSED` above per the HEAD-ancestry check.)
+
+#### IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED = 3
+
+`PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01`,
+`PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01-REPAIR-01`,
+`LIVE-TINY-CAPITAL-SMOKE-01`
+
+#### BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION = 4
+
+`LIVE-TRUST-CHAIN-SHADOW-CAPTURE-01`, `LIVE-TRUST-CHAIN-PARITY-SCORER-01`,
+`LIVE-TRUST-CHAIN-EVIDENCE-SIGNER-01`, `LIVE-CAPITAL-EXTERNAL-PROOF-01`
+
+#### DEFERRED_POST_LEDGER_AUDIT = 4
+
+`LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01`, `API-TYPES-RS-LEAN-OUT-01`,
+`HELD-MIGRATION-0017-DECISION-01`, `EXPORT-HANDOFF-SECRET-EXCLUSION-01`
+
+#### DEFERRED_FUTURE_MAINTENANCE = 7
+
+`STRATEGY-POSITION-SIZING-PARITY-01`, `CALENDAR-TABLE-EXTENSION-2029-2030-01`,
+`MULTI-ASSET-CRYPTO-EXECUTION-01`, `MULTI-ASSET-OPTIONS-FOUNDATION-01`,
+`MULTI-ASSET-FUTURES-FOREX-FOUNDATION-01`, `STATE-RS-LEAN-OUT-01`,
+`LIFECYCLE-RS-LEAN-OUT-01`
+
+(Pre-existing long-horizon `DEFERRED` rows — multi-asset expansion and the two
+lean-out patches — kept distinct from `DEFERRED_POST_LEDGER_AUDIT`, which is
+reserved for rows this/prior controller sessions specifically found and froze
+pending ledger cleanup.)
+
+#### RED_AUTHORIZATION_REQUIRED = 1
+
+`DEADMAN-LEASE-TTL-RECONCILE-01` (READY_RED — unchanged; not implemented
+without explicit separate operator authorization per the controlling
+mission).
+
+#### CLOSED (this normalization pass) = 25
+
+`PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`,
+`MARKET-DATA-PROVIDER-PROVENANCE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`,
+`MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`,
+`MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-01`,
+`MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-02`,
+`MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01`,
+`AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01`,
+`PORTFOLIO-DYNAMIC-SELECTION-DEEP-REVIEW-01`,
+`DYNAMIC-SELECTION-E2E-SCENARIO-TEST-01`,
+`DYNAMIC-SELECTION-TEST-DENSITY-AUDIT-01`, `CLI-RUNCMD-DOC-DISAMBIGUATION-01`,
+`CI-TESTKIT-FEATURE-GUARD-VERIFY-01`, `CLI-RUN-STUB-TRACKING-01`,
+`README-SNAPSHOT-REFRESH-01`, `DEPLOYMENT-DECISION-DOC-01`,
+`DOCS-TRACKER-RETIREMENT-01`, `PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01`,
+`AUTOFRESH-SCHEDULER-BARRIER-CALL-NEVER-STARTS-01` (superseded/duplicate,
+disposed under the same commit as the row above),
+`LIVE-ACCOUNT-TRUTH-01`, `LIVE-SECRETS-CONSOLIDATION-01`,
+`LIVE-CLI-ARM-RECONCILE-01`, `LIVE-FLATTEN-PROOF-01`,
+`MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
+`MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`
+
+**Sum check:** 21 + 8 + 0 + 3 + 4 + 4 + 7 + 1 + 25 = **73**. Matches the
+`04-active-row-table.csv` row count exactly — every row accounted for in
+exactly one bucket, no hidden subset counts.
+
+**`ACTIVE_IMPLEMENTATION_LEDGER = 21`** is the operative denominator from this
+point forward, superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
+`IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED` (3),
+`BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION` (4), `DEFERRED_POST_LEDGER_AUDIT`
+(4), `DEFERRED_FUTURE_MAINTENANCE` (7), and `RED_AUTHORIZATION_REQUIRED` (1)
+are each tracked separately and must never be folded into
+`ACTIVE_IMPLEMENTATION_LEDGER`.
+
+**Side effects this phase:** docs-only; no code changed. Paper orders = 0.
+Live orders = 0. Real broker calls = 0. Real Paper DB verification = 0. Paper
+validation = NOT RUN. Paper smoke = NOT RUN. Paper soak = NOT RUN. Real
+LiveShadow smoke = NOT RUN. LiveCapital = NEVER ENABLED. Scheduler activation
+= NOT RUN. Holdout consumption = 0. `smoke_logs/` untouched. No push to
+`origin`.
+
 ---
 
 ## 1. Paper-Soak Protection Rule
