@@ -495,7 +495,17 @@ impl mqk_execution::ReconcileGate for PassGate {
 /// Runs `ticks` iterations of the execution tick loop against a live DB.
 /// Uses `NullBroker` (no real orders), permissive integrity/reconcile gates,
 /// and a real mqk-risk-backed runtime risk adapter.
-/// Replace stubs with real implementations before LIVE deployment.
+///
+/// CLI-RUN-STUB-TRACKING-01 / LIVE-CLI-ARM-RECONCILE-01: this whole function
+/// is `#[cfg(feature = "testkit")]`-gated and the `testkit` feature is
+/// neither a default feature anywhere in the workspace nor enabled by any
+/// production `[dependencies]` section (verified workspace-wide and
+/// CI-guarded by `CI-TESTKIT-FEATURE-GUARD-VERIFY-01`,
+/// `scripts/guards/check_testkit_feature_not_default.sh`) — this function
+/// structurally cannot compile into any release/LIVE-deployed binary. There
+/// is no "replace stubs before LIVE" action item to track: the stubs
+/// (`NullBroker`, `PassGate`) can never reach a live deployment by
+/// construction, not by developer discipline.
 ///
 /// RT-2: gated — not available in production builds without `testkit` feature.
 #[cfg(feature = "testkit")]
