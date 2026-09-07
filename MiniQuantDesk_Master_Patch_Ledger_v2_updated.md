@@ -190,6 +190,42 @@ This does **not** match the wave controller's own stated "if all 15 close cleanl
 
 **Side effects this wave:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Paper validation = NOT RUN. Soak/smoke = NOT RUN. Holdout consumption = 0. `smoke_logs/` untouched. No push to `origin`.
 
+### MQK-LEDGER-BURN-CONTROLLER-02 — Phase R (Wave01 Independent-Review Repairs) Results (2026-09-06)
+
+An independent review of the W1 Burn-Down results above (external to this repo's own sessions) found: **14 of the 15 original W1 rows accepted as-is**; one row, `CI-TESTKIT-FEATURE-GUARD-VERIFY-01` (previously recorded `CLOSED` above, commit `6e6d4aa2`), **reverts to REPAIR REQUIRED** — its grep/awk-based guard false-passed several real release-safety bypass routes (multiline default arrays, target-specific/dotted dependency tables, workspace-inherited dependency features, feature-alias default chains); and `LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01` (new row from W1-13) is confirmed a genuine capability gap, not a safety defect, and is reclassified `DEFERRED — POST LEDGER AGGRESSIVE AUDIT` (feature/capability candidate, new-feature work frozen until ledger cleanup completes).
+
+| Row | Prior status | Independent-review / this-controller disposition | Commit |
+|---|---|---|---|
+| `LIVE-ACCOUNT-TRUTH-01` | `IMPLEMENTED_PENDING_REVIEW` (`2c99e48a`) | **CLOSED — INDEPENDENTLY ACCEPTED** | `2c99e48a` (unchanged) |
+| `LIVE-SECRETS-CONSOLIDATION-01` | `IMPLEMENTED_PENDING_REVIEW` (`da6cb635`) | **CLOSED — INDEPENDENTLY ACCEPTED** | `da6cb635` (unchanged) |
+| `CI-TESTKIT-FEATURE-GUARD-VERIFY-01` | `CLOSED` (`6e6d4aa2`) — reverted to REPAIR REQUIRED by independent review | **CLOSED — repaired.** Guard rewritten as a Cargo/TOML-structural (`tomllib`) parser; mutation-negative suite extended to the required TKG-A..H cases (direct default, multiline default, ordinary dependency, target-specific dependency, workspace-inherited route, feature-alias chain, dev-dependency-only correct pattern, current real repo) plus a combined-violations case. All 11 cases pass against the real guard entrypoint. | `14ec4096` |
+| `CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01` | `OPEN` (discovered by W1-07) | **CLOSED.** `research_replay.rs`'s `#[cfg(test)] unique_dir` no longer reads the wall clock; replaced with process id + a per-process atomic counter. `check_unsafe_patterns.sh` `[S]` section now passes; 8/8 targeted `research_replay` tests pass (1 pre-existing `#[ignore]`d E2E unaffected). | `e5e3d44c` |
+| `CI-UNSAFE-PATTERNS-UUID-TESTFIXTURE-01` (new, discovered while validating the row above) | N/A (new) | **CLOSED.** `session_controller.rs`'s `p8_05`/`p8_06` tests used `Uuid::new_v4()` as an arbitrary, semantically-unused `run_id`, tripping the guard's `[U]` check — same false-positive class as the SystemTime finding, different pattern/file. Replaced with fixed `Uuid::from_u128(..)` literals. `check_unsafe_patterns.sh` now passes end-to-end (all 7 sections `OK`); 3/3 targeted `session_controller` diagnostics tests pass. | `2819bfe4` |
+| `LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01` | `OPEN` (discovered by W1-13) | **DEFERRED — POST LEDGER AGGRESSIVE AUDIT.** Not a safety defect (LiveShadow has zero capital at risk by construction); whether to generalize `flatten-paper-positions`'s mode gate or add a dedicated action is a design decision, out of scope while the production ledger is being cleaned up. | — |
+
+**Recomputation** (starting from this ledger's own post-W1 `ACTIVE_REMAINING = 25`, which already included both new-row discoveries):
+
+```text
+ACTIVE_REMAINING (post-W1, pre-independent-review) = 25
+
+LIVE-ACCOUNT-TRUTH-01            PENDING_REVIEW -> CLOSED                    -1
+LIVE-SECRETS-CONSOLIDATION-01    PENDING_REVIEW -> CLOSED                    -1
+CI-TESTKIT-FEATURE-GUARD-VERIFY-01   CLOSED -> REPAIR REQUIRED (reactivated) +1
+LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01  OPEN -> DEFERRED (removed from active) -1
+                                                            ---------------------
+ACTIVE_IMPLEMENTATION_LEDGER (controller-02 start) = 25 - 1 - 1 + 1 - 1 = 23
+
+R1: CI-TESTKIT-FEATURE-GUARD-VERIFY-01 repaired -> CLOSED                    -1
+R2: CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01 fixed -> CLOSED             -1
+R2B: CI-UNSAFE-PATTERNS-UUID-TESTFIXTURE-01 discovered AND closed same session  net 0
+                                                            ---------------------
+ACTIVE_IMPLEMENTATION_LEDGER (after Phase R) = 21
+```
+
+Two categories are tracked separately from `ACTIVE_IMPLEMENTATION_LEDGER` and must not be merged into it (per this controller's own operating rule): **`DEFERRED_OPERATOR_VALIDATION`** (implementation complete, only a real Paper/Live/smoke/soak/scheduler-activation step remains, deliberately postponed by the operator) and **`DEFERRED_POST_LEDGER_AUDIT`** (feature/capability candidates frozen until ledger cleanup completes — currently: `LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01`).
+
+**Side effects this phase:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Paper validation = NOT RUN. Smoke/soak = NOT RUN. Scheduler activation = NOT RUN. Holdout consumption = 0. `smoke_logs/` untouched. No push to `origin`.
+
 ---
 
 ## 1. Paper-Soak Protection Rule
