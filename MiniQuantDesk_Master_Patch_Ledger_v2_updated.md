@@ -589,6 +589,17 @@ superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
 are each tracked separately and must never be folded into
 `ACTIVE_IMPLEMENTATION_LEDGER`.
 
+**BURN-PHASE CLOSEOUT (2026-09-07):** every non-RED, dependency-safe
+`ACTIVE_IMPLEMENTATION` row this controller could locate a defined scope for
+has been closed. `INSTRUMENT-UNIVERSE-REFRESH-01` is the sole remaining row
+and is explicitly unscoped (see its own bucket note above); it requires an
+operator scoping decision, not further implementation. `DEADMAN-LEASE-TTL-
+RECONCILE-01` remains `RED_AUTHORIZATION_REQUIRED`, untouched, per the
+controlling mission's explicit instruction. Full evidence, per-row
+disposition, and hashes are in the independent review bundle:
+`C:\Users\Zacha\Desktop\MQK-LEDGER-BURN-CONTROLLER-04-REVIEW.zip`
+(SHA256 `3FFBEC46247714A912D8AE0F99D3ED659C3683E134B8AB19662C6012048A1685`).
+
 **Side effects this phase:** docs-only; no code changed. Paper orders = 0.
 Live orders = 0. Real broker calls = 0. Real Paper DB verification = 0. Paper
 validation = NOT RUN. Paper smoke = NOT RUN. Paper soak = NOT RUN. Real
