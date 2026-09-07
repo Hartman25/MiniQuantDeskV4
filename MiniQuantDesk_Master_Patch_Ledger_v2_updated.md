@@ -410,12 +410,10 @@ the mission's own rule, so that row stays `PENDING_INDEPENDENT_REVIEW`.
 **Canonical normalized table — every one of the 73 rows in exactly one
 bucket:**
 
-#### ACTIVE_IMPLEMENTATION = 12
+#### ACTIVE_IMPLEMENTATION = 9
 
 `INSTRUMENT-UNIVERSE-REFRESH-01`,
-`MD-KRAKEN-FETCH-RETRY-BACKOFF-01`, `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`,
-`STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`,
-`STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01`,
+`MD-KRAKEN-FETCH-RETRY-BACKOFF-01`,
 `CLI-DAEMON-CONTROL-PASSTHROUGH-01`,
 `CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01`,
 `BROKER-ALPACA-RATE-LIMIT-RETRY-AFTER-01`,
@@ -423,7 +421,7 @@ bucket:**
 `DISCORD-CHANNEL-ROUTING-01`, `DISCORD-DATA-STALENESS-ALERT-01`,
 `DISCORD-DAILY-SUMMARY-PUSH-01`
 
-**Mechanical check:** 12 row IDs listed above == declared count 12. MATCH.
+**Mechanical check:** 9 row IDs listed above == declared count 9. MATCH.
 
 **Burn-phase updates (2026-09-07):**
 - `BROKER-ALPACA-DEAD-CODE-CLEANUP-01` normalized `ACTIVE_IMPLEMENTATION ->
@@ -458,9 +456,15 @@ bucket:**
   6 dedicated controls plus the full 1048/1048-green GUI suite confirm the
   409-body surfacing chain (`http.ts` -> `actions.ts` ->
   `ActionReceiptBanner.tsx`) is real and wired.
+- `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`,
+  `STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`,
+  `STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01` all normalized
+  `ACTIVE_IMPLEMENTATION -> CLOSED` — direct `#[test]` function counts (12,
+  10, 12 respectively, matching each row's own L0 truth-up) plus
+  `cargo test -p mqk-strategy --lib` at 119/119 green.
 
 See each row's own ledger entry for full evidence. `ACTIVE_IMPLEMENTATION`
-was 21 at the moment of the Phase N commit and is 12 as of this update.
+was 21 at the moment of the Phase N commit and is 9 as of this update.
 
 #### PENDING_INDEPENDENT_REVIEW = 8
 
@@ -510,14 +514,17 @@ pending ledger cleanup.)
 without explicit separate operator authorization per the controlling
 mission).
 
-#### CLOSED (this normalization pass, updated through the burn phase) = 34
+#### CLOSED (this normalization pass, updated through the burn phase) = 37
 
 `BROKER-ALPACA-DEAD-CODE-CLEANUP-01`, `RISK-AUTHORITY-DOC-NOTE-01`,
 `PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01`, `BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
 `DYNAMIC-SELECTION-MODULE-DOC-STALENESS-01`,
 `MULTI-SYMBOL-DISPATCH-DOC-CONCURRENCY-CLARITY-01`,
 `MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01`, `DB-OUTBOX-SCHEMA-VERSION-01`,
-`GUI-OPERATOR-ACTION-409-BODY-SURFACE-01` (all nine: burn-phase closures,
+`GUI-OPERATOR-ACTION-409-BODY-SURFACE-01`,
+`STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`,
+`STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`,
+`STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01` (all twelve: burn-phase closures,
 2026-09-07 — see above),
 `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`,
 `MARKET-DATA-PROVIDER-PROVENANCE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`,
@@ -539,11 +546,11 @@ disposed under the same commit as the row above),
 `MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
 `MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`
 
-**Sum check (as of the burn-phase update above):** 12 + 8 + 0 + 3 + 4 + 4 + 7
-+ 1 + 34 = **73**. Matches the `04-active-row-table.csv` row count exactly —
+**Sum check (as of the burn-phase update above):** 9 + 8 + 0 + 3 + 4 + 4 + 7
++ 1 + 37 = **73**. Matches the `04-active-row-table.csv` row count exactly —
 every row accounted for in exactly one bucket, no hidden subset counts.
 
-**`ACTIVE_IMPLEMENTATION_LEDGER = 12`** is the operative denominator as of the
+**`ACTIVE_IMPLEMENTATION_LEDGER = 9`** is the operative denominator as of the
 burn-phase update above (21 at the moment of the Phase N commit itself),
 superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
 `IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED` (3),
@@ -1082,7 +1089,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### STRATEGY-MEAN-REVERSION-UNIT-TESTS-01 — Add in-file signal-logic unit tests
 
-**Status:** READY · **Priority:** P2 · **Paper Impact:** GREEN (pure signal-generation, no broker/DB/portfolio writes) · **Subsystem:** mqk-strategy
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — this session's own fresh harness pass confirms the row's L0 truth-up: `mean_reversion.rs` carries exactly 12 `#[test]` functions (`mr01`..`mr12`, including boundary/fail-closed controls), and `cargo test -p mqk-strategy --lib` is 119/119 green. No code changed by this session. · **Priority:** P2 · **Paper Impact:** GREEN (pure signal-generation, no broker/DB/portfolio writes) · **Subsystem:** mqk-strategy
 **Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains 12 in-file tests (`mr01`-`mr12`, including boundary and fail-closed negative controls) at this file. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
 **Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-strategy/src/engines/mean_reversion.rs:36-64` has zero in-file unit tests (only indirect reference-only coverage in `scenario_daily_data_readiness_01.rs`), unlike `intraday_scalper.rs` (43 in-file tests, `engines/intraday_scalper.rs:522-1259`).
 **Problem:** A strategy currently dispatchable in production paper trading has no direct proof of its signal logic.
@@ -1096,7 +1103,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01 — Add in-file signal-logic unit tests
 
-**Status:** READY · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** mqk-strategy
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — this session's own fresh harness pass confirms the row's L0 truth-up: `volatility_breakout.rs` carries exactly 10 `#[test]` functions (`vb01`..`vb10`, including `vb08`'s explicit no-lookahead negative control), and `cargo test -p mqk-strategy --lib` is 119/119 green. No code changed by this session. · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** mqk-strategy
 **Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains 10 in-file tests (`vb01`-`vb10`, including an explicit no-lookahead negative control, `vb08`), independently confirmed by direct grep count. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
 **Current Source Truth / Problem / Scope (superseded by the Ledger Truth-Up above — retained for history):** Identical pattern to `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`, applied to `engines/volatility_breakout.rs:39-66` (prior-20-bar min/max breakout logic), currently zero in-file tests.
 **Dependencies:** NONE.
@@ -1108,7 +1115,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01 — Add in-file signal-logic unit tests
 
-**Status:** READY · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** mqk-strategy
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — this session's own fresh harness pass confirms the row's L0 truth-up: `swing_momentum.rs` carries exactly 12 `#[test]` functions (`sm01`..`sm12`, same pattern as `mean_reversion`), and `cargo test -p mqk-strategy --lib` is 119/119 green. No code changed by this session. · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** mqk-strategy
 **Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains 12 in-file tests (`sm01`-`sm12`, same pattern as `mean_reversion`), independently confirmed by direct grep count. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
 **Current Source Truth / Problem / Scope (superseded by the Ledger Truth-Up above — retained for history):** Identical pattern, applied to `engines/swing_momentum.rs:36-64` (daily close-vs-20d-average momentum), currently zero in-file tests.
 **Dependencies:** NONE.
