@@ -432,6 +432,20 @@ pub struct AppState {
     /// second/minute, same binding, same assignment set) always receive
     /// distinct `evaluation_id`s — never a minute-bucket collision.
     daily_data_readiness_attempt_seq: Arc<AtomicU64>,
+    /// PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01: injectable calendar-provider
+    /// override for the required-universe autofresh scheduler's immediate-
+    /// cycle market/session truth (`required_market_data_autofresh::
+    /// run_and_record_cycle`).
+    ///
+    /// `None` in production — that path resolves the real
+    /// `market_calendar::active_calendar_provider_from_env()` (NyseWeekdays)
+    /// directly, unchanged. Lets a test prove the scheduler's generation-race
+    /// ownership invariant deterministically regardless of the real
+    /// wall-clock weekday/holiday, without touching `now_utc` itself — the
+    /// background loop's own wake-time scheduling still needs the real wall
+    /// clock. Never set in production code.
+    required_universe_calendar_override_for_test:
+        Arc<RwLock<Option<Arc<dyn market_calendar::MarketCalendarProvider>>>>,
     /// PT-DAY-04: Deduplication flag for WS continuity-gap operator escalation.
     ///
     /// `false` at boot and after each Live transition.  Set to `true` on the
@@ -1923,6 +1937,7 @@ impl AppState {
             daily_data_readiness_clock_override: Arc::new(RwLock::new(None)),
             daily_data_readiness_evidence_override: Arc::new(RwLock::new(None)),
             daily_data_readiness_attempt_seq: Arc::new(AtomicU64::new(0)),
+            required_universe_calendar_override_for_test: Arc::new(RwLock::new(None)),
             gap_escalation_pending: Arc::new(AtomicBool::new(false)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
@@ -2664,6 +2679,32 @@ operator_reconcile_or_repair_required"
     /// real write-result behavior. Never called in production code.
     pub async fn set_daily_data_readiness_evidence_override_for_test(&self, forced: Option<bool>) {
         *self.daily_data_readiness_evidence_override.write().await = forced;
+    }
+
+    /// PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01 test seam: inject a
+    /// [`market_calendar::MarketCalendarProvider`] for the required-universe
+    /// autofresh scheduler's immediate-cycle market/session truth
+    /// (`required_market_data_autofresh::run_and_record_cycle`). `None`
+    /// restores the production `market_calendar::active_calendar_provider_
+    /// from_env()` (NyseWeekdays) behavior. Never called in production code.
+    pub async fn set_required_universe_calendar_override_for_test(
+        &self,
+        provider: Option<Arc<dyn market_calendar::MarketCalendarProvider>>,
+    ) {
+        *self.required_universe_calendar_override_for_test.write().await = provider;
+    }
+
+    /// Read the current required-universe calendar-provider override, if
+    /// any. `pub(crate)` — consumed only by `required_market_data_autofresh
+    /// ::run_and_record_cycle`, never by test code directly (tests use the
+    /// setter above).
+    pub(crate) async fn required_universe_calendar_provider_override(
+        &self,
+    ) -> Option<Arc<dyn market_calendar::MarketCalendarProvider>> {
+        self.required_universe_calendar_override_for_test
+            .read()
+            .await
+            .clone()
     }
 
     /// REPAIR 1 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): allocate the

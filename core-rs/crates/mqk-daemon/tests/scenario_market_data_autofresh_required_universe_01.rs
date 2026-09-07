@@ -1931,6 +1931,21 @@ async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
     st.db = Some(pool);
     st.set_latest_bar_provider_client_for_test(injected);
     let st = Arc::new(st);
+    // PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01: force the immediate cycle's
+    // trading-day truth deterministically true, independent of the real
+    // wall-clock weekday/holiday `now_a`/`now_b` land on (see the doc
+    // comment above `now_a` for why `now_utc` itself must stay real
+    // `Utc::now()`). Independent review confirmed the prior flakiness was
+    // exactly this real-calendar dependency: run_required_universe_cycle's
+    // `!schedule.is_trading_day` early return (required_market_data_
+    // autofresh.rs) short-circuits before the injected provider is ever
+    // called on a weekend/holiday, so BarrierDelayedProvider's
+    // `call_started.notify_one()` never fires and the test times out
+    // waiting on `call_started.notified()` -- not a production scheduler
+    // defect. `trading_day_calendar()` is the same fixed-truth fixture
+    // already used by the other tests in this file.
+    st.set_required_universe_calendar_override_for_test(Some(Arc::new(trading_day_calendar())))
+        .await;
 
     // Step 1/2: Start A claims generation A; its immediate cycle's
     // historical-bootstrap provider call parks on `release_gate`. Run on a

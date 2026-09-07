@@ -1587,13 +1587,23 @@ pub async fn run_and_record_cycle(
     now_utc: DateTime<Utc>,
     dry_run: bool,
 ) -> RequiredUniverseStatusReport {
-    let calendar_provider = active_calendar_provider_from_env();
+    // PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01: a test may inject a
+    // deterministic calendar provider so this immediate cycle's
+    // trading-day/session truth does not depend on the real wall-clock
+    // weekday/holiday. `None` in production — resolves the real canonical
+    // calendar exactly as before.
+    let override_provider = st.required_universe_calendar_provider_override().await;
+    let default_provider = active_calendar_provider_from_env();
+    let calendar_provider: &dyn MarketCalendarProvider = match &override_provider {
+        Some(overridden) => overridden.as_ref(),
+        None => default_provider.as_ref(),
+    };
     let result = run_required_universe_cycle(
         st.db.as_ref(),
         &st.instrument_registry_path,
         &st.provider_registry_path,
         st.latest_bar_provider_client.as_ref(),
-        calendar_provider.as_ref(),
+        calendar_provider,
         now_utc,
         dry_run,
     )
