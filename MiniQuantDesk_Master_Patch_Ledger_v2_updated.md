@@ -974,16 +974,18 @@ git diff --check
 
 #### README-SNAPSHOT-REFRESH-01 — Update or de-embed the stale repository snapshot
 
-**Status:** READY · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** Documentation
-**Current Source Truth:** `README.md:46-60` carries a "Repository snapshot used for this update (2026-07-20)" pinned to commit `3591064a`, describing Phase D/E1/E2A status. Current HEAD (`0a019b8b`, 2026-08-10) has moved through five additional closure/fix commits not mentioned (`PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01`, `PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01`, `PAPER-SOAK-PARTIAL-FILL-DEDUP-04`, and others).
-**Problem:** The README is the first doc an external reader or new operator trusts; it's materially stale on soak-readiness claims.
+**Status:** CLOSED — snapshot replaced with a living pointer (`POST-WAVE06-LEDGER-BURN-01` W1-14, 2026-09-06) · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** Documentation
+**Resolution (W1-14):** By 2026-09-06 the embedded snapshot was not merely 3 weeks stale but ~7 weeks stale and describing Phase D/E1/E2A-era status against a HEAD (`3591064a`) many major waves behind current (`84dcd14c`) — confirming updating the 226-line narrative in place would only recreate the same staleness trap sooner. Per this row's own "or replace" option and `audit_repo_truth_rules.md`'s "no stale snapshots in living docs" rule, the entire embedded patch-by-patch narrative (`README.md`, the "Repository snapshot..." paragraph through the "What that means in plain English" bullet list — ~226 lines) was replaced with a short, dated-nothing pointer to `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`/`git log` as the living status source, plus a durable, mode-level (not patch-level) one-paragraph summary that doesn't need per-patch edits. The immediately-following `### Current readiness boundary` table (already durable/table-based, not narrative) was left untouched, per this row's own out-of-scope boundary.
+**Regression:** `git diff --check` clean; visual review confirms the transition from `## What the repo is today` into `### Current readiness boundary` reads cleanly with no orphaned reference.
+**Original entry (retained for history):** `README.md:46-60` carries a "Repository snapshot used for this update (2026-07-20)" pinned to commit `3591064a`, describing Phase D/E1/E2A status. Current HEAD (`0a019b8b`, 2026-08-10) has moved through five additional closure/fix commits not mentioned (`PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01`, `PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01`, `PAPER-SOAK-PARTIAL-FILL-DEDUP-04`, and others).
+**Problem (original, resolved above):** The README is the first doc an external reader or new operator trusts; it's materially stale on soak-readiness claims.
 **Dependencies:** NONE.
 **In Scope:** Update the snapshot section to current HEAD and current soak status, or replace the embedded snapshot with a pointer to this ledger (which `.claude/rules/audit_repo_truth_rules.md` already establishes as the pattern to avoid re-staling — "no stale snapshots in living docs"). **Out of Scope:** Any other README content changes.
 **Likely Files:** `README.md`.
-**Required Validation:** None beyond visual review; `git diff --check`.
-**Acceptance Criteria:** 1) Snapshot date matches or is replaced by a pointer to a living source. 2) No other README content altered.
-**Exact CLOSED End State:** CLOSED when committed and the snapshot no longer references a 3-week-old commit as current.
-**Acceptance History:** PENDING / PENDING / PENDING / PENDING.
+**Required Validation:** None beyond visual review; `git diff --check`. — **DONE.**
+**Acceptance Criteria:** 1) Snapshot date matches or is replaced by a pointer to a living source. — **MET (replaced).** 2) No other README content altered. — **MET.**
+**Exact CLOSED End State:** CLOSED when committed and the snapshot no longer references a 3-week-old commit as current. — **MET.**
+**Acceptance History:** Snapshot replaced: DONE / Regression: DONE (clean diff, visual review passed).
 
 #### DEPLOYMENT-DECISION-DOC-01 — Document the no-container deployment decision
 
