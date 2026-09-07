@@ -410,15 +410,12 @@ the mission's own rule, so that row stays `PENDING_INDEPENDENT_REVIEW`.
 **Canonical normalized table — every one of the 73 rows in exactly one
 bucket:**
 
-#### ACTIVE_IMPLEMENTATION = 18
+#### ACTIVE_IMPLEMENTATION = 15
 
 `INSTRUMENT-UNIVERSE-REFRESH-01`,
-`BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
 `MD-KRAKEN-FETCH-RETRY-BACKOFF-01`, `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`,
 `STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`,
 `STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01`,
-`DYNAMIC-SELECTION-MODULE-DOC-STALENESS-01`,
-`MULTI-SYMBOL-DISPATCH-DOC-CONCURRENCY-CLARITY-01`,
 `CLI-DAEMON-CONTROL-PASSTHROUGH-01`,
 `CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01`,
 `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01`,
@@ -427,7 +424,7 @@ bucket:**
 `DISCORD-CHANNEL-ROUTING-01`, `DISCORD-DATA-STALENESS-ALERT-01`,
 `DISCORD-DAILY-SUMMARY-PUSH-01`
 
-**Mechanical check:** 18 row IDs listed above == declared count 18. MATCH.
+**Mechanical check:** 15 row IDs listed above == declared count 15. MATCH.
 
 **Burn-phase updates (2026-09-07):**
 - `BROKER-ALPACA-DEAD-CODE-CLEANUP-01` normalized `ACTIVE_IMPLEMENTATION ->
@@ -441,9 +438,19 @@ bucket:**
 - `PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01` normalized
   `ACTIVE_IMPLEMENTATION -> CLOSED` — `grep -in placeholder` on both named
   files returns zero hits at HEAD.
+- `BROKER-ALPACA-CRATE-SCOPE-DOC-01` normalized `ACTIVE_IMPLEMENTATION ->
+  CLOSED` — the required crate-scope doc section already exists at HEAD.
+- `DYNAMIC-SELECTION-MODULE-DOC-STALENESS-01` normalized
+  `ACTIVE_IMPLEMENTATION -> CLOSED` — this session's own fresh harness pass
+  confirmed the row's pre-recorded L0 truth-up (ancestor `805c0b12`, doc
+  already lists real callers, "NOT WIRED" framing absent).
+- `MULTI-SYMBOL-DISPATCH-DOC-CONCURRENCY-CLARITY-01` normalized
+  `ACTIVE_IMPLEMENTATION -> CLOSED` — this session upgraded the row's L0
+  truth-up from `LIKELY` to `CONFIRMED` by directly grepping the full
+  design doc for every sequential/concurrent/parallel occurrence.
 
 See each row's own ledger entry for full evidence. `ACTIVE_IMPLEMENTATION`
-was 21 at the moment of the Phase N commit and is 18 as of this update.
+was 21 at the moment of the Phase N commit and is 15 as of this update.
 
 #### PENDING_INDEPENDENT_REVIEW = 8
 
@@ -493,11 +500,13 @@ pending ledger cleanup.)
 without explicit separate operator authorization per the controlling
 mission).
 
-#### CLOSED (this normalization pass, updated through the burn phase) = 28
+#### CLOSED (this normalization pass, updated through the burn phase) = 31
 
 `BROKER-ALPACA-DEAD-CODE-CLEANUP-01`, `RISK-AUTHORITY-DOC-NOTE-01`,
-`PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01` (all three: burn-phase closures,
-2026-09-07 — see above),
+`PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01`, `BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
+`DYNAMIC-SELECTION-MODULE-DOC-STALENESS-01`,
+`MULTI-SYMBOL-DISPATCH-DOC-CONCURRENCY-CLARITY-01` (all six: burn-phase
+closures, 2026-09-07 — see above),
 `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`,
 `MARKET-DATA-PROVIDER-PROVENANCE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`,
 `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`,
@@ -518,11 +527,11 @@ disposed under the same commit as the row above),
 `MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
 `MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`
 
-**Sum check (as of the burn-phase update above):** 18 + 8 + 0 + 3 + 4 + 4 + 7
-+ 1 + 28 = **73**. Matches the `04-active-row-table.csv` row count exactly —
+**Sum check (as of the burn-phase update above):** 15 + 8 + 0 + 3 + 4 + 4 + 7
++ 1 + 31 = **73**. Matches the `04-active-row-table.csv` row count exactly —
 every row accounted for in exactly one bucket, no hidden subset counts.
 
-**`ACTIVE_IMPLEMENTATION_LEDGER = 18`** is the operative denominator as of the
+**`ACTIVE_IMPLEMENTATION_LEDGER = 15`** is the operative denominator as of the
 burn-phase update above (21 at the moment of the Phase N commit itself),
 superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
 `IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED` (3),
@@ -1034,7 +1043,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### BROKER-ALPACA-CRATE-SCOPE-DOC-01 — Document that WS transport lives outside the crate
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-broker-alpaca / mqk-daemon
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — already implemented at this session's HEAD: `mqk-broker-alpaca/src/lib.rs` lines 10-17 carry a `# Crate scope: REST order lifecycle only, not WS transport` doc section naming both `state/alpaca_ws_transport.rs` and `state/ws_gap_recovery.rs` as living in `mqk-daemon`, exactly matching this row's requirement. No code changed — a stale-row correction, not new work. · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-broker-alpaca / mqk-daemon
 **Current Source Truth:** Alpaca WS transport and gap-recovery (`alpaca_ws_transport.rs`, `ws_gap_recovery.rs`) actually live in `mqk-daemon/src/state/`, not in `mqk-broker-alpaca`, despite the crate's name suggesting it owns the full broker surface.
 **Problem:** Architecture-scope mismatch could mislead future audits into assuming WS logic is colocated with REST/normalize logic.
 **Dependencies:** NONE.
@@ -1217,7 +1226,7 @@ No caller-generated bypass. The Research registry path must come from trusted ap
 
 #### DYNAMIC-SELECTION-MODULE-DOC-STALENESS-01 — Correct stale "NOT WIRED" doc header
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-daemon dynamic selection
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — this session's own fresh harness pass confirms the row's pre-recorded L0 truth-up: `805c0b12` is an ancestor of HEAD, and `multi_symbol_config.rs`'s `# Wiring status` doc section (lines 14-29) accurately states it is not called from the legacy single-symbol path while listing its real wired callers (`daily_data_readiness.rs`, `routes/autonomous_daily_operator.rs`, `state/autonomous_completed_bar_task.rs`, `state/autonomous_daily_coordinator.rs`, `routes/market_data_readiness.rs`, `state/required_market_data_autofresh.rs`, `state/lifecycle.rs`) — the stale "NOT WIRED" framing this row named is not present anywhere in the file. No code changed — a stale-row correction. · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-daemon dynamic selection
 **Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `805c0b12`, verified `git merge-base --is-ancestor`; the module doc now lists real callers. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
 **Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-daemon/src/state/multi_symbol_config.rs`'s module doc says "NOT WIRED — this patch only," but current callers (`daily_data_readiness.rs`, `autonomous_daily_coordinator.rs`, `state/lifecycle.rs::StartAttemptAuthoritySnapshot`, and `state.rs:3558-3583`/`state/loop_runner.rs:1018-1021`) do consume it in the live dispatch path.
 **Problem:** Stale doc contradicts current reality, risking a future session mis-scoping a patch around it.
@@ -1257,7 +1266,7 @@ No caller-generated bypass. The Research registry path must come from trusted ap
 
 #### MULTI-SYMBOL-DISPATCH-DOC-CONCURRENCY-CLARITY-01 — Document sequential-per-tick dispatch semantics
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-daemon multi-symbol dispatch
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — this session upgrades the row's own L0 truth-up from `LIKELY` to `CONFIRMED`: `grep -in "sequential|concurrent|in parallel"` across the full `docs/design/native_multi_symbol_dispatch.md` shows every "concurrent" occurrence is part of a cap/field name (`max_concurrent_symbols`, `max_concurrent_positions`) never a claim of parallel dispatch, while "sequentially"/"sequential" is used explicitly and repeatedly for the actual per-tick dispatch behavior (e.g. "one `StrategyHost` instance, called sequentially once per..."; "one `StrategyHost`, called sequentially per symbol. Confirmed; no change."). The doc does not imply parallel dispatch anywhere. No code/doc change needed — a stale-row correction. · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** mqk-daemon multi-symbol dispatch
 **Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` per the input reconciliation's row citation — `docs/design/native_multi_symbol_dispatch.md` already states sequential-per-tick semantics repeatedly at current HEAD. Confidence flagged `LIKELY` not `CONFIRMED` by that reconciliation (the ~2000-line doc was not read end-to-end); this L0 pass records the finding without independently re-reading the full document. Documentation-drift correction only; not promoted to literal `CLOSED`.
 **Current Source Truth:** `state.rs:3529` (`for assignment in assignments { ... .await ... }`) dispatches symbols sequentially within a single tokio task, not in parallel — this is deterministic-by-construction (a good property) but `docs/design/native_multi_symbol_dispatch.md` (if it uses the word "concurrent") may overstate parallelism.
 **Problem:** Documentation/terminology mismatch risks a future session assuming true concurrency exists when it doesn't.
