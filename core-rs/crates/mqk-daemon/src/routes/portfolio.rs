@@ -1133,7 +1133,7 @@ struct PortfolioEconomicsPositionContext {
     /// manufactured fail-closed value (symbol not found, registry bridge
     /// failed, qty-scale overflow) -- in that case the response row reports
     /// `quote_currency` as unknown regardless of the internal
-    /// aggregator-routing placeholder set on the underlying
+    /// aggregator-routing default set on the underlying
     /// `PositionEconomicsValue` (see [`resolve_position_economics`] docs).
     resolved: bool,
 }
@@ -1285,7 +1285,7 @@ fn portfolio_economics_status_row(
 ) -> PortfolioEconomicsStatusPositionRow {
     // `quote_currency` is reported as unknown (empty) for unresolved
     // positions, even though the underlying aggregator input carried
-    // `account_currency` as an internal routing placeholder -- see
+    // `account_currency` as an internal routing default -- see
     // `resolve_position_economics` docs. This route never claims to know an
     // unresolved instrument's real currency.
     let quote_currency = if ctx.resolved {

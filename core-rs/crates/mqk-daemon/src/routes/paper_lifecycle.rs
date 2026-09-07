@@ -574,7 +574,7 @@ mod tests {
 
     // fill_seen=false in every test below except the fill-seen ones, so the
     // pnl_provenance argument is never inspected by the function body in
-    // those cases -- NotFound is used as an arbitrary placeholder.
+    // those cases -- NotFound is used as an arbitrary don't-care value.
     const UNUSED: PortfolioProvenanceState = PortfolioProvenanceState::NotFound;
 
     #[test]
