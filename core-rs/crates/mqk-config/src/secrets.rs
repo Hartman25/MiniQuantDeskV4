@@ -145,7 +145,14 @@ fn read_str_at(config: &Value, pointer: &str) -> Option<String> {
 /// Resolve a named environment variable.
 /// Returns `None` if the variable is unset or its value is blank.
 /// Never returns the value in an error path — callers report the NAME only.
-fn resolve_env(var_name: &str) -> Option<String> {
+///
+/// LIVE-SECRETS-CONSOLIDATION-01: `pub` so single-credential call sites (e.g.
+/// broker adapter construction, which needs exactly one named key/secret var
+/// and must not pull in `resolve_secrets_for_mode`'s wider per-mode bundle —
+/// that function also requires a TwelveData key in `LIVE` mode, an unrelated
+/// requirement broker construction must not inherit) can resolve through
+/// this crate's single source of truth instead of a bare `std::env::var`.
+pub fn resolve_env(var_name: &str) -> Option<String> {
     match std::env::var(var_name) {
         Ok(v) if !v.trim().is_empty() => Some(v),
         _ => None,

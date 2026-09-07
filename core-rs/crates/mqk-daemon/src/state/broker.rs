@@ -144,13 +144,18 @@ pub(crate) fn build_daemon_broker(
             };
             let base_url =
                 alpaca_base_url_for_mode(deployment_mode, paper_base_url_override.as_deref())?;
-            let key_id = std::env::var(key_env).map_err(|_| {
+            // LIVE-SECRETS-CONSOLIDATION-01: resolve through mqk_config::secrets
+            // (the documented single source of truth for env-var-named secret
+            // resolution) instead of a bare std::env::var — never the broader
+            // resolve_secrets_for_mode() bundle, which also requires a
+            // TwelveData key in LIVE mode, unrelated to broker construction.
+            let key_id = mqk_config::secrets::resolve_env(key_env).ok_or_else(|| {
                 RuntimeLifecycleError::service_unavailable(
                     "runtime.start_refused.alpaca_creds_missing",
                     format!("broker 'alpaca' requires {key_env} environment variable"),
                 )
             })?;
-            let secret = std::env::var(secret_env).map_err(|_| {
+            let secret = mqk_config::secrets::resolve_env(secret_env).ok_or_else(|| {
                 RuntimeLifecycleError::service_unavailable(
                     "runtime.start_refused.alpaca_creds_missing",
                     format!("broker 'alpaca' requires {secret_env} environment variable"),
