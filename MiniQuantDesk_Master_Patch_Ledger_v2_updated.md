@@ -1139,19 +1139,44 @@ git diff --check
 
 #### DOCS-TRACKER-RETIREMENT-01 — Finish retiring redundant historical tracker documents
 
-**Status:** OPEN — narrowed (`MQK-LEDGER-BURN-CONTROLLER-02` W3-A, 2026-09-06); one sub-blocker resolved by clarification, one sub-blocker narrowed, one confirmed already correctly scoped; no file deleted this session (deletion is a one-way action this session deliberately did not rush) · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Documentation / repository hygiene
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-03` Phase B, 2026-09-06) — all three sub-blockers cleared; `ACTIVE_PATCH_LEDGER_20260425.md` deleted this session · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Documentation / repository hygiene
 
-**W3-A findings (2026-09-06):**
+**W3-A findings (`MQK-LEDGER-BURN-CONTROLLER-02`, 2026-09-06):**
 1. `MiniQuantDesk_Master_Patch_Ledger_v2.md` — **this sub-blocker is resolved, not by a code/guard change, but by recognizing the premise was stale.** This ledger's own precedence text (top of this file) already states `MiniQuantDesk_Master_Patch_Ledger_v2.md` is "kept as historical archive — not deleted" — a permanent-retention policy, not a pending-deletion one. `validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`'s dependency on it (checking for the literal historical status lines `"PHASE G"` / `"BUNDLE 3: ACCEPTED — COMPLETE"`, confirmed present in v2.md, confirmed ABSENT from `v2_updated.md` — repointing the guard would break it, not fix it) is therefore not actually a blocker to anything: the document it depends on was never going to be deleted. No guard change needed or made.
-2. `ACTIVE_PATCH_LEDGER_20260425.md` — **narrowed, not resolved.** §2 ("Backlog-Derived Patch Ledger") is confirmed fully redundant: its own banner already states it is drawn from `miniquantdesk_future_backlog_brainstorm.md`, which still exists as its own separately-retained file — §2 duplicates, rather than uniquely holds, that content. §3 ("Prompt Grouping Plan") is confirmed obsolete process meta-content (a batching scheme for a manual single-prompt workflow this repo no longer uses, per the current multi-agent controller-driven process). **§1 ("Immediate Active Ledger", 18 items: `SEC-SNAPSHOT-01`, `BRK-GAP-01`, `BRK-REST-02`, `CTRL-ARM-01`, `EXEC-CANCEL-01`, `EXEC-RETRY-01`, `EXEC-CONT-01`, `OPS-REPAIR-01`, `CI-DB-01`, `DOC-READY-01`, `OBS-TIME-01`, `OPTR-LABEL-01`, `BRK-BLOCKING-01`, `BRK-PRICE-01`, `ARCH-SINK-01`, `ASSET-SCOPE-01`, `DOC-COMMENT-01`, `HOLD-MIG-01`) remains genuinely unverified against current repo truth** — `docs/audits/multi_asset_completion_audit.md` (the doc this file's own banner cites as having superseded it) does not reference any of these 18 IDs by name, so that supersession claim was not independently confirmed at the per-item level. Auditing 18 four-month-old hardening items against everything that has landed since is a real, standalone task in its own right, not a rubber-stamp — deliberately not attempted in this pass (would risk either falsely closing a real `Critical`/`AP,LIVE` item or producing a shallow, low-confidence audit). File not deleted.
+2. `ACTIVE_PATCH_LEDGER_20260425.md` — narrowed, not yet resolved at that point: §2/§3 confirmed fully redundant; §1 (18 items) flagged as the one real remaining sub-task, deliberately not attempted in that pass. See Phase B findings below for the completed per-item audit.
 3. `core-rs/mqk-gui/GUI_PATCH_TRACKER.md` — confirmed already correctly scoped (its own `DOCS-TRACKER-CLEANUP-01` banner already states its authority is GUI-patch-detail-only, overall status remaining master-ledger-authoritative). No action needed.
 
-**In Scope:** The three retirement sub-tasks above, executed only once their stated blockers are genuinely cleared. **Out of Scope:** Weakening any guard; deleting any tracker before its blocker is proven cleared; performing the retirement work itself as part of this ledger-truth-repair patch (this entry only records the open item).
-**Likely Files:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `ACTIVE_PATCH_LEDGER_20260425.md`, `scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`, `core-rs/mqk-gui/GUI_PATCH_TRACKER.md`.
-**Required Validation:** The specific guard(s) touched must still fail on their intended negative controls after any change; `git diff --check`.
-**Acceptance Criteria:** No unique actionable work lost; no guard weakened; no dangling references; old v2 ledger removed only after its hard dependency is eliminated; obsolete April ledger removed only after unique backlog migration is proven; this master ledger remains the sole repository-wide backlog authority.
-**Exact CLOSED End State:** CLOSED when all three sub-blockers are cleared per their stated conditions and the corresponding documents are either migrated-and-deleted or explicitly re-scoped, with the acceptance criteria above proven.
-**Acceptance History:** PENDING / PENDING / PENDING / PENDING.
+**Phase B findings (`MQK-LEDGER-BURN-CONTROLLER-03`, 2026-09-06) — the 18-item `ACTIVE_PATCH_LEDGER_20260425.md` §1 audit:**
+
+| # | ID | Disposition | Evidence |
+|---:|---|---|---|
+| 1 | `SEC-SNAPSHOT-01` | GENUINELY_MISSING → new row `EXPORT-HANDOFF-SECRET-EXCLUSION-01` (Lane F) | No automated handoff-archive secret-exclusion tooling/guard exists; `.gitignore` and `mqk-config`'s `CONFIG_SECRET_DETECTED` cover different scenarios (git-tracking, config values), not a filesystem archive. |
+| 2 | `BRK-GAP-01` | ALREADY_CLOSED | `ws_continuity_ready`/gap-detection machinery is extensive current production truth (`broker_rules.md`: `GapDetected` is terminal, blocks start, requires explicit operator recovery); `scenario_ws_continuity_gate_brk00r04.rs` and related tests prove it. |
+| 3 | `BRK-REST-02` | ALREADY_CLOSED | `mqk-broker-alpaca/src/lib.rs`'s `FILL_ACTIVITIES_PAGE_SIZE`/`FILL_ACTIVITIES_FOR_ORDER_MAX_PAGES` implement bounded pagination-until-exhaustion for `fetch_fill_activities_for_order`, not a single-page fetch. |
+| 4 | `CTRL-ARM-01` | ALREADY_CLOSED | `mqk-daemon/src/routes/control_plane.rs::ops_action`'s `arm-execution`/`arm-strategy` arm literally cites `// CTRL-ARM-01: preflight before any state mutation.` and gates on `check_arm_safety(...)` before any mutation. |
+| 5 | `EXEC-CANCEL-01` | ALREADY_CLOSED | Migration `0037_arm_state_reason_cancel_target_missing.sql` gives a missing cancel target its own durable, immediate arm-state reason rather than leaving the outbox row `DISPATCHING`. |
+| 6 | `EXEC-RETRY-01` | ALREADY_CLOSED | `mqk-db/src/orders.rs` carries `attempt_count`/bounded max-attempt fields for retryable broker errors. |
+| 7 | `EXEC-CONT-01` | ALREADY_CLOSED | `InboundContinuityUnproven` has its own durable arm-state-reason migration (`0036_arm_state_reason_inbound_continuity.sql`) and is load-bearing across 17 current source/test files (`orchestrator.rs`, `gateway.rs`, `loop_runner.rs`, etc.). |
+| 8 | `OPS-REPAIR-01` | ALREADY_CLOSED | `mqk-daemon/src/routes/repair.rs` is a dedicated audited repair-workflow route (broker-position-baseline adoption, evidence capture) — see also `BROKER-POSITION-BASELINE-ADOPTION-01` above. |
+| 9 | `CI-DB-01` | SUPERSEDED by `CI-PLATFORM-01` | `.github/workflows/ci.yml`'s `windows` job explicitly documents "Does NOT prove: DB-backed lanes. GitHub Actions windows-latest runners do not [have Postgres]" — the original item's "state local full proof transcript is mandatory" alternative is the repo's actual, consciously-documented operating norm; local full-DB proof is the established practice throughout this repo's history. |
+| 10 | `DOC-READY-01` | ALREADY_CLOSED | `docs/INSTITUTIONAL_SCORECARD.md` already separates a distinct "proof-clean" score from capability/architecture scoring, exactly the label-separation this item asked for. |
+| 11 | `OBS-TIME-01` | ALREADY_CLOSED | `mqk-db/src/inbox.rs` extracts and persists real `event_ts_ms` from the broker message JSON (`message_json.get("event_ts_ms")`), not a placeholder zero. |
+| 12 | `OPTR-LABEL-01` | ALREADY_CLOSED | A whole family of typed `arm_state_reason` migrations now exists (`0036`, `0037`, `0064`, ...); `UNKNOWN_ORDER_FILL` (`orchestrator/apply.rs`) is now correctly scoped to exactly one real case (no OMS order context in memory), proven by `scenario_unknown_order_fill_halt.rs`, not a catch-all for every apply error. |
+| 13 | `BRK-BLOCKING-01` | ALREADY_CLOSED | `mqk-broker-alpaca/tests/scenario_brk_blocking_01.rs` — named after this exact ID — proves the adapter's async `block_in_place → handle.block_on` dispatch from a Tokio multi-thread context, replacing the old blocking-reqwest-panics-inside-async-runtime hazard. |
+| 14 | `BRK-PRICE-01` | STILL_ACTIVE, already tracked | Instrument tick/lot/multi-asset metadata is tracked under the `ASSET-CORE-*` lineage and `MULTI-ASSET-COMPLETION-AUDIT-01`, both already master-ledger-authoritative. No duplicate row added. |
+| 15 | `ARCH-SINK-01` | DUPLICATE of `STATE-RS-LEAN-OUT-01`/`LIFECYCLE-RS-LEAN-OUT-01` (Lane F) | Both already track exactly this concern for `state.rs`/`state/lifecycle.rs`. `api_types.rs` (7,265 lines) had no row of its own — closed that one real gap with new row `API-TYPES-RS-LEAN-OUT-01` (Lane F) rather than reviving `ARCH-SINK-01` itself. |
+| 16 | `ASSET-SCOPE-01` | STILL_ACTIVE, already tracked | Same `ASSET-CORE-*`/`MULTI-ASSET-COMPLETION-AUDIT-01` lineage as #14. No duplicate row added. |
+| 17 | `DOC-COMMENT-01` | SUPERSEDED by ongoing practice | Diffuse, unbounded "clean stale comments opportunistically" scope with no discrete closeable invariant; already covered by `CLAUDE.md`'s standing diff-discipline review (§25), not worth its own tracked row four months on. |
+| 18 | `HOLD-MIG-01` | GENUINELY_MISSING → new row `HELD-MIGRATION-0017-DECISION-01` (Lane F) | `migrations/hold/0017_inbox_broker_fill_id_global_unique.sql` remains unapplied with no committed doc explaining why run-scoped `0024_inbox_fill_dedupe.sql` supersedes it. |
+
+Net: 11 already closed, 2 superseded by current practice/decisions, 2 duplicates of existing rows (1 partial gap closed), 2 genuinely missing (both now tracked as new Lane F rows, not implemented in this reconciliation pass per this controller's own instruction). Zero items required reopening a frozen contract; zero items were falsely closed.
+
+**In Scope:** The three retirement sub-tasks; the Phase B 18-item audit; adding exactly the new rows the audit found genuinely missing. **Out of Scope:** Implementing any of the 3 new/duplicate-gap rows in this same patch (docs-only reconciliation); weakening any guard.
+**Likely Files:** `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`, `ACTIVE_PATCH_LEDGER_20260425.md` (deleted), `core-rs/mqk-gui/GUI_PATCH_TRACKER.md`.
+**Required Validation:** `git diff --check`; no dangling references to the deleted file outside historical/narrative mentions.
+**Acceptance Criteria:** No unique actionable work lost (proven by the per-item table above); no guard weakened; this master ledger remains the sole repository-wide backlog authority.
+**Exact CLOSED End State:** CLOSED when all three sub-blockers are cleared and the obsolete April ledger is deleted with its unique backlog fully migrated — met by the table above and the companion retirement commit.
+**Acceptance History:** v2.md dependency: resolved by clarification (W3-A) / GUI_PATCH_TRACKER.md: confirmed correctly scoped (W3-A) / §1 18-item audit: complete (Phase B) / file deleted (Phase B retirement commit).
 
 #### OFFICIAL-DUAL-MODE-LAUNCHER-01 — Official Paper/Live dual-mode launcher (scripts/windows/Start-MiniQuantDesk.ps1)
 
@@ -1699,6 +1724,36 @@ One methodological note preserved for future investigators: the first attempt at
 **Current Source Truth:** `state/lifecycle.rs` is 7,126 lines.
 **Size:** L — same treatment as `STATE-RS-LEAN-OUT-01`: must be decomposed, not attempted as one patch.
 **Exact CLOSED End State:** Not defined at this ledger's current decomposition depth — requires a dedicated design pass identifying cohesive extraction boundaries first.
+**Acceptance History:** N/A (deferred, not started).
+
+#### API-TYPES-RS-LEAN-OUT-01 — Split mqk-daemon/src/api_types.rs into cohesive submodules
+
+**Status:** DEFERRED · **Priority:** P3 · **Paper Impact:** GREEN (purely structural, if done correctly) · **Subsystem:** mqk-daemon
+**Origin:** `MQK-LEDGER-BURN-CONTROLLER-03` Phase B historical-tracker reconciliation (2026-09-06) — the 2026-04-25 `ACTIVE_PATCH_LEDGER_20260425.md` §1 item `ARCH-SINK-01` named both `state.rs` and `api_types.rs` as daemon "sink" files needing decomposition. `state.rs`/`state/lifecycle.rs` are already tracked above (`STATE-RS-LEAN-OUT-01`/`LIFECYCLE-RS-LEAN-OUT-01`); `api_types.rs` had no row of its own — this is that gap, not a new invariant.
+**Current Source Truth:** `mqk-daemon/src/api_types.rs` is 7,265 lines (measured 2026-09-06).
+**Size:** L — same treatment as `STATE-RS-LEAN-OUT-01`: must be decomposed into a sequence, not attempted as one patch.
+**Exact CLOSED End State:** Not defined at this ledger's current decomposition depth — requires a dedicated design pass identifying cohesive extraction boundaries first.
+**Acceptance History:** N/A (deferred, not started).
+
+#### HELD-MIGRATION-0017-DECISION-01 — Document why run-scoped fill-uniqueness supersedes the held global-uniqueness migration
+
+**Status:** DEFERRED · **Priority:** P3 · **Paper Impact:** GREEN (docs-only) · **Subsystem:** mqk-db / migrations
+**Origin:** `MQK-LEDGER-BURN-CONTROLLER-03` Phase B historical-tracker reconciliation (2026-09-06) — the 2026-04-25 `ACTIVE_PATCH_LEDGER_20260425.md` §1 item `HOLD-MIG-01`.
+**Current Source Truth:** `core-rs/crates/mqk-db/migrations/hold/0017_inbox_broker_fill_id_global_unique.sql` (global `broker_fill_id` uniqueness) remains unapplied in `hold/`. The applied schema instead uses `0024_inbox_fill_dedupe.sql` (run-scoped dedupe). No committed doc currently states the rationale for keeping 0017 held rather than promoting or deleting it.
+**Problem:** An unapplied migration with no documented disposition is a standing ambiguity for a future reader/patcher (per `db_rules.md`: migrations are append-only and every schema decision should be traceable).
+**In Scope:** A short doc (or a comment block in `hold/0017_...sql` itself) stating why run-scoped dedupe (0024) is sufficient for current single-run-scoped trading semantics, and the condition under which 0017's global constraint would need to be promoted instead (e.g., a future cross-run fill-identity requirement). **Out of Scope:** Promoting or deleting the held migration itself — this is a decision-documentation task only.
+**Required Validation:** None (docs-only).
+**Exact CLOSED End State:** CLOSED when the rationale is committed in an unambiguous, discoverable location.
+**Acceptance History:** N/A (deferred, not started).
+
+#### EXPORT-HANDOFF-SECRET-EXCLUSION-01 — No automated secret-exclusion proof for repo handoff/export archives
+
+**Status:** DEFERRED · **Priority:** P3 · **Paper Impact:** GREEN (tooling-only) · **Subsystem:** Ops tooling
+**Origin:** `MQK-LEDGER-BURN-CONTROLLER-03` Phase B historical-tracker reconciliation (2026-09-06) — the 2026-04-25 `ACTIVE_PATCH_LEDGER_20260425.md` §1 item `SEC-SNAPSHOT-01` ("Repo handoff zips must not include `.env.local`, tokens, provider keys, broker keys, webhooks, proof secrets, or generated credentials").
+**Current Source Truth:** `.gitignore` excludes `.env`/`.env.*` (except the `.example` template) from anything git-tracked, and `core-rs/crates/mqk-config/tests/scenario_secrets_excluded.rs` proves the newer layered-config loader rejects literal secret values in config YAML (`CONFIG_SECRET_DETECTED`). Neither covers this item's actual scenario: an operator creating a filesystem archive (e.g. `zip`/`Compress-Archive` over the whole working tree, as `MiniQuantDesk_worktree_snapshot_*.zip` in the repo root shows has happened before) does not consult `.gitignore` and could include `.env.local` or other untracked secret-bearing files. No dedicated script or guard test proves an exported handoff archive excludes secrets; this remains a manual-discipline gap, not an automated one (mirrored by this same controller mission's own "Final Review Bundle" phase, which relies on explicit operator instruction — "No secrets. No .env contents." — rather than a tool).
+**In Scope:** A small `New-SecretExcludedArchive.ps1`-style helper (or equivalent) that builds a handoff archive from an explicit include-list/deny-list and a guard test proving `.env.local`/`.env`/`secrets.env`/known credential-file patterns are never included, mirroring the secret-hygiene conventions already established in `Start-LiveShadowSmoke.ps1`/`Start-PaperTradingSmoke.ps1`'s `$SECRET_NAMES` pattern. **Out of Scope:** Auditing or rotating any specific historical key (the original 2026-04-25 item's "rotate exposed keys" step cannot be independently re-verified four months later from repo state alone; if a specific exposure is identified, that is a separate, immediate incident-response action, not this row).
+**Required Validation:** A new guard test in `tests/script_guards/` proving the archive helper's output excludes every pattern in its own deny-list, using synthetic fixture files (never a real secret).
+**Exact CLOSED End State:** CLOSED when the helper + guard test exist and the guard passes.
 **Acceptance History:** N/A (deferred, not started).
 
 ---
