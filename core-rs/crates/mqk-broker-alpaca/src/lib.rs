@@ -8,6 +8,15 @@
 //! Legacy non-functional gateway scaffolding has been removed from the
 //! production adapter surface; this crate exports only live adapter paths.
 //!
+//! # Crate scope: REST order lifecycle only, not WS transport
+//!
+//! This crate owns Alpaca's REST order-lifecycle surface (submit/cancel/
+//! replace/poll) and inbound trade-update normalization. Alpaca WebSocket
+//! transport and gap-recovery live outside this crate, in `mqk-daemon`
+//! (`state/alpaca_ws_transport.rs`, `state/ws_gap_recovery.rs`) — despite
+//! this crate's name suggesting it owns the full broker surface. Do not
+//! assume WS logic is colocated with the REST/normalize logic here.
+//!
 //! # `AlpacaBrokerAdapter`
 //!
 //! Implements `mqk_execution::BrokerAdapter` against the Alpaca v2 REST API using
