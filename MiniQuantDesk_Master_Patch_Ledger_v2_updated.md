@@ -331,6 +331,23 @@ ACTIVE_IMPLEMENTATION_LEDGER (after Controller-03 Phase A/B) = 14
 
 **Side effects this phase:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Real Paper DB verification = 0. Paper validation = NOT RUN. Paper smoke = NOT RUN. Paper soak = NOT RUN. Real LiveShadow smoke = NOT RUN. LiveCapital = NEVER ENABLED. Scheduler activation = NOT RUN. Holdout consumption = 0. `smoke_logs/` untouched. No push to `origin`.
 
+### MQK-LEDGER-BURN-CONTROLLER-03 — Phase D Results (2026-09-07)
+
+| Row | Result | Commit |
+|---|---|---|
+| `AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01` PATCH 1 | CLOSED (typed authority) — see the row's own entry above for full detail. | `2e838260` |
+| `AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01` PATCH 2 | CLOSED (automatic wiring) — see the row's own entry above for full detail. | `2a7dad50` |
+
+```text
+ACTIVE_IMPLEMENTATION_LEDGER (start of Phase D) = 14
+
+AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01         OPEN -> CLOSED          -1
+                                                            ---------------------
+ACTIVE_IMPLEMENTATION_LEDGER (after Controller-03 Phase D) = 13
+```
+
+**Side effects this phase:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Real Paper DB verification = 0. Paper validation = NOT RUN. Paper smoke = NOT RUN. Paper soak = NOT RUN. Real LiveShadow smoke = NOT RUN. LiveCapital = NEVER ENABLED. Scheduler activation = NOT RUN. Holdout consumption = 0. Every test in both patches used a hermetic disposable-test-DB row it seeded and tore down itself — zero interaction with any real/running Paper session. `smoke_logs/` untouched. No push to `origin`.
+
 ---
 
 ## 1. Paper-Soak Protection Rule
@@ -740,9 +757,17 @@ git diff --check
 
 #### AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 — Automatic retry of manual_intervention_required once autofresh repairs data (blocked/future)
 
-**Status:** OPEN — investigated, not implemented (`MQK-LEDGER-BURN-CONTROLLER-02` W2-D, 2026-09-06); real prerequisite gap found, no code change made · **Priority:** P3 · **Paper Impact:** YELLOW · **Subsystem:** Autonomous daily operation / market-data freshness
-**W2-D finding:** Investigated both seams this row would reuse. `autonomous_retry_policy.rs`'s own documented fault-class table (D1.4) conservatively classifies the `daily_data_readiness_blocked` fault class as `UnclassifiedFailClosed -> Manual` for *every* sub-reason, specifically because that path only has `RuntimeLifecycleError`'s coarse static `fault_class` string to go on, and the module's own "no-string-authority rule" (D1.8) forbids parsing the embedded free-form message to recover the real sub-reason — its own doc comment names exactly this as future work: "A future phase that passes the typed `daily_data_readiness` report directly ... may classify it more precisely without violating this rule." Separately, `autonomous_daily_coordinator.rs` (`classify_and_apply_preopen_blocker` and its typed-report classifier around line 2280) *does* already build `AutonomousCoordinatorReason` directly from the typed `daily_data_readiness` report's `assignment.readiness_state`/`.blockers` for the preopen path specifically — but only distinguishes `db_unavailable_or_query_failed` (Transient) and `LatestCompletedBarPending` (WaitForCondition, auto-retried every tick already) from everything else, which still collapses to `UnclassifiedFailClosed -> Manual`. Whether that typed-report path is already sufficient to precisely detect "this specific block is a required-universe data-readiness condition that `required_market_data_autofresh` can and did repair" (as opposed to every other manual-intervention cause) — the exact distinction W2-D's every required negative control depends on — was not established either way this session; closing that gap safely, without weakening the no-string-authority rule or building a second retry framework, is real design/plumbing work in its own right, not a mechanical composition of two already-precise existing seams. Per this row's own long-standing text ("whether/how to safely automate that composition is undecided") and this session's own finding, this remains genuinely open — not attempted, not guessed at, no code changed.
-**Dependencies:** `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`, and (newly identified this session) precise typed sub-reason classification for `daily_data_readiness_blocked` in the coordinator's preopen-blocker path.
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-03` Phase D, 2026-09-07, commits `2e838260`/`2a7dad50`) · **Priority:** P3 · **Paper Impact:** YELLOW (touches the live coordinator tick path — see negative-control proof below) · **Subsystem:** Autonomous daily operation / market-data freshness
+
+**W2-D finding (preserved for history):** Investigated both seams this row would reuse. `autonomous_retry_policy.rs`'s own documented fault-class table (D1.4) conservatively classifies the `daily_data_readiness_blocked` fault class as `UnclassifiedFailClosed -> Manual` for *every* sub-reason, specifically because that path only has `RuntimeLifecycleError`'s coarse static `fault_class` string to go on, and the module's own "no-string-authority rule" (D1.8) forbids parsing the embedded free-form message to recover the real sub-reason — its own doc comment names exactly this as future work: "A future phase that passes the typed `daily_data_readiness` report directly ... may classify it more precisely without violating this rule." Closing that gap safely, without weakening the no-string-authority rule or building a second retry framework, was correctly assessed as real design/plumbing work, not a mechanical composition — deliberately not attempted that session.
+
+**PATCH 1 (`2e838260`, typed authority, representation only):** Added `DailyDataReadinessReason` — a closed 26-variant enum in `daily_data_readiness.rs` covering every `REASON_*` constant, mirroring `AutonomousCoordinatorReason`'s own no-string-authority convention — plus `DailyDataReadinessReasonClass::{DataRepairable,NonData}` and a fail-closed `classify_reason_str` helper. `required_market_data_autofresh.rs`'s `is_refreshable_reason` now delegates to this shared authority instead of maintaining a second, independently-updated list, proven identical by a consistency-guard test checking every reason constant's `REFRESHABLE_READINESS_REASONS` membership against the typed classification. No behavior change: 85/85 existing tests pass unmodified, plus 6 new tests (every reason round-trips, no collapse, exact data/non-data boundary, unknown reasons fail closed).
+
+**PATCH 2 (`2a7dad50`, automatic wiring):** Extracted `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`'s identity-check/fresh-readiness-recheck/durable-CAS-transition core into a shared `attempt_manual_intervention_recovery` function, then called it from a new automatic path in the coordinator's own `STATE_MANUAL_INTERVENTION_REQUIRED` tick arm — one implementation, reused by both the operator HTTP route and the automatic path. The automatic path is gated strictly by PATCH 1's narrow `DataRepairable` classification (never the operator route's own broader `RecoverablePreflight` set, which also accepts binding/config reasons only a human can judge fixed), only for a PAPER operation still inside its session window with the same prestart-activity safety gate the operator route uses. Bounded/idempotent by construction (the CAS transition only ever succeeds once per episode; every other branch is a pure read) — no new retry-timing state needed. Zero regressions: the extraction is behavior-preserving for the operator route (its full 18-test suite passes unmodified) plus 96 tests total across every `dispatch_by_state`-dependent scenario file. 6 new load-bearing tests against the REAL coordinator tick path (not a mock) prove: data-repairable + repaired readiness -> exactly one automatic transition with the same operation identity preserved and zero broker/arm/halt side effects; a non-data reason that IS in the operator route's own broader set never auto-recovers even with readiness genuinely passing; a data-repairable reason with genuinely unrepaired readiness stays manual; an unrecognized reason fails closed; repeated ticks (both while still blocked, and after recovery already applied) never produce more than the one legitimate mutation.
+
+No interaction with any real Paper session in either patch: every test seeds and tears down its own hermetic disposable-test-DB row and calls the production functions directly. No provider/broker/network call, no Paper/Live order, no Research trial/hypothesis identity touched.
+
+**Dependencies:** `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01` (CLOSED), `AUTONOMOUS-DAILY-OPERATOR-RETRY-01` (reused, not modified in behavior).
 
 #### INSTRUMENT-UNIVERSE-REFRESH-01 — Bulk instrument-registry provider/timeframe review beyond AAPL (blocked/future)
 
