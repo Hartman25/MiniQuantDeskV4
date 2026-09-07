@@ -190,7 +190,29 @@ function Assert-NotSecret {
 # log and is never a candidate. Zero exact matches or more than one exact
 # match both fail closed to 'not_observed' with an explicit reason. Neither
 # file timestamps, "newest file", nor new-file counts are ever consulted.
+#
+# MQK-LIVESHADOW-PROVENANCE-FINAL-01 (R1C):
+#   - LS-PROV-08 (closed evidence vocabulary): the two daemon-evidence
+#     fields read from the matched log are validated against a closed set
+#     (observed_true/observed_false/not_observed) before being trusted. An
+#     unrecognized type or value (a JSON bool, a free-text string like
+#     "yes", a number, an array/object, ...) never becomes authoritative --
+#     it fails closed to this function's own 'not_observed' default, with an
+#     explicit reason, exactly like a missing field.
+#   - Read consistency: the exact-match scan below parses each candidate
+#     file once and keeps that parsed object keyed by path. The selected
+#     log's evidence is read from that SAME parsed object, never by
+#     re-opening the file a second time -- closing a TOCTOU window where the
+#     file content used for identity validation could differ from the
+#     content used for evidence consumption.
 # ---------------------------------------------------------------------------
+function Test-LiveShadowEvidenceValue {
+    param($Value)
+    if ($null -eq $Value) { return $false }
+    if ($Value -isnot [string]) { return $false }
+    return @('observed_true', 'observed_false', 'not_observed') -contains $Value
+}
+
 function Resolve-LiveShadowRunEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$LauncherLogDir,
@@ -218,6 +240,7 @@ function Resolve-LiveShadowRunEvidence {
         Select-Object -ExpandProperty FullName)
 
     $exactMatches = @()
+    $parsedByPath = @{}
     foreach ($p in $candidatePaths) {
         $entry = $null
         try { $entry = Get-Content -Path $p -Raw | ConvertFrom-Json } catch { continue }
@@ -226,7 +249,10 @@ function Resolve-LiveShadowRunEvidence {
         $idProp = $entry.PSObject.Properties['invocation_id']
         if ($null -eq $idProp) { continue }
         if ([string]::IsNullOrWhiteSpace([string]$entry.invocation_id)) { continue }
-        if ([string]$entry.invocation_id -eq $ExpectedInvocationId) { $exactMatches += $p }
+        if ([string]$entry.invocation_id -eq $ExpectedInvocationId) {
+            $exactMatches += $p
+            $parsedByPath[$p] = $entry
+        }
     }
 
     if ($exactMatches.Count -eq 0) {
@@ -241,14 +267,54 @@ function Resolve-LiveShadowRunEvidence {
     $sourceLog = $exactMatches[0]
     $result.source_log = $sourceLog
 
-    $entry = Get-Content -Path $sourceLog -Raw | ConvertFrom-Json
-    if ($null -ne $entry.PSObject.Properties['daemon_started_by_this_invocation']) {
-        $result.daemon_started_by_this_invocation = $entry.daemon_started_by_this_invocation
+    # Read-consistency: reuse the exact same parsed object captured during
+    # the scan above -- never a second Get-Content of $sourceLog.
+    $entry = $parsedByPath[$sourceLog]
+
+    $malformedFields = @()
+
+    $startedProp = $entry.PSObject.Properties['daemon_started_by_this_invocation']
+    if ($null -ne $startedProp) {
+        if (Test-LiveShadowEvidenceValue -Value $entry.daemon_started_by_this_invocation) {
+            $result.daemon_started_by_this_invocation = $entry.daemon_started_by_this_invocation
+        } else {
+            $malformedFields += 'daemon_started_by_this_invocation'
+        }
     }
-    if ($null -ne $entry.PSObject.Properties['daemon_reachable_and_verified']) {
-        $result.daemon_reachable_and_verified = $entry.daemon_reachable_and_verified
+
+    $verifiedProp = $entry.PSObject.Properties['daemon_reachable_and_verified']
+    if ($null -ne $verifiedProp) {
+        if (Test-LiveShadowEvidenceValue -Value $entry.daemon_reachable_and_verified) {
+            $result.daemon_reachable_and_verified = $entry.daemon_reachable_and_verified
+        } else {
+            $malformedFields += 'daemon_reachable_and_verified'
+        }
     }
+
+    if ($malformedFields.Count -gt 0) {
+        $result.reason = "malformed/unrecognized evidence value(s) in ${sourceLog}: $($malformedFields -join ', ') -- failing closed to not_observed for those fields"
+    }
+
     return [pscustomobject]$result
+}
+
+# MQK-LIVESHADOW-PROVENANCE-FINAL-01 (LS-PROV-04): pure, dot-sourceable
+# evidence-directory path construction -- factored out so
+# tests\script_guards\test_live_shadow_smoke.ps1 can prove same-timestamp-
+# bucket collision-freedom against the REAL production seam (LS-EV-13), not
+# a duplicated copy of the algorithm. -InvocationId is this wrapper's own
+# always-freshly-generated per-invocation GUID (see the call site below,
+# generated BEFORE this path is computed) -- never a caller-reused value at
+# this layer, so two same-second wrapper invocations always resolve to
+# different evidence directories and therefore never share
+# readiness_report.log/manifest.json.
+function Get-LiveShadowEvidenceDirPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$InvocationId
+    )
+    $evStamp = [DateTime]::UtcNow.ToString('yyyyMMdd_HHmmss')
+    return (Join-Path $RepoRoot "exports\live_shadow_smoke\evidence_${evStamp}_${InvocationId}")
 }
 
 # ---------------------------------------------------------------------------
@@ -289,10 +355,27 @@ $env:MQK_DAEMON_DEPLOYMENT_MODE = 'live-shadow'
 Write-Ok "MQK_DAEMON_DEPLOYMENT_MODE forced to 'live-shadow' (LiveCapital is never enabled by this script)."
 
 # ---------------------------------------------------------------------------
+# R1B: opaque, non-secret invocation identity for THIS wrapper invocation.
+# Passed to the canonical launcher via -InvocationId; it writes this exact
+# value into its own launch_*.json log entry. Evidence is later bound to
+# this GUID, never to "the newest new log file" (see this file's header).
+#
+# MQK-LIVESHADOW-PROVENANCE-FINAL-01 (LS-PROV-04): generated BEFORE the
+# evidence directory below is chosen, and folded into that directory name --
+# a second-resolution timestamp alone let two same-second wrapper
+# invocations share one evidence_<timestamp> directory (and therefore one
+# readiness_report.log / manifest.json), proven pre-fix by LS-EV-13's RED
+# run. This is the wrapper's own always-freshly-generated identity (never a
+# caller-reused value at this layer), so folding it into the directory name
+# does not weaken the resolver's duplicate/reused-invocation_id-must-be-
+# ambiguous contract at the launcher-log layer.
+# ---------------------------------------------------------------------------
+$invocationId = [guid]::NewGuid().ToString()
+
+# ---------------------------------------------------------------------------
 # Deterministic evidence layout.
 # ---------------------------------------------------------------------------
-$evStamp = [DateTime]::UtcNow.ToString('yyyyMMdd_HHmmss')
-$evDir = Join-Path $RepoRoot "exports\live_shadow_smoke\evidence_$evStamp"
+$evDir = Get-LiveShadowEvidenceDirPath -RepoRoot $RepoRoot -InvocationId $invocationId
 New-Item -ItemType Directory -Force -Path $evDir | Out-Null
 $reportLog = Join-Path $evDir 'readiness_report.log'
 $manifestPath = Join-Path $evDir 'manifest.json'
@@ -304,12 +387,6 @@ Write-Ok "Evidence folder: $evDir"
 # lives entirely inside Start-MiniQuantDesk.ps1's own process.
 # ---------------------------------------------------------------------------
 Write-Section "Delegating to Start-MiniQuantDesk.ps1 -Mode LiveShadow$(if ($effectiveCheckOnly) { ' -CheckOnly' } else { '' })"
-
-# R1B: opaque, non-secret invocation identity for THIS wrapper invocation.
-# Passed to the canonical launcher via -InvocationId; it writes this exact
-# value into its own launch_*.json log entry. Evidence is later bound to
-# this GUID, never to "the newest new log file" (see this file's header).
-$invocationId = [guid]::NewGuid().ToString()
 
 $launcherArgs = @('-Mode', 'LiveShadow', '-InvocationId', $invocationId)
 if ($effectiveCheckOnly) { $launcherArgs += '-CheckOnly' }

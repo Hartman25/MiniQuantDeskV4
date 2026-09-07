@@ -125,7 +125,42 @@ function New-LauncherLog {
     $dir = Join-Path $RepoRoot "smoke_logs\launcher\$ModeLabel"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    return (Join-Path $dir "launch_$stamp.json")
+    # MQK-LIVESHADOW-PROVENANCE-FINAL-01 (LS-PROV-02): a second-resolution
+    # timestamp alone is not unique-enough path authority -- two invocations
+    # starting in the same second must never resolve to the same launcher
+    # JSON path (proven pre-fix by LS-EV-11's RED run). A fresh per-call GUID
+    # nonce, independent of any caller-supplied -InvocationId, closes that
+    # gap without weakening Resolve-LiveShadowRunEvidence's duplicate/reused-
+    # invocation_id-must-be-ambiguous contract (LS-PROV-05/LS-EV-10/14):
+    # filename uniqueness never depends solely on the caller-supplied
+    # identity, so a reused InvocationId still produces a separate file the
+    # resolver can find and flag as ambiguous. Filenames remain compatible
+    # with the existing `launch_*.json` discovery glob. Applies to all three
+    # modes (paper/live/live-shadow) -- filename-only hardening of a shared
+    # helper, no behavior change for Paper/Live.
+    $nonce = [guid]::NewGuid().ToString()
+    return (Join-Path $dir "launch_${stamp}_${nonce}.json")
+}
+
+# MQK-LIVESHADOW-PROVENANCE-FINAL-01 (LS-PROV-03): pure, dot-sourceable path
+# construction for LiveShadow's bounded-child bootstrap stdout/stderr logs --
+# factored out of Invoke-LiveShadowStartup so
+# tests\script_guards\test_live_shadow_smoke.ps1 can prove same-second/
+# reused-identity collision-freedom against the REAL production seam
+# (LS-EV-12), not a duplicated copy of the algorithm. Uniqueness is
+# deliberately independent of any caller-supplied InvocationId -- see
+# New-LauncherLog's own note on why filename uniqueness must never depend
+# solely on caller-supplied identity.
+function New-LiveShadowBootstrapLogPaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$BootstrapLogDir
+    )
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $nonce = [guid]::NewGuid().ToString()
+    return [pscustomobject]@{
+        StdoutLogPath = Join-Path $BootstrapLogDir "bootstrap_liveshadow_${stamp}_${nonce}.stdout.log"
+        StderrLogPath = Join-Path $BootstrapLogDir "bootstrap_liveshadow_${stamp}_${nonce}.stderr.log"
+    }
 }
 
 function Write-LauncherLogEntry {
@@ -1402,16 +1437,51 @@ function Invoke-LiveShadowStartup {
     $launchScript  = Join-Path $RepoRoot 'scripts\windows\Launch-VeritasLedger.ps1'
     $daemonBaseUrl = 'http://127.0.0.1:8899'
 
-    # R1B: recorded verbatim, always present (possibly ''), regardless of
-    # CheckOnly/full-run -- a caller-bound resolver (Resolve-LiveShadowRunEvidence
-    # in Start-LiveShadowSmoke.ps1) matches on this field exactly; it is never
+    # MQK-LIVESHADOW-PROVENANCE-FINAL-01 (LS-PROV-01): resolve THIS
+    # invocation's own identity before any CheckOnly/full-run behavior and
+    # before the launcher log is written, so invocation_id is never blank
+    # for a live-shadow log:
+    #   - no -InvocationId supplied (direct/manual launch) -> generate a
+    #     fresh GUID internally;
+    #   - a supplied -InvocationId must parse as a GUID -- an arbitrary
+    #     string is never accepted as path/identity material. Malformed
+    #     input fails closed here, before Launch-VeritasLedger.ps1 is ever
+    #     invoked (CheckOnly included).
+    # The parsed GUID's own normalized string form is used (never the raw
+    # caller text verbatim) while preserving the caller's logical identity --
+    # PowerShell's default `-eq` on strings is case-insensitive, so this
+    # still matches exactly what a wrapper such as Start-LiveShadowSmoke.ps1
+    # passed in.
+    if ([string]::IsNullOrWhiteSpace($InvocationId)) {
+        $resolvedInvocationId = [guid]::NewGuid().ToString()
+    } else {
+        $parsedInvocationId = [guid]::Empty
+        if (-not [guid]::TryParse($InvocationId, [ref]$parsedInvocationId)) {
+            Write-Fail "Invalid -InvocationId '$InvocationId' -- must be a valid GUID. Refusing to start LiveShadow (fail closed)."
+            $invalidIdLogEntry = @{
+                timestamp     = (Get-Date).ToUniversalTime().ToString('o')
+                mode          = 'live-shadow'
+                check_only    = $CheckOnlyFlag
+                repo_head     = (Get-RepoHeadShort -RepoRoot $RepoRoot)
+                invocation_id = ''
+                stages        = @(@{ name = 'invocation_id_validation'; ok = $false; reason = 'malformed_invocation_id' })
+            }
+            Write-LauncherLogEntry -Path $LogPath -Entry $invalidIdLogEntry
+            return $script:ExitSafetyRefusal
+        }
+        $resolvedInvocationId = $parsedInvocationId.ToString()
+    }
+
+    # R1B: recorded verbatim, always present and never blank for live-shadow
+    # -- a caller-bound resolver (Resolve-LiveShadowRunEvidence in
+    # Start-LiveShadowSmoke.ps1) matches on this field exactly; it is never
     # inferred from file timestamps or "newest new file".
     $logEntry = @{
         timestamp      = (Get-Date).ToUniversalTime().ToString('o')
         mode           = 'live-shadow'
         check_only     = $CheckOnlyFlag
         repo_head      = (Get-RepoHeadShort -RepoRoot $RepoRoot)
-        invocation_id  = $InvocationId
+        invocation_id  = $resolvedInvocationId
         stages         = @()
     }
 
@@ -1446,9 +1516,18 @@ function Invoke-LiveShadowStartup {
 
     $bootstrapLogDir = Join-Path $RepoRoot 'exports\launcher'
     New-Item -ItemType Directory -Force -Path $bootstrapLogDir | Out-Null
-    $bootstrapStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $bootstrapStdoutLog = Join-Path $bootstrapLogDir "bootstrap_liveshadow_$bootstrapStamp.stdout.log"
-    $bootstrapStderrLog = Join-Path $bootstrapLogDir "bootstrap_liveshadow_$bootstrapStamp.stderr.log"
+    # LS-PROV-03: a second-resolution timestamp alone let two same-second
+    # invocations -- or one invocation reusing another's -InvocationId --
+    # share this stdout file, letting a concurrent invocation's daemon-start
+    # evidence silently leak into this invocation's launcher JSON (this
+    # controller's primary defect; proven pre-fix by LS-EV-12's RED run).
+    # New-LiveShadowBootstrapLogPaths generates its uniqueness nonce fresh
+    # per call, independent of $resolvedInvocationId, so a caller reusing an
+    # InvocationId on purpose still gets its own bootstrap files rather than
+    # overwriting a prior invocation's.
+    $bootstrapLogPaths = New-LiveShadowBootstrapLogPaths -BootstrapLogDir $bootstrapLogDir
+    $bootstrapStdoutLog = $bootstrapLogPaths.StdoutLogPath
+    $bootstrapStderrLog = $bootstrapLogPaths.StderrLogPath
 
     $bootstrapResult = Invoke-BoundedChildScript -ScriptPath $launchScript -ScriptArgs $lvlArgs `
         -WorkingDirectory $RepoRoot -StdoutLogPath $bootstrapStdoutLog -StderrLogPath $bootstrapStderrLog `

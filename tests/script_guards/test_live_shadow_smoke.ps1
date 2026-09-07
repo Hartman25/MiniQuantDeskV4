@@ -63,10 +63,40 @@
 #   LS-EV-10 — two logs both claim exact id A -> fail closed as ambiguous,
 #              never guesses which one is authoritative
 #
+# MQK-LIVESHADOW-PROVENANCE-FINAL-01 (R1C) -- collision-proofing +
+# closed-vocabulary hardening of the same provenance chain:
+#   LS-EV-11 — two real New-LauncherLog calls (the production launcher-JSON
+#              filename seam, dot-sourced from Start-MiniQuantDesk.ps1)
+#              never resolve to the same path, independent of second-
+#              resolution timestamp equality
+#   LS-EV-12 — two real New-LiveShadowBootstrapLogPaths calls (the
+#              production bootstrap stdout/stderr filename seam) never
+#              collide, including when the caller InvocationId is
+#              intentionally reused -- stdout != stderr != a second
+#              invocation's stdout/stderr
+#   LS-EV-13 — two real Get-LiveShadowEvidenceDirPath calls (the production
+#              wrapper evidence-directory seam) never collide, even within
+#              the same timestamp bucket
+#   LS-EV-14 — a historical log and a current log both claiming exact id A
+#              coexist -> resolver still fails closed as ambiguous (proves
+#              collision-proof filenames did not silently repair R1B's
+#              duplicate/replay fail-closed contract)
+#   LS-EV-15 — exact mode+id match but a daemon evidence field holds an
+#              invalid type/value (JSON true, "yes", etc.) -> never
+#              propagates; fails closed to 'not_observed' with a reason
+#   LS-EV-16 — an explicitly supplied malformed -InvocationId to
+#              Start-MiniQuantDesk.ps1 -Mode LiveShadow -CheckOnly fails
+#              closed (nonzero exit, no operational startup) rather than
+#              being accepted as path/identity material
+#   LS-EV-17 — a direct -Mode LiveShadow -CheckOnly invocation with no
+#              -InvocationId supplied still receives a nonblank, valid,
+#              internally-generated invocation_id in its launcher log
+#
 # No live daemon, no broker call, no order, in any of the above -- LSS08's
 # real invocation only exercises Start-MiniQuantDesk.ps1 -Mode LiveShadow
 # -CheckOnly, which is itself read-only/report-only by construction
-# (Invoke-LiveShadowCheckOnly).
+# (Invoke-LiveShadowCheckOnly). LS-EV-16/17 also only ever invoke the
+# -CheckOnly path.
 # =============================================================================
 
 $ErrorActionPreference = 'Stop'
@@ -75,6 +105,7 @@ Set-StrictMode -Version Latest
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path.TrimEnd('\')
 $Target    = Join-Path $RepoRoot 'scripts\windows\Start-LiveShadowSmoke.ps1'
+$Launcher  = Join-Path $RepoRoot 'scripts\windows\Start-MiniQuantDesk.ps1'
 
 $Failures = 0
 
@@ -435,6 +466,48 @@ if (Test-Path $Target) {
             Fail 'LS-EV-10' "Did not fail closed on ambiguous duplicate-id logs: $($r10 | ConvertTo-Json -Compress)"
         }
 
+        # LS-EV-14 (replay/reused-id): a HISTORICAL log and a separate CURRENT
+        # log both claim exact id A, with distinct creation times -- proves
+        # collision-proof filenames did not silently repair R1B's
+        # duplicate/replay fail-closed contract (still no newest-file
+        # fallback).
+        $d14 = Join-Path $fixtureRoot 'ev14'
+        New-Item -ItemType Directory -Force -Path $d14 | Out-Null
+        New-EvFixtureLog -Dir $d14 -Name 'launch_historical_a.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_true' -Verified 'observed_true' | Out-Null
+        Start-Sleep -Milliseconds 50
+        New-EvFixtureLog -Dir $d14 -Name 'launch_current_a.json' -Mode 'live-shadow' -InvocationId $idA -Started 'observed_false' -Verified 'observed_true' | Out-Null
+        $r14 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d14 -ExpectedInvocationId $idA
+        if ($r14.daemon_started_by_this_invocation -eq 'not_observed' -and $r14.daemon_reachable_and_verified -eq 'not_observed' -and $null -eq $r14.source_log -and $r14.reason -match 'ambiguous') {
+            Pass 'LS-EV-14' "Historical log + current log both claiming exact id A still fail closed as ambiguous -- no newest-file/creation-time arbitration"
+        } else {
+            Fail 'LS-EV-14' "Did not fail closed on historical+current duplicate-id logs: $($r14 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-15: exact mode+id match, but daemon evidence fields hold
+        # invalid types/values -- must never propagate; fails closed to
+        # 'not_observed' with a reason.
+        $d15 = Join-Path $fixtureRoot 'ev15'
+        New-Item -ItemType Directory -Force -Path $d15 | Out-Null
+        $p15 = Join-Path $d15 'launch_new.json'
+        # Constructed directly (not via New-EvFixtureLog) so the evidence
+        # fields can carry a JSON boolean / free-text string rather than one
+        # of the closed-set values.
+        $obj15 = [ordered]@{
+            timestamp     = (Get-Date).ToUniversalTime().ToString('o')
+            mode          = 'live-shadow'
+            invocation_id = $idA
+            stages        = @()
+            daemon_started_by_this_invocation = 'yes'
+            daemon_reachable_and_verified     = $true
+        }
+        ($obj15 | ConvertTo-Json -Depth 5) | Set-Content -Path $p15 -Encoding UTF8
+        $r15 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d15 -ExpectedInvocationId $idA
+        if ($r15.daemon_started_by_this_invocation -eq 'not_observed' -and $r15.daemon_reachable_and_verified -eq 'not_observed' -and $r15.source_log -eq $p15 -and $r15.reason -match 'malformed') {
+            Pass 'LS-EV-15' "Invalid evidence values ('yes' string, JSON true) never propagate -- fail closed to 'not_observed' with a reason"
+        } else {
+            Fail 'LS-EV-15' "Invalid evidence value(s) were not rejected: $($r15 | ConvertTo-Json -Compress)"
+        }
+
         Remove-Item -Path $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
     } catch {
         Fail 'LS-EV-01' "Hermetic fixture harness threw: $($_.Exception.Message)"
@@ -445,6 +518,8 @@ if (Test-Path $Target) {
         Fail 'LS-EV-08' "skipped -- harness error"
         Fail 'LS-EV-09' "skipped -- harness error"
         Fail 'LS-EV-10' "skipped -- harness error"
+        Fail 'LS-EV-14' "skipped -- harness error"
+        Fail 'LS-EV-15' "skipped -- harness error"
     }
 } else {
     Fail 'LS-EV-01' "skipped -- target file missing"
@@ -455,6 +530,125 @@ if (Test-Path $Target) {
     Fail 'LS-EV-08' "skipped -- target file missing"
     Fail 'LS-EV-09' "skipped -- target file missing"
     Fail 'LS-EV-10' "skipped -- target file missing"
+    Fail 'LS-EV-14' "skipped -- target file missing"
+    Fail 'LS-EV-15' "skipped -- target file missing"
+}
+
+# ---------------------------------------------------------------------------
+# LS-EV-11/12/13: real production path-construction seams, dot-sourced from
+# both scripts (no daemon, no network, no evidence folder side effects
+# beyond the disposable fixture paths constructed here -- these functions
+# only build path strings; the launcher-log/bootstrap-log/evidence
+# directories are never actually created by calling them).
+# ---------------------------------------------------------------------------
+if ((Test-Path $Target) -and (Test-Path $Launcher)) {
+    try {
+        . $Target
+        . $Launcher
+        # Both target scripts declare their own param() blocks (including a
+        # -RepoRoot default on Start-LiveShadowSmoke.ps1); dot-sourcing
+        # re-binds those defaults into THIS script's scope, clobbering the
+        # $RepoRoot computed at the top of this file. Restore it before use.
+        $RepoRoot = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path.TrimEnd('\')
+
+        # LS-EV-11: two real New-LauncherLog calls must never resolve to the
+        # same launcher JSON path.
+        $lp1 = New-LauncherLog -RepoRoot $RepoRoot -ModeLabel 'live-shadow'
+        $lp2 = New-LauncherLog -RepoRoot $RepoRoot -ModeLabel 'live-shadow'
+        if ($lp1 -ne $lp2) {
+            Pass 'LS-EV-11' "Two real New-LauncherLog calls resolve to different paths (collision-proof independent of second-resolution timestamp)"
+        } else {
+            Fail 'LS-EV-11' "New-LauncherLog produced the SAME path twice: $lp1"
+        }
+
+        # LS-EV-12: two real New-LiveShadowBootstrapLogPaths calls must never
+        # collide with each other or with themselves (stdout != stderr), and
+        # this holds even conceptually reusing the same caller InvocationId
+        # (the helper takes no InvocationId at all -- uniqueness is
+        # independent of it by construction).
+        $bootstrapDir = Join-Path $RepoRoot 'exports\launcher'
+        $bp1 = New-LiveShadowBootstrapLogPaths -BootstrapLogDir $bootstrapDir
+        $bp2 = New-LiveShadowBootstrapLogPaths -BootstrapLogDir $bootstrapDir
+        if ($bp1.StdoutLogPath -ne $bp2.StdoutLogPath -and $bp1.StderrLogPath -ne $bp2.StderrLogPath -and
+            $bp1.StdoutLogPath -ne $bp1.StderrLogPath -and $bp2.StdoutLogPath -ne $bp2.StderrLogPath) {
+            Pass 'LS-EV-12' "Two real New-LiveShadowBootstrapLogPaths calls produce four distinct paths -- no same-second or reused-identity collision"
+        } else {
+            Fail 'LS-EV-12' "Bootstrap log path collision: A=$($bp1 | ConvertTo-Json -Compress) B=$($bp2 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-13: two real Get-LiveShadowEvidenceDirPath calls (distinct
+        # wrapper invocation ids, as the real wrapper always generates) must
+        # never collide, even within the same timestamp bucket.
+        $ep1 = Get-LiveShadowEvidenceDirPath -RepoRoot $RepoRoot -InvocationId ([guid]::NewGuid().ToString())
+        $ep2 = Get-LiveShadowEvidenceDirPath -RepoRoot $RepoRoot -InvocationId ([guid]::NewGuid().ToString())
+        if ($ep1 -ne $ep2) {
+            Pass 'LS-EV-13' "Two real Get-LiveShadowEvidenceDirPath calls resolve to different evidence directories"
+        } else {
+            Fail 'LS-EV-13' "Get-LiveShadowEvidenceDirPath produced the SAME evidence directory twice: $ep1"
+        }
+    } catch {
+        Fail 'LS-EV-11' "Real path-construction harness threw: $($_.Exception.Message)"
+        Fail 'LS-EV-12' "skipped -- harness error"
+        Fail 'LS-EV-13' "skipped -- harness error"
+    }
+} else {
+    Fail 'LS-EV-11' "skipped -- target or launcher file missing"
+    Fail 'LS-EV-12' "skipped -- target or launcher file missing"
+    Fail 'LS-EV-13' "skipped -- target or launcher file missing"
+}
+
+# ---------------------------------------------------------------------------
+# LS-EV-16 / LS-EV-17: real Start-MiniQuantDesk.ps1 -Mode LiveShadow
+# -CheckOnly invocations only (read-only/report-only by construction --
+# Invoke-LiveShadowCheckOnly). No daemon, no broker call, no order.
+# ---------------------------------------------------------------------------
+if (Test-Path $Launcher) {
+    # LS-EV-16: an explicitly malformed -InvocationId must fail closed
+    # before any LiveShadow startup behavior -- nonzero exit, no operational
+    # startup attempted.
+    try {
+        $ev16Output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Launcher -Mode LiveShadow -CheckOnly -InvocationId 'not-a-valid-guid' 2>&1 | Out-String
+        $ev16Exit = $LASTEXITCODE
+        if ($ev16Exit -ne 0 -and $ev16Output -match 'Invalid -InvocationId') {
+            Pass 'LS-EV-16' "Malformed -InvocationId 'not-a-valid-guid' fails closed (exit $ev16Exit) before any LiveShadow startup behavior"
+        } else {
+            Fail 'LS-EV-16' "Malformed -InvocationId was not rejected as expected (exit $ev16Exit): $ev16Output"
+        }
+    } catch {
+        Fail 'LS-EV-16' "Real -CheckOnly invocation with malformed -InvocationId threw: $($_.Exception.Message)"
+    }
+
+    # LS-EV-17: a direct invocation with NO -InvocationId supplied must still
+    # receive a nonblank, valid, internally-generated invocation_id in its
+    # launcher log (closes the blank-ID case, not just the wrapper path).
+    try {
+        $ev17Before = Get-Date
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Launcher -Mode LiveShadow -CheckOnly *> $null
+        $ev17Exit = $LASTEXITCODE
+
+        $ev17LogDir = Join-Path $RepoRoot 'smoke_logs\launcher\live-shadow'
+        $ev17Newest = Get-ChildItem -Path $ev17LogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue |
+            Where-Object { $_.CreationTimeUtc -ge $ev17Before.ToUniversalTime().AddSeconds(-5) } |
+            Sort-Object CreationTimeUtc -Descending | Select-Object -First 1
+
+        if ($ev17Exit -eq 0 -and $null -ne $ev17Newest) {
+            $ev17Entry = Get-Content -Path $ev17Newest.FullName -Raw | ConvertFrom-Json
+            $ev17ParsedGuid = [guid]::Empty
+            $ev17IsValidGuid = [guid]::TryParse([string]$ev17Entry.invocation_id, [ref]$ev17ParsedGuid)
+            if (-not [string]::IsNullOrWhiteSpace($ev17Entry.invocation_id) -and $ev17IsValidGuid) {
+                Pass 'LS-EV-17' "Direct -Mode LiveShadow -CheckOnly with no -InvocationId still receives a nonblank, valid, internally-generated invocation_id ($($ev17Entry.invocation_id))"
+            } else {
+                Fail 'LS-EV-17' "Direct invocation's launcher log has a blank/invalid invocation_id: '$($ev17Entry.invocation_id)'"
+            }
+        } else {
+            Fail 'LS-EV-17' "Direct -CheckOnly invocation (exit $ev17Exit) did not produce a discoverable fresh launcher log under $ev17LogDir"
+        }
+    } catch {
+        Fail 'LS-EV-17' "Real direct -CheckOnly invocation threw: $($_.Exception.Message)"
+    }
+} else {
+    Fail 'LS-EV-16' "skipped -- launcher file missing"
+    Fail 'LS-EV-17' "skipped -- launcher file missing"
 }
 
 Write-Host ""
