@@ -30,6 +30,22 @@
 #           runtime-evidence field, separately from the always-$false
 #           wrapper-static-contract fields
 #
+# MQK-LEDGER-BURN-CONTROLLER-04 R1 -- hermetic fixture tests for
+# Resolve-LiveShadowRunEvidence (dot-sourced from the target script, no real
+# daemon/child-process invocation):
+#   LS-EV-01 — pre-existing stale matching log + no new log this run -> the
+#              stale log MUST NOT be consumed as this run's evidence
+#   LS-EV-02 — two pre-existing logs + one exact new current log -> only the
+#              new log is used
+#   LS-EV-03 — already-running verified daemon fixture -> reachable=true,
+#              started_by_this_invocation=false (never conflated)
+#   LS-EV-04 — new daemon start fixture -> started_by_this_invocation=true
+#   LS-EV-05 — wrong-mode log cannot satisfy LiveShadow evidence
+#   LS-EV-06 — CheckOnly reports 'not_run' for both daemon fields and never
+#              calls Resolve-LiveShadowRunEvidence (real safe -CheckOnly run)
+#   LS-EV-07 — no secret value appears in the manifest produced by the real
+#              -CheckOnly run
+#
 # No live daemon, no broker call, no order, in any of the above -- LSS08's
 # real invocation only exercises Start-MiniQuantDesk.ps1 -Mode LiveShadow
 # -CheckOnly, which is itself read-only/report-only by construction
@@ -169,6 +185,8 @@ if ($text) {
 # evidence-capture plumbing actually works end to end, not just that the
 # source text looks right.
 # ---------------------------------------------------------------------------
+$script:CheckOnlyManifest = $null
+$script:CheckOnlyManifestRaw = $null
 if (Test-Path $Target) {
     try {
         $before = Get-Date
@@ -188,20 +206,25 @@ if (Test-Path $Target) {
                 Fail 'LSS08' "Evidence folder $($newestDir.FullName) has no manifest.json"
             } else {
                 $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
-                # A3B: CheckOnly's observed-evidence fields are the string
+                $script:CheckOnlyManifest = $manifest
+                $script:CheckOnlyManifestRaw = Get-Content -Path $manifestPath -Raw
+                # A3B/R1: CheckOnly's observed-evidence fields are the string
                 # 'not_run' (this action category was never attempted) --
                 # not a boolean $false -- per the truth-repair rationale in
                 # Start-LiveShadowSmoke.ps1's own header. wrapper_direct_*
                 # are the separate, provable-by-construction static-contract
                 # booleans (always $false for this file, both CheckOnly and
-                # full run).
+                # full run). daemon_started_by_this_invocation /
+                # daemon_reachable_and_verified are the R1-repaired,
+                # separately-tracked observed-evidence fields (schema v3).
                 if ($manifest.check_only -eq $true -and
-                    $manifest.schema_version -eq 'live-shadow-smoke-manifest-v2' -and
+                    $manifest.schema_version -eq 'live-shadow-smoke-manifest-v3' -and
                     $manifest.deployment_mode_forced -eq 'live-shadow' -and
                     $manifest.canonical_launcher_mode -eq 'LiveShadow' -and
                     $manifest.wrapper_direct_broker_call -eq $false -and
                     $manifest.wrapper_direct_order_submission -eq $false -and
-                    $manifest.real_daemon_start_performed -eq 'not_run' -and
+                    $manifest.daemon_started_by_this_invocation -eq 'not_run' -and
+                    $manifest.daemon_reachable_and_verified -eq 'not_run' -and
                     $manifest.real_broker_call_performed -eq 'not_run' -and
                     $manifest.real_order_submitted -eq 'not_run') {
                     Pass 'LSS08' "Real -CheckOnly run (exit $exitCode) produced a manifest truthfully recording 'not_run' (never fabricated `$false) for every observed-evidence field, delegating to -Mode LiveShadow"
@@ -215,6 +238,137 @@ if (Test-Path $Target) {
     }
 } else {
     Fail 'LSS08' "skipped -- target file missing"
+}
+
+# ---------------------------------------------------------------------------
+# LS-EV-06 / LS-EV-07: reuse the LSS08 real -CheckOnly manifest above --
+# CheckOnly must never bootstrap a daemon or resolve run evidence, and the
+# manifest it writes must never contain a secret value.
+# ---------------------------------------------------------------------------
+if ($null -ne $script:CheckOnlyManifest) {
+    if ($script:CheckOnlyManifest.daemon_started_by_this_invocation -eq 'not_run' -and
+        $script:CheckOnlyManifest.daemon_reachable_and_verified -eq 'not_run') {
+        Pass 'LS-EV-06' "CheckOnly reports 'not_run' for both daemon_started_by_this_invocation and daemon_reachable_and_verified -- no bootstrap attempted"
+    } else {
+        Fail 'LS-EV-06' "CheckOnly manifest did not report 'not_run' for both daemon fields: $($script:CheckOnlyManifest | ConvertTo-Json -Compress)"
+    }
+
+    $secretNamesForCheck = @(
+        'ALPACA_API_KEY_PAPER', 'ALPACA_API_SECRET_PAPER',
+        'ALPACA_API_KEY_LIVE',  'ALPACA_API_SECRET_LIVE',
+        'MQK_OPERATOR_TOKEN',   'DISCORD_WEBHOOK_URL',
+        'POSTGRES_PASSWORD',    'DATABASE_URL', 'MQK_DATABASE_URL'
+    )
+    $secretHit = @($secretNamesForCheck | Where-Object { $script:CheckOnlyManifestRaw -match [regex]::Escape($_) })
+    if ($secretHit.Count -eq 0) {
+        Pass 'LS-EV-07' "No secret env var name/value appears in the -CheckOnly manifest"
+    } else {
+        Fail 'LS-EV-07' "Manifest unexpectedly contains secret-related token(s): $($secretHit -join ', ')"
+    }
+} else {
+    Fail 'LS-EV-06' "skipped -- LSS08 real -CheckOnly run did not produce a manifest"
+    Fail 'LS-EV-07' "skipped -- LSS08 real -CheckOnly run did not produce a manifest"
+}
+
+# ---------------------------------------------------------------------------
+# LS-EV-01..05: hermetic Resolve-LiveShadowRunEvidence fixture tests. Dot-
+# source the target script (its own dot-source guard returns immediately
+# after defining functions -- no daemon, no network, no evidence folder) and
+# drive the function directly against constructed launch_*.json fixtures.
+# ---------------------------------------------------------------------------
+if (Test-Path $Target) {
+    try {
+        . $Target
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) "mqk-ls-ev-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Force -Path $fixtureRoot | Out-Null
+
+        function New-EvFixtureLog {
+            param([string]$Dir, [string]$Name, [string]$Mode, $Started, $Verified)
+            $p = Join-Path $Dir $Name
+            $obj = [ordered]@{
+                timestamp = (Get-Date).ToUniversalTime().ToString('o')
+                mode      = $Mode
+                stages    = @()
+            }
+            if ($null -ne $Started)  { $obj.daemon_started_by_this_invocation = $Started }
+            if ($null -ne $Verified) { $obj.daemon_reachable_and_verified = $Verified }
+            ($obj | ConvertTo-Json -Depth 5) | Set-Content -Path $p -Encoding UTF8
+            return $p
+        }
+
+        # LS-EV-01: one stale pre-existing log, no new log produced this run.
+        $d1 = Join-Path $fixtureRoot 'ev01'
+        New-Item -ItemType Directory -Force -Path $d1 | Out-Null
+        $stale1 = New-EvFixtureLog -Dir $d1 -Name 'launch_stale.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
+        $r1 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d1 -PreExistingLogPaths @($stale1)
+        if ($r1.daemon_started_by_this_invocation -eq 'not_observed' -and $r1.daemon_reachable_and_verified -eq 'not_observed' -and $null -eq $r1.source_log) {
+            Pass 'LS-EV-01' "Stale pre-existing log with no new log this run is never consumed -- stays 'not_observed'"
+        } else {
+            Fail 'LS-EV-01' "Stale log was incorrectly consumed as this run's evidence: $($r1 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-02: two pre-existing logs, one exact new log -> only new used.
+        $d2 = Join-Path $fixtureRoot 'ev02'
+        New-Item -ItemType Directory -Force -Path $d2 | Out-Null
+        $old2a = New-EvFixtureLog -Dir $d2 -Name 'launch_old_a.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
+        $old2b = New-EvFixtureLog -Dir $d2 -Name 'launch_old_b.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
+        Start-Sleep -Milliseconds 50
+        $new2 = New-EvFixtureLog -Dir $d2 -Name 'launch_new.json' -Mode 'live-shadow' -Started 'observed_false' -Verified 'observed_true'
+        $r2 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d2 -PreExistingLogPaths @($old2a, $old2b)
+        if ($r2.source_log -eq $new2 -and $r2.daemon_started_by_this_invocation -eq 'observed_false' -and $r2.daemon_reachable_and_verified -eq 'observed_true') {
+            Pass 'LS-EV-02' "Exactly the new log is used as evidence source; the two pre-existing logs are ignored"
+        } else {
+            Fail 'LS-EV-02' "Did not select the exact new log: $($r2 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-03: already-running verified daemon -> reachable=true, started=false.
+        $d3 = Join-Path $fixtureRoot 'ev03'
+        New-Item -ItemType Directory -Force -Path $d3 | Out-Null
+        $new3 = New-EvFixtureLog -Dir $d3 -Name 'launch_new.json' -Mode 'live-shadow' -Started 'observed_false' -Verified 'observed_true'
+        $r3 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d3 -PreExistingLogPaths @()
+        if ($r3.daemon_started_by_this_invocation -eq 'observed_false' -and $r3.daemon_reachable_and_verified -eq 'observed_true') {
+            Pass 'LS-EV-03' "Attach-to-already-running fixture: reachable_and_verified=true, started_by_this_invocation=false (never conflated)"
+        } else {
+            Fail 'LS-EV-03' "Attach fixture did not distinguish started vs reachable: $($r3 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-04: new daemon start -> started=true.
+        $d4 = Join-Path $fixtureRoot 'ev04'
+        New-Item -ItemType Directory -Force -Path $d4 | Out-Null
+        $new4 = New-EvFixtureLog -Dir $d4 -Name 'launch_new.json' -Mode 'live-shadow' -Started 'observed_true' -Verified 'observed_true'
+        $r4 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d4 -PreExistingLogPaths @()
+        if ($r4.daemon_started_by_this_invocation -eq 'observed_true' -and $r4.daemon_reachable_and_verified -eq 'observed_true') {
+            Pass 'LS-EV-04' "New daemon-start fixture: started_by_this_invocation=true"
+        } else {
+            Fail 'LS-EV-04' "New-start fixture did not report started=true: $($r4 | ConvertTo-Json -Compress)"
+        }
+
+        # LS-EV-05: wrong-mode log cannot satisfy LiveShadow evidence.
+        $d5 = Join-Path $fixtureRoot 'ev05'
+        New-Item -ItemType Directory -Force -Path $d5 | Out-Null
+        $new5 = New-EvFixtureLog -Dir $d5 -Name 'launch_new.json' -Mode 'paper' -Started 'observed_true' -Verified 'observed_true'
+        $r5 = Resolve-LiveShadowRunEvidence -LauncherLogDir $d5 -PreExistingLogPaths @()
+        if ($r5.daemon_started_by_this_invocation -eq 'not_observed' -and $r5.daemon_reachable_and_verified -eq 'not_observed') {
+            Pass 'LS-EV-05' "A wrong-mode (paper) log can never satisfy LiveShadow evidence, even though it is this run's only new log"
+        } else {
+            Fail 'LS-EV-05' "Wrong-mode log was incorrectly accepted as LiveShadow evidence: $($r5 | ConvertTo-Json -Compress)"
+        }
+
+        Remove-Item -Path $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {
+        Fail 'LS-EV-01' "Hermetic fixture harness threw: $($_.Exception.Message)"
+        Fail 'LS-EV-02' "skipped -- harness error"
+        Fail 'LS-EV-03' "skipped -- harness error"
+        Fail 'LS-EV-04' "skipped -- harness error"
+        Fail 'LS-EV-05' "skipped -- harness error"
+    }
+} else {
+    Fail 'LS-EV-01' "skipped -- target file missing"
+    Fail 'LS-EV-02' "skipped -- target file missing"
+    Fail 'LS-EV-03' "skipped -- target file missing"
+    Fail 'LS-EV-04' "skipped -- target file missing"
+    Fail 'LS-EV-05' "skipped -- target file missing"
 }
 
 Write-Host ""

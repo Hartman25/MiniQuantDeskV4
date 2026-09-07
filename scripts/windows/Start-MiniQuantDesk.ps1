@@ -1465,6 +1465,28 @@ function Invoke-LiveShadowStartup {
     }
     $logEntry.stages[-1].ok = $true
 
+    # A3B/R1 TRUTH REPAIR (MQK-LEDGER-BURN-CONTROLLER-04): whether this
+    # invocation itself started a new daemon process, versus attached to an
+    # already-running one, is NOT the same fact as the safety guard below
+    # (which only proves the daemon is reachable and in a verified posture --
+    # it says nothing about who started it, since the canonical launcher can
+    # attach to a daemon a prior invocation started). Derive
+    # daemon_started_by_this_invocation from Start-DaemonIfNeeded's own
+    # deterministic, already-captured stdout (Write-LauncherSuccess's literal
+    # "Started verified ... local live-shadow daemon (PID" vs "was already
+    # running" text) -- never inferred from the safety guard, and 'not_observed'
+    # (never a fabricated boolean) if neither literal is found.
+    $bootstrapStdoutContent = Get-Content -Path $bootstrapStdoutLog -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $bootstrapStdoutContent) { $bootstrapStdoutContent = '' }
+    $startedByThisInvocation = 'not_observed'
+    if ($bootstrapStdoutContent -match 'Started verified (trade-ready )?local live-shadow daemon \(PID') {
+        $startedByThisInvocation = 'observed_true'
+    } elseif ($bootstrapStdoutContent -match 'Verified local live-shadow daemon was already running') {
+        $startedByThisInvocation = 'observed_false'
+    }
+    $logEntry.stages[-1].started_by_this_invocation = $startedByThisInvocation
+    $logEntry.daemon_started_by_this_invocation = $startedByThisInvocation
+
     # Belt-and-suspenders safety guard, mirrors Invoke-PaperStartup's
     # equivalent post-start check: must never see anything but the
     # live-shadow identity this launch just established, and
@@ -1473,23 +1495,27 @@ function Invoke-LiveShadowStartup {
     $status = Invoke-JsonGet -Url ($daemonBaseUrl + '/api/v1/system/status') -TimeoutSec 5
     if (-not $status.Ok) {
         Write-Fail 'Could not verify daemon status after live-shadow startup.'
+        $logEntry.daemon_reachable_and_verified = 'observed_false'
         Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
         return $script:ExitGeneric
     }
     if ($status.Json.live_routing_enabled -eq $true) {
         Write-Fail 'live_routing_enabled=true on the daemon this live-shadow launch attached to. Refusing to proceed.'
         $logEntry.stages += @{ name = 'safety_guard'; ok = $false; reason = 'live_routing_enabled' }
+        $logEntry.daemon_reachable_and_verified = 'observed_false'
         Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
         return $script:ExitSafetyRefusal
     }
     if ($status.Json.daemon_mode -ne 'live-shadow' -or $status.Json.adapter_id -ne 'alpaca') {
         Write-Fail "Daemon is not in the expected live-shadow+alpaca posture (daemon_mode=$($status.Json.daemon_mode) adapter_id=$($status.Json.adapter_id))."
         $logEntry.stages += @{ name = 'safety_guard'; ok = $false; reason = 'mode_mismatch'; observed_mode = $status.Json.daemon_mode }
+        $logEntry.daemon_reachable_and_verified = 'observed_false'
         Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
         return $script:ExitSafetyRefusal
     }
     Write-Ok 'Live-shadow safety guard confirmed: live_routing_enabled=false, daemon_mode=live-shadow, adapter_id=alpaca.'
     $logEntry.stages += @{ name = 'safety_guard'; ok = $true }
+    $logEntry.daemon_reachable_and_verified = 'observed_true'
 
     Write-Section 'LIVE-SHADOW -- runtime start authority'
     Write-Ok 'This launcher never calls start-system for live-shadow. No arm, no runtime auto-start, no order submission -- daemon-bootstrap and identity verification only.'

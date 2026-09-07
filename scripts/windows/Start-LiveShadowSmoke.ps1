@@ -32,21 +32,44 @@
 #          facts about THIS FILE's own source -- it contains no broker/
 #          order/arm/halt route literal (see the guard test's LSS05 check) --
 #          unconditionally true regardless of CheckOnly or a full run.
-#        - OBSERVED RUNTIME EVIDENCE (real_daemon_start_performed,
-#          real_broker_call_performed, real_order_submitted): derived from
-#          the canonical launcher's OWN JSON log entry (read from a file it
-#          already wrote -- never a new HTTP call from this script, per the
-#          hard rule below), using 'not_run' when the action category was
-#          never attempted (CheckOnly), 'observed_true'/'observed_false'
-#          when the launcher's log directly proves the outcome, and
-#          'not_observed' when a full run was attempted but this wrapper has
-#          no instrumentation to directly prove that specific fact --
-#          broker-call and order-submission counters are not yet exposed by
-#          the launcher's log or any daemon route this script may call, so a
-#          full run always reports those two as 'not_observed' rather than
+#        - OBSERVED RUNTIME EVIDENCE (daemon_started_by_this_invocation,
+#          daemon_reachable_and_verified, real_broker_call_performed,
+#          real_order_submitted): derived from the canonical launcher's OWN
+#          JSON log entry (read from a file it already wrote -- never a new
+#          HTTP call from this script, per the hard rule below), using
+#          'not_run' when the action category was never attempted
+#          (CheckOnly), 'observed_true'/'observed_false' when the launcher's
+#          log directly proves the outcome, and 'not_observed' when a full
+#          run was attempted but this wrapper has no instrumentation to
+#          directly prove that specific fact -- broker-call and
+#          order-submission counters are not yet exposed by the launcher's
+#          log or any daemon route this script may call, so a full run
+#          always reports those two as 'not_observed' rather than
 #          fabricating a value. LiveShadow's own no-order-submission
 #          contract is a Rust-runtime design invariant (DeploymentMode::
 #          LiveShadow), not something this manifest independently proves.
+#
+# R1 EVIDENCE-PROVENANCE REPAIR (MQK-LEDGER-BURN-CONTROLLER-04): independent
+# review of the A3B version above found two further defects, both fixed here:
+#   4. $launcherLogBefore captured only a COUNT of pre-existing launcher logs
+#      and was never consulted again -- evidence derivation always selected
+#      simply the newest launch_*.json under the launcher's log directory. A
+#      failed/no-op current invocation could therefore silently consume a
+#      stale prior LiveShadow launcher log and attribute its evidence to this
+#      run. Fixed: Resolve-LiveShadowRunEvidence takes the exact SET of
+#      pre-existing log paths and computes this run's log as the (post minus
+#      pre) set difference. Evidence is derived ONLY from that exact new log;
+#      zero or more-than-one new logs both fail closed to 'not_observed' with
+#      an explicit reason -- "newest file" is never used as evidence identity.
+#   5. real_daemon_start_performed was inferred from safety_guard.ok, which
+#      only proves this invocation re-verified a reachable, correctly-postured
+#      daemon -- not that THIS invocation started it (the canonical launcher
+#      can attach to an already-running daemon a prior invocation started).
+#      Fixed: the canonical launcher itself now surfaces
+#      daemon_started_by_this_invocation (Start-DaemonIfNeeded's own
+#      Started/attached fact, via its deterministic stdout) as a field
+#      distinct from daemon_reachable_and_verified (the safety-guard fact).
+#      This wrapper consumes both, never conflates them.
 #
 # Usage:
 #   Start-LiveShadowSmoke.ps1                              (same as -CheckOnly)
@@ -127,8 +150,77 @@ function Assert-NotSecret {
 }
 
 # ---------------------------------------------------------------------------
+# R1 (MQK-LEDGER-BURN-CONTROLLER-04): pure, dot-sourceable evidence-resolution
+# function -- factored out so tests\script_guards\test_live_shadow_smoke.ps1
+# can prove the stale-log-rejection and started-vs-attached distinction with
+# hermetic fixture JSON files, without spawning a real daemon. Never called
+# for the CheckOnly path (that stays the unconditional 'not_run' evidence
+# below -- CheckOnly performs no daemon stage at all, so there is no log to
+# resolve).
+#
+# -PreExistingLogPaths is the EXACT SET of launch_*.json full paths that
+# existed under -LauncherLogDir before this invocation's child launcher ran.
+# "This run's own log" is defined ONLY as (current set) minus (that exact
+# pre-existing set) -- never "the newest file by timestamp", which a stale
+# prior LiveShadow log could satisfy on a failed/no-op current invocation.
+# ---------------------------------------------------------------------------
+function Resolve-LiveShadowRunEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$LauncherLogDir,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$PreExistingLogPaths
+    )
+
+    $result = [ordered]@{
+        daemon_started_by_this_invocation = 'not_observed'
+        daemon_reachable_and_verified     = 'not_observed'
+        source_log                        = $null
+        reason                            = $null
+    }
+
+    if (-not (Test-Path $LauncherLogDir)) {
+        $result.reason = 'launcher log directory does not exist'
+        return [pscustomobject]$result
+    }
+
+    $currentPaths = @(Get-ChildItem -Path $LauncherLogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName)
+    $preSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$PreExistingLogPaths)
+    $newPaths = @($currentPaths | Where-Object { -not $preSet.Contains($_) })
+
+    if ($newPaths.Count -eq 0) {
+        $result.reason = 'no new launcher log produced by this invocation (pre-existing logs are never consumed as evidence)'
+        return [pscustomobject]$result
+    }
+    if ($newPaths.Count -gt 1) {
+        $result.reason = "ambiguous: $($newPaths.Count) new launcher logs found; refusing to guess which one belongs to this invocation"
+        return [pscustomobject]$result
+    }
+
+    $sourceLog = $newPaths[0]
+    $result.source_log = $sourceLog
+
+    $entry = $null
+    try { $entry = Get-Content -Path $sourceLog -Raw | ConvertFrom-Json } catch {}
+
+    if ($null -eq $entry -or $entry.mode -ne 'live-shadow') {
+        $result.reason = 'this run''s own launcher log is missing or not mode=live-shadow'
+        return [pscustomobject]$result
+    }
+
+    if ($null -ne $entry.PSObject.Properties['daemon_started_by_this_invocation']) {
+        $result.daemon_started_by_this_invocation = $entry.daemon_started_by_this_invocation
+    }
+    if ($null -ne $entry.PSObject.Properties['daemon_reachable_and_verified']) {
+        $result.daemon_reachable_and_verified = $entry.daemon_reachable_and_verified
+    }
+    return [pscustomobject]$result
+}
+
+# ---------------------------------------------------------------------------
 # Resolve repo root
 # ---------------------------------------------------------------------------
+if ($MyInvocation.InvocationName -eq '.') { return }
+
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 }
@@ -183,8 +275,9 @@ if ($effectiveCheckOnly) { $launcherArgs += '-CheckOnly' }
 
 $launcherLogDir = Join-Path $RepoRoot 'smoke_logs\launcher\live-shadow'
 $launcherLogBefore = if (Test-Path $launcherLogDir) {
-    @(Get-ChildItem -Path $launcherLogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue).Count
-} else { 0 }
+    @(Get-ChildItem -Path $launcherLogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName)
+} else { @() }
 
 $launcherExitCode = 0
 try {
@@ -198,47 +291,28 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# A3B: derive OBSERVED runtime evidence from the canonical launcher's own
-# JSON log entry (a file it already wrote via New-LauncherLog /
-# Write-LauncherLogEntry inside Invoke-LiveShadowStartup) -- never a new
-# network call from this script. A newly-appeared file since
-# $launcherLogBefore's count is this run's own log, never a stale one from a
-# prior invocation.
+# R1: derive OBSERVED runtime evidence from EXACTLY this run's own launcher
+# log (Resolve-LiveShadowRunEvidence above) -- never a new network call from
+# this script, and never "the newest file" (see this file's header, defect
+# 4). daemon_started_by_this_invocation and daemon_reachable_and_verified are
+# two distinct facts the canonical launcher itself now records (defect 5) --
+# an attach to an already-running daemon reports started=observed_false,
+# reachable_and_verified=observed_true, never a fabricated "real start".
 # ---------------------------------------------------------------------------
-$observedDaemonStart = 'not_run'
+$observedDaemonStarted = 'not_run'
+$observedDaemonVerified = 'not_run'
 $observedBrokerCall = 'not_run'
 $observedOrderSubmitted = 'not_run'
 
 if (-not $effectiveCheckOnly) {
-    $observedDaemonStart = 'not_observed'
     $observedBrokerCall = 'not_observed'
     $observedOrderSubmitted = 'not_observed'
 
-    $launcherLogEntry = $null
-    if (Test-Path $launcherLogDir) {
-        $newestLog = Get-ChildItem -Path $launcherLogDir -Filter 'launch_*.json' -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-        if ($null -ne $newestLog) {
-            try { $launcherLogEntry = Get-Content -Path $newestLog.FullName -Raw | ConvertFrom-Json } catch {}
-        }
-    }
-
-    if ($null -ne $launcherLogEntry -and $launcherLogEntry.mode -eq 'live-shadow') {
-        $safetyGuardStage = @($launcherLogEntry.stages) | Where-Object { $_.name -eq 'safety_guard' } | Select-Object -First 1
-        if ($null -ne $safetyGuardStage) {
-            # safety_guard only runs after Invoke-LiveShadowStartup's daemon
-            # stage returned exit 0 -- ok=true here is direct evidence the
-            # launcher itself re-verified a reachable daemon reporting
-            # daemon_mode=live-shadow, live_routing_enabled=false.
-            $observedDaemonStart = if ($safetyGuardStage.ok -eq $true) { 'observed_true' } else { 'observed_false' }
-        } else {
-            $daemonStage = @($launcherLogEntry.stages) | Where-Object { $_.name -eq 'daemon' } | Select-Object -First 1
-            if ($null -ne $daemonStage -and $daemonStage.exit_code -ne 0) {
-                $observedDaemonStart = 'observed_false'
-            }
-        }
-    } else {
-        Write-Warn "Could not locate this run's own launcher log under $launcherLogDir; daemon-start evidence stays 'not_observed'."
+    $evidence = Resolve-LiveShadowRunEvidence -LauncherLogDir $launcherLogDir -PreExistingLogPaths $launcherLogBefore
+    $observedDaemonStarted = $evidence.daemon_started_by_this_invocation
+    $observedDaemonVerified = $evidence.daemon_reachable_and_verified
+    if ($null -ne $evidence.reason) {
+        Write-Warn "Evidence provenance: $($evidence.reason)"
     }
     # real_broker_call_performed / real_order_submitted: neither the
     # launcher's log nor any route this script may call currently exposes a
@@ -247,7 +321,7 @@ if (-not $effectiveCheckOnly) {
 }
 
 $manifest = [ordered]@{
-    schema_version         = 'live-shadow-smoke-manifest-v2'
+    schema_version         = 'live-shadow-smoke-manifest-v3'
     checked_at_utc         = [DateTime]::UtcNow.ToString('o')
     deployment_mode_forced = 'live-shadow'
     check_only             = $effectiveCheckOnly
@@ -262,14 +336,18 @@ $manifest = [ordered]@{
     wrapper_direct_broker_call      = $false
     wrapper_direct_order_submission = $false
     # OBSERVED RUNTIME EVIDENCE: 'not_run' (this action category was never
-    # attempted -- CheckOnly), 'observed_true'/'observed_false' (the
-    # canonical launcher's own log directly proves the outcome), or
-    # 'not_observed' (a full run was attempted but this wrapper has no
-    # instrumentation to directly prove this specific fact yet).
-    real_daemon_start_performed = $observedDaemonStart
-    real_broker_call_performed  = $observedBrokerCall
-    real_order_submitted        = $observedOrderSubmitted
-    note = 'wrapper_* fields are provable-by-construction facts about this script''s own source. real_* fields are observed runtime evidence derived from the canonical launcher''s own JSON log (never a value this script invents) -- see this file''s header for the full truth-repair rationale (MQK-LEDGER-BURN-CONTROLLER-03 A3B).'
+    # attempted -- CheckOnly), 'observed_true'/'observed_false' (this run's
+    # own launcher log directly proves the outcome), or 'not_observed' (a
+    # full run was attempted but no exact single new log could be resolved,
+    # or the log has no instrumentation for this specific fact yet).
+    # daemon_started_by_this_invocation and daemon_reachable_and_verified are
+    # deliberately distinct fields (R1) -- an attach to an already-running
+    # daemon is started=observed_false, reachable_and_verified=observed_true.
+    daemon_started_by_this_invocation = $observedDaemonStarted
+    daemon_reachable_and_verified     = $observedDaemonVerified
+    real_broker_call_performed        = $observedBrokerCall
+    real_order_submitted              = $observedOrderSubmitted
+    note = 'wrapper_* fields are provable-by-construction facts about this script''s own source. daemon_*/real_* fields are observed runtime evidence derived from EXACTLY this invocation''s own launcher JSON log (never a value this script invents, never "the newest file") -- see this file''s header for the full truth-repair rationale (MQK-LEDGER-BURN-CONTROLLER-03 A3B, MQK-LEDGER-BURN-CONTROLLER-04 R1).'
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding ASCII
 Write-Ok "Manifest written: $manifestPath"
