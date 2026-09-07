@@ -2073,25 +2073,45 @@ pub async fn dispatch_by_state(
                     )
                     .await;
 
+                    // R2 (MQK-LEDGER-BURN-CONTROLLER-04): `AlreadyApplied`
+                    // is not "no mutation occurred" -- per
+                    // `mqk_db::transition_autonomous_daily_operation`'s own
+                    // contract, it is returned ONLY when the durable row is
+                    // already at exactly the requested (state,
+                    // state_version) AND the event log proves that exact
+                    // transition (manual_intervention_required ->
+                    // preparing_data) already committed -- i.e. a
+                    // concurrent actor (an operator retry, or another
+                    // coordinator tick) won the identical CAS this call
+                    // attempted. Treating that as "still blocked" would
+                    // project a stale manual_intervention_required against
+                    // durable truth that has already moved on to
+                    // preparing_data. `Recovered` and `AlreadyApplied` are
+                    // therefore both truthful recovery outcomes here;
+                    // `StaleState` (a genuinely different concurrent
+                    // transition) remains fail-closed and falls through
+                    // unchanged below.
                     if matches!(
                         outcome,
                         crate::routes::autonomous_daily_operator::ManualInterventionRecoveryOutcome::Recovered(_)
+                            | crate::routes::autonomous_daily_operator::ManualInterventionRecoveryOutcome::AlreadyApplied(_)
                     ) {
                         recovered = true;
                     }
                     // Every other outcome (StillBlocked, IdentityMismatch,
-                    // AlreadyApplied, StaleState, transient backend
-                    // failure, ...) falls through to the unchanged sticky
-                    // projection below -- no mutation occurred on any of
-                    // those branches, so there is nothing to reconcile.
+                    // StaleState, transient backend failure, ...) falls
+                    // through to the unchanged sticky projection below --
+                    // no exact manual_intervention_required->preparing_data
+                    // transition is durably proven on any of those
+                    // branches, so there is nothing to reconcile.
                     // Bounded/idempotent: the CAS transition only ever
-                    // succeeds once per manual_intervention_required
-                    // episode (the moment it does, this arm is no longer
-                    // reached on the next tick because the durable state
-                    // itself has changed); every other branch here is a
-                    // pure read, so repeated coordinator ticks while still
-                    // genuinely blocked never produce more than one durable
-                    // mutation.
+                    // succeeds (Applied or AlreadyApplied) once per
+                    // manual_intervention_required episode (the moment it
+                    // does, this arm is no longer reached on the next tick
+                    // because the durable state itself has changed); every
+                    // other branch here is a pure read, so repeated
+                    // coordinator ticks while still genuinely blocked never
+                    // produce more than one durable mutation.
                 }
             }
 

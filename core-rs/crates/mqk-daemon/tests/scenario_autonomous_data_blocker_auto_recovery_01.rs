@@ -38,6 +38,24 @@
 //!     genuinely still blocked; POS3: a tick after the CAS already applied)
 //!   - no broker/order/arm/halt side effects (NEG4 asserts integrity/arm/
 //!     run_id/start_attempt_count are byte-for-byte unchanged)
+//!
+//! MQK-LEDGER-BURN-CONTROLLER-04 R2 (deterministic concurrent-CAS proof,
+//! no timing sleeps -- both "actors" start from the exact same durable
+//! row/version read by `seed_manual_intervention_fixture`, then apply the
+//! shared CAS deterministically in a fixed order):
+//!   - POS4: a concurrent actor (an operator retry, or another coordinator
+//!     tick) wins the identical manual_intervention_required ->
+//!     preparing_data CAS first; the coordinator's own attempt against the
+//!     same stale (state, state_version) it read must receive the DB's
+//!     canonical `AlreadyApplied` for that exact transition and project
+//!     `PreparingData` truthfully -- never a stale `ManualInterventionRequired`
+//!     re-projection. Exactly one transition event exists and state_version
+//!     increments exactly once (the winner's write only).
+//!   - NEG4: a genuinely different concurrent transition (manual_intervention_
+//!     required -> stopping, a different target than preparing_data) must
+//!     still classify as `StaleState` and must NOT be treated as recovered --
+//!     StaleState remains fail-closed, the coordinator stays in
+//!     `ManualInterventionRequired`.
 
 use std::sync::Arc;
 
@@ -57,6 +75,7 @@ use mqk_daemon::state::{
 use mqk_db::{
     AutonomousDailyTransitionOutcome, CreateAutonomousDailyOperationArgs,
     TransitionAutonomousDailyOperationArgs, STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA,
+    STATE_STOPPING,
 };
 use uuid::Uuid;
 
@@ -708,6 +727,209 @@ async fn neg3_unknown_reason_fails_closed() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     assert_eq!(after.state_version, manual.state_version);
+
+    cleanup_bars(&pool, SYMBOL, TIMEFRAME).await;
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// POS4 (MQK-LEDGER-BURN-CONTROLLER-04 R2) — deterministic concurrent-CAS
+// proof: a concurrent actor wins the identical manual_intervention_required
+// -> preparing_data CAS first (simulated deterministically, no timing
+// sleeps, by applying the shared transition directly against the exact same
+// (state, state_version) `dispatch_by_state` will independently attempt
+// below). The coordinator's own attempt must then receive the DB's
+// canonical `AlreadyApplied` for that exact transition and project
+// `PreparingData` truthfully -- never a stale `ManualInterventionRequired`
+// re-projection, and never a second durable mutation.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn pos4_concurrent_recovery_winner_and_loser_both_project_preparing_data(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("autorec-pos4-{}", unique_suffix());
+    let (st, plan, operation_id, manual) = seed_manual_intervention_fixture(
+        &pool,
+        &adapter_id,
+        mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING,
+    )
+    .await?;
+    let now = st.daily_data_readiness_now().await;
+
+    let (halted_before, disarmed_before) = {
+        let ig = st.integrity.read().await;
+        (ig.halted, ig.disarmed)
+    };
+
+    // Data is repaired -- both the "concurrent winner" below and the
+    // coordinator's own re-check will see a genuinely passing readiness
+    // evaluation, exactly as a real race would.
+    let bars = expected_bar_window(now, 5);
+    seed_bars_via_normal_ingestion(&pool, &bars).await;
+
+    // 1. Both actors begin from the same MANUAL state/version: `manual`
+    //    (read once by the fixture) is passed to both the winner's direct
+    //    transition below and to `dispatch_by_state` further down --
+    //    neither actor re-reads a newer row first, exactly like two
+    //    concurrent processes that both read the row before either wrote.
+    // 2. Exactly one CAS actually creates the transition/event: this direct
+    //    call is the only `Applied` outcome in this test -- the coordinator
+    //    below must never independently create a second one.
+    let winner = real_transition(
+        &pool,
+        operation_id,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        manual.state_version,
+        STATE_PREPARING_DATA,
+        None,
+        now,
+        "automatic_data_blocker_recovery: concurrent-winner fixture transition (POS4)",
+    )
+    .await;
+    assert_eq!(winner.state, STATE_PREPARING_DATA);
+    assert_eq!(winner.state_version, manual.state_version + 1);
+
+    // 3. The "loser": the coordinator ticks against the SAME stale `manual`
+    //    row it originally read (state_version unchanged) -- its internal
+    //    CAS guard cannot match (the winner already moved the row), so it
+    //    must re-read and classify. Because the winner applied the EXACT
+    //    same (expected_state -> new_state) transition, this classifies as
+    //    `AlreadyApplied`, not `StaleState`.
+    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+
+    // 4. Coordinator projection is PreparingData, never stale
+    //    ManualInterventionRequired.
+    assert!(
+        matches!(outcome, AutonomousDailyCoordinatorTickOutcome::PreparingData),
+        "the loser of a concurrent identical CAS must project PreparingData from the DB's own \
+         AlreadyApplied truth, not a stale ManualInterventionRequired re-projection, got {outcome:?}"
+    );
+
+    let final_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(final_row.state, STATE_PREPARING_DATA);
+    // 6. state_version increments exactly once (the winner's write only --
+    //    the loser's AlreadyApplied path must never attempt a second write).
+    assert_eq!(
+        final_row.state_version,
+        manual.state_version + 1,
+        "the loser's AlreadyApplied projection must never itself produce a second durable \
+         mutation on top of the winner's"
+    );
+
+    // 5. Exactly one transition event exists for this exact
+    //    manual_intervention_required -> preparing_data edge.
+    let event_count: i64 = sqlx::query_scalar(
+        "select count(*) from sys_autonomous_daily_operation_events \
+         where operation_id = $1 and from_state = $2 and to_state = $3",
+    )
+    .bind(operation_id)
+    .bind(STATE_MANUAL_INTERVENTION_REQUIRED)
+    .bind(STATE_PREPARING_DATA)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        event_count, 1,
+        "exactly one durable transition event must exist for this CAS, proving the loser never \
+         wrote a duplicate"
+    );
+
+    // 7. No run_id/order/broker/arm/halt side effects.
+    assert_eq!(final_row.run_id, None);
+    assert_eq!(final_row.start_attempt_count, 0);
+    let (halted_after, disarmed_after) = {
+        let ig = st.integrity.read().await;
+        (ig.halted, ig.disarmed)
+    };
+    assert_eq!(
+        (halted_before, disarmed_before),
+        (halted_after, disarmed_after),
+        "the loser's AlreadyApplied projection must never touch halt/disarm integrity state"
+    );
+
+    cleanup_bars(&pool, SYMBOL, TIMEFRAME).await;
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// NEG4 (MQK-LEDGER-BURN-CONTROLLER-04 R2) — a genuinely DIFFERENT concurrent
+// transition (manual_intervention_required -> stopping, not preparing_data)
+// must classify as StaleState and must NOT be treated as recovered.
+// StaleState remains fail-closed; the coordinator stays in
+// ManualInterventionRequired rather than broadening StaleState into success.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn neg4_different_concurrent_transition_stays_stale_and_manual() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("autorec-neg4-{}", unique_suffix());
+    let (st, plan, operation_id, manual) = seed_manual_intervention_fixture(
+        &pool,
+        &adapter_id,
+        mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING,
+    )
+    .await?;
+    let now = st.daily_data_readiness_now().await;
+
+    // Readiness would genuinely pass if evaluated (same repair as POS4) --
+    // proving the fail-closed result below comes from the CAS mismatch
+    // itself, not merely from a still-blocked readiness re-check.
+    let bars = expected_bar_window(now, 5);
+    seed_bars_via_normal_ingestion(&pool, &bars).await;
+
+    // A genuinely different concurrent transition wins first: the SAME
+    // starting (state, state_version) `manual` carries, but to a different
+    // legal target (`stopping`, e.g. an operator-initiated shutdown) --
+    // never the preparing_data edge the coordinator will attempt.
+    let winner = real_transition(
+        &pool,
+        operation_id,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        manual.state_version,
+        STATE_STOPPING,
+        None,
+        now,
+        "test fixture: genuinely different concurrent transition (NEG4)",
+    )
+    .await;
+    assert_eq!(winner.state, STATE_STOPPING);
+    assert_eq!(winner.state_version, manual.state_version + 1);
+
+    // The coordinator ticks against the same stale `manual` row it
+    // originally read. Its CAS guard cannot match (current state is now
+    // `stopping`, not `manual_intervention_required`), and the re-read
+    // classification cannot satisfy AlreadyApplied either (current.state !=
+    // args.new_state) -- this must resolve to StaleState, and StaleState
+    // must never be treated as recovered.
+    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired { .. }
+        ),
+        "a genuinely different concurrent transition (StaleState) must never be treated as \
+         recovered, got {outcome:?}"
+    );
+
+    let final_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        final_row.state, STATE_STOPPING,
+        "the coordinator's failed CAS attempt must never overwrite the genuinely different \
+         concurrent transition's durable outcome"
+    );
+    assert_eq!(
+        final_row.state_version,
+        manual.state_version + 1,
+        "the coordinator's StaleState outcome must never itself produce a durable mutation"
+    );
 
     cleanup_bars(&pool, SYMBOL, TIMEFRAME).await;
     cleanup_operation(&pool, operation_id).await;
