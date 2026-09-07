@@ -594,7 +594,8 @@ git diff --check
 #### BROKER-ALPACA-DEAD-CODE-CLEANUP-01 — Remove or wire orphaned client.rs/config.rs
 
 **Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN (uncompiled, unreachable) · **Subsystem:** mqk-broker-alpaca
-**Current Source Truth:** `mqk-broker-alpaca/src/client.rs` (`AlpacaHttpClient`) and `src/config.rs` (a second, differently-shaped `AlpacaConfig`) are not declared as `pub mod` in `lib.rs` — they do not compile into the crate and are unreachable from any caller. They also contain weaker error handling than the live path (e.g. `client.rs:18-19` silently swallows header-construction failure via `unwrap_or`).
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `39b4395f` ("refactor: remove obsolete alpaca client implementation"), verified `git merge-base --is-ancestor`; `client.rs`/`config.rs` are confirmed absent from `mqk-broker-alpaca/src/` at current HEAD (directly verified by directory listing). Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-broker-alpaca/src/client.rs` (`AlpacaHttpClient`) and `src/config.rs` (a second, differently-shaped `AlpacaConfig`) are not declared as `pub mod` in `lib.rs` — they do not compile into the crate and are unreachable from any caller. They also contain weaker error handling than the live path (e.g. `client.rs:18-19` silently swallows header-construction failure via `unwrap_or`).
 **Problem:** Dead, confusing, duplicate code that could mislead a future session into thinking it's the live path.
 **Dependencies:** NONE.
 **In Scope:** Either delete both files, or wire them in and delete `lib.rs`'s duplicate logic if intentional — pick one, do not do both in one patch. **Out of Scope:** Adding any new functionality to whichever path is kept.
@@ -635,7 +636,8 @@ git diff --check
 #### STRATEGY-MEAN-REVERSION-UNIT-TESTS-01 — Add in-file signal-logic unit tests
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** GREEN (pure signal-generation, no broker/DB/portfolio writes) · **Subsystem:** mqk-strategy
-**Current Source Truth:** `mqk-strategy/src/engines/mean_reversion.rs:36-64` has zero in-file unit tests (only indirect reference-only coverage in `scenario_daily_data_readiness_01.rs`), unlike `intraday_scalper.rs` (43 in-file tests, `engines/intraday_scalper.rs:522-1259`).
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains 12 in-file tests (`mr01`-`mr12`, including boundary and fail-closed negative controls) at this file. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-strategy/src/engines/mean_reversion.rs:36-64` has zero in-file unit tests (only indirect reference-only coverage in `scenario_daily_data_readiness_01.rs`), unlike `intraday_scalper.rs` (43 in-file tests, `engines/intraday_scalper.rs:522-1259`).
 **Problem:** A strategy currently dispatchable in production paper trading has no direct proof of its signal logic.
 **Dependencies:** NONE.
 **In Scope:** Unit tests covering entry/exit signal generation across representative bar sequences, mirroring the scalper's test pattern. **Out of Scope:** Any change to sizing, stops, or the signal algorithm itself.
@@ -648,7 +650,8 @@ git diff --check
 #### STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01 — Add in-file signal-logic unit tests
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** mqk-strategy
-**Current Source Truth / Problem / Scope:** Identical pattern to `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`, applied to `engines/volatility_breakout.rs:39-66` (prior-20-bar min/max breakout logic), currently zero in-file tests.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains 10 in-file tests (`vb01`-`vb10`, including an explicit no-lookahead negative control, `vb08`), independently confirmed by direct grep count. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth / Problem / Scope (superseded by the Ledger Truth-Up above — retained for history):** Identical pattern to `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`, applied to `engines/volatility_breakout.rs:39-66` (prior-20-bar min/max breakout logic), currently zero in-file tests.
 **Dependencies:** NONE.
 **Likely Files:** `core-rs/crates/mqk-strategy/src/engines/volatility_breakout.rs`.
 **Required Validation:** `cargo test -p mqk-strategy`.
@@ -659,7 +662,8 @@ git diff --check
 #### STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01 — Add in-file signal-logic unit tests
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** GREEN · **Subsystem:** mqk-strategy
-**Current Source Truth / Problem / Scope:** Identical pattern, applied to `engines/swing_momentum.rs:36-64` (daily close-vs-20d-average momentum), currently zero in-file tests.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains 12 in-file tests (`sm01`-`sm12`, same pattern as `mean_reversion`), independently confirmed by direct grep count. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth / Problem / Scope (superseded by the Ledger Truth-Up above — retained for history):** Identical pattern, applied to `engines/swing_momentum.rs:36-64` (daily close-vs-20d-average momentum), currently zero in-file tests.
 **Dependencies:** NONE.
 **Likely Files:** `core-rs/crates/mqk-strategy/src/engines/swing_momentum.rs`.
 **Required Validation:** `cargo test -p mqk-strategy`.
@@ -1279,7 +1283,8 @@ One methodological note preserved for future investigators: the first attempt at
 #### BROKER-ALPACA-RATE-LIMIT-RETRY-AFTER-01 — Parse Retry-After header on 429 responses
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** YELLOW (live order submit/replace/cancel path) · **Subsystem:** mqk-broker-alpaca
-**Current Source Truth:** `mqk-broker-alpaca/src/lib.rs:1138-1142` maps HTTP 429 to `BrokerError::RateLimit { retry_after_ms: None, ... }` — the `Retry-After` header is never read.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `edc5da02`, verified `git merge-base --is-ancestor`; `BR-03`..`BR-06` tests including a malformed-header negative control are confirmed present. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-broker-alpaca/src/lib.rs:1138-1142` maps HTTP 429 to `BrokerError::RateLimit { retry_after_ms: None, ... }` — the `Retry-After` header is never read.
 **Problem:** Callers can't honor Alpaca's actual backoff window; they're guessing.
 **Dependencies:** NONE.
 **In Scope:** Parse `Retry-After` in `classify_http_status`, thread through to `retry_after_ms`. **Out of Scope:** Changing overall rate-limit/retry policy or backoff algorithm.
@@ -1297,7 +1302,8 @@ One methodological note preserved for future investigators: the first attempt at
 #### DB-OUTBOX-SCHEMA-VERSION-01 — Add schema_version to the order_json envelope
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** YELLOW (live write path; shape is stable/tested, low drift risk today) · **Subsystem:** mqk-db / mqk-execution
-**Current Source Truth:** `schema_version` is present on JSON-evidence artifacts that need it (`dynamic_selection_evidence.rs`, `runtime_strategy_conflict.rs`) but absent from `oms_outbox.order_json` / `oms_inbox.message_json` (`mqk-db/src/orders.rs`, `src/inbox.rs`).
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `f4864e0c`, verified `git merge-base --is-ancestor`; the seam was relocated to `mqk-db` `orders.rs`/`inbox.rs` (tighter than originally planned), with legacy-row backward-compat proven (`sv03`). Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `schema_version` is present on JSON-evidence artifacts that need it (`dynamic_selection_evidence.rs`, `runtime_strategy_conflict.rs`) but absent from `oms_outbox.order_json` / `oms_inbox.message_json` (`mqk-db/src/orders.rs`, `src/inbox.rs`).
 **Problem:** `db_rules.md` requires `schema_version` on all serialized DB artifacts; this envelope is a gap against the literal rule, even though current drift risk is low (internally-produced, stable-shaped envelope).
 **Dependencies:** NONE.
 **In Scope:** Add a `schema_version` field to the order-command JSON envelope constructed by `mqk-execution` before it's persisted as `order_json`. **Out of Scope:** Any change to the outbox claim/atomicity logic itself.
@@ -1313,7 +1319,8 @@ One methodological note preserved for future investigators: the first attempt at
 #### MD-ALPACA-FETCH-RETRY-BACKOFF-01 — Add bounded retry/backoff to Alpaca fetch_bars
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** YELLOW (Alpaca is the live-gate equity data path; current behavior already fails safe — readiness gate correctly reports stale rather than fabricating data — so this is a resilience improvement, not a correctness fix) · **Subsystem:** mqk-md
-**Current Source Truth:** `mqk-md/src/alpaca_provider.rs:100-157` (`fetch_bars`) issues a single HTTP attempt per page; non-2xx or transport error propagates immediately. `provider.rs:412-514` (TwelveData) already has a proven bounded 429-retry pattern.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `8868c214` ("fix: add bounded retry backoff to alpaca market data"), verified `git merge-base --is-ancestor`. Independently confirmed by direct source read: `alpaca_provider.rs::fetch_bars` implements bounded retry with `Retry-After`/budget handling and tests `AF-01`..`AF-11` (including bounded-exhaustion and oversized-`Retry-After` fail-closed). Note: the input reconciliation's other two cited commits for this row (`c0c440b2`, `9a412b43`) were verified NOT to be ancestors of this HEAD — they live only on the separate, unmerged `planned-code-completion-wave-02*` branches; only `8868c214` and the source verification above are cited as evidence. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-md/src/alpaca_provider.rs:100-157` (`fetch_bars`) issues a single HTTP attempt per page; non-2xx or transport error propagates immediately. `provider.rs:412-514` (TwelveData) already has a proven bounded 429-retry pattern.
 **Dependencies:** Can reuse the pattern established by `MD-KRAKEN-FETCH-RETRY-BACKOFF-01` (Lane B) if that lands first, though independent.
 **In Scope:** Same bounded-retry-on-transient-status pattern applied to `AlpacaHistoricalProvider::fetch_bars`. **Out of Scope:** Any change to the readiness-gate logic that consumes ingested data.
 **Likely Files:** `core-rs/crates/mqk-md/src/alpaca_provider.rs`.
@@ -1366,7 +1373,8 @@ One methodological note preserved for future investigators: the first attempt at
 #### MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01 — Preflight warning when per-symbol/aggregate caps are unset
 
 **Status:** READY · **Priority:** P1 · **Paper Impact:** RED (touches the autonomous session preflight path; conservatively classified RED even though it is advisory-only, since it changes what preflight reports during an active soak) · **Subsystem:** mqk-daemon preflight
-**Current Source Truth:** `scenario_multi_symbol_capital_caps_01.rs` confirms caps #2 (`MQK_PER_SYMBOL_MAX_POSITION_QTY`), #3 (`MQK_PER_SYMBOL_MAX_NOTIONAL_USD`), #5 (`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`) all default to `None`/disabled. A soak running with these unset has zero per-symbol/aggregate notional protection beyond portfolio-level gates.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `57fbc1c2`, verified `git merge-base --is-ancestor`; the `mscw01` all-set/no-warning control plus per-cap tests are confirmed present. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `scenario_multi_symbol_capital_caps_01.rs` confirms caps #2 (`MQK_PER_SYMBOL_MAX_POSITION_QTY`), #3 (`MQK_PER_SYMBOL_MAX_NOTIONAL_USD`), #5 (`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`) all default to `None`/disabled. A soak running with these unset has zero per-symbol/aggregate notional protection beyond portfolio-level gates.
 **Problem:** An operator could be unaware these protections are off.
 **Dependencies:** NONE.
 **In Scope:** Add an advisory (non-blocking) warning to the autonomous session preflight response when any of caps 2/3/5 are unset. **Out of Scope:** Changing the caps' default values or enforcement behavior — advisory only in this patch.
@@ -1381,7 +1389,8 @@ One methodological note preserved for future investigators: the first attempt at
 #### DISCORD-CHANNEL-ROUTING-01 — Wire the 6-channel Discord routing that already exists but is unused
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** YELLOW (touches the already-running soak's live notifier construction) · **Subsystem:** mqk-daemon / mqk-config notify
-**Current Source Truth:** `mqk-config/src/secrets.rs:38-53` defines `ResolvedDiscordWebhooks` with 6 channels (`paper`,`live`,`backtest`,`alerts`,`heartbeat`,`c2`) sourced from `config/defaults/base.yaml:105-112`. `mqk-daemon/src/state.rs:1724` constructs the notifier via `DiscordNotifier::from_env()`, which only reads a single flat `DISCORD_WEBHOOK_URL` — the multi-channel resolution is dead code from the daemon's perspective; all alert types funnel into one webhook.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `73324b55`, verified `git merge-base --is-ancestor`; fail-closed unknown-channel-label handling is confirmed present (also independently corroborated by `scenario_discord_channel_routing_01.rs` existing at HEAD). Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-config/src/secrets.rs:38-53` defines `ResolvedDiscordWebhooks` with 6 channels (`paper`,`live`,`backtest`,`alerts`,`heartbeat`,`c2`) sourced from `config/defaults/base.yaml:105-112`. `mqk-daemon/src/state.rs:1724` constructs the notifier via `DiscordNotifier::from_env()`, which only reads a single flat `DISCORD_WEBHOOK_URL` — the multi-channel resolution is dead code from the daemon's perspective; all alert types funnel into one webhook.
 **Problem:** Built-and-unused routing means operators can't separate paper/live/critical alert streams.
 **Dependencies:** NONE. **Unlocks:** `DISCORD-DATA-STALENESS-ALERT-01`, `DISCORD-DAILY-SUMMARY-PUSH-01` (both should route through the correct channel once this lands).
 **In Scope:** Wire `ResolvedSecrets.discord` channels into `DiscordNotifier` construction in `state.rs`, routing critical alerts to `alerts`, trade events to `paper`/`live` per deployment mode. **Out of Scope:** Adding new alert types (separate patches).
@@ -1398,7 +1407,8 @@ One methodological note preserved for future investigators: the first attempt at
 #### DISCORD-DATA-STALENESS-ALERT-01 — Fire a critical alert when the MD-staleness gate trips
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** YELLOW · **Subsystem:** mqk-daemon notify / market data readiness
-**Current Source Truth:** `MD-STALENESS-PER-TICK-GATE-01` (memory: CLOSED) blocks trading on stale data but never fires a Discord notification — an operator watching only Discord would not see "feed went stale, trading paused" in real time. Grep for `notify_.*data|notify.*stale` in daemon src returns zero hits.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `b831c447` ("feat: alert on market data staleness"), verified `git merge-base --is-ancestor`; a dedicated scenario test file (`scenario_discord_data_staleness_alert_01.rs`, 8 test functions) plus the dedup-claim pattern are confirmed present. Note: the input reconciliation's other two cited commits for this row (`ab24517f`, `300abd51`) were verified NOT to be ancestors of this HEAD — they live only on the separate, unmerged `planned-code-completion-wave-02*` branches; only `b831c447` and the direct file-presence check above are cited as evidence. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `MD-STALENESS-PER-TICK-GATE-01` (memory: CLOSED) blocks trading on stale data but never fires a Discord notification — an operator watching only Discord would not see "feed went stale, trading paused" in real time. Grep for `notify_.*data|notify.*stale` in daemon src returns zero hits.
 **Dependencies:** `DISCORD-CHANNEL-ROUTING-01` (should route to the correct channel once available; can also ship to the single flat webhook first if sequencing requires).
 **In Scope:** Add a `notify_critical_alert` (or new `notify_data_feed_stale`) call at the staleness-gate trip site. **Out of Scope:** Any change to the staleness gate's blocking logic itself.
 **Likely Files:** Wherever the MD-staleness gate trips (per `MD-STALENESS-PER-TICK-GATE-01`'s implementation location), `core-rs/crates/mqk-daemon/src/notify.rs`.
@@ -1412,7 +1422,8 @@ One methodological note preserved for future investigators: the first attempt at
 #### DISCORD-DAILY-SUMMARY-PUSH-01 — Push daily no-trade/session diagnostics to Discord
 
 **Status:** READY · **Priority:** P2 · **Paper Impact:** YELLOW · **Subsystem:** mqk-daemon notify
-**Current Source Truth:** `autonomous_no_trade_diagnostics` exists as a read-route (`routes/system.rs:1210`) but is never pushed to Discord — operator must poll.
+**Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `ce64516c`, verified `git merge-base --is-ancestor`; source-backed (never fabricated) diagnostics are confirmed. Note: the push is finalization-triggered, not a literal wall-clock daily timer — flagged here in case the original mission intent specifically wanted a wall-clock cron push; if so, that gap should be tracked as a new, separate follow-on row rather than reopening this one. Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
+**Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `autonomous_no_trade_diagnostics` exists as a read-route (`routes/system.rs:1210`) but is never pushed to Discord — operator must poll.
 **Dependencies:** `DISCORD-CHANNEL-ROUTING-01`.
 **In Scope:** Add a scheduled/end-of-day push of the diagnostics summary to the appropriate Discord channel. **Out of Scope:** Changing the diagnostics computation itself.
 **Likely Files:** `core-rs/crates/mqk-daemon/src/routes/system.rs`, `src/notify.rs`.
