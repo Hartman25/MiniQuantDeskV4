@@ -233,8 +233,9 @@ blocker disappear, and do not edit the evidence file.
 - Do not claim a default production cutover just because active mode works
   when explicitly configured — `MQK_RUNTIME_SESSION_SOURCE` still defaults to
   `legacy`, and this runbook does not change that.
-- Do not stage generated `smoke_logs/` evidence files or the untracked
-  `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` draft.
+- Do not stage generated `smoke_logs/` evidence files. The canonical master
+  `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` is tracked operational
+  authority, not an untracked proof draft.
 - Do not run this script, or any market-hours proof, against the live broker
   adapter — paper + Alpaca only.
 

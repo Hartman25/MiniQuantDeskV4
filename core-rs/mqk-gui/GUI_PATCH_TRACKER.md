@@ -1,6 +1,6 @@
 # MiniQuantDesk GUI Patch Tracker (Source of Truth)
 
-> **Scope note** (added by `DOCS-TRACKER-CLEANUP-01`, 2026-08-17): "Source of Truth" above refers to GUI-specific patch detail (exact files/tests per GUI patch) within this narrow domain only. For overall repository backlog/status — including which GUI-touching patches are currently open, e.g. `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01` — `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` remains the single authoritative ledger; keep both in sync when a GUI patch's status changes.
+> **Scope note** (updated by `MT-01C`, 2026-09-07): "Source of Truth" above refers to GUI-specific patch detail (exact files/tests per GUI patch) within this narrow domain only. For overall repository program/backlog/status — including which GUI-touching patches are currently open — `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` is the canonical current authority; keep this GUI tracker consistent with that master when GUI patch status changes.
 
 Owner: Zach
 Mode: **Option A** — GUI is a client; daemon is the control-plane (HTTP/SSE).

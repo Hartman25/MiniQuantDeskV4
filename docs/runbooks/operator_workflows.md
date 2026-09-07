@@ -521,7 +521,7 @@ bounded historical bootstrap, latest-bar repair, and provider mapping.
 unattended invocation can never silently default to either mode. Selecting
 `-Mode Live` in the launcher does **not** mean LiveCapital is authorized:
 the launcher's live-readiness chain reads real, current blockers from
-`MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` and
+`MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` and
 `research-py/src/mqk_research/deployment/parity.py`; existing live
 trust/reconcile/risk gates in `mqk-daemon` remain the sole authority and are
 never weakened or bypassed by this launcher.

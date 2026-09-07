@@ -48,8 +48,8 @@ snapshot narrative — a prior version did, and it went stale within weeks
 (`README-SNAPSHOT-REFRESH-01`, `.claude/rules/audit_repo_truth_rules.md`'s
 "no stale snapshots in living docs" rule). For current, authoritative status —
 which phase/bundle is accepted, what's open, what's blocking Paper soak or
-Live readiness — see `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`
-(the canonical, git-tracked status source of truth) and `git log`. The table
+Live readiness — see `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md`
+(the canonical, git-tracked current program/status authority) and `git log`. The table
 immediately below gives the durable, mode-level picture that doesn't need
 per-patch updates.
 

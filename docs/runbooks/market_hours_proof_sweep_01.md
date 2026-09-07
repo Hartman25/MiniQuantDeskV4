@@ -217,8 +217,9 @@ only, do not stage.
   `MQK_RUNTIME_SESSION_SOURCE=v2_equity_active` during the isolated
   Section 2 proof window.
 - Do not persist that env var globally. Do not edit `.env.local`.
-- Do not stage generated evidence, smoke logs, exports, raw provider
-  responses, or `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`.
+- Do not stage generated evidence, smoke logs, exports, or raw provider
+  responses. The canonical master `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` is tracked
+  operational authority, not a generated proof artifact.
 
 ## Network rule
 
