@@ -101,22 +101,42 @@ Test-G14Case -Name "2: smoke_logs premarket-log fixture (both strings)" -ExpectF
     -Teardown { Remove-Item -Path $f2 -Force -ErrorAction SilentlyContinue }
 
 # ---------------------------------------------------------------------------
-# 3. The real untracked updated-ledger file. Read-only: it already exists as
-#    real operator evidence and already contains the forbidden strings; this
-#    proves G14 passes against the real file as-is. No fixture is created or
-#    removed.
+# 3. Canonical master source-candidate contract.
+#    The canonical master is tracked operational authority, so G14 must
+#    explicitly include it as an eligible root authority file. The former
+#    updated-ledger filename must not remain as an exclusion.
 # ---------------------------------------------------------------------------
-$LedgerFile = Join-Path $RepoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md'
-if (Test-Path $LedgerFile) {
-    $LedgerContent = Get-Content $LedgerFile -Raw
-    if ($LedgerContent -match 'approved_for_live' -or $LedgerContent -match 'live_routing_enabled') {
-        Test-G14Case -Name "3: real untracked updated-ledger file (contains forbidden strings)" -ExpectFail $false `
-            -Setup {} -Teardown {}
-    } else {
-        Assert-Pass "3: real untracked updated-ledger file present but contains no forbidden strings (nothing to prove); skipping as vacuous"
+$GuardContent = Get-Content $GuardScript -Raw
+
+$GuardCandidateStart = $GuardContent.IndexOf(
+    'function Test-IsGuardSourceCandidate([string]$RelPath) {',
+    [System.StringComparison]::Ordinal
+)
+
+$GuardCandidateEnd = $GuardContent.IndexOf(
+    'Push-Location $RepoRoot',
+    $GuardCandidateStart,
+    [System.StringComparison]::Ordinal
+)
+
+if ($GuardCandidateStart -ge 0 -and $GuardCandidateEnd -gt $GuardCandidateStart) {
+    $GuardCandidateSection = $GuardContent.Substring(
+        $GuardCandidateStart,
+        $GuardCandidateEnd - $GuardCandidateStart
+    )
+
+    if (
+        $GuardCandidateSection.Contains('MiniQuantDeskV4_Master_Program_Plan_and_Ledger\.md') -and
+        -not $GuardCandidateSection.Contains('MiniQuantDesk_Master_Patch_Ledger_v2_updated.md')
+    ) {
+        Assert-Pass '3: canonical master is explicitly guard-eligible and obsolete ledger exclusion is absent'
     }
-} else {
-    Assert-Pass "3: real untracked updated-ledger file not present in this run; skipping as vacuous"
+    else {
+        Assert-Fail '3: canonical master source-candidate contract is not correctly migrated'
+    }
+}
+else {
+    Assert-Fail '3: could not locate bounded Test-IsGuardSourceCandidate section in production guard'
 }
 
 # ---------------------------------------------------------------------------

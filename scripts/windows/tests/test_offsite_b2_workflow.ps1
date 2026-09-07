@@ -432,9 +432,9 @@ if (-not $resticCmd) {
     # an arbitrary root-level filename is never staged/scanned at all, so the
     # fixture MUST use this exact name for the canary collision to actually
     # reach staged (and later restic-restored) material.
-    Set-Content -Path (Join-Path $r4PosFixtureRepoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md') -Value "Fixture doc quoting: $CanonicalLocalPaperDbUrlForCanaryTest" -Encoding UTF8
+    Set-Content -Path (Join-Path $r4PosFixtureRepoRoot 'MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md') -Value "Fixture doc quoting: $CanonicalLocalPaperDbUrlForCanaryTest" -Encoding UTF8
     & git -C $r4PosFixtureRepoRoot init -q 2>&1 | Out-Null
-    & git -C $r4PosFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore config MiniQuantDesk_Master_Patch_Ledger_v2_updated.md 2>&1 | Out-Null
+    & git -C $r4PosFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore config MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md 2>&1 | Out-Null
     & git -C $r4PosFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' commit -q -m 'fixture' 2>&1 | Out-Null
 
     $r4PosResticRepoDir = Join-Path $r4PosRoot 'restic_repo'
@@ -470,9 +470,9 @@ if (-not $resticCmd) {
     New-Item -ItemType Directory -Force -Path (Join-Path $r4NegFixtureRepoRoot 'config') | Out-Null
     Set-Content -Path (Join-Path $r4NegFixtureRepoRoot '.gitignore') -Value '.env.local' -Encoding UTF8
     Set-Content -Path (Join-Path $r4NegFixtureRepoRoot 'config\fixture.json') -Value '{"fixture": true}' -Encoding UTF8
-    Set-Content -Path (Join-Path $r4NegFixtureRepoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md') -Value "Fixture doc quoting: $r4NegValue" -Encoding UTF8
+    Set-Content -Path (Join-Path $r4NegFixtureRepoRoot 'MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md') -Value "Fixture doc quoting: $r4NegValue" -Encoding UTF8
     & git -C $r4NegFixtureRepoRoot init -q 2>&1 | Out-Null
-    & git -C $r4NegFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore config MiniQuantDesk_Master_Patch_Ledger_v2_updated.md 2>&1 | Out-Null
+    & git -C $r4NegFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore config MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md 2>&1 | Out-Null
     & git -C $r4NegFixtureRepoRoot -c user.email='test@example.com' -c user.name='test' commit -q -m 'fixture' 2>&1 | Out-Null
 
     $r4NegResticRepoDir = Join-Path $r4NegRoot 'restic_repo'

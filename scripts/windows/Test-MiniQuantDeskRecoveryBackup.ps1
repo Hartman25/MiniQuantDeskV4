@@ -433,9 +433,9 @@ function New-CanaryFixtureRepo {
     $repoRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_canary_fixture_" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $repoRoot | Out-Null
     Set-Content -Path (Join-Path $repoRoot '.gitignore') -Value '.env.local' -Encoding UTF8
-    Set-Content -Path (Join-Path $repoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md') -Value "Fixture doc quoting: $LedgerValue" -Encoding UTF8
+    Set-Content -Path (Join-Path $repoRoot 'MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md') -Value "Fixture doc quoting: $LedgerValue" -Encoding UTF8
     & git -C $repoRoot init -q 2>&1 | Out-Null
-    & git -C $repoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore MiniQuantDesk_Master_Patch_Ledger_v2_updated.md 2>&1 | Out-Null
+    & git -C $repoRoot -c user.email='test@example.com' -c user.name='test' add .gitignore MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md 2>&1 | Out-Null
     & git -C $repoRoot -c user.email='test@example.com' -c user.name='test' commit -q -m 'fixture' 2>&1 | Out-Null
     Set-Content -Path (Join-Path $repoRoot '.env.local') -Value "$EnvVarName=$EnvValue" -Encoding UTF8
     return $repoRoot

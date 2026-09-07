@@ -330,7 +330,7 @@ New-Item -ItemType Directory -Force -Path $safeDestRoot | Out-Null
 $safeCopied = 0
 
 $namedFiles = @(
-    'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md',
+    'MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md',
     'docs\research\Research_Backtest_V1_Closeout_Audit.md'
 )
 foreach ($rel in $namedFiles) {

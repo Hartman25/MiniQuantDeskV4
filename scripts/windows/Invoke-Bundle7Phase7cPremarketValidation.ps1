@@ -351,7 +351,6 @@ function Test-HeadEqualsAcceptedSha {
 function Test-TrackedWorktreeClean {
     Write-Step 'Tracked worktree clean (only protected untracked paths)'
     $AllowedUntracked = @(
-        'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md',
         'smoke_logs/'
     )
     try {

@@ -201,12 +201,11 @@ if (-not $ForbiddenDb) {
 # G14 -- no approved_for_live=true / live-routing authority introduced.
 #
 # Source-candidate rule (PREMARKET-GUARD-UNTRACKED-EVIDENCE-SCOPE-01): this
-# guard must never scan operator evidence (smoke_logs/, exports/, the
-# untracked updated-ledger doc) or the script_guards tests themselves --
-# only paths that can actually introduce runtime/startup/config authority
-# are eligible for full-content scanning. Tracked added lines (git diff
-# HEAD) are still checked, but scoped through the same predicate so that
-# guard-script comments describing the forbidden pattern don't false-trip.
+# guard must never scan operator evidence (smoke_logs/, exports/) or the
+# script_guards tests themselves. The canonical master is tracked operational
+# authority and is therefore NOT excluded from source-candidate evaluation.
+# Tracked added lines (git diff HEAD) are checked through this same predicate
+# so guard-script comments describing the forbidden pattern do not false-trip.
 function Test-IsGuardSourceCandidate([string]$RelPath) {
     $p = $RelPath -replace '\\', '/'
 
@@ -215,7 +214,6 @@ function Test-IsGuardSourceCandidate([string]$RelPath) {
     # they contain.
     if ($p -match '^smoke_logs/' -or
         $p -match '^exports/' -or
-        $p -eq 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md' -or
         $p -match '^tests/script_guards/') {
         return $false
     }
@@ -231,8 +229,8 @@ function Test-IsGuardSourceCandidate([string]$RelPath) {
         return $true
     }
 
-    # Narrowly justified root configuration files.
-    if ($p -match '^(Cargo\.toml|Cargo\.lock|docker-compose\.ya?ml)$') {
+    # Narrowly justified root configuration/authority files.
+    if ($p -match '^(Cargo\.toml|Cargo\.lock|docker-compose\.ya?ml|MiniQuantDeskV4_Master_Program_Plan_and_Ledger\.md)$') {
         return $true
     }
 
