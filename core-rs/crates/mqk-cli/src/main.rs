@@ -59,7 +59,13 @@ enum Commands {
         paths: Vec<String>,
     },
 
-    /// Run lifecycle commands
+    /// Run lifecycle commands. CLI-RUNCMD-DOC-DISAMBIGUATION-01: every
+    /// subcommand here (`start`/`arm`/`begin`/`stop`/`halt`/...) connects
+    /// directly to the DB and mutates only the generic `runs` table row's
+    /// bookkeeping status — this is NOT the live daemon control plane and
+    /// none of these commands stop, halt, or otherwise affect a running
+    /// daemon process. For live-process control (arm/disarm/halt/clear-halt
+    /// against the actual running daemon), use `mqk daemon <cmd>` instead.
     Run {
         #[command(subcommand)]
         cmd: RunCmd,
@@ -1227,7 +1233,10 @@ enum RunCmd {
         run_id: String,
     },
 
-    /// Halt a run (ANY -> HALTED)
+    /// Halt a run's DB row (ANY -> HALTED). This does NOT halt a live daemon
+    /// process or stop order dispatch — it only marks this `runs` row
+    /// halted. During an incident, use `mqk daemon halt` (kill-switch) to
+    /// actually halt the running daemon.
     Halt {
         /// Run id
         #[arg(long)]
