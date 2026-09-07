@@ -485,49 +485,192 @@ pub(crate) async fn autonomous_daily_operation_retry(
         }
     }
 
-    // §23: current canonical identity must still match this exact operation.
+    // §23 onward: identity match, fresh readiness re-check, durable CAS
+    // transition — extracted into `attempt_manual_intervention_recovery`
+    // (AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 PATCH 2) so the automatic
+    // coordinator-tick path reuses this exact implementation rather than a
+    // second one. This route's own eligibility check above
+    // (`ManualRetryEligibility`) has already run; the shared function
+    // performs no reason-code classification of its own.
+    let previous_reason_code = operation.state_reason_code.clone();
+    let outcome = attempt_manual_intervention_recovery(
+        &st,
+        &pool,
+        &operation,
+        now_utc,
+        "operator_retry_after_preflight_repair: operator-initiated recovery from \
+         manual_intervention_required after preflight/readiness repair; canonical \
+         coordinator pipeline re-entered at preparing_data",
+    )
+    .await;
+
+    match outcome {
+        ManualInterventionRecoveryOutcome::ConfigUnresolved => (
+            StatusCode::CONFLICT,
+            Json(refusal_response(
+                &operation,
+                "still_blocked",
+                "current assignment configuration could not be resolved",
+            )),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::RuntimeContextUnresolved => (
+            StatusCode::CONFLICT,
+            Json(refusal_response(
+                &operation,
+                "still_blocked",
+                "current runtime binding could not be resolved",
+            )),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::SessionPlanNotApplicable => (
+            StatusCode::CONFLICT,
+            Json(refusal_response(
+                &operation,
+                "still_blocked",
+                "current calendar/session-plan resolution is not applicable",
+            )),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::IdentityMismatch => (
+            StatusCode::CONFLICT,
+            Json(refusal_response(
+                &operation,
+                "not_recoverable",
+                "operation identity no longer matches current canonical configuration",
+            )),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::StillBlocked => (
+            StatusCode::CONFLICT,
+            Json(refusal_response(
+                &operation,
+                "still_blocked",
+                "canonical daily-data-readiness evaluation is still blocked",
+            )),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::Recovered(updated) => {
+            let mut resp = base_response(updated.operation_id, "recovered");
+            resp.previous_state = Some(STATE_MANUAL_INTERVENTION_REQUIRED.to_string());
+            resp.new_state = Some(updated.state.clone());
+            resp.previous_reason_code = previous_reason_code;
+            resp.message = Some(
+                "operation re-entered the canonical coordinator pipeline at preparing_data"
+                    .to_string(),
+            );
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        ManualInterventionRecoveryOutcome::AlreadyApplied(updated) => (
+            StatusCode::OK,
+            Json(refusal_response(&updated, "already_recovered", "idempotent replay")),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::StaleState => (
+            StatusCode::CONFLICT,
+            Json(base_response(operation.operation_id, "conflict")),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(base_response(operation.operation_id, "not_found")),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::IllegalTransition => (
+            StatusCode::CONFLICT,
+            Json(refusal_response(
+                &operation,
+                "not_recoverable",
+                "manual_intervention_required -> preparing_data is not a legal transition \
+                 from this operation's current durable state",
+            )),
+        )
+            .into_response(),
+        ManualInterventionRecoveryOutcome::BackendUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(base_response(operation.operation_id, "backend_unavailable")),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 PATCH 2: shared recovery core
+// ---------------------------------------------------------------------------
+
+/// Outcome of attempting the canonical `manual_intervention_required ->
+/// preparing_data` recovery transition for one operation. Shared by both
+/// this route and the automatic coordinator-tick path
+/// (`state::autonomous_daily_coordinator`'s `STATE_MANUAL_INTERVENTION_
+/// REQUIRED` arm) so there is exactly one implementation of the §23 identity
+/// check, the §15/§17 fresh readiness re-evaluation, and the §18-21 durable
+/// CAS transition.
+#[derive(Debug)]
+pub(crate) enum ManualInterventionRecoveryOutcome {
+    /// §18/§19/§20: the CAS transition was applied. Carries the updated row.
+    Recovered(Box<AutonomousDailyOperationRecord>),
+    /// §23: current canonical operation identity no longer matches this
+    /// operation row (assignment/binding/config drifted since it entered
+    /// `manual_intervention_required`).
+    IdentityMismatch,
+    /// Current assignment configuration could not be resolved from env.
+    ConfigUnresolved,
+    /// Current runtime binding could not be resolved.
+    RuntimeContextUnresolved,
+    /// Current calendar/session-plan resolution is not applicable (e.g. a
+    /// non-trading day).
+    SessionPlanNotApplicable,
+    /// §15/§17: the fresh canonical readiness re-evaluation is still
+    /// blocked — the most common outcome for an automatic recovery attempt
+    /// whose data has not actually been repaired yet.
+    StillBlocked,
+    /// The CAS transition was already applied by a prior call (idempotent
+    /// replay proof, not a fabricated success).
+    AlreadyApplied(Box<AutonomousDailyOperationRecord>),
+    /// The CAS transition's expected `(state, state_version)` no longer
+    /// matched the durable row (concurrent modification).
+    StaleState,
+    NotFound,
+    /// `manual_intervention_required -> preparing_data` is not a legal
+    /// transition from this row's current durable state (defense in depth;
+    /// `mqk_db::is_legal_operation_transition` is the actual authority).
+    IllegalTransition,
+    BackendUnavailable,
+}
+
+/// Attempt the canonical `manual_intervention_required -> preparing_data`
+/// recovery transition for `operation`. Callers MUST have already performed
+/// their own eligibility classification of `operation.state_reason_code` —
+/// this function performs no reason-code classification itself. The
+/// operator HTTP route (broad `ManualRetryEligibility::RecoverablePreflight`)
+/// and the automatic coordinator-tick path (narrow, PATCH-1's
+/// `daily_data_readiness::DailyDataReadinessReasonClass::DataRepairable`
+/// only) intentionally use two different, independently-scoped closed sets
+/// — see each caller's own eligibility check.
+///
+/// Never calls `start_execution_runtime` / `try_autonomous_arm_typed` / any
+/// start or arm seam, never clears halt/kill-switch/reconcile state, never
+/// submits an order — identical to what this route always did, just
+/// extracted so there is exactly one implementation.
+pub(crate) async fn attempt_manual_intervention_recovery(
+    st: &Arc<AppState>,
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    now_utc: chrono::DateTime<chrono::Utc>,
+    bounded_detail: &str,
+) -> ManualInterventionRecoveryOutcome {
     let config = match crate::state::build_multi_symbol_runtime_config_from_env() {
         Ok(config) => config,
-        Err(_) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(refusal_response(
-                    &operation,
-                    "still_blocked",
-                    "current assignment configuration could not be resolved",
-                )),
-            )
-                .into_response();
-        }
+        Err(_) => return ManualInterventionRecoveryOutcome::ConfigUnresolved,
     };
-    let runtime_context = match resolve_autonomous_runtime_context(&st).await {
+    let runtime_context = match resolve_autonomous_runtime_context(st).await {
         Ok(ctx) => ctx,
-        Err(_) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(refusal_response(
-                    &operation,
-                    "still_blocked",
-                    "current runtime binding could not be resolved",
-                )),
-            )
-                .into_response();
-        }
+        Err(_) => return ManualInterventionRecoveryOutcome::RuntimeContextUnresolved,
     };
     let timing = AutonomousDailyPlanTiming::production_default();
     let plan = match resolve_autonomous_daily_session_plan_from_env(now_utc, &timing) {
         AutonomousDailySessionPlanResolution::Applicable(plan) => plan,
-        _ => {
-            return (
-                StatusCode::CONFLICT,
-                Json(refusal_response(
-                    &operation,
-                    "still_blocked",
-                    "current calendar/session-plan resolution is not applicable",
-                )),
-            )
-                .into_response();
-        }
+        _ => return ManualInterventionRecoveryOutcome::SessionPlanNotApplicable,
     };
     let deployment_mode = st.deployment_mode().as_db_mode();
     let adapter_id = st.adapter_id().to_string();
@@ -542,22 +685,14 @@ pub(crate) async fn autonomous_daily_operation_retry(
         &runtime_binding_identity,
     );
     if current_operation_id != operation.operation_id {
-        return (
-            StatusCode::CONFLICT,
-            Json(refusal_response(
-                &operation,
-                "not_recoverable",
-                "operation identity no longer matches current canonical configuration",
-            )),
-        )
-            .into_response();
+        return ManualInterventionRecoveryOutcome::IdentityMismatch;
     }
 
     // §15/§17: re-run the canonical read-only readiness evaluation — never a
     // watered-down duplicate.
     let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
     let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
-        Some(&pool),
+        Some(pool),
         &config,
         &runtime_context.effective_runtime_binding,
         &readiness_context,
@@ -565,22 +700,13 @@ pub(crate) async fn autonomous_daily_operation_retry(
     )
     .await;
     if !report.start_allowed {
-        return (
-            StatusCode::CONFLICT,
-            Json(refusal_response(
-                &operation,
-                "still_blocked",
-                "canonical daily-data-readiness evaluation is still blocked",
-            )),
-        )
-            .into_response();
+        return ManualInterventionRecoveryOutcome::StillBlocked;
     }
 
     // §18/§19/§20/§21: canonical durable CAS transition,
     // manual_intervention_required -> preparing_data only. Never
     // `apply_transition` here — that helper bails via `anyhow` on a stale
-    // CAS, which this route must instead map to a bounded `409 conflict`.
-    let previous_reason_code = operation.state_reason_code.clone();
+    // CAS, which callers must instead map to a bounded conflict.
     let args = TransitionAutonomousDailyOperationArgs {
         operation_id: operation.operation_id,
         expected_state: operation.state.clone(),
@@ -590,68 +716,39 @@ pub(crate) async fn autonomous_daily_operation_retry(
         blocker_signature: None,
         occurred_at_utc: now_utc,
         run_id: None,
-        bounded_detail: "operator_retry_after_preflight_repair: operator-initiated recovery \
-            from manual_intervention_required after preflight/readiness repair; canonical \
-            coordinator pipeline re-entered at preparing_data"
-            .to_string(),
+        bounded_detail: bounded_detail.to_string(),
     };
-    match mqk_db::transition_autonomous_daily_operation(&pool, &args).await {
+    match mqk_db::transition_autonomous_daily_operation(pool, &args).await {
         Ok(AutonomousDailyTransitionOutcome::Applied(updated)) => {
             // Best-effort: clears any stale `next_retry_utc`/`last_error` so
             // a later coordinator tick's `attempt_canonical_start` retry-
             // timing gate cannot reject on stale state. Never touches
             // `state`/`state_version`, so its own failure cannot desync the
             // CAS transition that already committed above.
-            if let Err(err) =
-                mqk_db::clear_retry_timing(&pool, operation.operation_id, now_utc).await
+            if let Err(err) = mqk_db::clear_retry_timing(pool, operation.operation_id, now_utc).await
             {
                 tracing::warn!(
-                    "autonomous_daily_operation_retry: clear_retry_timing failed after \
+                    "attempt_manual_intervention_recovery: clear_retry_timing failed after \
                      successful transition (non-fatal): {err}"
                 );
             }
-            let mut resp = base_response(updated.operation_id, "recovered");
-            resp.previous_state = Some(STATE_MANUAL_INTERVENTION_REQUIRED.to_string());
-            resp.new_state = Some(updated.state.clone());
-            resp.previous_reason_code = previous_reason_code;
-            resp.message = Some(
-                "operation re-entered the canonical coordinator pipeline at preparing_data"
-                    .to_string(),
-            );
-            (StatusCode::OK, Json(resp)).into_response()
+            ManualInterventionRecoveryOutcome::Recovered(Box::new(updated))
         }
-        Ok(AutonomousDailyTransitionOutcome::AlreadyApplied(updated)) => (
-            StatusCode::OK,
-            Json(refusal_response(&updated, "already_recovered", "idempotent replay")),
-        )
-            .into_response(),
-        Ok(AutonomousDailyTransitionOutcome::StaleState { .. }) => (
-            StatusCode::CONFLICT,
-            Json(base_response(operation.operation_id, "conflict")),
-        )
-            .into_response(),
-        Ok(AutonomousDailyTransitionOutcome::NotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(base_response(operation.operation_id, "not_found")),
-        )
-            .into_response(),
-        Ok(AutonomousDailyTransitionOutcome::IllegalTransition) => (
-            StatusCode::CONFLICT,
-            Json(refusal_response(
-                &operation,
-                "not_recoverable",
-                "manual_intervention_required -> preparing_data is not a legal transition \
-                 from this operation's current durable state",
-            )),
-        )
-            .into_response(),
+        Ok(AutonomousDailyTransitionOutcome::AlreadyApplied(updated)) => {
+            ManualInterventionRecoveryOutcome::AlreadyApplied(Box::new(updated))
+        }
+        Ok(AutonomousDailyTransitionOutcome::StaleState { .. }) => {
+            ManualInterventionRecoveryOutcome::StaleState
+        }
+        Ok(AutonomousDailyTransitionOutcome::NotFound) => {
+            ManualInterventionRecoveryOutcome::NotFound
+        }
+        Ok(AutonomousDailyTransitionOutcome::IllegalTransition) => {
+            ManualInterventionRecoveryOutcome::IllegalTransition
+        }
         Err(err) => {
-            tracing::error!("autonomous_daily_operation_retry: transition failed: {err}");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(base_response(operation.operation_id, "backend_unavailable")),
-            )
-                .into_response()
+            tracing::error!("attempt_manual_intervention_recovery: transition failed: {err}");
+            ManualInterventionRecoveryOutcome::BackendUnavailable
         }
     }
 }

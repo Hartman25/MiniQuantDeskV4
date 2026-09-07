@@ -2017,12 +2017,94 @@ pub async fn dispatch_by_state(
                 .state_reason_code
                 .as_deref()
                 .unwrap_or("manual_intervention_required");
-            Ok(
-                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                    reason_code: bounded_static_reason(reason_code),
-                    newly_applied: false,
-                },
-            )
+
+            // AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 PATCH 2: automatic
+            // recovery attempt, gated strictly by PATCH 1's typed
+            // `DailyDataReadinessReasonClass` authority -- narrower than the
+            // operator HTTP route's own `ManualRetryEligibility::
+            // RecoverablePreflight` set (which also accepts binding/config
+            // reasons only a human operator can judge fixed). Automatic
+            // recovery may only ever fire for a reason the required-
+            // universe autofresh controller itself could plausibly have
+            // just repaired by fetching more provider data -- never a
+            // registry/binding/provenance/config reason, and never an
+            // unrecognized one (fails closed to no-op, same sticky
+            // projection as before this patch).
+            let is_data_repairable = crate::daily_data_readiness::classify_reason_str(reason_code)
+                == crate::daily_data_readiness::DailyDataReadinessReasonClass::DataRepairable;
+
+            let mut recovered = false;
+            if is_data_repairable
+                && operation.deployment_mode.eq_ignore_ascii_case("PAPER")
+                && now_utc < operation.effective_operation_close_utc
+            {
+                // Same prestart-activity safety gate the operator route
+                // uses (reused verbatim, not duplicated) -- never attempt
+                // automatic recovery once any runtime/economic activity is
+                // attached to this operation.
+                let prestart_safe =
+                    crate::routes::autonomous_daily_operator::check_prestart_retry_safety(
+                        pool, &operation,
+                    )
+                    .await
+                    .unwrap_or(
+                        crate::routes::autonomous_daily_operator::PrestartRetrySafety::UnsafeActivity,
+                    );
+
+                if prestart_safe
+                    == crate::routes::autonomous_daily_operator::PrestartRetrySafety::Safe
+                {
+                    // Reuses the exact same identity-check / fresh-
+                    // readiness-recheck / durable-CAS-transition
+                    // implementation the operator route uses -- no second
+                    // retry implementation. `report.start_allowed` inside it
+                    // is what actually proves "readiness has become
+                    // genuinely ready", not this arm's own judgment.
+                    let outcome = crate::routes::autonomous_daily_operator::attempt_manual_intervention_recovery(
+                        state,
+                        pool,
+                        &operation,
+                        now_utc,
+                        "automatic_data_blocker_recovery: coordinator-initiated recovery from \
+                         manual_intervention_required after the required-universe autofresh \
+                         controller's own typed data-repairable classification and a fresh \
+                         readiness re-check both passed; canonical coordinator pipeline \
+                         re-entered at preparing_data",
+                    )
+                    .await;
+
+                    if matches!(
+                        outcome,
+                        crate::routes::autonomous_daily_operator::ManualInterventionRecoveryOutcome::Recovered(_)
+                    ) {
+                        recovered = true;
+                    }
+                    // Every other outcome (StillBlocked, IdentityMismatch,
+                    // AlreadyApplied, StaleState, transient backend
+                    // failure, ...) falls through to the unchanged sticky
+                    // projection below -- no mutation occurred on any of
+                    // those branches, so there is nothing to reconcile.
+                    // Bounded/idempotent: the CAS transition only ever
+                    // succeeds once per manual_intervention_required
+                    // episode (the moment it does, this arm is no longer
+                    // reached on the next tick because the durable state
+                    // itself has changed); every other branch here is a
+                    // pure read, so repeated coordinator ticks while still
+                    // genuinely blocked never produce more than one durable
+                    // mutation.
+                }
+            }
+
+            if recovered {
+                Ok(AutonomousDailyCoordinatorTickOutcome::PreparingData)
+            } else {
+                Ok(
+                    AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                        reason_code: bounded_static_reason(reason_code),
+                        newly_applied: false,
+                    },
+                )
+            }
         }
         mqk_db::STATE_CALENDAR_UNAVAILABLE => {
             Ok(AutonomousDailyCoordinatorTickOutcome::CalendarBlocked {
