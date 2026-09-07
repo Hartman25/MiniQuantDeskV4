@@ -989,15 +989,16 @@ git diff --check
 
 #### DEPLOYMENT-DECISION-DOC-01 — Document the no-container deployment decision
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Documentation / Config
-**Current Source Truth:** No Docker/docker-compose files exist anywhere in the repo. This may be intentional (single-operator desktop app via the Tauri GUI shell) but is currently undocumented as a decision.
-**Problem:** Ambiguous whether the absence is a gap or a deliberate choice.
+**Status:** CLOSED — decision documented (`POST-WAVE06-LEDGER-BURN-01` W1-15, 2026-09-06) · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Documentation / Config
+**Resolution (W1-15):** Confirmed via `find`/`grep` that no Dockerfile/docker-compose file exists anywhere in the repo for the application itself, while `docker` IS referenced throughout `scripts/windows/*.ps1` (11 files) purely as the mechanism running the local Postgres data-layer dependency (`mqk-paper-postgres`/`mqk-test-postgres` containers) — a distinct fact worth stating explicitly so a future reader doesn't mistake "no Dockerfile" for "no Docker usage at all." New `docs/DEPLOYMENT.md` records the decision (local, directly-run native processes on a single operator's Windows machine — no container packaging for `mqk-daemon`/`mqk-cli`/the Tauri GUI), its rationale (single-operator desktop app, Windows-first per `CI-PLATFORM-01`, direct process/filesystem control load-bearing for the deadman-file/halt/kill-switch safety mechanisms, no current multi-host/cloud requirement), the Postgres-via-Docker exception explained above, and explicit boundaries (does not authorize building a Dockerfile; a future reversal is a separate, explicitly-requested patch). No Dockerfile/compose infrastructure was built, per this row's own out-of-scope boundary.
+**Original entry (retained for history):** No Docker/docker-compose files exist anywhere in the repo. This may be intentional (single-operator desktop app via the Tauri GUI shell) but is currently undocumented as a decision.
+**Problem (original, resolved above):** Ambiguous whether the absence is a gap or a deliberate choice.
 **In Scope:** Add `docs/DEPLOYMENT.md` stating the decision and rationale (local-process-only, no container path) explicitly. **Out of Scope:** Building an actual Dockerfile (that would be a separate, larger, explicitly-requested patch if the decision is later reversed).
-**Likely Files:** `docs/DEPLOYMENT.md` (new).
-**Required Validation:** None.
-**Acceptance Criteria:** Doc exists and states the decision unambiguously.
-**Exact CLOSED End State:** CLOSED when committed.
-**Acceptance History:** PENDING / PENDING / PENDING / PENDING.
+**Likely Files:** `docs/DEPLOYMENT.md` (new). — **DONE.**
+**Required Validation:** None. — **N/A.**
+**Acceptance Criteria:** Doc exists and states the decision unambiguously. — **MET.**
+**Exact CLOSED End State:** CLOSED when committed. — **MET.**
+**Acceptance History:** Doc written: DONE / Docker-usage exception documented: DONE.
 
 #### DOCS-TRACKER-RETIREMENT-01 — Finish retiring redundant historical tracker documents
 
