@@ -11,7 +11,7 @@
 # architectural mode now, but this patch NEVER starts a live daemon
 # process, submits an order, or mutates a live account. Live mode only runs
 # read-only / source-guard preflight checks and reports the actual blocker
-# list from MiniQuantDesk_Master_Patch_Ledger_v2_updated.md).
+# list from MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md).
 #
 # This script does not implement Windows Task Scheduler registration and
 # does not make live capital ready. It does not change any Rust trading
@@ -518,18 +518,115 @@ function Get-LedgerPatchStatus {
         [Parameter(Mandatory = $true)][string]$LedgerPath,
         [Parameter(Mandatory = $true)][string]$PatchId
     )
-    if (-not (Test-Path $LedgerPath)) { return 'LEDGER_NOT_FOUND' }
-    $lines = Get-Content -Path $LedgerPath
+
+    # MASTER-TRACKER-MIGRATION-01 / MT-01A:
+    # Current automation authority comes ONLY from the explicitly
+    # bounded machine-readable status index in the canonical master.
+    # Historical mentions elsewhere must never influence current
+    # operational status.
+    if (-not (Test-Path -LiteralPath $LedgerPath -PathType Leaf)) {
+        return 'LEDGER_NOT_FOUND'
+    }
+
+    try {
+        $resolvedPath = (Resolve-Path -LiteralPath $LedgerPath -ErrorAction Stop).Path
+        $lines = [System.IO.File]::ReadAllLines(
+            $resolvedPath,
+            [System.Text.Encoding]::UTF8
+        )
+    } catch {
+        return 'LEDGER_READ_FAILED'
+    }
+
+    $beginSentinel = '<!-- BEGIN MQK_CURRENT_PATCH_STATUS -->'
+    $endSentinel   = '<!-- END MQK_CURRENT_PATCH_STATUS -->'
+
+    $beginIndexes = @()
+    $endIndexes = @()
+
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match [regex]::Escape($PatchId)) {
-            for ($j = $i; $j -lt [Math]::Min($i + 6, $lines.Count); $j++) {
-                if ($lines[$j] -match '\*\*Status:\*\*\s*([A-Z_]+)') {
-                    return $Matches[1]
-                }
-            }
+        $trimmed = $lines[$i].Trim()
+
+        if ($trimmed -ceq $beginSentinel) {
+            $beginIndexes += $i
+        }
+
+        if ($trimmed -ceq $endSentinel) {
+            $endIndexes += $i
         }
     }
-    return 'NOT_FOUND_IN_LEDGER'
+
+    if ($beginIndexes.Count -ne 1 -or $endIndexes.Count -ne 1) {
+        return 'STATUS_INDEX_INVALID_SENTINELS'
+    }
+
+    $beginIndex = $beginIndexes[0]
+    $endIndex = $endIndexes[0]
+
+    if ($beginIndex -ge $endIndex) {
+        return 'STATUS_INDEX_INVALID_SENTINELS'
+    }
+
+    $entries = @()
+
+    for ($i = $beginIndex + 1; $i -lt $endIndex; $i++) {
+        $line = $lines[$i].Trim()
+
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        $match = [regex]::Match(
+            $line,
+            '^(?<id>[A-Z0-9][A-Z0-9_-]*)\s*=\s*(?<status>[A-Z][A-Z0-9_]*)$',
+            [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+        )
+
+        if (-not $match.Success) {
+            return 'STATUS_INDEX_MALFORMED_ROW'
+        }
+
+        $id = $match.Groups['id'].Value
+        $status = $match.Groups['status'].Value
+
+        $duplicate = $false
+
+        foreach ($entry in $entries) {
+            if ($entry.Id -ceq $id) {
+                $duplicate = $true
+                break
+            }
+        }
+
+        if ($duplicate) {
+            return 'STATUS_INDEX_DUPLICATE_PATCH_ID'
+        }
+
+        $entries += [pscustomobject]@{
+            Id = $id
+            Status = $status
+        }
+    }
+
+    $foundStatus = $null
+    $foundCount = 0
+
+    foreach ($entry in $entries) {
+        if ($entry.Id -ceq $PatchId) {
+            $foundStatus = $entry.Status
+            $foundCount++
+        }
+    }
+
+    if ($foundCount -eq 0) {
+        return 'NOT_FOUND_IN_STATUS_INDEX'
+    }
+
+    if ($foundCount -ne 1) {
+        return 'STATUS_INDEX_DUPLICATE_PATCH_ID'
+    }
+
+    return [string]$foundStatus
 }
 
 function Test-LiveEnvironment {
@@ -548,40 +645,77 @@ function Test-LiveEnvironment {
 
 function Test-LiveBrokerTruth {
     param([Parameter(Mandatory = $true)][string]$LedgerPath)
-    $status = Get-LedgerPatchStatus -LedgerPath $LedgerPath -PatchId 'LIVE-SECRETS-CONSOLIDATION-01'
+
+    $status = Get-LedgerPatchStatus `
+        -LedgerPath $LedgerPath `
+        -PatchId 'LIVE-SECRETS-CONSOLIDATION-01'
+
     $pass = $status -eq 'CLOSED'
+
+    if ($pass) {
+        $detail = "LIVE-SECRETS-CONSOLIDATION-01 current-status index status=$status."
+    }
+    else {
+        $detail = "LIVE-SECRETS-CONSOLIDATION-01 current-status index status=$status; CLOSED is required for live broker-configuration readiness."
+    }
+
     return [pscustomobject]@{
         Name     = 'broker configuration'
         Status   = $(if ($pass) { 'PASS' } else { 'BLOCKED' })
-        Detail   = "LIVE-SECRETS-CONSOLIDATION-01 ledger status=$status (live secret resolution not yet routed through mqk_config::secrets; live endpoint is hardcoded to https://api.alpaca.markets)."
+        Detail   = $detail
         PatchIds = @('LIVE-SECRETS-CONSOLIDATION-01')
     }
 }
-
 function Test-LiveAccountTruth {
     param([Parameter(Mandatory = $true)][string]$LedgerPath)
-    $status = Get-LedgerPatchStatus -LedgerPath $LedgerPath -PatchId 'LIVE-ACCOUNT-TRUTH-01'
+
+    $status = Get-LedgerPatchStatus `
+        -LedgerPath $LedgerPath `
+        -PatchId 'LIVE-ACCOUNT-TRUTH-01'
+
     $pass = $status -eq 'CLOSED'
+
+    if ($pass) {
+        $detail = "LIVE-ACCOUNT-TRUTH-01 current-status index status=$status."
+    }
+    else {
+        $detail = "LIVE-ACCOUNT-TRUTH-01 current-status index status=$status; CLOSED is required for live account-truth readiness."
+    }
+
     return [pscustomobject]@{
         Name     = 'account truth'
         Status   = $(if ($pass) { 'PASS' } else { 'BLOCKED' })
-        Detail   = "LIVE-ACCOUNT-TRUTH-01 ledger status=$status (buying_power aliasing to cash at routes/portfolio.rs:440 not yet fixed)."
+        Detail   = $detail
         PatchIds = @('LIVE-ACCOUNT-TRUTH-01')
     }
 }
-
 function Test-LiveReconciliation {
     param([Parameter(Mandatory = $true)][string]$LedgerPath)
-    $status = Get-LedgerPatchStatus -LedgerPath $LedgerPath -PatchId 'LIVE-TINY-CAPITAL-SMOKE-01'
-    $pass = $status -eq 'CLOSED'
+
+    $status = Get-LedgerPatchStatus `
+        -LedgerPath $LedgerPath `
+        -PatchId 'LIVE-TINY-CAPITAL-SMOKE-01'
+
+    if ($status -eq 'CLOSED') {
+        $resultStatus = 'PASS'
+        $detail = "LIVE-TINY-CAPITAL-SMOKE-01 current-status index status=$status."
+    }
+    elseif ($status -eq 'IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED') {
+        $resultStatus = 'BLOCKED_OPERATOR_VALIDATION_DEFERRED'
+        $detail = 'LIVE-TINY-CAPITAL-SMOKE-01 engineering is accepted; real operational LiveShadow validation remains NOT RUN.'
+    }
+    else {
+        $resultStatus = 'BLOCKED'
+        $detail = "LIVE-TINY-CAPITAL-SMOKE-01 current-status index status=$status; CLOSED is required for live reconciliation readiness."
+    }
+
     return [pscustomobject]@{
         Name     = 'reconciliation'
-        Status   = $(if ($pass) { 'PASS' } else { 'BLOCKED_NOT_IMPLEMENTED' })
-        Detail   = "No live-capital smoke/reconciliation automation exists in scripts/ yet. LIVE-TINY-CAPITAL-SMOKE-01 ledger status=$status."
+        Status   = $resultStatus
+        Detail   = $detail
         PatchIds = @('LIVE-TINY-CAPITAL-SMOKE-01')
     }
 }
-
 function Test-LiveRisk {
     param([Parameter(Mandatory = $true)][string]$LedgerPath)
     $status = Get-LedgerPatchStatus -LedgerPath $LedgerPath -PatchId 'LIVE-FLATTEN-PROOF-01'
@@ -638,7 +772,7 @@ function Invoke-LiveStartup {
         [Parameter(Mandatory = $true)][string]$LogPath
     )
 
-    $ledgerPath = Join-Path $RepoRoot 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md'
+    $ledgerPath = Join-Path $RepoRoot 'MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md'
 
     Write-Section 'LIVE readiness / preflight chain (read-only, source-guard-based)'
 
