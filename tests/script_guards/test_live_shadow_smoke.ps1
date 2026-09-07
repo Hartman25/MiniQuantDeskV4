@@ -17,17 +17,23 @@
 #           launcher's own process, never duplicated here)
 #   LSS05 — the script never references an order-submission/arm/halt route
 #           literal (no duplicated broker lifecycle implementation)
-#   LSS06 — the script delegates to Start-MiniQuantDesk.ps1 (the canonical
-#           launcher), not a hand-rolled daemon bootstrap
+#   LSS06 — the script delegates to Start-MiniQuantDesk.ps1 -Mode LiveShadow
+#           (the real daemon-bootstrap path, MQK-LEDGER-BURN-CONTROLLER-03
+#           A3A), not a hand-rolled daemon bootstrap
+#   LSS06b — never delegates to -Mode Live (LiveCapital) anywhere in this
+#           file's code
 #   LSS07 — CheckOnly is the default effective mode when no run switch is
 #           passed (fail-closed default)
 #   LSS08 — a real -CheckOnly invocation succeeds, produces the deterministic
-#           evidence layout, and performs zero real daemon/broker/order
-#           effects (checked via the manifest's own recorded booleans)
+#           evidence layout, and its manifest truthfully reports 'not_run'
+#           (never a fabricated boolean $false, A3B) for every observed-
+#           runtime-evidence field, separately from the always-$false
+#           wrapper-static-contract fields
 #
 # No live daemon, no broker call, no order, in any of the above -- LSS08's
-# real invocation only exercises Start-MiniQuantDesk.ps1 -Mode Live
-# -CheckOnly, which is itself documented read-only/report-only.
+# real invocation only exercises Start-MiniQuantDesk.ps1 -Mode LiveShadow
+# -CheckOnly, which is itself read-only/report-only by construction
+# (Invoke-LiveShadowCheckOnly).
 # =============================================================================
 
 $ErrorActionPreference = 'Stop'
@@ -96,11 +102,24 @@ if ($text) {
         Fail 'LSS05' "Found forbidden route/action literal(s): $($foundForbidden -join ', ')"
     }
 
-    # LSS06: delegates to the canonical launcher.
-    if ($text -match [regex]::Escape('Start-MiniQuantDesk.ps1') -and $text -match "-Mode.{0,20}Live") {
-        Pass 'LSS06' "Delegates to Start-MiniQuantDesk.ps1 -Mode Live"
+    # LSS06: delegates to the canonical launcher's real LiveShadow path
+    # (MQK-LEDGER-BURN-CONTROLLER-03 A3A/A3B) -- specifically 'LiveShadow',
+    # not merely a substring match that 'Live' alone would also satisfy
+    # against 'LiveShadow' or against the old '-Mode Live' (LiveCapital).
+    if ($text -match [regex]::Escape('Start-MiniQuantDesk.ps1') -and
+        $text -match "\`$launcherArgs\s*=\s*@\('-Mode',\s*'LiveShadow'\)") {
+        Pass 'LSS06' "Delegates to Start-MiniQuantDesk.ps1 -Mode LiveShadow (the real daemon-bootstrap path, not LiveCapital's read-only preflight)"
     } else {
-        Fail 'LSS06' "Does not appear to delegate to Start-MiniQuantDesk.ps1 -Mode Live"
+        Fail 'LSS06' "Does not appear to delegate to Start-MiniQuantDesk.ps1 -Mode LiveShadow"
+    }
+
+    # A3B: never delegates to -Mode Live (LiveCapital) IN CODE anywhere in
+    # this file (comments excluded -- this file's own header prose discusses
+    # the OLD, now-repaired '-Mode Live' delegation as history).
+    if ($codeText -notmatch "'-Mode',\s*'Live'\)") {
+        Pass 'LSS06b' "Never delegates to -Mode Live (LiveCapital) anywhere in this file's code"
+    } else {
+        Fail 'LSS06b' "Found a possible code delegation to -Mode Live (LiveCapital)"
     }
 
     # LSS07: CheckOnly is the default effective mode.
@@ -109,20 +128,46 @@ if ($text) {
     } else {
         Fail 'LSS07' "Could not confirm CheckOnly-by-default logic"
     }
+
+    # LSS09 (A3B): the full-run path contains no inherited LiveCapital
+    # typed-confirmation prompt -- Confirm-LiveIntent / 'Type LIVE' must
+    # never appear in this file's code, proving -IAcknowledgeLiveShadowOnly
+    # cannot end up blocked on (or masking) LiveCapital's interactive gate.
+    if ($codeText -notmatch 'Confirm-LiveIntent' -and $codeText -notmatch 'Type LIVE') {
+        Pass 'LSS09' "Full-run path contains no inherited LiveCapital 'Type LIVE' / Confirm-LiveIntent prompt"
+    } else {
+        Fail 'LSS09' "Found a possible inherited LiveCapital confirmation prompt reference"
+    }
+
+    # LSS10 (A3B): no secret env var value is ever interpolated directly
+    # into a Write-Host/Write-Ok/Write-Step/Write-Warn/Write-Fail call --
+    # only presence/absence framing (this file's own Assert-NotSecret guard
+    # plus this structural check together cover the "never prints a secret"
+    # invariant).
+    $secretInterpolation = [regex]::Matches($codeText, 'Write-(Host|Ok|Step|Warn|Fail)[^\r\n]*\$env:(ALPACA_API_(KEY|SECRET)_(LIVE|PAPER)|MQK_OPERATOR_TOKEN|DISCORD_WEBHOOK_URL|POSTGRES_PASSWORD|(MQK_)?DATABASE_URL)\b')
+    if ($secretInterpolation.Count -eq 0) {
+        Pass 'LSS10' "No secret env var value is interpolated into any Write-* call in this file's code"
+    } else {
+        Fail 'LSS10' "Found $($secretInterpolation.Count) possible secret-value interpolation(s) in a Write-* call"
+    }
 } else {
     Fail 'LSS02' "skipped -- target file missing"
     Fail 'LSS03' "skipped -- target file missing"
     Fail 'LSS04' "skipped -- target file missing"
     Fail 'LSS05' "skipped -- target file missing"
     Fail 'LSS06' "skipped -- target file missing"
+    Fail 'LSS06b' "skipped -- target file missing"
     Fail 'LSS07' "skipped -- target file missing"
+    Fail 'LSS09' "skipped -- target file missing"
+    Fail 'LSS10' "skipped -- target file missing"
 }
 
 # ---------------------------------------------------------------------------
 # LSS08: one real -CheckOnly invocation. Safe by construction (delegates
-# only to Start-MiniQuantDesk.ps1 -Mode Live -CheckOnly, documented
-# read-only/report-only) -- proves the evidence-capture plumbing actually
-# works end to end, not just that the source text looks right.
+# only to Start-MiniQuantDesk.ps1 -Mode LiveShadow -CheckOnly, read-only/
+# report-only by construction -- Invoke-LiveShadowCheckOnly) -- proves the
+# evidence-capture plumbing actually works end to end, not just that the
+# source text looks right.
 # ---------------------------------------------------------------------------
 if (Test-Path $Target) {
     try {
@@ -143,14 +188,25 @@ if (Test-Path $Target) {
                 Fail 'LSS08' "Evidence folder $($newestDir.FullName) has no manifest.json"
             } else {
                 $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+                # A3B: CheckOnly's observed-evidence fields are the string
+                # 'not_run' (this action category was never attempted) --
+                # not a boolean $false -- per the truth-repair rationale in
+                # Start-LiveShadowSmoke.ps1's own header. wrapper_direct_*
+                # are the separate, provable-by-construction static-contract
+                # booleans (always $false for this file, both CheckOnly and
+                # full run).
                 if ($manifest.check_only -eq $true -and
+                    $manifest.schema_version -eq 'live-shadow-smoke-manifest-v2' -and
                     $manifest.deployment_mode_forced -eq 'live-shadow' -and
-                    $manifest.real_daemon_start_performed -eq $false -and
-                    $manifest.real_broker_call_performed -eq $false -and
-                    $manifest.real_order_submitted -eq $false) {
-                    Pass 'LSS08' "Real -CheckOnly run (exit $exitCode) produced a manifest recording zero real daemon/broker/order effects"
+                    $manifest.canonical_launcher_mode -eq 'LiveShadow' -and
+                    $manifest.wrapper_direct_broker_call -eq $false -and
+                    $manifest.wrapper_direct_order_submission -eq $false -and
+                    $manifest.real_daemon_start_performed -eq 'not_run' -and
+                    $manifest.real_broker_call_performed -eq 'not_run' -and
+                    $manifest.real_order_submitted -eq 'not_run') {
+                    Pass 'LSS08' "Real -CheckOnly run (exit $exitCode) produced a manifest truthfully recording 'not_run' (never fabricated `$false) for every observed-evidence field, delegating to -Mode LiveShadow"
                 } else {
-                    Fail 'LSS08' "Manifest did not record the expected zero-effect fields: $($manifest | ConvertTo-Json -Compress)"
+                    Fail 'LSS08' "Manifest did not record the expected fields: $($manifest | ConvertTo-Json -Compress)"
                 }
             }
         }
