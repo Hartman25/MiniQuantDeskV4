@@ -1192,7 +1192,17 @@ enum RunCmd {
         config_paths: Vec<String>,
     },
 
-    /// Arm an existing run (CREATED/STOPPED -> ARMED)
+    /// [DEPRECATED — see `mqk daemon arm`] Arm an existing run's DB row
+    /// (CREATED/STOPPED -> ARMED). LIVE-CLI-ARM-RECONCILE-01: this connects
+    /// directly to the DB and mutates only the `runs.status` bookkeeping
+    /// column — it is a real, CAS-guarded mutation, but it is a separate,
+    /// pre-daemon-era authority from the daemon's own `IntegrityState`
+    /// (`mqk daemon arm`, the actual order-dispatch gate). Arming a run here
+    /// does NOT arm the daemon and cannot by itself enable order dispatch;
+    /// conversely a `runs` row can read `ARMED`/`RUNNING` here while the
+    /// daemon has never actually started executing it. Use `mqk daemon arm`
+    /// for the live operator safety surface. Retained only for legacy
+    /// run-row bookkeeping.
     Arm {
         /// Run id
         #[arg(long)]

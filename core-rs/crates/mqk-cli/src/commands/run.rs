@@ -97,7 +97,20 @@ pub async fn run_start(engine: String, mode: String, config_paths: Vec<String>) 
 // run arm
 // ---------------------------------------------------------------------------
 
+/// [DEPRECATED — see `mqk daemon arm`] LIVE-CLI-ARM-RECONCILE-01: this
+/// mutates only the `runs.status` DB column via a real, CAS-guarded
+/// transition (`mqk_db::arm_preflight`/`arm_run`) — a separate, pre-daemon
+/// authority from the daemon's own `IntegrityState`, which is the sole gate
+/// `start_execution_runtime` actually checks before dispatching any order.
+/// Arming a run here neither arms the daemon nor can, by itself, enable
+/// order dispatch. Retained for legacy run-row bookkeeping only.
 pub async fn run_arm(run_id: String, confirm: Option<String>) -> Result<()> {
+    eprintln!(
+        "warning: 'mqk run arm' is deprecated — it only mutates the runs.status DB row \
+         and is NOT the daemon's live order-dispatch safety gate. Use 'mqk daemon arm' \
+         to arm the actual running daemon."
+    );
+
     let pool = mqk_db::connect_from_env().await?;
     let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
 
