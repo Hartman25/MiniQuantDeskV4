@@ -146,6 +146,50 @@ ACTIVE_PRODUCTION_LEDGER_BASELINE = 36   (BLOCKED 6 + DEPENDENCY_SATISFIED 6 + O
 
 **`ACTIVE_PRODUCTION_LEDGER_BASELINE = 36`** is the operative denominator for `MQK-LEDGER-BURN-WAVE-01` and any successor ledger-burn wave. Per the controlling operator instruction for that wave: **operational Paper verification (soak sessions, smoke tests, unattended Paper runs, migration `0067` verification against the real Paper DB, scheduler activation, alpha campaigns, Live activation) is intentionally deferred until this active production-ledger count reaches zero** — this rebaseline does not itself authorize or resume any of that activity.
 
+### MQK-LEDGER-BURN-WAVE-01 — W1 Burn-Down Results (2026-09-06)
+
+All 15 W1 rows were attempted sequentially on branch `post-wave06-ledger-burn-01` (from starting HEAD `84dcd14c7e2f0e2c5d47e3b179877aad49d88812`). Per `audit_repo_truth_rules.md`, a row is recorded `CLOSED` here only when its own stated acceptance criteria are fully met — code committed, tests committed and passing, **and** any independent-review requirement the row itself imposes also satisfied. A row whose own acceptance criteria explicitly require independent review before literal closure (both are `YELLOW`-classified, shared paper+live code paths under the Paper-Soak Protection Rule) is recorded `IMPLEMENTED_PENDING_REVIEW`, not `CLOSED`, and is **not** counted toward `CLOSED_THIS_WAVE` below — truth wins over a forced/expected result.
+
+| Row | Result | Commit |
+|---|---|---|
+| W1-01 `RISK-AUTHORITY-DOC-NOTE-01` | CLOSED | `82317377` |
+| W1-02 `PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01` | CLOSED | `199fa658` |
+| W1-03 `PORTFOLIO-DYNAMIC-SELECTION-DEEP-REVIEW-01` | CLOSED (reviewed, no defect found) | `6df62406` |
+| W1-04 `BROKER-ALPACA-CRATE-SCOPE-DOC-01` | CLOSED | `2404fe6e` |
+| W1-05 `MD-KRAKEN-FETCH-RETRY-BACKOFF-01` | CLOSED (real code fix + 3 new tests) | `e4a389c0` |
+| W1-06 `DYNAMIC-SELECTION-TEST-DENSITY-AUDIT-01` | CLOSED (coverage catalog, confirmed sufficient) | `52bd9c44` |
+| W1-07 `CI-TESTKIT-FEATURE-GUARD-VERIFY-01` | CLOSED (new CI guard + mutation-negative proof) | `6e6d4aa2` |
+| W1-08 `LIVE-ACCOUNT-TRUTH-01` | **IMPLEMENTED_PENDING_REVIEW** — code+tests done; independent paper-baseline review outstanding, per this row's own YELLOW acceptance criteria | `2c99e48a` |
+| W1-09 `LIVE-SECRETS-CONSOLIDATION-01` | **IMPLEMENTED_PENDING_REVIEW** — code+tests done; independent paper-baseline review outstanding, per this row's own YELLOW acceptance criteria | `da6cb635` |
+| W1-10 `LIVE-CLI-ARM-RECONCILE-01` | CLOSED (determined + deprecated) | `3ad0ee30` |
+| W1-11 `CLI-RUN-STUB-TRACKING-01` | CLOSED | `df087bda` |
+| W1-12 `CLI-RUNCMD-DOC-DISAMBIGUATION-01` | CLOSED | `c5225ab8` |
+| W1-13 `LIVE-FLATTEN-PROOF-01` | CLOSED (proof-only, both cases pass, no defect in the mechanism) | `8c445bd0` |
+| W1-14 `README-SNAPSHOT-REFRESH-01` | CLOSED | `4e1e9a3b` |
+| W1-15 `DEPLOYMENT-DECISION-DOC-01` | CLOSED | `7bd27d08` |
+
+**New rows discovered this wave** (per-row investigation surfaced a genuine, narrow, deterministic finding neither fixed nor silently absorbed into the discovering row, per this wave's own controller instruction):
+
+| New row | Discovered by | Status |
+|---|---|---|
+| `CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01` | W1-07 (validating the existing `guards` suite still passed) | OPEN — pre-existing, unrelated to this wave's own changes |
+| `LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01` | W1-13 (LSF-01's proof of current behavior) | OPEN — genuine capability gap, not a safety defect |
+
+**Recomputation** (per this wave's own formula; `36` is this wave's fresh current-HEAD baseline established above, never "43 minus N"):
+
+```text
+STARTING_ACTIVE_BASELINE = 36
+CLOSED_THIS_WAVE         = 13   (W1-01..07, W1-10..15 — excludes W1-08/09, IMPLEMENTED_PENDING_REVIEW)
+SUPERSEDED_THIS_WAVE     = 0
+NEW_ROWS_DISCOVERED      = 2    (CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01, LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01)
+
+ACTIVE_REMAINING = 36 - 13 - 0 + 2 = 25
+```
+
+This does **not** match the wave controller's own stated "if all 15 close cleanly" expectation of 21 — 2 rows (W1-08, W1-09) did not reach literal `CLOSED` because their own acceptance criteria require an independent review this same session cannot perform on itself, and 2 new rows were discovered and honestly tracked rather than absorbed. Per the controller's own instruction: **truth wins over the forced/expected result.**
+
+**Side effects this wave:** Paper orders = 0. Live orders = 0. Real broker calls = 0. Paper validation = NOT RUN. Soak/smoke = NOT RUN. Holdout consumption = 0. `smoke_logs/` untouched. No push to `origin`.
+
 ---
 
 ## 1. Paper-Soak Protection Rule
