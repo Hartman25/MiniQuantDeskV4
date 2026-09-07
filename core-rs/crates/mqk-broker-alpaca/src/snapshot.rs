@@ -44,6 +44,8 @@ pub fn normalize_account(raw: &AlpacaAccountRaw) -> BrokerAccount {
         equity: raw.equity.clone(),
         cash: raw.cash.clone(),
         currency: raw.currency.clone(),
+        buying_power: raw.buying_power.clone(),
+        daytrading_buying_power: raw.daytrading_buying_power.clone(),
     }
 }
 

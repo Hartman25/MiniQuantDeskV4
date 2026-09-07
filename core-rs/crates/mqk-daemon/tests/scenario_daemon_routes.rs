@@ -35,6 +35,8 @@ fn sample_snapshot() -> mqk_schemas::BrokerSnapshot {
             equity: "100".to_string(),
             cash: "50".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         positions: Vec::new(),
         orders: Vec::new(),
@@ -894,6 +896,8 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
                 equity: "1500.5".to_string(),
                 cash: "500.25".to_string(),
                 currency: "USD".to_string(),
+                buying_power: None,
+                daytrading_buying_power: None,
             },
             positions: vec![
                 BrokerPosition {
@@ -932,7 +936,10 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
         portfolio_json["short_market_value"].as_f64().unwrap(),
         100.0
     );
-    assert_eq!(portfolio_json["buying_power"].as_f64().unwrap(), 500.25);
+    // LIVE-ACCOUNT-TRUTH-01: the fixture account carries no real
+    // buying_power -- this must surface as null, never silently aliased to
+    // cash (500.25).
+    assert!(portfolio_json["buying_power"].is_null());
 
     let risk_req = Request::builder()
         .method("GET")
@@ -952,6 +959,89 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
     assert_eq!(risk_json["truth_state"], "no_db");
     assert_eq!(risk_json["kill_switch_active"], true);
     assert_eq!(risk_json["active_breaches"], 1);
+}
+
+// LIVE-ACCOUNT-TRUTH-01: a real, non-cash-equal buying_power on the broker
+// account must propagate through /api/v1/portfolio/summary verbatim -- never
+// aliased to cash, and never dropped.
+#[tokio::test]
+async fn api_portfolio_summary_propagates_real_buying_power_not_cash() {
+    use chrono::Utc;
+    use mqk_schemas::{BrokerAccount, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(BrokerSnapshot {
+            captured_at_utc: Utc::now(),
+            account: BrokerAccount {
+                equity: "1500.5".to_string(),
+                cash: "500.25".to_string(),
+                currency: "USD".to_string(),
+                // Deliberately distinct from `cash` -- a margin account's
+                // real buying power routinely exceeds settled cash.
+                buying_power: Some("2500.75".to_string()),
+                daytrading_buying_power: None,
+            },
+            positions: Vec::new(),
+            orders: Vec::new(),
+            fills: Vec::new(),
+        });
+    }
+
+    let portfolio_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (portfolio_status, portfolio_body) =
+        call(routes::build_router(Arc::clone(&st)), portfolio_req).await;
+    assert_eq!(portfolio_status, StatusCode::OK);
+    let portfolio_json = parse_json(portfolio_body);
+    assert_eq!(portfolio_json["cash"].as_f64().unwrap(), 500.25);
+    assert_eq!(portfolio_json["buying_power"].as_f64().unwrap(), 2500.75);
+}
+
+// LIVE-ACCOUNT-TRUTH-01: a malformed (non-decimal) buying_power string must
+// fail closed to null, never to a fabricated 0.0 or a silent cash fallback.
+#[tokio::test]
+async fn api_portfolio_summary_malformed_buying_power_is_null_not_zero() {
+    use chrono::Utc;
+    use mqk_schemas::{BrokerAccount, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(BrokerSnapshot {
+            captured_at_utc: Utc::now(),
+            account: BrokerAccount {
+                equity: "1500.5".to_string(),
+                cash: "500.25".to_string(),
+                currency: "USD".to_string(),
+                buying_power: Some("not-a-decimal".to_string()),
+                daytrading_buying_power: None,
+            },
+            positions: Vec::new(),
+            orders: Vec::new(),
+            fills: Vec::new(),
+        });
+    }
+
+    let portfolio_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (portfolio_status, portfolio_body) =
+        call(routes::build_router(Arc::clone(&st)), portfolio_req).await;
+    assert_eq!(portfolio_status, StatusCode::OK);
+    let portfolio_json = parse_json(portfolio_body);
+    assert_eq!(portfolio_json["cash"].as_f64().unwrap(), 500.25);
+    assert!(portfolio_json["buying_power"].is_null());
 }
 
 // ---------------------------------------------------------------------------

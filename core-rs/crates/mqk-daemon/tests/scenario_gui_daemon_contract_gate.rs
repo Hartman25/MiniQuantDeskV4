@@ -1219,6 +1219,8 @@ async fn gui_contract_portfolio_positions_active_snapshot() {
             equity: "100000.00".to_string(),
             cash: "50000.00".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         orders: vec![],
         fills: vec![],
@@ -1320,6 +1322,8 @@ async fn gui_contract_portfolio_open_orders_active_snapshot() {
             equity: "100000.00".to_string(),
             cash: "50000.00".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         orders: vec![BrokerOrder {
             broker_order_id: "broker-ord-1".to_string(),
@@ -1425,6 +1429,8 @@ async fn gui_contract_portfolio_fills_active_snapshot() {
             equity: "100000.00".to_string(),
             cash: "50000.00".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         orders: vec![],
         fills: vec![BrokerFill {
@@ -1795,6 +1801,8 @@ async fn gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows()
             equity: "100000.00".to_string(),
             cash: "50000.00".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         orders: vec![BrokerOrder {
             broker_order_id: "BRK-1".to_string(),

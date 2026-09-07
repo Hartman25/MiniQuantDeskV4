@@ -84,6 +84,8 @@ fn empty_broker_snapshot() -> mqk_schemas::BrokerSnapshot {
             equity: "10000".to_string(),
             cash: "10000".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         orders: vec![],
         fills: vec![],

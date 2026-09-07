@@ -294,6 +294,8 @@ async fn or_db_02_refused_when_live_order_in_snapshot() {
                 equity: "100000".to_string(),
                 cash: "100000".to_string(),
                 currency: "USD".to_string(),
+                buying_power: None,
+                daytrading_buying_power: None,
             },
             orders: vec![mqk_schemas::BrokerOrder {
                 broker_order_id: "broker-live-123".to_string(),
@@ -377,6 +379,8 @@ async fn or_db_04_released_when_broker_confirms_no_live_order() {
                 equity: "100000".to_string(),
                 cash: "100000".to_string(),
                 currency: "USD".to_string(),
+                buying_power: None,
+                daytrading_buying_power: None,
             },
             orders: vec![mqk_schemas::BrokerOrder {
                 broker_order_id: "broker-unrelated-456".to_string(),

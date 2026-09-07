@@ -31,6 +31,8 @@ fn n1_account_fields_passed_through() {
         equity: "123456.78".to_string(),
         cash: "9999.00".to_string(),
         currency: "USD".to_string(),
+        buying_power: None,
+        daytrading_buying_power: None,
     };
     let account = normalize_account(&raw);
     assert_eq!(account.equity, "123456.78");
@@ -45,6 +47,8 @@ fn n1_account_preserves_exact_broker_string() {
         equity: "99999999.999999".to_string(),
         cash: "0.000001".to_string(),
         currency: "USD".to_string(),
+        buying_power: None,
+        daytrading_buying_power: None,
     };
     let account = normalize_account(&raw);
     assert_eq!(account.equity, "99999999.999999");
@@ -241,6 +245,8 @@ fn n5_snapshot_fills_always_empty() {
         equity: "1000.00".to_string(),
         cash: "500.00".to_string(),
         currency: "USD".to_string(),
+        buying_power: None,
+        daytrading_buying_power: None,
     });
     let snapshot = build_snapshot(now, account, vec![], vec![]);
     assert!(
@@ -256,6 +262,8 @@ fn n5_snapshot_captured_at_is_caller_injected() {
         equity: "0.00".to_string(),
         cash: "0.00".to_string(),
         currency: "USD".to_string(),
+        buying_power: None,
+        daytrading_buying_power: None,
     });
     let snapshot = build_snapshot(injected, account, vec![], vec![]);
     assert_eq!(snapshot.captured_at_utc, injected);
@@ -268,6 +276,8 @@ fn n5_snapshot_positions_and_orders_forwarded() {
         equity: "5000.00".to_string(),
         cash: "2000.00".to_string(),
         currency: "USD".to_string(),
+        buying_power: None,
+        daytrading_buying_power: None,
     });
     let pos = normalize_position(&AlpacaPositionRaw {
         symbol: "NVDA".to_string(),
@@ -295,6 +305,8 @@ fn n6_same_input_produces_identical_snapshots() {
             equity: "12345.67".to_string(),
             cash: "999.00".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         });
         let pos = normalize_position(&AlpacaPositionRaw {
             symbol: "GOOG".to_string(),

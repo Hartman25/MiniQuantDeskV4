@@ -316,6 +316,8 @@ async fn daemon_state() -> Arc<state::AppState> {
                 equity: "100000".to_string(),
                 cash: "100000".to_string(),
                 currency: "USD".to_string(),
+                buying_power: None,
+                daytrading_buying_power: None,
             },
             orders: vec![],
             fills: vec![],

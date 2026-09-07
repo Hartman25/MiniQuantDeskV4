@@ -413,6 +413,14 @@ pub(crate) async fn portfolio_summary(
     let summary = if let Some(snapshot) = snap {
         let account_equity = parse_decimal(&snapshot.account.equity);
         let cash = parse_decimal(&snapshot.account.cash);
+        // LIVE-ACCOUNT-TRUTH-01: real broker-reported buying power, never
+        // aliased to cash -- None (not a fabricated value) when the broker
+        // snapshot omitted the field or it isn't a valid decimal.
+        let buying_power = snapshot
+            .account
+            .buying_power
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok());
         let (long_market_value, short_market_value, _, _) = exposure_breakdown(&snapshot.positions);
         let pnl_by_symbol =
             compute_broker_positions_pnl(&st, &snapshot.positions, &timeframe).await;
@@ -437,7 +445,7 @@ pub(crate) async fn portfolio_summary(
             unrealized_pnl,
             pnl_truth_state,
             pnl_unavailable_reason,
-            buying_power: Some(cash),
+            buying_power,
         }
     } else {
         PortfolioSummaryResponse {

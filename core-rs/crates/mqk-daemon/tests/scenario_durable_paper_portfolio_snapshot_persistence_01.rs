@@ -27,6 +27,8 @@ fn fixture_snapshot(
             equity: equity.to_string(),
             cash: cash.to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         orders: vec![],
         fills: vec![],

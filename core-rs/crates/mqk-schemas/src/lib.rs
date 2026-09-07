@@ -69,6 +69,15 @@ pub struct BrokerAccount {
     pub equity: String,
     pub cash: String,
     pub currency: String,
+    /// LIVE-ACCOUNT-TRUTH-01: real broker-reported buying power (margin-aware;
+    /// may exceed `cash` for a margin account). `None` when the broker
+    /// snapshot did not carry this field -- never aliased to `cash`.
+    #[serde(default)]
+    pub buying_power: Option<String>,
+    /// LIVE-ACCOUNT-TRUTH-01: real broker-reported day-trading buying power.
+    /// Same `None`-means-unavailable contract as `buying_power`.
+    #[serde(default)]
+    pub daytrading_buying_power: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

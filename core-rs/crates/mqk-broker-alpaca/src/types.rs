@@ -327,6 +327,16 @@ pub struct AlpacaAccountRaw {
     pub cash: String,
     /// ISO 4217 currency code (e.g. `"USD"`).
     pub currency: String,
+    /// LIVE-ACCOUNT-TRUTH-01: real Alpaca buying power as a decimal string
+    /// (margin-aware; may exceed `cash` for a margin account). `#[serde(default)]`
+    /// so an unexpectedly missing field deserializes to `None`, never a
+    /// fabricated value or a parse error on the rest of the account payload.
+    #[serde(default)]
+    pub buying_power: Option<String>,
+    /// LIVE-ACCOUNT-TRUTH-01: real Alpaca day-trading buying power as a
+    /// decimal string. Same fail-closed-to-`None` contract as `buying_power`.
+    #[serde(default)]
+    pub daytrading_buying_power: Option<String>,
 }
 
 /// Raw Alpaca position from `GET /v2/positions`.

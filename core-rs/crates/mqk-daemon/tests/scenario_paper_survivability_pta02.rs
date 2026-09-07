@@ -100,6 +100,8 @@ fn minimal_snapshot(ts: i64) -> BrokerSnapshot {
             equity: "100000.00".to_string(),
             cash: "50000.00".to_string(),
             currency: "USD".to_string(),
+            buying_power: None,
+            daytrading_buying_power: None,
         },
         orders: vec![BrokerOrder {
             broker_order_id: "broker-order-001".to_string(),

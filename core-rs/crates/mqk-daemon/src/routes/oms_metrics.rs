@@ -186,6 +186,14 @@ pub(crate) async fn metrics_dashboards(State(st): State<Arc<AppState>>) -> impl 
         Some(snap) => {
             let equity = parse_decimal(&snap.account.equity);
             let cash_val = parse_decimal(&snap.account.cash);
+            // LIVE-ACCOUNT-TRUTH-01: real broker-reported buying power, never
+            // aliased to cash -- None when the broker snapshot omitted the
+            // field or it isn't a valid decimal.
+            let buying_power_val = snap
+                .account
+                .buying_power
+                .as_deref()
+                .and_then(|s| s.parse::<f64>().ok());
             let (long_mv, short_mv, gross_exp, max_abs) = exposure_breakdown(&snap.positions);
             let net_exp = snap
                 .positions
@@ -203,7 +211,7 @@ pub(crate) async fn metrics_dashboards(State(st): State<Arc<AppState>>) -> impl 
                 Some(long_mv),
                 Some(short_mv),
                 Some(cash_val),
-                Some(cash_val),
+                buying_power_val,
                 "active".to_string(),
                 Some(gross_exp),
                 Some(net_exp),

@@ -251,6 +251,11 @@ pub(crate) fn synthesize_paper_broker_snapshot(
         equity: cash_whole.to_string(),
         cash: cash_whole.to_string(),
         currency: "USD".to_string(),
+        // LIVE-ACCOUNT-TRUTH-01: the internal synthetic Paper broker has no
+        // real margin/buying-power concept -- None is the honest value here,
+        // never a fabricated cash alias.
+        buying_power: None,
+        daytrading_buying_power: None,
     };
 
     mqk_schemas::BrokerSnapshot {
@@ -315,6 +320,11 @@ pub(crate) fn synthesize_broker_snapshot_from_execution(
         equity: cash_whole.to_string(),
         cash: cash_whole.to_string(),
         currency: "USD".to_string(),
+        // LIVE-ACCOUNT-TRUTH-01: same synthetic-broker rationale as
+        // synthesize_paper_broker_snapshot above -- None, never a fabricated
+        // cash alias.
+        buying_power: None,
+        daytrading_buying_power: None,
     };
 
     mqk_schemas::BrokerSnapshot {
@@ -3198,6 +3208,8 @@ mod f1_filled_qty_wiring_tests {
                 equity: "100000".to_string(),
                 cash: "100000".to_string(),
                 currency: "USD".to_string(),
+                buying_power: None,
+                daytrading_buying_power: None,
             },
             positions: vec![],
             orders: vec![order],
