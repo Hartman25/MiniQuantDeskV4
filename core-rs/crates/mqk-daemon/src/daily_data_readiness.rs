@@ -91,6 +91,324 @@ pub const REASON_LATEST_BAR_FUTURE: &str = "latest_bar_future";
 pub const REASON_EXPECTED_LATEST_BAR_MISSING: &str = "expected_latest_bar_missing";
 
 // ---------------------------------------------------------------------------
+// AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 PATCH 1: typed reason/subreason
+// authority
+//
+// Controller-02 (W2-D) found the real prerequisite this row needs before any
+// automatic-recovery wiring: coarse string fault classification gives no
+// typed distinction between data-readiness/manual-intervention causes that
+// the required-universe autofresh controller may repair (by fetching more
+// provider data) and non-data manual-intervention causes that must remain
+// manual/fail-closed. `autonomous_retry_policy.rs`'s own doc comment on
+// `daily_data_readiness_blocked` names exactly this gap and explicitly
+// anticipates "[a] future phase that passes the typed `daily_data_readiness`
+// report directly ... may classify it more precisely."
+//
+// This is that typed authority. It is additive representation only: no
+// behavior changes as of this patch. `required_market_data_autofresh.rs`'s
+// existing `REFRESHABLE_READINESS_REASONS`/`is_refreshable_reason` are
+// reworked to delegate to it (one authority, not two parallel lists) with
+// the exact same four reasons classified `DataRepairable`, so its own
+// bounded-refresh-attempt gate is provably unchanged.
+// ---------------------------------------------------------------------------
+
+/// Closed classification of every [`DailyDataReadinessReason`] into whether
+/// the required-universe autofresh controller may repair it by fetching more
+/// provider data, or it is a registry/binding/provenance/calendar/config/
+/// persistence defect that no amount of polling can fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DailyDataReadinessReasonClass {
+    /// Autofresh MAY repair this via a bounded historical-bars bootstrap or
+    /// a single latest-closed-bar poll (§17/§21-23 of the autofresh
+    /// controller's own contract).
+    DataRepairable,
+    /// Never remediable by polling more provider data. Includes every
+    /// registry/binding/provenance/calendar/config/timestamp-convention
+    /// defect, every readiness-evidence/run-link persistence failure, and
+    /// (fail-closed) any reason string this module does not recognize.
+    NonData,
+}
+
+/// Every blocking-reason code [`daily_data_readiness`](self) can produce, as
+/// a closed Rust enum — never a broad `Other(String)`/`Unknown(String)`
+/// variant. Mirrors the closed-enum, no-string-authority convention already
+/// established by `autonomous_retry_policy::AutonomousCoordinatorReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DailyDataReadinessReason {
+    RequiredAssignmentsMissing,
+    AssignmentResolutionFailed,
+    RuntimeStrategyAssignmentMismatch,
+    RuntimeStrategySymbolBindingMismatch,
+    RuntimeStrategyTimeframeMismatch,
+    StrategyRequirementUnknown,
+    AssetClassUnknown,
+    ProviderProvenanceInvalid,
+    ProviderSymbolMismatch,
+    ProviderIdMismatch,
+    ProviderUnknown,
+    ProviderIngestTimeFuture,
+    ProviderDisabled,
+    ProviderCapabilityMismatch,
+    ProviderTimestampConventionUnverified,
+    CalendarUnavailable,
+    UnsupportedTimeframe,
+    UnsupportedIntradayContinuity,
+    MarketDataMissing,
+    InsufficientHistory,
+    DuplicateTimestamp,
+    InteriorGap,
+    LatestBarFuture,
+    ExpectedLatestBarMissing,
+    ReadinessEvidencePersistFailed,
+    ReadinessRunLinkPersistFailed,
+}
+
+impl DailyDataReadinessReason {
+    /// Parse from one of the `REASON_*` string constants above. Fails
+    /// closed to `None` for anything else — including status-surface values
+    /// that are not blocker reason codes (e.g. `"db_unavailable"`,
+    /// `"query_failed"`, `"unavailable"`, `"blocked"`), and any future
+    /// `REASON_*` constant not yet added to this match (a compile-time
+    /// exhaustiveness match in [`Self::class`]/[`Self::as_str`] means such a
+    /// constant cannot be silently misclassified once it IS added here).
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            v if v == REASON_REQUIRED_ASSIGNMENTS_MISSING => Self::RequiredAssignmentsMissing,
+            v if v == REASON_ASSIGNMENT_RESOLUTION_FAILED => Self::AssignmentResolutionFailed,
+            v if v == REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH => {
+                Self::RuntimeStrategyAssignmentMismatch
+            }
+            v if v == REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH => {
+                Self::RuntimeStrategySymbolBindingMismatch
+            }
+            v if v == REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH => {
+                Self::RuntimeStrategyTimeframeMismatch
+            }
+            v if v == REASON_STRATEGY_REQUIREMENT_UNKNOWN => Self::StrategyRequirementUnknown,
+            v if v == REASON_ASSET_CLASS_UNKNOWN => Self::AssetClassUnknown,
+            v if v == REASON_PROVIDER_PROVENANCE_INVALID => Self::ProviderProvenanceInvalid,
+            v if v == REASON_PROVIDER_SYMBOL_MISMATCH => Self::ProviderSymbolMismatch,
+            v if v == REASON_PROVIDER_ID_MISMATCH => Self::ProviderIdMismatch,
+            v if v == REASON_PROVIDER_UNKNOWN => Self::ProviderUnknown,
+            v if v == REASON_PROVIDER_INGEST_TIME_FUTURE => Self::ProviderIngestTimeFuture,
+            v if v == REASON_PROVIDER_DISABLED => Self::ProviderDisabled,
+            v if v == REASON_PROVIDER_CAPABILITY_MISMATCH => Self::ProviderCapabilityMismatch,
+            v if v == REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED => {
+                Self::ProviderTimestampConventionUnverified
+            }
+            v if v == REASON_CALENDAR_UNAVAILABLE => Self::CalendarUnavailable,
+            v if v == REASON_UNSUPPORTED_TIMEFRAME => Self::UnsupportedTimeframe,
+            v if v == REASON_UNSUPPORTED_INTRADAY_CONTINUITY => {
+                Self::UnsupportedIntradayContinuity
+            }
+            v if v == REASON_MARKET_DATA_MISSING => Self::MarketDataMissing,
+            v if v == REASON_INSUFFICIENT_HISTORY => Self::InsufficientHistory,
+            v if v == REASON_DUPLICATE_TIMESTAMP => Self::DuplicateTimestamp,
+            v if v == REASON_INTERIOR_GAP => Self::InteriorGap,
+            v if v == REASON_LATEST_BAR_FUTURE => Self::LatestBarFuture,
+            v if v == REASON_EXPECTED_LATEST_BAR_MISSING => Self::ExpectedLatestBarMissing,
+            v if v == REASON_READINESS_EVIDENCE_PERSIST_FAILED => {
+                Self::ReadinessEvidencePersistFailed
+            }
+            v if v == REASON_READINESS_RUN_LINK_PERSIST_FAILED => {
+                Self::ReadinessRunLinkPersistFailed
+            }
+            _ => return None,
+        })
+    }
+
+    /// The exact `REASON_*` string constant this variant round-trips to.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RequiredAssignmentsMissing => REASON_REQUIRED_ASSIGNMENTS_MISSING,
+            Self::AssignmentResolutionFailed => REASON_ASSIGNMENT_RESOLUTION_FAILED,
+            Self::RuntimeStrategyAssignmentMismatch => {
+                REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH
+            }
+            Self::RuntimeStrategySymbolBindingMismatch => {
+                REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH
+            }
+            Self::RuntimeStrategyTimeframeMismatch => REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH,
+            Self::StrategyRequirementUnknown => REASON_STRATEGY_REQUIREMENT_UNKNOWN,
+            Self::AssetClassUnknown => REASON_ASSET_CLASS_UNKNOWN,
+            Self::ProviderProvenanceInvalid => REASON_PROVIDER_PROVENANCE_INVALID,
+            Self::ProviderSymbolMismatch => REASON_PROVIDER_SYMBOL_MISMATCH,
+            Self::ProviderIdMismatch => REASON_PROVIDER_ID_MISMATCH,
+            Self::ProviderUnknown => REASON_PROVIDER_UNKNOWN,
+            Self::ProviderIngestTimeFuture => REASON_PROVIDER_INGEST_TIME_FUTURE,
+            Self::ProviderDisabled => REASON_PROVIDER_DISABLED,
+            Self::ProviderCapabilityMismatch => REASON_PROVIDER_CAPABILITY_MISMATCH,
+            Self::ProviderTimestampConventionUnverified => {
+                REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED
+            }
+            Self::CalendarUnavailable => REASON_CALENDAR_UNAVAILABLE,
+            Self::UnsupportedTimeframe => REASON_UNSUPPORTED_TIMEFRAME,
+            Self::UnsupportedIntradayContinuity => REASON_UNSUPPORTED_INTRADAY_CONTINUITY,
+            Self::MarketDataMissing => REASON_MARKET_DATA_MISSING,
+            Self::InsufficientHistory => REASON_INSUFFICIENT_HISTORY,
+            Self::DuplicateTimestamp => REASON_DUPLICATE_TIMESTAMP,
+            Self::InteriorGap => REASON_INTERIOR_GAP,
+            Self::LatestBarFuture => REASON_LATEST_BAR_FUTURE,
+            Self::ExpectedLatestBarMissing => REASON_EXPECTED_LATEST_BAR_MISSING,
+            Self::ReadinessEvidencePersistFailed => REASON_READINESS_EVIDENCE_PERSIST_FAILED,
+            Self::ReadinessRunLinkPersistFailed => REASON_READINESS_RUN_LINK_PERSIST_FAILED,
+        }
+    }
+
+    /// Data-repairable vs non-data classification. Exhaustive match (no
+    /// wildcard arm covering the four `DataRepairable` variants) so adding a
+    /// new variant above without updating this match is a compile error,
+    /// not a silent misclassification; the remaining variants share one
+    /// `NonData` wildcard arm since that direction is always the safe
+    /// default.
+    pub fn class(&self) -> DailyDataReadinessReasonClass {
+        match self {
+            Self::MarketDataMissing
+            | Self::InsufficientHistory
+            | Self::InteriorGap
+            | Self::ExpectedLatestBarMissing => DailyDataReadinessReasonClass::DataRepairable,
+            _ => DailyDataReadinessReasonClass::NonData,
+        }
+    }
+}
+
+/// Parse-and-classify convenience over a raw blocker string. Fails closed to
+/// [`DailyDataReadinessReasonClass::NonData`] for any string that does not
+/// parse as a known [`DailyDataReadinessReason`] — never `DataRepairable`
+/// for an unrecognized reason.
+pub fn classify_reason_str(s: &str) -> DailyDataReadinessReasonClass {
+    DailyDataReadinessReason::parse(s)
+        .map(|r| r.class())
+        .unwrap_or(DailyDataReadinessReasonClass::NonData)
+}
+
+#[cfg(test)]
+mod daily_data_readiness_reason_tests {
+    use super::*;
+
+    const ALL_REASON_CONSTANTS: &[&str] = &[
+        REASON_REQUIRED_ASSIGNMENTS_MISSING,
+        REASON_ASSIGNMENT_RESOLUTION_FAILED,
+        REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH,
+        REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH,
+        REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH,
+        REASON_STRATEGY_REQUIREMENT_UNKNOWN,
+        REASON_ASSET_CLASS_UNKNOWN,
+        REASON_PROVIDER_PROVENANCE_INVALID,
+        REASON_PROVIDER_SYMBOL_MISMATCH,
+        REASON_PROVIDER_ID_MISMATCH,
+        REASON_PROVIDER_UNKNOWN,
+        REASON_PROVIDER_INGEST_TIME_FUTURE,
+        REASON_PROVIDER_DISABLED,
+        REASON_PROVIDER_CAPABILITY_MISMATCH,
+        REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
+        REASON_CALENDAR_UNAVAILABLE,
+        REASON_UNSUPPORTED_TIMEFRAME,
+        REASON_UNSUPPORTED_INTRADAY_CONTINUITY,
+        REASON_MARKET_DATA_MISSING,
+        REASON_INSUFFICIENT_HISTORY,
+        REASON_DUPLICATE_TIMESTAMP,
+        REASON_INTERIOR_GAP,
+        REASON_LATEST_BAR_FUTURE,
+        REASON_EXPECTED_LATEST_BAR_MISSING,
+        REASON_READINESS_EVIDENCE_PERSIST_FAILED,
+        REASON_READINESS_RUN_LINK_PERSIST_FAILED,
+    ];
+
+    const DATA_REPAIRABLE_REASON_CONSTANTS: &[&str] = &[
+        REASON_MARKET_DATA_MISSING,
+        REASON_INSUFFICIENT_HISTORY,
+        REASON_INTERIOR_GAP,
+        REASON_EXPECTED_LATEST_BAR_MISSING,
+    ];
+
+    /// Every existing coarse reason remains representable: each of the 26
+    /// `REASON_*` constants parses to a distinct variant and round-trips
+    /// back to the exact same string via `as_str`.
+    #[test]
+    fn every_reason_constant_round_trips() {
+        for &reason in ALL_REASON_CONSTANTS {
+            let parsed = DailyDataReadinessReason::parse(reason)
+                .unwrap_or_else(|| panic!("{reason} must parse to a known reason"));
+            assert_eq!(
+                parsed.as_str(),
+                reason,
+                "round-trip must preserve the exact string for {reason}"
+            );
+        }
+    }
+
+    /// No two distinct reason constants collapse onto the same variant
+    /// (would silently conflate two different facts).
+    #[test]
+    fn every_reason_constant_parses_to_a_distinct_variant() {
+        use std::collections::HashSet;
+        let variants: HashSet<_> = ALL_REASON_CONSTANTS
+            .iter()
+            .map(|r| DailyDataReadinessReason::parse(r).unwrap())
+            .collect();
+        assert_eq!(
+            variants.len(),
+            ALL_REASON_CONSTANTS.len(),
+            "every reason constant must parse to a distinct variant"
+        );
+    }
+
+    /// Data vs non-data classification: exactly the four known
+    /// autofresh-repairable reasons classify `DataRepairable`; every other
+    /// reason classifies `NonData`. Mirrors (and, after this patch, is the
+    /// authority behind) `required_market_data_autofresh::
+    /// REFRESHABLE_READINESS_REASONS`.
+    #[test]
+    fn data_vs_non_data_classification_matches_known_boundary() {
+        for &reason in DATA_REPAIRABLE_REASON_CONSTANTS {
+            assert_eq!(
+                classify_reason_str(reason),
+                DailyDataReadinessReasonClass::DataRepairable,
+                "{reason} must classify DataRepairable"
+            );
+        }
+        for &reason in ALL_REASON_CONSTANTS {
+            if DATA_REPAIRABLE_REASON_CONSTANTS.contains(&reason) {
+                continue;
+            }
+            assert_eq!(
+                classify_reason_str(reason),
+                DailyDataReadinessReasonClass::NonData,
+                "{reason} must classify NonData (registry/binding/provenance/config/persistence)"
+            );
+        }
+    }
+
+    /// Fail-closed negative control: an unrecognized reason string (never
+    /// produced by this module) must classify `NonData`, never
+    /// `DataRepairable` — and must not parse to any variant.
+    #[test]
+    fn unknown_reason_fails_closed_to_non_data() {
+        for garbage in [
+            "",
+            "totally_unknown_reason",
+            "db_unavailable",  // a readiness_state value, not a blocker reason code
+            "query_failed",    // likewise
+            "unavailable",     // likewise
+            "blocked",         // likewise
+            "MARKET_DATA_MISSING", // wrong case must not fuzzy-match
+        ] {
+            assert_eq!(
+                DailyDataReadinessReason::parse(garbage),
+                None,
+                "{garbage:?} must not parse to any known reason"
+            );
+            assert_eq!(
+                classify_reason_str(garbage),
+                DailyDataReadinessReasonClass::NonData,
+                "{garbage:?} must fail closed to NonData"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Grace / future-skew configuration (§8/§9)
 // ---------------------------------------------------------------------------
 

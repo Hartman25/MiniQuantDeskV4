@@ -895,10 +895,23 @@ async fn attempt_bounded_refresh(
 // and lets the real bar/provider/calendar readiness logic run standalone.
 
 /// The exact bounded set of readiness blockers this controller may attempt
-/// to repair by polling (§21). Every other blocker
+/// to repair by polling (§21), in priority order for
+/// `freshness_state_from_readiness` below. Every other blocker
 /// `daily_data_readiness::evaluate_assignment` can produce is a
 /// registry/provenance/binding/calendar-config defect — not remediable by
 /// more polling, and never retried here.
+///
+/// AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 PATCH 1: this ordered list is
+/// kept explicit only because `freshness_state_from_readiness` needs a
+/// deterministic priority order when multiple blockers are present
+/// simultaneously — membership itself is no longer a second, independently-
+/// maintained authority: `is_refreshable_reason` now delegates to
+/// `daily_data_readiness::classify_reason_str`, the same closed typed
+/// authority a future automatic-recovery patch will reuse. The
+/// `refreshable_reasons_exactly_match_data_repairable_class` test below
+/// proves this list's membership set is provably identical to that
+/// authority's `DataRepairable` classification, so the two can never drift
+/// apart silently.
 const REFRESHABLE_READINESS_REASONS: &[&str] = &[
     daily_data_readiness::REASON_MARKET_DATA_MISSING,
     daily_data_readiness::REASON_INSUFFICIENT_HISTORY,
@@ -907,7 +920,8 @@ const REFRESHABLE_READINESS_REASONS: &[&str] = &[
 ];
 
 fn is_refreshable_reason(reason: &str) -> bool {
-    REFRESHABLE_READINESS_REASONS.contains(&reason)
+    daily_data_readiness::classify_reason_str(reason)
+        == daily_data_readiness::DailyDataReadinessReasonClass::DataRepairable
 }
 
 /// `true` when the bounded historical-bars bootstrap (not the latest-bar
@@ -1809,6 +1823,86 @@ async fn required_universe_scheduler_loop(
                 scheduler.stop_tx = None;
             }
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod refreshable_reason_typed_authority_tests {
+    use super::*;
+
+    /// AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 PATCH 1: proves
+    /// `REFRESHABLE_READINESS_REASONS`'s membership set is exactly the set
+    /// `daily_data_readiness::classify_reason_str` classifies
+    /// `DataRepairable` — the two authorities can never silently drift
+    /// apart. Combined with `is_refreshable_reason` now delegating to that
+    /// same classifier, this is a real proof that this module's own
+    /// bounded-refresh-attempt gate is unchanged by the typed-authority
+    /// introduction, not merely an assertion that it compiles.
+    #[test]
+    fn refreshable_reasons_exactly_match_data_repairable_class() {
+        use daily_data_readiness::{DailyDataReadinessReason, DailyDataReadinessReasonClass};
+
+        let all_reasons = [
+            daily_data_readiness::REASON_REQUIRED_ASSIGNMENTS_MISSING,
+            daily_data_readiness::REASON_ASSIGNMENT_RESOLUTION_FAILED,
+            daily_data_readiness::REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH,
+            daily_data_readiness::REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH,
+            daily_data_readiness::REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH,
+            daily_data_readiness::REASON_STRATEGY_REQUIREMENT_UNKNOWN,
+            daily_data_readiness::REASON_ASSET_CLASS_UNKNOWN,
+            daily_data_readiness::REASON_PROVIDER_PROVENANCE_INVALID,
+            daily_data_readiness::REASON_PROVIDER_SYMBOL_MISMATCH,
+            daily_data_readiness::REASON_PROVIDER_ID_MISMATCH,
+            daily_data_readiness::REASON_PROVIDER_UNKNOWN,
+            daily_data_readiness::REASON_PROVIDER_INGEST_TIME_FUTURE,
+            daily_data_readiness::REASON_PROVIDER_DISABLED,
+            daily_data_readiness::REASON_PROVIDER_CAPABILITY_MISMATCH,
+            daily_data_readiness::REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
+            daily_data_readiness::REASON_CALENDAR_UNAVAILABLE,
+            daily_data_readiness::REASON_UNSUPPORTED_TIMEFRAME,
+            daily_data_readiness::REASON_UNSUPPORTED_INTRADAY_CONTINUITY,
+            daily_data_readiness::REASON_MARKET_DATA_MISSING,
+            daily_data_readiness::REASON_INSUFFICIENT_HISTORY,
+            daily_data_readiness::REASON_DUPLICATE_TIMESTAMP,
+            daily_data_readiness::REASON_INTERIOR_GAP,
+            daily_data_readiness::REASON_LATEST_BAR_FUTURE,
+            daily_data_readiness::REASON_EXPECTED_LATEST_BAR_MISSING,
+            daily_data_readiness::REASON_READINESS_EVIDENCE_PERSIST_FAILED,
+            daily_data_readiness::REASON_READINESS_RUN_LINK_PERSIST_FAILED,
+        ];
+
+        for reason in all_reasons {
+            let in_refreshable_list = REFRESHABLE_READINESS_REASONS.contains(&reason);
+            let is_data_repairable = DailyDataReadinessReason::parse(reason)
+                .expect("every reason constant must parse")
+                .class()
+                == DailyDataReadinessReasonClass::DataRepairable;
+            assert_eq!(
+                in_refreshable_list, is_data_repairable,
+                "{reason}: REFRESHABLE_READINESS_REASONS membership ({in_refreshable_list}) \
+                 must exactly match DailyDataReadinessReasonClass::DataRepairable ({is_data_repairable})"
+            );
+            // is_refreshable_reason itself must agree with both.
+            assert_eq!(
+                is_refreshable_reason(reason),
+                in_refreshable_list,
+                "{reason}: is_refreshable_reason must agree with REFRESHABLE_READINESS_REASONS"
+            );
+        }
+    }
+
+    /// Negative control: an unrecognized reason string must never be
+    /// treated as refreshable (fail closed), mirroring
+    /// `daily_data_readiness`'s own `unknown_reason_fails_closed_to_non_data`
+    /// proof but exercised through this module's actual production gate.
+    #[test]
+    fn unknown_reason_is_never_refreshable() {
+        for garbage in ["", "totally_unknown_reason", "db_unavailable", "query_failed"] {
+            assert!(
+                !is_refreshable_reason(garbage),
+                "{garbage:?} must not be treated as refreshable"
+            );
         }
     }
 }
