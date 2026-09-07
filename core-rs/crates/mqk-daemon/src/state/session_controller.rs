@@ -1234,7 +1234,11 @@ mod tests {
             super::super::types::BrokerKind::Alpaca,
         ));
         assert!(state.db.is_none(), "test fixture precondition: no db configured");
-        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::new_v4())).await;
+        // Fixed, arbitrary run_id (CI-UNSAFE-PATTERNS-UUID-TESTFIXTURE-01):
+        // the function short-circuits on the missing DB before the run_id
+        // value is ever inspected, so any deterministic UUID proves the
+        // same path.
+        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::from_u128(1))).await;
         assert_eq!(summary, "diagnostics: unavailable (db not connected)");
     }
 
@@ -1251,7 +1255,11 @@ mod tests {
             pool,
             super::super::types::OperatorAuthMode::ExplicitDevNoToken,
         ));
-        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::new_v4())).await;
+        // Fixed, arbitrary run_id (CI-UNSAFE-PATTERNS-UUID-TESTFIXTURE-01):
+        // the function short-circuits on the DB read error before the
+        // run_id value is ever inspected, so any deterministic UUID proves
+        // the same path.
+        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::from_u128(2))).await;
         assert_eq!(
             summary, "diagnostics: unavailable (read error)",
             "a genuine DB read error must produce an explicit unavailable string, never a \
