@@ -19,29 +19,37 @@
 #   - feature-alias chains (default -> local alias -> ... -> testkit, or
 #     default -> ... -> "some-crate/testkit")
 #
+# REPAIR-02 (CI-TESTKIT-FEATURE-GUARD-VERIFY-01-REPAIR-02): REPAIR-01's
+# dependency-table checker only compared a dependency edge's *literal*
+# requested feature strings against "testkit" -- it did not expand a
+# cross-crate feature name into the TARGET crate's own [features] table. A
+# dependency edge such as `b = { features = ["full"] }` where b declares
+# `full = ["testkit"]` silently bypassed the guard even though Cargo itself
+# would activate b's testkit feature. This version builds a real workspace-
+# wide feature graph (`feature_reaches_testkit` / `dependency_activation_
+# reaches_testkit`) and expands every edge -- local aliases, cross-crate
+# "<crate>/<feature>" and "<crate>?/<feature>" edges (including through
+# `package = "..."` dependency renames), and `dep:<name>` edges -- inside the
+# ACTUAL target crate's feature table, recursively, with a visited-set cycle
+# guard. Only crates local to this workspace (core-rs/crates/*) can be
+# expanded; an edge into an external crate is still flagged if the literal
+# feature name is "testkit" (fail-closed), but cannot be expanded further.
+#
 # Two independent, workspace-wide checks:
-#   1. Default-feature closure: starting from a crate's own `[features]
-#      default` list, transitively follow LOCAL feature aliases. Fail if
-#      "testkit" (this crate's own gate) or any "<crate>/testkit" /
-#      "<crate>?/testkit" edge (this crate's default enabling another
-#      crate's testkit feature) is reachable. A plain `cargo build` /
-#      `cargo build --release` with no explicit --features enables only
-#      default features, so this is the check that rules out "accidentally
-#      on by default", including transitively through aliases.
+#   1. Default-feature closure: for each crate, does activating its own
+#      `[features] default` (a plain `cargo build`/`--release` with no
+#      explicit --features) reach "testkit", transitively, through local
+#      aliases and cross-crate edges (including a dependency's own default
+#      features when a default-array entry activates that dependency)?
 #   2. Production-dependency closure: for every non-dev dependency table
 #      (top-level [dependencies]/[build-dependencies], and their
-#      [target.'cfg(...)'.*] equivalents), resolve the dependency's
-#      effective feature set -- including features inherited from the
-#      workspace root via `workspace = true` -- and fail if "testkit" is in
-#      it. Only [dev-dependencies] (and target-specific dev-dependencies)
+#      [target.'cfg(...)'.*] equivalents, plus [workspace.dependencies]
+#      itself), does any explicitly-requested feature on that edge --
+#      including features inherited from the workspace root via
+#      `workspace = true` -- reach "testkit" in the target crate's feature
+#      graph? Only [dev-dependencies] (and target-specific dev-dependencies)
 #      may enable testkit; that scopes the feature to `cargo test`, never to
 #      `cargo build`/`cargo build --release` of a binary target.
-#
-# The workspace root's own [workspace.dependencies] table is checked
-# directly too: any crate that inherits a workspace dependency via
-# `workspace = true` with no local override would otherwise silently
-# inherit a workspace-level "testkit" feature that no per-crate scan alone
-# would ever see.
 #
 # Usage: python3 scripts/guards/check_testkit_feature_not_default.py
 # Exit codes: 0 = clean, 1 = violation found.
@@ -67,9 +75,16 @@ def load_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
+def package_name(doc: dict) -> str | None:
+    pkg = doc.get("package")
+    if isinstance(pkg, dict):
+        return pkg.get("name")
+    return None
+
+
 def dep_feature_set(dep_value, workspace_deps: dict, dep_name: str) -> set:
-    """Effective extra features a dependency table entry activates on its
-    target crate, resolving `workspace = true` inheritance."""
+    """Effective extra features a dependency table entry explicitly requests
+    on its target crate, resolving `workspace = true` inheritance."""
     feats: set = set()
     if not isinstance(dep_value, dict):
         return feats
@@ -79,6 +94,12 @@ def dep_feature_set(dep_value, workspace_deps: dict, dep_name: str) -> set:
             feats.update(ws_entry.get("features", []) or [])
     feats.update(dep_value.get("features", []) or [])
     return feats
+
+
+def dep_default_features_enabled(dep_value) -> bool:
+    if isinstance(dep_value, dict):
+        return dep_value.get("default-features", dep_value.get("default_features", True)) is not False
+    return True
 
 
 def walk_dependency_tables(doc: dict):
@@ -102,52 +123,111 @@ def walk_dependency_tables(doc: dict):
                 yield (f"target.{cond}.dev-dependencies", True, section["dev-dependencies"])
 
 
-def expand_default_closure(features_table: dict) -> list:
-    """BFS from 'default' over LOCAL feature aliases only. Returns the list
-    of violation edges (either the literal "testkit" or a
-    "<crate>/testkit" / "<crate>?/testkit" cross-crate edge) reachable from
-    default."""
-    if "default" not in features_table:
-        return []
-    hits: list = []
-    seen: set = set()
-    queue = list(features_table.get("default") or [])
-    while queue:
-        entry = queue.pop()
-        if entry in seen:
-            continue
-        seen.add(entry)
-
-        if entry == "testkit":
-            hits.append("testkit")
-            continue
-        if entry.startswith("dep:"):
-            continue
-        if "/" in entry:
-            # "<crate>/feature" or "<crate>?/feature" -- cross-crate edge.
-            # Cannot expand further (needs the OTHER crate's feature
-            # graph), but flag if it targets testkit directly.
-            _base, _, feat = entry.partition("/")
-            if feat == "testkit":
-                hits.append(entry)
-            continue
-
-        # Local feature alias -- expand transitively.
-        if entry in features_table:
-            queue.extend(features_table[entry] or [])
-
-    return hits
+def resolve_dep_package(doc: dict, local_name: str, workspace_deps: dict) -> str:
+    """Resolve a dependency table entry's real package name, honoring
+    `package = "..."` renames (directly, or inherited through
+    `workspace = true`). Falls back to the local dependency-table key name
+    when no rename is present, which is the common case."""
+    for _section_path, _is_dev, table in walk_dependency_tables(doc):
+        if local_name in table:
+            dep_value = table[local_name]
+            if isinstance(dep_value, dict):
+                if "package" in dep_value:
+                    return dep_value["package"]
+                if dep_value.get("workspace") is True:
+                    ws_entry = workspace_deps.get(local_name, {})
+                    if isinstance(ws_entry, dict) and "package" in ws_entry:
+                        return ws_entry["package"]
+            return local_name
+    return local_name
 
 
-def check_crate(cargo_path: Path, workspace_deps: dict) -> None:
-    doc = load_toml(cargo_path)
+def find_dep_value(doc: dict, local_name: str):
+    for _section_path, _is_dev, table in walk_dependency_tables(doc):
+        if local_name in table:
+            return table[local_name]
+    return None
+
+
+def feature_reaches_testkit(pkg_name: str, feature_entry: str, crate_docs: dict, workspace_deps: dict, visited: set) -> bool:
+    """Does activating `feature_entry` inside crate `pkg_name` reach
+    "testkit", directly or transitively through local feature aliases,
+    cross-crate "<crate>/<feature>" / "<crate>?/<feature>" / "dep:<crate>"
+    edges (resolved through `package = "..."` renames), and a dependency's
+    own default features when that dependency edge is what activates it?"""
+    if feature_entry == "testkit":
+        return True
+
+    key = (pkg_name, feature_entry)
+    if key in visited:
+        return False
+    visited.add(key)
+
+    if feature_entry.startswith("dep:"):
+        dep_local = feature_entry[len("dep:") :].rstrip("?")
+        return dependency_activation_reaches_testkit(pkg_name, dep_local, crate_docs, workspace_deps, visited)
+
+    if "/" in feature_entry:
+        dep_local, _, target_feat = feature_entry.partition("/")
+        dep_local = dep_local.rstrip("?")
+        return dependency_activation_reaches_testkit(
+            pkg_name, dep_local, crate_docs, workspace_deps, visited, extra_feature=target_feat
+        )
+
+    doc = crate_docs.get(pkg_name)
+    if doc is None:
+        return False
+    features_table = doc.get("features", {})
+    if isinstance(features_table, dict) and feature_entry in features_table:
+        for entry in features_table[feature_entry] or []:
+            if feature_reaches_testkit(pkg_name, entry, crate_docs, workspace_deps, visited):
+                return True
+        return False
+
+    # Not a declared [features] key -- may be an implicit feature naming an
+    # optional dependency directly. Enabling it only activates that
+    # dependency (no further feature recursion beyond its own defaults).
+    return dependency_activation_reaches_testkit(pkg_name, feature_entry, crate_docs, workspace_deps, visited)
+
+
+def dependency_activation_reaches_testkit(
+    pkg_name: str, dep_local_name: str, crate_docs: dict, workspace_deps: dict, visited: set, extra_feature: str | None = None
+) -> bool:
+    doc = crate_docs.get(pkg_name)
+    if doc is None:
+        return False
+    target_pkg = resolve_dep_package(doc, dep_local_name, workspace_deps)
+    if target_pkg == "testkit":
+        return True
+    if target_pkg not in crate_docs:
+        return False  # external crate, outside this workspace's control
+
+    dep_value = find_dep_value(doc, dep_local_name)
+    explicit_feats = set(dep_feature_set(dep_value, workspace_deps, dep_local_name))
+    if extra_feature:
+        explicit_feats.add(extra_feature)
+
+    for feat in explicit_feats:
+        if feature_reaches_testkit(target_pkg, feat, crate_docs, workspace_deps, visited):
+            return True
+
+    if dep_default_features_enabled(dep_value) and feature_reaches_testkit(
+        target_pkg, "default", crate_docs, workspace_deps, visited
+    ):
+        return True
+
+    return False
+
+
+def check_crate(cargo_path: Path, doc: dict, crate_docs: dict, workspace_deps: dict) -> None:
     rel = cargo_path.relative_to(REPO_ROOT)
+    pkg_name = package_name(doc) or cargo_path.parent.name
 
     features_table = doc.get("features", {})
-    if isinstance(features_table, dict):
-        for hit in expand_default_closure(features_table):
+    if isinstance(features_table, dict) and "default" in features_table:
+        if feature_reaches_testkit(pkg_name, "default", crate_docs, workspace_deps, set()):
             fail(
-                f'{rel}: [features] default transitively activates "{hit}" -- '
+                f'{rel}: [features] default transitively activates "testkit" -- '
                 f"a plain cargo build/--release would enable it"
             )
 
@@ -155,12 +235,16 @@ def check_crate(cargo_path: Path, workspace_deps: dict) -> None:
         if is_dev:
             continue
         for dep_name, dep_value in table.items():
+            target_pkg = resolve_dep_package(doc, dep_name, workspace_deps)
             feats = dep_feature_set(dep_value, workspace_deps, dep_name)
-            if "testkit" in feats:
-                fail(
-                    f'{rel}: [{section_path}] enables "{dep_name}"\'s testkit feature '
-                    f"in a production dependency table -- move to [dev-dependencies] only"
-                )
+            for feat in sorted(feats):
+                if feature_reaches_testkit(target_pkg, feat, crate_docs, workspace_deps, set()):
+                    fail(
+                        f'{rel}: [{section_path}] enables "{dep_name}"\'s testkit feature '
+                        f'in a production dependency table (via "{feat}") -- move to '
+                        f"[dev-dependencies] only"
+                    )
+                    break
 
 
 def main() -> int:
@@ -185,8 +269,14 @@ def main() -> int:
                     f"override would compile it into production"
                 )
 
-    for cargo_toml in sorted(CRATES_DIR.glob("*/Cargo.toml")):
-        check_crate(cargo_toml, workspace_deps)
+    cargo_paths = sorted(CRATES_DIR.glob("*/Cargo.toml"))
+    docs: dict[Path, dict] = {p: load_toml(p) for p in cargo_paths}
+    crate_docs: dict[str, dict] = {}
+    for p, doc in docs.items():
+        crate_docs[package_name(doc) or p.parent.name] = doc
+
+    for p, doc in docs.items():
+        check_crate(p, doc, crate_docs, workspace_deps)
 
     print("")
     if not violations:

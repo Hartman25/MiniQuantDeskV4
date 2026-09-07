@@ -27,6 +27,20 @@
 #   TKG-G  dev-dependency-only testkit                        -> PASS
 #   TKG-H  current real repo                                  -> PASS
 #
+# Required cases (per CI-TESTKIT-FEATURE-GUARD-VERIFY-01-REPAIR-02): a real
+# TWO-crate cross-crate feature graph -- a source crate ("fake-crate")
+# depending on a target crate ("fake-dep") whose OWN [features] table is what
+# actually reaches testkit, which a guard comparing only literal requested
+# feature strings against "testkit" cannot see.
+#   TKG-R2-01  dep features=["full"], target full=["testkit"]              -> FAIL
+#   TKG-R2-02  dep features=["full"], target full=["testing"]->testkit      -> FAIL
+#   TKG-R2-03  source default activates "dep/full" -> target testkit        -> FAIL
+#   TKG-R2-04  target-specific production dependency alias -> testkit       -> FAIL
+#   TKG-R2-05  workspace-inherited dependency feature alias -> testkit      -> FAIL
+#   TKG-R2-06  renamed local dependency alias -> target alias -> testkit    -> FAIL
+#   TKG-R2-07  dev-dependency features=["full"] -> target testkit           -> PASS
+#   TKG-R2-08  current real repo                                            -> PASS
+#
 # Usage: bash tests/script_guards/test_testkit_feature_not_default.sh
 # Exit codes: 0 = all pass, 1 = one or more failures.
 # =============================================================================
@@ -383,6 +397,221 @@ if [ "$exit_code" -ne 0 ] \
     pass "TKG-COMBINED" "Guard reports all violations when default + [dependencies] + target-specific routes are all mutated at once"
 else
     fail "TKG-COMBINED" "Guard did NOT report all simultaneous violations (exit=$exit_code); see $ROOT_COMBINED/guard_output.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# TKG-R2: real TWO-crate cross-crate feature graph cases (REPAIR-02).
+# build_repo2 lays down a source crate ("fake-crate") AND a real target
+# crate ("fake-dep", or a caller-chosen dir name for the rename case) with
+# its own [features] table, so testkit is reachable only by resolving the
+# TARGET crate's feature graph -- never by literal string matching on the
+# source's requested feature name.
+# ---------------------------------------------------------------------------
+build_repo2() {
+    local root="$1" ws_toml_file="$2" source_toml_file="$3" dep_toml_file="$4" dep_dir="${5:-fake-dep}"
+    mkdir -p "$root/scripts/guards" "$root/core-rs/crates/fake-crate" "$root/core-rs/crates/$dep_dir"
+    cp "$GUARD_SH" "$root/scripts/guards/check_testkit_feature_not_default.sh"
+    cp "$GUARD_PY" "$root/scripts/guards/check_testkit_feature_not_default.py"
+    cp "$ws_toml_file" "$root/core-rs/Cargo.toml"
+    cp "$source_toml_file" "$root/core-rs/crates/fake-crate/Cargo.toml"
+    cp "$dep_toml_file" "$root/core-rs/crates/$dep_dir/Cargo.toml"
+}
+
+WS_R2_BASE="$TMP_ROOT/ws_r2_base.toml"
+cat > "$WS_R2_BASE" <<'EOF'
+[workspace]
+resolver = "2"
+members = ["crates/fake-crate", "crates/fake-dep"]
+
+[workspace.dependencies]
+serde = { version = "1" }
+fake-dep = { path = "../fake-dep" }
+EOF
+
+DEP_FULL_DIRECT="$TMP_ROOT/dep_full_direct.toml"
+cat > "$DEP_FULL_DIRECT" <<'EOF'
+[package]
+name = "fake-dep"
+version = "0.0.1"
+edition = "2021"
+
+[features]
+testkit = []
+full = ["testkit"]
+EOF
+
+DEP_FULL_MULTILEVEL="$TMP_ROOT/dep_full_multilevel.toml"
+cat > "$DEP_FULL_MULTILEVEL" <<'EOF'
+[package]
+name = "fake-dep"
+version = "0.0.1"
+edition = "2021"
+
+[features]
+testkit = []
+testing = ["testkit"]
+full = ["testing"]
+EOF
+
+# TKG-R2-01: dependency features=["full"], target full=["testkit"] -> FAIL
+SRC_R2_01="$TMP_ROOT/src_r2_01.toml"
+cat > "$SRC_R2_01" <<'EOF'
+[package]
+name = "fake-crate"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+fake-dep = { path = "../fake-dep", features = ["full"] }
+EOF
+ROOT_R2_01="$TMP_ROOT/tkg_r2_01"
+build_repo2 "$ROOT_R2_01" "$WS_R2_BASE" "$SRC_R2_01" "$DEP_FULL_DIRECT"
+exit_code="$(run_guard "$ROOT_R2_01")"
+if [ "$exit_code" -ne 0 ] && grep -q 'testkit feature in a production dependency table' "$ROOT_R2_01/guard_output.txt"; then
+    pass "TKG-R2-01" "Guard resolves a cross-crate feature alias (full -> testkit) in the target crate's own feature table"
+else
+    fail "TKG-R2-01" "Guard did NOT catch cross-crate alias full->testkit (exit=$exit_code); see $ROOT_R2_01/guard_output.txt"
+fi
+
+# TKG-R2-02: dependency features=["full"], target full=["testing"], testing=["testkit"] -> FAIL
+ROOT_R2_02="$TMP_ROOT/tkg_r2_02"
+build_repo2 "$ROOT_R2_02" "$WS_R2_BASE" "$SRC_R2_01" "$DEP_FULL_MULTILEVEL"
+exit_code="$(run_guard "$ROOT_R2_02")"
+if [ "$exit_code" -ne 0 ] && grep -q 'testkit feature in a production dependency table' "$ROOT_R2_02/guard_output.txt"; then
+    pass "TKG-R2-02" "Guard resolves a multi-level cross-crate alias chain (full -> testing -> testkit)"
+else
+    fail "TKG-R2-02" "Guard did NOT catch multi-level cross-crate alias chain (exit=$exit_code); see $ROOT_R2_02/guard_output.txt"
+fi
+
+# TKG-R2-03: source default activates "fake-dep/full" cross-crate edge -> FAIL
+SRC_R2_03="$TMP_ROOT/src_r2_03.toml"
+cat > "$SRC_R2_03" <<'EOF'
+[package]
+name = "fake-crate"
+version = "0.0.1"
+edition = "2021"
+
+[features]
+default = ["fake-dep/full"]
+
+[dependencies]
+serde = { workspace = true }
+fake-dep = { path = "../fake-dep" }
+EOF
+ROOT_R2_03="$TMP_ROOT/tkg_r2_03"
+build_repo2 "$ROOT_R2_03" "$WS_R2_BASE" "$SRC_R2_03" "$DEP_FULL_DIRECT"
+exit_code="$(run_guard "$ROOT_R2_03")"
+if [ "$exit_code" -ne 0 ] && grep -q 'default transitively activates "testkit"' "$ROOT_R2_03/guard_output.txt"; then
+    pass "TKG-R2-03" "Guard resolves source default -> \"dep/feature\" cross-crate edge -> target testkit"
+else
+    fail "TKG-R2-03" "Guard did NOT catch source default cross-crate edge to testkit (exit=$exit_code); see $ROOT_R2_03/guard_output.txt"
+fi
+
+# TKG-R2-04: target-specific production dependency alias -> testkit -> FAIL
+SRC_R2_04="$TMP_ROOT/src_r2_04.toml"
+cat > "$SRC_R2_04" <<'EOF'
+[package]
+name = "fake-crate"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+fake-dep = { path = "../fake-dep", features = ["full"] }
+EOF
+ROOT_R2_04="$TMP_ROOT/tkg_r2_04"
+build_repo2 "$ROOT_R2_04" "$WS_R2_BASE" "$SRC_R2_04" "$DEP_FULL_DIRECT"
+exit_code="$(run_guard "$ROOT_R2_04")"
+if [ "$exit_code" -ne 0 ] && grep -q 'target\.cfg(windows)\.dependencies.*testkit feature' "$ROOT_R2_04/guard_output.txt"; then
+    pass "TKG-R2-04" "Guard resolves a cross-crate alias on a target-specific production dependency"
+else
+    fail "TKG-R2-04" "Guard did NOT catch target-specific cross-crate alias (exit=$exit_code); see $ROOT_R2_04/guard_output.txt"
+fi
+
+# TKG-R2-05: workspace-inherited dependency feature alias -> testkit -> FAIL
+WS_R2_05="$TMP_ROOT/ws_r2_05.toml"
+cat > "$WS_R2_05" <<'EOF'
+[workspace]
+resolver = "2"
+members = ["crates/fake-crate", "crates/fake-dep"]
+
+[workspace.dependencies]
+serde = { version = "1" }
+fake-dep = { path = "../fake-dep", features = ["full"] }
+EOF
+SRC_R2_05="$TMP_ROOT/src_r2_05.toml"
+cat > "$SRC_R2_05" <<'EOF'
+[package]
+name = "fake-crate"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+fake-dep = { workspace = true }
+EOF
+ROOT_R2_05="$TMP_ROOT/tkg_r2_05"
+build_repo2 "$ROOT_R2_05" "$WS_R2_05" "$SRC_R2_05" "$DEP_FULL_DIRECT"
+exit_code="$(run_guard "$ROOT_R2_05")"
+if [ "$exit_code" -ne 0 ] && grep -q 'testkit feature in a production dependency table' "$ROOT_R2_05/guard_output.txt"; then
+    pass "TKG-R2-05" "Guard resolves a workspace-inherited dependency's feature alias to testkit"
+else
+    fail "TKG-R2-05" "Guard did NOT catch workspace-inherited cross-crate alias (exit=$exit_code); see $ROOT_R2_05/guard_output.txt"
+fi
+
+# TKG-R2-06: renamed local dependency (package = "...") alias -> target testkit -> FAIL
+SRC_R2_06="$TMP_ROOT/src_r2_06.toml"
+cat > "$SRC_R2_06" <<'EOF'
+[package]
+name = "fake-crate"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+renamed_dep = { path = "../fake-dep", package = "fake-dep", features = ["full"] }
+EOF
+ROOT_R2_06="$TMP_ROOT/tkg_r2_06"
+build_repo2 "$ROOT_R2_06" "$WS_R2_BASE" "$SRC_R2_06" "$DEP_FULL_DIRECT"
+exit_code="$(run_guard "$ROOT_R2_06")"
+if [ "$exit_code" -ne 0 ] && grep -q 'testkit feature in a production dependency table' "$ROOT_R2_06/guard_output.txt"; then
+    pass "TKG-R2-06" "Guard resolves a renamed (package=\"...\") local dependency's feature alias to testkit"
+else
+    fail "TKG-R2-06" "Guard did NOT catch renamed-dependency cross-crate alias (exit=$exit_code); see $ROOT_R2_06/guard_output.txt"
+fi
+
+# TKG-R2-07: dev-dependency features=["full"] -> target testkit -> PASS (exempt lane)
+SRC_R2_07="$TMP_ROOT/src_r2_07.toml"
+cat > "$SRC_R2_07" <<'EOF'
+[package]
+name = "fake-crate"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+fake-dep = { path = "../fake-dep", features = ["full"] }
+EOF
+ROOT_R2_07="$TMP_ROOT/tkg_r2_07"
+build_repo2 "$ROOT_R2_07" "$WS_R2_BASE" "$SRC_R2_07" "$DEP_FULL_DIRECT"
+exit_code="$(run_guard "$ROOT_R2_07")"
+if [ "$exit_code" -eq 0 ] && ! grep -q 'FAIL' "$ROOT_R2_07/guard_output.txt"; then
+    pass "TKG-R2-07" "Guard does not false-positive when the cross-crate alias to testkit is dev-dependency-only"
+else
+    fail "TKG-R2-07" "Guard false-positived on a dev-dependency-only cross-crate alias (exit=$exit_code); see $ROOT_R2_07/guard_output.txt"
+fi
+
+# TKG-R2-08: current real repo -> PASS (no false positive from the new graph resolution)
+real_output_r2="$(bash "$GUARD_SH" 2>&1)"
+real_exit_r2=$?
+if [ "$real_exit_r2" -eq 0 ]; then
+    pass "TKG-R2-08" "Guard exits 0 against the current real repo under the new cross-crate graph resolution"
+else
+    fail "TKG-R2-08" "Guard exits $real_exit_r2 against the current real repo (expected 0): $real_output_r2"
 fi
 
 echo ""
