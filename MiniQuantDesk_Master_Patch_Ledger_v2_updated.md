@@ -410,11 +410,11 @@ the mission's own rule, so that row stays `PENDING_INDEPENDENT_REVIEW`.
 **Canonical normalized table — every one of the 73 rows in exactly one
 bucket:**
 
-#### ACTIVE_IMPLEMENTATION = 21
+#### ACTIVE_IMPLEMENTATION = 20
 
 `INSTRUMENT-UNIVERSE-REFRESH-01`, `RISK-AUTHORITY-DOC-NOTE-01`,
 `PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01`,
-`BROKER-ALPACA-DEAD-CODE-CLEANUP-01`, `BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
+`BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
 `MD-KRAKEN-FETCH-RETRY-BACKOFF-01`, `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`,
 `STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`,
 `STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01`,
@@ -428,7 +428,15 @@ bucket:**
 `DISCORD-CHANNEL-ROUTING-01`, `DISCORD-DATA-STALENESS-ALERT-01`,
 `DISCORD-DAILY-SUMMARY-PUSH-01`
 
-**Mechanical check:** 21 row IDs listed above == declared count 21. MATCH.
+**Mechanical check:** 20 row IDs listed above == declared count 20. MATCH.
+
+**Burn-phase update (2026-09-07):** `BROKER-ALPACA-DEAD-CODE-CLEANUP-01`
+normalized `ACTIVE_IMPLEMENTATION -> CLOSED` — this session's own fresh
+harness pass (`git merge-base --is-ancestor 39b4395f HEAD`, directory
+listing, `cargo build -p mqk-broker-alpaca`) confirmed the row's own
+pre-recorded L0 `ALREADY_CLOSED_LEDGER_STALE` truth-up was accurate; see the
+row's own ledger entry for full evidence. `ACTIVE_IMPLEMENTATION` was 21 at
+the moment of the Phase N commit above and is 20 as of this update.
 
 #### PENDING_INDEPENDENT_REVIEW = 8
 
@@ -478,8 +486,10 @@ pending ledger cleanup.)
 without explicit separate operator authorization per the controlling
 mission).
 
-#### CLOSED (this normalization pass) = 25
+#### CLOSED (this normalization pass, updated through the burn phase) = 26
 
+`BROKER-ALPACA-DEAD-CODE-CLEANUP-01` (burn-phase closure, 2026-09-07 — see
+above),
 `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`,
 `MARKET-DATA-PROVIDER-PROVENANCE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`,
 `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`,
@@ -500,12 +510,13 @@ disposed under the same commit as the row above),
 `MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
 `MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`
 
-**Sum check:** 21 + 8 + 0 + 3 + 4 + 4 + 7 + 1 + 25 = **73**. Matches the
-`04-active-row-table.csv` row count exactly — every row accounted for in
-exactly one bucket, no hidden subset counts.
+**Sum check (as of the burn-phase update above):** 20 + 8 + 0 + 3 + 4 + 4 + 7
++ 1 + 26 = **73**. Matches the `04-active-row-table.csv` row count exactly —
+every row accounted for in exactly one bucket, no hidden subset counts.
 
-**`ACTIVE_IMPLEMENTATION_LEDGER = 21`** is the operative denominator from this
-point forward, superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
+**`ACTIVE_IMPLEMENTATION_LEDGER = 20`** is the operative denominator as of the
+burn-phase update above (21 at the moment of the Phase N commit itself),
+superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
 `IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED` (3),
 `BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION` (4), `DEFERRED_POST_LEDGER_AUDIT`
 (4), `DEFERRED_FUTURE_MAINTENANCE` (7), and `RED_AUTHORIZATION_REQUIRED` (1)
@@ -1000,7 +1011,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### BROKER-ALPACA-DEAD-CODE-CLEANUP-01 — Remove or wire orphaned client.rs/config.rs
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN (uncompiled, unreachable) · **Subsystem:** mqk-broker-alpaca
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — the L0 truth-up below is now confirmed against this session's own HEAD by a fresh harness pass, per `audit_repo_truth_rules.md`'s closure-evidence standard. `39b4395f` re-confirmed ancestor of HEAD; `client.rs`/`config.rs` re-confirmed absent from `core-rs/crates/mqk-broker-alpaca/src/` by direct directory listing; `cargo build -p mqk-broker-alpaca` compiles clean. `cargo clippy -p mqk-broker-alpaca --all-targets -- -D warnings` (this row's own stated validation command) currently fails, but only on pre-existing `doc_lazy_continuation` lint violations in `mqk-db` (a dependency, e.g. `autonomous_daily_operation.rs:1491-1493`) that `--all-targets` pulls into the same lint pass — unrelated to this row's subject (dead broker-client code, already absent) and out of scope for this patch. · **Priority:** P3 · **Paper Impact:** GREEN (uncompiled, unreachable) · **Subsystem:** mqk-broker-alpaca
 **Ledger Truth-Up (`POST-WAVE06-LEDGER-BURN-01` L0, 2026-09-06):** Reclassified `ALREADY_CLOSED_LEDGER_STALE` — current HEAD `84dcd14c` already contains this invariant via ancestor commit `39b4395f` ("refactor: remove obsolete alpaca client implementation"), verified `git merge-base --is-ancestor`; `client.rs`/`config.rs` are confirmed absent from `mqk-broker-alpaca/src/` at current HEAD (directly verified by directory listing). Documentation-drift correction only; not promoted to literal `CLOSED` pending a fresh harness pass per `audit_repo_truth_rules.md`.
 **Current Source Truth (superseded by the Ledger Truth-Up above — retained for history):** `mqk-broker-alpaca/src/client.rs` (`AlpacaHttpClient`) and `src/config.rs` (a second, differently-shaped `AlpacaConfig`) are not declared as `pub mod` in `lib.rs` — they do not compile into the crate and are unreachable from any caller. They also contain weaker error handling than the live path (e.g. `client.rs:18-19` silently swallows header-construction failure via `unwrap_or`).
 **Problem:** Dead, confusing, duplicate code that could mislead a future session into thinking it's the live path.
