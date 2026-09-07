@@ -29,6 +29,11 @@
 #                                                      full paper startup always arms.
 #   Start-MiniQuantDesk.ps1 -Mode Live                live readiness report (blocked today)
 #   Start-MiniQuantDesk.ps1 -Mode Live -CheckOnly     read-only live diagnostic
+#   Start-MiniQuantDesk.ps1 -Mode LiveShadow          full live-shadow daemon start (real broker
+#                                                      connectivity, no orders submitted, no arm, no
+#                                                      runtime auto-start) -- distinct from -Mode Live;
+#                                                      see MQK-LEDGER-BURN-CONTROLLER-03 A3A
+#   Start-MiniQuantDesk.ps1 -Mode LiveShadow -CheckOnly  read-only live-shadow diagnostic
 #   Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled    unattended paper start (future Task Scheduler);
 #                                                      also always arms; uses the same required-universe
 #                                                      scheduler contract as interactive Paper and fails
@@ -48,7 +53,11 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Paper', 'Live')]
+    # MQK-LEDGER-BURN-CONTROLLER-03 A3A: 'LiveShadow' is a distinct value
+    # from 'Live' -- it can NEVER resolve to the LiveCapital startup path
+    # (Invoke-LiveStartup / Confirm-LiveIntent), and 'Live' can never resolve
+    # to LiveShadow. See Invoke-LiveShadowStartup below.
+    [ValidateSet('Paper', 'Live', 'LiveShadow')]
     [string]$Mode,
     [switch]$CheckOnly,
     [switch]$Scheduled,
@@ -103,7 +112,7 @@ function Get-RepoHeadShort {
 function New-LauncherLog {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][ValidateSet('paper', 'live')][string]$ModeLabel
+        [Parameter(Mandatory = $true)][ValidateSet('paper', 'live', 'live-shadow')][string]$ModeLabel
     )
     $dir = Join-Path $RepoRoot "smoke_logs\launcher\$ModeLabel"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -391,7 +400,15 @@ function Write-StartupHeader {
         [Parameter(Mandatory = $true)][bool]$ScheduledFlag
     )
     $head = Get-RepoHeadShort -RepoRoot $RepoRoot
-    $capitalLabel = if ($TradingMode -eq 'Live') { 'REAL' } else { 'SIMULATED' }
+    # A3A: LiveShadow connects to real broker/account truth (ALPACA_API_KEY_LIVE,
+    # api.alpaca.markets) even though it never submits an order -- calling it
+    # "SIMULATED"/"PAPER TRADING" here would misrepresent that, the exact kind
+    # of fabricated-truth the daemon side already refuses to do.
+    $capitalLabel = switch ($TradingMode) {
+        'Live'       { 'REAL' }
+        'LiveShadow' { 'REAL (shadow -- no orders submitted)' }
+        default      { 'SIMULATED' }
+    }
     Write-Host ''
     Write-Host ('=' * 60) -ForegroundColor Cyan
     Write-Host ' MiniQuantDesk V4' -ForegroundColor Cyan
@@ -408,6 +425,8 @@ function Write-StartupHeader {
     Write-Host ''
     if ($TradingMode -eq 'Live') {
         Write-Host '  LIVE TRADING -- REAL CAPITAL' -ForegroundColor Red
+    } elseif ($TradingMode -eq 'LiveShadow') {
+        Write-Host '  LIVE-SHADOW -- REAL BROKER CONNECTIVITY, NO ORDERS SUBMITTED' -ForegroundColor Yellow
     } else {
         Write-Host '  PAPER TRADING -- SIMULATED CAPITAL' -ForegroundColor Green
     }
@@ -1336,6 +1355,150 @@ function Invoke-PaperStartup {
 }
 
 # =============================================================================
+# MQK-LEDGER-BURN-CONTROLLER-03 A3A: canonical LiveShadow daemon-bootstrap
+# path -- LIVE-TINY-CAPITAL-SMOKE-01's prerequisite.
+#
+# Structurally separate from BOTH Invoke-PaperStartup (does not run any
+# paper-specific arm/reconcile/required-universe-scheduler/GUI orchestration
+# -- none of that applies to LiveShadow) AND Invoke-LiveStartup (the
+# LiveCapital read-only preflight chain, which this function never calls and
+# has no code path into). Delegates the actual daemon resolve/build/start/
+# identity-verify work to the ONE existing daemon-bootstrap seam,
+# Launch-VeritasLedger.ps1, via its new -DeploymentMode live-shadow parameter
+# (MQK-LEDGER-BURN-CONTROLLER-03 A3A in that file) -- no second daemon-start
+# framework is created here.
+#
+# Hard invariants:
+#   - The literal string 'live-shadow' is passed to -DeploymentMode here and
+#     nowhere else in this function; this function has no code path that can
+#     pass 'live'/'live-capital'. LiveShadow can therefore never resolve to
+#     LiveCapital through this seam.
+#   - -ArmPaper and -CaptureStartupEvidence (paper-specific concepts) are
+#     never passed to Launch-VeritasLedger.ps1 from here.
+#   - -SkipGui is always passed -- headless, noninteractive, no hidden
+#     Read-Host of any kind (Confirm-LiveIntent's `Type LIVE` prompt lives
+#     only in the separate LiveCapital branch of the main dispatch below and
+#     is never reachable from this function).
+#   - CheckOnly is zero-side-effect: it only adds -CheckOnly to the delegated
+#     Launch-VeritasLedger.ps1 invocation, which itself performs no daemon
+#     start (Invoke-LiveShadowCheckOnly in that file is read-only).
+# =============================================================================
+function Invoke-LiveShadowStartup {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][bool]$CheckOnlyFlag,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    $launchScript  = Join-Path $RepoRoot 'scripts\windows\Launch-VeritasLedger.ps1'
+    $daemonBaseUrl = 'http://127.0.0.1:8899'
+
+    $logEntry = @{
+        timestamp  = (Get-Date).ToUniversalTime().ToString('o')
+        mode       = 'live-shadow'
+        check_only = $CheckOnlyFlag
+        repo_head  = (Get-RepoHeadShort -RepoRoot $RepoRoot)
+        stages     = @()
+    }
+
+    if (-not (Test-Path $launchScript)) {
+        Write-Fail "Canonical daemon-bootstrap seam not found at $launchScript. This function only delegates to it -- it does not reimplement daemon startup."
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitGeneric
+    }
+
+    if ($CheckOnlyFlag) {
+        # Mirrors Invoke-PaperStartup's own CheckOnly branch: a direct `&`
+        # invocation piped to Out-Host, not Invoke-BoundedChildScript (which
+        # this function reserves for the full daemon-start path below, same
+        # as Paper does). CheckOnly is fast/read-only and needs no bounded
+        # timeout; it also sidesteps a real defect this patch found in
+        # testing -- ProcessStartInfo-driven redirected-output capture
+        # returned empty stdout/stderr for this exact invocation even though
+        # the child ran to completion with exit 0, while the direct-pipe
+        # form (proven by Paper's own CheckOnly path) reliably surfaces it.
+        Write-Section 'LIVE-SHADOW -- read-only diagnostic (delegates to Launch-VeritasLedger.ps1 -DeploymentMode live-shadow -CheckOnly)'
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launchScript -DeploymentMode 'live-shadow' -SkipGui -CheckOnly | Out-Host
+        $checkExit = $LASTEXITCODE
+        $logEntry.stages += @{ name = 'checkonly'; exit_code = $checkExit }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        if ($checkExit -ne 0) { return $script:ExitGeneric }
+        return $script:ExitOk
+    }
+
+    $lvlArgs = @('-DeploymentMode', 'live-shadow', '-SkipGui')
+
+    Write-Section 'LIVE-SHADOW -- daemon (delegates to Launch-VeritasLedger.ps1 -DeploymentMode live-shadow, bounded + noninteractive)'
+
+    $bootstrapLogDir = Join-Path $RepoRoot 'exports\launcher'
+    New-Item -ItemType Directory -Force -Path $bootstrapLogDir | Out-Null
+    $bootstrapStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $bootstrapStdoutLog = Join-Path $bootstrapLogDir "bootstrap_liveshadow_$bootstrapStamp.stdout.log"
+    $bootstrapStderrLog = Join-Path $bootstrapLogDir "bootstrap_liveshadow_$bootstrapStamp.stderr.log"
+
+    $bootstrapResult = Invoke-BoundedChildScript -ScriptPath $launchScript -ScriptArgs $lvlArgs `
+        -WorkingDirectory $RepoRoot -StdoutLogPath $bootstrapStdoutLog -StderrLogPath $bootstrapStderrLog `
+        -TimeoutSeconds $script:BootstrapTimeoutSeconds
+
+    Get-Content -Path $bootstrapResult.StdoutLogPath -ErrorAction SilentlyContinue | Out-Host
+    $bootstrapStderrContent = Get-Content -Path $bootstrapResult.StderrLogPath -ErrorAction SilentlyContinue
+    if ($bootstrapStderrContent) { $bootstrapStderrContent | Out-Host }
+
+    $exitCode = $bootstrapResult.ExitCode
+    $logEntry.stages += @{
+        name       = 'daemon'
+        exit_code  = $exitCode
+        timed_out  = $bootstrapResult.TimedOut
+        stdout_log = $bootstrapResult.StdoutLogPath
+        stderr_log = $bootstrapResult.StderrLogPath
+    }
+
+    if ($bootstrapResult.TimedOut -or $exitCode -ne 0) {
+        $reason = if ($bootstrapResult.TimedOut) {
+            "Launch-VeritasLedger.ps1 -DeploymentMode live-shadow exceeded the bounded bootstrap timeout ($($script:BootstrapTimeoutSeconds)s) and was terminated"
+        } else {
+            "Launch-VeritasLedger.ps1 -DeploymentMode live-shadow did not reach a verified state (exit $exitCode)"
+        }
+        Write-Fail $reason
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitGeneric
+    }
+    $logEntry.stages[-1].ok = $true
+
+    # Belt-and-suspenders safety guard, mirrors Invoke-PaperStartup's
+    # equivalent post-start check: must never see anything but the
+    # live-shadow identity this launch just established, and
+    # live_routing_enabled must remain false. (CheckOnly already returned
+    # above -- this only ever runs for the full daemon-start path.)
+    $status = Invoke-JsonGet -Url ($daemonBaseUrl + '/api/v1/system/status') -TimeoutSec 5
+    if (-not $status.Ok) {
+        Write-Fail 'Could not verify daemon status after live-shadow startup.'
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitGeneric
+    }
+    if ($status.Json.live_routing_enabled -eq $true) {
+        Write-Fail 'live_routing_enabled=true on the daemon this live-shadow launch attached to. Refusing to proceed.'
+        $logEntry.stages += @{ name = 'safety_guard'; ok = $false; reason = 'live_routing_enabled' }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitSafetyRefusal
+    }
+    if ($status.Json.daemon_mode -ne 'live-shadow' -or $status.Json.adapter_id -ne 'alpaca') {
+        Write-Fail "Daemon is not in the expected live-shadow+alpaca posture (daemon_mode=$($status.Json.daemon_mode) adapter_id=$($status.Json.adapter_id))."
+        $logEntry.stages += @{ name = 'safety_guard'; ok = $false; reason = 'mode_mismatch'; observed_mode = $status.Json.daemon_mode }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitSafetyRefusal
+    }
+    Write-Ok 'Live-shadow safety guard confirmed: live_routing_enabled=false, daemon_mode=live-shadow, adapter_id=alpaca.'
+    $logEntry.stages += @{ name = 'safety_guard'; ok = $true }
+
+    Write-Section 'LIVE-SHADOW -- runtime start authority'
+    Write-Ok 'This launcher never calls start-system for live-shadow. No arm, no runtime auto-start, no order submission -- daemon-bootstrap and identity verification only.'
+
+    Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+    return $script:ExitOk
+}
+
+# =============================================================================
 # MAIN DISPATCH
 #
 # Guarded so scripts\windows\tests\test_official_dual_mode_launcher.ps1 can
@@ -1385,6 +1548,15 @@ try {
         }
         $logPath = New-LauncherLog -RepoRoot $RepoRoot -ModeLabel 'live'
         $code = Invoke-LiveStartup -RepoRoot $RepoRoot -CheckOnlyFlag $CheckOnly.IsPresent -ScheduledFlag $Scheduled.IsPresent -LogPath $logPath
+        exit $code
+    }
+    elseif ($resolvedMode -eq 'LiveShadow') {
+        # A3A: structurally separate branch from 'Live' above -- never
+        # shares a code path with Confirm-LiveIntent/Invoke-LiveStartup, so
+        # LiveShadow can never inherit LiveCapital's Read-Host confirmation
+        # or resolve into the LiveCapital preflight chain.
+        $logPath = New-LauncherLog -RepoRoot $RepoRoot -ModeLabel 'live-shadow'
+        $code = Invoke-LiveShadowStartup -RepoRoot $RepoRoot -CheckOnlyFlag $CheckOnly.IsPresent -LogPath $logPath
         exit $code
     }
     else {

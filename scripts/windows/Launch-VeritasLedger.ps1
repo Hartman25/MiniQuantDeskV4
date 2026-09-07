@@ -2,6 +2,16 @@
 param(
     [ValidateSet('Observe', 'TradeReady')]
     [string]$Mode = 'Observe',
+    # -DeploymentMode: MQK-LEDGER-BURN-CONTROLLER-03 A3A -- which
+    # `MQK_DAEMON_DEPLOYMENT_MODE` this launch establishes. Default 'paper'
+    # preserves every existing caller's behavior byte-for-byte. 'live-shadow'
+    # is the ONLY other accepted value -- this parameter can NEVER select
+    # 'live'/'live-capital'; LiveCapital startup remains exclusively
+    # Start-MiniQuantDesk.ps1's separate, untouched, read-only-today
+    # Invoke-LiveStartup path (Test-Live* preflight chain), which does not
+    # call this script at all.
+    [ValidateSet('paper', 'live-shadow')]
+    [string]$DeploymentMode = 'paper',
     # -RebuildGui: force GUI rebuild only (safe when daemon is already running)
     [switch]$RebuildGui,
     # -RebuildDaemon: force daemon rebuild only (requires daemon not locked)
@@ -491,6 +501,31 @@ function Get-EnvValue {
     return $null
 }
 
+# A3A: extracted as its own function (rather than left inline in MAIN
+# DISPATCH) specifically so it is unit-testable by dot-sourcing this file --
+# MAIN DISPATCH itself is guarded to never execute when dot-sourced (see the
+# `$MyInvocation.InvocationName -ne '.'` guard below), so any check left
+# inline there is otherwise reachable only via a real subprocess invocation.
+function Assert-LiveShadowStartupPrerequisites {
+    param(
+        [Parameter(Mandatory = $true)][string]$DeploymentMode,
+        [Parameter(Mandatory = $true)][bool]$ArmPaperRequested
+    )
+    if ($DeploymentMode -ne 'live-shadow') { return }
+
+    if ($ArmPaperRequested) {
+        throw '-ArmPaper is a paper-only concept and is not valid with -DeploymentMode live-shadow.'
+    }
+
+    # Presence-only: no value is ever read into a variable that could be
+    # printed or logged, only compared against blank/whitespace.
+    $requiredVars = @('MQK_DATABASE_URL', 'ALPACA_API_KEY_LIVE', 'ALPACA_API_SECRET_LIVE')
+    $missing = @($requiredVars | Where-Object { [string]::IsNullOrWhiteSpace((Get-EnvValue -Name $_)) })
+    if ($missing.Count -gt 0) {
+        throw "live-shadow startup requires the following configuration, which is missing/empty: $($missing -join ', '). Refusing to start fail-closed."
+    }
+}
+
 function Resolve-RequiredOperatorToken {
     $token = Get-EnvValue -Name 'MQK_OPERATOR_TOKEN'
     if ($null -eq $token -or $token.Trim().Length -eq 0) {
@@ -503,7 +538,9 @@ function Resolve-RequiredOperatorToken {
 function Set-LauncherEnvironment {
     param(
         [Parameter(Mandatory = $true)][string]$OperatorToken,
-        [Parameter(Mandatory = $true)][string]$RepoRoot
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [ValidateSet('paper', 'live-shadow')]
+        [string]$DeploymentMode = 'paper'
     )
 
     $names = @(
@@ -518,7 +555,12 @@ function Set-LauncherEnvironment {
 
     $snapshot = New-EnvSnapshot -Names $names
 
-    $env:MQK_DAEMON_DEPLOYMENT_MODE = 'paper'
+    # A3A hard invariant: this is the ONE and only assignment to
+    # MQK_DAEMON_DEPLOYMENT_MODE in this file, and it is always exactly the
+    # validated $DeploymentMode parameter ('paper' or 'live-shadow') -- never
+    # a literal 'live'/'live-capital' string, so this seam cannot be made to
+    # silently start a LiveCapital-mode daemon.
+    $env:MQK_DAEMON_DEPLOYMENT_MODE = $DeploymentMode
     $env:MQK_DAEMON_ADAPTER_ID = 'alpaca'
     $env:MQK_DAEMON_ADDR = '127.0.0.1:8899'
     $env:MQK_GUI_DAEMON_URL = 'http://127.0.0.1:8899'
@@ -813,7 +855,9 @@ function Get-TradeReadinessReasons {
 function Get-BackendProbe {
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [Parameter(Mandatory = $true)][string]$OperatorToken
+        [Parameter(Mandatory = $true)][string]$OperatorToken,
+        [ValidateSet('paper', 'live-shadow')]
+        [string]$DeploymentMode = 'paper'
     )
 
     $result = [ordered]@{
@@ -889,8 +933,8 @@ function Get-BackendProbe {
         return [pscustomobject]$result
     }
 
-    if ($result.Metadata.daemon_mode -ne 'paper' -or $result.Status.daemon_mode -ne 'paper' -or $result.Session.daemon_mode -ne 'paper' -or $result.Preflight.daemon_mode -ne 'paper') {
-        $result.FailureReason = "daemon mode mismatch (metadata=$($result.Metadata.daemon_mode), status=$($result.Status.daemon_mode), session=$($result.Session.daemon_mode), preflight=$($result.Preflight.daemon_mode))"
+    if ($result.Metadata.daemon_mode -ne $DeploymentMode -or $result.Status.daemon_mode -ne $DeploymentMode -or $result.Session.daemon_mode -ne $DeploymentMode -or $result.Preflight.daemon_mode -ne $DeploymentMode) {
+        $result.FailureReason = "daemon mode mismatch (expected $DeploymentMode; metadata=$($result.Metadata.daemon_mode), status=$($result.Status.daemon_mode), session=$($result.Session.daemon_mode), preflight=$($result.Preflight.daemon_mode))"
         return [pscustomobject]$result
     }
 
@@ -910,7 +954,7 @@ function Get-BackendProbe {
     }
 
     if ($result.Status.deployment_start_allowed -ne $true -or $result.Session.deployment_start_allowed -ne $true -or $result.Preflight.deployment_start_allowed -ne $true) {
-        $result.FailureReason = "deployment_start_allowed is not consistently true for the configured paper+alpaca backend (status=$($result.Status.deployment_start_allowed), session=$($result.Session.deployment_start_allowed), preflight=$($result.Preflight.deployment_start_allowed))"
+        $result.FailureReason = "deployment_start_allowed is not consistently true for the configured $DeploymentMode+alpaca backend (status=$($result.Status.deployment_start_allowed), session=$($result.Session.deployment_start_allowed), preflight=$($result.Preflight.deployment_start_allowed))"
         return [pscustomobject]$result
     }
 
@@ -919,29 +963,47 @@ function Get-BackendProbe {
         return [pscustomobject]$result
     }
 
-    if ($result.Preflight.autonomous_readiness_applicable -ne $true) {
-        $result.FailureReason = 'preflight reports autonomous_readiness_applicable=false; this is not the canonical paper+alpaca path'
-        return [pscustomobject]$result
-    }
+    if ($DeploymentMode -eq 'paper') {
+        if ($result.Preflight.autonomous_readiness_applicable -ne $true) {
+            $result.FailureReason = 'preflight reports autonomous_readiness_applicable=false; this is not the canonical paper+alpaca path'
+            return [pscustomobject]$result
+        }
 
-    if ($null -eq $result.AutonomousReadiness) {
-        $result.FailureReason = 'autonomous readiness payload is missing'
-        return [pscustomobject]$result
-    }
+        if ($null -eq $result.AutonomousReadiness) {
+            $result.FailureReason = 'autonomous readiness payload is missing'
+            return [pscustomobject]$result
+        }
 
-    if ($result.AutonomousReadiness.truth_state -ne 'active') {
-        $result.FailureReason = "autonomous readiness is not authoritative (truth_state=$($result.AutonomousReadiness.truth_state))"
-        return [pscustomobject]$result
-    }
+        if ($result.AutonomousReadiness.truth_state -ne 'active') {
+            $result.FailureReason = "autonomous readiness is not authoritative (truth_state=$($result.AutonomousReadiness.truth_state))"
+            return [pscustomobject]$result
+        }
 
-    if ($result.AutonomousReadiness.canonical_path -ne $true) {
-        $result.FailureReason = 'autonomous readiness says canonical_path=false'
-        return [pscustomobject]$result
-    }
+        if ($result.AutonomousReadiness.canonical_path -ne $true) {
+            $result.FailureReason = 'autonomous readiness says canonical_path=false'
+            return [pscustomobject]$result
+        }
 
-    if ($result.AutonomousReadiness.signal_ingestion_configured -ne $true) {
-        $result.FailureReason = 'autonomous readiness says signal_ingestion_configured=false'
-        return [pscustomobject]$result
+        if ($result.AutonomousReadiness.signal_ingestion_configured -ne $true) {
+            $result.FailureReason = 'autonomous readiness says signal_ingestion_configured=false'
+            return [pscustomobject]$result
+        }
+    }
+    else {
+        # A3A: routes/system.rs defines autonomous_readiness_applicable as
+        # literally `is_paper_alpaca` -- the whole autonomous-daily-paper-
+        # operations readiness concept is Paper-only by the route's own
+        # documented contract, not something a live-shadow backend can ever
+        # satisfy. Skipping it here is honoring that contract, not lowering
+        # this probe's bar. The one thing worth asserting the other
+        # direction: a live-shadow backend claiming applicable=true would
+        # mean the daemon disagrees with this script about which mode it is
+        # running in, which is exactly the kind of identity mismatch this
+        # probe exists to catch.
+        if ($result.Preflight.autonomous_readiness_applicable -eq $true) {
+            $result.FailureReason = 'preflight reports autonomous_readiness_applicable=true for a live-shadow backend -- daemon disagrees with this launcher about (deployment_mode, adapter_id)'
+            return [pscustomobject]$result
+        }
     }
 
     # Bearer auth round-trip required in all modes — both Observe and TradeReady.
@@ -1011,13 +1073,15 @@ function Wait-ForBackendState {
         [Parameter(Mandatory = $true)][string]$BaseUrl,
         [Parameter(Mandatory = $true)][string]$OperatorToken,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
-        [Parameter(Mandatory = $true)][bool]$RequireTradeReady
+        [Parameter(Mandatory = $true)][bool]$RequireTradeReady,
+        [ValidateSet('paper', 'live-shadow')]
+        [string]$DeploymentMode = 'paper'
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastProbe = $null
     while ((Get-Date) -lt $deadline) {
-        $lastProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken
+        $lastProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken -DeploymentMode $DeploymentMode
         if ($lastProbe.IdentityVerified -and ((-not $RequireTradeReady) -or $lastProbe.TradeReady)) {
             return $lastProbe
         }
@@ -1237,11 +1301,13 @@ function Start-DaemonIfNeeded {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$BaseUrl,
         [Parameter(Mandatory = $true)][string]$OperatorToken,
-        [Parameter(Mandatory = $true)][string]$LauncherMode
+        [Parameter(Mandatory = $true)][string]$LauncherMode,
+        [ValidateSet('paper', 'live-shadow')]
+        [string]$DeploymentMode = 'paper'
     )
 
     $requireTradeReady = $LauncherMode -eq 'TradeReady'
-    $existingProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken
+    $existingProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken -DeploymentMode $DeploymentMode
     if ($existingProbe.IdentityVerified) {
         if ($requireTradeReady -and -not $existingProbe.TradeReady) {
             $existingReasonText = if ($null -eq $existingProbe.TradeReadinessReasons -or @($existingProbe.TradeReadinessReasons).Count -eq 0) {
@@ -1284,7 +1350,7 @@ throw "Verified canonical backend is not trade-ready. $existingReasonText"
     $stdoutLog = Join-Path $logDir "daemon_$stamp.stdout.log"
     $stderrLog = Join-Path $logDir "daemon_$stamp.stderr.log"
 
-    Write-LauncherStep 'Starting mqk-daemon in canonical local paper+alpaca posture'
+    Write-LauncherStep "Starting mqk-daemon in canonical local $DeploymentMode+alpaca posture"
     $process = Start-Process `
         -FilePath $DaemonExe `
         -WorkingDirectory $RepoRoot `
@@ -1295,7 +1361,7 @@ throw "Verified canonical backend is not trade-ready. $existingReasonText"
 
     $probe = $null
     try {
-        $probe = Wait-ForBackendState -BaseUrl $BaseUrl -OperatorToken $OperatorToken -TimeoutSeconds 30 -RequireTradeReady:$requireTradeReady
+        $probe = Wait-ForBackendState -BaseUrl $BaseUrl -OperatorToken $OperatorToken -TimeoutSeconds 30 -RequireTradeReady:$requireTradeReady -DeploymentMode $DeploymentMode
         if (-not $probe.IdentityVerified) {
             throw "daemon did not reach verified canonical identity. $($probe.FailureReason)"
         }
@@ -1656,6 +1722,140 @@ function Invoke-StartupCheckOnly {
     }
 }
 
+# =============================================================================
+# A3A (MQK-LEDGER-BURN-CONTROLLER-03): -DeploymentMode live-shadow -CheckOnly
+# read-only status report. Deliberately NOT a copy of Invoke-StartupCheckOnly
+# -- that function's paper-DB-container/AAPL-bars/sys_arm_state checks target
+# `mqk-paper-postgres` specifically and would report false/misleading
+# "UNKNOWN" noise against whatever database a live-shadow operator actually
+# configured. This checks only what is genuinely mode-agnostic (repo,
+# .env.local, docker, daemon binary, daemon health/status reachability) plus
+# the live-shadow-specific required configuration (MQK_DATABASE_URL,
+# ALPACA_API_KEY_LIVE, ALPACA_API_SECRET_LIVE) -- presence only, values never
+# read into a variable that could be printed, never logged.
+# =============================================================================
+function Invoke-LiveShadowCheckOnly {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $DaemonBaseUrl = 'http://127.0.0.1:8899'
+
+    Write-Host ''
+    Write-Host '=== Veritas Ledger Startup -- CheckOnly (live-shadow) ===' -ForegroundColor Cyan
+    Write-Host '    Read-only status report. No daemon start, no build,' -ForegroundColor DarkGray
+    Write-Host '    no broker calls, no DB writes, no Discord alerts.' -ForegroundColor DarkGray
+    Write-Host ''
+
+    $hardFailure = $false
+
+    Write-CheckField 'Repo root detected' $RepoRoot
+
+    $envLocalPresent = Test-Path (Join-Path $RepoRoot '.env.local')
+    if ($envLocalPresent) {
+        Write-CheckField '.env.local present' 'yes (contents not read or printed)'
+    } else {
+        Write-CheckField '.env.local present' 'no'
+        $hardFailure = $true
+    }
+
+    $dockerAvailable = $false
+    try {
+        $null = Get-Command 'docker' -ErrorAction Stop
+        $dockerAvailable = $true
+        Write-CheckField 'Docker available' 'yes (informational only -- live-shadow does not own any DB container lifecycle)'
+    } catch {
+        Write-CheckField 'Docker available' 'no (informational only -- live-shadow does not own any DB container lifecycle)'
+    }
+
+    # Required live-shadow configuration -- presence only, values never read
+    # into a variable, never printed, never logged.
+    $requiredVars = @('MQK_DATABASE_URL', 'ALPACA_API_KEY_LIVE', 'ALPACA_API_SECRET_LIVE')
+    foreach ($name in $requiredVars) {
+        $present = -not [string]::IsNullOrWhiteSpace((Get-EnvValue -Name $name))
+        Write-CheckField "$name configured" $(if ($present) { 'yes (value not read or printed)' } else { 'no' })
+        if (-not $present) { $hardFailure = $true }
+    }
+
+    $daemonExePath = Join-Path $RepoRoot 'core-rs\target\release\mqk-daemon.exe'
+    if (Test-Path $daemonExePath) {
+        Write-CheckField 'mqk-daemon binary exists' "yes ($daemonExePath)"
+    } else {
+        Write-CheckField 'mqk-daemon binary exists' 'no (will build on launch)'
+    }
+
+    $health = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/v1/health'
+    $daemonReachable = $null -ne $health
+    if ($daemonReachable) {
+        $serviceName = Get-JsonField -Obj $health -Field 'service' -Default '(unknown)'
+        Write-CheckField 'Daemon health endpoint reachable' "yes (service=$serviceName)"
+    } else {
+        Write-CheckField 'Daemon health endpoint reachable' 'no (expected before startup)'
+    }
+
+    $liveRoutingEnabled = $null
+    $runtimeStatus = 'unknown'
+    $killSwitchActive = $null
+    $reconcileStatus = 'unknown'
+    $daemonMode = 'unknown'
+    if ($daemonReachable) {
+        $sysStatus = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/api/v1/system/status'
+        $daemonMode = Get-JsonField -Obj $sysStatus -Field 'daemon_mode' -Default 'unknown'
+        $liveRoutingEnabled = Get-JsonField -Obj $sysStatus -Field 'live_routing_enabled' -Default 'unknown'
+        $runtimeStatus = Get-JsonField -Obj $sysStatus -Field 'runtime_status' -Default 'unknown'
+        $killSwitchActive = Get-JsonField -Obj $sysStatus -Field 'kill_switch_active' -Default 'unknown'
+
+        $reconcile = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/api/v1/reconcile/status'
+        $reconcileStatus = Get-JsonField -Obj $reconcile -Field 'status' -Default 'unknown'
+
+        Write-CheckField 'Daemon mode (reachable backend)' $daemonMode
+        Write-CheckField 'Live routing' (Format-CheckOnlyBoolField $liveRoutingEnabled)
+        Write-CheckField 'Runtime status' $runtimeStatus
+        Write-CheckField 'Kill switch' (Format-CheckOnlyBoolField $killSwitchActive)
+        Write-CheckField 'Reconcile' $reconcileStatus
+
+        if ($daemonMode -ne 'unknown' -and $daemonMode -ne 'live-shadow') {
+            Write-Host ''
+            Write-Host "  WARNING: a daemon IS reachable on 127.0.0.1:8899 but reports daemon_mode='$daemonMode', not 'live-shadow'." -ForegroundColor Yellow
+            Write-Host '  A live-shadow full run would refuse to attach to it (see Get-BackendProbe).' -ForegroundColor Yellow
+        }
+    } else {
+        Write-CheckField 'Live routing' 'unknown (daemon offline)'
+        Write-CheckField 'Runtime status' 'unknown (daemon offline)'
+        Write-CheckField 'Kill switch' 'unknown (daemon offline)'
+        Write-CheckField 'Reconcile' 'unknown (daemon offline)'
+    }
+
+    if ($liveRoutingEnabled -eq $true) {
+        Write-Host ''
+        Write-Host '  DANGER: live_routing_enabled=true on a reachable daemon.' -ForegroundColor Red
+        Write-Host '  Investigate before proceeding. Do not start or trade.' -ForegroundColor Red
+    }
+
+    Write-Host ''
+    if (-not $envLocalPresent) {
+        $nextAction = 'Copy .env.local.example to .env.local and fill in credentials, then re-run -CheckOnly.'
+    } elseif ($hardFailure) {
+        $nextAction = 'One or more required live-shadow configuration values are missing (see above). Fill them in, then re-run -CheckOnly.'
+    } elseif ($liveRoutingEnabled -eq $true) {
+        $nextAction = 'DANGER: live_routing_enabled=true. Investigate immediately. Do not start or trade.'
+    } elseif ($daemonReachable -and $daemonMode -ne 'live-shadow') {
+        $nextAction = "A daemon is reachable in a different mode ($daemonMode). Stop it or resolve the conflict before a live-shadow full run."
+    } elseif ($daemonReachable) {
+        $nextAction = 'Daemon is already reachable in live-shadow mode. Run Get-PaperOperatorStatus.ps1-equivalent tooling for full status, or re-run without -CheckOnly to reattach.'
+    } else {
+        $nextAction = 'Prerequisites look OK. Run Start-MiniQuantDesk.ps1 -Mode LiveShadow (no -CheckOnly) for a full live-shadow start.'
+    }
+    Write-CheckField 'Next action' $nextAction
+
+    Write-Host ''
+    if ($hardFailure) {
+        Write-Host '=== CheckOnly (live-shadow): prerequisite check FAILED (see above) ===' -ForegroundColor Red
+        return 1
+    } else {
+        Write-Host '=== CheckOnly (live-shadow) complete ===' -ForegroundColor Cyan
+        return 0
+    }
+}
+
 # STALE-DAEMON-BINARY-PROVENANCE-01 / SCHEDULED-HEADLESS-BOOTSTRAP-01: guard
 # MAIN DISPATCH so this file can be safely dot-sourced by tests (defines
 # functions only -- no daemon start, no build, no exit) when the file is
@@ -1671,12 +1871,21 @@ try {
     Import-LauncherEnvironmentFiles -RepoRoot $repoRoot
 
     if ($CheckOnly.IsPresent) {
-        $checkOnlyExitCode = Invoke-StartupCheckOnly -RepoRoot $repoRoot
+        $checkOnlyExitCode = if ($DeploymentMode -eq 'live-shadow') {
+            Invoke-LiveShadowCheckOnly -RepoRoot $repoRoot
+        } else {
+            Invoke-StartupCheckOnly -RepoRoot $repoRoot
+        }
         exit $checkOnlyExitCode
     }
 
+    # A3A hard invariants, enforced before any daemon start is attempted --
+    # see Assert-LiveShadowStartupPrerequisites's doc comment for why this is
+    # a named function rather than inline here.
+    Assert-LiveShadowStartupPrerequisites -DeploymentMode $DeploymentMode -ArmPaperRequested $ArmPaper.IsPresent
+
     $operatorToken = Resolve-RequiredOperatorToken
-    $envSnapshot = Set-LauncherEnvironment -OperatorToken $operatorToken -RepoRoot $repoRoot
+    $envSnapshot = Set-LauncherEnvironment -OperatorToken $operatorToken -RepoRoot $repoRoot -DeploymentMode $DeploymentMode
 
     try {
         # Resolve rebuild flags: -Rebuild is a legacy alias for -RebuildAll
@@ -1716,7 +1925,7 @@ try {
         Write-LauncherStep 'Resolving daemon binary'
         $daemonExe = Ensure-DaemonBinary -RepoRoot $repoRoot -ForceRebuild:$forceRebuildDaemon
 
-        $daemonInfo = Start-DaemonIfNeeded -DaemonExe $daemonExe -RepoRoot $repoRoot -BaseUrl $env:MQK_GUI_DAEMON_URL -OperatorToken $operatorToken -LauncherMode $Mode
+        $daemonInfo = Start-DaemonIfNeeded -DaemonExe $daemonExe -RepoRoot $repoRoot -BaseUrl $env:MQK_GUI_DAEMON_URL -OperatorToken $operatorToken -LauncherMode $Mode -DeploymentMode $DeploymentMode
         $verified = $daemonInfo.Probe
 
         Write-BackendSummary -Probe $verified -LauncherMode $Mode
@@ -1738,18 +1947,19 @@ try {
             Write-LauncherStep 'GUI launch skipped (-SkipGui)'
         }
 
+        $daemonLabel = if ($DeploymentMode -eq 'live-shadow') { 'live-shadow' } else { 'paper' }
         if ($daemonInfo.Started) {
             if ($Mode -eq 'TradeReady') {
-                Write-LauncherSuccess "Started verified trade-ready local paper daemon (PID $($daemonInfo.ProcessId))"
+                Write-LauncherSuccess "Started verified trade-ready local $daemonLabel daemon (PID $($daemonInfo.ProcessId))"
             }
             else {
-                Write-LauncherSuccess "Started verified local paper daemon (PID $($daemonInfo.ProcessId))"
+                Write-LauncherSuccess "Started verified local $daemonLabel daemon (PID $($daemonInfo.ProcessId))"
             }
             Write-Host "[Veritas Ledger] stdout: $($daemonInfo.StdoutLog)" -ForegroundColor DarkGray
             Write-Host "[Veritas Ledger] stderr: $($daemonInfo.StderrLog)" -ForegroundColor DarkGray
         }
         else {
-            Write-LauncherSuccess 'Verified local paper daemon was already running; GUI attached without starting runtime'
+            Write-LauncherSuccess "Verified local $daemonLabel daemon was already running; GUI attached without starting runtime"
         }
 
         if ($guiLaunched) {

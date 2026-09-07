@@ -95,8 +95,8 @@ function Invoke-Launcher {
 Show-Info ''
 Show-Info '=== Section 1: static source-guard checks ==='
 
-Assert-True 'ValidateSet restricts -Mode to Paper/Live only' `
-    ($LauncherText -match "\[ValidateSet\('Paper',\s*'Live'\)\]")
+Assert-True 'ValidateSet restricts -Mode to Paper/Live/LiveShadow only (MQK-LEDGER-BURN-CONTROLLER-03 A3A added LiveShadow, distinct from Live)' `
+    ($LauncherText -match "\[ValidateSet\('Paper',\s*'Live',\s*'LiveShadow'\)\]")
 
 Assert-True '-Scheduled with no -Mode is refused before any other logic runs' `
     ($LauncherText -match 'scheduled_mode_requires_explicit_trading_mode')
