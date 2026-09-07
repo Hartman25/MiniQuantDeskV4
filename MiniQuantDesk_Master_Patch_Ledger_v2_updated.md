@@ -410,12 +410,24 @@ the mission's own rule, so that row stays `PENDING_INDEPENDENT_REVIEW`.
 **Canonical normalized table — every one of the 73 rows in exactly one
 bucket:**
 
-#### ACTIVE_IMPLEMENTATION = 2
+#### ACTIVE_IMPLEMENTATION = 1
 
-`INSTRUMENT-UNIVERSE-REFRESH-01`,
-`MD-KRAKEN-FETCH-RETRY-BACKOFF-01`
+`INSTRUMENT-UNIVERSE-REFRESH-01`
 
-**Mechanical check:** 2 row IDs listed above == declared count 2. MATCH.
+**Mechanical check:** 1 row ID listed above == declared count 1. MATCH.
+
+**Note on this row:** unlike every other row in this inventory,
+`INSTRUMENT-UNIVERSE-REFRESH-01`'s own ledger entry (Lane A, above) carries
+no `In Scope`/`Acceptance Criteria`/`Exact CLOSED End State` fields at all —
+it is an explicitly unscoped "(blocked/future)" architecture question (which
+other seeded equities need registry review; whether the registry's single
+`provider` field is sufficient long-term), not a bounded patch. Per
+CLAUDE.md's "smallest clear implementation" and no-fabricated-closure rules,
+this session does not invent a scope or a closure for it — doing so would
+itself be exactly the kind of unauthorized scope invention the operating
+contract forbids. It stays the sole `ACTIVE_IMPLEMENTATION` row, genuinely
+requiring an operator scoping decision before any patch can be defined
+against it.
 
 **Burn-phase updates (2026-09-07):**
 - `BROKER-ALPACA-DEAD-CODE-CLEANUP-01` normalized `ACTIVE_IMPLEMENTATION ->
@@ -468,9 +480,16 @@ bucket:**
   was a genuine discovery entry), but this session found its own named fix
   already implemented (`e5e3d44c`): `unique_dir` no longer uses
   `SystemTime::now()`. A fresh run of `check_unsafe_patterns.sh` exits 0.
+- `MD-KRAKEN-FETCH-RETRY-BACKOFF-01` normalized `ACTIVE_IMPLEMENTATION ->
+  CLOSED` — also no prior L0 truth-up; this session found the bounded-retry
+  pattern already implemented (`e4a389c0`) and fully tested (`kh05`..`kh07`
+  plus `kf01`..`kf12`, 50/50 green for `providers::kraken` as a whole).
 
 See each row's own ledger entry for full evidence. `ACTIVE_IMPLEMENTATION`
-was 21 at the moment of the Phase N commit and is 2 as of this update.
+was 21 at the moment of the Phase N commit and is 1 as of this update —
+`INSTRUMENT-UNIVERSE-REFRESH-01` only, which is explicitly unscoped (see its
+own note in the bucket listing above) and requires an operator scoping
+decision, not further code archaeology, to become an actionable patch.
 
 #### PENDING_INDEPENDENT_REVIEW = 8
 
@@ -520,7 +539,7 @@ pending ledger cleanup.)
 without explicit separate operator authorization per the controlling
 mission).
 
-#### CLOSED (this normalization pass, updated through the burn phase) = 44
+#### CLOSED (this normalization pass, updated through the burn phase) = 45
 
 `BROKER-ALPACA-DEAD-CODE-CLEANUP-01`, `RISK-AUTHORITY-DOC-NOTE-01`,
 `PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01`, `BROKER-ALPACA-CRATE-SCOPE-DOC-01`,
@@ -534,8 +553,9 @@ mission).
 `CLI-DAEMON-CONTROL-PASSTHROUGH-01`, `BROKER-ALPACA-RATE-LIMIT-RETRY-AFTER-01`,
 `MD-ALPACA-FETCH-RETRY-BACKOFF-01`, `DISCORD-CHANNEL-ROUTING-01`,
 `DISCORD-DATA-STALENESS-ALERT-01`, `DISCORD-DAILY-SUMMARY-PUSH-01`,
-`CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01` (all nineteen: burn-phase
-closures, 2026-09-07 — see above),
+`CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01`,
+`MD-KRAKEN-FETCH-RETRY-BACKOFF-01` (all twenty: burn-phase closures,
+2026-09-07 — see above),
 `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`,
 `MARKET-DATA-PROVIDER-PROVENANCE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`,
 `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`,
@@ -556,11 +576,11 @@ disposed under the same commit as the row above),
 `MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
 `MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`
 
-**Sum check (as of the burn-phase update above):** 2 + 8 + 0 + 3 + 4 + 4 + 7
-+ 1 + 44 = **73**. Matches the `04-active-row-table.csv` row count exactly —
+**Sum check (as of the burn-phase update above):** 1 + 8 + 0 + 3 + 4 + 4 + 7
++ 1 + 45 = **73**. Matches the `04-active-row-table.csv` row count exactly —
 every row accounted for in exactly one bucket, no hidden subset counts.
 
-**`ACTIVE_IMPLEMENTATION_LEDGER = 2`** is the operative denominator as of the
+**`ACTIVE_IMPLEMENTATION_LEDGER = 1`** is the operative denominator as of the
 burn-phase update above (21 at the moment of the Phase N commit itself),
 superseding the retired `13`. `PENDING_INDEPENDENT_REVIEW` (8),
 `IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED` (3),
@@ -1085,7 +1105,7 @@ No interaction with any real Paper session in either patch: every test seeds and
 
 #### MD-KRAKEN-FETCH-RETRY-BACKOFF-01 — Add bounded retry/backoff to Kraken fetch_bars
 
-**Status:** READY · **Priority:** P3 · **Paper Impact:** GREEN (Kraken is not in the live equity paper path) · **Subsystem:** mqk-md
+**Status:** CLOSED (`MQK-LEDGER-BURN-CONTROLLER-04` burn phase, 2026-09-07) — already implemented at this session's HEAD (no prior L0 truth-up existed for this row; discovered fresh this session): `e4a389c0` ("fix(mqk-md): wire bounded retry/backoff into Kraken fetch_bars") is an ancestor of HEAD. `fetch_kraken_ohlc_body_from` implements the bounded-retry-on-transient-status pattern (mirroring/exceeding TwelveData's, including `Retry-After` budget handling), wired into `KrakenHistoricalProvider::fetch_bars`. `cargo test -p mqk-md --lib providers::kraken` is 50/50 green, including `kh05` (fetch_bars retries transient 429 then succeeds — the row's own literal "Exact CLOSED End State" negative-control requirement), `kh06` (permanent error never retried), `kh07` (persistent 5xx exhausts retry budget), and `kf01`..`kf12` (the underlying HTTP-fetch retry primitive's full transient/permanent/exhaustion/`Retry-After`-budget matrix). No code changed by this session. · **Priority:** P3 · **Paper Impact:** GREEN (Kraken is not in the live equity paper path) · **Subsystem:** mqk-md
 **Current Source Truth:** `mqk-md/src/providers/kraken.rs:631-683` issues a single HTTP attempt per page with no retry on transient failure. `mqk-md/src/provider.rs:412-514` (TwelveData) already has a proven bounded-retry pattern (`provider.rs:1285`, test `rate_limit_retry_succeeds_after_one_body_429`).
 **Problem:** A single dropped connection fails the whole Kraken poll cycle.
 **Dependencies:** NONE. **Unlocks:** Establishes the pattern reusable by `MD-ALPACA-FETCH-RETRY-BACKOFF-01`.
