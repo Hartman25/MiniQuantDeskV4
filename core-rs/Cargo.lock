@@ -1866,6 +1866,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
+ "httpmock",
  "mqk-artifacts",
  "mqk-audit",
  "mqk-backtest",

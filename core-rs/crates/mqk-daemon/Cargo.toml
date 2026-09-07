@@ -113,3 +113,12 @@ rusqlite = { version = "0.30", features = ["bundled"] }
 # that would compile the disposable-database helper into the production
 # `mqk-daemon` binary. See scripts/guards/check_disposable_db_not_in_production.sh.
 mqk-db = { path = "../mqk-db", features = ["testkit"] }
+# LIVE-FLATTEN-PROOF-01: activates BrokerGateway::for_test/BrokerInvokeToken::
+# for_test (mqk-execution's testkit escape hatches) for this crate's own
+# tests only -- MUST NOT be moved to [dependencies], for the same reason as
+# the mqk-db entry above (CI-TESTKIT-FEATURE-GUARD-VERIFY-01 guards this
+# workspace-wide: scripts/guards/check_testkit_feature_not_default.sh).
+mqk-execution = { path = "../mqk-execution", features = ["testkit"] }
+# LIVE-FLATTEN-PROOF-01: hermetic HTTP mock seam, same crate+version already
+# used by mqk-cli/mqk-md, for a real (non-network) AlpacaBrokerAdapter proof.
+httpmock = "0.7"
