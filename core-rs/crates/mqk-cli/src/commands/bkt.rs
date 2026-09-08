@@ -1455,6 +1455,7 @@ pub fn run_finalize_p7a_p7b_replay_stress(
 /// Mirrors [`run_finalize_p7a_p7b_replay_stress`] exactly -- a genuinely
 /// separate production phase, same cross-candidate authority check, same
 /// merge seam (generalized to accept any of the three deferred scenarios).
+#[allow(clippy::too_many_arguments)]
 pub fn run_finalize_genuine_shuffled_placebo(
     artifact_root: String,
     run_id: String,
