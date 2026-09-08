@@ -104,7 +104,9 @@ mod opening_bar_freshness_authority_tests {
             .timestamp()
     }
 
-    fn report_from(statuses: Vec<crate::api_types::MarketDataFreshnessStatus>) -> MultiSymbolFreshnessReport {
+    fn report_from(
+        statuses: Vec<crate::api_types::MarketDataFreshnessStatus>,
+    ) -> MultiSymbolFreshnessReport {
         crate::market_data_freshness::aggregate_freshness_statuses(
             statuses.iter().map(|s| s.symbol.clone()).collect(),
             statuses,
@@ -117,7 +119,8 @@ mod opening_bar_freshness_authority_tests {
         let now = open_ts + 45;
         // Only a prior-session bar exists — structurally guaranteed this
         // early, so `evaluate_md_freshness_snapshot` reports "stale".
-        let status = evaluate_md_freshness_snapshot("ZZLC01", "5m", 10, Some(open_ts - 20_000), now);
+        let status =
+            evaluate_md_freshness_snapshot("ZZLC01", "5m", 10, Some(open_ts - 20_000), now);
         assert_eq!(status.freshness_state, "stale");
         let report = report_from(vec![status]);
         let provider = NyseWeekdaysProvider;
@@ -132,7 +135,8 @@ mod opening_bar_freshness_authority_tests {
     fn obf_lc_02_stale_well_inside_session_is_not_covered() {
         let open_ts = session_open_ts();
         let now = open_ts + 3600; // 1 hour into the session
-        let status = evaluate_md_freshness_snapshot("ZZLC02", "5m", 10, Some(open_ts - 20_000), now);
+        let status =
+            evaluate_md_freshness_snapshot("ZZLC02", "5m", 10, Some(open_ts - 20_000), now);
         assert_eq!(status.freshness_state, "stale");
         let report = report_from(vec![status]);
         let provider = NyseWeekdaysProvider;
@@ -179,7 +183,8 @@ mod opening_bar_freshness_authority_tests {
     fn obf_lc_05_one_covered_one_not_refuses_the_whole_verdict() {
         let open_ts = session_open_ts();
         let now = open_ts + 45;
-        let pending = evaluate_md_freshness_snapshot("ZZLC05A", "5m", 10, Some(open_ts - 20_000), now);
+        let pending =
+            evaluate_md_freshness_snapshot("ZZLC05A", "5m", 10, Some(open_ts - 20_000), now);
         let missing = evaluate_md_freshness_snapshot("ZZLC05B", "5m", 0, None, now);
         let report = report_from(vec![pending, missing]);
         let provider = NyseWeekdaysProvider;

@@ -1292,8 +1292,7 @@ pub(crate) async fn ops_action(
                         disposition: "db_unavailable".to_string(),
                         resulting_integrity_state: None,
                         resulting_desired_armed: None,
-                        blockers: vec!["recover-orphaned-run requires a DB connection"
-                            .to_string()],
+                        blockers: vec!["recover-orphaned-run requires a DB connection".to_string()],
                         warnings: vec![],
                         environment: Some(env_label),
                         scope: Some("daemon_instance".to_string()),
@@ -1550,9 +1549,7 @@ pub(crate) async fn ops_action(
                     }),
                 )
                     .into_response(),
-                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::UnappliedInbox {
-                    unapplied_count,
-                }) => (
+                Ok(mqk_db::StopRunIfEvidenceCleanOutcome::UnappliedInbox { unapplied_count }) => (
                     StatusCode::CONFLICT,
                     Json(OperatorActionResponse {
                         requested_action: "recover-orphaned-run".to_string(),
@@ -2838,8 +2835,9 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
                 Some("recover-orphaned-run is paper-only".to_string())
             } else if !has_orphaned_active_run {
                 if st.db.is_none() {
-                    Some("Backend unavailable; cannot query for an orphaned active run."
-                        .to_string())
+                    Some(
+                        "Backend unavailable; cannot query for an orphaned active run.".to_string(),
+                    )
                 } else {
                     Some(
                         "No ARMED/RUNNING run without a local owner found; nothing to recover."

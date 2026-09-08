@@ -56,8 +56,11 @@ pub const STRESS_SUITE_PROTOCOL_VERSION: &str = "bkt_stress_suite_v1";
 /// accepted as evidence for that protocol. If the scenario set ever changes,
 /// bump `STRESS_SUITE_PROTOCOL_VERSION` and update this list in the same
 /// patch so old artifacts are never silently reinterpreted under a new set.
-pub const REQUIRED_SCENARIO_NAMES: &[&str] =
-    &["cost_stress_2x", "cost_stress_3x", "conservative_risk_limits"];
+pub const REQUIRED_SCENARIO_NAMES: &[&str] = &[
+    "cost_stress_2x",
+    "cost_stress_3x",
+    "conservative_risk_limits",
+];
 
 /// Outcome of one adversarial re-run.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,8 +156,7 @@ fn conservative_risk_limits_config(base: &BacktestConfig) -> BacktestConfig {
         0.0
     };
     let mut cfg = base.clone();
-    cfg.daily_loss_limit_micros =
-        (base.initial_cash_micros as f64 * daily_loss_fraction) as i64;
+    cfg.daily_loss_limit_micros = (base.initial_cash_micros as f64 * daily_loss_fraction) as i64;
     cfg.max_drawdown_limit_micros =
         (base.initial_cash_micros as f64 * conservative_max_drawdown_fraction()) as i64;
     cfg
@@ -304,8 +306,11 @@ pub fn run_backtest_stress_suite(
     bars: &[BacktestBar],
     make_strategy: impl Fn() -> Box<dyn Strategy>,
 ) -> StressSuiteRunOutput {
-    let baseline_final_equity_micros =
-        baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(base_config.initial_cash_micros);
+    let baseline_final_equity_micros = baseline
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(base_config.initial_cash_micros);
     let expected_fp = baseline.strategy_semantic_fingerprint.as_str();
 
     let scenarios = vec![

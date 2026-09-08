@@ -131,7 +131,9 @@ fn no_artifact_lock_blocks_promotion() {
         stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: None, // ← B6 gate fires here
         oos_evidence: Some(common::valid_oos_evidence_for_testing("no_lock_trial")), // P7C: isolate B6 gate
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("no_lock_trial")),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "no_lock_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -169,7 +171,9 @@ fn valid_lock_admits_promotion() {
         stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(lock),
         oos_evidence: Some(common::valid_oos_evidence_for_testing("valid_lock_trial")), // P7C
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("valid_lock_trial")),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "valid_lock_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -377,8 +381,12 @@ fn new_for_testing_is_accepted_by_evaluator() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(lock),
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("new_for_testing_lock_trial")), // P7C
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("new_for_testing_lock_trial")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "new_for_testing_lock_trial",
+        )), // P7C
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "new_for_testing_lock_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);

@@ -374,7 +374,8 @@ fn resolve_symbols_for_provider_operation(
         }
         (Some(_), None) => resolve_symbols_with_provider_symbol(symbols, None),
         (None, Some(path)) => {
-            let instruments = resolve_provider_scoped_registry_instruments(path, source, timeframe)?;
+            let instruments =
+                resolve_provider_scoped_registry_instruments(path, source, timeframe)?;
             if instruments.is_empty() {
                 anyhow::bail!(
                     "registry at {} contains no enabled equity instruments whose provider matches \
@@ -3616,8 +3617,14 @@ mod tests {
     #[test]
     fn rs_scope_01_instrument_authorizes_timeframe_matches_and_rejects() {
         let inst = scoped_test_instrument("AAPL", "alpaca", &["5m"]);
-        assert!(instrument_authorizes_timeframe(&inst, mqk_md::Timeframe::M5));
-        assert!(!instrument_authorizes_timeframe(&inst, mqk_md::Timeframe::D1));
+        assert!(instrument_authorizes_timeframe(
+            &inst,
+            mqk_md::Timeframe::M5
+        ));
+        assert!(!instrument_authorizes_timeframe(
+            &inst,
+            mqk_md::Timeframe::D1
+        ));
     }
 
     // RS-SCOPE-02 (mission item 12): source=alpaca timeframe=5m selects
@@ -3678,7 +3685,10 @@ mod tests {
             mqk_md::Timeframe::D1,
         );
         fs::remove_file(&path).ok();
-        assert!(result.is_err(), "no authorized instrument must be Err, not empty Ok");
+        assert!(
+            result.is_err(),
+            "no authorized instrument must be Err, not empty Ok"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("no enabled equity instruments"),
@@ -3831,7 +3841,10 @@ mod tests {
         .unwrap();
 
         let row = fetch_provenance_row(&pool, symbol, 1_708_041_600).await;
-        assert_eq!(row.0, "alpaca", "provider_id must be the truthful source, never unknown");
+        assert_eq!(
+            row.0, "alpaca",
+            "provider_id must be the truthful source, never unknown"
+        );
         assert_eq!(row.1.as_deref(), Some("alpaca"));
         assert_eq!(row.2.as_deref(), Some(symbol));
         assert_eq!(row.3.as_deref(), Some("provider_sync"));
@@ -3928,7 +3941,10 @@ mod tests {
         let row = fetch_provenance_row(&pool, symbol, 1_708_041_600).await;
         assert_eq!(row.0, "alpaca", "provider_id is still truthful");
         assert_eq!(row.1.as_deref(), Some("alpaca"));
-        assert_eq!(row.2, None, "provider_symbol must never be forged when unknown");
+        assert_eq!(
+            row.2, None,
+            "provider_symbol must never be forged when unknown"
+        );
 
         sqlx::query("delete from md_bars where symbol = $1")
             .bind(symbol)

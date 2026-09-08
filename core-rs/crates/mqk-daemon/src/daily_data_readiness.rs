@@ -198,9 +198,7 @@ impl DailyDataReadinessReason {
             }
             v if v == REASON_CALENDAR_UNAVAILABLE => Self::CalendarUnavailable,
             v if v == REASON_UNSUPPORTED_TIMEFRAME => Self::UnsupportedTimeframe,
-            v if v == REASON_UNSUPPORTED_INTRADAY_CONTINUITY => {
-                Self::UnsupportedIntradayContinuity
-            }
+            v if v == REASON_UNSUPPORTED_INTRADAY_CONTINUITY => Self::UnsupportedIntradayContinuity,
             v if v == REASON_MARKET_DATA_MISSING => Self::MarketDataMissing,
             v if v == REASON_INSUFFICIENT_HISTORY => Self::InsufficientHistory,
             v if v == REASON_DUPLICATE_TIMESTAMP => Self::DuplicateTimestamp,
@@ -222,9 +220,7 @@ impl DailyDataReadinessReason {
         match self {
             Self::RequiredAssignmentsMissing => REASON_REQUIRED_ASSIGNMENTS_MISSING,
             Self::AssignmentResolutionFailed => REASON_ASSIGNMENT_RESOLUTION_FAILED,
-            Self::RuntimeStrategyAssignmentMismatch => {
-                REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH
-            }
+            Self::RuntimeStrategyAssignmentMismatch => REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH,
             Self::RuntimeStrategySymbolBindingMismatch => {
                 REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH
             }
@@ -388,10 +384,10 @@ mod daily_data_readiness_reason_tests {
         for garbage in [
             "",
             "totally_unknown_reason",
-            "db_unavailable",  // a readiness_state value, not a blocker reason code
-            "query_failed",    // likewise
-            "unavailable",     // likewise
-            "blocked",         // likewise
+            "db_unavailable", // a readiness_state value, not a blocker reason code
+            "query_failed",   // likewise
+            "unavailable",    // likewise
+            "blocked",        // likewise
             "MARKET_DATA_MISSING", // wrong case must not fuzzy-match
         ] {
             assert_eq!(

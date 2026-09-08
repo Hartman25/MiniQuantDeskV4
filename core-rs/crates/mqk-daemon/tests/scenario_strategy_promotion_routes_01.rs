@@ -274,8 +274,11 @@ fn write_research_evidence_fixture_with_strategy(
         r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}},"folds":[{{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}}]}}"#
     );
     let economic_sha = hex::encode(Sha256::digest(economic_json.as_bytes()));
-    std::fs::write(evidence_dir.join("economic_walk_forward.json"), &economic_json)
-        .expect("write economic artifact");
+    std::fs::write(
+        evidence_dir.join("economic_walk_forward.json"),
+        &economic_json,
+    )
+    .expect("write economic artifact");
 
     let judge_json = format!(
         r#"{{"schema_version":"multiple_testing_judge_v1","protocol":{{"protocol_id":"research_multiple_testing_judge_v1"}},"comparison_scope":{{"experiment_id":"{experiment_id}"}},"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":0.85}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
@@ -467,7 +470,10 @@ fn write_real_research_evidence_via_production_pipeline(
                 "fixture precondition: every real trial's DSR must be evaluable: {t}"
             );
             let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
-            let economic_eval_id = t["economic_eval_id"].as_str().expect("economic_eval_id").to_string();
+            let economic_eval_id = t["economic_eval_id"]
+                .as_str()
+                .expect("economic_eval_id")
+                .to_string();
             let economic_json_path =
                 PathBuf::from(t["economic_walk_forward_json"].as_str().expect("path"));
             let evidence_dir = economic_json_path
@@ -541,12 +547,18 @@ fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
             1 => price *= 1.0017,
             _ => price *= 0.9960,
         }
-        let (hi_mult, lo_mult) = if leg == 1 { (1.09, 0.91) } else { (1.005, 0.995) };
+        let (hi_mult, lo_mult) = if leg == 1 {
+            (1.09, 0.91)
+        } else {
+            (1.005, 0.995)
+        };
         let o = (price * m as f64) as i64;
         let h = (price * hi_mult * m as f64) as i64;
         let l = (price * lo_mult * m as f64) as i64;
         let c = (price * m as f64) as i64;
-        bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+        bars.push(mqk_backtest::BacktestBar::new(
+            symbol, ts, o, h, l, c, 10_000,
+        ));
     }
     bars
 }
@@ -568,7 +580,9 @@ fn bars_that_fail_concentration(symbol: &str) -> Vec<mqk_backtest::BacktestBar> 
         let h = (price * 1.01 * m as f64) as i64;
         let l = (price * 0.99 * m as f64) as i64;
         let c = (price * m as f64) as i64;
-        bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+        bars.push(mqk_backtest::BacktestBar::new(
+            symbol, ts, o, h, l, c, 10_000,
+        ));
     }
     bars
 }
@@ -669,7 +683,10 @@ fn write_real_backtest_evidence(
 
     let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
     engine
-        .add_strategy(reg.instantiate("swing_momentum").expect("swing_momentum registered"))
+        .add_strategy(
+            reg.instantiate("swing_momentum")
+                .expect("swing_momentum registered"),
+        )
         .expect("add_strategy");
     let report = engine.run(&opts.bars).expect("engine.run");
 
@@ -696,7 +713,8 @@ fn write_real_backtest_evidence(
     if opts.write_stress {
         let stress_output =
             mqk_backtest::run_backtest_stress_suite(&report, &cfg, &opts.bars, || {
-                reg.instantiate("swing_momentum").expect("swing_momentum registered")
+                reg.instantiate("swing_momentum")
+                    .expect("swing_momentum registered")
             });
         mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
             .expect("write_canonical_stress_suite");
@@ -705,7 +723,8 @@ fn write_real_backtest_evidence(
     if opts.write_p9 {
         let gauntlet_output =
             mqk_backtest::run_robustness_gauntlet(&report, &cfg, &opts.bars, || {
-                reg.instantiate("swing_momentum").expect("swing_momentum registered")
+                reg.instantiate("swing_momentum")
+                    .expect("swing_momentum registered")
             });
         mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
             .expect("write_canonical_robustness_gauntlet");
@@ -747,14 +766,14 @@ fn write_real_backtest_evidence(
                 research_economic_eval_id,
                 &report.strategy_name,
                 &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
-                20,        // test-fixture-only stress knob; not asserted as accepted policy
-                50,        // test-fixture-only stress knob; not asserted as accepted policy
+                20,         // test-fixture-only stress knob; not asserted as accepted policy
+                50,         // test-fixture-only stress knob; not asserted as accepted policy
                 Some(1000), // FINAL-P7A-P7B-REPLAY-AUTHORITY-01: baseline max_target_qty is
-                            // None (real_research_promotion_e2e_cli's WeightToShareSpec never
-                            // sets it) -- None -> finite is a genuine P7B tightening, required
-                            // by the new genuine-adversity validation.
-                None,      // test-fixture-only stress knob; not asserted as accepted policy
-                0.30,      // test-fixture-only threshold; not asserted as accepted policy
+                // None (real_research_promotion_e2e_cli's WeightToShareSpec never
+                // sets it) -- None -> finite is a genuine P7B tightening, required
+                // by the new genuine-adversity validation.
+                None, // test-fixture-only stress knob; not asserted as accepted policy
+                0.30, // test-fixture-only threshold; not asserted as accepted policy
             );
             mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(
                 &init_result.run_dir,
@@ -1139,11 +1158,10 @@ async fn same_strategy_different_research_trial_for_p9_vs_p7c_is_rejected() {
     assert_eq!(json["accepted"], false);
     assert_eq!(json["disposition"], "evidence_invalid");
     assert!(
-        json["blockers"]
-            .as_array()
+        json["blockers"].as_array().unwrap().iter().any(|b| b
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|b| b.as_str().unwrap().contains("Research trial binding mismatch")),
+            .contains("Research trial binding mismatch")),
         "got: {json}"
     );
 }
@@ -1197,8 +1215,9 @@ async fn real_research_production_trial_used_for_both_p7c_and_p9_passes() {
     // scenario didn't block promotion. `RobustnessGauntletArtifact` has no
     // per-scenario accessor beyond aggregate helpers, so this reads the raw
     // artifact JSON directly (test-only introspection).
-    let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&root.join(run_id.to_string()))
-        .expect("robustness gauntlet must load");
+    let gauntlet =
+        mqk_artifacts::load_canonical_robustness_gauntlet(&root.join(run_id.to_string()))
+            .expect("robustness gauntlet must load");
     assert!(gauntlet.is_complete(), "P9 must be complete");
     assert!(
         gauntlet.all_applicable_passed(),
@@ -1206,10 +1225,12 @@ async fn real_research_production_trial_used_for_both_p7c_and_p9_passes() {
         gauntlet.failed_scenario_descriptions()
     );
     let raw = std::fs::read_to_string(
-        root.join(run_id.to_string()).join("robustness_gauntlet.json"),
+        root.join(run_id.to_string())
+            .join("robustness_gauntlet.json"),
     )
     .expect("read robustness_gauntlet.json");
-    let raw_json: serde_json::Value = serde_json::from_str(&raw).expect("parse robustness_gauntlet.json");
+    let raw_json: serde_json::Value =
+        serde_json::from_str(&raw).expect("parse robustness_gauntlet.json");
     let p7a_p7b_entry = raw_json["scenarios"]
         .as_array()
         .expect("scenarios array")
@@ -1312,11 +1333,10 @@ async fn real_research_production_same_strategy_different_trial_for_p9_vs_p7c_is
     assert_eq!(json["accepted"], false);
     assert_eq!(json["disposition"], "evidence_invalid");
     assert!(
-        json["blockers"]
-            .as_array()
+        json["blockers"].as_array().unwrap().iter().any(|b| b
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|b| b.as_str().unwrap().contains("Research trial binding mismatch")),
+            .contains("Research trial binding mismatch")),
         "got: {json}"
     );
 }
@@ -1935,7 +1955,11 @@ async fn tradable_live_always_false() {
         post_json_req(TRANSITION_ROUTE, None, body),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "real evidence must produce a genuine transition");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "real evidence must produce a genuine transition"
+    );
 
     let uri = format!(
         "/api/v1/strategy/promotions/check?strategy_id={}&symbol={}&timeframe_secs=86400",
@@ -2091,7 +2115,11 @@ async fn missing_backtest_run_id_is_rejected() {
         research.judge_path.to_str().unwrap(),
         "", // no real evidence was ever written for this candidate
     );
-    let (status, resp_body) = call(router_with(&st), post_json_req(TRANSITION_ROUTE, None, body)).await;
+    let (status, resp_body) = call(
+        router_with(&st),
+        post_json_req(TRANSITION_ROUTE, None, body),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let json = parse_json(resp_body);
     assert_eq!(json["disposition"], "evidence_invalid");
@@ -2148,15 +2176,18 @@ async fn missing_backtest_evidence_artifact_root_is_rejected() {
         research.judge_path.to_str().unwrap(),
         &run_id.to_string(),
     );
-    let (status, resp_body) = call(router_with(&st), post_json_req(TRANSITION_ROUTE, None, body)).await;
+    let (status, resp_body) = call(
+        router_with(&st),
+        post_json_req(TRANSITION_ROUTE, None, body),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let json = parse_json(resp_body);
     assert_eq!(json["disposition"], "evidence_invalid");
-    assert!(json["blockers"]
-        .as_array()
+    assert!(json["blockers"].as_array().unwrap().iter().any(|b| b
+        .as_str()
         .unwrap()
-        .iter()
-        .any(|b| b.as_str().unwrap().contains("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT")));
+        .contains("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT")));
 }
 
 #[tokio::test]
@@ -2551,7 +2582,11 @@ async fn duplicate_retry_with_mismatched_backtest_run_id_is_rejected() {
         post_json_req(TRANSITION_ROUTE, None, body),
     )
     .await;
-    assert_ne!(status2, StatusCode::OK, "a mismatched-lineage retry must never succeed");
+    assert_ne!(
+        status2,
+        StatusCode::OK,
+        "a mismatched-lineage retry must never succeed"
+    );
     let json2 = parse_json(body2);
     assert_ne!(
         json2["disposition"], "duplicate",

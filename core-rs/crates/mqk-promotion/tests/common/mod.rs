@@ -106,7 +106,12 @@ pub fn register_trial_with_strategy(
     .expect("insert research_trials row");
 }
 
-pub fn register_succeeded_attempt(db_path: &Path, attempt_id: &str, trial_id: &str, result_id: &str) {
+pub fn register_succeeded_attempt(
+    db_path: &Path,
+    attempt_id: &str,
+    trial_id: &str,
+    result_id: &str,
+) {
     let conn = Connection::open(db_path).expect("open registry db");
     conn.execute(
         "insert into research_attempts (attempt_id, trial_id, status, result_id) \
@@ -135,7 +140,13 @@ pub fn register_judge_artifact(
         "insert into research_judge_artifacts \
          (judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json) \
          values (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json],
+        rusqlite::params![
+            judge_artifact_sha256,
+            judge_id,
+            experiment_id,
+            hypothesis_id,
+            canonical_judge_json
+        ],
     )
     .expect("insert research_judge_artifacts row");
 }
@@ -200,8 +211,14 @@ pub fn valid_oos_evidence_for_testing_with_strategy(
         Some(&judge_json),
     );
 
-    verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &judge_json)
-        .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")
+    verify_promotion_oos_evidence(
+        &registry.path,
+        trial_id,
+        &economic_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .expect("common::valid_oos_evidence_for_testing must build a genuinely valid bundle")
 }
 
 /// FINAL-P9-AUTHORITY-BINDING-REPAIR-01 Section 1: the EXACT SAME
@@ -242,7 +259,9 @@ pub fn deterministic_judge_artifact_sha256_for_testing(trial_id: &str) -> String
 /// pass the SAME trial_id used for `valid_oos_evidence_for_testing` in the
 /// same `PromotionInput` so `evaluate_promotion`'s trial-binding gate
 /// accepts the pair.
-pub fn valid_robustness_evidence_for_testing(research_trial_id: &str) -> mqk_promotion::RobustnessEvidence {
+pub fn valid_robustness_evidence_for_testing(
+    research_trial_id: &str,
+) -> mqk_promotion::RobustnessEvidence {
     let economic_eval_id = format!("econ_eval_{research_trial_id}");
     let judge_sha = deterministic_judge_artifact_sha256_for_testing(research_trial_id);
 

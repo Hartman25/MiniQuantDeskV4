@@ -2942,7 +2942,8 @@ mod tests {
 
     #[test]
     fn mscw03_only_cap3_missing_names_cap3() {
-        let warnings = multi_symbol_capital_caps_preflight_warnings(Some(100), None, Some(250_000.0));
+        let warnings =
+            multi_symbol_capital_caps_preflight_warnings(Some(100), None, Some(250_000.0));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("MQK_PER_SYMBOL_MAX_NOTIONAL_USD"));
     }
@@ -2959,8 +2960,12 @@ mod tests {
     fn mscw05_all_three_missing_names_all_three() {
         let warnings = multi_symbol_capital_caps_preflight_warnings(None, None, None);
         assert_eq!(warnings.len(), 3);
-        assert!(warnings.iter().any(|w| w.contains("MQK_PER_SYMBOL_MAX_POSITION_QTY")));
-        assert!(warnings.iter().any(|w| w.contains("MQK_PER_SYMBOL_MAX_NOTIONAL_USD")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("MQK_PER_SYMBOL_MAX_POSITION_QTY")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("MQK_PER_SYMBOL_MAX_NOTIONAL_USD")));
         assert!(warnings
             .iter()
             .any(|w| w.contains("MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD")));

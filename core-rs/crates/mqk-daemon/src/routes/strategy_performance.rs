@@ -56,7 +56,9 @@ use crate::api_types::{
     StrategyRiskVisibility,
 };
 use crate::dynamic_selection_dispatch_authority::timeframe_secs_to_db_label;
-use crate::state::{resolve_authoritative_closed_trade_view, AppState, ClosureAttribution, ClosureFragment};
+use crate::state::{
+    resolve_authoritative_closed_trade_view, AppState, ClosureAttribution, ClosureFragment,
+};
 
 const CANONICAL: &str = "/api/v1/strategy/performance";
 
@@ -72,7 +74,8 @@ const FEE_ALLOCATION_STATE: &str = "not_allocated_to_strategy_close_events";
 /// P4.2: fixed deterministic decay monitor windows.
 const BASELINE_EVENT_COUNT_REQUIRED: usize = 10;
 const RECENT_EVENT_COUNT_REQUIRED: usize = 5;
-const TOTAL_EVENT_COUNT_REQUIRED: usize = BASELINE_EVENT_COUNT_REQUIRED + RECENT_EVENT_COUNT_REQUIRED;
+const TOTAL_EVENT_COUNT_REQUIRED: usize =
+    BASELINE_EVENT_COUNT_REQUIRED + RECENT_EVENT_COUNT_REQUIRED;
 
 /// P4.5: this route's regime detection is ALWAYS research-only observational
 /// context -- it must never gate execution, risk, promotion, or suppression.
@@ -181,8 +184,10 @@ fn build_attributed_close_events(
     }
 
     let mut by_strategy: BTreeMap<(String, String), Vec<AttributedCloseEvent>> = BTreeMap::new();
-    for ((strategy_id, fingerprint, _close_inbox_id, close_internal_order_id), (qty, pnl, frag_count)) in
-        event_map
+    for (
+        (strategy_id, fingerprint, _close_inbox_id, close_internal_order_id),
+        (qty, pnl, frag_count),
+    ) in event_map
     {
         by_strategy
             .entry((strategy_id, fingerprint))
@@ -350,7 +355,9 @@ fn compute_performance_row(
 /// `None` when there are fewer than 15 events (`decay_state ==
 /// "insufficient_data"`). Events older than the 15-event window are ignored
 /// by this comparison (still visible in the row's own lifetime metrics).
-fn split_decay_windows(events: &[AttributedCloseEvent]) -> Option<(&[AttributedCloseEvent], &[AttributedCloseEvent])> {
+fn split_decay_windows(
+    events: &[AttributedCloseEvent],
+) -> Option<(&[AttributedCloseEvent], &[AttributedCloseEvent])> {
     let n = events.len();
     if n < TOTAL_EVENT_COUNT_REQUIRED {
         return None;
@@ -619,7 +626,9 @@ const ATTRIBUTION_COVERAGE_STATES: [&str; 7] = [
 /// dynamic/encountered-only set (WAVE05-P3-COVERAGE-CLOSED-VOCAB-REPAIR-01).
 /// `sum(bucket.gross_realized_pnl_micros)` always equals the upstream
 /// projection's total gross realized P&L.
-fn compute_attribution_coverage(fragments: &[ClosureFragment]) -> Vec<StrategyPerformanceCoverageBucket> {
+fn compute_attribution_coverage(
+    fragments: &[ClosureFragment],
+) -> Vec<StrategyPerformanceCoverageBucket> {
     let mut counts = [(0i64, 0i64); ATTRIBUTION_COVERAGE_STATES.len()];
     for f in fragments {
         let state = f.attribution.as_str();
@@ -636,11 +645,13 @@ fn compute_attribution_coverage(fragments: &[ClosureFragment]) -> Vec<StrategyPe
     ATTRIBUTION_COVERAGE_STATES
         .iter()
         .zip(counts.iter())
-        .map(|(&state, &(count, pnl))| StrategyPerformanceCoverageBucket {
-            attribution_state: state.to_string(),
-            fragment_count: count,
-            gross_realized_pnl_micros: pnl,
-        })
+        .map(
+            |(&state, &(count, pnl))| StrategyPerformanceCoverageBucket {
+                attribution_state: state.to_string(),
+                fragment_count: count,
+                gross_realized_pnl_micros: pnl,
+            },
+        )
         .collect()
 }
 
@@ -869,9 +880,9 @@ pub(crate) async fn strategy_performance(
     }
 
     let attribution_coverage = compute_attribution_coverage(&view.fragments);
-    let total_gross_realized_pnl_micros: i64 = attribution_coverage
-        .iter()
-        .fold(0i64, |acc, b| acc.saturating_add(b.gross_realized_pnl_micros));
+    let total_gross_realized_pnl_micros: i64 = attribution_coverage.iter().fold(0i64, |acc, b| {
+        acc.saturating_add(b.gross_realized_pnl_micros)
+    });
 
     // P5.4: response-wide attribution-coverage facts, computed once and
     // applied identically to every row (see `compute_risk_flags`'s doc).
@@ -903,7 +914,8 @@ pub(crate) async fn strategy_performance(
         // distinct exact semantic-strategy identities.
         let decay_monitor = compute_decay_monitor(&events);
         let regime_context = resolve_strategy_regime_context(db, run.run_id, &events).await;
-        let regime_kind_is_high_volatility = regime_context.regime_kind.as_deref() == Some("high_volatility");
+        let regime_kind_is_high_volatility =
+            regime_context.regime_kind.as_deref() == Some("high_volatility");
         let risk_visibility = resolve_risk_visibility(
             db,
             &strategy_id,
@@ -945,7 +957,8 @@ pub(crate) async fn strategy_performance(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_risk_visibility_state, compute_max_realized_pnl_drawdown, recommended_operator_action,
+        classify_risk_visibility_state, compute_max_realized_pnl_drawdown,
+        recommended_operator_action,
     };
 
     /// P3-11: event pnl sequence +100, -40, -80, +20 must produce exact
@@ -956,10 +969,7 @@ mod tests {
     /// drawdown:     0,  40,  120, 100 -> max = 120
     #[test]
     fn drawdown_matches_hand_computed_sequence() {
-        assert_eq!(
-            compute_max_realized_pnl_drawdown(&[100, -40, -80, 20]),
-            120
-        );
+        assert_eq!(compute_max_realized_pnl_drawdown(&[100, -40, -80, 20]), 120);
     }
 
     #[test]
@@ -1042,9 +1052,18 @@ mod tests {
     /// closed `risk_visibility_state` vocabulary.
     #[test]
     fn recommended_action_mapping_is_exact() {
-        assert_eq!(recommended_operator_action("unavailable"), "insufficient_evidence");
-        assert_eq!(recommended_operator_action("insufficient_data"), "insufficient_evidence");
-        assert_eq!(recommended_operator_action("suppressed"), "already_suppressed");
+        assert_eq!(
+            recommended_operator_action("unavailable"),
+            "insufficient_evidence"
+        );
+        assert_eq!(
+            recommended_operator_action("insufficient_data"),
+            "insufficient_evidence"
+        );
+        assert_eq!(
+            recommended_operator_action("suppressed"),
+            "already_suppressed"
+        );
         assert_eq!(recommended_operator_action("watch"), "review");
         assert_eq!(recommended_operator_action("normal"), "none");
     }

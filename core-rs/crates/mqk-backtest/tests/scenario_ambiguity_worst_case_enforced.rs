@@ -48,9 +48,9 @@ fn buy_fills_at_high_not_close() {
     let bar2 = BacktestBar::new(
         "SPY",
         1_700_000_120,
-        500_000_000, // open
-        high_micros, // high
-        490_000_000, // low
+        500_000_000,  // open
+        high_micros,  // high
+        490_000_000,  // low
         close_micros, // close
         1000,
     );
@@ -152,7 +152,10 @@ fn sell_fills_at_low_not_close() {
     let sell_fill = &report.fills[1];
     assert_eq!(sell_fill.side, PfSide::Sell);
     assert_eq!(sell_fill.qty, 10);
-    assert_eq!(sell_fill.signal_ts, bars[1].end_ts, "sell signalled on bar 2");
+    assert_eq!(
+        sell_fill.signal_ts, bars[1].end_ts,
+        "sell signalled on bar 2"
+    );
     assert_eq!(sell_fill.fill_ts, bars[2].end_ts, "sell priced from bar 3");
 
     // Ambiguity worst-case: SELL fills at bar 3's LOW, not CLOSE

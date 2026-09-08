@@ -149,10 +149,38 @@ fn test3_correct_symbol_pricing_never_uses_other_symbol_price() {
     // far apart). AAPL@1060 high=999 (decoy — must never price the AMD
     // order). AMD@1060 high=260 — the only bar allowed to price it.
     let bars = [
-        bar("AAPL", 1_000, 100_000_000, 100_000_000, 100_000_000, 100_000_000),
-        bar("AMD", 1_000, 250_000_000, 250_000_000, 250_000_000, 250_000_000),
-        bar("AAPL", 1_060, 999_000_000, 999_000_000, 999_000_000, 999_000_000),
-        bar("AMD", 1_060, 260_000_000, 260_000_000, 260_000_000, 260_000_000),
+        bar(
+            "AAPL",
+            1_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+        ),
+        bar(
+            "AMD",
+            1_000,
+            250_000_000,
+            250_000_000,
+            250_000_000,
+            250_000_000,
+        ),
+        bar(
+            "AAPL",
+            1_060,
+            999_000_000,
+            999_000_000,
+            999_000_000,
+            999_000_000,
+        ),
+        bar(
+            "AMD",
+            1_060,
+            260_000_000,
+            260_000_000,
+            260_000_000,
+            260_000_000,
+        ),
     ];
     // BUY AMD signalled at tick 2 (the AMD@1000 bar). The batch-1060 resolve
     // step (which runs BEFORE either of that batch's two physical rows
@@ -195,10 +223,38 @@ fn test3_correct_symbol_pricing_never_uses_other_symbol_price() {
 fn test4_missing_symbol_delays_fill_no_substitution() {
     // T: AMD signal. T+60: only AAPL/SPY (no AMD). T+120: AMD reappears.
     let bars = [
-        bar("AMD", 1_000, 200_000_000, 200_000_000, 200_000_000, 200_000_000),
-        bar("AAPL", 1_060, 300_000_000, 300_000_000, 300_000_000, 300_000_000),
-        bar("SPY", 1_060, 400_000_000, 400_000_000, 400_000_000, 400_000_000),
-        bar("AMD", 1_120, 210_000_000, 210_000_000, 210_000_000, 210_000_000),
+        bar(
+            "AMD",
+            1_000,
+            200_000_000,
+            200_000_000,
+            200_000_000,
+            200_000_000,
+        ),
+        bar(
+            "AAPL",
+            1_060,
+            300_000_000,
+            300_000_000,
+            300_000_000,
+            300_000_000,
+        ),
+        bar(
+            "SPY",
+            1_060,
+            400_000_000,
+            400_000_000,
+            400_000_000,
+            400_000_000,
+        ),
+        bar(
+            "AMD",
+            1_120,
+            210_000_000,
+            210_000_000,
+            210_000_000,
+            210_000_000,
+        ),
     ];
     // AMD's only order fills on the last bar of the run — no restate needed.
     let mut engine = BacktestEngine::new(wide_cfg());
@@ -233,8 +289,16 @@ fn test5_end_of_data_leaves_order_unfilled_not_fabricated() {
         .unwrap();
     let report = engine.run(&bars).unwrap();
 
-    assert_eq!(report.fills.len(), 0, "no future bar exists — no fill may be fabricated");
-    assert_eq!(report.orders.len(), 1, "the attempt must remain visible in evidence");
+    assert_eq!(
+        report.fills.len(),
+        0,
+        "no future bar exists — no fill may be fabricated"
+    );
+    assert_eq!(
+        report.orders.len(),
+        1,
+        "the attempt must remain visible in evidence"
+    );
     let o = &report.orders[0];
     assert_eq!(o.status, OrderStatus::UnfilledEndOfData);
     assert_eq!(o.symbol, "AAPL");
@@ -371,7 +435,10 @@ fn test8_commission_charged_only_at_fill_time() {
         (1_000, initial),
         "no commission may be charged while the order is only pending"
     );
-    assert_eq!(report.fills[0].fee_micros, 10_000, "10 shares * 1_000 micros/share");
+    assert_eq!(
+        report.fills[0].fee_micros, 10_000,
+        "10 shares * 1_000 micros/share"
+    );
     // Fee only reduces equity once the fill actually lands (flat bar, so
     // notional cancels against the mark-to-market contribution exactly).
     assert_eq!(report.equity_curve[1], (1_060, initial - 10_000));
@@ -417,10 +484,38 @@ fn test9_portfolio_unchanged_while_order_is_pending() {
 #[test]
 fn test10_multiple_symbols_pending_resolve_independently() {
     let bars = [
-        bar("AAPL", 1_000, 105_000_000, 105_000_000, 105_000_000, 105_000_000), // tick1: AAPL signal
-        bar("AMD", 1_000, 205_000_000, 205_000_000, 205_000_000, 205_000_000),  // tick2: AMD signal
-        bar("AAPL", 1_060, 115_000_000, 115_000_000, 115_000_000, 115_000_000), // tick3: AAPL fills
-        bar("AMD", 1_200, 225_000_000, 225_000_000, 225_000_000, 225_000_000),  // tick4: AMD fills
+        bar(
+            "AAPL",
+            1_000,
+            105_000_000,
+            105_000_000,
+            105_000_000,
+            105_000_000,
+        ), // tick1: AAPL signal
+        bar(
+            "AMD",
+            1_000,
+            205_000_000,
+            205_000_000,
+            205_000_000,
+            205_000_000,
+        ), // tick2: AMD signal
+        bar(
+            "AAPL",
+            1_060,
+            115_000_000,
+            115_000_000,
+            115_000_000,
+            115_000_000,
+        ), // tick3: AAPL fills
+        bar(
+            "AMD",
+            1_200,
+            225_000_000,
+            225_000_000,
+            225_000_000,
+            225_000_000,
+        ), // tick4: AMD fills
     ];
     // tick3 restates AAPL (just filled this tick) but omits AMD, which is
     // safe: AMD is still unfilled (position 0) at this point.
@@ -448,11 +543,17 @@ fn test10_multiple_symbols_pending_resolve_independently() {
     let amd = report.fills.iter().find(|f| f.symbol == "AMD").unwrap();
 
     assert_eq!(aapl.signal_ts, 1_000);
-    assert_eq!(aapl.fill_ts, 1_060, "AAPL resolves against its own next bar");
+    assert_eq!(
+        aapl.fill_ts, 1_060,
+        "AAPL resolves against its own next bar"
+    );
     assert_eq!(aapl.price_micros, 115_000_000);
 
     assert_eq!(amd.signal_ts, 1_000);
-    assert_eq!(amd.fill_ts, 1_200, "AMD resolves against its own (later) next bar");
+    assert_eq!(
+        amd.fill_ts, 1_200,
+        "AMD resolves against its own (later) next bar"
+    );
     assert_eq!(amd.price_micros, 225_000_000);
 }
 
@@ -471,10 +572,38 @@ fn test10_multiple_symbols_pending_resolve_independently() {
 /// (which timestamp/price fills which symbol) must still be identical.
 #[test]
 fn test11a_same_timestamp_row_order_does_not_change_fill_chronology() {
-    let signal_aapl = bar("AAPL", 940, 105_000_000, 105_000_000, 105_000_000, 105_000_000);
-    let signal_amd = bar("AMD", 940, 205_000_000, 205_000_000, 205_000_000, 205_000_000);
-    let fill_aapl = bar("AAPL", 1_000, 111_000_000, 111_000_000, 111_000_000, 111_000_000);
-    let fill_amd = bar("AMD", 1_000, 211_000_000, 211_000_000, 211_000_000, 211_000_000);
+    let signal_aapl = bar(
+        "AAPL",
+        940,
+        105_000_000,
+        105_000_000,
+        105_000_000,
+        105_000_000,
+    );
+    let signal_amd = bar(
+        "AMD",
+        940,
+        205_000_000,
+        205_000_000,
+        205_000_000,
+        205_000_000,
+    );
+    let fill_aapl = bar(
+        "AAPL",
+        1_000,
+        111_000_000,
+        111_000_000,
+        111_000_000,
+        111_000_000,
+    );
+    let fill_amd = bar(
+        "AMD",
+        1_000,
+        211_000_000,
+        211_000_000,
+        211_000_000,
+        211_000_000,
+    );
 
     // Ordering A: AAPL's fill bar precedes AMD's at the shared timestamp.
     let bars_a = [
@@ -514,17 +643,19 @@ fn test11a_same_timestamp_row_order_does_not_change_fill_chronology() {
     ];
 
     let mut engine_a = BacktestEngine::new(wide_cfg());
-    engine_a.add_strategy(Box::new(TickScript::new(schedule_a))).unwrap();
+    engine_a
+        .add_strategy(Box::new(TickScript::new(schedule_a)))
+        .unwrap();
     let report_a = engine_a.run(&bars_a).unwrap();
 
     let mut engine_b = BacktestEngine::new(wide_cfg());
-    engine_b.add_strategy(Box::new(TickScript::new(schedule_b))).unwrap();
+    engine_b
+        .add_strategy(Box::new(TickScript::new(schedule_b)))
+        .unwrap();
     let report_b = engine_b.run(&bars_b).unwrap();
 
     use std::collections::BTreeMap;
-    fn chronology(
-        report: &mqk_backtest::BacktestReport,
-    ) -> BTreeMap<String, (i64, i64, i64)> {
+    fn chronology(report: &mqk_backtest::BacktestReport) -> BTreeMap<String, (i64, i64, i64)> {
         report
             .fills
             .iter()
@@ -604,7 +735,10 @@ fn test12_future_bar_data_never_leaks_into_strategy_evaluation() {
     assert_eq!(log.len(), 3);
     // At each tick, the strategy must see exactly that bar's close — never
     // a later one.
-    assert_eq!(log[0], 100_000_000, "tick 1 must not see bar 2 or 3's close");
+    assert_eq!(
+        log[0], 100_000_000,
+        "tick 1 must not see bar 2 or 3's close"
+    );
     assert_eq!(log[1], 200_000_000, "tick 2 must not see bar 3's close");
     assert_eq!(log[2], 300_000_000);
 }
@@ -623,7 +757,7 @@ fn test13_daily_loss_limit_halt_still_fires_at_signal_time() {
     let bars = [
         flat_bar("AAPL", 1_000, 100 * M), // tick1: buy signal
         flat_bar("AAPL", 1_060, 100 * M), // tick2: buy fills here @ $100
-        flat_bar("AAPL", 1_120, 40 * M),  // tick3: crash; sell signal evaluated against $9,400 equity
+        flat_bar("AAPL", 1_120, 40 * M), // tick3: crash; sell signal evaluated against $9,400 equity
     ];
     let mut engine = BacktestEngine::new(cfg);
     engine
@@ -685,10 +819,38 @@ fn test14_existing_builtin_strategy_runs_end_to_end() {
 #[test]
 fn test15_multi_symbol_replay_is_fully_deterministic() {
     let bars = [
-        bar("AAPL", 1_000, 105_000_000, 105_000_000, 105_000_000, 105_000_000),
-        bar("AMD", 1_000, 205_000_000, 205_000_000, 205_000_000, 205_000_000),
-        bar("AAPL", 1_060, 115_000_000, 115_000_000, 115_000_000, 115_000_000),
-        bar("AMD", 1_200, 225_000_000, 225_000_000, 225_000_000, 225_000_000),
+        bar(
+            "AAPL",
+            1_000,
+            105_000_000,
+            105_000_000,
+            105_000_000,
+            105_000_000,
+        ),
+        bar(
+            "AMD",
+            1_000,
+            205_000_000,
+            205_000_000,
+            205_000_000,
+            205_000_000,
+        ),
+        bar(
+            "AAPL",
+            1_060,
+            115_000_000,
+            115_000_000,
+            115_000_000,
+            115_000_000,
+        ),
+        bar(
+            "AMD",
+            1_200,
+            225_000_000,
+            225_000_000,
+            225_000_000,
+            225_000_000,
+        ),
     ];
     let schedule = || {
         vec![
@@ -706,15 +868,20 @@ fn test15_multi_symbol_replay_is_fully_deterministic() {
     };
 
     let mut e1 = BacktestEngine::new(wide_cfg());
-    e1.add_strategy(Box::new(TickScript::new(schedule()))).unwrap();
+    e1.add_strategy(Box::new(TickScript::new(schedule())))
+        .unwrap();
     let r1 = e1.run(&bars).unwrap();
 
     let mut e2 = BacktestEngine::new(wide_cfg());
-    e2.add_strategy(Box::new(TickScript::new(schedule()))).unwrap();
+    e2.add_strategy(Box::new(TickScript::new(schedule())))
+        .unwrap();
     let r2 = e2.run(&bars).unwrap();
 
     assert_eq!(r1.orders.len(), r2.orders.len());
-    assert_eq!(r1.fills, r2.fills, "fills (ids, prices, timestamps) must be byte-identical");
+    assert_eq!(
+        r1.fills, r2.fills,
+        "fills (ids, prices, timestamps) must be byte-identical"
+    );
     assert_eq!(r1.equity_curve, r2.equity_curve);
     assert_eq!(r1.run_id, r2.run_id);
     for (o1, o2) in r1.orders.iter().zip(r2.orders.iter()) {
@@ -731,8 +898,22 @@ fn test15_multi_symbol_replay_is_fully_deterministic() {
 #[test]
 fn high_value_extreme_decoy_price_never_prices_the_wrong_symbol() {
     let bars = [
-        bar("AAPL", 1_000, 100_000_000, 100_000_000, 100_000_000, 100_000_000), // tick1
-        bar("AMD", 1_000, 200_000_000, 200_000_000, 200_000_000, 200_000_000),  // tick2: AMD signal
+        bar(
+            "AAPL",
+            1_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+        ), // tick1
+        bar(
+            "AMD",
+            1_000,
+            200_000_000,
+            200_000_000,
+            200_000_000,
+            200_000_000,
+        ), // tick2: AMD signal
         bar(
             "AAPL",
             1_060,
@@ -741,7 +922,14 @@ fn high_value_extreme_decoy_price_never_prices_the_wrong_symbol() {
             1_000_000_000_000,
             1_000_000_000_000,
         ), // tick3: absurd decoy, no AMD bar here
-        bar("AMD", 1_120, 205_000_000, 205_000_000, 205_000_000, 205_000_000), // tick4: AMD's real fill bar
+        bar(
+            "AMD",
+            1_120,
+            205_000_000,
+            205_000_000,
+            205_000_000,
+            205_000_000,
+        ), // tick4: AMD's real fill bar
     ];
     // AMD's only order fills on the last bar — no restate needed.
     let mut engine = BacktestEngine::new(wide_cfg());

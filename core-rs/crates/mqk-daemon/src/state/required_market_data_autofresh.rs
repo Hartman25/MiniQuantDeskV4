@@ -1898,7 +1898,12 @@ mod refreshable_reason_typed_authority_tests {
     /// proof but exercised through this module's actual production gate.
     #[test]
     fn unknown_reason_is_never_refreshable() {
-        for garbage in ["", "totally_unknown_reason", "db_unavailable", "query_failed"] {
+        for garbage in [
+            "",
+            "totally_unknown_reason",
+            "db_unavailable",
+            "query_failed",
+        ] {
             assert!(
                 !is_refreshable_reason(garbage),
                 "{garbage:?} must not be treated as refreshable"

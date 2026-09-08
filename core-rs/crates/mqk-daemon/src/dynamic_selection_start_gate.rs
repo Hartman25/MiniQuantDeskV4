@@ -520,11 +520,13 @@ fn evaluate_plan_for_start_gate(plan: DynamicSelectionPlan) -> DynamicSelectionS
                 if !matches {
                     return refused(
                         plan,
-                        vec![DynamicSelectionStartGateReason::HostSemanticIdentityMismatch {
-                            symbol: symbol.clone(),
-                            strategy_id: strategy_id.clone(),
-                            timeframe_secs: *timeframe_secs,
-                        }],
+                        vec![
+                            DynamicSelectionStartGateReason::HostSemanticIdentityMismatch {
+                                symbol: symbol.clone(),
+                                strategy_id: strategy_id.clone(),
+                                timeframe_secs: *timeframe_secs,
+                            },
+                        ],
                     );
                 }
             }

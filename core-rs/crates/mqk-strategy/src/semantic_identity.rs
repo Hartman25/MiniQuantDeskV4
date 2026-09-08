@@ -110,7 +110,10 @@ mod tests {
             .push_str("a")
             .push_str("bc")
             .finish();
-        assert_ne!(a, b, "length-prefixing must prevent field-boundary collisions");
+        assert_ne!(
+            a, b,
+            "length-prefixing must prevent field-boundary collisions"
+        );
     }
 
     #[test]

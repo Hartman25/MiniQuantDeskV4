@@ -12,6 +12,10 @@
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
 use mqk_db::{
+    arm_run, begin_run, insert_run, persist_reconcile_status_state, stop_run, NewRun,
+    PersistReconcileStatusState,
+};
+use mqk_db::{
     clear_retry_timing, create_or_recover_autonomous_daily_operation,
     fetch_autonomous_daily_operation_event_at_sequence,
     fetch_relevant_open_autonomous_daily_operation, list_autonomous_daily_operation_events,
@@ -26,10 +30,6 @@ use mqk_db::{
     ENV_DB_URL, STATE_AWAITING_OPEN, STATE_AWAITING_PREOPEN, STATE_CONTROLLER_DEGRADED,
     STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA, STATE_RECOVERY_RETRYING,
     STATE_RUNNING, STATE_START_RETRYING, STATE_STOPPING, STATE_STOP_RETRYING,
-};
-use mqk_db::{
-    arm_run, begin_run, insert_run, persist_reconcile_status_state, stop_run, NewRun,
-    PersistReconcileStatusState,
 };
 use uuid::Uuid;
 
@@ -1284,15 +1284,13 @@ async fn relevant_open_lookup_stale_no_run_evidence_degraded_row_cannot_shadow_r
         .expect("row must exist");
     let stale_row = advance_one(&pool, &stale_row, STATE_STOPPING, stale_ts).await?;
     record_stopped_at(&pool, stale_id, stale_ts).await?;
-    let stale_row = advance_one(
-        &pool,
-        &stale_row,
-        mqk_db::STATE_EVIDENCE_DEGRADED,
-        stale_ts,
-    )
-    .await?;
+    let stale_row =
+        advance_one(&pool, &stale_row, mqk_db::STATE_EVIDENCE_DEGRADED, stale_ts).await?;
     assert_eq!(stale_row.state, mqk_db::STATE_EVIDENCE_DEGRADED);
-    assert!(stale_row.run_id.is_none(), "fixture precondition: no run ever started");
+    assert!(
+        stale_row.run_id.is_none(),
+        "fixture precondition: no run ever started"
+    );
 
     // Today's current row: running.
     let current_id = seed_operation_for_date(&pool, "relopen-ed-stale", today).await;
@@ -1336,15 +1334,12 @@ async fn relevant_open_lookup_evidence_degraded_row_with_run_evidence_still_bloc
     let stale_ts = session_bounds(yesterday).0;
     let stale_run_id = Uuid::new_v4();
     let running = advance_to_running(&pool, stale_id, stale_run_id, stale_ts).await?;
-    let degraded = advance_one(
-        &pool,
-        &running,
-        mqk_db::STATE_EVIDENCE_DEGRADED,
-        stale_ts,
-    )
-    .await?;
+    let degraded = advance_one(&pool, &running, mqk_db::STATE_EVIDENCE_DEGRADED, stale_ts).await?;
     assert_eq!(degraded.state, mqk_db::STATE_EVIDENCE_DEGRADED);
-    assert!(degraded.run_id.is_some(), "fixture precondition: a real run was bound");
+    assert!(
+        degraded.run_id.is_some(),
+        "fixture precondition: a real run was bound"
+    );
 
     let current_id = seed_operation_for_date(&pool, "relopen-ed-active", today).await;
     let current_run_id = Uuid::new_v4();
@@ -1371,7 +1366,8 @@ async fn relevant_open_lookup_evidence_degraded_row_with_run_evidence_still_bloc
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn relevant_open_lookup_same_day_no_run_evidence_degraded_still_found() -> anyhow::Result<()> {
+async fn relevant_open_lookup_same_day_no_run_evidence_degraded_still_found() -> anyhow::Result<()>
+{
     let pool = test_pool().await?;
     let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
 
@@ -1387,7 +1383,10 @@ async fn relevant_open_lookup_same_day_no_run_evidence_degraded_still_found() ->
     let row = advance_one(&pool, &row, STATE_STOPPING, ts).await?;
     record_stopped_at(&pool, operation_id, ts).await?;
     let degraded = advance_one(&pool, &row, mqk_db::STATE_EVIDENCE_DEGRADED, ts).await?;
-    assert!(degraded.run_id.is_none(), "fixture precondition: no run ever started");
+    assert!(
+        degraded.run_id.is_none(),
+        "fixture precondition: no run ever started"
+    );
 
     let inside_window = ts + ChronoDuration::hours(1);
     let found = fetch_relevant_open_autonomous_daily_operation(
@@ -1414,7 +1413,10 @@ async fn relevant_open_lookup_same_day_no_run_evidence_degraded_still_found() ->
 // stop_run -- never a raw UPDATE).
 // ---------------------------------------------------------------------------
 
-async fn reset_reconcile_status_clean(pool: &sqlx::PgPool, now: DateTime<Utc>) -> anyhow::Result<()> {
+async fn reset_reconcile_status_clean(
+    pool: &sqlx::PgPool,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
     persist_reconcile_status_state(
         pool,
         &PersistReconcileStatusState {
@@ -1545,7 +1547,8 @@ async fn relevant_open_lookup_stopped_run_with_unacked_outbox_still_blocks() -> 
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn relevant_open_lookup_stopped_run_with_dirty_reconcile_still_blocks() -> anyhow::Result<()> {
+async fn relevant_open_lookup_stopped_run_with_dirty_reconcile_still_blocks() -> anyhow::Result<()>
+{
     let pool = test_pool().await?;
     let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
     let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
@@ -1682,13 +1685,9 @@ async fn relevant_open_lookup_stopped_run_with_unmatched_broker_events_still_blo
     begin_run(&pool, run_id).await?;
     stop_run(&pool, run_id).await?;
 
-    let stale_id = seed_stopped_evidence_degraded_with_run(
-        &pool,
-        "relopen-ed-unmatched",
-        yesterday,
-        run_id,
-    )
-    .await?;
+    let stale_id =
+        seed_stopped_evidence_degraded_with_run(&pool, "relopen-ed-unmatched", yesterday, run_id)
+            .await?;
 
     // status="ok" and every mismatch counter is zero, but
     // unmatched_broker_events is nonzero -- must still be treated as dirty.
@@ -1919,7 +1918,8 @@ async fn relevant_open_lookup_stopped_run_zero_activity_clean_reconcile_stopping
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn relevant_open_lookup_stopping_row_with_unacked_outbox_still_blocks() -> anyhow::Result<()> {
+async fn relevant_open_lookup_stopping_row_with_unacked_outbox_still_blocks() -> anyhow::Result<()>
+{
     let pool = test_pool().await?;
     reset_reconcile_status_clean(&pool, Utc::now()).await?;
     let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
@@ -1933,8 +1933,7 @@ async fn relevant_open_lookup_stopping_row_with_unacked_outbox_still_blocks() ->
     stop_run(&pool, run_id).await?;
 
     let stale_id =
-        seed_stopped_stopping_with_run(&pool, "relopen-stopping-outbox", yesterday, run_id)
-            .await?;
+        seed_stopped_stopping_with_run(&pool, "relopen-stopping-outbox", yesterday, run_id).await?;
 
     // A SENT-but-not-yet-ACKED order still associated with the now-stopped
     // run -- an order may still be in flight; this must never be silently
@@ -1979,7 +1978,8 @@ async fn relevant_open_lookup_stopping_row_with_unacked_outbox_still_blocks() ->
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn relevant_open_lookup_stopping_row_with_dirty_reconcile_still_blocks() -> anyhow::Result<()> {
+async fn relevant_open_lookup_stopping_row_with_dirty_reconcile_still_blocks() -> anyhow::Result<()>
+{
     let pool = test_pool().await?;
     let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
     let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
@@ -2313,9 +2313,13 @@ async fn relevant_open_lookup_stop_retrying_row_with_dirty_reconcile_still_block
     begin_run(&pool, run_id).await?;
     stop_run(&pool, run_id).await?;
 
-    let stale_id =
-        seed_stopped_stop_retrying_with_run(&pool, "relopen-stop-retrying-dirty", yesterday, run_id)
-            .await?;
+    let stale_id = seed_stopped_stop_retrying_with_run(
+        &pool,
+        "relopen-stop-retrying-dirty",
+        yesterday,
+        run_id,
+    )
+    .await?;
 
     persist_reconcile_status_state(
         &pool,
@@ -2436,13 +2440,9 @@ async fn relevant_open_lookup_same_day_stop_retrying_with_stopped_run_still_foun
     begin_run(&pool, run_id).await?;
     stop_run(&pool, run_id).await?;
 
-    let operation_id = seed_stopped_stop_retrying_with_run(
-        &pool,
-        "relopen-stop-retrying-sameday",
-        today,
-        run_id,
-    )
-    .await?;
+    let operation_id =
+        seed_stopped_stop_retrying_with_run(&pool, "relopen-stop-retrying-sameday", today, run_id)
+            .await?;
 
     // Same-day stop_retrying row, even with fully proven-safe release
     // evidence, must still be found while `now_utc` falls inside its own
@@ -2530,9 +2530,13 @@ async fn relevant_open_lookup_stop_retrying_row_with_non_stopped_run_still_relev
     arm_run(&pool, run_id).await?;
     begin_run(&pool, run_id).await?; // run stays RUNNING -- never durably STOPPED
 
-    let stale_id =
-        seed_stopped_stop_retrying_with_run(&pool, "relopen-stop-retrying-nonstopped", yesterday, run_id)
-            .await?;
+    let stale_id = seed_stopped_stop_retrying_with_run(
+        &pool,
+        "relopen-stop-retrying-nonstopped",
+        yesterday,
+        run_id,
+    )
+    .await?;
 
     let current_id =
         seed_operation_for_date(&pool, "relopen-stop-retrying-nonstopped", today).await;
@@ -3122,8 +3126,7 @@ async fn relevant_open_lookup_stale_recovery_retrying_row_with_safely_terminal_r
     begin_run(&pool, stale_run_id).await?;
     stop_run(&pool, stale_run_id).await?; // genuinely STOPPED, zero economic evidence
 
-    let stale_id =
-        seed_operation_for_date(&pool, "relopen-recovery-released", stale_date).await;
+    let stale_id = seed_operation_for_date(&pool, "relopen-recovery-released", stale_date).await;
     let running = advance_to_running(&pool, stale_id, stale_run_id, stale_open).await?;
     advance_one(&pool, &running, STATE_RECOVERY_RETRYING, stale_open).await?;
 

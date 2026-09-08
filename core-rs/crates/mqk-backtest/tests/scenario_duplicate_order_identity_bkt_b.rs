@@ -81,7 +81,10 @@ fn wide_cfg() -> BacktestConfig {
 /// insertion, or any fill/portfolio/economics application.
 #[test]
 fn b1_duplicate_order_identity_within_same_batch_fails_closed_before_second_application() {
-    let bars = vec![flat_bar("AAA", 60, 100_000_000), flat_bar("BBB", 60, 50_000_000)];
+    let bars = vec![
+        flat_bar("AAA", 60, 100_000_000),
+        flat_bar("BBB", 60, 50_000_000),
+    ];
     let script = TickScript::new(vec![
         (1, vec![TargetPosition::new("AAA", 10)]),
         (2, vec![TargetPosition::new("AAA", 10)]),
@@ -112,7 +115,10 @@ fn b1_duplicate_order_identity_within_same_batch_fails_closed_before_second_appl
 /// and one fill.
 #[test]
 fn b2_single_legitimate_order_produces_one_unchanged_fill() {
-    let bars = vec![flat_bar("AAA", 60, 100_000_000), flat_bar("AAA", 120, 100_000_000)];
+    let bars = vec![
+        flat_bar("AAA", 60, 100_000_000),
+        flat_bar("AAA", 120, 100_000_000),
+    ];
     let script = TickScript::new(vec![
         (1, vec![TargetPosition::new("AAA", 10)]),
         (2, vec![TargetPosition::new("AAA", 10)]), // same target reasserted -- zero delta
@@ -177,7 +183,10 @@ fn b6_different_intent_seq_is_distinct() {
 /// to include qty as a way of "avoiding" the collision.
 #[test]
 fn b7_differing_qty_with_identical_identity_fields_still_collides() {
-    let bars = vec![flat_bar("AAA", 60, 100_000_000), flat_bar("BBB", 60, 50_000_000)];
+    let bars = vec![
+        flat_bar("AAA", 60, 100_000_000),
+        flat_bar("BBB", 60, 50_000_000),
+    ];
     let script = TickScript::new(vec![
         (1, vec![TargetPosition::new("AAA", 10)]),
         (2, vec![TargetPosition::new("AAA", 15)]), // same identity fields, different qty
@@ -219,7 +228,7 @@ fn ordinary_multi_day_bars_and_script() -> (Vec<BacktestBar>, TickScript) {
     ];
     let script = TickScript::new(vec![
         (1, vec![TargetPosition::new("AAA", 10)]), // order1: BUY AAA 10 @ ts=60
-        (2, vec![TargetPosition::new("BBB", 5)]),   // order2: BUY BBB 5 @ ts=120
+        (2, vec![TargetPosition::new("BBB", 5)]),  // order2: BUY BBB 5 @ ts=120
         // ts=180: resolves+fills order1 (AAA bar, 180>60), then a new decision.
         (3, vec![TargetPosition::new("AAA", 4)]), // order3: SELL AAA 6 @ ts=180 (stays pending)
         // ts=240: resolves+fills order2 (BBB bar, 240>120), then a new decision.
@@ -239,7 +248,11 @@ fn b8_ordinary_backtest_all_fill_ids_unique() {
 
     assert!(!report.fills.is_empty());
     let unique: HashSet<_> = report.fills.iter().map(|f| f.fill_id).collect();
-    assert_eq!(unique.len(), report.fills.len(), "every fill_id must be unique across the run");
+    assert_eq!(
+        unique.len(),
+        report.fills.len(),
+        "every fill_id must be unique across the run"
+    );
 }
 
 /// B9: every `Filled` order's `order_id` corresponds to exactly one fill.
@@ -250,10 +263,22 @@ fn b9_each_filled_order_has_exactly_one_corresponding_fill() {
     engine.add_strategy(Box::new(script)).unwrap();
     let report = engine.run(&bars).unwrap();
 
-    let filled: Vec<_> = report.orders.iter().filter(|o| o.status == OrderStatus::Filled).collect();
+    let filled: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.status == OrderStatus::Filled)
+        .collect();
     assert!(!filled.is_empty());
     for order in filled {
-        let matching = report.fills.iter().filter(|f| f.order_id == order.order_id).count();
-        assert_eq!(matching, 1, "order {:?} must have exactly one fill", order.order_id);
+        let matching = report
+            .fills
+            .iter()
+            .filter(|f| f.order_id == order.order_id)
+            .count();
+        assert_eq!(
+            matching, 1,
+            "order {:?} must have exactly one fill",
+            order.order_id
+        );
     }
 }

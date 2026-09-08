@@ -192,8 +192,13 @@ async fn da01_stale_bar_delivers_critical_alert() {
         st.set_per_symbol_bar_staleness_secs_for_test(Some(300));
         st.deposit_strategy_bar_input(test_bar_input(1)).await;
 
-        let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
-        assert!(result.is_none(), "DA01: stale bar must still refuse dispatch");
+        let result = st
+            .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+            .await;
+        assert!(
+            result.is_none(),
+            "DA01: stale bar must still refuse dispatch"
+        );
 
         settle().await;
         assert_eq!(
@@ -228,7 +233,9 @@ async fn da02_fresh_bar_delivers_no_alert() {
         st.set_per_symbol_bar_staleness_secs_for_test(Some(300));
         st.deposit_strategy_bar_input(test_bar_input(1)).await;
 
-        let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
+        let result = st
+            .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+            .await;
         assert!(result.is_some(), "DA02: fresh bar must dispatch normally");
 
         settle().await;
@@ -263,7 +270,9 @@ async fn da03_missing_bar_delivers_critical_alert() {
         st.set_per_symbol_bar_staleness_secs_for_test(Some(300));
         st.deposit_strategy_bar_input(test_bar_input(1)).await;
 
-        let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
+        let result = st
+            .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+            .await;
         assert!(result.is_none(), "DA03: missing bar must refuse dispatch");
 
         settle().await;
@@ -300,8 +309,13 @@ async fn da04_repeated_stale_ticks_dedup_to_one_alert() {
 
         for tick in 1..=3u64 {
             st.deposit_strategy_bar_input(test_bar_input(tick)).await;
-            let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
-            assert!(result.is_none(), "DA04: every stale tick must refuse dispatch");
+            let result = st
+                .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+                .await;
+            assert!(
+                result.is_none(),
+                "DA04: every stale tick must refuse dispatch"
+            );
         }
 
         settle().await;
@@ -338,7 +352,9 @@ async fn da05_discord_delivery_failure_does_not_affect_dispatch_refusal() {
         st.set_per_symbol_bar_staleness_secs_for_test(Some(300));
         st.deposit_strategy_bar_input(test_bar_input(1)).await;
 
-        let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
+        let result = st
+            .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+            .await;
         assert!(
             result.is_none(),
             "DA05: dispatch refusal must be identical regardless of Discord delivery outcome"

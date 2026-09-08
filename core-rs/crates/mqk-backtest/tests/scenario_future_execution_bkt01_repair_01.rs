@@ -104,9 +104,7 @@ fn tiebreak_winner_symbol(signal_ts: i64) -> &'static str {
 /// Canonical (symbol -> (price, signal_ts, fill_ts, status)) view of a
 /// report's fills, keyed so row-order permutations can be compared without
 /// caring about `Vec` iteration order.
-fn fills_by_symbol(
-    report: &mqk_backtest::BacktestReport,
-) -> BTreeMap<String, (i64, i64, i64)> {
+fn fills_by_symbol(report: &mqk_backtest::BacktestReport) -> BTreeMap<String, (i64, i64, i64)> {
     report
         .fills
         .iter()
@@ -141,13 +139,41 @@ fn original_order_status_by_symbol(
 /// byte-identical between A and B.
 #[test]
 fn cap_binding_same_timestamp_permutation_produces_identical_result() {
-    let signal_aapl = bar("AAPL", 940, 100_000_000, 100_000_000, 100_000_000, 100_000_000);
-    let signal_amd = bar("AMD", 940, 200_000_000, 200_000_000, 200_000_000, 200_000_000);
+    let signal_aapl = bar(
+        "AAPL",
+        940,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+    );
+    let signal_amd = bar(
+        "AMD",
+        940,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+    );
     // Notional at fill: AAPL 550 * 100_000_000 = 55_000_000_000.
     //                   AMD  275 * 200_000_000 = 55_000_000_000.
     // Symmetric so neither symbol has an intrinsic size advantage.
-    let fill_aapl = bar("AAPL", 1_000, 100_000_000, 100_000_000, 100_000_000, 100_000_000);
-    let fill_amd = bar("AMD", 1_000, 200_000_000, 200_000_000, 200_000_000, 200_000_000);
+    let fill_aapl = bar(
+        "AAPL",
+        1_000,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+    );
+    let fill_amd = bar(
+        "AMD",
+        1_000,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+    );
 
     // The allocation cap admits exactly one of the two -- the deterministic
     // tie-break winner (see `tiebreak_winner_symbol`). Ticks 3/4 (the
@@ -182,16 +208,28 @@ fn cap_binding_same_timestamp_permutation_produces_identical_result() {
     let bars_b = [signal_aapl, signal_amd, fill_amd, fill_aapl];
 
     let mut engine_a = BacktestEngine::new(cfg.clone());
-    engine_a.add_strategy(Box::new(TickScript::new(schedule()))).unwrap();
+    engine_a
+        .add_strategy(Box::new(TickScript::new(schedule())))
+        .unwrap();
     let report_a = engine_a.run(&bars_a).unwrap();
 
     let mut engine_b = BacktestEngine::new(cfg);
-    engine_b.add_strategy(Box::new(TickScript::new(schedule()))).unwrap();
+    engine_b
+        .add_strategy(Box::new(TickScript::new(schedule())))
+        .unwrap();
     let report_b = engine_b.run(&bars_b).unwrap();
 
     // Exactly one of the two competing orders fills, in both orderings.
-    assert_eq!(report_a.fills.len(), 1, "cap must bind: only one order fills (ordering A)");
-    assert_eq!(report_b.fills.len(), 1, "cap must bind: only one order fills (ordering B)");
+    assert_eq!(
+        report_a.fills.len(),
+        1,
+        "cap must bind: only one order fills (ordering A)"
+    );
+    assert_eq!(
+        report_b.fills.len(),
+        1,
+        "cap must bind: only one order fills (ordering B)"
+    );
 
     // The accepted order, its price/timestamps, must be identical.
     assert_eq!(
@@ -208,11 +246,17 @@ fn cap_binding_same_timestamp_permutation_produces_identical_result() {
         "accepted/rejected split must be identical regardless of row order"
     );
     assert_eq!(
-        statuses_a.values().filter(|s| **s == OrderStatus::Filled).count(),
+        statuses_a
+            .values()
+            .filter(|s| **s == OrderStatus::Filled)
+            .count(),
         1
     );
     assert_eq!(
-        statuses_a.values().filter(|s| **s == OrderStatus::Rejected).count(),
+        statuses_a
+            .values()
+            .filter(|s| **s == OrderStatus::Rejected)
+            .count(),
         1
     );
 
@@ -244,10 +288,38 @@ fn cfg_initial_cash() -> i64 {
 
 #[test]
 fn non_binding_cap_same_timestamp_permutation_both_fill_identically() {
-    let signal_aapl = bar("AAPL", 940, 100_000_000, 100_000_000, 100_000_000, 100_000_000);
-    let signal_amd = bar("AMD", 940, 200_000_000, 200_000_000, 200_000_000, 200_000_000);
-    let fill_aapl = bar("AAPL", 1_000, 100_000_000, 100_000_000, 100_000_000, 100_000_000);
-    let fill_amd = bar("AMD", 1_000, 200_000_000, 200_000_000, 200_000_000, 200_000_000);
+    let signal_aapl = bar(
+        "AAPL",
+        940,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+    );
+    let signal_amd = bar(
+        "AMD",
+        940,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+    );
+    let fill_aapl = bar(
+        "AAPL",
+        1_000,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+    );
+    let fill_amd = bar(
+        "AMD",
+        1_000,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+        200_000_000,
+    );
 
     // Generous cap: both orders fill, so ticks 3/4 (the fill batch's two
     // physical rows) safely reassert BOTH already-filled targets -- zero
@@ -256,8 +328,20 @@ fn non_binding_cap_same_timestamp_permutation_both_fill_identically() {
         vec![
             (1, vec![TargetPosition::new("AAPL", 550)]),
             (2, vec![TargetPosition::new("AMD", 275)]),
-            (3, vec![TargetPosition::new("AAPL", 550), TargetPosition::new("AMD", 275)]),
-            (4, vec![TargetPosition::new("AAPL", 550), TargetPosition::new("AMD", 275)]),
+            (
+                3,
+                vec![
+                    TargetPosition::new("AAPL", 550),
+                    TargetPosition::new("AMD", 275),
+                ],
+            ),
+            (
+                4,
+                vec![
+                    TargetPosition::new("AAPL", 550),
+                    TargetPosition::new("AMD", 275),
+                ],
+            ),
         ]
     };
 
@@ -270,15 +354,27 @@ fn non_binding_cap_same_timestamp_permutation_both_fill_identically() {
     let bars_b = [signal_aapl, signal_amd, fill_amd, fill_aapl];
 
     let mut engine_a = BacktestEngine::new(wide_cfg());
-    engine_a.add_strategy(Box::new(TickScript::new(schedule()))).unwrap();
+    engine_a
+        .add_strategy(Box::new(TickScript::new(schedule())))
+        .unwrap();
     let report_a = engine_a.run(&bars_a).unwrap();
 
     let mut engine_b = BacktestEngine::new(wide_cfg());
-    engine_b.add_strategy(Box::new(TickScript::new(schedule()))).unwrap();
+    engine_b
+        .add_strategy(Box::new(TickScript::new(schedule())))
+        .unwrap();
     let report_b = engine_b.run(&bars_b).unwrap();
 
-    assert_eq!(report_a.fills.len(), 2, "generous cap: both orders fill (ordering A)");
-    assert_eq!(report_b.fills.len(), 2, "generous cap: both orders fill (ordering B)");
+    assert_eq!(
+        report_a.fills.len(),
+        2,
+        "generous cap: both orders fill (ordering A)"
+    );
+    assert_eq!(
+        report_b.fills.len(),
+        2,
+        "generous cap: both orders fill (ordering B)"
+    );
     assert_eq!(fills_by_symbol(&report_a), fills_by_symbol(&report_b));
     assert_eq!(
         original_order_status_by_symbol(&report_a),
@@ -312,10 +408,20 @@ fn identical_inputs_produce_identical_run_id_under_new_model() {
     let cfg = BacktestConfig::test_defaults();
     let config_id = cfg.config_id();
     let hash = derive_input_data_hash(&[]);
-    let id1 =
-        derive_run_id_with_execution_model("strat", &config_id, &hash, &econ_equity(), BACKTEST_EXECUTION_MODEL_ID);
-    let id2 =
-        derive_run_id_with_execution_model("strat", &config_id, &hash, &econ_equity(), BACKTEST_EXECUTION_MODEL_ID);
+    let id1 = derive_run_id_with_execution_model(
+        "strat",
+        &config_id,
+        &hash,
+        &econ_equity(),
+        BACKTEST_EXECUTION_MODEL_ID,
+    );
+    let id2 = derive_run_id_with_execution_model(
+        "strat",
+        &config_id,
+        &hash,
+        &econ_equity(),
+        BACKTEST_EXECUTION_MODEL_ID,
+    );
     assert_eq!(id1, id2, "identical inputs must yield identical run_id");
 }
 
@@ -447,7 +553,9 @@ fn changing_execution_model_id_changes_replay_identity() {
 fn report_carries_truthful_execution_model_and_run_id_matches_independent_derivation() {
     let bars = [flat_bar("AAPL", 1_000, 100_000_000)];
     let mut engine = BacktestEngine::new(BacktestConfig::test_defaults());
-    engine.add_strategy(Box::new(TickScript::new(vec![]))).unwrap();
+    engine
+        .add_strategy(Box::new(TickScript::new(vec![])))
+        .unwrap();
     let report = engine.run(&bars).unwrap();
 
     assert_eq!(
@@ -487,7 +595,14 @@ fn pending_order_orphaned_by_early_halt_is_labeled_canceled_on_halt() {
     cfg.daily_loss_limit_micros = 500 * M;
 
     let bars = [
-        bar("MSFT", 1_000, 300_000_000, 300_000_000, 300_000_000, 300_000_000), // tick1: MSFT signal (forever pending)
+        bar(
+            "MSFT",
+            1_000,
+            300_000_000,
+            300_000_000,
+            300_000_000,
+            300_000_000,
+        ), // tick1: MSFT signal (forever pending)
         flat_bar("AAPL", 1_000, 100 * M), // tick2: AAPL buy signal
         flat_bar("AAPL", 1_060, 100 * M), // tick3: AAPL fills @ $100
         flat_bar("AAPL", 1_120, 40 * M),  // tick4: crash -> daily loss halt

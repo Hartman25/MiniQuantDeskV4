@@ -557,10 +557,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // semantic-strategy performance analytics (public, no auth). GET-only
         // -- no DB write, no order/broker/OMS path, no promotion/suppression
         // state read or written.
-        .route(
-            "/api/v1/strategy/performance",
-            get(strategy_performance),
-        )
+        .route("/api/v1/strategy/performance", get(strategy_performance))
         .route(
             "/api/v1/broker/assets/:symbol/shortable-preflight",
             get(broker_asset_shortable_preflight),

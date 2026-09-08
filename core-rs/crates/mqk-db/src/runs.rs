@@ -1086,7 +1086,9 @@ pub async fn stop_run_if_evidence_clean(
 
     let Some(status) = status else {
         tx.rollback().await.ok();
-        return Err(anyhow!("stop_run_if_evidence_clean: run {run_id} not found"));
+        return Err(anyhow!(
+            "stop_run_if_evidence_clean: run {run_id} not found"
+        ));
     };
 
     if !matches!(status.as_str(), "ARMED" | "RUNNING") {

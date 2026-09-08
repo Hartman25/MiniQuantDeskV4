@@ -423,8 +423,7 @@ async fn log_coordinator_outcome(
             // durably applied above; a read failure only degrades the
             // notification's content (an explicit "unavailable" string), it
             // never rolls back or alters finalization truth.
-            let diagnostics_summary =
-                summarize_no_trade_diagnostics_for_run(state, *run_id).await;
+            let diagnostics_summary = summarize_no_trade_diagnostics_for_run(state, *run_id).await;
             state
                 .discord_notifier
                 .notify_run_status(&RunStatusPayload {
@@ -619,7 +618,10 @@ async fn log_coordinator_outcome(
 /// after finalization truth is already durably applied by the caller, so a
 /// read failure here degrades only the notification's content, never
 /// finalization truth.
-async fn summarize_no_trade_diagnostics_for_run(state: &Arc<AppState>, run_id: Option<Uuid>) -> String {
+async fn summarize_no_trade_diagnostics_for_run(
+    state: &Arc<AppState>,
+    run_id: Option<Uuid>,
+) -> String {
     let Some(run_id) = run_id else {
         return "diagnostics: unavailable (no run_id associated with this operation)".to_string();
     };
@@ -1233,12 +1235,16 @@ mod tests {
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
         ));
-        assert!(state.db.is_none(), "test fixture precondition: no db configured");
+        assert!(
+            state.db.is_none(),
+            "test fixture precondition: no db configured"
+        );
         // Fixed, arbitrary run_id (CI-UNSAFE-PATTERNS-UUID-TESTFIXTURE-01):
         // the function short-circuits on the missing DB before the run_id
         // value is ever inspected, so any deterministic UUID proves the
         // same path.
-        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::from_u128(1))).await;
+        let summary =
+            summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::from_u128(1))).await;
         assert_eq!(summary, "diagnostics: unavailable (db not connected)");
     }
 
@@ -1259,7 +1265,8 @@ mod tests {
         // the function short-circuits on the DB read error before the
         // run_id value is ever inspected, so any deterministic UUID proves
         // the same path.
-        let summary = summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::from_u128(2))).await;
+        let summary =
+            summarize_no_trade_diagnostics_for_run(&state, Some(Uuid::from_u128(2))).await;
         assert_eq!(
             summary, "diagnostics: unavailable (read error)",
             "a genuine DB read error must produce an explicit unavailable string, never a \

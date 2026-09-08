@@ -764,7 +764,10 @@ fn reject_first_time_on_owned_order_sets_terminal_apply_succeeded() {
         "a genuine first-time reject on a run-owned order must set the \
          exact-once guard the orchestrator uses to record a reject-storm hit"
     );
-    assert_eq!(oms["ord-r1"].state, mqk_execution::oms::state_machine::OrderState::Rejected);
+    assert_eq!(
+        oms["ord-r1"].state,
+        mqk_execution::oms::state_machine::OrderState::Rejected
+    );
 }
 
 #[test]
@@ -824,7 +827,10 @@ fn cancel_reject_and_replace_reject_never_set_terminal_apply_succeeded() {
     )
     .expect("cancel-reject apply must succeed");
     assert!(!outcome.terminal_apply_succeeded);
-    assert_eq!(oms["ord-cr"].state, mqk_execution::oms::state_machine::OrderState::Open);
+    assert_eq!(
+        oms["ord-cr"].state,
+        mqk_execution::oms::state_machine::OrderState::Open
+    );
 
     // ReplaceReject: ReplacePending -> Open (non-terminal), same story.
     let mut oms2: BTreeMap<String, OmsOrder> = BTreeMap::new();
@@ -842,7 +848,10 @@ fn cancel_reject_and_replace_reject_never_set_terminal_apply_succeeded() {
     )
     .expect("replace-reject apply must succeed");
     assert!(!outcome2.terminal_apply_succeeded);
-    assert_eq!(oms2["ord-rr"].state, mqk_execution::oms::state_machine::OrderState::Open);
+    assert_eq!(
+        oms2["ord-rr"].state,
+        mqk_execution::oms::state_machine::OrderState::Open
+    );
 }
 
 #[test]

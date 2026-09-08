@@ -9,19 +9,19 @@ mod commands;
 use commands::{
     bkt::{
         run_backtest_csv, run_backtest_db, run_finalize_genuine_shuffled_placebo,
-        run_finalize_p7a_p7b_replay_stress, run_finalize_robustness_sensitivity,
-        run_regime_detect, run_review_scan, run_strategy_lab_evaluate, run_strategy_lab_rank,
-        run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
+        run_finalize_p7a_p7b_replay_stress, run_finalize_robustness_sensitivity, run_regime_detect,
+        run_review_scan, run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan,
+        run_sweep_csv, IntegrityCalendarArg,
     },
     daemon::{daemon_arm, daemon_clear_halted_run, daemon_disarm, daemon_halt, daemon_status},
     load_payload,
-    research_replay::{run_research_replay_backtest, ResearchReplayArgs},
     md::{
         md_coinlore_latest_mark, md_crypto_registry_readiness, md_ingest_csv, md_ingest_provider,
         md_kraken_ohlc_dry_run, md_kraken_ohlc_ingest, md_kraken_ohlc_sync,
         md_kraken_scheduler_readiness, md_registry_v2_status, md_registry_v2_translation_check,
         md_sync_provider,
     },
+    research_replay::{run_research_replay_backtest, ResearchReplayArgs},
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
         run_start, run_status, run_stop,

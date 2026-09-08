@@ -60,7 +60,10 @@ async fn fetch_journal(st: &Arc<state::AppState>) -> serde_json::Value {
 
 /// Find the fills_lane row with the given internal_order_id, or panic with
 /// the full lane dumped for diagnosis.
-fn find_fill_row<'a>(journal: &'a serde_json::Value, internal_order_id: &str) -> &'a serde_json::Value {
+fn find_fill_row<'a>(
+    journal: &'a serde_json::Value,
+    internal_order_id: &str,
+) -> &'a serde_json::Value {
     journal["fills_lane"]["rows"]
         .as_array()
         .expect("fills_lane.rows must be an array")
@@ -242,7 +245,12 @@ async fn seed_promotion_config_drift(
     };
     mqk_db::insert_strategy_promotion_transition(
         pool,
-        &step(seed("1"), Some("active_paper"), "demoted", now + Duration::milliseconds(10)),
+        &step(
+            seed("1"),
+            Some("active_paper"),
+            "demoted",
+            now + Duration::milliseconds(10),
+        ),
     )
     .await
     .expect("seed drift: demoted");
@@ -333,7 +341,12 @@ fn make_decision(
 
 /// Insert a fill_quality_telemetry row whose `internal_order_id` is the
 /// exact `decision_id`/`idempotency_key` of the order it fills.
-async fn insert_fill_for_order(pool: &sqlx::PgPool, run_id: Uuid, internal_order_id: &str, symbol: &str) {
+async fn insert_fill_for_order(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    internal_order_id: &str,
+    symbol: &str,
+) {
     let now = Utc::now();
     mqk_db::insert_fill_quality_telemetry(
         pool,
@@ -395,8 +408,7 @@ async fn wl01_internal_strategy_fill_round_trip() {
         let run_id = seed_active_run(&st).await;
 
         let dec_id = unique_id("dec_rt");
-        let out =
-            submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid, &fp_a)).await;
+        let out = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid, &fp_a)).await;
         assert!(
             out.accepted,
             "decision must be accepted; disposition={:?} blockers={:?}",
@@ -455,10 +467,16 @@ async fn wl02_two_strategies_same_symbol_exact_order_attribution() {
         let dec_id_b = unique_id("dec_b");
         let out_a =
             submit_internal_strategy_decision(&st, make_decision(&dec_id_a, &sid_a, &fp_a)).await;
-        assert!(out_a.accepted, "strategy A decision must be accepted: {out_a:?}");
+        assert!(
+            out_a.accepted,
+            "strategy A decision must be accepted: {out_a:?}"
+        );
         let out_b =
             submit_internal_strategy_decision(&st, make_decision(&dec_id_b, &sid_b, &fp_b)).await;
-        assert!(out_b.accepted, "strategy B decision must be accepted: {out_b:?}");
+        assert!(
+            out_b.accepted,
+            "strategy B decision must be accepted: {out_b:?}"
+        );
 
         // Only A's order fills.
         insert_fill_for_order(&pool, run_id, &dec_id_a, "AAPL").await;
@@ -474,7 +492,10 @@ async fn wl02_two_strategies_same_symbol_exact_order_attribution() {
             Some(sid_a.as_str()),
             "fill must be attributed to strategy A only, never B; row={row}"
         );
-        assert_eq!(row["strategy_semantic_fingerprint"].as_str(), Some(fp_a.as_str()));
+        assert_eq!(
+            row["strategy_semantic_fingerprint"].as_str(),
+            Some(fp_a.as_str())
+        );
         assert_ne!(
             row["strategy_id"].as_str(),
             Some(sid_b.as_str()),
@@ -511,7 +532,10 @@ async fn wl03_current_config_drift_never_rewrites_historical_fingerprint() {
         let dec_id = unique_id("dec_drift");
         let out =
             submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid, &fp_old)).await;
-        assert!(out.accepted, "decision under OLD fingerprint must be accepted: {out:?}");
+        assert!(
+            out.accepted,
+            "decision under OLD fingerprint must be accepted: {out:?}"
+        );
 
         insert_fill_for_order(&pool, run_id, &dec_id, "AAPL").await;
 
@@ -650,9 +674,14 @@ async fn wl05_manual_order_reports_unattributed_not_invented() {
             "time_in_force": "day",
             "limit_price": serde_json::Value::Null,
         });
-        mqk_db::outbox_enqueue_for_running_run(&pool, run_id, &client_request_id, manual_order_json)
-            .await
-            .expect("enqueue manual outbox row");
+        mqk_db::outbox_enqueue_for_running_run(
+            &pool,
+            run_id,
+            &client_request_id,
+            manual_order_json,
+        )
+        .await
+        .expect("enqueue manual outbox row");
 
         insert_fill_for_order(&pool, run_id, &client_request_id, "MSFT").await;
 
@@ -664,7 +693,10 @@ async fn wl05_manual_order_reports_unattributed_not_invented() {
 
         let journal = fetch_journal(&st).await;
         let row = find_fill_row(&journal, &client_request_id);
-        assert!(row["strategy_id"].is_null(), "manual order must have no strategy_id; row={row}");
+        assert!(
+            row["strategy_id"].is_null(),
+            "manual order must have no strategy_id; row={row}"
+        );
         assert!(
             row["strategy_semantic_fingerprint"].is_null(),
             "manual order must have no fingerprint; row={row}"
@@ -948,7 +980,8 @@ async fn wl08b_external_signal_source_missing_strategy_id_is_lineage_invalid() {
         let row = find_fill_row(&journal, &dec_id);
         assert_eq!(row["strategy_attribution_state"], "lineage_invalid");
         assert_eq!(
-            row["strategy_attribution_reason"], "strategy_id_missing_for_strategy_source"
+            row["strategy_attribution_reason"],
+            "strategy_id_missing_for_strategy_source"
         );
     })
     .await;
@@ -1078,7 +1111,10 @@ async fn wl10_fingerprint_without_strategy_id_or_malformed_is_lineage_invalid() 
 
         let row_a = find_fill_row(&journal, &dec_id_a);
         assert!(row_a["strategy_id"].is_null(), "row_a={row_a}");
-        assert_eq!(row_a["strategy_attribution_state"], "lineage_invalid", "row_a={row_a}");
+        assert_eq!(
+            row_a["strategy_attribution_state"], "lineage_invalid",
+            "row_a={row_a}"
+        );
         assert_eq!(
             row_a["strategy_attribution_reason"], "fingerprint_without_strategy_id",
             "row_a={row_a}"
@@ -1086,8 +1122,14 @@ async fn wl10_fingerprint_without_strategy_id_or_malformed_is_lineage_invalid() 
 
         let row_b = find_fill_row(&journal, &dec_id_b);
         assert!(row_b["strategy_id"].is_null(), "row_b={row_b}");
-        assert!(row_b["strategy_semantic_fingerprint"].is_null(), "row_b={row_b}");
-        assert_eq!(row_b["strategy_attribution_state"], "lineage_invalid", "row_b={row_b}");
+        assert!(
+            row_b["strategy_semantic_fingerprint"].is_null(),
+            "row_b={row_b}"
+        );
+        assert_eq!(
+            row_b["strategy_attribution_state"], "lineage_invalid",
+            "row_b={row_b}"
+        );
         assert_eq!(
             row_b["strategy_attribution_reason"], "fingerprint_malformed",
             "row_b={row_b}"

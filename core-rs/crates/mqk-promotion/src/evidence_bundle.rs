@@ -196,8 +196,8 @@ pub fn resolve_backtest_evidence(
 
     // --- BacktestReport authority (identity-checked against manifest.json
     // by the loader itself) ---
-    let report =
-        load_canonical_backtest_report(&candidate_canon).map_err(BacktestEvidenceResolveError::Report)?;
+    let report = load_canonical_backtest_report(&candidate_canon)
+        .map_err(BacktestEvidenceResolveError::Report)?;
     if report.run_id != run_id {
         return Err(BacktestEvidenceResolveError::ReportIdentityMismatch {
             requested: run_id,
@@ -206,16 +206,19 @@ pub fn resolve_backtest_evidence(
     }
 
     // --- ArtifactLock (Patch B6's existing, unmodified verifier) ---
-    let manifest_json = fs::read_to_string(candidate_canon.join("manifest.json"))
-        .map_err(|_| BacktestEvidenceResolveError::Report(BacktestReportArtifactError::ManifestMissing))?;
+    let manifest_json =
+        fs::read_to_string(candidate_canon.join("manifest.json")).map_err(|_| {
+            BacktestEvidenceResolveError::Report(BacktestReportArtifactError::ManifestMissing)
+        })?;
     let audit_jsonl = fs::read_to_string(candidate_canon.join("audit.jsonl")).unwrap_or_default();
     let artifact_lock = lock_artifact_from_str(&manifest_json, &audit_jsonl)
         .map_err(BacktestEvidenceResolveError::ArtifactLockFailed)?;
 
     // --- Report content integrity: cross-check the audited hash against
     // the actual on-disk bytes (never verified by the loader itself). ---
-    let report_bytes = fs::read(candidate_canon.join("backtest_report.json"))
-        .map_err(|_| BacktestEvidenceResolveError::Report(BacktestReportArtifactError::MissingCanonicalReport))?;
+    let report_bytes = fs::read(candidate_canon.join("backtest_report.json")).map_err(|_| {
+        BacktestEvidenceResolveError::Report(BacktestReportArtifactError::MissingCanonicalReport)
+    })?;
     let actual_sha256 = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -245,7 +248,10 @@ pub fn resolve_backtest_evidence(
         if recorded != actual_sha256 {
             return Err(BacktestEvidenceResolveError::ReportContentHashMismatch);
         }
-        initial_equity_micros = ev.payload.get("initial_cash_micros").and_then(|v| v.as_i64());
+        initial_equity_micros = ev
+            .payload
+            .get("initial_cash_micros")
+            .and_then(|v| v.as_i64());
     }
     if !found_report_event {
         return Err(BacktestEvidenceResolveError::ReportAuditEventMissing);
@@ -254,8 +260,8 @@ pub fn resolve_backtest_evidence(
         initial_equity_micros.ok_or(BacktestEvidenceResolveError::ReportInitialEquityMissing)?;
 
     // --- StressSuiteResult authority ---
-    let stress_artifact =
-        load_canonical_stress_suite(&candidate_canon).map_err(BacktestEvidenceResolveError::StressSuite)?;
+    let stress_artifact = load_canonical_stress_suite(&candidate_canon)
+        .map_err(BacktestEvidenceResolveError::StressSuite)?;
     let stress_artifact_sha256 = stress_artifact.content_sha256();
     let stress_suite = stress_result_from_artifact(&stress_artifact);
 

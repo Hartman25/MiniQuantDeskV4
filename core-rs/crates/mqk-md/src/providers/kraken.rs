@@ -1597,7 +1597,10 @@ mod tests {
     fn kf08_retry_after_parsing_accepts_valid_and_falls_back_on_malformed() {
         assert_eq!(kraken_fetch_parse_retry_after_secs(Some("5")), Some(5));
         assert_eq!(kraken_fetch_parse_retry_after_secs(Some(" 5 ")), Some(5));
-        assert_eq!(kraken_fetch_parse_retry_after_secs(Some("not-a-number")), None);
+        assert_eq!(
+            kraken_fetch_parse_retry_after_secs(Some("not-a-number")),
+            None
+        );
         assert_eq!(kraken_fetch_parse_retry_after_secs(Some("")), None);
         assert_eq!(kraken_fetch_parse_retry_after_secs(None), None);
     }
@@ -1650,7 +1653,9 @@ mod tests {
                 .matches(|_req: &HttpMockRequest| {
                     KF11_CALL.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 1
                 });
-            then.status(429).header("Retry-After", "0").body("rate limited");
+            then.status(429)
+                .header("Retry-After", "0")
+                .body("rate limited");
         });
         let mock_ok = server.mock(|when, then| {
             when.method(GET)
@@ -1694,7 +1699,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("exceeds the permitted in-call retry budget"),
+            err.to_string()
+                .contains("exceeds the permitted in-call retry budget"),
             "must fail closed naming the exceeded budget, got: {err}"
         );
         mock.assert_hits(1);

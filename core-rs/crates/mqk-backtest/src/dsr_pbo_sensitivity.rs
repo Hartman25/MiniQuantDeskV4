@@ -188,7 +188,8 @@ pub fn dsr_pbo_sensitivity_scenario(
     // construction rather than genuine evidence of insensitivity. This is a
     // structural requirement failure, not a not_evaluable/inapplicable
     // candidate property -- it fails BEFORE any subprocess is spawned.
-    let distinct_block_counts: std::collections::BTreeSet<u32> = block_counts.iter().copied().collect();
+    let distinct_block_counts: std::collections::BTreeSet<u32> =
+        block_counts.iter().copied().collect();
     if distinct_block_counts.len() < 2 {
         let reason = format!(
             "block_counts must contain at least 2 DISTINCT values to measure sensitivity \
@@ -304,8 +305,9 @@ pub fn dsr_pbo_sensitivity_scenario(
     // agrees with what THIS caller supplied -- same discipline as the
     // `strategy_id`/`baseline_economic_eval_id` cross-checks elsewhere in
     // this P9 module family, guarding against caller/CLI drift.
-    if let Some(actual_judge_sha256) =
-        value.get("authoritative_judge_artifact_sha256").and_then(|v| v.as_str())
+    if let Some(actual_judge_sha256) = value
+        .get("authoritative_judge_artifact_sha256")
+        .and_then(|v| v.as_str())
     {
         if actual_judge_sha256 != authoritative_judge_artifact_sha256 {
             let reason = format!(
@@ -333,8 +335,7 @@ pub fn dsr_pbo_sensitivity_scenario(
             let pbo_range = value.get("pbo_range").and_then(|v| v.as_f64());
             match (dsr_range, pbo_range) {
                 (Some(dr), Some(pr)) => {
-                    let passed =
-                        dr <= dsr_max_sensitivity_range && pr <= pbo_max_sensitivity_range;
+                    let passed = dr <= dsr_max_sensitivity_range && pr <= pbo_max_sensitivity_range;
                     RobustnessScenarioOutcome {
                         name,
                         applicable: true,
@@ -439,7 +440,10 @@ mod tests {
         );
         assert!(outcome.applicable);
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("2 DISTINCT values"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("2 DISTINCT values"));
     }
 
     /// A duplicate-only grid (`[8, 8]`) is exactly as unevaluable as a
@@ -458,7 +462,10 @@ mod tests {
             0.25,
         );
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("2 DISTINCT values"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("2 DISTINCT values"));
     }
 
     /// A structurally valid, genuinely distinct 2-value grid must NOT be
@@ -504,7 +511,10 @@ mod tests {
         assert!(outcome.applicable);
         assert!(!outcome.passed);
         assert!(
-            outcome.reason.unwrap_or_default().contains("invalid dsr_max_sensitivity_range"),
+            outcome
+                .reason
+                .unwrap_or_default()
+                .contains("invalid dsr_max_sensitivity_range"),
             "must name the exact invalid parameter"
         );
     }
@@ -523,7 +533,10 @@ mod tests {
             0.25,
         );
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("invalid dsr_max_sensitivity_range"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("invalid dsr_max_sensitivity_range"));
     }
 
     #[test]
@@ -540,7 +553,10 @@ mod tests {
             1.5, // PBO is a probability -- must be within [0, 1]
         );
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("invalid pbo_max_sensitivity_range"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("invalid pbo_max_sensitivity_range"));
     }
 
     #[test]
@@ -557,7 +573,10 @@ mod tests {
             -0.01,
         );
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("invalid pbo_max_sensitivity_range"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("invalid pbo_max_sensitivity_range"));
     }
 
     /// Every rejected outcome (including invalid-threshold rejections) still
@@ -599,11 +618,9 @@ mod tests {
         );
         assert!(outcome.applicable);
         assert!(!outcome.passed);
-        assert!(
-            outcome
-                .reason
-                .unwrap_or_default()
-                .contains("authoritative_judge_artifact_sha256 must not be empty")
-        );
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("authoritative_judge_artifact_sha256 must not be empty"));
     }
 }

@@ -260,7 +260,8 @@ fn build_replay_bundle_via_python(
 // R3.3 -- frozen Wave06 campaign policy, never an operator-tunable knob.
 // ---------------------------------------------------------------------------
 
-const PREDECLARED_CAMPAIGN_RELATIVE_PATH: &str = "experiments/wave06_campaign/PREDECLARED_CAMPAIGN.json";
+const PREDECLARED_CAMPAIGN_RELATIVE_PATH: &str =
+    "experiments/wave06_campaign/PREDECLARED_CAMPAIGN.json";
 
 /// R3.3: `block_counts`/`dsr_max_sensitivity_range`/`pbo_max_sensitivity_range`/
 /// P7A-P7B stress knobs/`max_drawdown_ceiling` are PREDECLARED Wave06
@@ -289,7 +290,10 @@ impl Wave06CampaignPolicy {
             )
         })?;
         let value: serde_json::Value = serde_json::from_str(&text).with_context(|| {
-            format!("Fail-closed: malformed Wave06 campaign policy at {}", path.display())
+            format!(
+                "Fail-closed: malformed Wave06 campaign policy at {}",
+                path.display()
+            )
         })?;
         let policy = value
             .get("advancement_policy")
@@ -333,10 +337,13 @@ impl Wave06CampaignPolicy {
             .and_then(|v| v.as_u64())
             .context("Fail-closed: missing/malformed stress_execution_volatility_mult_bps")?
             as u32;
-        let stress_max_target_qty =
-            stress.get("stress_max_target_qty").and_then(|v| v.as_u64()).map(|n| n as u32);
-        let stress_max_position_notional_usd =
-            stress.get("stress_max_position_notional_usd").and_then(|v| v.as_f64());
+        let stress_max_target_qty = stress
+            .get("stress_max_target_qty")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let stress_max_position_notional_usd = stress
+            .get("stress_max_position_notional_usd")
+            .and_then(|v| v.as_f64());
         let max_drawdown_ceiling = stress
             .get("max_drawdown_ceiling")
             .and_then(|v| v.as_f64())
@@ -355,7 +362,11 @@ impl Wave06CampaignPolicy {
     }
 
     fn block_counts_csv(&self) -> String {
-        self.block_counts.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",")
+        self.block_counts
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -384,7 +395,12 @@ fn resolve_campaign_judge_artifact_sha256(
     let script = research_py_root.join(RUN_CAMPAIGN_JUDGE_RELATIVE_PATH);
     let output = Command::new(python)
         .arg(&script)
-        .args(["--execute", "--json", "--registry-db", &registry_db.display().to_string()])
+        .args([
+            "--execute",
+            "--json",
+            "--registry-db",
+            &registry_db.display().to_string(),
+        ])
         .output()
         .with_context(|| format!("failed to spawn {python} {}", script.display()))?;
 
@@ -398,7 +414,10 @@ fn resolve_campaign_judge_artifact_sha256(
         )
     })?;
     if value.get("status").and_then(|v| v.as_str()) != Some("ok") {
-        let reason = value.get("reason").and_then(|v| v.as_str()).unwrap_or("unknown reason");
+        let reason = value
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown reason");
         bail!("Fail-closed: run_campaign_judge.py refused/failed: {reason}");
     }
     value
@@ -445,8 +464,12 @@ pub fn resolve_replay_bundle(
     expected_manifest_sha256: &str,
 ) -> Result<ResolvedReplayBundle> {
     let manifest_path = bundle_dir.join("manifest.json");
-    let actual_manifest_sha256 = sha256_hex_of_file(&manifest_path)
-        .with_context(|| format!("missing replay bundle manifest: {}", manifest_path.display()))?;
+    let actual_manifest_sha256 = sha256_hex_of_file(&manifest_path).with_context(|| {
+        format!(
+            "missing replay bundle manifest: {}",
+            manifest_path.display()
+        )
+    })?;
     if actual_manifest_sha256 != expected_manifest_sha256 {
         bail!(
             "Fail-closed: replay bundle manifest.json at {} does not match the replay builder's \
@@ -455,10 +478,18 @@ pub fn resolve_replay_bundle(
             manifest_path.display()
         );
     }
-    let manifest_text = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("missing replay bundle manifest: {}", manifest_path.display()))?;
-    let manifest: ReplayManifestDto = serde_json::from_str(&manifest_text)
-        .with_context(|| format!("malformed replay bundle manifest: {}", manifest_path.display()))?;
+    let manifest_text = fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "missing replay bundle manifest: {}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: ReplayManifestDto = serde_json::from_str(&manifest_text).with_context(|| {
+        format!(
+            "malformed replay bundle manifest: {}",
+            manifest_path.display()
+        )
+    })?;
 
     if manifest.schema_version != REQUIRED_MANIFEST_PROTOCOL_VERSION
         || manifest.protocol_version != REQUIRED_MANIFEST_PROTOCOL_VERSION
@@ -506,10 +537,9 @@ pub fn resolve_replay_bundle(
             .path
             .as_ref()
             .with_context(|| format!("replay bundle source_file_hashes.{label} missing a path"))?;
-        let sha256 = record
-            .sha256
-            .as_ref()
-            .with_context(|| format!("replay bundle source_file_hashes.{label} missing a sha256"))?;
+        let sha256 = record.sha256.as_ref().with_context(|| {
+            format!("replay bundle source_file_hashes.{label} missing a sha256")
+        })?;
         require_hash_match(label, Path::new(path), sha256)?;
         if label == "bars_csv" {
             bars_csv_path = Some(PathBuf::from(path));
@@ -551,7 +581,8 @@ pub fn resolve_replay_bundle(
 /// dependency-free parser: this format is fully controlled by Patch A and
 /// never contains embedded commas/quoting.
 fn load_schedule_csv(path: &Path) -> Result<BTreeMap<i64, Vec<TargetPosition>>> {
-    let text = fs::read_to_string(path).with_context(|| format!("read failed: {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("read failed: {}", path.display()))?;
     let mut lines = text.lines();
     let header = lines.next().context("empty schedule csv")?;
     let cols: Vec<&str> = header.split(',').collect();
@@ -587,9 +618,17 @@ fn load_schedule_csv(path: &Path) -> Result<BTreeMap<i64, Vec<TargetPosition>>> 
             .parse()
             .with_context(|| format!("schedule csv line {}: invalid target_qty", line_no + 2))?;
         let end_ts = DateTime::parse_from_rfc3339(ts_str)
-            .with_context(|| format!("schedule csv line {}: invalid decision_ts {ts_str:?}", line_no + 2))?
+            .with_context(|| {
+                format!(
+                    "schedule csv line {}: invalid decision_ts {ts_str:?}",
+                    line_no + 2
+                )
+            })?
             .timestamp();
-        schedule.entry(end_ts).or_default().push(TargetPosition::new(symbol, qty));
+        schedule
+            .entry(end_ts)
+            .or_default()
+            .push(TargetPosition::new(symbol, qty));
     }
     Ok(schedule)
 }
@@ -603,7 +642,8 @@ fn load_schedule_csv(path: &Path) -> Result<BTreeMap<i64, Vec<TargetPosition>>> 
 /// same documented close-only convention `mqk_strategy::BarStub::new`
 /// already uses); missing volume falls back to 0.
 pub fn load_research_bars_csv(path: &Path) -> Result<Vec<BacktestBar>> {
-    let text = fs::read_to_string(path).with_context(|| format!("read failed: {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("read failed: {}", path.display()))?;
     let mut lines = text.lines();
     let header = lines.next().context("empty bars csv")?;
     let cols: Vec<&str> = header.split(',').collect();
@@ -616,7 +656,8 @@ pub fn load_research_bars_csv(path: &Path) -> Result<Vec<BacktestBar>> {
     let low_idx = find("low");
     let vol_idx = find("volume");
 
-    let mut converted = String::from("symbol,end_ts,open_micros,high_micros,low_micros,close_micros,volume\n");
+    let mut converted =
+        String::from("symbol,end_ts,open_micros,high_micros,low_micros,close_micros,volume\n");
     for (line_no, line) in lines.enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -636,24 +677,37 @@ pub fn load_research_bars_csv(path: &Path) -> Result<Vec<BacktestBar>> {
             .context("missing close")?
             .parse()
             .with_context(|| format!("bars csv line {}: invalid close", line_no + 2))?;
-        let open = open_idx.and_then(|i| fields.get(i)).and_then(|s| s.parse::<f64>().ok()).unwrap_or(close);
-        let high = high_idx.and_then(|i| fields.get(i)).and_then(|s| s.parse::<f64>().ok()).unwrap_or(close);
-        let low = low_idx.and_then(|i| fields.get(i)).and_then(|s| s.parse::<f64>().ok()).unwrap_or(close);
+        let open = open_idx
+            .and_then(|i| fields.get(i))
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(close);
+        let high = high_idx
+            .and_then(|i| fields.get(i))
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(close);
+        let low = low_idx
+            .and_then(|i| fields.get(i))
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(close);
         let volume: i64 = vol_idx
             .and_then(|i| fields.get(i))
             .and_then(|s| s.parse::<f64>().ok())
             .map(|v| v as i64)
             .unwrap_or(0);
 
-        let open_micros = mqk_execution::price_to_micros(open).context("open price out of range")?;
-        let high_micros = mqk_execution::price_to_micros(high).context("high price out of range")?;
+        let open_micros =
+            mqk_execution::price_to_micros(open).context("open price out of range")?;
+        let high_micros =
+            mqk_execution::price_to_micros(high).context("high price out of range")?;
         let low_micros = mqk_execution::price_to_micros(low).context("low price out of range")?;
-        let close_micros = mqk_execution::price_to_micros(close).context("close price out of range")?;
+        let close_micros =
+            mqk_execution::price_to_micros(close).context("close price out of range")?;
         converted.push_str(&format!(
             "{symbol},{end_ts},{open_micros},{high_micros},{low_micros},{close_micros},{volume}\n"
         ));
     }
-    mqk_backtest::parse_csv_bars(&converted).map_err(|e| anyhow::anyhow!("parse_csv_bars failed: {e}"))
+    mqk_backtest::parse_csv_bars(&converted)
+        .map_err(|e| anyhow::anyhow!("parse_csv_bars failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -803,7 +857,8 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
     )
     .context("resolve_replay_bundle failed")?;
 
-    let bars = load_research_bars_csv(&bundle.bars_csv_path).context("load_research_bars_csv failed")?;
+    let bars =
+        load_research_bars_csv(&bundle.bars_csv_path).context("load_research_bars_csv failed")?;
     if bars.is_empty() {
         bail!("Fail-closed: replay bundle's bars_csv resolved to zero bars");
     }
@@ -822,7 +877,9 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
     engine
         .add_strategy(baseline_strategy)
         .context("add_strategy failed for baseline replay strategy")?;
-    let report = engine.run(&bars).context("baseline replay backtest run failed")?;
+    let report = engine
+        .run(&bars)
+        .context("baseline replay backtest run failed")?;
 
     let run_id = report.run_id;
     let git_hash = super::bkt::bkt_git_hash();
@@ -843,8 +900,12 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
     })
     .context("init_run_artifacts failed")?;
 
-    mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, base_config.initial_cash_micros)
-        .context("write_backtest_report failed")?;
+    mqk_artifacts::write_backtest_report(
+        &init_result.run_dir,
+        &report,
+        base_config.initial_cash_micros,
+    )
+    .context("write_backtest_report failed")?;
 
     let make_strategy = || -> Box<dyn Strategy> {
         strategy_for(&bundle, None, &bars).expect("baseline strategy construction cannot fail here")
@@ -856,8 +917,7 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
         let excluded_symbol = excluded
             .first()
             .unwrap_or_else(|| panic!("symbol_leave_one_out must exclude exactly one symbol"));
-        strategy_for(&bundle, Some(excluded_symbol), filtered)
-            .unwrap_or_else(|e| panic!("{e}"))
+        strategy_for(&bundle, Some(excluded_symbol), filtered).unwrap_or_else(|e| panic!("{e}"))
     };
 
     let stress_output =
@@ -930,7 +990,8 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
 
     let finalized = mqk_artifacts::load_canonical_robustness_gauntlet(&init_result.run_dir)
         .context("re-loading the finalized canonical robustness gauntlet failed")?;
-    let artifact_sha256 = sha256_hex_of_file(&init_result.run_dir.join("robustness_gauntlet.json"))?;
+    let artifact_sha256 =
+        sha256_hex_of_file(&init_result.run_dir.join("robustness_gauntlet.json"))?;
 
     Ok(ResearchReplaySummary {
         trial_id: bundle.trial_id,
@@ -957,13 +1018,16 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("mqk_cli_research_replay_test_{label}_{pid}_{seq}"));
+        let dir =
+            std::env::temp_dir().join(format!("mqk_cli_research_replay_test_{label}_{pid}_{seq}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn rfc3339(epoch: i64) -> String {
-        chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0).unwrap().to_rfc3339()
+        chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0)
+            .unwrap()
+            .to_rfc3339()
     }
 
     fn write_bars(dir: &Path, symbols: &[&str], days: i64) -> PathBuf {
@@ -1051,7 +1115,11 @@ mod tests {
             "symbol_loo_schedules": loo_obj,
         });
         let manifest_path = dir.join("manifest.json");
-        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
         sha256_hex_of_file(&manifest_path).unwrap()
     }
 
@@ -1061,8 +1129,17 @@ mod tests {
         let dir = unique_dir("wrong_trial");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        let sha = write_manifest(&dir, "trial-real", "strat-1", "econ-1", &bars, &baseline, &[]);
-        let err = resolve_replay_bundle(&dir, "trial-WRONG", "strat-1", "econ-1", &sha).unwrap_err();
+        let sha = write_manifest(
+            &dir,
+            "trial-real",
+            "strat-1",
+            "econ-1",
+            &bars,
+            &baseline,
+            &[],
+        );
+        let err =
+            resolve_replay_bundle(&dir, "trial-WRONG", "strat-1", "econ-1", &sha).unwrap_err();
         assert!(err.to_string().contains("trial_id"), "{err}");
     }
 
@@ -1072,8 +1149,17 @@ mod tests {
         let dir = unique_dir("wrong_econ");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        let sha = write_manifest(&dir, "trial-1", "strat-1", "econ-real", &bars, &baseline, &[]);
-        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-WRONG", &sha).unwrap_err();
+        let sha = write_manifest(
+            &dir,
+            "trial-1",
+            "strat-1",
+            "econ-real",
+            &bars,
+            &baseline,
+            &[],
+        );
+        let err =
+            resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-WRONG", &sha).unwrap_err();
         assert!(err.to_string().contains("economic_eval_id"), "{err}");
     }
 
@@ -1083,8 +1169,17 @@ mod tests {
         let dir = unique_dir("wrong_strategy");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        let sha = write_manifest(&dir, "trial-1", "strat-real", "econ-1", &bars, &baseline, &[]);
-        let err = resolve_replay_bundle(&dir, "trial-1", "strat-WRONG", "econ-1", &sha).unwrap_err();
+        let sha = write_manifest(
+            &dir,
+            "trial-1",
+            "strat-real",
+            "econ-1",
+            &bars,
+            &baseline,
+            &[],
+        );
+        let err =
+            resolve_replay_bundle(&dir, "trial-1", "strat-WRONG", "econ-1", &sha).unwrap_err();
         assert!(err.to_string().contains("strategy_id"), "{err}");
     }
 
@@ -1110,7 +1205,10 @@ mod tests {
         let sha = write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
         fs::remove_file(&baseline).unwrap();
         let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1", &sha).unwrap_err();
-        assert!(format!("{err:#}").to_lowercase().contains("read failed"), "{err:#}");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("read failed"),
+            "{err:#}"
+        );
     }
 
     /// R3.2 (Finding C): the missing negative control -- alter a schedule
@@ -1123,7 +1221,8 @@ mod tests {
         let dir = unique_dir("manifest_mutation");
         let bars = write_bars(&dir, &["AAA", "BBB"], 2);
         let baseline = write_schedule(&dir, "baseline.csv", &[(86_400, "AAA", 5)]);
-        let original_sha = write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
+        let original_sha =
+            write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
 
         // Mutate the schedule CSV...
         let original = fs::read_to_string(&baseline).unwrap();
@@ -1135,8 +1234,13 @@ mod tests {
         // `original_sha` anchors to.
         write_manifest(&dir, "trial-1", "strat-1", "econ-1", &bars, &baseline, &[]);
 
-        let err = resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1", &original_sha).unwrap_err();
-        assert!(err.to_string().contains("does not match the replay builder's own reported manifest_sha256"), "{err}");
+        let err =
+            resolve_replay_bundle(&dir, "trial-1", "strat-1", "econ-1", &original_sha).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the replay builder's own reported manifest_sha256"),
+            "{err}"
+        );
     }
 
     /// Bars CSV round-trip: ISO8601 -> epoch seconds, float prices -> micros.
@@ -1180,7 +1284,8 @@ mod tests {
                 ],
             );
         }
-        let mut loo_schedules: BTreeMap<String, BTreeMap<i64, Vec<TargetPosition>>> = BTreeMap::new();
+        let mut loo_schedules: BTreeMap<String, BTreeMap<i64, Vec<TargetPosition>>> =
+            BTreeMap::new();
         for excluded in symbols {
             let mut sched = BTreeMap::new();
             for ts in &all_ts {
@@ -1247,8 +1352,12 @@ mod tests {
             now_utc: chrono::Utc::now(),
         })
         .unwrap();
-        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, base_config.initial_cash_micros)
-            .unwrap();
+        mqk_artifacts::write_backtest_report(
+            &init_result.run_dir,
+            &report,
+            base_config.initial_cash_micros,
+        )
+        .unwrap();
 
         let make_strategy = || -> Box<dyn Strategy> { strategy_for(&bundle, None, &bars).unwrap() };
         let make_strategy_for_bars = |filtered: &[BacktestBar]| -> Box<dyn Strategy> {
@@ -1277,11 +1386,13 @@ mod tests {
         assert!(loo_outcome.applicable);
         assert!(loo_outcome.passed, "{:?}", loo_outcome.reason);
 
-        mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output).unwrap();
+        mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
+            .unwrap();
 
         // REQUIRED TEST 7: incomplete P9 (three deferred Research-anchored
         // scenarios never merged in this test) remains is_complete=false.
-        let loaded = mqk_artifacts::load_canonical_robustness_gauntlet(&init_result.run_dir).unwrap();
+        let loaded =
+            mqk_artifacts::load_canonical_robustness_gauntlet(&init_result.run_dir).unwrap();
         assert!(!loaded.is_complete());
         assert_eq!(loaded.scenarios_run(), 6);
     }
@@ -1402,8 +1513,10 @@ mod tests {
         assert_eq!(fixture["status"], "ok");
         let strategy_id = fixture["strategy_id"].as_str().unwrap().to_string();
         let trial_id = fixture["primary"]["trial_id"].as_str().unwrap().to_string();
-        let economic_eval_id =
-            fixture["primary"]["economic_eval_id"].as_str().unwrap().to_string();
+        let economic_eval_id = fixture["primary"]["economic_eval_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let summary = run_research_replay_backtest(ResearchReplayArgs {
             registry_db: registry_db.display().to_string(),
@@ -1425,12 +1538,21 @@ mod tests {
 
         let report = mqk_artifacts::load_canonical_backtest_report(&summary.run_dir)
             .expect("load_canonical_backtest_report failed");
-        assert_eq!(report.strategy_name, strategy_id, "R2.1: strategy_name == Research strategy_id");
+        assert_eq!(
+            report.strategy_name, strategy_id,
+            "R2.1: strategy_name == Research strategy_id"
+        );
 
         let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&summary.run_dir)
             .expect("load_canonical_robustness_gauntlet failed");
-        assert_eq!(gauntlet.protocol_version, mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION);
-        assert!(gauntlet.is_complete(), "every required scenario must be present");
+        assert_eq!(
+            gauntlet.protocol_version,
+            mqk_backtest::ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION
+        );
+        assert!(
+            gauntlet.is_complete(),
+            "every required scenario must be present"
+        );
         assert_eq!(
             gauntlet.scenarios_run(),
             mqk_backtest::REQUIRED_ROBUSTNESS_SCENARIO_NAMES.len(),
@@ -1439,7 +1561,10 @@ mod tests {
 
         // Research-registry-anchored scenarios bind to the SAME trial this
         // fixture registered -- never a different/unrelated trial.
-        assert_eq!(gauntlet.dsr_pbo_sensitivity_research_trial_id(), Some(trial_id.as_str()));
+        assert_eq!(
+            gauntlet.dsr_pbo_sensitivity_research_trial_id(),
+            Some(trial_id.as_str())
+        );
         assert_eq!(
             gauntlet.p7a_p7b_economic_replay_stress_research_trial_id(),
             Some(trial_id.as_str())
@@ -1454,7 +1579,9 @@ mod tests {
         // the real production path, not merely by unit test.
         let failed = gauntlet.failed_scenario_descriptions();
         assert!(
-            !failed.iter().any(|d| d.starts_with("genuine_shuffled_placebo:")),
+            !failed
+                .iter()
+                .any(|d| d.starts_with("genuine_shuffled_placebo:")),
             "genuine_shuffled_placebo must genuinely pass for this cross-sectional-rank fixture \
              after the placebo repair; failed scenarios: {failed:?}"
         );
@@ -1482,8 +1609,9 @@ mod tests {
         // R3.5: resolve_backtest_evidence consumes the resulting artifact
         // tree end-to-end through the REAL production evidence-resolution
         // seam (never itself requiring all_applicable_passed()).
-        let evidence = mqk_promotion::resolve_backtest_evidence(&dir.join("artifacts"), summary.run_id)
-            .expect("resolve_backtest_evidence failed");
+        let evidence =
+            mqk_promotion::resolve_backtest_evidence(&dir.join("artifacts"), summary.run_id)
+                .expect("resolve_backtest_evidence failed");
         assert_eq!(evidence.robustness_evidence.is_complete, true);
         assert_eq!(evidence.robustness_evidence.all_applicable_passed, true);
 

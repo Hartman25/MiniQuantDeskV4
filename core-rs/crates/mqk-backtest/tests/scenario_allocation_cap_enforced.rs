@@ -66,8 +66,5 @@ fn allocation_cap_rejects_risk_increasing_intent() {
     // The intent should be rejected due to allocation cap. No fills.
     assert_eq!(report.fills.len(), 0);
     assert_eq!(report.orders.len(), 1);
-    assert_eq!(
-        report.orders[0].status,
-        mqk_backtest::OrderStatus::Rejected
-    );
+    assert_eq!(report.orders[0].status, mqk_backtest::OrderStatus::Rejected);
 }

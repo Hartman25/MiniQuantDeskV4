@@ -45,9 +45,8 @@ use crate::strategy_config_identity::{
     CONFIG_IDENTITY_STATUS_VERIFIED_V1,
 };
 use mqk_db::{
-    fetch_all_current_promotions, fetch_current_promotion_state,
-    fetch_promotion_history, insert_strategy_promotion_transition_serialized,
-    is_known_promotion_state, is_legal_transition,
+    fetch_all_current_promotions, fetch_current_promotion_state, fetch_promotion_history,
+    insert_strategy_promotion_transition_serialized, is_known_promotion_state, is_legal_transition,
     resolve_evidence_lineage, transition_requires_evidence, InsertStrategyPromotionTransitionArgs,
     StrategyPromotionTransitionRecord, TransitionInsertOutcome, PROMOTION_STATE_ACTIVE_PAPER,
     PROMOTION_STATE_PAPER_APPROVED,
@@ -927,45 +926,49 @@ pub(crate) async fn strategy_promotion_transition(
     //     logged;
     // (4) missing canonical backtest-evidence seam -- closed by
     //     PROMOTION-BACKTEST-EVIDENCE-SEAM-01 (`resolve_backtest_evidence`).
-    let promotion_lineage = if transition_requires_evidence(previous_state.as_deref(), &target_state)
-    {
-        let (research_trial_id, research_evidence_dir, research_judge_artifact_path, backtest_run_id) =
-            match (
-                body.research_trial_id.as_deref(),
-                body.research_evidence_dir.as_deref(),
-                body.research_judge_artifact_path.as_deref(),
-                body.backtest_run_id.as_deref(),
-            ) {
-                (Some(t), Some(d), Some(j), Some(b))
-                    if !t.trim().is_empty()
-                        && !d.trim().is_empty()
-                        && !j.trim().is_empty()
-                        && !b.trim().is_empty() =>
-                {
-                    (t, d, j, b)
-                }
-                _ => {
-                    return transition_response(TransitionResponseArgs {
-                        status: StatusCode::BAD_REQUEST,
-                        accepted: false,
-                        disposition: "evidence_invalid",
-                        strategy_id,
-                        symbol,
-                        timeframe_secs,
-                        previous_state,
-                        target_state,
-                        transition_id: None,
-                        blockers: vec![
-                            "research_trial_id, research_evidence_dir, \
+    let promotion_lineage = if transition_requires_evidence(
+        previous_state.as_deref(),
+        &target_state,
+    ) {
+        let (
+            research_trial_id,
+            research_evidence_dir,
+            research_judge_artifact_path,
+            backtest_run_id,
+        ) = match (
+            body.research_trial_id.as_deref(),
+            body.research_evidence_dir.as_deref(),
+            body.research_judge_artifact_path.as_deref(),
+            body.backtest_run_id.as_deref(),
+        ) {
+            (Some(t), Some(d), Some(j), Some(b))
+                if !t.trim().is_empty()
+                    && !d.trim().is_empty()
+                    && !j.trim().is_empty()
+                    && !b.trim().is_empty() =>
+            {
+                (t, d, j, b)
+            }
+            _ => {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::BAD_REQUEST,
+                    accepted: false,
+                    disposition: "evidence_invalid",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state,
+                    target_state,
+                    transition_id: None,
+                    blockers: vec!["research_trial_id, research_evidence_dir, \
                              research_judge_artifact_path, and backtest_run_id are all required \
                              for this transition (PROMOTION-WALKFORWARD-GATE-WIRING-01: verified \
                              Research out-of-sample evidence AND canonical Backtest evidence are \
                              both required in addition to review-artifact evidence)"
-                                .to_string(),
-                        ],
-                    });
-                }
-            };
+                        .to_string()],
+                });
+            }
+        };
 
         // PROMOTION-EVIDENCE-SEMANTIC-BINDING-01: bind fresh evidence to the
         // exact semantic configuration being promoted -- the same
@@ -1122,7 +1125,10 @@ pub(crate) async fn strategy_promotion_transition(
             research_judge_artifact_sha256,
             stress_protocol_version: backtest_bundle.stress_suite.protocol_version.clone(),
             stress_artifact_sha256: backtest_bundle.stress_artifact_sha256.clone(),
-            robustness_protocol_version: backtest_bundle.robustness_evidence.protocol_version.clone(),
+            robustness_protocol_version: backtest_bundle
+                .robustness_evidence
+                .protocol_version
+                .clone(),
             finalized_robustness_artifact_sha256: backtest_bundle
                 .finalized_robustness_artifact_sha256
                 .clone(),
@@ -1173,7 +1179,10 @@ pub(crate) async fn strategy_promotion_transition(
     let (config_fingerprint, config_identity_status): (Option<String>, String) =
         if is_fresh_evidence_transition {
             match &config_identity_result {
-                Ok(fp) => (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string()),
+                Ok(fp) => (
+                    Some(fp.clone()),
+                    CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string(),
+                ),
                 Err(e) => {
                     let blocker = format!(
                         "config identity could not be resolved for this evidence-bearing \
@@ -1218,9 +1227,12 @@ pub(crate) async fn strategy_promotion_transition(
             // between the two diagnostic blocker messages below -- it never
             // itself authorizes anything.
             let parent_status = current.as_ref().map(|c| c.config_identity_status.as_str());
-            let parent_fingerprint = current.as_ref().and_then(|c| c.config_fingerprint.as_deref());
-            let parent_verified_fingerprint = parent_status
-                .and_then(|status| crate::strategy_config_identity::verified_fingerprint(status, parent_fingerprint));
+            let parent_fingerprint = current
+                .as_ref()
+                .and_then(|c| c.config_fingerprint.as_deref());
+            let parent_verified_fingerprint = parent_status.and_then(|status| {
+                crate::strategy_config_identity::verified_fingerprint(status, parent_fingerprint)
+            });
 
             match &config_identity_result {
                 Ok(fp)
@@ -1234,7 +1246,10 @@ pub(crate) async fn strategy_promotion_transition(
                         })
                         .unwrap_or(false) =>
                 {
-                    (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string())
+                    (
+                        Some(fp.clone()),
+                        CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string(),
+                    )
                 }
                 Ok(fp) if parent_verified_fingerprint.is_some() => {
                     let parent_fp = parent_verified_fingerprint.expect("checked by guard above");
@@ -1302,7 +1317,10 @@ pub(crate) async fn strategy_promotion_transition(
         } else {
             // Safety exit: attempt, never block.
             match &config_identity_result {
-                Ok(fp) => (Some(fp.clone()), CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string()),
+                Ok(fp) => (
+                    Some(fp.clone()),
+                    CONFIG_IDENTITY_STATUS_VERIFIED_V1.to_string(),
+                ),
                 Err(_) => (None, CONFIG_IDENTITY_STATUS_UNAVAILABLE.to_string()),
             }
         };
@@ -1354,23 +1372,26 @@ pub(crate) async fn strategy_promotion_transition(
     // write up front so it can be passed into the SAME atomic transaction
     // as the transition insert -- never a second, independently-failable
     // step after the transition is already committed.
-    let evidence_lineage = promotion_lineage.as_ref().map(|src| mqk_db::PromotionEvidenceLineageV3 {
-        research_trial_id: Some(src.oos_evidence.trial_id().to_string()),
-        research_economic_eval_id: Some(src.oos_evidence.economic_eval_id().to_string()),
-        research_deflated_sharpe_ratio: Some(src.oos_evidence.deflated_sharpe_ratio()),
-        research_probability_backtest_overfitting: Some(
-            src.oos_evidence.probability_of_backtest_overfitting(),
-        ),
-        backtest_run_id: Some(src.backtest_run_id),
-        research_judge_artifact_sha256: Some(src.research_judge_artifact_sha256.clone()),
-        stress_protocol_version: Some(src.stress_protocol_version.clone()),
-        stress_artifact_sha256: Some(src.stress_artifact_sha256.clone()),
-        robustness_protocol_version: Some(src.robustness_protocol_version.clone()),
-        finalized_robustness_artifact_sha256: Some(
-            src.finalized_robustness_artifact_sha256.clone(),
-        ),
-        promotion_policy_fingerprint: Some(src.promotion_policy_fingerprint.clone()),
-    });
+    let evidence_lineage =
+        promotion_lineage
+            .as_ref()
+            .map(|src| mqk_db::PromotionEvidenceLineageV3 {
+                research_trial_id: Some(src.oos_evidence.trial_id().to_string()),
+                research_economic_eval_id: Some(src.oos_evidence.economic_eval_id().to_string()),
+                research_deflated_sharpe_ratio: Some(src.oos_evidence.deflated_sharpe_ratio()),
+                research_probability_backtest_overfitting: Some(
+                    src.oos_evidence.probability_of_backtest_overfitting(),
+                ),
+                backtest_run_id: Some(src.backtest_run_id),
+                research_judge_artifact_sha256: Some(src.research_judge_artifact_sha256.clone()),
+                stress_protocol_version: Some(src.stress_protocol_version.clone()),
+                stress_artifact_sha256: Some(src.stress_artifact_sha256.clone()),
+                robustness_protocol_version: Some(src.robustness_protocol_version.clone()),
+                finalized_robustness_artifact_sha256: Some(
+                    src.finalized_robustness_artifact_sha256.clone(),
+                ),
+                promotion_policy_fingerprint: Some(src.promotion_policy_fingerprint.clone()),
+            });
 
     // Gate 5: atomic, serialized insert (STRATEGY-PROMOTION-REGISTRY-
     // CLOSURE-REPAIR-01 Phase B) -- the only insert path this route uses.
@@ -1381,20 +1402,18 @@ pub(crate) async fn strategy_promotion_transition(
     match insert_strategy_promotion_transition_serialized(db, &args, evidence_lineage.as_ref())
         .await
     {
-        Ok(TransitionInsertOutcome::Inserted(_)) => {
-            transition_response(TransitionResponseArgs {
-                status: StatusCode::OK,
-                accepted: true,
-                disposition: "transitioned",
-                strategy_id,
-                symbol,
-                timeframe_secs,
-                previous_state,
-                target_state,
-                transition_id: Some(transition_id),
-                blockers: Vec::new(),
-            })
-        }
+        Ok(TransitionInsertOutcome::Inserted(_)) => transition_response(TransitionResponseArgs {
+            status: StatusCode::OK,
+            accepted: true,
+            disposition: "transitioned",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state,
+            target_state,
+            transition_id: Some(transition_id),
+            blockers: Vec::new(),
+        }),
         Ok(TransitionInsertOutcome::Duplicate(existing)) => {
             transition_response(TransitionResponseArgs {
                 status: StatusCode::OK,

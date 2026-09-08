@@ -869,7 +869,8 @@ async fn manual_intervention_required_prior_day_does_not_block_next_day() -> any
     let args1 = make_create_args(
         day1, "paper", &adapter, "splan-d1", "asgn-d1", "bind-d1", now,
     );
-    let day1_op = unwrap_created(create_or_recover_autonomous_daily_operation(&pool, &args1).await?);
+    let day1_op =
+        unwrap_created(create_or_recover_autonomous_daily_operation(&pool, &args1).await?);
 
     let to_preparing = TransitionAutonomousDailyOperationArgs {
         operation_id: day1_op.operation_id,
@@ -909,7 +910,8 @@ async fn manual_intervention_required_prior_day_does_not_block_next_day() -> any
     let args2 = make_create_args(
         day2, "paper", &adapter, "splan-d2", "asgn-d2", "bind-d2", now,
     );
-    let day2_op = unwrap_created(create_or_recover_autonomous_daily_operation(&pool, &args2).await?);
+    let day2_op =
+        unwrap_created(create_or_recover_autonomous_daily_operation(&pool, &args2).await?);
 
     assert_ne!(
         day2_op.operation_id, day1_final.operation_id,

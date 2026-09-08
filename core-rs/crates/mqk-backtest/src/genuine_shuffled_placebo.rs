@@ -144,7 +144,10 @@ pub fn genuine_shuffled_placebo_scenario(
             };
         }
     }
-    if let Some(actual_eval_id) = value.get("baseline_economic_eval_id").and_then(|v| v.as_str()) {
+    if let Some(actual_eval_id) = value
+        .get("baseline_economic_eval_id")
+        .and_then(|v| v.as_str())
+    {
         if actual_eval_id != economic_eval_id {
             let reason = format!(
                 "economic_eval_id mismatch: CLI resolved baseline_economic_eval_id \
@@ -167,8 +170,12 @@ pub fn genuine_shuffled_placebo_scenario(
     match status {
         "evaluated" => {
             let passed = value.get("passed").and_then(|v| v.as_bool());
-            let baseline = value.get("baseline_net_total_return").and_then(|v| v.as_f64());
-            let placebo = value.get("placebo_net_total_return").and_then(|v| v.as_f64());
+            let baseline = value
+                .get("baseline_net_total_return")
+                .and_then(|v| v.as_f64());
+            let placebo = value
+                .get("placebo_net_total_return")
+                .and_then(|v| v.as_f64());
             match (passed, baseline, placebo) {
                 (Some(passed), Some(b), Some(p)) => RobustnessScenarioOutcome {
                     name,
@@ -262,7 +269,10 @@ mod tests {
         );
         assert!(outcome.applicable);
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("failed to spawn"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("failed to spawn"));
         assert_eq!(outcome.research_trial_id.as_deref(), Some("some_trial"));
     }
 }

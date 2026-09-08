@@ -790,7 +790,11 @@ async fn interior_gap_specifically_triggers_bounded_historical_bootstrap() {
         false,
     )
     .await;
-    assert_eq!(result3.report.overall_state, "ready", "{:?}", result3.report);
+    assert_eq!(
+        result3.report.overall_state, "ready",
+        "{:?}",
+        result3.report
+    );
     assert_eq!(
         provider.historical_calls(),
         2,

@@ -414,7 +414,11 @@ pub fn verify_promotion_oos_evidence(
     // economics marker on every fold, not merely the weight_to_share
     // TRANSLATION marker checked above -- proves discrete shares actually
     // drove the economics, not merely that the translation exists.
-    let folds = econ.get("folds").and_then(Value::as_array).cloned().unwrap_or_default();
+    let folds = econ
+        .get("folds")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if folds.is_empty() {
         errs.push(
             "OOS evidence rejected: economic artifact has no folds[] -- no discrete economics \
@@ -543,7 +547,9 @@ pub fn verify_promotion_oos_evidence(
     }
 
     let input_economic_result_ids = str_array(&judge, &["input_economic_result_ids"]);
-    if !economic_eval_id.is_empty() && !input_economic_result_ids.contains(&economic_eval_id.as_str()) {
+    if !economic_eval_id.is_empty()
+        && !input_economic_result_ids.contains(&economic_eval_id.as_str())
+    {
         errs.push(format!(
             "OOS evidence rejected: economic_eval_id {economic_eval_id:?} is not among judge \
              input_economic_result_ids -- this candidate's economic result was not actually \

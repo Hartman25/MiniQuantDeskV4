@@ -1344,7 +1344,11 @@ mod tests {
     fn sfp05_long_vs_short_only_variant_different_fingerprint() {
         let long = IntradayScalperStrategy::new("AAPL");
         let short = IntradayScalperStrategy::new_short("AAPL");
-        assert_ne!(long.spec().name, short.spec().name, "sanity: distinct registered names");
+        assert_ne!(
+            long.spec().name,
+            short.spec().name,
+            "sanity: distinct registered names"
+        );
         assert_ne!(long.semantic_fingerprint(), short.semantic_fingerprint());
     }
 

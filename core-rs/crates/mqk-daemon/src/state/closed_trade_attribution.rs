@@ -397,18 +397,17 @@ pub(crate) async fn build_closed_trade_projection(
         let lineage = match lineage_cache.get(&caf.internal_order_id) {
             Some(cached) => cached.clone(),
             None => {
-                let raw =
-                    mqk_db::fetch_fill_strategy_lineage(db, run_id, &caf.internal_order_id)
-                        .await
-                        .map_err(|e| {
-                            RuntimeLifecycleError::internal(
-                                "build_closed_trade_projection.lineage_lookup_failed",
-                                format!(
-                                    "run_id={run_id} internal_order_id={}: {e}",
-                                    caf.internal_order_id
-                                ),
-                            )
-                        })?;
+                let raw = mqk_db::fetch_fill_strategy_lineage(db, run_id, &caf.internal_order_id)
+                    .await
+                    .map_err(|e| {
+                        RuntimeLifecycleError::internal(
+                            "build_closed_trade_projection.lineage_lookup_failed",
+                            format!(
+                                "run_id={run_id} internal_order_id={}: {e}",
+                                caf.internal_order_id
+                            ),
+                        )
+                    })?;
                 let resolved = ResolvedLineage::from_fill_strategy_lineage(raw);
                 lineage_cache.insert(caf.internal_order_id.clone(), resolved.clone());
                 resolved
@@ -566,7 +565,6 @@ pub(crate) struct AuthoritativeClosedTradeView {
     /// `"active"` or `"incomplete"` -- empty otherwise (never fabricated).
     pub(crate) fragments: Vec<ClosureFragment>,
 }
-
 
 /// Resolve the single authoritative closed-trade view for `run_id`. Pure
 /// read-only: performs no writes. This is the ONLY place that combines

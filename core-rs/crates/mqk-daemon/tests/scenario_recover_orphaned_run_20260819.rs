@@ -509,13 +509,17 @@ async fn r09_mismatched_local_run_also_refuses() {
         let orphan_run_id = run_id_for("mqk-daemon.orphan-repair-route.r09-orphan");
         let other_run_id = run_id_for("mqk-daemon.orphan-repair-route.r09-other");
         seed_run(&pool, orphan_run_id).await;
-        mqk_db::arm_run(&pool, orphan_run_id).await.expect("arm_run orphan");
+        mqk_db::arm_run(&pool, orphan_run_id)
+            .await
+            .expect("arm_run orphan");
         mqk_db::begin_run(&pool, orphan_run_id)
             .await
             .expect("begin_run orphan");
         seed_clean_reconcile(&pool).await;
         seed_run(&pool, other_run_id).await;
-        mqk_db::arm_run(&pool, other_run_id).await.expect("arm_run other");
+        mqk_db::arm_run(&pool, other_run_id)
+            .await
+            .expect("arm_run other");
         mqk_db::begin_run(&pool, other_run_id)
             .await
             .expect("begin_run other");

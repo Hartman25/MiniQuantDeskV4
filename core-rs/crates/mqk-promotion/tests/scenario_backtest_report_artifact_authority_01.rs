@@ -99,11 +99,8 @@ fn run_and_persist() -> (BacktestReport, PathBuf) {
     );
 
     let seq = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let exports_root = std::env::temp_dir().join(format!(
-        "mqk_braa01_{}_{}",
-        std::process::id(),
-        seq
-    ));
+    let exports_root =
+        std::env::temp_dir().join(format!("mqk_braa01_{}_{}", std::process::id(), seq));
     let _ = fs::remove_dir_all(&exports_root);
 
     let config_hash = report.config_id.to_string();
@@ -215,7 +212,8 @@ fn braa01d_config_id_mismatch_rejected() {
 fn braa01e_execution_model_mismatch_rejected() {
     let (_report, run_dir) = run_and_persist();
     tamper_canonical_report(&run_dir, |v| {
-        v["execution_model_id"] = serde_json::Value::String("some_other_execution_model".to_string());
+        v["execution_model_id"] =
+            serde_json::Value::String("some_other_execution_model".to_string());
     });
 
     let err = load_canonical_backtest_report(&run_dir).unwrap_err();
@@ -246,7 +244,11 @@ fn braa01f_missing_canonical_report_rejected_not_reconstructed() {
 #[test]
 fn braa01g_malformed_json_rejected() {
     let (_report, run_dir) = run_and_persist();
-    fs::write(run_dir.join("backtest_report.json"), "{ this is not valid json").unwrap();
+    fs::write(
+        run_dir.join("backtest_report.json"),
+        "{ this is not valid json",
+    )
+    .unwrap();
 
     let err = load_canonical_backtest_report(&run_dir).unwrap_err();
     assert!(matches!(err, BacktestReportArtifactError::MalformedJson(_)));
@@ -293,11 +295,8 @@ fn braa01j_empty_audit_from_real_run_dir_rejected() {
     // init_run_artifacts alone (no write_backtest_report) leaves audit.jsonl
     // as the empty placeholder -- exactly the pre-PATCH-A defect state.
     let seq = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let exports_root = std::env::temp_dir().join(format!(
-        "mqk_braa01j_{}_{}",
-        std::process::id(),
-        seq
-    ));
+    let exports_root =
+        std::env::temp_dir().join(format!("mqk_braa01j_{}_{}", std::process::id(), seq));
     let _ = fs::remove_dir_all(&exports_root);
     let init_result = mqk_artifacts::init_run_artifacts(InitRunArtifactsArgs {
         exports_root: &exports_root,

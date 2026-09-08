@@ -2406,7 +2406,10 @@ async fn ddr_62_provider_provenance_ok_when_ingested_with_truthful_metadata() {
     let rows = mqk_db::md::fetch_bounded_bars_with_provenance(&pool, symbol, "5m", 10)
         .await
         .expect("DDR-62: fetch failed");
-    assert!(!rows.is_empty(), "DDR-62: rows must exist after normal ingestion");
+    assert!(
+        !rows.is_empty(),
+        "DDR-62: rows must exist after normal ingestion"
+    );
 
     let mut actual_provider_ids: Vec<String> = Vec::new();
     for row in &rows {
@@ -2421,7 +2424,8 @@ async fn ddr_62_provider_provenance_ok_when_ingested_with_truthful_metadata() {
     );
 
     let calendar_provider = NyseWeekdaysProvider;
-    let schedule = resolve_market_session_schedule(&calendar_provider, ts(MON_2024_04_15_935AM_EDT));
+    let schedule =
+        resolve_market_session_schedule(&calendar_provider, ts(MON_2024_04_15_935AM_EDT));
     let real_now_ts = Utc::now().timestamp();
 
     let blockers = evaluate_bar_readiness(
@@ -2489,7 +2493,8 @@ async fn ddr_63_provider_provenance_mismatch_still_blocks() {
     assert!(rows.iter().all(|r| r.provider_id == "twelvedata"));
 
     let calendar_provider = NyseWeekdaysProvider;
-    let schedule = resolve_market_session_schedule(&calendar_provider, ts(MON_2024_04_15_935AM_EDT));
+    let schedule =
+        resolve_market_session_schedule(&calendar_provider, ts(MON_2024_04_15_935AM_EDT));
     let real_now_ts = Utc::now().timestamp();
 
     let blockers = evaluate_bar_readiness(

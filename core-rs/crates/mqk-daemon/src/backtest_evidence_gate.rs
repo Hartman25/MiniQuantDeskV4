@@ -158,7 +158,8 @@ mod tests {
     fn state_with_root(root: &std::path::Path) -> AppState {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT", root);
-        let st = AppState::new_with_operator_auth(crate::state::OperatorAuthMode::ExplicitDevNoToken);
+        let st =
+            AppState::new_with_operator_auth(crate::state::OperatorAuthMode::ExplicitDevNoToken);
         std::env::remove_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT");
         st
     }
@@ -174,7 +175,10 @@ mod tests {
         let root = std::env::temp_dir().join("mqk_beg01_blank_never_created");
         let st = state_with_root(&root);
         let outcome = evaluate_backtest_evidence_gate(&st, "   ", "any_strategy", None);
-        assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            BacktestEvidenceGateOutcome::Rejected { .. }
+        ));
     }
 
     #[test]
@@ -182,7 +186,10 @@ mod tests {
         let root = std::env::temp_dir().join("mqk_beg01_malformed_never_created");
         let st = state_with_root(&root);
         let outcome = evaluate_backtest_evidence_gate(&st, "not-a-uuid", "any_strategy", None);
-        assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            BacktestEvidenceGateOutcome::Rejected { .. }
+        ));
     }
 
     #[test]
@@ -194,15 +201,16 @@ mod tests {
             "any_strategy",
             None,
         );
-        assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            BacktestEvidenceGateOutcome::Rejected { .. }
+        ));
     }
 
     #[test]
     fn nonexistent_candidate_fails_closed() {
-        let root = std::env::temp_dir().join(format!(
-            "mqk_beg01_nonexistent_root_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("mqk_beg01_nonexistent_root_{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let st = state_with_root(&root);
         let outcome = evaluate_backtest_evidence_gate(
@@ -211,7 +219,10 @@ mod tests {
             "any_strategy",
             None,
         );
-        assert!(matches!(outcome, BacktestEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            BacktestEvidenceGateOutcome::Rejected { .. }
+        ));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -246,16 +257,15 @@ mod tests {
     /// and a real (trivially passing, flat/no-trade) stress suite. Returns
     /// (root, run_id).
     fn real_persisted_candidate(strategy_name: &'static str) -> (std::path::PathBuf, Uuid) {
-        let bars = vec![
-            flat_bar(1_700_000_060, 500),
-            flat_bar(1_700_000_120, 501),
-        ];
+        let bars = vec![flat_bar(1_700_000_060, 500), flat_bar(1_700_000_120, 501)];
         let config = BacktestConfig::test_defaults();
         let initial_cash = config.initial_cash_micros;
 
         let mut engine = BacktestEngine::new(config.clone());
         engine
-            .add_strategy(Box::new(HoldFlat { name: strategy_name }))
+            .add_strategy(Box::new(HoldFlat {
+                name: strategy_name,
+            }))
             .unwrap();
         let report = engine.run(&bars).expect("engine.run must succeed");
 
@@ -267,32 +277,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         let config_hash = report.config_id.to_string();
-        let init_result =
-            mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
-                exports_root: &root,
-                schema_version: 1,
-                run_id: report.run_id,
-                strategy_name: &report.strategy_name,
-                engine_id: "mqk-backtest",
-                mode: "backtest",
-                timeframe: None,
-                timeframe_secs: Some(60),
-                git_hash: "beg01_test_git_hash",
-                config_hash: &config_hash,
-                host_fingerprint: "beg01_test_host",
-                now_utc: chrono::Utc::now(),
-            })
-            .expect("init_run_artifacts must succeed");
+        let init_result = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+            exports_root: &root,
+            schema_version: 1,
+            run_id: report.run_id,
+            strategy_name: &report.strategy_name,
+            engine_id: "mqk-backtest",
+            mode: "backtest",
+            timeframe: None,
+            timeframe_secs: Some(60),
+            git_hash: "beg01_test_git_hash",
+            config_hash: &config_hash,
+            host_fingerprint: "beg01_test_host",
+            now_utc: chrono::Utc::now(),
+        })
+        .expect("init_run_artifacts must succeed");
 
         mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, initial_cash)
             .expect("write_backtest_report must succeed");
 
         let strategy_name_owned = strategy_name;
-        let stress_output = mqk_backtest::run_backtest_stress_suite(&report, &config, &bars, || {
-            Box::new(HoldFlat {
-                name: strategy_name_owned,
-            })
-        });
+        let stress_output =
+            mqk_backtest::run_backtest_stress_suite(&report, &config, &bars, || {
+                Box::new(HoldFlat {
+                    name: strategy_name_owned,
+                })
+            });
         mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
             .expect("write_canonical_stress_suite must succeed");
 
@@ -385,7 +395,10 @@ mod tests {
             name: "Beg01SemanticMismatch",
         }
         .semantic_fingerprint();
-        assert_ne!(wrong_fp, real_fp, "sanity: fixture constant must not collide with reality");
+        assert_ne!(
+            wrong_fp, real_fp,
+            "sanity: fixture constant must not collide with reality"
+        );
 
         let outcome = evaluate_backtest_evidence_gate(
             &st,
@@ -396,7 +409,9 @@ mod tests {
         match outcome {
             BacktestEvidenceGateOutcome::Rejected { blockers } => {
                 assert!(
-                    blockers.iter().any(|b| b.contains("strategy_semantic_fingerprint")),
+                    blockers
+                        .iter()
+                        .any(|b| b.contains("strategy_semantic_fingerprint")),
                     "expected a semantic-fingerprint blocker, got: {blockers:?}"
                 );
             }
@@ -422,7 +437,9 @@ mod tests {
         match outcome {
             BacktestEvidenceGateOutcome::Rejected { blockers } => {
                 assert!(
-                    blockers.iter().any(|b| b.contains("strategy_semantic_fingerprint")),
+                    blockers
+                        .iter()
+                        .any(|b| b.contains("strategy_semantic_fingerprint")),
                     "expected a semantic-fingerprint blocker, got: {blockers:?}"
                 );
             }

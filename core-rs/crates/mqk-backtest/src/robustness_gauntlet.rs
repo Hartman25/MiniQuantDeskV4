@@ -179,7 +179,10 @@ fn clears_conservative_bar(initial_cash: i64, curve: &[(i64, i64)]) -> (bool, St
             format!("max_drawdown_fraction={dd:.6} exceeds conservative ceiling={ceiling:.6}"),
         );
     }
-    (true, format!("max_drawdown_fraction={dd:.6}, final_equity_micros={final_equity}"))
+    (
+        true,
+        format!("max_drawdown_fraction={dd:.6}, final_equity_micros={final_equity}"),
+    )
 }
 
 /// FINAL-P9-ROBUSTNESS-SEMANTICS-01: edge-collapse check shared by every
@@ -199,7 +202,10 @@ fn clears_economic_edge(
     curve: &[(i64, i64)],
 ) -> (bool, String) {
     if baseline_final_equity_micros <= initial_cash {
-        return (true, "baseline was not profitable; edge-collapse check not applicable".to_string());
+        return (
+            true,
+            "baseline was not profitable; edge-collapse check not applicable".to_string(),
+        );
     }
     let final_equity = curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
     if final_equity <= initial_cash {
@@ -213,7 +219,10 @@ fn clears_economic_edge(
             ),
         );
     }
-    (true, format!("remains profitable: final_equity_micros={final_equity}"))
+    (
+        true,
+        format!("remains profitable: final_equity_micros={final_equity}"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +284,9 @@ impl Strategy for DelayedStrategy {
         let real = self.inner.on_bar(ctx);
         self.buffer.push_back(real);
         if self.buffer.len() > self.delay_bars {
-            self.buffer.pop_front().expect("just checked len > delay_bars >= 0")
+            self.buffer
+                .pop_front()
+                .expect("just checked len > delay_bars >= 0")
         } else {
             StrategyOutput::new(Vec::new())
         }
@@ -412,7 +423,9 @@ impl Strategy for TimestampBatchDelayedStrategy {
         // batch has now aged past `delay_batches`, if any.
         self.buffer.push_back(real);
         if self.buffer.len() > self.delay_batches {
-            self.buffer.pop_front().expect("just checked len > delay_batches >= 0")
+            self.buffer
+                .pop_front()
+                .expect("just checked len > delay_batches >= 0")
         } else {
             StrategyOutput::new(Vec::new())
         }
@@ -570,7 +583,9 @@ fn run_engine(
     engine
         .add_strategy(strategy)
         .map_err(|e| format!("add_strategy failed: {e}"))?;
-    engine.run(bars).map_err(|e| format!("engine.run failed: {e}"))
+    engine
+        .run(bars)
+        .map_err(|e| format!("engine.run failed: {e}"))
 }
 
 /// The choke point every scenario that executes the candidate UNWRAPPED
@@ -599,9 +614,15 @@ fn execution_delay_scenario(
 ) -> RobustnessScenarioOutcome {
     let name = "execution_delay_stress".to_string();
     let initial_cash = base_config.initial_cash_micros;
-    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
+    let baseline_final = baseline
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial_cash);
     let inner = make_strategy();
-    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+    if let Err(e) =
+        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
+    {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -615,7 +636,8 @@ fn execution_delay_scenario(
     let delayed = DelayedStrategy::new(inner, 1);
     match run_engine(base_config.clone(), bars, Box::new(delayed)) {
         Ok(report) => {
-            let (bar_passed, bar_detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
+            let (bar_passed, bar_detail) =
+                clears_conservative_bar(initial_cash, &report.equity_curve);
             let (edge_passed, edge_detail) =
                 clears_economic_edge(baseline_final, initial_cash, &report.equity_curve);
             let passed = bar_passed && edge_passed;
@@ -660,9 +682,15 @@ fn execution_delay_scenario_batch_aware(
 ) -> RobustnessScenarioOutcome {
     let name = "execution_delay_stress".to_string();
     let initial_cash = base_config.initial_cash_micros;
-    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
+    let baseline_final = baseline
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial_cash);
     let inner = make_strategy();
-    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+    if let Err(e) =
+        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
+    {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -676,7 +704,8 @@ fn execution_delay_scenario_batch_aware(
     let delayed = TimestampBatchDelayedStrategy::new(inner, 1, bars);
     match run_engine(base_config.clone(), bars, Box::new(delayed)) {
         Ok(report) => {
-            let (bar_passed, bar_detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
+            let (bar_passed, bar_detail) =
+                clears_conservative_bar(initial_cash, &report.equity_curve);
             let (edge_passed, edge_detail) =
                 clears_economic_edge(baseline_final, initial_cash, &report.equity_curve);
             let passed = bar_passed && edge_passed;
@@ -718,7 +747,9 @@ fn symbol_leave_one_out_scenario(
     // -- the bar argument is ignored, exactly reproducing this function's
     // own pre-existing behavior (every prior caller's `make_strategy` never
     // depended on the filtered bars either).
-    symbol_leave_one_out_scenario_with_factory(baseline, base_config, bars, &|_filtered| make_strategy())
+    symbol_leave_one_out_scenario_with_factory(baseline, base_config, bars, &|_filtered| {
+        make_strategy()
+    })
 }
 
 /// W06-P9-RUST-REPLAY-STRATEGY-01 (B5): bar-aware counterpart used by
@@ -747,16 +778,23 @@ fn symbol_leave_one_out_scenario_with_factory(
             ),
             detail: format!("distinct_symbols={}", symbols.len()),
             research_trial_id: None,
-                evidence: None,
+            evidence: None,
         };
     }
 
     let initial_cash = base_config.initial_cash_micros;
-    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
+    let baseline_final = baseline
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial_cash);
     let mut worst: Option<(String, f64)> = None;
     for symbol in &symbols {
-        let filtered: Vec<BacktestBar> =
-            bars.iter().filter(|b| b.symbol != *symbol).cloned().collect();
+        let filtered: Vec<BacktestBar> = bars
+            .iter()
+            .filter(|b| b.symbol != *symbol)
+            .cloned()
+            .collect();
         let report = match run_with_strategy(
             base_config.clone(),
             &filtered,
@@ -847,7 +885,10 @@ fn concentration_dimension<K: Ord + Clone + std::fmt::Debug>(
         return None;
     }
     let total_positive: i64 = gain_by_bucket.values().filter(|&&v| v > 0).sum();
-    let worst = gain_by_bucket.iter().filter(|(_, &v)| v > 0).max_by_key(|(_, &v)| v);
+    let worst = gain_by_bucket
+        .iter()
+        .filter(|(_, &v)| v > 0)
+        .max_by_key(|(_, &v)| v);
     let concentration_fraction = match (total_positive, worst) {
         (tp, Some((_, &max_gain))) if tp > 0 => max_gain as f64 / tp as f64,
         _ => 0.0,
@@ -930,14 +971,22 @@ fn month_year_regime_concentration_scenario(
                 monthly_gain.len(),
                 regime_gain.len()
             )),
-            detail: format!("distinct_months={}, distinct_regimes={}", monthly_gain.len(), regime_gain.len()),
+            detail: format!(
+                "distinct_months={}, distinct_regimes={}",
+                monthly_gain.len(),
+                regime_gain.len()
+            ),
             research_trial_id: None,
             evidence: None,
         };
     }
 
     let mut failures: Vec<String> = Vec::new();
-    for (label, dim) in [("month", &month_dim), ("year", &year_dim), ("regime", &regime_dim)] {
+    for (label, dim) in [
+        ("month", &month_dim),
+        ("year", &year_dim),
+        ("regime", &regime_dim),
+    ] {
         if let Some(d) = dim {
             if d.concentration_fraction > CONCENTRATION_CEILING_FRACTION {
                 failures.push(format!(
@@ -954,7 +1003,11 @@ fn month_year_regime_concentration_scenario(
         name,
         applicable: true,
         passed,
-        reason: if passed { None } else { Some(failures.join("; ")) },
+        reason: if passed {
+            None
+        } else {
+            Some(failures.join("; "))
+        },
         detail: format!(
             "distinct_months={}, month_concentration={:.4?}, distinct_years={}, \
              year_concentration={:.4?}, distinct_regimes={}, regime_concentration={:.4?}",
@@ -978,7 +1031,11 @@ fn parameter_neighborhood_scenario(
 ) -> RobustnessScenarioOutcome {
     let name = "parameter_neighborhood_execution".to_string();
     let initial_cash = base_config.initial_cash_micros;
-    let baseline_final = baseline.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(initial_cash);
+    let baseline_final = baseline
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial_cash);
     let baseline_profitable = baseline_final > initial_cash;
     let base_slippage = base_config.stress.slippage_bps;
     let grid = SweepGrid {
@@ -1030,7 +1087,7 @@ fn parameter_neighborhood_scenario(
                 detail: reason,
                 research_trial_id: None,
                 evidence: None,
-            }
+            };
         }
     };
 
@@ -1038,7 +1095,9 @@ fn parameter_neighborhood_scenario(
     let worst_row = rows
         .iter()
         .max_by(|a, b| a.max_drawdown_pct.partial_cmp(&b.max_drawdown_pct).unwrap());
-    let bar_passed = rows.iter().all(|r| r.max_drawdown_pct <= ceiling && !r.halted);
+    let bar_passed = rows
+        .iter()
+        .all(|r| r.max_drawdown_pct <= ceiling && !r.halted);
     // FINAL-P9-ROBUSTNESS-SEMANTICS-01: a neighboring parameter point that
     // becomes economically non-profitable fails, when the baseline itself
     // was genuinely profitable -- zero net return is sufficient to fail.
@@ -1095,7 +1154,9 @@ fn placebo_temporal_offset_scenario(
         .unwrap_or(initial_cash);
 
     let inner = make_strategy();
-    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+    if let Err(e) =
+        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
+    {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -1148,7 +1209,7 @@ fn placebo_temporal_offset_scenario(
             reason: Some(e.clone()),
             detail: e,
             research_trial_id: None,
-                evidence: None,
+            evidence: None,
         },
     }
 }
@@ -1178,7 +1239,9 @@ fn placebo_temporal_offset_scenario_batch_aware(
         .unwrap_or(initial_cash);
 
     let inner = make_strategy();
-    if let Err(e) = verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint) {
+    if let Err(e) =
+        verify_candidate_identity(inner.as_ref(), &baseline.strategy_semantic_fingerprint)
+    {
         return RobustnessScenarioOutcome {
             name,
             applicable: true,
@@ -1257,8 +1320,10 @@ fn conservative_capacity_config(base: &BacktestConfig) -> BacktestConfig {
         (base.initial_cash_micros as f64 * conservative_max_drawdown_fraction()) as i64;
     cfg.max_gross_exposure_mult_micros = (base.max_gross_exposure_mult_micros / 2).max(1);
     cfg.sizing.max_target_qty = base.sizing.max_target_qty.map(|q| (q / 2).max(1));
-    cfg.sizing.max_position_notional_usd =
-        base.sizing.max_position_notional_usd.map(|n| (n / 2).max(1));
+    cfg.sizing.max_position_notional_usd = base
+        .sizing
+        .max_position_notional_usd
+        .map(|n| (n / 2).max(1));
     cfg
 }
 
@@ -1271,7 +1336,12 @@ fn conservative_capacity_stress_scenario(
     let name = "conservative_capacity_stress".to_string();
     let initial_cash = base_config.initial_cash_micros;
     let cfg = conservative_capacity_config(base_config);
-    match run_with_strategy(cfg, bars, make_strategy(), &baseline.strategy_semantic_fingerprint) {
+    match run_with_strategy(
+        cfg,
+        bars,
+        make_strategy(),
+        &baseline.strategy_semantic_fingerprint,
+    ) {
         Ok(report) => {
             let (passed, detail) = clears_conservative_bar(initial_cash, &report.equity_curve);
             RobustnessScenarioOutcome {
@@ -1291,7 +1361,7 @@ fn conservative_capacity_stress_scenario(
             reason: Some(e.clone()),
             detail: e,
             research_trial_id: None,
-                evidence: None,
+            evidence: None,
         },
     }
 }
@@ -1329,8 +1399,9 @@ pub fn run_robustness_gauntlet(
                 .to_string(),
         },
         DeferredScenario {
-            name: crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME
-                .to_string(),
+            name:
+                crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME
+                    .to_string(),
             reason: "requires a completed, registered Research trial plus subprocess/filesystem \
                  I/O this pure, engine-only function does not accept as input -- call \
                  crate::p7a_p7b_economic_replay_stress::p7a_p7b_economic_replay_stress_scenario \
@@ -1340,7 +1411,8 @@ pub fn run_robustness_gauntlet(
                 .to_string(),
         },
         DeferredScenario {
-            name: crate::genuine_shuffled_placebo::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME.to_string(),
+            name: crate::genuine_shuffled_placebo::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME
+                .to_string(),
             reason: "requires a completed, registered Research trial plus subprocess/filesystem \
                  I/O this pure, engine-only function does not accept as input -- call \
                  crate::genuine_shuffled_placebo::genuine_shuffled_placebo_scenario separately \
@@ -1388,7 +1460,12 @@ pub fn run_robustness_gauntlet_with_symbol_loo_factory(
         // module docs). `run_robustness_gauntlet` (the builtin-strategy
         // entry point) is completely untouched.
         execution_delay_scenario_batch_aware(baseline, base_config, bars, &make_strategy),
-        symbol_leave_one_out_scenario_with_factory(baseline, base_config, bars, &make_strategy_for_bars),
+        symbol_leave_one_out_scenario_with_factory(
+            baseline,
+            base_config,
+            bars,
+            &make_strategy_for_bars,
+        ),
         month_year_regime_concentration_scenario(baseline, bars),
         parameter_neighborhood_scenario(baseline, base_config, bars, &make_strategy),
         placebo_temporal_offset_scenario_batch_aware(baseline, base_config, bars, &make_strategy),
@@ -1406,8 +1483,9 @@ pub fn run_robustness_gauntlet_with_symbol_loo_factory(
                 .to_string(),
         },
         DeferredScenario {
-            name: crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME
-                .to_string(),
+            name:
+                crate::p7a_p7b_economic_replay_stress::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME
+                    .to_string(),
             reason: "requires a completed, registered Research trial plus subprocess/filesystem \
                  I/O this pure, engine-only function does not accept as input -- call \
                  crate::p7a_p7b_economic_replay_stress::p7a_p7b_economic_replay_stress_scenario \
@@ -1417,7 +1495,8 @@ pub fn run_robustness_gauntlet_with_symbol_loo_factory(
                 .to_string(),
         },
         DeferredScenario {
-            name: crate::genuine_shuffled_placebo::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME.to_string(),
+            name: crate::genuine_shuffled_placebo::GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME
+                .to_string(),
             reason: "requires a completed, registered Research trial plus subprocess/filesystem \
                  I/O this pure, engine-only function does not accept as input -- call \
                  crate::genuine_shuffled_placebo::genuine_shuffled_placebo_scenario separately \
@@ -1487,8 +1566,18 @@ mod research_oos_replay_integration_tests {
         let mut out = Vec::new();
         for d in 0..days {
             let ts = DAY * (d + 1);
-            out.push(BacktestBar::new("AAA", ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000));
-            out.push(BacktestBar::new("BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000));
+            out.push(BacktestBar::new(
+                "AAA",
+                ts,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                1_000,
+            ));
+            out.push(BacktestBar::new(
+                "BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000,
+            ));
         }
         out
     }
@@ -1496,7 +1585,13 @@ mod research_oos_replay_integration_tests {
     fn schedule_for(bars: &[BacktestBar], qty_aaa: i64) -> BTreeMap<i64, Vec<TargetPosition>> {
         let mut schedule = BTreeMap::new();
         for ts in bars.iter().map(|b| b.end_ts).collect::<BTreeSet<_>>() {
-            schedule.insert(ts, vec![TargetPosition::new("AAA", qty_aaa), TargetPosition::new("BBB", 0)]);
+            schedule.insert(
+                ts,
+                vec![
+                    TargetPosition::new("AAA", qty_aaa),
+                    TargetPosition::new("BBB", 0),
+                ],
+            );
         }
         schedule
     }
@@ -1508,7 +1603,8 @@ mod research_oos_replay_integration_tests {
         let bars = two_symbol_bars(3);
         let schedule = schedule_for(&bars, 10);
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
-        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+        let report =
+            run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
         assert!(!report.equity_curve.is_empty());
     }
 
@@ -1529,7 +1625,10 @@ mod research_oos_replay_integration_tests {
             ..daily_config()
         };
         let report = run_engine(config, &bars, Box::new(strategy)).expect("engine run succeeds");
-        assert!(report.halted, "engine must halt on the forbidden corporate-action period");
+        assert!(
+            report.halted,
+            "engine must halt on the forbidden corporate-action period"
+        );
         // Day 1's full 2-bar batch reaches the strategy and records one
         // equity_curve entry per row; day 2's batch halts on its FIRST bar
         // (before any dispatch), so it contributes zero entries -- the
@@ -1571,10 +1670,12 @@ mod research_oos_replay_integration_tests {
     fn symbol_loo_uses_schedule_derived_for_actual_filtered_bars() {
         let bars = two_symbol_bars(3);
         let baseline_schedule = schedule_for(&bars, 10);
-        let baseline_strategy = ResearchOosReplayStrategy::new(semantic(), baseline_schedule, &bars);
+        let baseline_strategy =
+            ResearchOosReplayStrategy::new(semantic(), baseline_schedule, &bars);
         let baseline_config = daily_config();
-        let baseline_report = run_engine(baseline_config.clone(), &bars, Box::new(baseline_strategy))
-            .expect("baseline run succeeds");
+        let baseline_report =
+            run_engine(baseline_config.clone(), &bars, Box::new(baseline_strategy))
+                .expect("baseline run succeeds");
 
         // The bar-aware factory asserts its `bars` argument really is the
         // filtered (1-symbol) slice for THIS exclusion -- constructing the
@@ -1584,7 +1685,11 @@ mod research_oos_replay_integration_tests {
         // failure below rather than a passing false positive.
         let make_strategy_for_bars = |filtered: &[BacktestBar]| -> Box<dyn Strategy> {
             let distinct: BTreeSet<&str> = filtered.iter().map(|b| b.symbol.as_str()).collect();
-            assert_eq!(distinct.len(), 1, "leave-one-out must be called with exactly one symbol removed");
+            assert_eq!(
+                distinct.len(),
+                1,
+                "leave-one-out must be called with exactly one symbol removed"
+            );
             Box::new(ResearchOosReplayStrategy::new(
                 semantic(),
                 schedule_for(filtered, 10),
@@ -1622,10 +1727,18 @@ mod research_oos_replay_integration_tests {
         assert_eq!(baseline_report.strategy_name, "test_strategy_v1");
 
         let make_strategy = || -> Box<dyn Strategy> {
-            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule.clone(), &bars))
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule.clone(),
+                &bars,
+            ))
         };
         let make_strategy_for_bars = |filtered: &[BacktestBar]| -> Box<dyn Strategy> {
-            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(filtered, 10), filtered))
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(filtered, 10),
+                filtered,
+            ))
         };
         let gauntlet = run_robustness_gauntlet_with_symbol_loo_factory(
             &baseline_report,
@@ -1646,8 +1759,18 @@ mod research_oos_replay_integration_tests {
         let mut out = Vec::new();
         for d in 0..days {
             let ts = DAY * (d + 1);
-            out.push(BacktestBar::new("BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000));
-            out.push(BacktestBar::new("AAA", ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000));
+            out.push(BacktestBar::new(
+                "BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000,
+            ));
+            out.push(BacktestBar::new(
+                "AAA",
+                ts,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                1_000,
+            ));
         }
         out
     }
@@ -1661,8 +1784,10 @@ mod research_oos_replay_integration_tests {
     fn baseline_replay_is_order_independent_under_symbol_permutation() {
         let bars_a = two_symbol_bars(3);
         let bars_b = two_symbol_bars_swapped_order(3);
-        let strat_a = ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_a, 10), &bars_a);
-        let strat_b = ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_b, 10), &bars_b);
+        let strat_a =
+            ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_a, 10), &bars_a);
+        let strat_b =
+            ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_b, 10), &bars_b);
         let report_a = run_engine(daily_config(), &bars_a, Box::new(strat_a)).unwrap();
         let report_b = run_engine(daily_config(), &bars_b, Box::new(strat_b)).unwrap();
         assert_eq!(
@@ -1684,26 +1809,46 @@ mod research_oos_replay_integration_tests {
         let bars_b = two_symbol_bars_swapped_order(4);
         let config = daily_config();
 
-        let baseline_a =
-            run_engine(config.clone(), &bars_a, Box::new(ResearchOosReplayStrategy::new(
-                semantic(), schedule_for(&bars_a, 10), &bars_a,
-            )))
-            .unwrap();
-        let baseline_b =
-            run_engine(config.clone(), &bars_b, Box::new(ResearchOosReplayStrategy::new(
-                semantic(), schedule_for(&bars_b, 10), &bars_b,
-            )))
-            .unwrap();
+        let baseline_a = run_engine(
+            config.clone(),
+            &bars_a,
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_a, 10),
+                &bars_a,
+            )),
+        )
+        .unwrap();
+        let baseline_b = run_engine(
+            config.clone(),
+            &bars_b,
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_b, 10),
+                &bars_b,
+            )),
+        )
+        .unwrap();
 
         let make_a = || -> Box<dyn Strategy> {
-            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_a, 10), &bars_a))
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_a, 10),
+                &bars_a,
+            ))
         };
         let make_b = || -> Box<dyn Strategy> {
-            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_b, 10), &bars_b))
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_b, 10),
+                &bars_b,
+            ))
         };
 
-        let outcome_a = execution_delay_scenario_batch_aware(&baseline_a, &config, &bars_a, &make_a);
-        let outcome_b = execution_delay_scenario_batch_aware(&baseline_b, &config, &bars_b, &make_b);
+        let outcome_a =
+            execution_delay_scenario_batch_aware(&baseline_a, &config, &bars_a, &make_a);
+        let outcome_b =
+            execution_delay_scenario_batch_aware(&baseline_b, &config, &bars_b, &make_b);
         assert_eq!(outcome_a.passed, outcome_b.passed);
         assert_eq!(outcome_a.detail, outcome_b.detail);
     }
@@ -1717,26 +1862,46 @@ mod research_oos_replay_integration_tests {
         let bars_b = two_symbol_bars_swapped_order(6);
         let config = daily_config();
 
-        let baseline_a =
-            run_engine(config.clone(), &bars_a, Box::new(ResearchOosReplayStrategy::new(
-                semantic(), schedule_for(&bars_a, 10), &bars_a,
-            )))
-            .unwrap();
-        let baseline_b =
-            run_engine(config.clone(), &bars_b, Box::new(ResearchOosReplayStrategy::new(
-                semantic(), schedule_for(&bars_b, 10), &bars_b,
-            )))
-            .unwrap();
+        let baseline_a = run_engine(
+            config.clone(),
+            &bars_a,
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_a, 10),
+                &bars_a,
+            )),
+        )
+        .unwrap();
+        let baseline_b = run_engine(
+            config.clone(),
+            &bars_b,
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_b, 10),
+                &bars_b,
+            )),
+        )
+        .unwrap();
 
         let make_a = || -> Box<dyn Strategy> {
-            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_a, 10), &bars_a))
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_a, 10),
+                &bars_a,
+            ))
         };
         let make_b = || -> Box<dyn Strategy> {
-            Box::new(ResearchOosReplayStrategy::new(semantic(), schedule_for(&bars_b, 10), &bars_b))
+            Box::new(ResearchOosReplayStrategy::new(
+                semantic(),
+                schedule_for(&bars_b, 10),
+                &bars_b,
+            ))
         };
 
-        let outcome_a = placebo_temporal_offset_scenario_batch_aware(&baseline_a, &config, &bars_a, &make_a);
-        let outcome_b = placebo_temporal_offset_scenario_batch_aware(&baseline_b, &config, &bars_b, &make_b);
+        let outcome_a =
+            placebo_temporal_offset_scenario_batch_aware(&baseline_a, &config, &bars_a, &make_a);
+        let outcome_b =
+            placebo_temporal_offset_scenario_batch_aware(&baseline_b, &config, &bars_b, &make_b);
         assert_eq!(outcome_a.passed, outcome_b.passed);
         assert_eq!(outcome_a.detail, outcome_b.detail);
     }
@@ -1758,7 +1923,13 @@ mod research_oos_replay_integration_tests {
             let recent = mqk_strategy::RecentBarsWindow::new(
                 10,
                 vec![mqk_strategy::BarStub::with_ohlcv(
-                    end_ts, true, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000,
+                    end_ts,
+                    true,
+                    100_000_000,
+                    100_000_000,
+                    100_000_000,
+                    100_000_000,
+                    1_000,
                 )],
             );
             StrategyContext::new(DAY, 1, recent)
@@ -1772,7 +1943,10 @@ mod research_oos_replay_integration_tests {
         assert!(delayed.on_bar(&ctx(2 * DAY)).targets.is_empty());
         // Batch 2's FINAL row: batch 1's decision is emitted now.
         let emitted = delayed.on_bar(&ctx(2 * DAY));
-        assert!(!emitted.targets.is_empty(), "batch 1's decision must emit on batch 2's final row");
+        assert!(
+            !emitted.targets.is_empty(),
+            "batch 1's decision must emit on batch 2's final row"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1783,9 +1957,21 @@ mod research_oos_replay_integration_tests {
         let mut out = Vec::new();
         for d in 0..days {
             let ts = DAY * (d + 1);
-            out.push(BacktestBar::new("AAA", ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000));
-            out.push(BacktestBar::new("BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000));
-            out.push(BacktestBar::new("CCC", ts, 25_000_000, 25_000_000, 25_000_000, 25_000_000, 1_000));
+            out.push(BacktestBar::new(
+                "AAA",
+                ts,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                1_000,
+            ));
+            out.push(BacktestBar::new(
+                "BBB", ts, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 1_000,
+            ));
+            out.push(BacktestBar::new(
+                "CCC", ts, 25_000_000, 25_000_000, 25_000_000, 25_000_000, 1_000,
+            ));
         }
         out
     }
@@ -1794,7 +1980,13 @@ mod research_oos_replay_integration_tests {
         (0..days)
             .map(|d| {
                 BacktestBar::new(
-                    "AAA", DAY * (d + 1), 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000,
+                    "AAA",
+                    DAY * (d + 1),
+                    100_000_000,
+                    100_000_000,
+                    100_000_000,
+                    100_000_000,
+                    1_000,
                 )
             })
             .collect()
@@ -1811,10 +2003,17 @@ mod research_oos_replay_integration_tests {
     fn a1_intermediate_row_of_batch_with_held_position_creates_no_spurious_flatten() {
         let bars = two_symbol_bars(3);
         let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        schedule.insert(
+            DAY,
+            vec![
+                TargetPosition::new("AAA", 10),
+                TargetPosition::new("BBB", 0),
+            ],
+        );
         // Day 2 (2*DAY) and day 3 (3*DAY) have no entry at all.
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
-        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+        let report =
+            run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
 
         assert_eq!(
             report.orders.len(),
@@ -1845,15 +2044,24 @@ mod research_oos_replay_integration_tests {
         // Day 2 (2*DAY) has no entry: three physical rows, two of them
         // intermediate, one final-but-absent -- none may emit an order.
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
-        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+        let report =
+            run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
 
-        let day2_orders: Vec<_> = report.orders.iter().filter(|o| o.signal_ts == 2 * DAY).collect();
+        let day2_orders: Vec<_> = report
+            .orders
+            .iter()
+            .filter(|o| o.signal_ts == 2 * DAY)
+            .collect();
         assert!(
             day2_orders.is_empty(),
             "day 2's 3-row batch (schedule entry absent) must produce zero orders, found: {:?}",
             day2_orders,
         );
-        assert_eq!(report.orders.len(), 2, "day 1 must emit exactly one order per non-zero-delta symbol");
+        assert_eq!(
+            report.orders.len(),
+            2,
+            "day 1 must emit exactly one order per non-zero-delta symbol"
+        );
     }
 
     /// A3: a batch's own FINAL, actually-scheduled decision executes
@@ -1862,15 +2070,26 @@ mod research_oos_replay_integration_tests {
     fn a3_scheduled_batch_decision_executes_exactly_once_not_once_per_row() {
         let bars = two_symbol_bars(1);
         let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 5)]);
+        schedule.insert(
+            DAY,
+            vec![
+                TargetPosition::new("AAA", 10),
+                TargetPosition::new("BBB", 5),
+            ],
+        );
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
-        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+        let report =
+            run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
 
         // Exactly one order per symbol with a non-zero delta -- 2 physical
         // rows in this batch must not produce 4 orders.
         assert_eq!(report.orders.len(), 2, "found: {:?}", report.orders);
         let aaa_orders: Vec<_> = report.orders.iter().filter(|o| o.symbol == "AAA").collect();
-        assert_eq!(aaa_orders.len(), 1, "AAA must receive exactly one order, not one per physical row");
+        assert_eq!(
+            aaa_orders.len(),
+            1,
+            "AAA must receive exactly one order, not one per physical row"
+        );
     }
 
     /// A4: an EXPLICIT complete-target zero (`TargetPosition(symbol, 0)`
@@ -1881,12 +2100,26 @@ mod research_oos_replay_integration_tests {
     fn a4_explicit_complete_zero_target_still_causally_flattens() {
         let bars = two_symbol_bars(2);
         let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
-        schedule.insert(2 * DAY, vec![TargetPosition::new("AAA", 0), TargetPosition::new("BBB", 0)]);
+        schedule.insert(
+            DAY,
+            vec![
+                TargetPosition::new("AAA", 10),
+                TargetPosition::new("BBB", 0),
+            ],
+        );
+        schedule.insert(
+            2 * DAY,
+            vec![TargetPosition::new("AAA", 0), TargetPosition::new("BBB", 0)],
+        );
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
-        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+        let report =
+            run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
 
-        let day2_orders: Vec<_> = report.orders.iter().filter(|o| o.signal_ts == 2 * DAY).collect();
+        let day2_orders: Vec<_> = report
+            .orders
+            .iter()
+            .filter(|o| o.signal_ts == 2 * DAY)
+            .collect();
         assert_eq!(
             day2_orders.len(),
             1,
@@ -1907,7 +2140,8 @@ mod research_oos_replay_integration_tests {
         schedule.insert(DAY, vec![TargetPosition::new("AAA", 10)]);
         // 2*DAY and 3*DAY: no entry.
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
-        let report = run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
+        let report =
+            run_engine(daily_config(), &bars, Box::new(strategy)).expect("engine run succeeds");
 
         assert_eq!(report.orders.len(), 1, "found: {:?}", report.orders);
         assert_eq!(report.orders[0].signal_ts, DAY);
@@ -1923,7 +2157,13 @@ mod research_oos_replay_integration_tests {
         let bars_a = two_symbol_bars(3);
         let bars_b = two_symbol_bars_swapped_order(3);
         let mut schedule_a: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule_a.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        schedule_a.insert(
+            DAY,
+            vec![
+                TargetPosition::new("AAA", 10),
+                TargetPosition::new("BBB", 0),
+            ],
+        );
         // day 2 absent for both.
         let schedule_b = schedule_a.clone();
 
@@ -1947,12 +2187,25 @@ mod research_oos_replay_integration_tests {
     fn a7_no_decision_survives_timestamp_batch_delayed_strategy_wrapper() {
         let bars = two_symbol_bars(3);
         let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        schedule.insert(
+            DAY,
+            vec![
+                TargetPosition::new("AAA", 10),
+                TargetPosition::new("BBB", 0),
+            ],
+        );
         // day 2 absent; day 3 repeats the same complete target (no delta).
-        schedule.insert(3 * DAY, vec![TargetPosition::new("AAA", 10), TargetPosition::new("BBB", 0)]);
+        schedule.insert(
+            3 * DAY,
+            vec![
+                TargetPosition::new("AAA", 10),
+                TargetPosition::new("BBB", 0),
+            ],
+        );
         let inner = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
         let delayed = TimestampBatchDelayedStrategy::new(Box::new(inner), 1, &bars);
-        let report = run_engine(daily_config(), &bars, Box::new(delayed)).expect("engine run succeeds");
+        let report =
+            run_engine(daily_config(), &bars, Box::new(delayed)).expect("engine run succeeds");
 
         // Delayed by one batch: whichever later batch the single real BUY
         // AAA=10 decision lands on once delayed, no batch (including the
@@ -2003,7 +2256,11 @@ mod research_oos_replay_integration_tests {
             .unwrap();
         let report = engine.run(&bars).unwrap();
 
-        let day2_orders: Vec<_> = report.orders.iter().filter(|o| o.signal_ts == 2 * DAY).collect();
+        let day2_orders: Vec<_> = report
+            .orders
+            .iter()
+            .filter(|o| o.signal_ts == 2 * DAY)
+            .collect();
         assert_eq!(
             day2_orders.len(),
             1,
@@ -2054,14 +2311,18 @@ mod stress_transform_semantic_identity_tests {
     // 1. raw candidate A matches baseline A and is accepted for wrapping.
     #[test]
     fn raw_candidate_matching_baseline_is_accepted() {
-        let a = FingerprintedStrategy { fingerprint: "fp-a" };
+        let a = FingerprintedStrategy {
+            fingerprint: "fp-a",
+        };
         assert!(verify_candidate_identity(&a, "fp-a").is_ok());
     }
 
     // 2. raw candidate B presented as baseline A is refused BEFORE wrapping.
     #[test]
     fn raw_candidate_b_presented_as_a_is_refused_before_wrapping() {
-        let b = FingerprintedStrategy { fingerprint: "fp-b" };
+        let b = FingerprintedStrategy {
+            fingerprint: "fp-b",
+        };
         let err = verify_candidate_identity(&b, "fp-a")
             .expect_err("mismatched raw candidate must be refused before any wrapping occurs");
         assert!(err.contains("semantic fingerprint mismatch"));
@@ -2070,7 +2331,9 @@ mod stress_transform_semantic_identity_tests {
     // 3. DelayedStrategy(A,1).fp != A.fp
     #[test]
     fn wrapper_fingerprint_differs_from_inner_fingerprint() {
-        let a = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let a = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-a",
+        }) as Box<dyn Strategy>;
         let inner_fp = a.semantic_fingerprint();
         let wrapped = DelayedStrategy::new(a, 1);
         assert_ne!(
@@ -2084,8 +2347,12 @@ mod stress_transform_semantic_identity_tests {
     // 4. DelayedStrategy(A,1).fp != DelayedStrategy(A,2).fp
     #[test]
     fn wrapper_fingerprint_differs_by_delay_bars() {
-        let a1 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
-        let a2 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let a1 = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-a",
+        }) as Box<dyn Strategy>;
+        let a2 = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-a",
+        }) as Box<dyn Strategy>;
         let delayed_1 = DelayedStrategy::new(a1, 1);
         let delayed_2 = DelayedStrategy::new(a2, 2);
         assert_ne!(
@@ -2100,8 +2367,12 @@ mod stress_transform_semantic_identity_tests {
     // (repeated construction is deterministic).
     #[test]
     fn wrapper_fingerprint_is_deterministic_for_same_candidate_and_delay() {
-        let a1 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
-        let a2 = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let a1 = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-a",
+        }) as Box<dyn Strategy>;
+        let a2 = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-a",
+        }) as Box<dyn Strategy>;
         let fp1 = DelayedStrategy::new(a1, 1).semantic_fingerprint();
         let fp2 = DelayedStrategy::new(a2, 1).semantic_fingerprint();
         assert_eq!(
@@ -2114,8 +2385,12 @@ mod stress_transform_semantic_identity_tests {
     // 6. A != B -> wrapped A and wrapped B remain different.
     #[test]
     fn wrapper_fingerprint_changes_when_underlying_candidate_changes() {
-        let a = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
-        let b = Box::new(FingerprintedStrategy { fingerprint: "fp-b" }) as Box<dyn Strategy>;
+        let a = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-a",
+        }) as Box<dyn Strategy>;
+        let b = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-b",
+        }) as Box<dyn Strategy>;
         let fp_a = DelayedStrategy::new(a, 1).semantic_fingerprint();
         let fp_b = DelayedStrategy::new(b, 1).semantic_fingerprint();
         assert_ne!(
@@ -2134,12 +2409,16 @@ mod stress_transform_semantic_identity_tests {
 
         let mut baseline_engine = BacktestEngine::new(config.clone());
         baseline_engine
-            .add_strategy(Box::new(FingerprintedStrategy { fingerprint: "fp-a" }))
+            .add_strategy(Box::new(FingerprintedStrategy {
+                fingerprint: "fp-a",
+            }))
             .unwrap();
         let baseline_report = baseline_engine.run(&bars).unwrap();
 
         let delayed = DelayedStrategy::new(
-            Box::new(FingerprintedStrategy { fingerprint: "fp-a" }),
+            Box::new(FingerprintedStrategy {
+                fingerprint: "fp-a",
+            }),
             1,
         );
         let mut delayed_engine = BacktestEngine::new(config);
@@ -2148,7 +2427,10 @@ mod stress_transform_semantic_identity_tests {
 
         assert_eq!(baseline_report.strategy_name, delayed_report.strategy_name);
         assert_eq!(baseline_report.config_id, delayed_report.config_id);
-        assert_eq!(baseline_report.input_data_hash, delayed_report.input_data_hash);
+        assert_eq!(
+            baseline_report.input_data_hash,
+            delayed_report.input_data_hash
+        );
         assert_ne!(
             baseline_report.run_id, delayed_report.run_id,
             "an execution-delay-wrapped run of the SAME candidate must never collide on run_id \
@@ -2166,7 +2448,9 @@ mod stress_transform_semantic_identity_tests {
         let mut engine_1 = BacktestEngine::new(config.clone());
         engine_1
             .add_strategy(Box::new(DelayedStrategy::new(
-                Box::new(FingerprintedStrategy { fingerprint: "fp-a" }),
+                Box::new(FingerprintedStrategy {
+                    fingerprint: "fp-a",
+                }),
                 1,
             )))
             .unwrap();
@@ -2175,7 +2459,9 @@ mod stress_transform_semantic_identity_tests {
         let mut engine_2 = BacktestEngine::new(config);
         engine_2
             .add_strategy(Box::new(DelayedStrategy::new(
-                Box::new(FingerprintedStrategy { fingerprint: "fp-a" }),
+                Box::new(FingerprintedStrategy {
+                    fingerprint: "fp-a",
+                }),
                 2,
             )))
             .unwrap();
@@ -2195,7 +2481,9 @@ mod stress_transform_semantic_identity_tests {
     // candidate still fails closed before any wrapping/execution occurs.
     #[test]
     fn wrong_underlying_candidate_fails_closed_before_wrapping() {
-        let b = FingerprintedStrategy { fingerprint: "fp-b" };
+        let b = FingerprintedStrategy {
+            fingerprint: "fp-b",
+        };
         assert!(
             verify_candidate_identity(&b, "fp-a").is_err(),
             "a candidate presented under the wrong baseline fingerprint must fail closed"
@@ -2207,7 +2495,9 @@ mod stress_transform_semantic_identity_tests {
     // `on_bar` calls must never change its fingerprint.
     #[test]
     fn wrapper_fingerprint_is_unaffected_by_on_bar_execution_state() {
-        let inner = Box::new(FingerprintedStrategy { fingerprint: "fp-a" }) as Box<dyn Strategy>;
+        let inner = Box::new(FingerprintedStrategy {
+            fingerprint: "fp-a",
+        }) as Box<dyn Strategy>;
         let mut wrapped = DelayedStrategy::new(inner, 1);
         let fp_before = wrapped.semantic_fingerprint();
 

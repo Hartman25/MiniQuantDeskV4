@@ -615,7 +615,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("changing provider equity alone must change the decision at the threshold");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::CapitalLimitExceeded
+        );
     }
 
     // -----------------------------------------------------------------
@@ -635,7 +638,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("unavailable authority must deny");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -651,7 +657,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("stale authority must deny");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -667,7 +676,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("malformed authority must deny");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     // -----------------------------------------------------------------
@@ -745,7 +757,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = decision else {
             panic!("sticky halt must survive a later equity recovery for non-reducing orders");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     // -----------------------------------------------------------------
@@ -775,7 +790,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("reject-storm threshold must deny in the current window");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::MaxOrderSizeExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::MaxOrderSizeExceeded
+        );
     }
 
     #[test]
@@ -798,7 +816,10 @@ mod tests {
         // Equity drifts down to 99_500 — inside the 1k daily-loss floor for
         // day 20240115 (floor 99k), so this must still be allowed.
         authority.set(99_500 * 1_000_000);
-        assert_eq!(risk_gate.evaluate_gate(), mqk_execution::RiskDecision::Allow);
+        assert_eq!(
+            risk_gate.evaluate_gate(),
+            mqk_execution::RiskDecision::Allow
+        );
 
         // Cross midnight: day rolls to 20240116, day-start equity resets to
         // the current 99_500. A further 400 drop to 99_100 is NOT a 1k
@@ -971,14 +992,20 @@ mod tests {
         risk_gate.record_broker_reject();
         // 2 recorded, threshold 3: still allowed (threshold-1 does not
         // prematurely halt).
-        assert_eq!(risk_gate.evaluate_gate(), mqk_execution::RiskDecision::Allow);
+        assert_eq!(
+            risk_gate.evaluate_gate(),
+            mqk_execution::RiskDecision::Allow
+        );
 
         risk_gate.record_broker_reject();
         // 3rd reject reaches the threshold.
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("Nth reject reaching the threshold must deny new risk");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::MaxOrderSizeExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::MaxOrderSizeExceeded
+        );
     }
 
     #[test]
@@ -989,7 +1016,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("fail-closed gate must remain denied");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     // AUTON-PAPER-RISK-04: day_id/reject_window_id derivation formulas.
@@ -1003,7 +1033,10 @@ mod tests {
         assert_eq!(reject_window_id_for(t(2024, 1, 15, 23, 59)), 1439);
 
         let far = t(9999, 12, 31, 0, 0);
-        assert!(day_id_for(far) < u32::MAX, "day_id fits in u32 for any calendar date");
+        assert!(
+            day_id_for(far) < u32::MAX,
+            "day_id fits in u32 for any calendar date"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1018,9 +1051,14 @@ mod tests {
             100_000 * 1_000_000,
         );
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
-            panic!("missing max_drawdown must fail the gate closed, not silently disable the check");
+            panic!(
+                "missing max_drawdown must fail the gate closed, not silently disable the check"
+            );
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -1034,7 +1072,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("a non-positive max_drawdown ratio must fail closed");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1054,7 +1095,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("a null daily_loss_limit must fail closed");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -1066,7 +1110,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("a string daily_loss_limit must fail closed");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -1079,7 +1126,10 @@ mod tests {
         // `is_finite()` guard remains defense-in-depth for any f64 that
         // reaches it.
         assert_eq!(ratio_limit_to_micros(f64::NAN, 100_000 * 1_000_000), None);
-        assert_eq!(ratio_limit_to_micros(f64::INFINITY, 100_000 * 1_000_000), None);
+        assert_eq!(
+            ratio_limit_to_micros(f64::INFINITY, 100_000 * 1_000_000),
+            None
+        );
     }
 
     #[test]
@@ -1091,7 +1141,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("a zero daily_loss_limit ratio must fail closed");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
 
         let risk_gate2 = RuntimeRiskGate::from_run_config(
             &serde_json::json!({ "risk": { "daily_loss_limit": -0.02, "max_drawdown": 0.10 } }),
@@ -1100,7 +1153,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial2) = risk_gate2.evaluate_gate() else {
             panic!("a negative daily_loss_limit ratio must fail closed");
         };
-        assert_eq!(denial2.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial2.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -1112,7 +1168,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("a daily_loss_limit ratio of exactly 1.0 must fail closed");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
 
         let risk_gate2 = RuntimeRiskGate::from_run_config(
             &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 2.0 } }),
@@ -1121,7 +1180,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial2) = risk_gate2.evaluate_gate() else {
             panic!("a max_drawdown ratio >= 1.0 must fail closed");
         };
-        assert_eq!(denial2.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial2.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -1151,10 +1213,16 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate2.evaluate_gate() else {
             panic!("max-drawdown breach must deny once both limits are wired");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::CapitalLimitExceeded
+        );
         // Sanity: the first gate (config_json path) is at least constructed
         // and reachable (not FailClosed) given both ratios were valid.
-        assert_eq!(risk_gate.evaluate_gate(), mqk_execution::RiskDecision::Allow);
+        assert_eq!(
+            risk_gate.evaluate_gate(),
+            mqk_execution::RiskDecision::Allow
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1194,7 +1262,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("breach of the authoritative-95k-anchored floor must deny");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::CapitalLimitExceeded
+        );
     }
 
     /// Control B: broker-authoritative starting equity (105k) ABOVE a
@@ -1218,7 +1289,10 @@ mod tests {
                  (102_900) — a stale 100k-anchored floor (98k) would incorrectly allow it"
             );
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::CapitalLimitExceeded
+        );
     }
 
     /// Control C: same mismatch proof for `max_drawdown` — the peak-equity
@@ -1238,7 +1312,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("94_499 must breach the max-drawdown floor anchored to the authoritative peak");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::CapitalLimitExceeded
+        );
     }
 
     /// Control D: an authority that cannot supply a truthful equity AT
@@ -1254,7 +1331,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("an authority unavailable at construction must fail the gate closed");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     #[test]
@@ -1267,7 +1347,10 @@ mod tests {
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("non-positive authoritative equity at construction must fail the gate closed");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::RiskEngineUnavailable);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
     }
 
     /// Control E: after construction, later authority-reported equity
@@ -1281,12 +1364,18 @@ mod tests {
             authority.clone(),
             FixedClock::new(t(2024, 1, 15, 9, 0)),
         );
-        assert_eq!(risk_gate.evaluate_gate(), mqk_execution::RiskDecision::Allow);
+        assert_eq!(
+            risk_gate.evaluate_gate(),
+            mqk_execution::RiskDecision::Allow
+        );
 
         authority.set(97_999 * 1_000_000);
         let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
             panic!("a live equity drop after construction must still be observed and deny");
         };
-        assert_eq!(denial.reason, mqk_execution::RiskReason::CapitalLimitExceeded);
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::CapitalLimitExceeded
+        );
     }
 }

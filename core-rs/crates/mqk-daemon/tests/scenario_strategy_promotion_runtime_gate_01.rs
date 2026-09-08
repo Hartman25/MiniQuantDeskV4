@@ -311,12 +311,16 @@ async fn seed_active_paper_with_fingerprint(
     let seed = |suffix: &str| {
         Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
-            format!("rtg01-seed-realfp:{strategy_id}:{symbol}:{timeframe_secs}:{suffix}").as_bytes(),
+            format!("rtg01-seed-realfp:{strategy_id}:{symbol}:{timeframe_secs}:{suffix}")
+                .as_bytes(),
         )
     };
-    mqk_db::insert_strategy_promotion_transition(pool, &step(seed("1"), None, "shadow_approved", now))
-        .await
-        .expect("seed shadow_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(seed("1"), None, "shadow_approved", now),
+    )
+    .await
+    .expect("seed shadow_approved");
     mqk_db::insert_strategy_promotion_transition(
         pool,
         &step(
@@ -993,7 +997,8 @@ async fn external_active_paper_exact_identity_is_refused_at_promotion_gate() {
         "must be refused at Gate 2b regardless of arm state: {json}"
     );
     assert_eq!(
-        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+        json["disposition"],
+        "promotion_external_semantic_provenance_unavailable"
     );
 }
 
@@ -1047,7 +1052,8 @@ async fn external_active_paper_full_happy_path_is_refused_at_promotion_gate() {
          config-bound Paper authority: {json}"
     );
     assert_eq!(
-        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+        json["disposition"],
+        "promotion_external_semantic_provenance_unavailable"
     );
     assert_eq!(json["intent_placed"], false);
     assert_eq!(outbox_row_count(&pool, &signal_id).await, 0);

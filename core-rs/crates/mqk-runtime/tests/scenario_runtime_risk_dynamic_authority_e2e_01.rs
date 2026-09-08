@@ -35,9 +35,9 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use mqk_execution::gateway::{BrokerGateway, IntegrityGate, ReconcileGate};
 use mqk_execution::{
-    broker_error::BrokerError, AssetClass, BrokerAdapter, BrokerCancelResponse,
-    BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, GateRefusal, OutboxClaimToken, Side, SubmitError,
+    broker_error::BrokerError, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerInvokeToken,
+    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
+    GateRefusal, OutboxClaimToken, Side, SubmitError,
 };
 use mqk_runtime::runtime_risk::{
     AccountAuthorityContext, AccountAuthorityError, RuntimeAccountAuthority, RuntimeClock,
@@ -78,7 +78,11 @@ struct TestAccountAuthority {
 }
 
 impl TestAccountAuthority {
-    fn new(equity_micros: i64, captured_at: DateTime<Utc>, freshness_bound: ChronoDuration) -> Arc<Self> {
+    fn new(
+        equity_micros: i64,
+        captured_at: DateTime<Utc>,
+        freshness_bound: ChronoDuration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             equity_micros: AtomicI64::new(equity_micros),
             captured_at: Mutex::new(captured_at),
@@ -236,7 +240,8 @@ fn claim(id: &str) -> OutboxClaimToken {
 fn case1_daily_loss_denies_before_broker_invocation() {
     let clock = TestClock::new(t(2024, 1, 15, 9, 0));
     let start = t(2024, 1, 15, 9, 0);
-    let account = TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
+    let account =
+        TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
     let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
         &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
         account.clone(),
@@ -258,7 +263,10 @@ fn case1_daily_loss_denies_before_broker_invocation() {
     let err = gateway
         .submit(&claim("c2"), submit_req("c2"))
         .expect_err("daily-loss breach must deny before broker invocation");
-    assert!(matches!(err, SubmitError::Gate(GateRefusal::RiskBlocked(_))));
+    assert!(matches!(
+        err,
+        SubmitError::Gate(GateRefusal::RiskBlocked(_))
+    ));
     assert_eq!(
         broker.submit_count(),
         1,
@@ -273,7 +281,8 @@ fn case1_daily_loss_denies_before_broker_invocation() {
 fn case2_max_drawdown_denies_before_broker_invocation() {
     let clock = TestClock::new(t(2024, 1, 15, 9, 0));
     let start = t(2024, 1, 15, 9, 0);
-    let account = TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
+    let account =
+        TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
     let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
         // daily_loss_limit set very loose (50%) so it can never fire first;
         // max_drawdown at 10% is the only limit under test.
@@ -300,7 +309,10 @@ fn case2_max_drawdown_denies_before_broker_invocation() {
     let err = gateway
         .submit(&claim("c2"), submit_req("c2"))
         .expect_err("max-drawdown breach must deny before broker invocation");
-    assert!(matches!(err, SubmitError::Gate(GateRefusal::RiskBlocked(_))));
+    assert!(matches!(
+        err,
+        SubmitError::Gate(GateRefusal::RiskBlocked(_))
+    ));
     assert_eq!(
         broker.submit_count(),
         1,
@@ -315,7 +327,8 @@ fn case2_max_drawdown_denies_before_broker_invocation() {
 fn case3_reject_storm_denies_next_new_risk_before_broker_invocation() {
     let clock = TestClock::new(t(2024, 1, 15, 9, 0));
     let start = t(2024, 1, 15, 9, 0);
-    let account = TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
+    let account =
+        TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
     let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
         &serde_json::json!({
             "risk": {
@@ -343,7 +356,10 @@ fn case3_reject_storm_denies_next_new_risk_before_broker_invocation() {
     let err = gateway
         .submit(&claim("r-next"), submit_req("r-next"))
         .expect_err("reject-storm threshold must deny the next new-risk submit");
-    assert!(matches!(err, SubmitError::Gate(GateRefusal::RiskBlocked(_))));
+    assert!(matches!(
+        err,
+        SubmitError::Gate(GateRefusal::RiskBlocked(_))
+    ));
     assert_eq!(
         broker.submit_count(),
         3,
@@ -358,7 +374,8 @@ fn case3_reject_storm_denies_next_new_risk_before_broker_invocation() {
 fn case4_stale_authority_denies_before_broker_invocation() {
     let clock = TestClock::new(t(2024, 1, 15, 9, 0));
     let start = t(2024, 1, 15, 9, 0);
-    let account = TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
+    let account =
+        TestAccountAuthority::new(100_000 * 1_000_000, start, ChronoDuration::seconds(180));
     let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
         &serde_json::json!({ "risk": { "daily_loss_limit": 0.02, "max_drawdown": 0.50 } }),
         account.clone(),
@@ -379,7 +396,10 @@ fn case4_stale_authority_denies_before_broker_invocation() {
     let err = gateway
         .submit(&claim("c2"), submit_req("c2"))
         .expect_err("stale account authority must deny before broker invocation");
-    assert!(matches!(err, SubmitError::Gate(GateRefusal::RiskBlocked(_))));
+    assert!(matches!(
+        err,
+        SubmitError::Gate(GateRefusal::RiskBlocked(_))
+    ));
     assert_eq!(
         broker.submit_count(),
         1,
@@ -391,6 +411,9 @@ fn case4_stale_authority_denies_before_broker_invocation() {
     let err2 = gateway
         .submit(&claim("c3"), submit_req("c3"))
         .expect_err("unavailable account authority must deny before broker invocation");
-    assert!(matches!(err2, SubmitError::Gate(GateRefusal::RiskBlocked(_))));
+    assert!(matches!(
+        err2,
+        SubmitError::Gate(GateRefusal::RiskBlocked(_))
+    ));
     assert_eq!(broker.submit_count(), 1);
 }

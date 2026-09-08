@@ -130,7 +130,12 @@ fn resolve_identity_for_env(
         &assignment_identity,
         &runtime_binding_identity,
     );
-    (plan, assignment_identity, runtime_binding_identity, operation_id)
+    (
+        plan,
+        assignment_identity,
+        runtime_binding_identity,
+        operation_id,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -224,8 +229,7 @@ async fn seed_controller_degraded_operation(
         blocker_signature: None,
         occurred_at_utc: now_utc,
         run_id: Some(run_id),
-        bounded_detail: "test setup: -> controller_degraded (simulated forced restart)"
-            .to_string(),
+        bounded_detail: "test setup: -> controller_degraded (simulated forced restart)".to_string(),
     };
     match mqk_db::transition_autonomous_daily_operation(pool, &args).await? {
         AutonomousDailyTransitionOutcome::Applied(r) => Ok(r),
@@ -352,7 +356,8 @@ async fn t1_degraded_with_running_run_does_not_recover() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     assert_ne!(
-        after.state, mqk_db::STATE_STOPPING,
+        after.state,
+        mqk_db::STATE_STOPPING,
         "must never advance toward stopping while the run is still active"
     );
 
@@ -745,7 +750,10 @@ async fn t5_repeated_ticks_after_recovery_are_idempotent() -> anyhow::Result<()>
         .await?
         .expect("row must exist");
     let outcome1 = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
-    assert_eq!(outcome1, AutonomousDailyCoordinatorTickOutcome::RuntimeStopped);
+    assert_eq!(
+        outcome1,
+        AutonomousDailyCoordinatorTickOutcome::RuntimeStopped
+    );
     let after_first = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
@@ -770,13 +778,14 @@ async fn t5_repeated_ticks_after_recovery_are_idempotent() -> anyhow::Result<()>
         "STOPPED",
         "the same run row must remain STOPPED -- no duplicate run was created"
     );
-    let run_count: i64 = sqlx::query_scalar(
-        "select count(*) from runs where run_id = $1",
-    )
-    .bind(run_id)
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(run_count, 1, "exactly one run row must exist for this run_id");
+    let run_count: i64 = sqlx::query_scalar("select count(*) from runs where run_id = $1")
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        run_count, 1,
+        "exactly one run row must exist for this run_id"
+    );
 
     cleanup_operation(&pool, operation_id).await;
     cleanup_run(&pool, run_id).await;

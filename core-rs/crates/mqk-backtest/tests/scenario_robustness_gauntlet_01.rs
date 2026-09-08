@@ -68,7 +68,11 @@ impl Strategy for SingleSymbolBuyHoldSell {
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
-        let target = if self.bar_idx < self.sell_at_idx { self.qty } else { 0 };
+        let target = if self.bar_idx < self.sell_at_idx {
+            self.qty
+        } else {
+            0
+        };
         StrategyOutput::new(vec![TargetPosition::new(self.symbol, target)])
     }
 }
@@ -155,7 +159,11 @@ impl Strategy for TwoSymbolBuyHoldSell {
             // state so this row contributes zero delta.
             self.held
         } else {
-            let target = if self.day_idx < self.sell_at_idx { self.qty } else { 0 };
+            let target = if self.day_idx < self.sell_at_idx {
+                self.qty
+            } else {
+                0
+            };
             self.held = target;
             target
         };
@@ -242,11 +250,21 @@ fn rg01a_healthy_single_symbol_candidate_reports_leave_one_out_not_applicable() 
     let bars = healthy_single_symbol_bars();
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        }),
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        })
     });
 
     let leave_one_out = output
@@ -254,7 +272,10 @@ fn rg01a_healthy_single_symbol_candidate_reports_leave_one_out_not_applicable() 
         .iter()
         .find(|s| s.name == "symbol_leave_one_out")
         .unwrap();
-    assert!(!leave_one_out.applicable, "single-symbol run must report not-applicable");
+    assert!(
+        !leave_one_out.applicable,
+        "single-symbol run must report not-applicable"
+    );
 
     assert_eq!(
         output.deferred.len(),
@@ -265,9 +286,18 @@ fn rg01a_healthy_single_symbol_candidate_reports_leave_one_out_not_applicable() 
          dsr_pbo_sensitivity_scenario/p7a_p7b_economic_replay_stress_scenario/\
          genuine_shuffled_placebo_scenario and merge_dsr_pbo_sensitivity"
     );
-    assert!(output.deferred.iter().any(|d| d.name == "dsr_pbo_sensitivity"));
-    assert!(output.deferred.iter().any(|d| d.name == "p7a_p7b_economic_replay_stress"));
-    assert!(output.deferred.iter().any(|d| d.name == "genuine_shuffled_placebo"));
+    assert!(output
+        .deferred
+        .iter()
+        .any(|d| d.name == "dsr_pbo_sensitivity"));
+    assert!(output
+        .deferred
+        .iter()
+        .any(|d| d.name == "p7a_p7b_economic_replay_stress"));
+    assert!(output
+        .deferred
+        .iter()
+        .any(|d| d.name == "genuine_shuffled_placebo"));
     assert!(
         !output.is_complete(),
         "must not be complete until every deferred scenario is merged in"
@@ -313,7 +343,8 @@ fn rg01c_placebo_distinguishes_real_trend_from_temporal_offset() {
     let bars = trending_bars(20);
     let (report, config) = run(&bars, Box::new(AlwaysLong { qty: 10 }));
 
-    let output = run_robustness_gauntlet(&report, &config, &bars, || Box::new(AlwaysLong { qty: 10 }));
+    let output =
+        run_robustness_gauntlet(&report, &config, &bars, || Box::new(AlwaysLong { qty: 10 }));
 
     let placebo = output
         .scenarios
@@ -331,11 +362,21 @@ fn rg01d_deterministic_across_identical_inputs() {
     let bars = healthy_single_symbol_bars();
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        }),
     );
 
     let make = || -> Box<dyn Strategy> {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        })
     };
     let output1 = run_robustness_gauntlet(&report, &config, &bars, make);
     let output2 = run_robustness_gauntlet(&report, &config, &bars, make);
@@ -364,11 +405,21 @@ fn rg01f_profit_concentrated_in_one_month_fails_concentration_scenario() {
     ];
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 10, sell_at_idx: 3 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 10,
+            sell_at_idx: 3,
+        }),
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 10, sell_at_idx: 3 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 10,
+            sell_at_idx: 3,
+        })
     });
 
     let concentration = output
@@ -376,12 +427,19 @@ fn rg01f_profit_concentrated_in_one_month_fails_concentration_scenario() {
         .iter()
         .find(|s| s.name == "month_year_regime_concentration")
         .unwrap();
-    assert!(concentration.applicable, "must span 2+ months: {concentration:?}");
+    assert!(
+        concentration.applicable,
+        "must span 2+ months: {concentration:?}"
+    );
     assert!(
         !concentration.passed,
         "all profit concentrated in one of two months must fail: {concentration:?}"
     );
-    assert!(concentration.reason.as_deref().unwrap_or_default().contains("month:"));
+    assert!(concentration
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("month:"));
 }
 
 /// FINAL-P9-ROBUSTNESS-SEMANTICS-01: profit concentrated in one YEAR across
@@ -392,7 +450,12 @@ fn rg01f_profit_concentrated_in_one_month_fails_concentration_scenario() {
 fn rg01l_profit_concentrated_in_one_year_across_multiple_months_fails() {
     use chrono::NaiveDate;
     fn ts(y: i32, m: u32, d: u32) -> i64 {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp()
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
     }
 
     // Year 2024: two distinct months, BOTH profitable (so month concentration
@@ -410,11 +473,21 @@ fn rg01l_profit_concentrated_in_one_year_across_multiple_months_fails() {
     ];
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 10, sell_at_idx: 100 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 10,
+            sell_at_idx: 100,
+        }),
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 10, sell_at_idx: 100 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 10,
+            sell_at_idx: 100,
+        })
     });
 
     let concentration = output
@@ -428,7 +501,11 @@ fn rg01l_profit_concentrated_in_one_year_across_multiple_months_fails() {
         "all profit concentrated in one of two years must fail even though it spans 4 months: \
          {concentration:?}"
     );
-    assert!(concentration.reason.as_deref().unwrap_or_default().contains("year:"));
+    assert!(concentration
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("year:"));
 }
 
 /// FINAL-P9-ROBUSTNESS-SEMANTICS-01: an execution delay that turns a
@@ -450,10 +527,23 @@ fn rg01n_execution_delay_destroys_profitability_fails() {
     ];
     // Override bar2's price to $100.50 (flat_bar only takes whole USD).
     let mut bars = bars;
-    bars[2] = BacktestBar::new("ES", 1_700_000_120, 100_500_000, 100_500_000, 100_500_000, 100_500_000, 1_000);
+    bars[2] = BacktestBar::new(
+        "ES",
+        1_700_000_120,
+        100_500_000,
+        100_500_000,
+        100_500_000,
+        100_500_000,
+        1_000,
+    );
 
     let make = || -> Box<dyn Strategy> {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 100, sell_at_idx: 2 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 100,
+            sell_at_idx: 2,
+        })
     };
     let (report, config) = run(&bars, make());
     let baseline_final = report.equity_curve.last().unwrap().1;
@@ -463,13 +553,21 @@ fn rg01n_execution_delay_destroys_profitability_fails() {
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, make);
-    let delay = output.scenarios.iter().find(|s| s.name == "execution_delay_stress").unwrap();
+    let delay = output
+        .scenarios
+        .iter()
+        .find(|s| s.name == "execution_delay_stress")
+        .unwrap();
     assert!(
         !delay.passed,
         "an execution delay that turns a real profit into a real loss must fail: {delay:?}"
     );
     assert!(
-        delay.reason.as_deref().unwrap_or_default().contains("economic edge collapsed"),
+        delay
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("economic edge collapsed"),
         "must fail via the edge-collapse reason, not bankruptcy/drawdown: {delay:?}"
     );
 }
@@ -510,18 +608,32 @@ fn rg01o_leave_one_out_removes_positive_result_fails_even_when_flat() {
     // each rerun's own expected-row-count table must be derived from that
     // filtered slice, not the full 2-symbol baseline bars (see
     // `TwoSymbolBuyHoldSell` docs).
-    let make_for_bars =
-        |filtered: &[BacktestBar]| -> Box<dyn Strategy> { Box::new(TwoSymbolBuyHoldSell::new(10, 100, filtered)) };
-    let output =
-        run_robustness_gauntlet_with_symbol_loo_factory(&report, &config, &bars, make, make_for_bars);
-    let leave_one_out = output.scenarios.iter().find(|s| s.name == "symbol_leave_one_out").unwrap();
+    let make_for_bars = |filtered: &[BacktestBar]| -> Box<dyn Strategy> {
+        Box::new(TwoSymbolBuyHoldSell::new(10, 100, filtered))
+    };
+    let output = run_robustness_gauntlet_with_symbol_loo_factory(
+        &report,
+        &config,
+        &bars,
+        make,
+        make_for_bars,
+    );
+    let leave_one_out = output
+        .scenarios
+        .iter()
+        .find(|s| s.name == "symbol_leave_one_out")
+        .unwrap();
     assert!(
         !leave_one_out.passed,
         "excluding ES (all of the real profit) must fail even though SPY alone is merely flat, \
          never negative: {leave_one_out:?}"
     );
     assert!(
-        leave_one_out.reason.as_deref().unwrap_or_default().contains("economic edge collapsed"),
+        leave_one_out
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("economic edge collapsed"),
         "must fail via the edge-collapse reason, not a drawdown breach: {leave_one_out:?}"
     );
 }
@@ -539,12 +651,23 @@ fn rg01p_parameter_neighborhood_point_becomes_non_profitable_fails() {
         flat_bar("ES", 1_700_000_000, 100),
         flat_bar("ES", 1_700_000_060, 100),
         BacktestBar::new(
-            "ES", 1_700_000_120, 100_150_000, 100_150_000, 100_150_000, 100_150_000, 1_000,
+            "ES",
+            1_700_000_120,
+            100_150_000,
+            100_150_000,
+            100_150_000,
+            100_150_000,
+            1_000,
         ),
         flat_bar("ES", 1_700_000_180, 100),
     ];
     let make = || -> Box<dyn Strategy> {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 100, sell_at_idx: 2 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 100,
+            sell_at_idx: 2,
+        })
     };
     let (report, config) = run(&bars, make());
     let baseline_final = report.equity_curve.last().unwrap().1;
@@ -554,15 +677,22 @@ fn rg01p_parameter_neighborhood_point_becomes_non_profitable_fails() {
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, make);
-    let neighborhood =
-        output.scenarios.iter().find(|s| s.name == "parameter_neighborhood_execution").unwrap();
+    let neighborhood = output
+        .scenarios
+        .iter()
+        .find(|s| s.name == "parameter_neighborhood_execution")
+        .unwrap();
     assert!(
         !neighborhood.passed,
         "a neighboring slippage point that erodes a thin edge into a loss must fail: \
          {neighborhood:?}"
     );
     assert!(
-        neighborhood.reason.as_deref().unwrap_or_default().contains("economic edge collapsed"),
+        neighborhood
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("economic edge collapsed"),
         "must fail via the edge-collapse reason, not a drawdown breach: {neighborhood:?}"
     );
 }
@@ -577,7 +707,12 @@ fn rg01p_parameter_neighborhood_point_becomes_non_profitable_fails() {
 fn rg01m_profit_concentrated_in_one_regime_while_multiple_regimes_exist_fails() {
     use chrono::NaiveDate;
     fn ts(y: i32, m: u32, d: u32) -> i64 {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp()
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
     }
     // 10 bars/month on odd days 1,3,...,19 -- comfortably clears
     // MarketRegimePolicy::conservative_defaults().min_bars (8) per month.
@@ -587,7 +722,7 @@ fn rg01m_profit_concentrated_in_one_regime_while_multiple_regimes_exist_fails() 
 
     let mut bars = Vec::new();
     let mut price: i64 = 100; // +1/bar over 10 bars ~9% move -- clears the 5% BullTrend threshold
-    // Jan: strong, consistent uptrend -> BullTrend, genuine profit.
+                              // Jan: strong, consistent uptrend -> BullTrend, genuine profit.
     for d in month_days() {
         bars.push(flat_bar("ES", ts(2024, 1, d), price));
         price += 1;
@@ -610,10 +745,20 @@ fn rg01m_profit_concentrated_in_one_regime_while_multiple_regimes_exist_fails() 
 
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 10, sell_at_idx: 1000 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 10,
+            sell_at_idx: 1000,
+        }),
     );
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 10, sell_at_idx: 1000 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 10,
+            sell_at_idx: 1000,
+        })
     });
 
     let concentration = output
@@ -629,7 +774,10 @@ fn rg01m_profit_concentrated_in_one_regime_while_multiple_regimes_exist_fails() 
     );
     let reason = concentration.reason.as_deref().unwrap_or_default();
     assert!(reason.contains("regime:"), "got: {reason}");
-    assert!(!reason.contains("month:"), "month dimension must PASS (0.5 boundary): {reason}");
+    assert!(
+        !reason.contains("month:"),
+        "month dimension must PASS (0.5 boundary): {reason}"
+    );
 }
 
 #[test]
@@ -637,11 +785,21 @@ fn rg01e_healthy_candidate_clears_every_applicable_scenario() {
     let bars = healthy_single_symbol_bars();
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        }),
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        })
     });
 
     for s in &output.scenarios {
@@ -657,11 +815,21 @@ fn rg01g_conservative_capacity_stress_present_and_passes_for_healthy_candidate()
     let bars = healthy_single_symbol_bars();
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        }),
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        })
     });
 
     let capacity = output
@@ -670,7 +838,10 @@ fn rg01g_conservative_capacity_stress_present_and_passes_for_healthy_candidate()
         .find(|s| s.name == "conservative_capacity_stress")
         .expect("conservative_capacity_stress must be a real, present scenario");
     assert!(capacity.applicable);
-    assert!(capacity.passed, "healthy candidate must clear reduced-capacity conservative bar: {capacity:?}");
+    assert!(
+        capacity.passed,
+        "healthy candidate must clear reduced-capacity conservative bar: {capacity:?}"
+    );
 }
 
 #[test]
@@ -680,13 +851,26 @@ fn rg01h_is_complete_only_after_both_deferred_scenarios_are_merged() {
     let bars = healthy_single_symbol_bars();
     let (report, config) = run(
         &bars,
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 }),
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        }),
     );
 
     let output = run_robustness_gauntlet(&report, &config, &bars, || {
-        Box::new(SingleSymbolBuyHoldSell { symbol: "ES", bar_idx: 0, qty: 1, sell_at_idx: 3 })
+        Box::new(SingleSymbolBuyHoldSell {
+            symbol: "ES",
+            bar_idx: 0,
+            qty: 1,
+            sell_at_idx: 3,
+        })
     });
-    assert!(!output.is_complete(), "must be incomplete before either deferred scenario is merged");
+    assert!(
+        !output.is_complete(),
+        "must be incomplete before either deferred scenario is merged"
+    );
 
     let after_dsr_pbo = output.merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
         name: "dsr_pbo_sensitivity".to_string(),
@@ -702,7 +886,10 @@ fn rg01h_is_complete_only_after_both_deferred_scenarios_are_merged() {
         2,
         "merging dsr_pbo_sensitivity must clear only its own deferred entry"
     );
-    assert!(!after_dsr_pbo.is_complete(), "must still be incomplete: two scenarios remain deferred");
+    assert!(
+        !after_dsr_pbo.is_complete(),
+        "must still be incomplete: two scenarios remain deferred"
+    );
 
     let after_p7a_p7b = after_dsr_pbo.merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
         name: "p7a_p7b_economic_replay_stress".to_string(),
@@ -718,7 +905,10 @@ fn rg01h_is_complete_only_after_both_deferred_scenarios_are_merged() {
         1,
         "merging p7a_p7b_economic_replay_stress must clear only its own deferred entry"
     );
-    assert!(!after_p7a_p7b.is_complete(), "must still be incomplete: one scenario remains deferred");
+    assert!(
+        !after_p7a_p7b.is_complete(),
+        "must still be incomplete: one scenario remains deferred"
+    );
 
     let merged = after_p7a_p7b.merge_dsr_pbo_sensitivity(RobustnessScenarioOutcome {
         name: "genuine_shuffled_placebo".to_string(),
@@ -729,6 +919,12 @@ fn rg01h_is_complete_only_after_both_deferred_scenarios_are_merged() {
         research_trial_id: Some("rg01h_test_trial".to_string()),
         evidence: None,
     });
-    assert!(merged.deferred.is_empty(), "merging all three must clear every deferred entry");
-    assert!(merged.is_complete(), "must be complete once every required scenario is present");
+    assert!(
+        merged.deferred.is_empty(),
+        "merging all three must clear every deferred entry"
+    );
+    assert!(
+        merged.is_complete(),
+        "must be complete once every required scenario is present"
+    );
 }

@@ -33,14 +33,14 @@
 
 use chrono::{Duration, Utc};
 use mqk_db::{
-    evaluate_promotion_tradability, fetch_current_promotion_state,
-    fetch_promotion_transition_lineage_v3, fetch_promotion_history,
-    insert_strategy_promotion_transition, insert_strategy_promotion_transition_serialized,
-    is_legal_transition, resolve_evidence_lineage, transition_requires_evidence,
-    upsert_strategy_registry_entry, InsertStrategyPromotionTransitionArgs, PromotionEvidenceLineageV3,
-    PromotionReasonCode, TransitionInsertOutcome, UpsertStrategyRegistryArgs, ENV_DB_URL,
-    PROMOTION_STATE_ACTIVE_PAPER, PROMOTION_STATE_DEMOTED, PROMOTION_STATE_PAPER_APPROVED,
-    PROMOTION_STATE_REJECTED, PROMOTION_STATE_RETIRED, PROMOTION_STATE_SHADOW_APPROVED,
+    evaluate_promotion_tradability, fetch_current_promotion_state, fetch_promotion_history,
+    fetch_promotion_transition_lineage_v3, insert_strategy_promotion_transition,
+    insert_strategy_promotion_transition_serialized, is_legal_transition, resolve_evidence_lineage,
+    transition_requires_evidence, upsert_strategy_registry_entry,
+    InsertStrategyPromotionTransitionArgs, PromotionEvidenceLineageV3, PromotionReasonCode,
+    TransitionInsertOutcome, UpsertStrategyRegistryArgs, ENV_DB_URL, PROMOTION_STATE_ACTIVE_PAPER,
+    PROMOTION_STATE_DEMOTED, PROMOTION_STATE_PAPER_APPROVED, PROMOTION_STATE_REJECTED,
+    PROMOTION_STATE_RETIRED, PROMOTION_STATE_SHADOW_APPROVED,
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -1053,7 +1053,8 @@ async fn stale_parent_rejected_as_conflict() -> anyhow::Result<()> {
         now + Duration::milliseconds(1),
     );
     advance_args.parent_transition_id = Some(root_id);
-    let outcome = insert_strategy_promotion_transition_serialized(&pool, &advance_args, None).await?;
+    let outcome =
+        insert_strategy_promotion_transition_serialized(&pool, &advance_args, None).await?;
     assert!(matches!(outcome, TransitionInsertOutcome::Inserted(_)));
 
     // A caller that still believes `root_id` is current (stale read) tries
@@ -1070,7 +1071,8 @@ async fn stale_parent_rejected_as_conflict() -> anyhow::Result<()> {
         now + Duration::milliseconds(2),
     );
     stale_args.parent_transition_id = Some(root_id);
-    let stale_outcome = insert_strategy_promotion_transition_serialized(&pool, &stale_args, None).await?;
+    let stale_outcome =
+        insert_strategy_promotion_transition_serialized(&pool, &stale_args, None).await?;
     match stale_outcome {
         TransitionInsertOutcome::Conflict { current } => {
             let current = current.expect("conflict must carry the actual current record");
@@ -1188,7 +1190,10 @@ async fn lineage_atomicity_fresh_insert_commits_lineage_with_transition() -> any
     let recorded = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
         .await?
         .expect("lineage must be readable for the transition_id just inserted");
-    assert_eq!(recorded, lineage, "recorded lineage must exactly match what was supplied");
+    assert_eq!(
+        recorded, lineage,
+        "recorded lineage must exactly match what was supplied"
+    );
 
     Ok(())
 }
@@ -1266,7 +1271,10 @@ async fn lineage_atomicity_duplicate_of_null_lineage_row_refuses_backfill() -> a
     let before = fetch_promotion_transition_lineage_v3(&pool, args.transition_id)
         .await?
         .expect("row must exist after first insert");
-    assert!(before.research_trial_id.is_none(), "precondition: lineage must start NULL");
+    assert!(
+        before.research_trial_id.is_none(),
+        "precondition: lineage must start NULL"
+    );
 
     // A later "duplicate" request for the EXACT SAME transition_id, now
     // supplying genuinely valid lineage -- must be refused, never silently
@@ -1279,7 +1287,8 @@ async fn lineage_atomicity_duplicate_of_null_lineage_row_refuses_backfill() -> a
              refused, never silently backfilled",
         );
     assert!(
-        format!("{err:#}").contains("duplicate of a historical transition with NO recorded evidence lineage"),
+        format!("{err:#}")
+            .contains("duplicate of a historical transition with NO recorded evidence lineage"),
         "got: {err:#}"
     );
 
@@ -1291,7 +1300,10 @@ async fn lineage_atomicity_duplicate_of_null_lineage_row_refuses_backfill() -> a
         after.research_trial_id.is_none() && after.backtest_run_id.is_none(),
         "the refused lineage must never have been backfilled onto the historical row, got {after:?}"
     );
-    assert_eq!(before, after, "lineage state must be byte-identical before and after the refused attempt");
+    assert_eq!(
+        before, after,
+        "lineage state must be byte-identical before and after the refused attempt"
+    );
 
     Ok(())
 }
@@ -1365,13 +1377,16 @@ async fn lineage_atomicity_mismatched_replay_lineage_is_rejected() -> anyhow::Re
     let original_lineage = sample_lineage("trial-original-001", Uuid::new_v4());
     let forged_lineage = sample_lineage("trial-FORGED-999", Uuid::new_v4());
 
-    let first = insert_strategy_promotion_transition_serialized(&pool, &args, Some(&original_lineage))
-        .await?;
+    let first =
+        insert_strategy_promotion_transition_serialized(&pool, &args, Some(&original_lineage))
+            .await?;
     assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
 
     let err = insert_strategy_promotion_transition_serialized(&pool, &args, Some(&forged_lineage))
         .await
-        .expect_err("a divergent lineage for an already-lineage-bound transition_id must be refused");
+        .expect_err(
+            "a divergent lineage for an already-lineage-bound transition_id must be refused",
+        );
     assert!(
         format!("{err:#}").contains("refusing to overwrite authoritative lineage"),
         "got: {err:#}"
@@ -1481,7 +1496,8 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     root_args.evidence_artifact_path = Some("exports/strategy_reviews/evid".to_string());
     root_args.evidence_fingerprint =
         Some("67684119ecbfa8391eee4cc571d59adab9c6dad3d41f7788a984b36da1028dc5".to_string());
-    let root_outcome = insert_strategy_promotion_transition_serialized(&pool, &root_args, None).await?;
+    let root_outcome =
+        insert_strategy_promotion_transition_serialized(&pool, &root_args, None).await?;
     assert!(matches!(root_outcome, TransitionInsertOutcome::Inserted(_)));
 
     // shadow_approved -> paper_approved: no fresh evidence required; must
@@ -1508,7 +1524,8 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     paper_args.evidence_artifact_path = None;
     paper_args.evidence_fingerprint = None;
     paper_args.evidence_fingerprint_v2 = None;
-    let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args, None).await?;
+    let paper_outcome =
+        insert_strategy_promotion_transition_serialized(&pool, &paper_args, None).await?;
     let TransitionInsertOutcome::Inserted(paper_record) = paper_outcome else {
         panic!("expected Inserted");
     };
@@ -1614,7 +1631,8 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
     paper_args.evidence_artifact_path = None;
     paper_args.evidence_fingerprint = None;
     paper_args.evidence_fingerprint_v2 = None;
-    let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args, None).await?;
+    let paper_outcome =
+        insert_strategy_promotion_transition_serialized(&pool, &paper_args, None).await?;
     let TransitionInsertOutcome::Inserted(paper_record) = paper_outcome else {
         panic!("expected Inserted");
     };
@@ -1807,7 +1825,8 @@ async fn valid_v2_fingerprint_inserts_and_replays_idempotently() -> anyhow::Resu
 
     // Exact replay (same transition_id, same content) is idempotent -- no
     // second row, no error, and the v2 fingerprint round-trips unchanged.
-    let replay_outcome = insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
+    let replay_outcome =
+        insert_strategy_promotion_transition_serialized(&pool, &args, None).await?;
     match replay_outcome {
         TransitionInsertOutcome::Duplicate(dup) => {
             assert_eq!(

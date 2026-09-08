@@ -141,6 +141,9 @@ pub use multi_symbol_config::{
 // `multi_symbol_config.rs` for its own internal caller,
 // `build_multi_symbol_runtime_config_from_env` — not re-exported here since
 // nothing else in the crate calls it via this path anymore.)
+pub(crate) use closed_trade_attribution::{
+    resolve_authoritative_closed_trade_view, ClosureAttribution, ClosureFragment,
+};
 pub(crate) use multi_symbol_config::read_multi_symbol_config_raw_inputs_from_env_and_fleet;
 pub use per_symbol_bar_window::{
     classify_bar_staleness, load_recent_completed_bars_for_symbol_window,
@@ -158,9 +161,6 @@ pub use session_controller::{
     autonomous_session_schedule_from_env, run_durable_session_controller_tick,
     run_session_controller_tick, session_window_from_env, spawn_autonomous_session_controller,
     AutonomousSessionSchedule, SessionWindow, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
-};
-pub(crate) use closed_trade_attribution::{
-    resolve_authoritative_closed_trade_view, ClosureAttribution, ClosureFragment,
 };
 pub(crate) use snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
@@ -2542,8 +2542,7 @@ operator_reconcile_or_repair_required"
         let reconcile_gate = types::ReconcileTruthGate {
             reconcile_status: Arc::clone(&self.reconcile_status),
         };
-        let risk_gate =
-            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
+        let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
         let gateway = mqk_execution::wiring::build_gateway(
             daemon_broker,
@@ -2691,7 +2690,10 @@ operator_reconcile_or_repair_required"
         &self,
         provider: Option<Arc<dyn market_calendar::MarketCalendarProvider>>,
     ) {
-        *self.required_universe_calendar_override_for_test.write().await = provider;
+        *self
+            .required_universe_calendar_override_for_test
+            .write()
+            .await = provider;
     }
 
     /// Read the current required-universe calendar-provider override, if
@@ -3638,7 +3640,11 @@ operator_reconcile_or_repair_required"
             return;
         };
         let evaluation_id = Self::derive_strategy_signal_evaluation_id(
-            run_id, strategy_id, symbol, timeframe, now_tick,
+            run_id,
+            strategy_id,
+            symbol,
+            timeframe,
+            now_tick,
         );
         let args = mqk_db::InsertStrategySignalEvaluationArgs {
             evaluation_id,
@@ -3696,13 +3702,18 @@ operator_reconcile_or_repair_required"
     /// letting it unwind the whole tick, as before this repair) safe.
     async fn invoke_native_strategy_host_on_bar(
         &self,
-        call_on_bar: impl FnOnce(&mut NativeStrategyBootstrap) -> Option<mqk_strategy::StrategyBarResult>,
+        call_on_bar: impl FnOnce(
+            &mut NativeStrategyBootstrap,
+        ) -> Option<mqk_strategy::StrategyBarResult>,
     ) -> Result<Option<mqk_strategy::StrategyBarResult>, NativeStrategyOnBarPanicFault> {
         let mut guard = self.native_strategy_bootstrap.lock().await;
         let Some(bootstrap) = guard.as_mut() else {
             return Ok(None);
         };
-        let strategy_id_before = bootstrap.active_strategy_id().unwrap_or_default().to_string();
+        let strategy_id_before = bootstrap
+            .active_strategy_id()
+            .unwrap_or_default()
+            .to_string();
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| call_on_bar(bootstrap)));
         match outcome {
             Ok(result) => Ok(result),
@@ -4328,8 +4339,8 @@ operator_reconcile_or_repair_required"
             // (`panic_on_symbol_for_test`), resolved here (async) so the
             // synchronous `catch_unwind` closure below only needs a plain
             // bool. Permanently `false` in production.
-            let inject_panic_for_test =
-                self.panic_on_symbol_for_test.lock().await.as_deref() == Some(binding.symbol.as_str());
+            let inject_panic_for_test = self.panic_on_symbol_for_test.lock().await.as_deref()
+                == Some(binding.symbol.as_str());
             let bar_result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
                 if inject_panic_for_test {
                     panic!("A1_TEST_INJECTED_PANIC for symbol {}", binding.symbol);
@@ -4799,7 +4810,8 @@ operator_reconcile_or_repair_required"
         // arm-state read failure must fail closed no matter what the
         // DURABLE RUN's own status happened to be, not only the no-run
         // branches that used to check it inline.
-        let snapshot = apply_arm_state_read_failure_override(snapshot, arm_state_read_failed_note.as_deref());
+        let snapshot =
+            apply_arm_state_read_failure_override(snapshot, arm_state_read_failed_note.as_deref());
 
         self.publish_status(snapshot.clone()).await;
         Ok(snapshot)
@@ -5188,8 +5200,7 @@ operator_reconcile_or_repair_required"
         let reconcile_gate = types::ReconcileTruthGate {
             reconcile_status: Arc::clone(&self.reconcile_status),
         };
-        let risk_gate =
-            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
+        let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
         let gateway = mqk_execution::wiring::build_gateway(
             daemon_broker,
@@ -5967,7 +5978,11 @@ mod tests {
             Some("durable arm-state read failed; kill switch status is failing closed (halted)"),
         );
         assert_eq!(snapshot.state, "halted");
-        assert!(snapshot.notes.as_deref().unwrap().contains("durable arm-state read failed"));
+        assert!(snapshot
+            .notes
+            .as_deref()
+            .unwrap()
+            .contains("durable arm-state read failed"));
         // Active-run evidence is preserved, never pretended to have vanished.
         assert_eq!(snapshot.active_run_id, Some(Uuid::nil()));
         assert_eq!(snapshot.deadman_status, "ok");
@@ -7346,8 +7361,7 @@ mod ownership_state_machine_tests {
         let reconcile_gate = types::ReconcileTruthGate {
             reconcile_status: Arc::clone(&state.reconcile_status),
         };
-        let risk_gate =
-            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
+        let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
         let gateway = mqk_execution::wiring::build_gateway(
             daemon_broker,

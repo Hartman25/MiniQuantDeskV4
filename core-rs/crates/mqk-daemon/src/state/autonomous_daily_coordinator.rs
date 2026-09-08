@@ -1920,7 +1920,8 @@ pub async fn apply_completed_bar_task_permanent_failure(
 fn evidence_degraded_runtime_stop_already_recorded(
     operation: &AutonomousDailyOperationRecord,
 ) -> bool {
-    operation.state.as_str() == mqk_db::STATE_EVIDENCE_DEGRADED && operation.stopped_at_utc.is_some()
+    operation.state.as_str() == mqk_db::STATE_EVIDENCE_DEGRADED
+        && operation.stopped_at_utc.is_some()
 }
 
 pub async fn dispatch_by_state(
@@ -2246,7 +2247,9 @@ fn bounded_static_reason(reason_code: &str) -> &'static str {
         "evidence_degraded_recovery_unresolved_inbox" => {
             "evidence_degraded_recovery_unresolved_inbox"
         }
-        "evidence_degraded_recovery_reconcile_dirty" => "evidence_degraded_recovery_reconcile_dirty",
+        "evidence_degraded_recovery_reconcile_dirty" => {
+            "evidence_degraded_recovery_reconcile_dirty"
+        }
         _ => "manual_intervention_required",
     }
 }
@@ -3426,8 +3429,7 @@ async fn attempt_evidence_degraded_recovery(
     // intermediate DB state, by self-looping the retry-timing fields while
     // `state` remains `evidence_degraded`.
     if operation.next_retry_utc.is_none() {
-        let next_retry =
-            next_retry_at(now_utc, (operation.start_attempt_count.max(0) as u64) + 1);
+        let next_retry = next_retry_at(now_utc, (operation.start_attempt_count.max(0) as u64) + 1);
         mqk_db::record_retry_timing(
             pool,
             operation.operation_id,
@@ -3436,7 +3438,9 @@ async fn attempt_evidence_degraded_recovery(
             now_utc,
         )
         .await?;
-        return Ok(Some(AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled));
+        return Ok(Some(
+            AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled,
+        ));
     }
 
     // `attempt_canonical_start` re-checks `next_retry_utc` itself and
@@ -3571,7 +3575,9 @@ async fn reconcile_durable_run_without_local_owner(
     // row remains.
     let unapplied = mqk_db::inbox_load_unapplied_for_run(pool, expected_run_id)
         .await
-        .context("reconcile_durable_run_without_local_owner: inbox_load_unapplied_for_run failed")?;
+        .context(
+            "reconcile_durable_run_without_local_owner: inbox_load_unapplied_for_run failed",
+        )?;
     if !unapplied.is_empty() {
         let newly_applied = apply_manual_if_changed(
             pool,

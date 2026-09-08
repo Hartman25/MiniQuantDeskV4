@@ -251,7 +251,10 @@ mod tests {
         let mut s = SwingMomentumStrategy::new("AAPL");
         let out = s.on_bar(&ctx);
         assert_eq!(out.targets.len(), 1, "SM-12: exactly one target");
-        assert_eq!(out.targets[0].symbol, "AAPL", "SM-12: target symbol matches");
+        assert_eq!(
+            out.targets[0].symbol, "AAPL",
+            "SM-12: target symbol matches"
+        );
         assert_eq!(out.targets[0].qty, 1, "SM-12: qty matches raw signal");
     }
 }

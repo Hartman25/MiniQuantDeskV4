@@ -270,7 +270,10 @@ fn dispatch_cli_value(
     // already enforces this as its OWN binding authority; this is a cheap,
     // independent cross-check against caller/CLI drift, same discipline as
     // the `strategy_id` cross-check above.
-    if let Some(actual_eval_id) = value.get("baseline_economic_eval_id").and_then(|v| v.as_str()) {
+    if let Some(actual_eval_id) = value
+        .get("baseline_economic_eval_id")
+        .and_then(|v| v.as_str())
+    {
         if actual_eval_id != economic_eval_id {
             let reason = format!(
                 "economic_eval_id mismatch: CLI resolved baseline_economic_eval_id \
@@ -317,7 +320,8 @@ fn dispatch_cli_value(
                     evidence: Some(value),
                 },
                 _ => {
-                    let reason = format!("evaluated result missing passed/stressed_max_drawdown: {value}");
+                    let reason =
+                        format!("evaluated result missing passed/stressed_max_drawdown: {value}");
                     RobustnessScenarioOutcome {
                         name,
                         applicable: true,
@@ -400,7 +404,10 @@ mod tests {
         assert!(outcome.applicable);
         assert!(!outcome.passed);
         assert!(
-            outcome.reason.unwrap_or_default().contains("invalid max_drawdown_ceiling"),
+            outcome
+                .reason
+                .unwrap_or_default()
+                .contains("invalid max_drawdown_ceiling"),
             "must name the exact invalid parameter"
         );
     }
@@ -422,7 +429,10 @@ mod tests {
             1.5,
         );
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("invalid max_drawdown_ceiling"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("invalid max_drawdown_ceiling"));
     }
 
     #[test]
@@ -442,7 +452,10 @@ mod tests {
             f64::NAN,
         );
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap_or_default().contains("invalid max_drawdown_ceiling"));
+        assert!(outcome
+            .reason
+            .unwrap_or_default()
+            .contains("invalid max_drawdown_ceiling"));
     }
 
     /// Every rejected outcome (including invalid-threshold rejections) still
@@ -492,7 +505,10 @@ mod tests {
             Some("some_trial".to_string()),
         )
         .unwrap_or_else(|e| e);
-        assert!(outcome.applicable, "not_evaluable must never become applicable: false");
+        assert!(
+            outcome.applicable,
+            "not_evaluable must never become applicable: false"
+        );
         assert!(!outcome.passed);
         assert!(outcome.reason.unwrap().contains("official model"));
     }
@@ -520,7 +536,10 @@ mod tests {
         .unwrap_or_else(|e| e);
         assert!(outcome.applicable);
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap().contains("economic_eval_id mismatch"));
+        assert!(outcome
+            .reason
+            .unwrap()
+            .contains("economic_eval_id mismatch"));
     }
 
     /// A genuine `strategy_id` mismatch still fails closed exactly as before
@@ -567,9 +586,19 @@ mod tests {
         .unwrap_or_else(|e| e);
         assert!(outcome.applicable);
         assert!(outcome.passed);
-        let evidence = outcome.evidence.expect("evaluated outcome must carry structured evidence");
-        assert_eq!(evidence.get("bars_csv_sha256").and_then(|v| v.as_str()), Some("abc"));
-        assert_eq!(evidence.get("stressed_economic_eval_id").and_then(|v| v.as_str()), Some("e2"));
+        let evidence = outcome
+            .evidence
+            .expect("evaluated outcome must carry structured evidence");
+        assert_eq!(
+            evidence.get("bars_csv_sha256").and_then(|v| v.as_str()),
+            Some("abc")
+        );
+        assert_eq!(
+            evidence
+                .get("stressed_economic_eval_id")
+                .and_then(|v| v.as_str()),
+            Some("e2")
+        );
     }
 
     /// A drawdown-ceiling breach ("evaluated, not passed") is a genuine
@@ -587,7 +616,10 @@ mod tests {
             .unwrap_or_else(|e| e);
         assert!(outcome.applicable);
         assert!(!outcome.passed);
-        assert!(outcome.reason.unwrap().contains("breached the conservative max-drawdown"));
+        assert!(outcome
+            .reason
+            .unwrap()
+            .contains("breached the conservative max-drawdown"));
         assert!(outcome.evidence.is_some());
     }
 

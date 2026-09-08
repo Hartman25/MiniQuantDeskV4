@@ -1328,7 +1328,11 @@ mod broker_retry_tests {
     // field) -- non-429 classification is unchanged by this patch.
     #[test]
     fn br03_classify_http_status_threads_retry_after_onto_rate_limit_only() {
-        let err = classify_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down", Some(30_000));
+        let err = classify_http_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "slow down",
+            Some(30_000),
+        );
         assert_eq!(
             err,
             BrokerError::RateLimit {
@@ -1338,7 +1342,8 @@ mod broker_retry_tests {
             }
         );
 
-        let err_no_header = classify_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down", None);
+        let err_no_header =
+            classify_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down", None);
         assert_eq!(
             err_no_header,
             BrokerError::RateLimit {
@@ -1351,7 +1356,11 @@ mod broker_retry_tests {
         // A retry_after_ms value is passed through unused for a status
         // whose BrokerError variant carries no such field -- classification
         // itself is otherwise identical to before this patch.
-        let err_500 = classify_http_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "oops", Some(5_000));
+        let err_500 = classify_http_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "oops",
+            Some(5_000),
+        );
         assert!(matches!(err_500, BrokerError::Transient { .. }));
     }
 

@@ -53,7 +53,15 @@ fn load_fixture() -> GoldenFixture {
 /// this symbol" to be signalled from (BKT-FUTURE-EXECUTION-01: signal at T,
 /// fill only on the first strictly-later bar).
 fn setup_bar(ts: i64) -> BacktestBar {
-    BacktestBar::new(SYMBOL, ts, 500_000_000, 500_000_000, 500_000_000, 500_000_000, 1000)
+    BacktestBar::new(
+        SYMBOL,
+        ts,
+        500_000_000,
+        500_000_000,
+        500_000_000,
+        500_000_000,
+        1000,
+    )
 }
 
 fn golden_bar(ts: i64, case: &GoldenCase) -> BacktestBar {

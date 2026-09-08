@@ -89,7 +89,8 @@ fn write_inline_promotion_evidence(
     mqk_artifacts::write_canonical_stress_suite(run_dir, &stress_output)
         .context("write_canonical_stress_suite failed")?;
 
-    let gauntlet_output = mqk_backtest::run_robustness_gauntlet(report, config, bars, &make_strategy);
+    let gauntlet_output =
+        mqk_backtest::run_robustness_gauntlet(report, config, bars, &make_strategy);
     mqk_artifacts::write_canonical_robustness_gauntlet(run_dir, &gauntlet_output)
         .context("write_canonical_robustness_gauntlet failed")?;
 
@@ -240,9 +241,16 @@ pub async fn run_backtest_csv(
         // + P9 robustness gauntlet, using the SAME genuine cfg/bars/reg this
         // run just used -- reg is still owned here (instantiate only
         // borrows), never reconstructed.
-        write_inline_promotion_evidence(&init_result.run_dir, &report, &cfg_for_evidence, &bars, || {
-            reg.instantiate(&strategy).expect("strategy known valid: already instantiated once above")
-        })
+        write_inline_promotion_evidence(
+            &init_result.run_dir,
+            &report,
+            &cfg_for_evidence,
+            &bars,
+            || {
+                reg.instantiate(&strategy)
+                    .expect("strategy known valid: already instantiated once above")
+            },
+        )
         .with_context(|| {
             format!(
                 "write inline promotion evidence failed: {}",
@@ -642,9 +650,16 @@ pub async fn run_backtest_db(
         // + P9 robustness gauntlet, using the SAME genuine cfg/bars/reg this
         // run just used -- reg is still owned here (instantiate only
         // borrows), never reconstructed.
-        write_inline_promotion_evidence(&init_result.run_dir, &report, &cfg_for_evidence, &bars, || {
-            reg.instantiate(&strategy).expect("strategy known valid: already instantiated once above")
-        })
+        write_inline_promotion_evidence(
+            &init_result.run_dir,
+            &report,
+            &cfg_for_evidence,
+            &bars,
+            || {
+                reg.instantiate(&strategy)
+                    .expect("strategy known valid: already instantiated once above")
+            },
+        )
         .with_context(|| {
             format!(
                 "write inline promotion evidence failed: {}",
@@ -1287,13 +1302,14 @@ pub fn run_finalize_robustness_sensitivity(
     let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
     let run_dir = Path::new(&artifact_root).join(run_id.to_string());
 
-    let existing = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
-        format!(
-            "existing robustness_gauntlet.json must already be real and structurally valid \
+    let existing =
+        mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
+            format!(
+                "existing robustness_gauntlet.json must already be real and structurally valid \
              at {} -- run the real backtest (mqk backtest csv/db with --out-dir) first",
-            run_dir.display()
-        )
-    })?;
+                run_dir.display()
+            )
+        })?;
 
     let block_counts: Vec<u32> = parse_u32_list(&block_counts)?;
     if block_counts.is_empty() {
@@ -1336,7 +1352,10 @@ pub fn run_finalize_robustness_sensitivity(
     println!("finalized_artifact={}", path.display());
     println!("scenarios_run={}", finalized.scenarios_run());
     println!("is_complete={}", finalized.is_complete());
-    println!("all_applicable_passed={}", finalized.all_applicable_passed());
+    println!(
+        "all_applicable_passed={}",
+        finalized.all_applicable_passed()
+    );
 
     Ok(())
 }
@@ -1372,13 +1391,14 @@ pub fn run_finalize_p7a_p7b_replay_stress(
     let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
     let run_dir = Path::new(&artifact_root).join(run_id.to_string());
 
-    let existing = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
-        format!(
-            "existing robustness_gauntlet.json must already be real and structurally valid \
+    let existing =
+        mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
+            format!(
+                "existing robustness_gauntlet.json must already be real and structurally valid \
              at {} -- run the real backtest (mqk backtest csv/db with --out-dir) first",
-            run_dir.display()
-        )
-    })?;
+                run_dir.display()
+            )
+        })?;
 
     let stress = mqk_backtest::p7a_p7b_economic_replay_stress_scenario(
         &python,
@@ -1405,11 +1425,11 @@ pub fn run_finalize_p7a_p7b_replay_stress(
     let path =
         mqk_artifacts::finalize_canonical_robustness_gauntlet_with_sensitivity(&run_dir, &stress)
             .with_context(|| {
-                format!(
-                    "finalize_canonical_robustness_gauntlet_with_sensitivity failed for {}",
-                    run_dir.display()
-                )
-            })?;
+            format!(
+                "finalize_canonical_robustness_gauntlet_with_sensitivity failed for {}",
+                run_dir.display()
+            )
+        })?;
 
     let finalized = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir)
         .context("re-loading the finalized artifact failed")?;
@@ -1417,7 +1437,10 @@ pub fn run_finalize_p7a_p7b_replay_stress(
     println!("finalized_artifact={}", path.display());
     println!("scenarios_run={}", finalized.scenarios_run());
     println!("is_complete={}", finalized.is_complete());
-    println!("all_applicable_passed={}", finalized.all_applicable_passed());
+    println!(
+        "all_applicable_passed={}",
+        finalized.all_applicable_passed()
+    );
 
     Ok(())
 }
@@ -1445,13 +1468,14 @@ pub fn run_finalize_genuine_shuffled_placebo(
     let run_id: uuid::Uuid = run_id.parse().context("--run-id must be a valid UUID")?;
     let run_dir = Path::new(&artifact_root).join(run_id.to_string());
 
-    let existing = mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
-        format!(
-            "existing robustness_gauntlet.json must already be real and structurally valid \
+    let existing =
+        mqk_artifacts::load_canonical_robustness_gauntlet(&run_dir).with_context(|| {
+            format!(
+                "existing robustness_gauntlet.json must already be real and structurally valid \
              at {} -- run the real backtest (mqk backtest csv/db with --out-dir) first",
-            run_dir.display()
-        )
-    })?;
+                run_dir.display()
+            )
+        })?;
 
     let placebo = mqk_backtest::genuine_shuffled_placebo_scenario(
         &python,
@@ -1485,7 +1509,10 @@ pub fn run_finalize_genuine_shuffled_placebo(
     println!("finalized_artifact={}", path.display());
     println!("scenarios_run={}", finalized.scenarios_run());
     println!("is_complete={}", finalized.is_complete());
-    println!("all_applicable_passed={}", finalized.all_applicable_passed());
+    println!(
+        "all_applicable_passed={}",
+        finalized.all_applicable_passed()
+    );
 
     Ok(())
 }
@@ -1494,7 +1521,10 @@ fn parse_u32_list(s: &str) -> Result<Vec<u32>> {
     s.split(',')
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
-        .map(|v| v.parse::<u32>().with_context(|| format!("invalid integer: {v}")))
+        .map(|v| {
+            v.parse::<u32>()
+                .with_context(|| format!("invalid integer: {v}"))
+        })
         .collect()
 }
 

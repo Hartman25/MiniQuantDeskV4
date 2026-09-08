@@ -613,8 +613,11 @@ mod opening_bar_tests {
         crate::state::market_calendar::MarketSessionSchedule {
             market_date: (2024, 4, 15),
             session_open_utc: DateTime::<Utc>::from_timestamp(session_open_utc_ts, 0).unwrap(),
-            session_close_utc: DateTime::<Utc>::from_timestamp(session_open_utc_ts + 6 * 3600 + 1800, 0)
-                .unwrap(),
+            session_close_utc: DateTime::<Utc>::from_timestamp(
+                session_open_utc_ts + 6 * 3600 + 1800,
+                0,
+            )
+            .unwrap(),
             previous_trading_date: (2024, 4, 12),
             is_early_close: false,
             is_trading_day,
@@ -628,7 +631,12 @@ mod opening_bar_tests {
     #[test]
     fn obf_01_true_45_seconds_after_open_for_5m_timeframe() {
         let sched = schedule(OPEN_TS, true);
-        assert!(is_awaiting_first_session_bar(&sched, 300, 300, OPEN_TS + 45));
+        assert!(is_awaiting_first_session_bar(
+            &sched,
+            300,
+            300,
+            OPEN_TS + 45
+        ));
     }
 
     #[test]
@@ -656,7 +664,12 @@ mod opening_bar_tests {
     #[test]
     fn obf_04_false_on_a_non_trading_day_regardless_of_wall_clock() {
         let sched = schedule(OPEN_TS, false);
-        assert!(!is_awaiting_first_session_bar(&sched, 300, 300, OPEN_TS + 45));
+        assert!(!is_awaiting_first_session_bar(
+            &sched,
+            300,
+            300,
+            OPEN_TS + 45
+        ));
     }
 
     #[test]

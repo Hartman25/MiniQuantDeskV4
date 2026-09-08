@@ -625,10 +625,8 @@ impl BacktestEngine {
                 Vec::new()
             } else {
                 let position_book = self.build_position_book();
-                let decision = targets_to_order_intents(
-                    &bar_result.intents.output.targets,
-                    &position_book,
-                );
+                let decision =
+                    targets_to_order_intents(&bar_result.intents.output.targets, &position_book);
                 match decision {
                     mqk_execution::ExecutionDecision::Noop => Vec::new(),
                     mqk_execution::ExecutionDecision::PlaceOrders(intents) => intents,
@@ -813,8 +811,7 @@ impl BacktestEngine {
         // -- never reconstructed from `strategy_name` or any other cached
         // value. Empty string mirrors `strategy_name`'s own no-strategy
         // default.
-        let strategy_semantic_fingerprint =
-            self.host.semantic_fingerprint().unwrap_or_default();
+        let strategy_semantic_fingerprint = self.host.semantic_fingerprint().unwrap_or_default();
         let config_id = self.config.config_id();
         // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01 / BKT-FUTURE-EXECUTION-01-REPAIR-01
         // (Blocker 2) / BACKTEST-STRATEGY-SEMANTIC-RUN-IDENTITY-01: run
@@ -1195,8 +1192,9 @@ impl BacktestEngine {
                 let product = (reducing_qty as i128) * (mark_micros as i128);
                 product.clamp(i64::MIN as i128, i64::MAX as i128) as i64
             };
-            let prospective_gross_exposure_micros =
-                exposure.gross_exposure_micros.saturating_sub(closing_exposure_micros);
+            let prospective_gross_exposure_micros = exposure
+                .gross_exposure_micros
+                .saturating_sub(closing_exposure_micros);
             // BACKTEST-MULTIPLIER-RUN-WIRE-01: multiplier-aware notional.
             // With `economics.contract_multiplier == 1` this is exactly
             // `qty * fill_price`, unchanged for every existing equity backtest.
@@ -1233,7 +1231,13 @@ impl BacktestEngine {
         let fill_id = BacktestFill::make_fill_id(&pending.order_id);
         // BKT-03P: commission fee computed at fill time, never at signal time.
         let fee = self.config.commission.compute_fee(pending.qty, fill_price);
-        let inner = Fill::new(pending.symbol.clone(), pf_side, pending.qty, fill_price, fee);
+        let inner = Fill::new(
+            pending.symbol.clone(),
+            pf_side,
+            pending.qty,
+            fill_price,
+            fee,
+        );
         apply_fill(&mut self.portfolio, &inner);
         // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel multiplier-aware shadow
         // ledger update. Never reads from or mutates `self.portfolio`.

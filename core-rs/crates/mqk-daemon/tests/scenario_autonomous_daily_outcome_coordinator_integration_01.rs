@@ -1163,7 +1163,11 @@ async fn ci_11_12_evidence_degraded_warning_dedup() {
     // that unrelated recovery gate (which fails closed on this fixture's
     // absent `sys_reconcile_status` row) instead of E2B's dedup/replay
     // path this test targets.
-    ci_tick(&st, plan.effective_operation_close_utc + chrono::Duration::seconds(1)).await;
+    ci_tick(
+        &st,
+        plan.effective_operation_close_utc + chrono::Duration::seconds(1),
+    )
+    .await;
     let record_2 = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
         .await
         .expect("fetch ok")

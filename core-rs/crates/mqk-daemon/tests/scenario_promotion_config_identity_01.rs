@@ -169,7 +169,9 @@ async fn continuity_match_advances_and_persists_same_fingerprint() {
         .expect("swing_momentum must resolve");
     assert_eq!(real_fp.len(), 64, "fingerprint must be 64 hex chars");
     assert!(
-        real_fp.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+        real_fp
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
         "fingerprint must be lowercase hex"
     );
 
@@ -200,7 +202,11 @@ async fn continuity_match_advances_and_persists_same_fingerprint() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "continuity match must succeed: {json}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "continuity match must succeed: {json}"
+    );
     assert_eq!(json["disposition"], "transitioned");
 
     let transition_id: Uuid = Uuid::parse_str(json["transition_id"].as_str().unwrap()).unwrap();
@@ -240,7 +246,10 @@ async fn continuity_mismatch_shadow_to_paper_is_rejected() {
     let symbol = unique_symbol();
     let real_fp = resolve_server_semantic_fingerprint(STRATEGY_ID, &symbol, TIMEFRAME_SECS)
         .expect("swing_momentum must resolve");
-    assert_ne!(real_fp, WRONG_FINGERPRINT, "sanity: fixture constant must not collide with reality");
+    assert_ne!(
+        real_fp, WRONG_FINGERPRINT,
+        "sanity: fixture constant must not collide with reality"
+    );
 
     seed_transition(
         &pool,
@@ -270,7 +279,11 @@ async fn continuity_mismatch_shadow_to_paper_is_rejected() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "mismatch must be refused: {json}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "mismatch must be refused: {json}"
+    );
     assert_eq!(json["disposition"], "config_identity_mismatch");
     assert_eq!(
         row_count_for(&pool, &symbol).await,
@@ -316,7 +329,11 @@ async fn continuity_mismatch_paper_to_active_is_rejected() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "mismatch must be refused: {json}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "mismatch must be refused: {json}"
+    );
     assert_eq!(json["disposition"], "config_identity_mismatch");
 
     cleanup(&pool, &symbol).await;
@@ -358,7 +375,11 @@ async fn continuity_legacy_null_parent_is_rejected() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "legacy NULL must never wildcard-match: {json}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "legacy NULL must never wildcard-match: {json}"
+    );
     assert_eq!(json["disposition"], "config_identity_mismatch");
 
     cleanup(&pool, &symbol).await;

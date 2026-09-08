@@ -33,11 +33,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use mqk_config::secrets::ResolvedDiscordWebhooks;
 use mqk_daemon::notify::{
     CriticalAlertPayload, DiscordNotifier, OperatorNotifyPayload, RunStatusPayload,
     TestAlertPayload, TradeEventPayload,
 };
-use mqk_config::secrets::ResolvedDiscordWebhooks;
 
 // ---------------------------------------------------------------------------
 // In-process webhook sink
@@ -111,10 +111,26 @@ async fn cr01_critical_alert_delivers_to_alerts_only() {
         })
         .await;
 
-    assert_eq!(alerts.hits.load(Ordering::SeqCst), 1, "alerts channel must receive the alert");
-    assert_eq!(c2.hits.load(Ordering::SeqCst), 0, "c2 channel must not receive it");
-    assert_eq!(paper.hits.load(Ordering::SeqCst), 0, "paper channel must not receive it");
-    assert_eq!(live.hits.load(Ordering::SeqCst), 0, "live channel must not receive it");
+    assert_eq!(
+        alerts.hits.load(Ordering::SeqCst),
+        1,
+        "alerts channel must receive the alert"
+    );
+    assert_eq!(
+        c2.hits.load(Ordering::SeqCst),
+        0,
+        "c2 channel must not receive it"
+    );
+    assert_eq!(
+        paper.hits.load(Ordering::SeqCst),
+        0,
+        "paper channel must not receive it"
+    );
+    assert_eq!(
+        live.hits.load(Ordering::SeqCst),
+        0,
+        "live channel must not receive it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -146,8 +162,16 @@ async fn cr02_operator_action_delivers_to_c2_only() {
         })
         .await;
 
-    assert_eq!(c2.hits.load(Ordering::SeqCst), 1, "c2 channel must receive the operator action");
-    assert_eq!(alerts.hits.load(Ordering::SeqCst), 0, "alerts channel must not receive it");
+    assert_eq!(
+        c2.hits.load(Ordering::SeqCst),
+        1,
+        "c2 channel must receive the operator action"
+    );
+    assert_eq!(
+        alerts.hits.load(Ordering::SeqCst),
+        0,
+        "alerts channel must not receive it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -188,8 +212,16 @@ async fn cr03_trade_event_paper_delivers_to_paper_only() {
         .notify_trade_event(&trade_event_payload(Some("paper")))
         .await;
 
-    assert_eq!(paper.hits.load(Ordering::SeqCst), 1, "paper channel must receive the trade event");
-    assert_eq!(live.hits.load(Ordering::SeqCst), 0, "live channel must not receive it");
+    assert_eq!(
+        paper.hits.load(Ordering::SeqCst),
+        1,
+        "paper channel must receive the trade event"
+    );
+    assert_eq!(
+        live.hits.load(Ordering::SeqCst),
+        0,
+        "live channel must not receive it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -216,8 +248,16 @@ async fn cr04_trade_event_live_shadow_delivers_to_live_only() {
         .notify_trade_event(&trade_event_payload(Some("live-shadow")))
         .await;
 
-    assert_eq!(live.hits.load(Ordering::SeqCst), 1, "live channel must receive live-shadow trade events");
-    assert_eq!(paper.hits.load(Ordering::SeqCst), 0, "paper channel must not receive it");
+    assert_eq!(
+        live.hits.load(Ordering::SeqCst),
+        1,
+        "live channel must receive live-shadow trade events"
+    );
+    assert_eq!(
+        paper.hits.load(Ordering::SeqCst),
+        0,
+        "paper channel must not receive it"
+    );
 }
 
 #[tokio::test]
@@ -238,8 +278,16 @@ async fn cr04b_trade_event_live_capital_delivers_to_live_only() {
         .notify_trade_event(&trade_event_payload(Some("live-capital")))
         .await;
 
-    assert_eq!(live.hits.load(Ordering::SeqCst), 1, "live channel must receive live-capital trade events");
-    assert_eq!(paper.hits.load(Ordering::SeqCst), 0, "paper channel must not receive it");
+    assert_eq!(
+        live.hits.load(Ordering::SeqCst),
+        1,
+        "live channel must receive live-capital trade events"
+    );
+    assert_eq!(
+        paper.hits.load(Ordering::SeqCst),
+        0,
+        "paper channel must not receive it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -328,9 +376,16 @@ async fn cr06_test_alert_delivers_to_alerts_only() {
         })
         .await;
 
-    assert!(delivered, "alerts channel is configured; delivery must succeed");
+    assert!(
+        delivered,
+        "alerts channel is configured; delivery must succeed"
+    );
     assert_eq!(alerts.hits.load(Ordering::SeqCst), 1);
-    assert_eq!(c2.hits.load(Ordering::SeqCst), 0, "test alert must not land on c2");
+    assert_eq!(
+        c2.hits.load(Ordering::SeqCst),
+        0,
+        "test alert must not land on c2"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +411,9 @@ async fn cr07_unrecognized_environment_routes_nowhere() {
     notifier
         .notify_trade_event(&trade_event_payload(Some("staging"))) // not a real deployment mode label
         .await;
-    notifier.notify_trade_event(&trade_event_payload(None)).await;
+    notifier
+        .notify_trade_event(&trade_event_payload(None))
+        .await;
 
     assert_eq!(paper.hits.load(Ordering::SeqCst), 0);
     assert_eq!(live.hits.load(Ordering::SeqCst), 0);
@@ -412,8 +469,15 @@ async fn cr08_unconfigured_channel_noops_with_others_fully_configured() {
         })
         .await;
 
-    assert!(!delivered, "test alert must report non-delivery when alerts is unconfigured");
-    assert_eq!(paper.hits.load(Ordering::SeqCst), 0, "unrelated channels must not receive alerts traffic");
+    assert!(
+        !delivered,
+        "test alert must report non-delivery when alerts is unconfigured"
+    );
+    assert_eq!(
+        paper.hits.load(Ordering::SeqCst),
+        0,
+        "unrelated channels must not receive alerts traffic"
+    );
     assert_eq!(live.hits.load(Ordering::SeqCst), 0);
     assert_eq!(c2.hits.load(Ordering::SeqCst), 0);
 }

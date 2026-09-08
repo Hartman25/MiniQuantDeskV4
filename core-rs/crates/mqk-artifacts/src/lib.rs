@@ -1107,7 +1107,7 @@ pub fn write_backtest_report(
             "{},{},{},{},{},{},{},{}\n",
             f.fill_ts, // bar end timestamp that actually priced this fill (BKT-FUTURE-EXECUTION-01: may be later than the order's signal_ts)
             f.fill_id, // deterministic UUIDv5 per fill
-            f.order_id,   // deterministic UUIDv5 per originating order intent
+            f.order_id, // deterministic UUIDv5 per originating order intent
             f.symbol,
             side,
             f.qty,
@@ -1353,12 +1353,12 @@ pub fn write_backtest_report(
             &canonical_report_path,
             initial_cash_micros,
         )
-            .with_context(|| {
-                format!(
-                    "write backtest completion audit event failed: {}",
-                    run_dir.display()
-                )
-            })?;
+        .with_context(|| {
+            format!(
+                "write backtest completion audit event failed: {}",
+                run_dir.display()
+            )
+        })?;
     }
 
     Ok(())
@@ -1499,10 +1499,7 @@ fn build_report_md(
         "| Input Data Hash | {} |\n",
         report.input_data_hash
     ));
-    out.push_str(&format!(
-        "| Execution Model | {} |\n",
-        m.execution_model_id
-    ));
+    out.push_str(&format!("| Execution Model | {} |\n", m.execution_model_id));
     out.push_str(&format!("| Halted | {} |\n", m.halted));
     if let Some(r) = m.halt_reason {
         out.push_str(&format!("| Halt Reason | {} |\n", r));
@@ -1891,10 +1888,8 @@ mod tests {
     /// execution.
     #[test]
     fn execution_model_id_is_written_truthfully_to_metrics_and_report_md() {
-        let tmp = std::env::temp_dir().join(format!(
-            "mqk_art_test_exec_model_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("mqk_art_test_exec_model_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = BacktestReport {
@@ -1907,7 +1902,8 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&metrics_contents).expect("metrics.json must be valid JSON");
         assert_eq!(
-            v["execution_model_id"], mqk_backtest::BACKTEST_EXECUTION_MODEL_ID,
+            v["execution_model_id"],
+            mqk_backtest::BACKTEST_EXECUTION_MODEL_ID,
             "metrics.json must truthfully carry the execution model that produced the run"
         );
 
@@ -1993,7 +1989,10 @@ mod tests {
                     status: OrderStatus::Filled,
                 },
                 BacktestOrder {
-                    order_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"mixed_allocation_reject"),
+                    order_id: Uuid::new_v5(
+                        &Uuid::from_bytes([0u8; 16]),
+                        b"mixed_allocation_reject",
+                    ),
                     signal_ts: 2_000,
                     symbol: "SPY".to_string(),
                     side: BacktestOrderSide::Buy,
@@ -2046,10 +2045,7 @@ mod tests {
         );
         // The generic allocation-cap rejection's row must still read exactly
         // "REJECTED" and not have been reinterpreted as liquidity-specific.
-        let generic_rejected_rows = csv
-            .lines()
-            .filter(|l| l.ends_with(",REJECTED"))
-            .count();
+        let generic_rejected_rows = csv.lines().filter(|l| l.ends_with(",REJECTED")).count();
         assert_eq!(
             generic_rejected_rows, 1,
             "exactly one order must carry the plain REJECTED status: {csv}"

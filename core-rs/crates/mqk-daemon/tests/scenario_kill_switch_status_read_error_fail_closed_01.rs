@@ -259,14 +259,19 @@ async fn ksre04_system_status_route_reports_kill_switch_active_on_read_error() {
         )
         .await
         .expect("KSRE-04: oneshot failed");
-    assert_eq!(resp.status(), StatusCode::OK, "KSRE-04: status route must not hard-error on an arm-state read failure");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "KSRE-04: status route must not hard-error on an arm-state read failure"
+    );
     let body = resp
         .into_body()
         .collect()
         .await
         .expect("KSRE-04: body collect failed")
         .to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("KSRE-04: response must be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).expect("KSRE-04: response must be valid JSON");
 
     assert_eq!(
         json.get("kill_switch_active"),

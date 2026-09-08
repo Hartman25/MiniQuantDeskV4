@@ -132,7 +132,12 @@ fn resolve_identity_for_env(
         &assignment_identity,
         &runtime_binding_identity,
     );
-    (plan, assignment_identity, runtime_binding_identity, operation_id)
+    (
+        plan,
+        assignment_identity,
+        runtime_binding_identity,
+        operation_id,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -296,7 +301,10 @@ async fn cleanup_run(pool: &sqlx::PgPool, run_id: Uuid) {
         .await;
 }
 
-async fn reset_reconcile_status_clean(pool: &sqlx::PgPool, now_utc: DateTime<Utc>) -> anyhow::Result<()> {
+async fn reset_reconcile_status_clean(
+    pool: &sqlx::PgPool,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<()> {
     mqk_db::persist_reconcile_status_state(
         pool,
         &mqk_db::PersistReconcileStatusState {
@@ -438,7 +446,10 @@ async fn t2_due_retry_genuinely_attempts_start_never_reschedules_again() -> anyh
         .await?
         .expect("row must exist");
     let outcome = dispatch_by_state(&st, &pool, before, &plan, now).await?;
-    assert_eq!(outcome, AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled);
+    assert_eq!(
+        outcome,
+        AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled
+    );
 
     let scheduled = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
@@ -776,7 +787,10 @@ async fn t8_unresolved_inbox_fails_closed() -> anyhow::Result<()> {
         serde_json::json!({"event_kind": "fill"}),
     )
     .await?;
-    assert!(inserted, "fixture precondition: inbox row must be newly inserted");
+    assert!(
+        inserted,
+        "fixture precondition: inbox row must be newly inserted"
+    );
 
     let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
@@ -1037,7 +1051,10 @@ async fn t12_repeated_ticks_before_due_are_idempotent() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let outcome1 = dispatch_by_state(&st, &pool, before, &plan, now).await?;
-    assert_eq!(outcome1, AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled);
+    assert_eq!(
+        outcome1,
+        AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled
+    );
     let after_first = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");

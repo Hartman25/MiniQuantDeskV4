@@ -29,11 +29,11 @@ fn bar(symbol: &str, end_ts: i64, close: i64) -> BacktestBar {
     BacktestBar::new(
         symbol,
         end_ts,
-        close - 3,       // open
-        close + 5,       // high
-        close - 5,       // low
-        close,           // close
-        1_000 + close,   // volume (also distinct, for fidelity check)
+        close - 3,     // open
+        close + 5,     // high
+        close - 5,     // low
+        close,         // close
+        1_000 + close, // volume (also distinct, for fidelity check)
     )
 }
 
@@ -52,14 +52,22 @@ fn test1_same_timestamp_bars_form_one_coherent_frame() {
     ];
     let frames = build_market_frames(&bars, 20).unwrap();
 
-    assert_eq!(frames.len(), 1, "one distinct end_ts must produce exactly one frame");
+    assert_eq!(
+        frames.len(),
+        1,
+        "one distinct end_ts must produce exactly one frame"
+    );
     let f = &frames[0];
     assert_eq!(f.end_ts(), 600);
     assert!(f.current("AAPL").is_some());
     assert!(f.current("AMD").is_some());
     assert!(f.current("SPY").is_some());
     let symbols: Vec<&str> = f.symbols().collect();
-    assert_eq!(symbols, vec!["AAPL", "AMD", "SPY"], "symbols() must be deterministic (alphabetical)");
+    assert_eq!(
+        symbols,
+        vec!["AAPL", "AMD", "SPY"],
+        "symbols() must be deterministic (alphabetical)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +276,10 @@ fn test6_missing_symbol_is_explicit_none() {
     assert!(f0.current("NVDA").is_some(), "NVDA present at 600");
 
     let f1 = &frames[1];
-    assert!(f1.current("NVDA").is_none(), "NVDA absent at 660 must be explicit None");
+    assert!(
+        f1.current("NVDA").is_none(),
+        "NVDA absent at 660 must be explicit None"
+    );
     assert!(!f1.is_present("NVDA"));
     // The other four symbols are unaffected by NVDA's absence.
     for s in ["AAPL", "AMD", "SPY", "SMH"] {
@@ -299,7 +310,11 @@ fn test7_history_is_bounded_per_symbol() {
     let last = frames.last().unwrap();
 
     let hist = last.history("AAPL").unwrap();
-    assert_eq!(hist.len(), 3, "history must be truncated to bar_history_len=3");
+    assert_eq!(
+        hist.len(),
+        3,
+        "history must be truncated to bar_history_len=3"
+    );
     // Must contain exactly the 3 most recent bars (end_ts 1020, 1080, 1140,
     // i.e. i=7,8,9 of the 10 bars at 600 + i*60).
     let end_tss: Vec<i64> = hist.bars.iter().map(|b| b.end_ts).collect();
@@ -352,11 +367,12 @@ fn test8_compat_adapter_matches_existing_engine_context() {
     let engine_windows = engine_log.lock().unwrap().clone();
 
     // Path B: market_frame layer + compatibility adapter, same bars/config.
-    let frames = build_market_frames(&bars, BacktestConfig::test_defaults().bar_history_len).unwrap();
+    let frames =
+        build_market_frames(&bars, BacktestConfig::test_defaults().bar_history_len).unwrap();
     let mut adapter_windows = Vec::new();
     for (i, f) in frames.iter().enumerate() {
-        let ctx = strategy_context_for_symbol(f, "SPY", 60, (i + 1) as u64)
-            .expect("SPY history present");
+        let ctx =
+            strategy_context_for_symbol(f, "SPY", 60, (i + 1) as u64).expect("SPY history present");
         adapter_windows.push(ctx.recent.clone());
     }
 
@@ -412,7 +428,10 @@ fn optional_cross_sectional_probe_computes_relative_close() {
     let spy_close = f.current("SPY").unwrap().close_micros;
     let ratio = aapl_close as f64 / spy_close as f64;
 
-    assert!((ratio - 0.25).abs() < 1e-9, "expected AAPL/SPY == 100/400 == 0.25, got {ratio}");
+    assert!(
+        (ratio - 0.25).abs() < 1e-9,
+        "expected AAPL/SPY == 100/400 == 0.25, got {ratio}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -472,9 +491,17 @@ fn test10_evaluation_seam_sees_aapl_amd_spy_contemporaneously_across_timestamps(
     let mut evaluator = RecordingEvaluator::default();
     evaluate_market_frames(&bars, 20, &mut evaluator).expect("valid input must not fail closed");
 
-    assert_eq!(evaluator.calls.len(), 4, "one on_frame call per distinct timestamp");
+    assert_eq!(
+        evaluator.calls.len(),
+        4,
+        "one on_frame call per distinct timestamp"
+    );
     let end_tss: Vec<i64> = evaluator.calls.iter().map(|c| c.end_ts).collect();
-    assert_eq!(end_tss, vec![600, 660, 720, 780], "must evaluate in ascending timestamp order");
+    assert_eq!(
+        end_tss,
+        vec![600, 660, 720, 780],
+        "must evaluate in ascending timestamp order"
+    );
 
     for call in &evaluator.calls {
         let symbols: Vec<&str> = call.present.iter().map(|(s, _)| s.as_str()).collect();
@@ -511,7 +538,11 @@ fn test11_evaluation_happens_once_per_timestamp_not_per_symbol() {
 
     // 5 timestamps x 5 symbols = 25 bars, but only 5 on_frame calls.
     assert_eq!(bars.len(), 25);
-    assert_eq!(evaluator.calls.len(), 5, "on_frame must fire once per timestamp, not once per bar");
+    assert_eq!(
+        evaluator.calls.len(),
+        5,
+        "on_frame must fire once per timestamp, not once per bar"
+    );
 }
 
 /// The seam's missing-symbol contract must be explicit (never forward-filled)
@@ -594,7 +625,9 @@ fn test13_evaluation_seam_has_no_future_bar_leakage() {
         bar("AAPL", 660, 999),
         bar("SPY", 660, 999),
     ];
-    let mut checker = LeakChecker { violations: Vec::new() };
+    let mut checker = LeakChecker {
+        violations: Vec::new(),
+    };
     evaluate_market_frames(&bars, 20, &mut checker).unwrap();
 
     assert!(
@@ -626,8 +659,14 @@ fn test14_duplicate_bar_dataset_a_fails_closed() {
 
     let mut evaluator = RecordingEvaluator::default();
     let eval_err = evaluate_market_frames(&bars, 20, &mut evaluator).unwrap_err();
-    assert_eq!(eval_err, build_err, "both entry points must report the same typed error");
-    assert!(evaluator.calls.is_empty(), "zero evaluations on a refused input");
+    assert_eq!(
+        eval_err, build_err,
+        "both entry points must report the same typed error"
+    );
+    assert!(
+        evaluator.calls.is_empty(),
+        "zero evaluations on a refused input"
+    );
 }
 
 /// Dataset B: same pair, rows reversed (close=101 then close=100). Must fail
@@ -640,7 +679,10 @@ fn test15_duplicate_bar_dataset_b_reversed_rows_fails_closed_identically() {
 
     let err_a = build_market_frames(&dataset_a, 20).unwrap_err();
     let err_b = build_market_frames(&dataset_b, 20).unwrap_err();
-    assert_eq!(err_a, err_b, "reversing the duplicate rows must yield the identical failure");
+    assert_eq!(
+        err_a, err_b,
+        "reversing the duplicate rows must yield the identical failure"
+    );
 
     let mut eval_a = RecordingEvaluator::default();
     let mut eval_b = RecordingEvaluator::default();

@@ -62,7 +62,9 @@ async fn wr01_outbox_enqueue_stamps_current_version_and_reader_accepts_it() -> a
         .expect("row must exist");
 
     assert_eq!(
-        row.order_json.get("schema_version").and_then(|v| v.as_i64()),
+        row.order_json
+            .get("schema_version")
+            .and_then(|v| v.as_i64()),
         Some(mqk_db::ORDER_JSON_SCHEMA_VERSION),
         "round-tripped order_json must carry the current schema_version"
     );
@@ -137,7 +139,9 @@ async fn wr03_inbox_insert_stamps_current_version_and_reader_accepts_it() -> any
         .expect("row must be present and unapplied");
 
     assert_eq!(
-        row.message_json.get("schema_version").and_then(|v| v.as_i64()),
+        row.message_json
+            .get("schema_version")
+            .and_then(|v| v.as_i64()),
         Some(mqk_db::MESSAGE_JSON_SCHEMA_VERSION),
         "round-tripped message_json must carry the current schema_version"
     );
@@ -183,8 +187,8 @@ async fn wr05_outbox_enqueue_refuses_future_schema_version_and_writes_nothing() 
 // ---------------------------------------------------------------------------
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
-async fn wr06_outbox_enqueue_refuses_malformed_schema_version_and_writes_nothing()
--> anyhow::Result<()> {
+async fn wr06_outbox_enqueue_refuses_malformed_schema_version_and_writes_nothing(
+) -> anyhow::Result<()> {
     let pool = connect().await?;
     let run_id = seed_run(&pool).await?;
     let idem = format!("{run_id}_wr06");
@@ -237,7 +241,8 @@ async fn wr07_outbox_enqueue_refuses_non_object_order_json_and_writes_nothing() 
 // ---------------------------------------------------------------------------
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
-async fn wr08_inbox_insert_refuses_future_schema_version_and_writes_nothing() -> anyhow::Result<()> {
+async fn wr08_inbox_insert_refuses_future_schema_version_and_writes_nothing() -> anyhow::Result<()>
+{
     let pool = connect().await?;
     let run_id = seed_run(&pool).await?;
     let msg_id = format!("BROKER_MSG_{run_id}_wr08");

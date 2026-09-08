@@ -41,8 +41,9 @@ use mqk_daemon::state::{
 };
 use mqk_db::{
     AutonomousDailyTransitionOutcome, CreateAutonomousDailyOperationArgs,
-    TransitionAutonomousDailyOperationArgs, STATE_AWAITING_OPEN, STATE_MANUAL_INTERVENTION_REQUIRED,
-    STATE_PREPARING_DATA, STATE_RECOVERY_RETRYING, STATE_RUNNING, STATE_START_RETRYING,
+    TransitionAutonomousDailyOperationArgs, STATE_AWAITING_OPEN,
+    STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA, STATE_RECOVERY_RETRYING,
+    STATE_RUNNING, STATE_START_RETRYING,
 };
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -140,10 +141,8 @@ fn paper_state_with_db_and_auth(
     st.set_adapter_id_for_test(adapter_id);
     // Rebuild with the requested auth mode (test-only constructor composition:
     // `new_for_test_with_db_mode_and_broker` always uses `ExplicitDevNoToken`).
-    let mut st2 = AppState::new_with_db_and_operator_auth(
-        st.db.clone().expect("db must be set"),
-        auth,
-    );
+    let mut st2 =
+        AppState::new_with_db_and_operator_auth(st.db.clone().expect("db must be set"), auth);
     st2.set_adapter_id_for_test(adapter_id);
     let _ = st; // drop the throwaway state used only to construct the pool clone above
     Arc::new(st2)
@@ -228,7 +227,12 @@ async fn resolve_active_identity(
         &assignment_identity,
         &runtime_binding_identity,
     );
-    (plan, assignment_identity, runtime_binding_identity, operation_id)
+    (
+        plan,
+        assignment_identity,
+        runtime_binding_identity,
+        operation_id,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -387,7 +391,10 @@ fn expected_bar_window(now_utc: DateTime<Utc>, required: usize) -> Vec<i64> {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, serde_json::Value) {
+async fn call(
+    router: axum::Router,
+    req: Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let body = resp
@@ -551,13 +558,15 @@ async fn t01_full_recovery_lifecycle_market_data_repair() -> anyhow::Result<()> 
     assert!(
         events
             .iter()
-            .any(|(from, to)| from == STATE_PREPARING_DATA && to == STATE_MANUAL_INTERVENTION_REQUIRED),
+            .any(|(from, to)| from == STATE_PREPARING_DATA
+                && to == STATE_MANUAL_INTERVENTION_REQUIRED),
         "original blocker event must be preserved: {events:?}"
     );
     assert!(
         events
             .iter()
-            .any(|(from, to)| from == STATE_MANUAL_INTERVENTION_REQUIRED && to == STATE_PREPARING_DATA),
+            .any(|(from, to)| from == STATE_MANUAL_INTERVENTION_REQUIRED
+                && to == STATE_PREPARING_DATA),
         "recovery transition event must be recorded: {events:?}"
     );
 
@@ -649,13 +658,27 @@ async fn r02_runtime_history_present_refuses_retry() -> anyhow::Result<()> {
     // bound `run_id`, then to `manual_intervention_required` — proving this
     // operation carries genuine runtime history, never faked via raw SQL.
     let v2 = real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_AWAITING_OPEN, None, None, now,
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_AWAITING_OPEN,
+        None,
+        None,
+        now,
         "test: preopen readiness satisfied",
     )
     .await;
     let v3 = real_transition(
-        &pool, operation_id, STATE_AWAITING_OPEN, v2.state_version, STATE_START_RETRYING, None,
-        None, now, "test: entering start sequence",
+        &pool,
+        operation_id,
+        STATE_AWAITING_OPEN,
+        v2.state_version,
+        STATE_START_RETRYING,
+        None,
+        None,
+        now,
+        "test: entering start sequence",
     )
     .await;
 
@@ -678,17 +701,34 @@ async fn r02_runtime_history_present_refuses_retry() -> anyhow::Result<()> {
     assert_eq!(v4.run_id, Some(run_id));
 
     let v5 = real_transition(
-        &pool, operation_id, STATE_RUNNING, v4.state_version, STATE_RECOVERY_RETRYING, None,
-        None, now, "test: runtime ended without halt",
+        &pool,
+        operation_id,
+        STATE_RUNNING,
+        v4.state_version,
+        STATE_RECOVERY_RETRYING,
+        None,
+        None,
+        now,
+        "test: runtime ended without halt",
     )
     .await;
     let manual = real_transition(
-        &pool, operation_id, STATE_RECOVERY_RETRYING, v5.state_version,
-        STATE_MANUAL_INTERVENTION_REQUIRED, Some("runtime_run_id_mismatch"), None, now,
+        &pool,
+        operation_id,
+        STATE_RECOVERY_RETRYING,
+        v5.state_version,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some("runtime_run_id_mismatch"),
+        None,
+        now,
         "test: runtime run id mismatch",
     )
     .await;
-    assert_eq!(manual.run_id, Some(run_id), "run_id must survive into manual state");
+    assert_eq!(
+        manual.run_id,
+        Some(run_id),
+        "run_id must survive into manual state"
+    );
 
     let (status, json) = call(
         mqk_daemon::routes::build_router(Arc::clone(&st)),
@@ -701,7 +741,10 @@ async fn r02_runtime_history_present_refuses_retry() -> anyhow::Result<()> {
     let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    assert_eq!(row.state, STATE_MANUAL_INTERVENTION_REQUIRED, "must be unmutated");
+    assert_eq!(
+        row.state, STATE_MANUAL_INTERVENTION_REQUIRED,
+        "must be unmutated"
+    );
 
     cleanup_operation(&pool, operation_id).await;
     Ok(())
@@ -749,8 +792,14 @@ async fn r03_stale_identity_refuses_retry() -> anyhow::Result<()> {
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING), None, now,
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING),
+        None,
+        now,
         "test: stale identity fixture",
     )
     .await;
@@ -805,8 +854,14 @@ async fn r04_session_closed_refuses_retry() -> anyhow::Result<()> {
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING), None, now,
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING),
+        None,
+        now,
         "test: session-closed fixture",
     )
     .await;
@@ -884,8 +939,14 @@ async fn r06_live_deployment_not_authorized() -> anyhow::Result<()> {
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING), None, now,
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING),
+        None,
+        now,
         "test: live-mode fixture",
     )
     .await;
@@ -948,8 +1009,14 @@ async fn r07_stale_cas_version_is_refused_not_applied() -> anyhow::Result<()> {
     )
     .await?;
     let manual = real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING), None, now,
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING),
+        None,
+        now,
         "test: race fixture blocker",
     )
     .await;
@@ -959,8 +1026,14 @@ async fn r07_stale_cas_version_is_refused_not_applied() -> anyhow::Result<()> {
     // Simulate a second writer moving the row before this route's own CAS
     // write lands.
     real_transition(
-        &pool, operation_id, STATE_MANUAL_INTERVENTION_REQUIRED, captured_version,
-        mqk_db::STATE_PREFLIGHT_BLOCKED, None, None, now,
+        &pool,
+        operation_id,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        captured_version,
+        mqk_db::STATE_PREFLIGHT_BLOCKED,
+        None,
+        None,
+        now,
         "test: concurrent writer moved the row",
     )
     .await;
@@ -1048,8 +1121,14 @@ async fn r09_successful_retry_never_touches_halt_or_arm_authority() -> anyhow::R
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING), None, now,
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING),
+        None,
+        now,
         "test: halt-safety fixture",
     )
     .await;
@@ -1122,8 +1201,14 @@ async fn r10_recovered_operation_still_requires_arm_before_start() -> anyhow::Re
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING), None, now,
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(mqk_daemon::daily_data_readiness::REASON_MARKET_DATA_MISSING),
+        None,
+        now,
         "test: arm-before-start fixture",
     )
     .await;
@@ -1143,11 +1228,7 @@ async fn r10_recovered_operation_still_requires_arm_before_start() -> anyhow::Re
     // Coordinator dispatch progresses preparing_data -> awaiting_open with
     // readiness now satisfied (still integrity-disarmed throughout).
     let after_preparing = mqk_daemon::state::autonomous_daily_coordinator::dispatch_by_state(
-        &st,
-        &pool,
-        recovered,
-        &plan,
-        now,
+        &st, &pool, recovered, &plan, now,
     )
     .await?;
     let awaiting_open_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
@@ -1161,14 +1242,8 @@ async fn r10_recovered_operation_still_requires_arm_before_start() -> anyhow::Re
     // Negative control: attempt_canonical_start must refuse (durable arm
     // disarmed / integrity halted) and start_execution_runtime must never
     // be reached — start_attempt_count stays exactly 0.
-    let outcome = attempt_canonical_start(
-        &st,
-        &pool,
-        awaiting_open_row,
-        now,
-        STATE_AWAITING_OPEN,
-    )
-    .await?;
+    let outcome =
+        attempt_canonical_start(&st, &pool, awaiting_open_row, now, STATE_AWAITING_OPEN).await?;
     assert!(
         matches!(
             outcome,
@@ -1228,8 +1303,15 @@ async fn eligibility_unsafe_runtime_history_reason_refuses_retry() -> anyhow::Re
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some("integrity_halted"), None, now, "test: unsafe-reason fixture",
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some("integrity_halted"),
+        None,
+        now,
+        "test: unsafe-reason fixture",
     )
     .await;
 
@@ -1279,8 +1361,15 @@ async fn eligibility_identity_conflict_reason_refuses_retry() -> anyhow::Result<
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some("operation_identity_conflict"), None, now, "test: identity-conflict fixture",
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some("operation_identity_conflict"),
+        None,
+        now,
+        "test: identity-conflict fixture",
     )
     .await;
 
@@ -1330,8 +1419,15 @@ async fn eligibility_unknown_reason_fails_closed() -> anyhow::Result<()> {
     )
     .await?;
     real_transition(
-        &pool, operation_id, STATE_PREPARING_DATA, 1, STATE_MANUAL_INTERVENTION_REQUIRED,
-        Some("totally_unrecognized_reason_code_xyz"), None, now, "test: unknown-reason fixture",
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some("totally_unrecognized_reason_code_xyz"),
+        None,
+        now,
+        "test: unknown-reason fixture",
     )
     .await;
 
@@ -1407,11 +1503,8 @@ async fn auth_missing_token_fail_closed_blocks_retry() -> anyhow::Result<()> {
     reset_env();
     let pool = test_pool().await?;
     let adapter_id = format!("retry-auth-missing-{}", unique_suffix());
-    let st = paper_state_with_db_and_auth(
-        pool,
-        &adapter_id,
-        OperatorAuthMode::MissingTokenFailClosed,
-    );
+    let st =
+        paper_state_with_db_and_auth(pool, &adapter_id, OperatorAuthMode::MissingTokenFailClosed);
 
     let (status, json) = call(
         mqk_daemon::routes::build_router(Arc::clone(&st)),
@@ -1575,7 +1668,10 @@ async fn t_legacy_full_recovery_lifecycle_market_data_not_fresh() -> anyhow::Res
     .await;
     assert_eq!(status, StatusCode::OK, "recovery must succeed: {json}");
     assert_eq!(json["truth_state"], "recovered", "{json}");
-    assert_eq!(json["previous_state"], STATE_MANUAL_INTERVENTION_REQUIRED, "{json}");
+    assert_eq!(
+        json["previous_state"], STATE_MANUAL_INTERVENTION_REQUIRED,
+        "{json}"
+    );
     assert_eq!(json["new_state"], STATE_PREPARING_DATA, "{json}");
     assert_eq!(json["previous_reason_code"], LEGACY_REASON, "{json}");
     assert_eq!(json["runtime_started"], false, "{json}");
@@ -1731,7 +1827,10 @@ async fn t_prestart_bars_observed_only_retry_succeeds() -> anyhow::Result<()> {
         "a genuinely prestart-observed operation must recover: {json}"
     );
     assert_eq!(json["truth_state"], "recovered", "{json}");
-    assert_eq!(json["previous_state"], STATE_MANUAL_INTERVENTION_REQUIRED, "{json}");
+    assert_eq!(
+        json["previous_state"], STATE_MANUAL_INTERVENTION_REQUIRED,
+        "{json}"
+    );
     assert_eq!(json["new_state"], STATE_PREPARING_DATA, "{json}");
     assert_eq!(json["previous_reason_code"], LEGACY_REASON, "{json}");
     assert_eq!(json["runtime_started"], false, "{json}");

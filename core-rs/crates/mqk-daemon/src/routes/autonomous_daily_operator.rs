@@ -46,7 +46,9 @@ use axum::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::api_types::{AutonomousDailyOperationRetryRequest, AutonomousDailyOperationRetryResponse};
+use crate::api_types::{
+    AutonomousDailyOperationRetryRequest, AutonomousDailyOperationRetryResponse,
+};
 use crate::state::autonomous_daily_operation::{
     derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env,
@@ -66,8 +68,7 @@ use crate::state::autonomous_daily_coordinator::{
 };
 
 const CANONICAL_ROUTE: &str = "/api/v1/autonomous/daily-operation/retry";
-const CANONICAL_ROUTE_FINALIZE_STALE: &str =
-    "/api/v1/autonomous/daily-operation/finalize-stale";
+const CANONICAL_ROUTE_FINALIZE_STALE: &str = "/api/v1/autonomous/daily-operation/finalize-stale";
 
 // ---------------------------------------------------------------------------
 // §14 — closed-set manual-intervention retry eligibility classification
@@ -332,26 +333,25 @@ pub(crate) async fn autonomous_daily_operation_retry(
             .into_response();
     };
 
-    let operation = match mqk_db::fetch_autonomous_daily_operation_by_id(&pool, body.operation_id)
-        .await
-    {
-        Ok(Some(op)) => op,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(base_response(body.operation_id, "not_found")),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            tracing::error!("autonomous_daily_operation_retry: fetch failed: {err}");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(base_response(body.operation_id, "backend_unavailable")),
-            )
-                .into_response();
-        }
-    };
+    let operation =
+        match mqk_db::fetch_autonomous_daily_operation_by_id(&pool, body.operation_id).await {
+            Ok(Some(op)) => op,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(base_response(body.operation_id, "not_found")),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                tracing::error!("autonomous_daily_operation_retry: fetch failed: {err}");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(base_response(body.operation_id, "backend_unavailable")),
+                )
+                    .into_response();
+            }
+        };
 
     // §9: identity safety — an operator-supplied expected_market_date, when
     // present, must match the target row exactly.
@@ -425,7 +425,9 @@ pub(crate) async fn autonomous_daily_operation_retry(
                 .into_response();
         }
         Err(err) => {
-            tracing::error!("autonomous_daily_operation_retry: prestart retry safety check failed: {err}");
+            tracing::error!(
+                "autonomous_daily_operation_retry: prestart retry safety check failed: {err}"
+            );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(base_response(operation.operation_id, "backend_unavailable")),
@@ -563,7 +565,11 @@ pub(crate) async fn autonomous_daily_operation_retry(
         }
         ManualInterventionRecoveryOutcome::AlreadyApplied(updated) => (
             StatusCode::OK,
-            Json(refusal_response(&updated, "already_recovered", "idempotent replay")),
+            Json(refusal_response(
+                &updated,
+                "already_recovered",
+                "idempotent replay",
+            )),
         )
             .into_response(),
         ManualInterventionRecoveryOutcome::StaleState => (
@@ -725,7 +731,8 @@ pub(crate) async fn attempt_manual_intervention_recovery(
             // timing gate cannot reject on stale state. Never touches
             // `state`/`state_version`, so its own failure cannot desync the
             // CAS transition that already committed above.
-            if let Err(err) = mqk_db::clear_retry_timing(pool, operation.operation_id, now_utc).await
+            if let Err(err) =
+                mqk_db::clear_retry_timing(pool, operation.operation_id, now_utc).await
             {
                 tracing::warn!(
                     "attempt_manual_intervention_recovery: clear_retry_timing failed after \
@@ -808,31 +815,36 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale(
     let Some(pool) = st.db.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(finalize_stale_base_response(body.operation_id, "backend_unavailable")),
+            Json(finalize_stale_base_response(
+                body.operation_id,
+                "backend_unavailable",
+            )),
         )
             .into_response();
     };
 
-    let operation = match mqk_db::fetch_autonomous_daily_operation_by_id(&pool, body.operation_id)
-        .await
-    {
-        Ok(Some(op)) => op,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(finalize_stale_base_response(body.operation_id, "not_found")),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            tracing::error!("autonomous_daily_operation_finalize_stale: fetch failed: {err}");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(finalize_stale_base_response(body.operation_id, "backend_unavailable")),
-            )
-                .into_response();
-        }
-    };
+    let operation =
+        match mqk_db::fetch_autonomous_daily_operation_by_id(&pool, body.operation_id).await {
+            Ok(Some(op)) => op,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(finalize_stale_base_response(body.operation_id, "not_found")),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                tracing::error!("autonomous_daily_operation_finalize_stale: fetch failed: {err}");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(finalize_stale_base_response(
+                        body.operation_id,
+                        "backend_unavailable",
+                    )),
+                )
+                    .into_response();
+            }
+        };
 
     if let Some(expected_market_date) = &body.expected_market_date {
         if operation.market_date.format("%Y-%m-%d").to_string() != *expected_market_date {
@@ -919,7 +931,10 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale(
             );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(finalize_stale_base_response(operation.operation_id, "backend_unavailable")),
+                Json(finalize_stale_base_response(
+                    operation.operation_id,
+                    "backend_unavailable",
+                )),
             )
                 .into_response();
         }
@@ -945,7 +960,10 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale(
             ));
             (StatusCode::OK, Json(resp)).into_response()
         }
-        Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeAlreadyFinalized { state, outcome_reason_code }) => {
+        Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeAlreadyFinalized {
+            state,
+            outcome_reason_code,
+        }) => {
             let mut resp = finalize_stale_base_response(operation_id, "already_finalized");
             resp.previous_state = Some(previous_state);
             resp.new_state = Some(state);
@@ -957,16 +975,19 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale(
             let mut resp = finalize_stale_base_response(operation_id, "not_finalized_this_call");
             resp.previous_state = Some(previous_state);
             resp.previous_reason_code = previous_reason_code;
-            resp.message = Some(format!(
-                "finalization was not reached this call: {other:?}"
-            ));
+            resp.message = Some(format!("finalization was not reached this call: {other:?}"));
             (StatusCode::OK, Json(resp)).into_response()
         }
         Err(err) => {
-            tracing::error!("autonomous_daily_operation_finalize_stale: finalization failed: {err}");
+            tracing::error!(
+                "autonomous_daily_operation_finalize_stale: finalization failed: {err}"
+            );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(finalize_stale_base_response(operation_id, "backend_unavailable")),
+                Json(finalize_stale_base_response(
+                    operation_id,
+                    "backend_unavailable",
+                )),
             )
                 .into_response()
         }
@@ -1208,14 +1229,17 @@ mod prestart_retry_safety_tests {
             RecordCompletedBarObservedOutcome::Recorded { bars_observed: 1 }
         ));
 
-        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let refreshed =
+            mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(refreshed.bars_observed, 1);
 
         assert_eq!(
-            check_prestart_retry_safety(&pool, &refreshed).await.unwrap(),
+            check_prestart_retry_safety(&pool, &refreshed)
+                .await
+                .unwrap(),
             PrestartRetrySafety::Safe
         );
 
@@ -1242,10 +1266,11 @@ mod prestart_retry_safety_tests {
         mqk_db::record_completed_bar_observed(&pool, operation.operation_id, 1_800_000_000, t0)
             .await
             .expect("record observed ok");
-        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let refreshed =
+            mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap();
 
         assert_eq!(
             check_operation_pristine(&pool, &refreshed).await.unwrap(),
@@ -1282,12 +1307,15 @@ mod prestart_retry_safety_tests {
         .await
         .expect("claim ok");
 
-        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let refreshed =
+            mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(
-            check_prestart_retry_safety(&pool, &refreshed).await.unwrap(),
+            check_prestart_retry_safety(&pool, &refreshed)
+                .await
+                .unwrap(),
             PrestartRetrySafety::UnsafeActivity
         );
 
@@ -1331,14 +1359,17 @@ mod prestart_retry_safety_tests {
         .await
         .expect("complete ok");
 
-        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let refreshed =
+            mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap();
         assert!(refreshed.bars_dispatched > 0);
         assert!(refreshed.last_dispatched_bar_ts.is_some());
         assert_eq!(
-            check_prestart_retry_safety(&pool, &refreshed).await.unwrap(),
+            check_prestart_retry_safety(&pool, &refreshed)
+                .await
+                .unwrap(),
             PrestartRetrySafety::UnsafeActivity
         );
 

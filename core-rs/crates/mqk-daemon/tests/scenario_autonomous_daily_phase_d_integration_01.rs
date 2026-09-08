@@ -2859,7 +2859,8 @@ async fn phase_d_integrated_stale_running_row_with_active_run_fails_closed() {
     // The real production completed-bar adapter's authority lookup must
     // fail closed: both the stale row (active run) and today's row (inside
     // its own preopen window) are simultaneously relevant.
-    let preopen_driver_result = tick_autonomous_completed_bar_driver_from_state(&st, preopen_now).await;
+    let preopen_driver_result =
+        tick_autonomous_completed_bar_driver_from_state(&st, preopen_now).await;
     assert!(
         preopen_driver_result.is_err(),
         "PD negative: preopen driver tick must fail closed as ambiguous while the stale row's \
@@ -2915,7 +2916,8 @@ async fn phase_d_integrated_stale_running_row_with_active_run_fails_closed() {
     // and no strategy evaluation ever occurs for this adapter slot while
     // the authority lookup fails closed.
     let dispatch_tick_now = pd_now() + chrono::Duration::seconds(5);
-    let dispatch_result = tick_autonomous_completed_bar_driver_from_state(&st, dispatch_tick_now).await;
+    let dispatch_result =
+        tick_autonomous_completed_bar_driver_from_state(&st, dispatch_tick_now).await;
     assert!(
         dispatch_result.is_err(),
         "PD negative: dispatch driver tick must fail closed as ambiguous while the stale row's \
@@ -2936,13 +2938,12 @@ async fn phase_d_integrated_stale_running_row_with_active_run_fails_closed() {
          lookup fails closed"
     );
 
-    let evals: i64 = sqlx::query_scalar(
-        "select count(*) from strategy_signal_evaluations where symbol = $1",
-    )
-    .bind(PD_SYMBOL)
-    .fetch_one(&pool)
-    .await
-    .expect("count ok");
+    let evals: i64 =
+        sqlx::query_scalar("select count(*) from strategy_signal_evaluations where symbol = $1")
+            .bind(PD_SYMBOL)
+            .fetch_one(&pool)
+            .await
+            .expect("count ok");
     assert_eq!(
         evals, 0,
         "PD negative: zero strategy evaluation while the authority lookup fails closed"

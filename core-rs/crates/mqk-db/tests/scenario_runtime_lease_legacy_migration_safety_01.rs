@@ -72,7 +72,11 @@ async fn drop_disposable_database(admin: &AdminConn, db_name: &str) {
 }
 
 fn disposable_db_name(label: &str) -> String {
-    format!("mqk_lease_legacy_safety_{}_{}", label, Uuid::new_v4().simple())
+    format!(
+        "mqk_lease_legacy_safety_{}_{}",
+        label,
+        Uuid::new_v4().simple()
+    )
 }
 
 /// Copies migration files with numeric version prefix <= `max_version`,
@@ -118,7 +122,9 @@ async fn migrate_fresh(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 }
 
 fn ts(seconds: i64) -> DateTime<Utc> {
-    Utc.timestamp_opt(seconds, 0).single().expect("valid timestamp")
+    Utc.timestamp_opt(seconds, 0)
+        .single()
+        .expect("valid timestamp")
 }
 
 async fn insert_run_with_status(
@@ -152,7 +158,11 @@ async fn insert_run_with_status(
         .expect("force run status/heartbeat for migration-safety fixture");
 }
 
-async fn seed_legacy_null_lease(pool: &sqlx::PgPool, lease_expires_at: DateTime<Utc>, updated_at: DateTime<Utc>) {
+async fn seed_legacy_null_lease(
+    pool: &sqlx::PgPool,
+    lease_expires_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) {
     sqlx::query(
         r#"
         INSERT INTO runtime_leader_lease (id, run_id, holder_id, epoch, lease_expires_at, updated_at)
@@ -198,7 +208,10 @@ async fn mig_01_fresh_database_applies_through_0069() {
     .fetch_one(&pool)
     .await
     .expect("fk lookup");
-    assert_eq!(fk_action, "r", "expected ON DELETE RESTRICT ('r'), got confdeltype={fk_action}");
+    assert_eq!(
+        fk_action, "r",
+        "expected ON DELETE RESTRICT ('r'), got confdeltype={fk_action}"
+    );
 
     pool.close().await;
     drop_disposable_database(&admin, &db_name).await;
@@ -325,7 +338,9 @@ async fn mig_04_legacy_lease_with_armed_run_fails_closed_atomically() {
         .await
         .expect_err("0069 must refuse while an ARMED run exists");
     assert!(
-        format!("{err:?}").to_lowercase().contains("runtime_leader_lease legacy migration safety"),
+        format!("{err:?}")
+            .to_lowercase()
+            .contains("runtime_leader_lease legacy migration safety"),
         "unexpected error: {err}"
     );
 
@@ -335,7 +350,10 @@ async fn mig_04_legacy_lease_with_armed_run_fails_closed_atomically() {
         .fetch_one(&pool)
         .await
         .expect("count runtime_leader_lease");
-    assert_eq!(lease_count, 1, "the refused migration must not have deleted the legacy row");
+    assert_eq!(
+        lease_count, 1,
+        "the refused migration must not have deleted the legacy row"
+    );
 
     let (fk_action,): (String,) = sqlx::query_as(
         r#"
@@ -346,7 +364,10 @@ async fn mig_04_legacy_lease_with_armed_run_fails_closed_atomically() {
     .fetch_one(&pool)
     .await
     .expect("fk lookup");
-    assert_eq!(fk_action, "c", "a failed migration must not have applied the RESTRICT FK change");
+    assert_eq!(
+        fk_action, "c",
+        "a failed migration must not have applied the RESTRICT FK change"
+    );
 
     pool.close().await;
     drop_disposable_database(&admin, &db_name).await;
@@ -381,13 +402,21 @@ async fn mig_05_legacy_lease_with_deadman_fresh_running_run_fails_closed() {
 
     let running_run = Uuid::new_v4();
     // Heartbeat 10s old: well inside the 120s deadman window.
-    insert_run_with_status(&pool, running_run, "RUNNING", Some(now - Duration::seconds(10))).await;
+    insert_run_with_status(
+        &pool,
+        running_run,
+        "RUNNING",
+        Some(now - Duration::seconds(10)),
+    )
+    .await;
 
     let err = migrate_fresh(&pool)
         .await
         .expect_err("0069 must refuse while a deadman-fresh RUNNING run exists");
     assert!(
-        format!("{err:?}").to_lowercase().contains("runtime_leader_lease legacy migration safety"),
+        format!("{err:?}")
+            .to_lowercase()
+            .contains("runtime_leader_lease legacy migration safety"),
         "unexpected error: {err}"
     );
 
@@ -395,7 +424,10 @@ async fn mig_05_legacy_lease_with_deadman_fresh_running_run_fails_closed() {
         .fetch_one(&pool)
         .await
         .expect("count runtime_leader_lease");
-    assert_eq!(lease_count, 1, "the refused migration must not have deleted the legacy row");
+    assert_eq!(
+        lease_count, 1,
+        "the refused migration must not have deleted the legacy row"
+    );
 
     pool.close().await;
     drop_disposable_database(&admin, &db_name).await;
@@ -447,7 +479,9 @@ async fn mig_06_running_run_with_stale_heartbeat_still_blocks_migration() {
         .await
         .expect_err("a RUNNING run must block migration regardless of heartbeat staleness");
     assert!(
-        format!("{err:?}").to_lowercase().contains("runtime_leader_lease legacy migration safety"),
+        format!("{err:?}")
+            .to_lowercase()
+            .contains("runtime_leader_lease legacy migration safety"),
         "unexpected error: {err}"
     );
 
@@ -455,7 +489,10 @@ async fn mig_06_running_run_with_stale_heartbeat_still_blocks_migration() {
         .fetch_one(&pool)
         .await
         .expect("count runtime_leader_lease");
-    assert_eq!(lease_count, 1, "the refused migration must not have deleted the legacy row");
+    assert_eq!(
+        lease_count, 1,
+        "the refused migration must not have deleted the legacy row"
+    );
 
     pool.close().await;
     drop_disposable_database(&admin, &db_name).await;
@@ -497,7 +534,9 @@ async fn mig_08_running_run_with_null_heartbeat_blocks_migration() {
         .await
         .expect_err("a RUNNING run with NULL heartbeat must block migration");
     assert!(
-        format!("{err:?}").to_lowercase().contains("runtime_leader_lease legacy migration safety"),
+        format!("{err:?}")
+            .to_lowercase()
+            .contains("runtime_leader_lease legacy migration safety"),
         "unexpected error: {err}"
     );
 
@@ -505,7 +544,10 @@ async fn mig_08_running_run_with_null_heartbeat_blocks_migration() {
         .fetch_one(&pool)
         .await
         .expect("count runtime_leader_lease");
-    assert_eq!(lease_count, 1, "the refused migration must not have deleted the legacy row");
+    assert_eq!(
+        lease_count, 1,
+        "the refused migration must not have deleted the legacy row"
+    );
 
     pool.close().await;
     drop_disposable_database(&admin, &db_name).await;
@@ -656,7 +698,9 @@ async fn mig_11_begin_run_committed_before_migration_blocks_migration() {
         .await
         .expect_err("migration must refuse once begin_run has committed RUNNING status");
     assert!(
-        format!("{err:?}").to_lowercase().contains("runtime_leader_lease legacy migration safety"),
+        format!("{err:?}")
+            .to_lowercase()
+            .contains("runtime_leader_lease legacy migration safety"),
         "unexpected error: {err}"
     );
 
@@ -664,7 +708,10 @@ async fn mig_11_begin_run_committed_before_migration_blocks_migration() {
         .fetch_one(&pool)
         .await
         .expect("count runtime_leader_lease");
-    assert_eq!(lease_count, 1, "the refused migration must not have deleted the legacy row");
+    assert_eq!(
+        lease_count, 1,
+        "the refused migration must not have deleted the legacy row"
+    );
 
     pool.close().await;
     drop_disposable_database(&admin, &db_name).await;
@@ -806,7 +853,10 @@ async fn mig_07_concurrent_run_insert_blocks_while_migration_lock_is_held() {
         .fetch_one(&pool)
         .await
         .expect("post-unblock existence check");
-    assert!(exists, "the racer's insert must have proceeded after the lock was released");
+    assert!(
+        exists,
+        "the racer's insert must have proceeded after the lock was released"
+    );
 
     pool.close().await;
     drop_disposable_database(&admin, &db_name).await;

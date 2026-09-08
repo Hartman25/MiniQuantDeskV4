@@ -52,11 +52,19 @@ async fn fetch_performance(st: &Arc<state::AppState>, run_id: Uuid) -> serde_jso
         get(&format!("/api/v1/strategy/performance?run_id={run_id}")),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "strategy/performance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "strategy/performance must return 200"
+    );
     serde_json::from_slice(&body).expect("body is not valid JSON")
 }
 
-fn find_row<'a>(perf: &'a serde_json::Value, strategy_id: &str, fingerprint: &str) -> Option<&'a serde_json::Value> {
+fn find_row<'a>(
+    perf: &'a serde_json::Value,
+    strategy_id: &str,
+    fingerprint: &str,
+) -> Option<&'a serde_json::Value> {
     perf["rows"]
         .as_array()
         .expect("rows must be an array")
@@ -120,10 +128,16 @@ struct OrderCtx<'a> {
 
 impl<'a> OrderCtx<'a> {
     fn manual() -> Self {
-        Self { strategy_id: None, strategy_semantic_fingerprint: None }
+        Self {
+            strategy_id: None,
+            strategy_semantic_fingerprint: None,
+        }
     }
     fn full(strategy_id: &'a str, fp: &'a str) -> Self {
-        Self { strategy_id: Some(strategy_id), strategy_semantic_fingerprint: Some(fp) }
+        Self {
+            strategy_id: Some(strategy_id),
+            strategy_semantic_fingerprint: Some(fp),
+        }
     }
 }
 
@@ -180,7 +194,16 @@ async fn fixture_applied_event(
     };
     let json = serde_json::to_value(&ev).expect("serialize BrokerEvent");
     mqk_db::inbox_insert_deduped_with_identity(
-        pool, run_id, broker_message_id, None, internal_order_id, broker_order_id, "fill", &json, 0, at,
+        pool,
+        run_id,
+        broker_message_id,
+        None,
+        internal_order_id,
+        broker_order_id,
+        "fill",
+        &json,
+        0,
+        at,
     )
     .await
     .expect("inbox insert should succeed");
@@ -209,7 +232,16 @@ async fn place_and_fill(
     let broker_message_id = format!("bm:{order_id}");
     let broker_order_id = format!("bo:{order_id}");
     fixture_applied_event(
-        pool, run_id, &broker_message_id, order_id, &broker_order_id, symbol, side, qty, price_micros, at,
+        pool,
+        run_id,
+        &broker_message_id,
+        order_id,
+        &broker_order_id,
+        symbol,
+        side,
+        qty,
+        price_micros,
+        at,
     )
     .await;
 }
@@ -228,8 +260,30 @@ async fn round_trip(
     const ENTRY_PRICE: i64 = 1_000_000;
     let buy_id = unique_id(&format!("rtbuy{seq}"));
     let sell_id = unique_id(&format!("rtsell{seq}"));
-    place_and_fill(pool, run_id, &buy_id, symbol, Side::Buy, 1, ENTRY_PRICE, &OrderCtx::full(strategy_id, fp), at).await;
-    place_and_fill(pool, run_id, &sell_id, symbol, Side::Sell, 1, ENTRY_PRICE + delta_micros, &OrderCtx::full(strategy_id, fp), at).await;
+    place_and_fill(
+        pool,
+        run_id,
+        &buy_id,
+        symbol,
+        Side::Buy,
+        1,
+        ENTRY_PRICE,
+        &OrderCtx::full(strategy_id, fp),
+        at,
+    )
+    .await;
+    place_and_fill(
+        pool,
+        run_id,
+        &sell_id,
+        symbol,
+        Side::Sell,
+        1,
+        ENTRY_PRICE + delta_micros,
+        &OrderCtx::full(strategy_id, fp),
+        at,
+    )
+    .await;
 }
 
 async fn max_applied_inbox_id(pool: &sqlx::PgPool, run_id: Uuid) -> i64 {
@@ -264,7 +318,10 @@ async fn seed_accounting_state(pool: &sqlx::PgPool, run_id: Uuid, realized_pnl_m
     )
     .await
     .expect("insert_or_confirm_paper_portfolio_snapshot failed");
-    assert!(matches!(insert_outcome, mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { .. }));
+    assert!(matches!(
+        insert_outcome,
+        mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { .. }
+    ));
 
     let last_applied_inbox_id = max_applied_inbox_id(pool, run_id).await;
     let upsert_outcome = mqk_db::upsert_paper_portfolio_accounting_state(
@@ -283,7 +340,10 @@ async fn seed_accounting_state(pool: &sqlx::PgPool, run_id: Uuid, realized_pnl_m
     )
     .await
     .expect("upsert_paper_portfolio_accounting_state failed");
-    assert!(matches!(upsert_outcome, mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Inserted { .. }));
+    assert!(matches!(
+        upsert_outcome,
+        mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Inserted { .. }
+    ));
 }
 
 async fn seed_suppression(pool: &sqlx::PgPool, strategy_id: &str) -> Uuid {
@@ -304,7 +364,13 @@ async fn seed_suppression(pool: &sqlx::PgPool, strategy_id: &str) -> Uuid {
     suppression_id
 }
 
-async fn seed_md_bar(pool: &sqlx::PgPool, symbol: &str, timeframe: &str, end_ts: i64, close_micros: i64) {
+async fn seed_md_bar(
+    pool: &sqlx::PgPool,
+    symbol: &str,
+    timeframe: &str,
+    end_ts: i64,
+    close_micros: i64,
+) {
     sqlx::query(
         r#"
         insert into md_bars (symbol, timeframe, end_ts, open_micros, high_micros, low_micros, close_micros, volume, is_complete)
@@ -329,7 +395,8 @@ async fn seed_md_bar(pool: &sqlx::PgPool, symbol: &str, timeframe: &str, end_ts:
 async fn p5_01_active_suppression_is_suppressed() {
     mqk_db::run_isolated("p5_01_suppressed", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -340,14 +407,32 @@ async fn p5_01_active_suppression_is_suppressed() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["risk_visibility"]["risk_visibility_state"], "suppressed", "row={row}");
-        assert_eq!(row["risk_visibility"]["suppression_truth_state"], "active", "row={row}");
+        assert_eq!(
+            row["risk_visibility"]["risk_visibility_state"], "suppressed",
+            "row={row}"
+        );
+        assert_eq!(
+            row["risk_visibility"]["suppression_truth_state"], "active",
+            "row={row}"
+        );
         assert_eq!(row["risk_visibility"]["active_strategy_suppression"], true);
-        assert_eq!(row["risk_visibility"]["active_suppression_id"], suppression_id.to_string());
-        assert_eq!(row["risk_visibility"]["active_suppression_trigger_domain"], "risk");
-        assert_eq!(row["risk_visibility"]["recommended_operator_action"], "already_suppressed");
+        assert_eq!(
+            row["risk_visibility"]["active_suppression_id"],
+            suppression_id.to_string()
+        );
+        assert_eq!(
+            row["risk_visibility"]["active_suppression_trigger_domain"],
+            "risk"
+        );
+        assert_eq!(
+            row["risk_visibility"]["recommended_operator_action"],
+            "already_suppressed"
+        );
         assert!(row["risk_visibility"]["risk_flags"]
-            .as_array().unwrap().iter().any(|f| f == "active_strategy_suppression"));
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "active_strategy_suppression"));
     })
     .await;
 }
@@ -360,7 +445,8 @@ async fn p5_01_active_suppression_is_suppressed() {
 async fn p5_02_suppression_applies_to_both_fingerprints_of_same_strategy() {
     mqk_db::run_isolated("p5_02_both_fp", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -374,8 +460,14 @@ async fn p5_02_suppression_applies_to_both_fingerprints_of_same_strategy() {
         let perf = fetch_performance(&st, run_id).await;
         let row1 = find_row(&perf, &sid, &fp1).expect("fp1 row must exist");
         let row2 = find_row(&perf, &sid, &fp2).expect("fp2 row must exist");
-        assert_eq!(row1["risk_visibility"]["risk_visibility_state"], "suppressed", "row1={row1}");
-        assert_eq!(row2["risk_visibility"]["risk_visibility_state"], "suppressed", "row2={row2}");
+        assert_eq!(
+            row1["risk_visibility"]["risk_visibility_state"], "suppressed",
+            "row1={row1}"
+        );
+        assert_eq!(
+            row2["risk_visibility"]["risk_visibility_state"], "suppressed",
+            "row2={row2}"
+        );
         assert_eq!(row1["risk_visibility"]["active_strategy_suppression"], true);
         assert_eq!(row2["risk_visibility"]["active_strategy_suppression"], true);
     })
@@ -390,7 +482,8 @@ async fn p5_02_suppression_applies_to_both_fingerprints_of_same_strategy() {
 async fn p5_03_decay_observed_without_suppression_is_watch() {
     mqk_db::run_isolated("p5_03_watch", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -408,11 +501,20 @@ async fn p5_03_decay_observed_without_suppression_is_watch() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["decay_monitor"]["decay_state"], "decay_observed", "row={row}");
+        assert_eq!(
+            row["decay_monitor"]["decay_state"], "decay_observed",
+            "row={row}"
+        );
         assert_eq!(row["risk_visibility"]["risk_visibility_state"], "watch");
-        assert_eq!(row["risk_visibility"]["recommended_operator_action"], "review");
+        assert_eq!(
+            row["risk_visibility"]["recommended_operator_action"],
+            "review"
+        );
         assert!(row["risk_visibility"]["risk_flags"]
-            .as_array().unwrap().iter().any(|f| f == "gross_expectancy_sign_flip_negative"));
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "gross_expectancy_sign_flip_negative"));
         assert_eq!(row["risk_visibility"]["active_strategy_suppression"], false);
     })
     .await;
@@ -426,7 +528,8 @@ async fn p5_03_decay_observed_without_suppression_is_watch() {
 async fn p5_04_insufficient_data_propagates() {
     mqk_db::run_isolated("p5_04_insufficient", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -437,8 +540,14 @@ async fn p5_04_insufficient_data_propagates() {
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
         assert_eq!(row["decay_monitor"]["decay_state"], "insufficient_data");
-        assert_eq!(row["risk_visibility"]["risk_visibility_state"], "insufficient_data", "row={row}");
-        assert_eq!(row["risk_visibility"]["recommended_operator_action"], "insufficient_evidence");
+        assert_eq!(
+            row["risk_visibility"]["risk_visibility_state"], "insufficient_data",
+            "row={row}"
+        );
+        assert_eq!(
+            row["risk_visibility"]["recommended_operator_action"],
+            "insufficient_evidence"
+        );
     })
     .await;
 }
@@ -451,7 +560,8 @@ async fn p5_04_insufficient_data_propagates() {
 async fn p5_05_no_sign_flip_no_suppression_is_normal() {
     mqk_db::run_isolated("p5_05_normal", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -465,11 +575,23 @@ async fn p5_05_no_sign_flip_no_suppression_is_normal() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["decay_monitor"]["decay_state"], "no_expectancy_sign_flip");
-        assert_eq!(row["risk_visibility"]["risk_visibility_state"], "normal", "row={row}");
-        assert_eq!(row["risk_visibility"]["suppression_truth_state"], "not_active", "row={row}");
+        assert_eq!(
+            row["decay_monitor"]["decay_state"],
+            "no_expectancy_sign_flip"
+        );
+        assert_eq!(
+            row["risk_visibility"]["risk_visibility_state"], "normal",
+            "row={row}"
+        );
+        assert_eq!(
+            row["risk_visibility"]["suppression_truth_state"], "not_active",
+            "row={row}"
+        );
         assert_eq!(row["risk_visibility"]["active_strategy_suppression"], false);
-        assert_eq!(row["risk_visibility"]["recommended_operator_action"], "none");
+        assert_eq!(
+            row["risk_visibility"]["recommended_operator_action"],
+            "none"
+        );
         assert_eq!(row["risk_visibility"]["risk_flags"], serde_json::json!([]));
     })
     .await;
@@ -535,7 +657,8 @@ async fn p5_06_high_volatility_context_alone_does_not_escalate_risk_state() {
 async fn p5_07_08_09_coverage_flags_surface_on_every_row() {
     mqk_db::run_isolated("p5_07_08_09_flags", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -547,28 +670,107 @@ async fn p5_07_08_09_coverage_flags_surface_on_every_row() {
         let sid2 = unique_id("strat2");
         let fp_old = fingerprint('i');
         let fp_new = fingerprint('j');
-        place_and_fill(&pool, run_id, &unique_id("sicbuy"), "MSFT", Side::Buy, 1, 1_000_000, &OrderCtx::full(&sid2, &fp_old), at()).await;
-        place_and_fill(&pool, run_id, &unique_id("sicsell"), "MSFT", Side::Sell, 1, 1_000_010, &OrderCtx::full(&sid2, &fp_new), at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("sicbuy"),
+            "MSFT",
+            Side::Buy,
+            1,
+            1_000_000,
+            &OrderCtx::full(&sid2, &fp_old),
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("sicsell"),
+            "MSFT",
+            Side::Sell,
+            1,
+            1_000_010,
+            &OrderCtx::full(&sid2, &fp_new),
+            at(),
+        )
+        .await;
 
         // cross_strategy: two different strategies.
         let sid3 = unique_id("strat3");
         let sid4 = unique_id("strat4");
-        place_and_fill(&pool, run_id, &unique_id("xsbuy"), "GOOG", Side::Buy, 1, 1_000_000, &OrderCtx::full(&sid3, &fingerprint('k')), at()).await;
-        place_and_fill(&pool, run_id, &unique_id("xssell"), "GOOG", Side::Sell, 1, 1_000_010, &OrderCtx::full(&sid4, &fingerprint('l')), at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("xsbuy"),
+            "GOOG",
+            Side::Buy,
+            1,
+            1_000_000,
+            &OrderCtx::full(&sid3, &fingerprint('k')),
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("xssell"),
+            "GOOG",
+            Side::Sell,
+            1,
+            1_000_010,
+            &OrderCtx::full(&sid4, &fingerprint('l')),
+            at(),
+        )
+        .await;
 
         // manual_or_mixed:
-        place_and_fill(&pool, run_id, &unique_id("manbuy"), "TSLA", Side::Buy, 1, 1_000_000, &OrderCtx::manual(), at()).await;
-        place_and_fill(&pool, run_id, &unique_id("mansell"), "TSLA", Side::Sell, 1, 1_000_010, &OrderCtx::manual(), at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("manbuy"),
+            "TSLA",
+            Side::Buy,
+            1,
+            1_000_000,
+            &OrderCtx::manual(),
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("mansell"),
+            "TSLA",
+            Side::Sell,
+            1,
+            1_000_010,
+            &OrderCtx::manual(),
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 10 + 10 + 10 + 10).await;
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
         let flags: Vec<String> = row["risk_visibility"]["risk_flags"]
-            .as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-        assert!(flags.contains(&"semantic_identity_change_excluded_pnl".to_string()), "flags={flags:?}");
-        assert!(flags.contains(&"cross_strategy_closure_pnl".to_string()), "flags={flags:?}");
-        assert!(flags.contains(&"manual_mixed_closure_pnl".to_string()), "flags={flags:?}");
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            flags.contains(&"semantic_identity_change_excluded_pnl".to_string()),
+            "flags={flags:?}"
+        );
+        assert!(
+            flags.contains(&"cross_strategy_closure_pnl".to_string()),
+            "flags={flags:?}"
+        );
+        assert!(
+            flags.contains(&"manual_mixed_closure_pnl".to_string()),
+            "flags={flags:?}"
+        );
         // These closures must never be folded into sid/fp's own exact metrics.
         assert_eq!(row["attributed_close_event_count"], 1);
     })
@@ -635,7 +837,8 @@ async fn sup_r3_suppression_query_failure_fails_closed_through_real_route() {
 async fn p5_12_route_call_is_zero_mutation() {
     mqk_db::run_isolated("p5_12_zero_mutation", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -644,17 +847,39 @@ async fn p5_12_route_call_is_zero_mutation() {
         seed_accounting_state(&pool, run_id, 10).await;
         seed_suppression(&pool, &sid).await;
 
-        async fn counts(pool: &sqlx::PgPool, run_id: Uuid, strategy_id: &str) -> (i64, i64, i64, i64, String) {
-            let outbox: i64 = sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
-                .bind(run_id).fetch_one(pool).await.unwrap();
+        async fn counts(
+            pool: &sqlx::PgPool,
+            run_id: Uuid,
+            strategy_id: &str,
+        ) -> (i64, i64, i64, i64, String) {
+            let outbox: i64 =
+                sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
+                    .bind(run_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
             let inbox: i64 = sqlx::query_scalar("select count(*) from oms_inbox where run_id = $1")
-                .bind(run_id).fetch_one(pool).await.unwrap();
-            let suppressions: i64 = sqlx::query_scalar("select count(*) from sys_strategy_suppressions where strategy_id = $1")
-                .bind(strategy_id).fetch_one(pool).await.unwrap();
-            let promotions: i64 = sqlx::query_scalar("select count(*) from sys_strategy_promotion_transitions")
-                .fetch_one(pool).await.unwrap();
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            let suppressions: i64 = sqlx::query_scalar(
+                "select count(*) from sys_strategy_suppressions where strategy_id = $1",
+            )
+            .bind(strategy_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            let promotions: i64 =
+                sqlx::query_scalar("select count(*) from sys_strategy_promotion_transitions")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
             let status: String = sqlx::query_scalar("select status from runs where run_id = $1")
-                .bind(run_id).fetch_one(pool).await.unwrap();
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
             (outbox, inbox, suppressions, promotions, status)
         }
 

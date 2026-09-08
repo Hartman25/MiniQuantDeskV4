@@ -441,7 +441,11 @@ mod tests {
 
     #[test]
     fn single_frame_groups_same_timestamp_symbols() {
-        let bars = vec![bar("AAPL", 60, 100), bar("AMD", 60, 200), bar("SPY", 60, 400)];
+        let bars = vec![
+            bar("AAPL", 60, 100),
+            bar("AMD", 60, 200),
+            bar("SPY", 60, 400),
+        ];
         let frames = build_market_frames(&bars, 10).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].end_ts(), 60);
@@ -461,7 +465,10 @@ mod tests {
         let frames = build_market_frames(&bars, 10).unwrap();
         assert_eq!(frames.len(), 2);
         let f120 = &frames[1];
-        assert!(f120.current("NVDA").is_none(), "NVDA missing at 120 must be None");
+        assert!(
+            f120.current("NVDA").is_none(),
+            "NVDA missing at 120 must be None"
+        );
         // History persists last-known NVDA data, unchanged, not extended.
         let nvda_hist = f120.history("NVDA").expect("NVDA history exists from t=60");
         assert_eq!(nvda_hist.len(), 1);
@@ -499,6 +506,9 @@ mod tests {
                 end_ts: 60
             }
         );
-        assert_eq!(counter.0, 0, "no evaluation may happen when the input is refused");
+        assert_eq!(
+            counter.0, 0,
+            "no evaluation may happen when the input is refused"
+        );
     }
 }

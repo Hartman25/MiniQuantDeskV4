@@ -112,7 +112,11 @@ impl Strategy for BuyHoldSell {
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
-        let target = if self.bar_idx < self.sell_at_idx { self.qty } else { 0 };
+        let target = if self.bar_idx < self.sell_at_idx {
+            self.qty
+        } else {
+            0
+        };
         StrategyOutput::new(vec![TargetPosition::new("ES", target)])
     }
 }
@@ -172,12 +176,18 @@ fn run_and_persist_full(
 
     let mut engine = BacktestEngine::new(config.clone());
     engine
-        .add_strategy(Box::new(BuyHoldSell { name: strategy_name, bar_idx: 0, qty, sell_at_idx }))
+        .add_strategy(Box::new(BuyHoldSell {
+            name: strategy_name,
+            bar_idx: 0,
+            qty,
+            sell_at_idx,
+        }))
         .unwrap();
     let report = engine.run(&bars).expect("engine.run must succeed");
 
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
-    let root = std::env::temp_dir().join(format!("mqk_p10_{}_{}_{}", label, std::process::id(), seq));
+    let root =
+        std::env::temp_dir().join(format!("mqk_p10_{}_{}_{}", label, std::process::id(), seq));
     let _ = fs::remove_dir_all(&root);
 
     let config_hash = report.config_id.to_string();
@@ -201,7 +211,12 @@ fn run_and_persist_full(
         .expect("write_backtest_report must succeed");
 
     let stress_output = run_backtest_stress_suite(&report, &config, &bars, || {
-        Box::new(BuyHoldSell { name: strategy_name, bar_idx: 0, qty, sell_at_idx })
+        Box::new(BuyHoldSell {
+            name: strategy_name,
+            bar_idx: 0,
+            qty,
+            sell_at_idx,
+        })
     });
     mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
         .expect("write_canonical_stress_suite must succeed");
@@ -321,11 +336,8 @@ fn build_real_research_evidence(
     seed: &str,
     strategy_id: &str,
 ) -> (PathBuf, String, Vec<u8>, String, String, String) {
-    let dir = std::env::temp_dir().join(format!(
-        "mqk_p10_research_{}_{}",
-        seed,
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("mqk_p10_research_{}_{}", seed, std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
@@ -388,12 +400,25 @@ fn build_real_research_evidence(
         "insert into research_judge_artifacts \
          (judge_artifact_sha256, judge_id, experiment_id, hypothesis_id, canonical_judge_json) \
          values (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![judge_sha, format!("judge_{seed}"), experiment_id, Option::<String>::None, judge_json],
+        rusqlite::params![
+            judge_sha,
+            format!("judge_{seed}"),
+            experiment_id,
+            Option::<String>::None,
+            judge_json
+        ],
     )
     .unwrap();
     drop(conn);
 
-    (registry_path, economic_json, daily_csv, judge_json, trial_id, judge_sha)
+    (
+        registry_path,
+        economic_json,
+        daily_csv,
+        judge_json,
+        trial_id,
+        judge_sha,
+    )
 }
 
 fn lenient_promotion_config() -> PromotionConfig {
@@ -422,22 +447,24 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     let (registry_path, econ_json, daily_csv, judge_json, trial_id, judge_sha256) =
         build_real_research_evidence("full_chain", "P10FullChain");
 
-    let (report, root) =
-        run_and_persist_full(
-            "full_chain",
-            "P10FullChain",
-            profitable_bars(),
-            5,
-            25,
-            "trial_full_chain",
-            "econ_eval_full_chain",
-            &judge_sha256,
-        );
+    let (report, root) = run_and_persist_full(
+        "full_chain",
+        "P10FullChain",
+        profitable_bars(),
+        5,
+        25,
+        "trial_full_chain",
+        "econ_eval_full_chain",
+        &judge_sha256,
+    );
 
     // Backtest evidence (report + artifact_lock + stress_suite), resolved
     // by the exact candidate-bound seam the production route uses.
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
-    assert!(bundle.stress_suite.passed, "profitable/non-fragile candidate must pass its own stress suite");
+    assert!(
+        bundle.stress_suite.passed,
+        "profitable/non-fragile candidate must pass its own stress suite"
+    );
 
     // Robustness gauntlet: proves it is a genuinely resolvable, audit-
     // consumable part of the chain (P9) -- CANONICAL-ROBUSTNESS-PROMOTION-
@@ -455,8 +482,14 @@ fn p10a_full_chain_real_evidence_passes_canonical_evaluate_promotion() {
     assert!(bundle.robustness_evidence.is_complete);
     assert!(bundle.robustness_evidence.all_applicable_passed);
 
-    let oos_evidence = verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
-        .expect("real, registry-anchored Research evidence must verify");
+    let oos_evidence = verify_promotion_oos_evidence(
+        &registry_path,
+        &trial_id,
+        &econ_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .expect("real, registry-anchored Research evidence must verify");
     assert_eq!(oos_evidence.strategy_id(), report.strategy_name);
 
     // Canonical decision: exactly the fields PromotionInput/evaluate_promotion
@@ -506,8 +539,14 @@ fn p10b_cross_candidate_identity_is_distinguishable() {
     // Research evidence registered under a DIFFERENT strategy_id.
     let (registry_path, econ_json, daily_csv, judge_json, trial_id, _judge_sha256) =
         build_real_research_evidence("cross_candidate", "SomeUnrelatedStrategy");
-    let oos_evidence = verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
-        .expect("evidence is internally valid on its own");
+    let oos_evidence = verify_promotion_oos_evidence(
+        &registry_path,
+        &trial_id,
+        &econ_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .expect("evidence is internally valid on its own");
 
     assert_ne!(
         oos_evidence.strategy_id(),
@@ -538,9 +577,18 @@ fn p10c_valid_research_evidence_does_not_override_failed_stress_suite() {
         &judge_sha256,
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
-    assert!(!bundle.stress_suite.passed, "fixture precondition: this candidate's real stress suite must fail");
-    let oos_evidence = verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
-        .expect("Research evidence itself is genuinely valid");
+    assert!(
+        !bundle.stress_suite.passed,
+        "fixture precondition: this candidate's real stress suite must fail"
+    );
+    let oos_evidence = verify_promotion_oos_evidence(
+        &registry_path,
+        &trial_id,
+        &econ_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .expect("Research evidence itself is genuinely valid");
 
     let input = PromotionInput {
         initial_equity_micros: bundle.initial_equity_micros,
@@ -601,7 +649,10 @@ fn p10d_same_strategy_different_trial_for_p9_vs_p7c_is_rejected() {
     assert!(bundle.robustness_evidence.is_complete);
     assert!(bundle.robustness_evidence.all_applicable_passed);
     assert_eq!(
-        bundle.robustness_evidence.dsr_pbo_sensitivity_research_trial_id.as_deref(),
+        bundle
+            .robustness_evidence
+            .dsr_pbo_sensitivity_research_trial_id
+            .as_deref(),
         Some("trial_trial_binding_b")
     );
 
@@ -661,9 +712,14 @@ fn p10e_same_trial_for_p9_and_p7c_is_accepted() {
         &judge_sha256,
     );
     let bundle = resolve_backtest_evidence(&root, report.run_id).expect("must resolve");
-    let oos_evidence =
-        verify_promotion_oos_evidence(&registry_path, &trial_id, &econ_json, &daily_csv, &judge_json)
-            .expect("evidence must be genuinely valid");
+    let oos_evidence = verify_promotion_oos_evidence(
+        &registry_path,
+        &trial_id,
+        &econ_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .expect("evidence must be genuinely valid");
 
     let input = PromotionInput {
         initial_equity_micros: bundle.initial_equity_micros,

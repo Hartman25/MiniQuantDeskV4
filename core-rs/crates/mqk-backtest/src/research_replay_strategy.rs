@@ -285,14 +285,28 @@ mod tests {
     }
 
     fn bar(symbol: &str, end_ts: i64) -> BacktestBar {
-        BacktestBar::new(symbol, end_ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000)
+        BacktestBar::new(
+            symbol,
+            end_ts,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1_000,
+        )
     }
 
     fn ctx_for(end_ts: i64) -> StrategyContext {
         let recent = RecentBarsWindow::new(
             10,
             vec![mqk_strategy::BarStub::with_ohlcv(
-                end_ts, true, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000,
+                end_ts,
+                true,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                1_000,
             )],
         );
         StrategyContext::new(86_400, 1, recent)
@@ -314,15 +328,27 @@ mod tests {
     fn full_timestamp_emits_exactly_once() {
         let bars = two_symbol_two_day_bars();
         let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule.insert(1_000, vec![TargetPosition::new("AAA", 5), TargetPosition::new("BBB", -5)]);
+        schedule.insert(
+            1_000,
+            vec![
+                TargetPosition::new("AAA", 5),
+                TargetPosition::new("BBB", -5),
+            ],
+        );
         let mut strat = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
 
         let first = strat.on_bar(&ctx_for(1_000));
-        assert!(first.targets.is_empty(), "no partial emission on the first row of the batch");
+        assert!(
+            first.targets.is_empty(),
+            "no partial emission on the first row of the batch"
+        );
         let second = strat.on_bar(&ctx_for(1_000));
         assert_eq!(
             second.targets,
-            vec![TargetPosition::new("AAA", 5), TargetPosition::new("BBB", -5)]
+            vec![
+                TargetPosition::new("AAA", 5),
+                TargetPosition::new("BBB", -5)
+            ]
         );
     }
 
@@ -401,7 +427,13 @@ mod tests {
     fn fingerprint_identical_for_baseline_and_loo_schedule_variant() {
         let bars = two_symbol_two_day_bars();
         let mut baseline_schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        baseline_schedule.insert(1_000, vec![TargetPosition::new("AAA", 5), TargetPosition::new("BBB", -5)]);
+        baseline_schedule.insert(
+            1_000,
+            vec![
+                TargetPosition::new("AAA", 5),
+                TargetPosition::new("BBB", -5),
+            ],
+        );
         let mut loo_schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
         loo_schedule.insert(1_000, vec![TargetPosition::new("AAA", 10)]); // BBB excluded
 
@@ -451,7 +483,13 @@ mod tests {
         let mut schedule_a: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
         schedule_a.insert(1_000, vec![TargetPosition::new("AAA", 5)]);
         let mut schedule_b: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule_b.insert(1_000, vec![TargetPosition::new("AAA", -5), TargetPosition::new("BBB", 5)]);
+        schedule_b.insert(
+            1_000,
+            vec![
+                TargetPosition::new("AAA", -5),
+                TargetPosition::new("BBB", 5),
+            ],
+        );
 
         let a = ResearchOosReplayStrategy::new(semantic(), schedule_a, &bars);
         let b = ResearchOosReplayStrategy::new(semantic(), schedule_b, &bars);

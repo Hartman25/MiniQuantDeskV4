@@ -67,10 +67,22 @@ impl Strategy for SellOnce {
 fn two_flat_bars(volume: i64) -> Vec<BacktestBar> {
     vec![
         BacktestBar::new(
-            "SPY", 1_700_000_060, 100_000_000, 100_000_000, 100_000_000, 100_000_000, volume,
+            "SPY",
+            1_700_000_060,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            volume,
         ),
         BacktestBar::new(
-            "SPY", 1_700_000_120, 100_000_000, 100_000_000, 100_000_000, 100_000_000, volume,
+            "SPY",
+            1_700_000_120,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            volume,
         ),
     ]
 }
@@ -145,7 +157,10 @@ fn impact_disabled_by_default_price_unaffected() {
     assert_eq!(cfg.stress.participation_impact_bps, 0);
 
     let price = run_buy_fill_price(100, 10, impact(0));
-    assert_eq!(price, 100_000_000, "flat bar, no stress: fills at HIGH exactly");
+    assert_eq!(
+        price, 100_000_000,
+        "flat bar, no stress: fills at HIGH exactly"
+    );
 }
 
 #[test]

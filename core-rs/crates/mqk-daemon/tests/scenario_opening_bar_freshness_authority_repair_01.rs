@@ -85,7 +85,10 @@ const REF_INSTANT: i64 = 1_713_188_100; // 2024-04-15 13:35 UTC
 /// temporal shape of the 2026-08-14 production incident (T+45s).
 fn now_45s_after_open() -> DateTime<Utc> {
     let provider = NyseWeekdaysProvider;
-    let ref_now = Utc.timestamp_opt(REF_INSTANT, 0).single().expect("valid ts");
+    let ref_now = Utc
+        .timestamp_opt(REF_INSTANT, 0)
+        .single()
+        .expect("valid ts");
     let schedule = resolve_market_session_schedule(&provider, ref_now);
     schedule.session_open_utc + chrono::Duration::seconds(45)
 }
@@ -346,7 +349,10 @@ async fn obf_01_45s_after_open_returns_latest_completed_bar_pending_and_coordina
     // be WaitForCondition, never ManualInterventionRequired — this is the
     // real proof that today's autonomous soak would NOT get durably stuck.
     let reason = coordinator_reason_from_runtime_lifecycle_error(&err);
-    assert_eq!(reason, AutonomousCoordinatorReason::LatestCompletedBarPending);
+    assert_eq!(
+        reason,
+        AutonomousCoordinatorReason::LatestCompletedBarPending
+    );
     assert_eq!(
         classify_autonomous_reason(&reason),
         AutonomousRetryClass::WaitForCondition,

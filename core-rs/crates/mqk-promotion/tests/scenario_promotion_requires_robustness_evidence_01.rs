@@ -68,7 +68,9 @@ fn base_input(robustness_evidence: Option<RobustnessEvidence>) -> PromotionInput
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(3, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("robustness_gate_trial")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "robustness_gate_trial",
+        )),
         robustness_evidence,
     }
 }
@@ -78,7 +80,10 @@ fn robustness_evidence_missing_blocks_promotion() {
     let input = base_input(None);
     let decision = evaluate_promotion(&lenient_config(), &input);
 
-    assert!(!decision.passed, "promotion must be blocked when robustness_evidence is None");
+    assert!(
+        !decision.passed,
+        "promotion must be blocked when robustness_evidence is None"
+    );
     let reasons = decision.fail_reasons.join("; ");
     assert!(
         reasons.contains("Robustness evidence missing"),
@@ -118,8 +123,14 @@ fn robustness_evidence_wrong_protocol_blocks_promotion() {
         "a complete, passed evidence bundle under the WRONG protocol must still block promotion"
     );
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("Robustness evidence protocol mismatch"), "got: {reasons}");
-    assert!(reasons.contains(REQUIRED_ROBUSTNESS_PROTOCOL_VERSION), "got: {reasons}");
+    assert!(
+        reasons.contains("Robustness evidence protocol mismatch"),
+        "got: {reasons}"
+    );
+    assert!(
+        reasons.contains(REQUIRED_ROBUSTNESS_PROTOCOL_VERSION),
+        "got: {reasons}"
+    );
 }
 
 #[test]
@@ -148,7 +159,10 @@ fn robustness_evidence_incomplete_blocks_promotion() {
         "a deferred required scenario must block promotion even if everything else passed"
     );
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("Robustness evidence incomplete"), "got: {reasons}");
+    assert!(
+        reasons.contains("Robustness evidence incomplete"),
+        "got: {reasons}"
+    );
     assert!(reasons.contains("dsr_pbo_sensitivity"), "got: {reasons}");
 }
 
@@ -158,7 +172,9 @@ fn robustness_evidence_failed_scenario_blocks_promotion() {
         protocol_version: REQUIRED_ROBUSTNESS_PROTOCOL_VERSION.to_string(),
         is_complete: true,
         all_applicable_passed: false,
-        failed_scenarios: vec!["symbol_leave_one_out: excluding ES breaches conservative bar".to_string()],
+        failed_scenarios: vec![
+            "symbol_leave_one_out: excluding ES breaches conservative bar".to_string(),
+        ],
         deferred_scenarios: Vec::new(),
         dsr_pbo_sensitivity_research_trial_id: Some("robustness_gate_trial".to_string()),
         p7a_p7b_economic_replay_stress_research_trial_id: Some("robustness_gate_trial".to_string()),
@@ -179,9 +195,15 @@ fn robustness_evidence_failed_scenario_blocks_promotion() {
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
-    assert!(!decision.passed, "a genuinely failed required scenario must block promotion");
+    assert!(
+        !decision.passed,
+        "a genuinely failed required scenario must block promotion"
+    );
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("Robustness evidence failed"), "got: {reasons}");
+    assert!(
+        reasons.contains("Robustness evidence failed"),
+        "got: {reasons}"
+    );
     assert!(reasons.contains("symbol_leave_one_out"), "got: {reasons}");
 }
 
@@ -261,7 +283,10 @@ fn p7a_p7b_replay_stress_trial_mismatch_blocks_promotion_even_when_dsr_pbo_match
          promotion even though dsr_pbo_sensitivity is correctly bound"
     );
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("p7a_p7b_economic_replay_stress"), "got: {reasons}");
+    assert!(
+        reasons.contains("p7a_p7b_economic_replay_stress"),
+        "got: {reasons}"
+    );
     assert!(reasons.contains("a_different_trial_b"), "got: {reasons}");
     assert!(reasons.contains("robustness_gate_trial"), "got: {reasons}");
 }
@@ -303,8 +328,14 @@ fn p7a_p7b_replay_stress_missing_trial_binding_blocks_promotion_even_when_dsr_pb
          promotion even though dsr_pbo_sensitivity is correctly bound"
     );
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("p7a_p7b_economic_replay_stress"), "got: {reasons}");
-    assert!(reasons.contains("Research trial binding missing"), "got: {reasons}");
+    assert!(
+        reasons.contains("p7a_p7b_economic_replay_stress"),
+        "got: {reasons}"
+    );
+    assert!(
+        reasons.contains("Research trial binding missing"),
+        "got: {reasons}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +394,10 @@ fn dsr_pbo_sensitivity_judge_scope_mismatch_blocks_promotion() {
          P7C/OOS evidence must block promotion"
     );
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("Judge scope binding mismatch"), "got: {reasons}");
+    assert!(
+        reasons.contains("Judge scope binding mismatch"),
+        "got: {reasons}"
+    );
 }
 
 /// Missing-binding form: no `dsr_pbo_sensitivity_authoritative_judge_artifact_sha256`
@@ -378,7 +412,10 @@ fn dsr_pbo_sensitivity_missing_judge_scope_binding_blocks_promotion() {
 
     assert!(!decision.passed);
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("Judge scope binding missing"), "got: {reasons}");
+    assert!(
+        reasons.contains("Judge scope binding missing"),
+        "got: {reasons}"
+    );
 }
 
 /// Section 3: `genuine_shuffled_placebo` bound to a DIFFERENT research trial
@@ -393,8 +430,14 @@ fn genuine_shuffled_placebo_trial_mismatch_blocks_promotion() {
 
     assert!(!decision.passed);
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("genuine_shuffled_placebo"), "got: {reasons}");
-    assert!(reasons.contains("Research trial binding mismatch"), "got: {reasons}");
+    assert!(
+        reasons.contains("genuine_shuffled_placebo"),
+        "got: {reasons}"
+    );
+    assert!(
+        reasons.contains("Research trial binding mismatch"),
+        "got: {reasons}"
+    );
     assert!(reasons.contains("a_different_trial_c"), "got: {reasons}");
 }
 
@@ -413,8 +456,14 @@ fn genuine_shuffled_placebo_economic_eval_mismatch_blocks_promotion() {
 
     assert!(!decision.passed);
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("genuine_shuffled_placebo"), "got: {reasons}");
-    assert!(reasons.contains("Economic result binding mismatch"), "got: {reasons}");
+    assert!(
+        reasons.contains("genuine_shuffled_placebo"),
+        "got: {reasons}"
+    );
+    assert!(
+        reasons.contains("Economic result binding mismatch"),
+        "got: {reasons}"
+    );
 }
 
 /// Section 3: `genuine_shuffled_placebo` declaring the WRONG protocol_id
@@ -422,14 +471,19 @@ fn genuine_shuffled_placebo_economic_eval_mismatch_blocks_promotion() {
 #[test]
 fn genuine_shuffled_placebo_wrong_protocol_blocks_promotion() {
     let input = base_input(Some(RobustnessEvidence {
-        genuine_shuffled_placebo_protocol_id: Some("temporal_offset_placebo_v0_fabricated".to_string()),
+        genuine_shuffled_placebo_protocol_id: Some(
+            "temporal_offset_placebo_v0_fabricated".to_string(),
+        ),
         ..full_valid_robustness_evidence()
     }));
     let decision = evaluate_promotion(&lenient_config(), &input);
 
     assert!(!decision.passed);
     let reasons = decision.fail_reasons.join("; ");
-    assert!(reasons.contains("genuine_shuffled_placebo protocol mismatch"), "got: {reasons}");
+    assert!(
+        reasons.contains("genuine_shuffled_placebo protocol mismatch"),
+        "got: {reasons}"
+    );
 }
 
 /// Section 4: a `p7a_p7b_economic_replay_stress` scenario missing REQUIRED

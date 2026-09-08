@@ -112,8 +112,7 @@ pub const REASON_REFUSED_DIVERGENT_DUPLICATE: &str = "refused_divergent_duplicat
 /// fingerprint for this candidate does not match (or could not be verified
 /// against) the current server-resolved semantic configuration -- see
 /// [`ExactSelectionReason::ConfigIdentityUnavailable`].
-pub const REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE: &str =
-    "refused_config_identity_unavailable";
+pub const REASON_REFUSED_CONFIG_IDENTITY_UNAVAILABLE: &str = "refused_config_identity_unavailable";
 pub const REASON_NO_VALID_CANDIDATE: &str = "no_valid_candidate_for_symbol";
 
 pub const TRUTH_STATE_COMPUTED: &str = "computed";
@@ -2886,7 +2885,10 @@ mod tests {
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
         let result = result_for(&plan, "AAPL");
         assert_eq!(result.disposition, SelectionCandidateDisposition::Selected);
-        assert_eq!(result.candidates[0].reason_code, REASON_SELECTED_HIGHEST_SCORE);
+        assert_eq!(
+            result.candidates[0].reason_code,
+            REASON_SELECTED_HIGHEST_SCORE
+        );
     }
 
     /// This gate fires strictly BEFORE plugin/timeframe/data-readiness in the

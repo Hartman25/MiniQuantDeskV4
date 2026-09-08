@@ -52,11 +52,19 @@ async fn fetch_performance(st: &Arc<state::AppState>, run_id: Uuid) -> serde_jso
         get(&format!("/api/v1/strategy/performance?run_id={run_id}")),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "strategy/performance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "strategy/performance must return 200"
+    );
     serde_json::from_slice(&body).expect("body is not valid JSON")
 }
 
-fn find_row<'a>(perf: &'a serde_json::Value, strategy_id: &str, fingerprint: &str) -> Option<&'a serde_json::Value> {
+fn find_row<'a>(
+    perf: &'a serde_json::Value,
+    strategy_id: &str,
+    fingerprint: &str,
+) -> Option<&'a serde_json::Value> {
     perf["rows"]
         .as_array()
         .expect("rows must be an array")
@@ -122,10 +130,18 @@ struct OrderCtx<'a> {
 
 impl<'a> OrderCtx<'a> {
     fn manual() -> Self {
-        Self { strategy_id: None, strategy_semantic_fingerprint: None, timeframe_secs: None }
+        Self {
+            strategy_id: None,
+            strategy_semantic_fingerprint: None,
+            timeframe_secs: None,
+        }
     }
     fn full(strategy_id: &'a str, fp: &'a str, timeframe_secs: Option<i64>) -> Self {
-        Self { strategy_id: Some(strategy_id), strategy_semantic_fingerprint: Some(fp), timeframe_secs }
+        Self {
+            strategy_id: Some(strategy_id),
+            strategy_semantic_fingerprint: Some(fp),
+            timeframe_secs,
+        }
     }
 }
 
@@ -185,7 +201,16 @@ async fn fixture_applied_event(
     };
     let json = serde_json::to_value(&ev).expect("serialize BrokerEvent");
     mqk_db::inbox_insert_deduped_with_identity(
-        pool, run_id, broker_message_id, None, internal_order_id, broker_order_id, "fill", &json, 0, at,
+        pool,
+        run_id,
+        broker_message_id,
+        None,
+        internal_order_id,
+        broker_order_id,
+        "fill",
+        &json,
+        0,
+        at,
     )
     .await
     .expect("inbox insert should succeed");
@@ -214,7 +239,16 @@ async fn place_and_fill(
     let broker_message_id = format!("bm:{order_id}");
     let broker_order_id = format!("bo:{order_id}");
     fixture_applied_event(
-        pool, run_id, &broker_message_id, order_id, &broker_order_id, symbol, side, qty, price_micros, at,
+        pool,
+        run_id,
+        &broker_message_id,
+        order_id,
+        &broker_order_id,
+        symbol,
+        side,
+        qty,
+        price_micros,
+        at,
     )
     .await;
 }
@@ -240,13 +274,29 @@ async fn round_trip(
     let buy_id = unique_id(&format!("rtbuy{seq}"));
     let sell_id = unique_id(&format!("rtsell{seq}"));
     place_and_fill(
-        pool, run_id, &buy_id, symbol, Side::Buy, 1, ENTRY_PRICE,
-        &OrderCtx::full(strategy_id, fp, None), at,
-    ).await;
+        pool,
+        run_id,
+        &buy_id,
+        symbol,
+        Side::Buy,
+        1,
+        ENTRY_PRICE,
+        &OrderCtx::full(strategy_id, fp, None),
+        at,
+    )
+    .await;
     place_and_fill(
-        pool, run_id, &sell_id, symbol, Side::Sell, 1, ENTRY_PRICE + delta_micros,
-        &OrderCtx::full(strategy_id, fp, close_timeframe_secs), at,
-    ).await;
+        pool,
+        run_id,
+        &sell_id,
+        symbol,
+        Side::Sell,
+        1,
+        ENTRY_PRICE + delta_micros,
+        &OrderCtx::full(strategy_id, fp, close_timeframe_secs),
+        at,
+    )
+    .await;
 }
 
 async fn max_applied_inbox_id(pool: &sqlx::PgPool, run_id: Uuid) -> i64 {
@@ -311,7 +361,13 @@ async fn seed_accounting_state(pool: &sqlx::PgPool, run_id: Uuid, realized_pnl_m
 
 /// Seed one completed `md_bars` row directly (no ingest pipeline / provider
 /// call -- read-only regime detection consumes whatever is already durable).
-async fn seed_md_bar(pool: &sqlx::PgPool, symbol: &str, timeframe: &str, end_ts: i64, close_micros: i64) {
+async fn seed_md_bar(
+    pool: &sqlx::PgPool,
+    symbol: &str,
+    timeframe: &str,
+    end_ts: i64,
+    close_micros: i64,
+) {
     sqlx::query(
         r#"
         insert into md_bars (symbol, timeframe, end_ts, open_micros, high_micros, low_micros, close_micros, volume, is_complete)
@@ -336,7 +392,8 @@ async fn seed_md_bar(pool: &sqlx::PgPool, symbol: &str, timeframe: &str, end_ts:
 async fn p4_01_fourteen_events_is_insufficient_data() {
     mqk_db::run_isolated("p4_01_fourteen", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -368,7 +425,8 @@ async fn p4_01_fourteen_events_is_insufficient_data() {
 async fn p4_02_exactly_fifteen_splits_baseline_ten_recent_five_no_overlap() {
     mqk_db::run_isolated("p4_02_fifteen", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -385,7 +443,10 @@ async fn p4_02_exactly_fifteen_splits_baseline_ten_recent_five_no_overlap() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_ne!(row["decay_monitor"]["decay_state"], "insufficient_data", "row={row}");
+        assert_ne!(
+            row["decay_monitor"]["decay_state"], "insufficient_data",
+            "row={row}"
+        );
         let baseline = &row["decay_monitor"]["baseline"];
         let recent = &row["decay_monitor"]["recent"];
         assert_eq!(baseline["event_count"], 10);
@@ -424,7 +485,8 @@ async fn build_decay_scenario(
 async fn p4_03_baseline_positive_recent_negative_is_decay_observed() {
     mqk_db::run_isolated("p4_03_decay", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -434,7 +496,10 @@ async fn p4_03_baseline_positive_recent_negative_is_decay_observed() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["decay_monitor"]["decay_state"], "decay_observed", "row={row}");
+        assert_eq!(
+            row["decay_monitor"]["decay_state"], "decay_observed",
+            "row={row}"
+        );
     })
     .await;
 }
@@ -443,7 +508,8 @@ async fn p4_03_baseline_positive_recent_negative_is_decay_observed() {
 async fn p4_04_baseline_nonpositive_recent_positive_is_improvement_observed() {
     mqk_db::run_isolated("p4_04_improve", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -453,7 +519,10 @@ async fn p4_04_baseline_nonpositive_recent_positive_is_improvement_observed() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["decay_monitor"]["decay_state"], "improvement_observed", "row={row}");
+        assert_eq!(
+            row["decay_monitor"]["decay_state"], "improvement_observed",
+            "row={row}"
+        );
     })
     .await;
 }
@@ -462,7 +531,8 @@ async fn p4_04_baseline_nonpositive_recent_positive_is_improvement_observed() {
 async fn p4_05_same_sign_positive_is_no_expectancy_sign_flip() {
     mqk_db::run_isolated("p4_05_same_pos", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -472,7 +542,10 @@ async fn p4_05_same_sign_positive_is_no_expectancy_sign_flip() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["decay_monitor"]["decay_state"], "no_expectancy_sign_flip", "row={row}");
+        assert_eq!(
+            row["decay_monitor"]["decay_state"], "no_expectancy_sign_flip",
+            "row={row}"
+        );
     })
     .await;
 }
@@ -481,7 +554,8 @@ async fn p4_05_same_sign_positive_is_no_expectancy_sign_flip() {
 async fn p4_06_same_sign_negative_is_no_expectancy_sign_flip() {
     mqk_db::run_isolated("p4_06_same_neg", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -491,7 +565,10 @@ async fn p4_06_same_sign_negative_is_no_expectancy_sign_flip() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["decay_monitor"]["decay_state"], "no_expectancy_sign_flip", "row={row}");
+        assert_eq!(
+            row["decay_monitor"]["decay_state"], "no_expectancy_sign_flip",
+            "row={row}"
+        );
     })
     .await;
 }
@@ -504,7 +581,8 @@ async fn p4_06_same_sign_negative_is_no_expectancy_sign_flip() {
 async fn p4_07_fingerprint_change_splits_samples() {
     mqk_db::run_isolated("p4_07_fp_split", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -543,7 +621,8 @@ async fn p4_07_fingerprint_change_splits_samples() {
 async fn p4_08_manual_closures_do_not_count_toward_sample_size() {
     mqk_db::run_isolated("p4_08_manual_excluded", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -559,15 +638,40 @@ async fn p4_08_manual_closures_do_not_count_toward_sample_size() {
         for i in 10..15 {
             let buy_id = unique_id(&format!("manbuy{i}"));
             let sell_id = unique_id(&format!("mansell{i}"));
-            place_and_fill(&pool, run_id, &buy_id, "MSFT", Side::Buy, 1, 1_000_000, &OrderCtx::manual(), at()).await;
-            place_and_fill(&pool, run_id, &sell_id, "MSFT", Side::Sell, 1, 1_000_010, &OrderCtx::manual(), at()).await;
+            place_and_fill(
+                &pool,
+                run_id,
+                &buy_id,
+                "MSFT",
+                Side::Buy,
+                1,
+                1_000_000,
+                &OrderCtx::manual(),
+                at(),
+            )
+            .await;
+            place_and_fill(
+                &pool,
+                run_id,
+                &sell_id,
+                "MSFT",
+                Side::Sell,
+                1,
+                1_000_010,
+                &OrderCtx::manual(),
+                at(),
+            )
+            .await;
             total += 10;
         }
         seed_accounting_state(&pool, run_id, total).await;
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["attributed_close_event_count"], 10, "manual closures must never inflate the attributed sample size");
+        assert_eq!(
+            row["attributed_close_event_count"], 10,
+            "manual closures must never inflate the attributed sample size"
+        );
         assert_eq!(row["decay_monitor"]["decay_state"], "insufficient_data");
     })
     .await;
@@ -581,7 +685,8 @@ async fn p4_08_manual_closures_do_not_count_toward_sample_size() {
 async fn p4_09_exact_durable_timeframe_context_used() {
     mqk_db::run_isolated("p4_09_exact_context", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -593,8 +698,14 @@ async fn p4_09_exact_durable_timeframe_context_used() {
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
         assert_eq!(row["regime_context"]["symbol"], "AAPL");
         assert_eq!(row["regime_context"]["timeframe_secs"], 300);
-        assert_eq!(row["regime_context"]["regime_authority"], "research_only_observational");
-        assert_ne!(row["regime_context"]["regime_truth_state"], "context_unavailable", "row={row}");
+        assert_eq!(
+            row["regime_context"]["regime_authority"],
+            "research_only_observational"
+        );
+        assert_ne!(
+            row["regime_context"]["regime_truth_state"], "context_unavailable",
+            "row={row}"
+        );
     })
     .await;
 }
@@ -607,7 +718,8 @@ async fn p4_09_exact_durable_timeframe_context_used() {
 async fn p4_10_conflicting_exact_timeframes_is_context_ambiguous() {
     mqk_db::run_isolated("p4_10_ambiguous", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -618,9 +730,15 @@ async fn p4_10_conflicting_exact_timeframes_is_context_ambiguous() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["regime_context"]["regime_truth_state"], "context_ambiguous", "row={row}");
+        assert_eq!(
+            row["regime_context"]["regime_truth_state"], "context_ambiguous",
+            "row={row}"
+        );
         assert_eq!(row["regime_context"]["symbol"], serde_json::Value::Null);
-        assert_eq!(row["regime_context"]["timeframe_secs"], serde_json::Value::Null);
+        assert_eq!(
+            row["regime_context"]["timeframe_secs"],
+            serde_json::Value::Null
+        );
     })
     .await;
 }
@@ -633,7 +751,8 @@ async fn p4_10_conflicting_exact_timeframes_is_context_ambiguous() {
 async fn p4_11_missing_exact_context_is_context_unavailable() {
     mqk_db::run_isolated("p4_11_unavailable", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -644,8 +763,14 @@ async fn p4_11_missing_exact_context_is_context_unavailable() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["regime_context"]["regime_truth_state"], "context_unavailable", "row={row}");
-        assert_eq!(row["regime_context"]["regime_kind"], serde_json::Value::Null);
+        assert_eq!(
+            row["regime_context"]["regime_truth_state"], "context_unavailable",
+            "row={row}"
+        );
+        assert_eq!(
+            row["regime_context"]["regime_kind"],
+            serde_json::Value::Null
+        );
     })
     .await;
 }
@@ -658,7 +783,8 @@ async fn p4_11_missing_exact_context_is_context_unavailable() {
 async fn p4_12_13_completed_bars_only_and_marked_research_only_observational() {
     mqk_db::run_isolated("p4_12_13_bars", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -668,13 +794,26 @@ async fn p4_12_13_completed_bars_only_and_marked_research_only_observational() {
 
         // 20 completed 1m bars -- comfortably above MarketRegimePolicy::conservative_defaults().min_bars (8).
         for i in 0..20 {
-            seed_md_bar(&pool, "AAPL", "1m", 1_700_000_000 + i * 60, 1_000_000 + i * 100).await;
+            seed_md_bar(
+                &pool,
+                "AAPL",
+                "1m",
+                1_700_000_000 + i * 60,
+                1_000_000 + i * 100,
+            )
+            .await;
         }
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["regime_context"]["regime_authority"], "research_only_observational");
-        assert_eq!(row["regime_context"]["regime_truth_state"], "active_observational", "row={row}");
+        assert_eq!(
+            row["regime_context"]["regime_authority"],
+            "research_only_observational"
+        );
+        assert_eq!(
+            row["regime_context"]["regime_truth_state"], "active_observational",
+            "row={row}"
+        );
         assert!(row["regime_context"]["regime_kind"].is_string());
         assert_eq!(row["regime_context"]["input_bar_count"], 20);
     })
@@ -689,7 +828,8 @@ async fn p4_12_13_completed_bars_only_and_marked_research_only_observational() {
 async fn p4_14_insufficient_detector_bars_is_insufficient_data() {
     mqk_db::run_isolated("p4_14_insufficient_bars", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -704,7 +844,10 @@ async fn p4_14_insufficient_detector_bars_is_insufficient_data() {
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["regime_context"]["regime_truth_state"], "insufficient_data", "row={row}");
+        assert_eq!(
+            row["regime_context"]["regime_truth_state"], "insufficient_data",
+            "row={row}"
+        );
         assert_eq!(row["regime_context"]["regime_kind"], "insufficient_data");
     })
     .await;
@@ -718,7 +861,8 @@ async fn p4_14_insufficient_detector_bars_is_insufficient_data() {
 async fn p4_15_route_call_is_zero_mutation() {
     mqk_db::run_isolated("p4_15_zero_mutation", |pool| async move {
         let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(), state::OperatorAuthMode::ExplicitDevNoToken,
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let run_id = seed_run(&st).await;
         let sid = unique_id("strat");
@@ -727,12 +871,22 @@ async fn p4_15_route_call_is_zero_mutation() {
         seed_accounting_state(&pool, run_id, 10).await;
 
         async fn counts(pool: &sqlx::PgPool, run_id: Uuid) -> (i64, i64, String) {
-            let outbox: i64 = sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
-                .bind(run_id).fetch_one(pool).await.unwrap();
+            let outbox: i64 =
+                sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
+                    .bind(run_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
             let inbox: i64 = sqlx::query_scalar("select count(*) from oms_inbox where run_id = $1")
-                .bind(run_id).fetch_one(pool).await.unwrap();
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
             let status: String = sqlx::query_scalar("select status from runs where run_id = $1")
-                .bind(run_id).fetch_one(pool).await.unwrap();
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
             (outbox, inbox, status)
         }
 

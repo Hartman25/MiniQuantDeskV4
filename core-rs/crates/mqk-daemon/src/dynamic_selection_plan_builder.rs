@@ -358,11 +358,12 @@ async fn evaluate_candidate(
                         p.timeframe_secs,
                     )
                     .ok();
-                let config_identity_verified = crate::strategy_config_identity::config_identity_is_verified(
-                    &v.config_identity_status,
-                    v.config_fingerprint.as_deref(),
-                    current_config_fingerprint.as_deref(),
-                );
+                let config_identity_verified =
+                    crate::strategy_config_identity::config_identity_is_verified(
+                        &v.config_identity_status,
+                        v.config_fingerprint.as_deref(),
+                        current_config_fingerprint.as_deref(),
+                    );
                 (
                     SelectionCandidateEvidence {
                         promotion_query_ok: true,
@@ -897,12 +898,18 @@ mod tests {
                 1 => price *= 1.0017,
                 _ => price *= 0.9960,
             }
-            let (hi_mult, lo_mult) = if leg == 1 { (1.09, 0.91) } else { (1.005, 0.995) };
+            let (hi_mult, lo_mult) = if leg == 1 {
+                (1.09, 0.91)
+            } else {
+                (1.005, 0.995)
+            };
             let o = (price * m as f64) as i64;
             let h = (price * hi_mult * m as f64) as i64;
             let l = (price * lo_mult * m as f64) as i64;
             let c = (price * m as f64) as i64;
-            bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+            bars.push(mqk_backtest::BacktestBar::new(
+                symbol, ts, o, h, l, c, 10_000,
+            ));
         }
         bars
     }
@@ -960,12 +967,13 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
-            panic!(
-                "real_research_promotion_e2e_cli produced unparseable stdout: {e}; stdout={}",
-                String::from_utf8_lossy(&output.stdout)
-            )
-        });
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+                panic!(
+                    "real_research_promotion_e2e_cli produced unparseable stdout: {e}; stdout={}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            });
         assert_eq!(
             parsed["status"], "ok",
             "real_research_promotion_e2e_cli reported non-ok status: {parsed}"
@@ -990,8 +998,10 @@ mod tests {
                     "fixture precondition: every real trial's DSR must be evaluable: {t}"
                 );
                 let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
-                let economic_eval_id =
-                    t["economic_eval_id"].as_str().expect("economic_eval_id").to_string();
+                let economic_eval_id = t["economic_eval_id"]
+                    .as_str()
+                    .expect("economic_eval_id")
+                    .to_string();
                 let economic_json_path = std::path::PathBuf::from(
                     t["economic_walk_forward_json"].as_str().expect("path"),
                 );
@@ -1039,7 +1049,10 @@ mod tests {
 
         let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
         engine
-            .add_strategy(reg.instantiate("swing_momentum").expect("swing_momentum registered"))
+            .add_strategy(
+                reg.instantiate("swing_momentum")
+                    .expect("swing_momentum registered"),
+            )
             .expect("add_strategy");
         let bars = smooth_uptrend_bars(symbol);
         let report = engine.run(&bars).expect("engine.run");
@@ -1065,13 +1078,15 @@ mod tests {
             .expect("write_backtest_report");
 
         let stress_output = mqk_backtest::run_backtest_stress_suite(&report, &cfg, &bars, || {
-            reg.instantiate("swing_momentum").expect("swing_momentum registered")
+            reg.instantiate("swing_momentum")
+                .expect("swing_momentum registered")
         });
         mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
             .expect("write_canonical_stress_suite");
 
         let gauntlet_output = mqk_backtest::run_robustness_gauntlet(&report, &cfg, &bars, || {
-            reg.instantiate("swing_momentum").expect("swing_momentum registered")
+            reg.instantiate("swing_momentum")
+                .expect("swing_momentum registered")
         });
         mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
             .expect("write_canonical_robustness_gauntlet");
@@ -1128,7 +1143,9 @@ mod tests {
             &init_result.run_dir,
             &placebo,
         )
-        .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (genuine_shuffled_placebo)");
+        .expect(
+            "finalize_canonical_robustness_gauntlet_with_sensitivity (genuine_shuffled_placebo)",
+        );
 
         report.run_id
     }

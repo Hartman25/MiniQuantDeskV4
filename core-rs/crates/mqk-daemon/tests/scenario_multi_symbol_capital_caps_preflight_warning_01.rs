@@ -143,9 +143,18 @@ async fn pw01_all_three_caps_set_no_cap_warnings() {
     let json = parse_json(body);
     let text = warnings_text(&json);
 
-    assert!(!text.contains(ENV_CAP2), "unexpected cap #2 warning: {text}");
-    assert!(!text.contains(ENV_CAP3), "unexpected cap #3 warning: {text}");
-    assert!(!text.contains(ENV_CAP5), "unexpected cap #5 warning: {text}");
+    assert!(
+        !text.contains(ENV_CAP2),
+        "unexpected cap #2 warning: {text}"
+    );
+    assert!(
+        !text.contains(ENV_CAP3),
+        "unexpected cap #3 warning: {text}"
+    );
+    assert!(
+        !text.contains(ENV_CAP5),
+        "unexpected cap #5 warning: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -164,9 +173,18 @@ async fn pw02_only_cap2_missing_names_cap2_only() {
     let json = parse_json(body);
     let text = warnings_text(&json);
 
-    assert!(text.contains(ENV_CAP2), "expected cap #2 warning, got: {text}");
-    assert!(!text.contains(ENV_CAP3), "unexpected cap #3 warning: {text}");
-    assert!(!text.contains(ENV_CAP5), "unexpected cap #5 warning: {text}");
+    assert!(
+        text.contains(ENV_CAP2),
+        "expected cap #2 warning, got: {text}"
+    );
+    assert!(
+        !text.contains(ENV_CAP3),
+        "unexpected cap #3 warning: {text}"
+    );
+    assert!(
+        !text.contains(ENV_CAP5),
+        "unexpected cap #5 warning: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -185,9 +203,18 @@ async fn pw03_only_cap3_missing_names_cap3_only() {
     let json = parse_json(body);
     let text = warnings_text(&json);
 
-    assert!(!text.contains(ENV_CAP2), "unexpected cap #2 warning: {text}");
-    assert!(text.contains(ENV_CAP3), "expected cap #3 warning, got: {text}");
-    assert!(!text.contains(ENV_CAP5), "unexpected cap #5 warning: {text}");
+    assert!(
+        !text.contains(ENV_CAP2),
+        "unexpected cap #2 warning: {text}"
+    );
+    assert!(
+        text.contains(ENV_CAP3),
+        "expected cap #3 warning, got: {text}"
+    );
+    assert!(
+        !text.contains(ENV_CAP5),
+        "unexpected cap #5 warning: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -206,9 +233,18 @@ async fn pw04_only_cap5_missing_names_cap5_only() {
     let json = parse_json(body);
     let text = warnings_text(&json);
 
-    assert!(!text.contains(ENV_CAP2), "unexpected cap #2 warning: {text}");
-    assert!(!text.contains(ENV_CAP3), "unexpected cap #3 warning: {text}");
-    assert!(text.contains(ENV_CAP5), "expected cap #5 warning, got: {text}");
+    assert!(
+        !text.contains(ENV_CAP2),
+        "unexpected cap #2 warning: {text}"
+    );
+    assert!(
+        !text.contains(ENV_CAP3),
+        "unexpected cap #3 warning: {text}"
+    );
+    assert!(
+        text.contains(ENV_CAP5),
+        "expected cap #5 warning, got: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -227,9 +263,18 @@ async fn pw05_all_three_missing_names_all_three() {
     let json = parse_json(body);
     let text = warnings_text(&json);
 
-    assert!(text.contains(ENV_CAP2), "expected cap #2 warning, got: {text}");
-    assert!(text.contains(ENV_CAP3), "expected cap #3 warning, got: {text}");
-    assert!(text.contains(ENV_CAP5), "expected cap #5 warning, got: {text}");
+    assert!(
+        text.contains(ENV_CAP2),
+        "expected cap #2 warning, got: {text}"
+    );
+    assert!(
+        text.contains(ENV_CAP3),
+        "expected cap #3 warning, got: {text}"
+    );
+    assert!(
+        text.contains(ENV_CAP5),
+        "expected cap #5 warning, got: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------

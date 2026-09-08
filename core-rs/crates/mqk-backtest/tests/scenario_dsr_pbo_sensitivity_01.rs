@@ -99,7 +99,8 @@ fn dpsr01a_never_attempted_trial_is_a_genuine_failure_never_inapplicable() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let registry_db = dir.join("registry.sqlite3");
-    let judge_sha256 = register_never_attempted_trial(&registry_db, "rust_it_never_attempted", "only");
+    let judge_sha256 =
+        register_never_attempted_trial(&registry_db, "rust_it_never_attempted", "only");
 
     let outcome = dsr_pbo_sensitivity_scenario(
         &python_executable(),
@@ -123,7 +124,10 @@ fn dpsr01a_never_attempted_trial_is_a_genuine_failure_never_inapplicable() {
         outcome.applicable,
         "dsr_pbo_sensitivity must NEVER report applicable: false: {outcome:?}"
     );
-    assert!(!outcome.passed, "a never-attempted trial must never silently pass: {outcome:?}");
+    assert!(
+        !outcome.passed,
+        "a never-attempted trial must never silently pass: {outcome:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -142,7 +146,8 @@ fn dpsr01b_unknown_trial_id_is_a_real_failure_not_a_silent_pass() {
     std::fs::create_dir_all(&dir).unwrap();
     // Registry file created (empty DB, schema initialized) but no such
     // trial was ever registered.
-    let judge_sha256 = register_never_attempted_trial(&dir.join("registry.sqlite3"), "some_other_trial", "only");
+    let judge_sha256 =
+        register_never_attempted_trial(&dir.join("registry.sqlite3"), "some_other_trial", "only");
     let registry_db = dir.join("registry.sqlite3");
 
     let outcome = dsr_pbo_sensitivity_scenario(
@@ -158,8 +163,14 @@ fn dpsr01b_unknown_trial_id_is_a_real_failure_not_a_silent_pass() {
     );
 
     assert_eq!(outcome.name, "dsr_pbo_sensitivity");
-    assert!(outcome.applicable, "an operational error is never inapplicable");
-    assert!(!outcome.passed, "an unknown trial_id must never silently pass: {outcome:?}");
+    assert!(
+        outcome.applicable,
+        "an operational error is never inapplicable"
+    );
+    assert!(
+        !outcome.passed,
+        "an unknown trial_id must never silently pass: {outcome:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -177,7 +188,8 @@ fn dpsr01c_bad_python_executable_fails_closed_not_a_panic() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let registry_db = dir.join("registry.sqlite3");
-    let judge_sha256 = register_never_attempted_trial(&registry_db, "trial_for_bad_python_test", "only");
+    let judge_sha256 =
+        register_never_attempted_trial(&registry_db, "trial_for_bad_python_test", "only");
 
     let outcome = dsr_pbo_sensitivity_scenario(
         "mqk_definitely_not_a_real_python_executable_xyz",
@@ -192,8 +204,14 @@ fn dpsr01c_bad_python_executable_fails_closed_not_a_panic() {
     );
 
     assert!(outcome.applicable);
-    assert!(!outcome.passed, "a spawn failure must fail closed, never silently pass: {outcome:?}");
-    assert!(outcome.reason.unwrap_or_default().contains("failed to spawn"));
+    assert!(
+        !outcome.passed,
+        "a spawn failure must fail closed, never silently pass: {outcome:?}"
+    );
+    assert!(outcome
+        .reason
+        .unwrap_or_default()
+        .contains("failed to spawn"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -213,8 +231,11 @@ fn dpsr01d_research_trial_strategy_mismatch_is_rejected() {
     let registry_db = dir.join("registry.sqlite3");
     // Trial genuinely registered under strategy_id="registered_strategy" --
     // the backtest candidate claims to be a DIFFERENT strategy.
-    let judge_sha256 =
-        register_never_attempted_trial(&registry_db, "rust_it_mismatch_trial", "registered_strategy");
+    let judge_sha256 = register_never_attempted_trial(
+        &registry_db,
+        "rust_it_mismatch_trial",
+        "registered_strategy",
+    );
 
     let outcome = dsr_pbo_sensitivity_scenario(
         &python_executable(),
@@ -229,12 +250,21 @@ fn dpsr01d_research_trial_strategy_mismatch_is_rejected() {
     );
 
     assert_eq!(outcome.name, "dsr_pbo_sensitivity");
-    assert!(outcome.applicable, "a cross-candidate mismatch is a real failure, never inapplicable");
-    assert!(!outcome.passed, "a Research trial registered under a DIFFERENT strategy must never merge: {outcome:?}");
+    assert!(
+        outcome.applicable,
+        "a cross-candidate mismatch is a real failure, never inapplicable"
+    );
+    assert!(
+        !outcome.passed,
+        "a Research trial registered under a DIFFERENT strategy must never merge: {outcome:?}"
+    );
     let reason = outcome.reason.unwrap_or_default();
     assert!(reason.contains("Research trial mismatch"), "got: {reason}");
     assert!(reason.contains("registered_strategy"), "got: {reason}");
-    assert!(reason.contains("a_completely_different_backtest_strategy"), "got: {reason}");
+    assert!(
+        reason.contains("a_completely_different_backtest_strategy"),
+        "got: {reason}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

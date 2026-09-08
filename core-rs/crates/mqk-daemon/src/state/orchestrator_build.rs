@@ -87,9 +87,8 @@ impl RuntimeAccountAuthority for DaemonAccountAuthority {
             return Err(AccountAuthorityError::Stale);
         }
 
-        let equity_micros =
-            crate::routes::helpers::parse_decimal_micros(&snapshot.account.equity)
-                .ok_or(AccountAuthorityError::Malformed)?;
+        let equity_micros = crate::routes::helpers::parse_decimal_micros(&snapshot.account.equity)
+            .ok_or(AccountAuthorityError::Malformed)?;
         if equity_micros <= 0 {
             return Err(AccountAuthorityError::Malformed);
         }
@@ -411,11 +410,14 @@ impl AppState {
         // the same authoritative source, never the daemon/env-configured
         // `initial_equity_micros` (which remains solely a LOCAL
         // `PortfolioState` seed — see `recover_oms_and_portfolio` above).
-        let account_authority: Arc<dyn RuntimeAccountAuthority> = Arc::new(DaemonAccountAuthority {
-            broker_snapshot: Arc::clone(&self.broker_snapshot),
-            source: self.broker_snapshot_source,
-            freshness_bound: chrono::Duration::seconds(super::ACCOUNT_RISK_FRESHNESS_BOUND_SECS),
-        });
+        let account_authority: Arc<dyn RuntimeAccountAuthority> =
+            Arc::new(DaemonAccountAuthority {
+                broker_snapshot: Arc::clone(&self.broker_snapshot),
+                source: self.broker_snapshot_source,
+                freshness_bound: chrono::Duration::seconds(
+                    super::ACCOUNT_RISK_FRESHNESS_BOUND_SECS,
+                ),
+            });
 
         let gateway = build_gateway(
             daemon_broker,
@@ -1260,8 +1262,7 @@ mod tests {
                 "max_drawdown": 0.05_f64,
             }
         });
-        let effective =
-            effective_run_config_for_risk(&base, Some(99_000_000_000), None, None);
+        let effective = effective_run_config_for_risk(&base, Some(99_000_000_000), None, None);
 
         assert_eq!(
             effective.pointer("/risk/initial_equity_micros"),
@@ -1283,7 +1284,10 @@ mod tests {
         let effective = effective_run_config_for_risk(&base, None, Some(0.03), None);
 
         assert!(
-            effective.pointer("/risk/daily_loss_limit").unwrap().is_array(),
+            effective
+                .pointer("/risk/daily_loss_limit")
+                .unwrap()
+                .is_array(),
             "a present-but-wrong-type (array) daily_loss_limit must remain untouched"
         );
     }
@@ -1299,7 +1303,10 @@ mod tests {
         let effective = serde_json::json!({ "risk": {} });
         let err = required_initial_equity_micros(&effective)
             .expect_err("absent seed must refuse to start, never default to 0");
-        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_missing");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.portfolio_seed_missing"
+        );
 
         // RUNTIME-RISK-EQUITY-ENV-OPERATOR-MESSAGE-01: the refusal must name
         // the actual supported env var, not the nonexistent "_MICROS" literal.
@@ -1317,9 +1324,12 @@ mod tests {
     #[test]
     fn null_initial_equity_micros_refuses_to_start() {
         let effective = serde_json::json!({ "risk": { "initial_equity_micros": null } });
-        let err = required_initial_equity_micros(&effective)
-            .expect_err("null seed must refuse to start");
-        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+        let err =
+            required_initial_equity_micros(&effective).expect_err("null seed must refuse to start");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.portfolio_seed_invalid"
+        );
     }
 
     #[test]
@@ -1327,7 +1337,10 @@ mod tests {
         let effective = serde_json::json!({ "risk": { "initial_equity_micros": "bad" } });
         let err = required_initial_equity_micros(&effective)
             .expect_err("string seed must refuse to start, never coerce to 0");
-        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.portfolio_seed_invalid"
+        );
     }
 
     #[test]
@@ -1335,15 +1348,21 @@ mod tests {
         let effective = serde_json::json!({ "risk": { "initial_equity_micros": 50_000.5 } });
         let err = required_initial_equity_micros(&effective)
             .expect_err("non-integer float seed must refuse to start");
-        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.portfolio_seed_invalid"
+        );
     }
 
     #[test]
     fn zero_initial_equity_micros_refuses_to_start() {
         let effective = serde_json::json!({ "risk": { "initial_equity_micros": 0i64 } });
-        let err = required_initial_equity_micros(&effective)
-            .expect_err("zero seed must refuse to start");
-        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+        let err =
+            required_initial_equity_micros(&effective).expect_err("zero seed must refuse to start");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.portfolio_seed_invalid"
+        );
     }
 
     #[test]
@@ -1351,7 +1370,10 @@ mod tests {
         let effective = serde_json::json!({ "risk": { "initial_equity_micros": -1i64 } });
         let err = required_initial_equity_micros(&effective)
             .expect_err("negative seed must refuse to start");
-        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.portfolio_seed_invalid"
+        );
     }
 
     #[test]
@@ -1363,13 +1385,17 @@ mod tests {
         ] {
             let err = required_initial_equity_micros(&bad)
                 .expect_err("non-numeric-typed seed must refuse to start");
-            assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+            assert_eq!(
+                err.fault_class(),
+                "runtime.start_refused.portfolio_seed_invalid"
+            );
         }
     }
 
     #[test]
     fn positive_initial_equity_micros_returns_exact_value() {
-        let effective = serde_json::json!({ "risk": { "initial_equity_micros": 25_000_000_000i64 } });
+        let effective =
+            serde_json::json!({ "risk": { "initial_equity_micros": 25_000_000_000i64 } });
         assert_eq!(
             required_initial_equity_micros(&effective).expect("positive seed must be accepted"),
             25_000_000_000i64,
@@ -1398,8 +1424,7 @@ mod tests {
         // and this validation accepts the merged, now-present positive
         // value exactly.
         let base = serde_json::json!({ "runtime": "mqk-daemon" });
-        let effective =
-            effective_run_config_for_risk(&base, Some(50_000_000_000), None, None);
+        let effective = effective_run_config_for_risk(&base, Some(50_000_000_000), None, None);
         assert_eq!(
             required_initial_equity_micros(&effective).expect("env-supplied seed must validate"),
             50_000_000_000i64,
@@ -1414,8 +1439,7 @@ mod tests {
         let base = serde_json::json!({
             "risk": { "initial_equity_micros": "bad" }
         });
-        let effective =
-            effective_run_config_for_risk(&base, Some(50_000_000_000), None, None);
+        let effective = effective_run_config_for_risk(&base, Some(50_000_000_000), None, None);
         assert_eq!(
             effective.pointer("/risk/initial_equity_micros"),
             Some(&serde_json::json!("bad")),
@@ -1423,7 +1447,10 @@ mod tests {
         );
         let err = required_initial_equity_micros(&effective)
             .expect_err("malformed explicit seed must remain refused after RR2 merge");
-        assert_eq!(err.fault_class(), "runtime.start_refused.portfolio_seed_invalid");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.portfolio_seed_invalid"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1813,7 +1840,10 @@ mod tests {
         }
     }
 
-    fn schema_snapshot(equity: &str, captured_at_utc: DateTime<Utc>) -> mqk_schemas::BrokerSnapshot {
+    fn schema_snapshot(
+        equity: &str,
+        captured_at_utc: DateTime<Utc>,
+    ) -> mqk_schemas::BrokerSnapshot {
         mqk_schemas::BrokerSnapshot {
             captured_at_utc,
             account: schema_account(equity),

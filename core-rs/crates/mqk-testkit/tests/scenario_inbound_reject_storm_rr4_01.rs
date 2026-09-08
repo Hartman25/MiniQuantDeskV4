@@ -276,12 +276,11 @@ mod db_tests {
         reject_storm_max_rejects_in_window: u32,
     ) -> ExecutionOrchestrator<ScriptedBroker, PassGate, RuntimeRiskGate, PassGate, DbFixedClock>
     {
-        let clock: Arc<dyn RuntimeClock> =
-            Arc::new(FixedRuntimeClock(chrono::DateTime::parse_from_rfc3339(
-                "2026-01-15T09:00:00Z",
-            )
-            .unwrap()
-            .with_timezone(&Utc)));
+        let clock: Arc<dyn RuntimeClock> = Arc::new(FixedRuntimeClock(
+            chrono::DateTime::parse_from_rfc3339("2026-01-15T09:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ));
         let risk_gate = RuntimeRiskGate::for_test(
             RiskConfig {
                 daily_loss_limit_micros: 0,
@@ -354,7 +353,9 @@ mod db_tests {
         // --- Tick 1: submit r0, broker accepts, inbound Reject applies. ---
         enqueue_order(&pool, run_id, "rr4-r0").await?;
         broker.queue_event(reject_event("rr4-r0", "rr4-reject-r0"));
-        orch.tick().await.expect("tick 1 (accept + inbound reject) must not error");
+        orch.tick()
+            .await
+            .expect("tick 1 (accept + inbound reject) must not error");
         assert_eq!(broker.submit_count(), 1, "r0 must have reached the broker");
 
         // --- Tick 2: submit r1, broker accepts, inbound Reject applies.
@@ -367,7 +368,9 @@ mod db_tests {
         enqueue_order(&pool, run_id, "rr4-r1").await?;
         broker.queue_event(reject_event("rr4-r0", "rr4-reject-r0")); // duplicate
         broker.queue_event(reject_event("rr4-r1", "rr4-reject-r1"));
-        orch.tick().await.expect("tick 2 (accept + inbound reject + duplicate) must not error");
+        orch.tick()
+            .await
+            .expect("tick 2 (accept + inbound reject + duplicate) must not error");
         assert_eq!(broker.submit_count(), 2, "r1 must have reached the broker");
 
         // --- Tick 3: submit r2 — this is the "threshold-1 still permits
@@ -377,7 +380,9 @@ mod db_tests {
         //     own inbound Reject then pushes the window to exactly 3. ---
         enqueue_order(&pool, run_id, "rr4-r2").await?;
         broker.queue_event(reject_event("rr4-r2", "rr4-reject-r2"));
-        orch.tick().await.expect("tick 3 (r2 accepted despite 2 prior rejects) must not error");
+        orch.tick()
+            .await
+            .expect("tick 3 (r2 accepted despite 2 prior rejects) must not error");
         assert_eq!(
             broker.submit_count(),
             3,
@@ -466,7 +471,9 @@ mod db_tests {
         broker.queue_event(reject_event("orphan-order-never-submitted", "orphan-msg-1"));
         // A tick with nothing claimed still runs Phase 2/3 against whatever
         // fetch_events returns.
-        orch.tick().await.expect("tick with only an orphan inbound reject must not error");
+        orch.tick()
+            .await
+            .expect("tick with only an orphan inbound reject must not error");
 
         // Now submit ONE real order. With threshold=1, if the orphan reject
         // had counted, this submit would already be denied at the gate.
@@ -475,7 +482,11 @@ mod db_tests {
             "the legitimate order must be accepted — the orphan reject must not have \
              counted toward this run's reject-storm window",
         );
-        assert_eq!(broker.submit_count(), 1, "the legitimate order must have reached the broker");
+        assert_eq!(
+            broker.submit_count(),
+            1,
+            "the legitimate order must have reached the broker"
+        );
 
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;

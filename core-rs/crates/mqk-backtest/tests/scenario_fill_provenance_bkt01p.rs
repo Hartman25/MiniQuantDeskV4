@@ -149,12 +149,18 @@ fn signal_ts_and_fill_ts_reflect_decision_and_pricing_bars_separately() {
 
     let buy = &report.fills[0];
     assert_eq!(buy.signal_ts, TS_BAR1, "buy decision made on bar 1");
-    assert_eq!(buy.fill_ts, TS_BAR2, "buy priced from the first later SPY bar");
+    assert_eq!(
+        buy.fill_ts, TS_BAR2,
+        "buy priced from the first later SPY bar"
+    );
     assert!(buy.fill_ts > buy.signal_ts);
 
     let sell = &report.fills[1];
     assert_eq!(sell.signal_ts, TS_BAR2, "sell decision made on bar 2");
-    assert_eq!(sell.fill_ts, TS_BAR3, "sell priced from the first later SPY bar");
+    assert_eq!(
+        sell.fill_ts, TS_BAR3,
+        "sell priced from the first later SPY bar"
+    );
     assert!(sell.fill_ts > sell.signal_ts);
 }
 

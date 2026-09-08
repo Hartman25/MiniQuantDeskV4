@@ -1473,8 +1473,7 @@ async fn pd_02_provider_dryrun_completes_provider_scoped_symbols_zero_api_calls(
     // symbols_count must equal the TwelveData/1D provider-scoped registry size
     // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
     let expected =
-        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
-            as u64;
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len() as u64;
     let symbols_count = body["symbols_count"]
         .as_u64()
         .expect("symbols_count must be a number in completed job");
@@ -2141,8 +2140,7 @@ async fn pd_10_real_provider_job_runs_with_fake_provider() {
     // symbols_count must be the TwelveData/1D provider-scoped registry size
     // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
     let expected =
-        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
-            as u64;
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len() as u64;
     let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
     assert_eq!(
         symbols_count, expected,
@@ -2335,8 +2333,7 @@ async fn pd_12_api_credits_per_minute_guardrail_stops_batch() {
     // symbols_count must be the TwelveData/1D provider-scoped registry size
     // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
     let expected =
-        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
-            as u64;
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len() as u64;
     let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
     assert_eq!(
         symbols_count, expected,
@@ -2372,9 +2369,7 @@ async fn pd_13_per_symbol_failure_tracked() {
     let (mut st_raw, _) = make_provider_router_with_registry_raw();
     // FakeProvider that fails for the first two symbols the guardrail will
     // actually reach (small cap so the test runs quickly; both calls fail).
-    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::failing(
-        first_two_symbols.clone(),
-    )));
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::failing(first_two_symbols.clone())));
     let st = Arc::new(st_raw);
 
     let router_post = routes::build_router(Arc::clone(&st));
@@ -2406,8 +2401,7 @@ async fn pd_13_per_symbol_failure_tracked() {
     // symbols_count must be the TwelveData/1D provider-scoped registry size
     // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
     let expected_symbols_count =
-        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
-            as u64;
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len() as u64;
     let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
     assert_eq!(
         symbols_count, expected_symbols_count,

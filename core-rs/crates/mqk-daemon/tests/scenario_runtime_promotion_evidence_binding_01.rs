@@ -209,7 +209,15 @@ async fn internal_exact_fingerprint_match_is_accepted() {
     let sid = unique_id("c2i_match");
     seed_registry(&pool, &sid, true).await;
     let fp = REAL_FINGERPRINT_A();
-    seed_active_paper(&pool, &sid, SYMBOL, TIMEFRAME_SECS, Some(&fp), "verified_v1").await;
+    seed_active_paper(
+        &pool,
+        &sid,
+        SYMBOL,
+        TIMEFRAME_SECS,
+        Some(&fp),
+        "verified_v1",
+    )
+    .await;
     let (st, run_id) = state_with_arm_and_run(pool.clone()).await;
 
     let dec_id = unique_id("dec");
@@ -344,7 +352,13 @@ async fn internal_malformed_decision_fingerprint_is_refused() {
     let dec_id = unique_id("dec");
     let out = submit_internal_strategy_decision(
         &st,
-        make_decision(&dec_id, &sid, SYMBOL, TIMEFRAME_SECS, "not-a-real-fingerprint"),
+        make_decision(
+            &dec_id,
+            &sid,
+            SYMBOL,
+            TIMEFRAME_SECS,
+            "not-a-real-fingerprint",
+        ),
     )
     .await;
     assert!(!out.accepted, "malformed fingerprint must refuse: {out:?}");
@@ -363,7 +377,15 @@ async fn internal_result_values_do_not_affect_config_identity_check() {
     let sid = unique_id("c2i_resultagnostic");
     seed_registry(&pool, &sid, true).await;
     let fp = REAL_FINGERPRINT_A();
-    seed_active_paper(&pool, &sid, SYMBOL, TIMEFRAME_SECS, Some(&fp), "verified_v1").await;
+    seed_active_paper(
+        &pool,
+        &sid,
+        SYMBOL,
+        TIMEFRAME_SECS,
+        Some(&fp),
+        "verified_v1",
+    )
+    .await;
     let (st, _run_id) = state_with_arm_and_run(pool.clone()).await;
 
     let mut d1 = make_decision(&unique_id("dec"), &sid, SYMBOL, TIMEFRAME_SECS, &fp);
@@ -376,7 +398,10 @@ async fn internal_result_values_do_not_affect_config_identity_check() {
     let out1 = submit_internal_strategy_decision(&st, d1).await;
     let out2 = submit_internal_strategy_decision(&st, d2).await;
     assert!(out1.accepted, "d1 must pass config identity: {out1:?}");
-    assert!(out2.accepted, "d2 must pass config identity regardless of differing qty/side: {out2:?}");
+    assert!(
+        out2.accepted,
+        "d2 must pass config identity regardless of differing qty/side: {out2:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -466,12 +491,18 @@ async fn external_unresolvable_strategy_identity_fails_closed() {
     let signal_id = unique_id("sig");
     let (status, json) = call(
         routes::build_router(st),
-        signal_req(external_signal_body(&signal_id, &sid, SYMBOL, Some(TIMEFRAME_SECS))),
+        signal_req(external_signal_body(
+            &signal_id,
+            &sid,
+            SYMBOL,
+            Some(TIMEFRAME_SECS),
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "must be refused: {json}");
     assert_eq!(
-        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+        json["disposition"],
+        "promotion_external_semantic_provenance_unavailable"
     );
     assert_eq!(outbox_row_count(&pool, &signal_id).await, 0);
 }
@@ -501,7 +532,15 @@ async fn external_forged_fingerprint_field_has_no_effect() {
     )
     .expect("swing_momentum must resolve");
     seed_registry(&pool, &sid, true).await;
-    seed_active_paper(&pool, &sid, &symbol, TIMEFRAME_SECS, Some(&real_fp), "verified_v1").await;
+    seed_active_paper(
+        &pool,
+        &sid,
+        &symbol,
+        TIMEFRAME_SECS,
+        Some(&real_fp),
+        "verified_v1",
+    )
+    .await;
     mqk_db::persist_arm_state(&pool, "ARMED", None)
         .await
         .expect("persist ARMED");
@@ -523,7 +562,8 @@ async fn external_forged_fingerprint_field_has_no_effect() {
          channel on this path: {json}"
     );
     assert_eq!(
-        json["disposition"], "promotion_external_semantic_provenance_unavailable"
+        json["disposition"],
+        "promotion_external_semantic_provenance_unavailable"
     );
     assert_eq!(outbox_row_count(&pool, &signal_id).await, 0);
 }
@@ -537,7 +577,15 @@ async fn exact_match_never_authorizes_live_mode() {
     let sid = unique_id("c2_live");
     seed_registry(&pool, &sid, true).await;
     let fp = REAL_FINGERPRINT_A();
-    seed_active_paper(&pool, &sid, SYMBOL, TIMEFRAME_SECS, Some(&fp), "verified_v1").await;
+    seed_active_paper(
+        &pool,
+        &sid,
+        SYMBOL,
+        TIMEFRAME_SECS,
+        Some(&fp),
+        "verified_v1",
+    )
+    .await;
 
     let outcome = mqk_daemon::promotion_gate::evaluate_paper_promotion_gate(
         &pool,
@@ -552,8 +600,5 @@ async fn exact_match_never_authorizes_live_mode() {
         !outcome.paper_tradable,
         "exact fingerprint match must not authorize Live mode"
     );
-    assert_eq!(
-        outcome.reason_code.code(),
-        "promotion_live_not_authorized"
-    );
+    assert_eq!(outcome.reason_code.code(), "promotion_live_not_authorized");
 }

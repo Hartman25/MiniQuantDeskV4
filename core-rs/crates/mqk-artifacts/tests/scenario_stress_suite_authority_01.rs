@@ -119,13 +119,22 @@ fn run_and_persist(
     bars: Vec<BacktestBar>,
     qty: i64,
     sell_at_idx: u64,
-) -> (mqk_backtest::BacktestReport, BacktestConfig, Vec<BacktestBar>, PathBuf) {
+) -> (
+    mqk_backtest::BacktestReport,
+    BacktestConfig,
+    Vec<BacktestBar>,
+    PathBuf,
+) {
     let config = cfg_with_wide_cap();
     let initial_cash = config.initial_cash_micros;
 
     let mut engine = BacktestEngine::new(config.clone());
     engine
-        .add_strategy(Box::new(BuyHoldSell::named(strategy_name, qty, sell_at_idx)))
+        .add_strategy(Box::new(BuyHoldSell::named(
+            strategy_name,
+            qty,
+            sell_at_idx,
+        )))
         .unwrap();
     let report = engine.run(&bars).expect("engine.run must succeed");
 
@@ -179,13 +188,17 @@ fn tamper_stress_suite_json(run_dir: &Path, mutate: impl FnOnce(&mut serde_json:
 
 #[test]
 fn bsaa01a_healthy_candidate_round_trip_all_scenarios_pass() {
-    let (report, config, bars, run_dir) = run_and_persist("healthy", "BsaaHealthy", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("healthy", "BsaaHealthy", healthy_bars(), 1, 3);
 
     let output = run_backtest_stress_suite(&report, &config, &bars, || {
         Box::new(BuyHoldSell::named("BsaaHealthy", 1, 3))
     });
     assert_eq!(output.scenarios.len(), 3);
-    assert!(output.all_passed(), "healthy candidate must pass every scenario");
+    assert!(
+        output.all_passed(),
+        "healthy candidate must pass every scenario"
+    );
     mqk_artifacts::write_canonical_stress_suite(&run_dir, &output)
         .expect("write_canonical_stress_suite must succeed");
 
@@ -203,7 +216,8 @@ fn bsaa01a_healthy_candidate_round_trip_all_scenarios_pass() {
 
 #[test]
 fn bsaa01b_fragile_candidate_produces_real_failed_scenario() {
-    let (report, config, bars, run_dir) = run_and_persist("fragile", "BsaaFragile", fragile_bars(), 100, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("fragile", "BsaaFragile", fragile_bars(), 100, 3);
 
     let output = run_backtest_stress_suite(&report, &config, &bars, || {
         Box::new(BuyHoldSell::new(100, 3))
@@ -227,7 +241,13 @@ fn bsaa01b_fragile_candidate_produces_real_failed_scenario() {
 
 #[test]
 fn bsaa01c_missing_artifact_rejected() {
-    let (_report, _config, _bars, run_dir) = run_and_persist("missing_artifact", "BsaaMissingArtifact", healthy_bars(), 1, 3);
+    let (_report, _config, _bars, run_dir) = run_and_persist(
+        "missing_artifact",
+        "BsaaMissingArtifact",
+        healthy_bars(),
+        1,
+        3,
+    );
     // No stress suite ever written for this run_dir.
     let err = load_canonical_stress_suite(&run_dir).unwrap_err();
     assert_eq!(err, StressSuiteArtifactError::MissingArtifact);
@@ -236,7 +256,8 @@ fn bsaa01c_missing_artifact_rejected() {
 
 #[test]
 fn bsaa01d_zero_scenarios_rejected() {
-    let (report, config, bars, run_dir) = run_and_persist("zero_scen", "BsaaZeroScen", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("zero_scen", "BsaaZeroScen", healthy_bars(), 1, 3);
     let output =
         run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
     mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
@@ -252,7 +273,8 @@ fn bsaa01d_zero_scenarios_rejected() {
 
 #[test]
 fn bsaa01e_run_id_mismatch_rejected() {
-    let (report, config, bars, run_dir) = run_and_persist("run_id_mismatch", "BsaaRunIdMismatch", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("run_id_mismatch", "BsaaRunIdMismatch", healthy_bars(), 1, 3);
     let output =
         run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
     mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
@@ -294,7 +316,10 @@ fn bsaa01f_cross_candidate_stress_artifact_rejected() {
     .unwrap();
 
     let err = load_canonical_stress_suite(&run_dir_b).unwrap_err();
-    assert!(matches!(err, StressSuiteArtifactError::RunIdMismatch { .. }));
+    assert!(matches!(
+        err,
+        StressSuiteArtifactError::RunIdMismatch { .. }
+    ));
 
     cleanup(&run_dir_a);
     cleanup(&run_dir_b);
@@ -302,7 +327,8 @@ fn bsaa01f_cross_candidate_stress_artifact_rejected() {
 
 #[test]
 fn bsaa01g_missing_audit_event_rejected() {
-    let (report, config, bars, run_dir) = run_and_persist("no_audit_event", "BsaaNoAuditEvent", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("no_audit_event", "BsaaNoAuditEvent", healthy_bars(), 1, 3);
     let output =
         run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
 
@@ -323,7 +349,8 @@ fn bsaa01g_missing_audit_event_rejected() {
 
 #[test]
 fn bsaa01h_broken_audit_chain_rejected() {
-    let (report, config, bars, run_dir) = run_and_persist("broken_chain", "BsaaBrokenChain", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("broken_chain", "BsaaBrokenChain", healthy_bars(), 1, 3);
     let output =
         run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
     mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
@@ -345,7 +372,8 @@ fn bsaa01h_broken_audit_chain_rejected() {
 
 #[test]
 fn bsaa01i_content_tampered_after_write_rejected() {
-    let (report, config, bars, run_dir) = run_and_persist("content_tamper", "BsaaContentTamper", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("content_tamper", "BsaaContentTamper", healthy_bars(), 1, 3);
     let output =
         run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
     mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
@@ -420,11 +448,18 @@ fn bsaa01m_blank_protocol_version_rejected() {
 /// the required-scenario-set completeness check can reject it.
 #[test]
 fn bsaa01n_missing_required_scenario_rejected() {
-    let (report, config, bars, run_dir) =
-        run_and_persist("missing_scenario", "BsaaMissingScenario", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) = run_and_persist(
+        "missing_scenario",
+        "BsaaMissingScenario",
+        healthy_bars(),
+        1,
+        3,
+    );
     let mut output =
         run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
-    output.scenarios.retain(|s| s.name != "conservative_risk_limits");
+    output
+        .scenarios
+        .retain(|s| s.name != "conservative_risk_limits");
     mqk_artifacts::write_canonical_stress_suite(&run_dir, &output).unwrap();
 
     let err = load_canonical_stress_suite(&run_dir).unwrap_err();
@@ -449,7 +484,8 @@ fn bsaa01n_missing_required_scenario_rejected() {
 
 #[test]
 fn bsaa01j_write_is_idempotent() {
-    let (report, config, bars, run_dir) = run_and_persist("idempotent", "BsaaIdempotent", healthy_bars(), 1, 3);
+    let (report, config, bars, run_dir) =
+        run_and_persist("idempotent", "BsaaIdempotent", healthy_bars(), 1, 3);
     let output =
         run_backtest_stress_suite(&report, &config, &bars, || Box::new(BuyHoldSell::new(1, 3)));
 
@@ -461,7 +497,10 @@ fn bsaa01j_write_is_idempotent() {
         .lines()
         .filter(|l| l.contains("stress_suite_completed"))
         .count();
-    assert_eq!(stress_events, 1, "stress completion event must not duplicate on retry");
+    assert_eq!(
+        stress_events, 1,
+        "stress completion event must not duplicate on retry"
+    );
 
     let verify = mqk_audit::verify_hash_chain_str(&audit_jsonl).unwrap();
     assert!(matches!(verify, mqk_audit::VerifyResult::Valid { .. }));
@@ -482,7 +521,11 @@ fn bsaa01k_no_production_struct_literal_bypass_exists() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let mut offenders = Vec::new();
     for crate_dir in [
-        "mqk-artifacts", "mqk-backtest", "mqk-promotion", "mqk-cli", "mqk-daemon",
+        "mqk-artifacts",
+        "mqk-backtest",
+        "mqk-promotion",
+        "mqk-cli",
+        "mqk-daemon",
     ] {
         let src_dir = root.join("crates").join(crate_dir).join("src");
         if !src_dir.exists() {

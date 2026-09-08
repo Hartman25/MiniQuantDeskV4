@@ -758,8 +758,7 @@ pub async fn insert_strategy_promotion_transition_serialized(
     .context("insert_strategy_promotion_transition_serialized: insert failed")?;
 
     if let Some(lineage) = evidence_lineage {
-        write_evidence_lineage_for_fresh_insert_in_tx(&mut tx, args.transition_id, lineage)
-            .await?;
+        write_evidence_lineage_for_fresh_insert_in_tx(&mut tx, args.transition_id, lineage).await?;
     }
 
     tx.commit()
@@ -1212,9 +1211,11 @@ async fn write_evidence_lineage_for_fresh_insert_in_tx(
     transition_id: Uuid,
     lineage: &PromotionEvidenceLineageV3,
 ) -> Result<()> {
-    let existing = read_evidence_lineage_in_tx(tx, transition_id).await?.context(
-        "write_evidence_lineage_for_fresh_insert_in_tx: row must already exist (just inserted)",
-    )?;
+    let existing = read_evidence_lineage_in_tx(tx, transition_id)
+        .await?
+        .context(
+            "write_evidence_lineage_for_fresh_insert_in_tx: row must already exist (just inserted)",
+        )?;
     if existing.research_trial_id.is_some() {
         anyhow::bail!(
             "write_evidence_lineage_for_fresh_insert_in_tx: transition_id {transition_id} \

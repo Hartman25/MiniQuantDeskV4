@@ -33,20 +33,35 @@ pub mod sweep;
 pub mod types;
 
 pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
+pub use dsr_pbo_sensitivity::{dsr_pbo_sensitivity_scenario, DSR_PBO_SENSITIVITY_SCENARIO_NAME};
 pub use economics::{
     mark_to_market_value_micros, notional_micros, realized_pnl_micros, BacktestEconomicsReport,
     BacktestInstrumentEconomics, EconomicsError,
 }; // BACKTEST-MULTIPLIER-MARGIN-01 / BACKTEST-REPORT-ECONOMICS-ARTIFACT-01
 pub use engine::{BacktestEngine, BacktestError};
+pub use genuine_shuffled_placebo::{
+    genuine_shuffled_placebo_scenario, GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID,
+    GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME,
+};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
 pub use market_frame::{
     build_market_frames, evaluate_market_frames, strategy_context_for_symbol, MarketFrame,
     MarketFrameError, MarketFrameEvaluator, MarketFrameView,
 }; // BKT-MULTISYMBOL-MARKET-FRAME-01
+pub use p7a_p7b_economic_replay_stress::{
+    p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
+    P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
+};
 pub use regime::{
     detect_market_regime, MarketRegimeClassification, MarketRegimeConfidence, MarketRegimeFeatures,
     MarketRegimeInput, MarketRegimeKind, MarketRegimePolicy, MarketRegimeReasonCode,
 };
+pub use research_replay_strategy::{ReplaySemanticSpec, ResearchOosReplayStrategy}; // W06-P9-RUST-REPLAY-STRATEGY-01
+pub use robustness_gauntlet::{
+    run_robustness_gauntlet, run_robustness_gauntlet_with_symbol_loo_factory, DeferredScenario,
+    RobustnessGauntletOutput, RobustnessScenarioOutcome, REQUIRED_ROBUSTNESS_SCENARIO_NAMES,
+    ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION,
+}; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub use strategy_lab::{
     evaluate_strategy_lab, evaluate_strategy_lab_with_policy, rank_strategy_lab_evaluations,
     strategy_lab_input_from_sweep_row, StrategyLabDecision, StrategyLabEvaluation,
@@ -66,21 +81,6 @@ pub use strategy_scanner::{
     StrategyScanMetrics, StrategyScanPolicy, StrategyScanReasonCode, StrategyScanTruthState,
     DEFAULT_MIN_BARS,
 };
-pub use dsr_pbo_sensitivity::{dsr_pbo_sensitivity_scenario, DSR_PBO_SENSITIVITY_SCENARIO_NAME};
-pub use genuine_shuffled_placebo::{
-    genuine_shuffled_placebo_scenario, GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID,
-    GENUINE_SHUFFLED_PLACEBO_SCENARIO_NAME,
-};
-pub use p7a_p7b_economic_replay_stress::{
-    p7a_p7b_economic_replay_stress_scenario, P7A_P7B_ECONOMIC_REPLAY_STRESS_PROTOCOL_ID,
-    P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
-};
-pub use research_replay_strategy::{ReplaySemanticSpec, ResearchOosReplayStrategy}; // W06-P9-RUST-REPLAY-STRATEGY-01
-pub use robustness_gauntlet::{
-    run_robustness_gauntlet, run_robustness_gauntlet_with_symbol_loo_factory, DeferredScenario,
-    RobustnessGauntletOutput, RobustnessScenarioOutcome, REQUIRED_ROBUSTNESS_SCENARIO_NAMES,
-    ROBUSTNESS_GAUNTLET_PROTOCOL_VERSION,
-}; // P9 BKT-ROBUSTNESS-GAUNTLET-01
 pub use stress_suite::{
     run_backtest_stress_suite, StressScenarioOutcome, StressSuiteRunOutput,
     REQUIRED_SCENARIO_NAMES, STRESS_SUITE_PROTOCOL_VERSION,

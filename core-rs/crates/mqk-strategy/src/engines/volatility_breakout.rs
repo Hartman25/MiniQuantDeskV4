@@ -242,7 +242,10 @@ mod tests {
         let mut s = VolatilityBreakoutStrategy::new("AAPL");
         let out = s.on_bar(&ctx);
         assert_eq!(out.targets.len(), 1, "VB-10: exactly one target");
-        assert_eq!(out.targets[0].symbol, "AAPL", "VB-10: target symbol matches");
+        assert_eq!(
+            out.targets[0].symbol, "AAPL",
+            "VB-10: target symbol matches"
+        );
         assert_eq!(out.targets[0].qty, -1, "VB-10: qty matches raw signal");
     }
 }

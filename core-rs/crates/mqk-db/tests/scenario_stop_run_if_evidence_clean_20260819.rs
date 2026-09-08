@@ -376,6 +376,7 @@ async fn t07_absent_reconcile_status_blocks_release() {
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL"]
 async fn t08_bound_operation_row_is_untouched() {
+    use chrono::{Duration as ChronoDuration, NaiveDate, TimeZone};
     use mqk_db::{
         create_or_recover_autonomous_daily_operation, transition_autonomous_daily_operation,
         AutonomousDailyTransitionOutcome, CreateAutonomousDailyOperationArgs,
@@ -383,7 +384,6 @@ async fn t08_bound_operation_row_is_untouched() {
         STATE_AWAITING_OPEN, STATE_AWAITING_PREOPEN, STATE_PREPARING_DATA, STATE_RUNNING,
         STATE_START_RETRYING,
     };
-    use chrono::{Duration as ChronoDuration, NaiveDate, TimeZone};
 
     mqk_db::run_isolated("stop_orphan_t08", |pool| async move {
         let run_id = run_id_for("mqk-daemon.orphan-repair.t08");
@@ -393,9 +393,7 @@ async fn t08_bound_operation_row_is_untouched() {
         seed_clean_reconcile(&pool).await;
 
         let market_date = NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
-        let open = Utc
-            .with_ymd_and_hms(2026, 8, 19, 13, 30, 0)
-            .unwrap();
+        let open = Utc.with_ymd_and_hms(2026, 8, 19, 13, 30, 0).unwrap();
         let close = open + ChronoDuration::hours(6) + ChronoDuration::minutes(30);
         let preopen = open - ChronoDuration::minutes(30);
         let postclose = close + ChronoDuration::minutes(15);
@@ -673,9 +671,7 @@ async fn t12_active_runtime_lease_blocks_release() {
             .expect("stop_run_if_evidence_clean");
         match outcome {
             StopRunIfEvidenceCleanOutcome::ActiveRuntimeLease {
-                holder_id,
-                epoch,
-                ..
+                holder_id, epoch, ..
             } => {
                 assert_eq!(holder_id, want_holder, "t12: body: {holder_id}");
                 assert_eq!(epoch, want_epoch, "t12: body: {epoch}");

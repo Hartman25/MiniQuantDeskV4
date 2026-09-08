@@ -808,8 +808,15 @@ mod tests {
         let err = gw
             .submit(&make_claim(), make_submit_req())
             .expect_err("Reject must surface as SubmitError::Broker");
-        assert!(matches!(err, SubmitError::Broker(BrokerError::Reject { .. })));
-        assert_eq!(gw.risk.count(), 1, "exactly one Reject must record exactly one count");
+        assert!(matches!(
+            err,
+            SubmitError::Broker(BrokerError::Reject { .. })
+        ));
+        assert_eq!(
+            gw.risk.count(),
+            1,
+            "exactly one Reject must record exactly one count"
+        );
     }
 
     #[test]
@@ -819,7 +826,11 @@ mod tests {
             detail: "conn refused".to_string(),
         });
         let _ = gw.submit(&make_claim(), make_submit_req());
-        assert_eq!(gw.risk.count(), 0, "Transport is not a confirmed hard reject");
+        assert_eq!(
+            gw.risk.count(),
+            0,
+            "Transport is not a confirmed hard reject"
+        );
     }
 
     #[test]
@@ -830,7 +841,11 @@ mod tests {
             detail: "429".to_string(),
         });
         let _ = gw.submit(&make_claim(), make_submit_req());
-        assert_eq!(gw.risk.count(), 0, "RateLimit is not a confirmed hard reject");
+        assert_eq!(
+            gw.risk.count(),
+            0,
+            "RateLimit is not a confirmed hard reject"
+        );
     }
 
     #[test]
@@ -839,7 +854,11 @@ mod tests {
             detail: "5xx".to_string(),
         });
         let _ = gw.submit(&make_claim(), make_submit_req());
-        assert_eq!(gw.risk.count(), 0, "Transient is not a confirmed hard reject");
+        assert_eq!(
+            gw.risk.count(),
+            0,
+            "Transient is not a confirmed hard reject"
+        );
     }
 
     #[test]
@@ -848,7 +867,11 @@ mod tests {
             detail: "expired".to_string(),
         });
         let _ = gw.submit(&make_claim(), make_submit_req());
-        assert_eq!(gw.risk.count(), 0, "AuthSession halt policy is unchanged by reject counting");
+        assert_eq!(
+            gw.risk.count(),
+            0,
+            "AuthSession halt policy is unchanged by reject counting"
+        );
     }
 
     #[test]
@@ -880,7 +903,10 @@ mod tests {
         let err = gw
             .submit(&make_claim(), make_submit_req())
             .expect_err("integrity disarmed must refuse before broker invocation");
-        assert!(matches!(err, SubmitError::Gate(GateRefusal::IntegrityDisarmed)));
+        assert!(matches!(
+            err,
+            SubmitError::Gate(GateRefusal::IntegrityDisarmed)
+        ));
         assert_eq!(
             gw.risk.count(),
             0,
@@ -935,14 +961,20 @@ mod tests {
 
         for i in 0..3 {
             let err = gw.submit(&make_claim(), make_submit_req());
-            assert!(err.is_err(), "reject #{i} must still surface as a broker error");
+            assert!(
+                err.is_err(),
+                "reject #{i} must still surface as a broker error"
+            );
         }
         // 3 rejects recorded; a 4th NEW submit is now refused by the gate
         // itself, before the broker adapter is invoked again.
         let err = gw
             .submit(&make_claim(), make_submit_req())
             .expect_err("threshold reached: next new-risk submit must be gate-refused");
-        assert!(matches!(err, SubmitError::Gate(GateRefusal::RiskBlocked(_))));
+        assert!(matches!(
+            err,
+            SubmitError::Gate(GateRefusal::RiskBlocked(_))
+        ));
     }
 
     #[test]

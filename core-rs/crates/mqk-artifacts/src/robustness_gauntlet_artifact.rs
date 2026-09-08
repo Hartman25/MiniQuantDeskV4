@@ -154,9 +154,7 @@ impl RobustnessGauntletArtifact {
     /// P7A-P7B-ECONOMIC-REPLAY-STRESS-01: see
     /// [`Self::scenario_research_trial_id`] for `p7a_p7b_economic_replay_stress`.
     pub fn p7a_p7b_economic_replay_stress_research_trial_id(&self) -> Option<&str> {
-        self.scenario_research_trial_id(
-            mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME,
-        )
+        self.scenario_research_trial_id(mqk_backtest::P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME)
     }
 
     /// FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section B: the exact P7C-authorized
@@ -187,7 +185,9 @@ impl RobustnessGauntletArtifact {
     /// evidence blob (scenario missing, deferred, or recorded before
     /// `evidence` existed) reports a single sentinel entry rather than every
     /// individual field name, since none of them can be checked at all.
-    pub fn p7a_p7b_economic_replay_stress_missing_required_evidence_fields(&self) -> Vec<&'static str> {
+    pub fn p7a_p7b_economic_replay_stress_missing_required_evidence_fields(
+        &self,
+    ) -> Vec<&'static str> {
         const REQUIRED_STRING_FIELDS: &[&str] = &[
             "research_trial_id",
             "baseline_economic_eval_id",
@@ -227,11 +227,19 @@ impl RobustnessGauntletArtifact {
         // "bars provenance/pricing identity": the reconstructed baseline
         // protocol identity (which itself carries the P7A execution_pricing
         // identity that was replayed) must be a structurally present object.
-        if !evidence.get("baseline_protocol_identity").map(Value::is_object).unwrap_or(false) {
+        if !evidence
+            .get("baseline_protocol_identity")
+            .map(Value::is_object)
+            .unwrap_or(false)
+        {
             missing.push("baseline_protocol_identity");
         }
         // "stress-spec identity": the EXACT P7A/P7B stress knobs replayed.
-        if !evidence.get("stress_spec").map(Value::is_object).unwrap_or(false) {
+        if !evidence
+            .get("stress_spec")
+            .map(Value::is_object)
+            .unwrap_or(false)
+        {
             missing.push("stress_spec");
         }
         // "actual stressed result/pass-fail metric".
@@ -350,7 +358,11 @@ impl From<&RobustnessGauntletOutput> for RobustnessGauntletArtifact {
             run_id: o.run_id,
             config_id: o.config_id,
             strategy_name: o.strategy_name.clone(),
-            scenarios: o.scenarios.iter().map(RobustnessScenarioOutcomeDto::from).collect(),
+            scenarios: o
+                .scenarios
+                .iter()
+                .map(RobustnessScenarioOutcomeDto::from)
+                .collect(),
             deferred: o.deferred.iter().map(DeferredScenarioDto::from).collect(),
         }
     }
@@ -375,9 +387,18 @@ pub enum RobustnessGauntletArtifactError {
     /// completion repair.
     UnsupportedProtocolVersion(String),
     ZeroScenarios,
-    RunIdMismatch { manifest: Uuid, artifact: Uuid },
-    StrategyNameMismatch { manifest: String, artifact: String },
-    ConfigIdMismatch { manifest_config_hash: String, artifact_config_id: String },
+    RunIdMismatch {
+        manifest: Uuid,
+        artifact: Uuid,
+    },
+    StrategyNameMismatch {
+        manifest: String,
+        artifact: String,
+    },
+    ConfigIdMismatch {
+        manifest_config_hash: String,
+        artifact_config_id: String,
+    },
     AuditEventMissing,
     AuditChainBroken(String),
     ContentHashMismatch,
@@ -488,7 +509,12 @@ pub fn write_canonical_robustness_gauntlet(
     });
 
     writer
-        .append(output.run_id, "backtest", ROBUSTNESS_GAUNTLET_AUDIT_EVENT_TYPE, payload)
+        .append(
+            output.run_id,
+            "backtest",
+            ROBUSTNESS_GAUNTLET_AUDIT_EVENT_TYPE,
+            payload,
+        )
         .with_context(|| {
             format!(
                 "append robustness gauntlet completion audit event failed: {}",
@@ -600,7 +626,11 @@ pub fn finalize_canonical_robustness_gauntlet_with_sensitivity(
         .map_err(RobustnessGauntletFinalizeError::ExistingArtifactInvalid)?;
     let path = run_dir.join("robustness_gauntlet.json");
 
-    if let Some(prev) = existing.scenarios.iter().find(|s| s.name == sensitivity.name) {
+    if let Some(prev) = existing
+        .scenarios
+        .iter()
+        .find(|s| s.name == sensitivity.name)
+    {
         let prev_matches = prev.applicable == sensitivity.applicable
             && prev.passed == sensitivity.passed
             && prev.reason == sensitivity.reason
@@ -623,13 +653,14 @@ pub fn finalize_canonical_robustness_gauntlet_with_sensitivity(
     // artifact level.
     let mut merged = existing;
     merged.deferred.retain(|d| d.name != sensitivity.name);
-    merged.scenarios.push(RobustnessScenarioOutcomeDto::from(sensitivity));
+    merged
+        .scenarios
+        .push(RobustnessScenarioOutcomeDto::from(sensitivity));
 
     let json = serde_json::to_string_pretty(&merged)
         .map_err(|e| RobustnessGauntletFinalizeError::Io(e.to_string()))?;
     let contents = format!("{json}\n");
-    fs::write(&path, &contents)
-        .map_err(|e| RobustnessGauntletFinalizeError::Io(e.to_string()))?;
+    fs::write(&path, &contents).map_err(|e| RobustnessGauntletFinalizeError::Io(e.to_string()))?;
 
     let audit_path = run_dir.join("audit.jsonl");
     let audit_raw = fs::read_to_string(&audit_path).unwrap_or_default();
@@ -744,7 +775,11 @@ pub fn load_canonical_robustness_gauntlet(
                 "line {line}: {reason}"
             )))
         }
-        Err(e) => return Err(RobustnessGauntletArtifactError::AuditChainBroken(e.to_string())),
+        Err(e) => {
+            return Err(RobustnessGauntletArtifactError::AuditChainBroken(
+                e.to_string(),
+            ))
+        }
     }
 
     let mut hasher = Sha256::new();

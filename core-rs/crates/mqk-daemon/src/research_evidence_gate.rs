@@ -123,7 +123,9 @@ pub fn evaluate_research_evidence_gate(
     let evidence_dir_canon = match std::fs::canonicalize(Path::new(evidence_dir_raw)) {
         Ok(p) => p,
         Err(_) => {
-            return reject(format!("research_evidence_dir not found: {evidence_dir_raw}"));
+            return reject(format!(
+                "research_evidence_dir not found: {evidence_dir_raw}"
+            ));
         }
     };
     if !evidence_dir_canon.starts_with(&root_canon) {
@@ -133,11 +135,11 @@ pub fn evaluate_research_evidence_gate(
         );
     }
     let econ_child = evidence_dir_canon.join("economic_walk_forward.json");
-    let econ_file =
-        match open_confined_regular_child(&econ_child, &root_canon, &evidence_dir_canon) {
-            Ok(f) => f,
-            Err(msg) => return reject(msg),
-        };
+    let econ_file = match open_confined_regular_child(&econ_child, &root_canon, &evidence_dir_canon)
+    {
+        Ok(f) => f,
+        Err(msg) => return reject(msg),
+    };
     let economic_walk_forward_json =
         match read_bounded_file_string(econ_file, &econ_child, MAX_ECONOMIC_ARTIFACT_JSON_BYTES) {
             Ok(s) => s,
@@ -287,8 +289,11 @@ mod tests {
             r#"{{"protocol":{{"protocol_id":"economic_walk_forward_v1"}},"aggregate":{{"folds_used":3}},"holdout":{{"status":"reserved_not_evaluated"}},"execution_pricing":{{"pricing_model_id":"rust_conservative_bar_range_v1"}},"weight_to_share":{{"weight_to_share_protocol_id":"weight_to_share_v1"}},"outputs":{{"economic_daily_returns_csv":{{"sha256":"{daily_sha}"}}}},"ids":{{"economic_eval_id":"{economic_eval_id}"}},"folds":[{{"discrete_economics_protocol_id":"discrete_share_economic_path_v1"}}]}}"#
         );
         let economic_sha = sha256_hex(economic_json.as_bytes());
-        std::fs::write(evidence_dir.join("economic_walk_forward.json"), &economic_json)
-            .expect("write economic artifact");
+        std::fs::write(
+            evidence_dir.join("economic_walk_forward.json"),
+            &economic_json,
+        )
+        .expect("write economic artifact");
 
         let judge_json = format!(
             r#"{{"schema_version":"multiple_testing_judge_v1","protocol":{{"protocol_id":"research_multiple_testing_judge_v1"}},"comparison_scope":{{"experiment_id":"{experiment_id}"}},"judge_status":"evaluated","holdout":{{"status":"reserved_not_evaluated"}},"included_trial_ids":["{trial_id}"],"input_economic_result_ids":["{economic_eval_id}"],"input_artifacts":[{{"trial_id":"{trial_id}","economic_walk_forward_json_sha256":"{economic_sha}","economic_daily_returns_csv_sha256":"{daily_sha}"}}],"dsr_results":[{{"trial_id":"{trial_id}","evaluable":true,"deflated_sharpe_ratio":0.85}}],"pbo_result":{{"status":"evaluated","pbo":0.15}}}}"#
@@ -390,9 +395,7 @@ mod tests {
             ResearchEvidenceGateOutcome::Passed { oos_evidence } => {
                 assert_eq!(oos_evidence.trial_id(), f.trial_id);
                 assert!((oos_evidence.deflated_sharpe_ratio() - 0.85).abs() < 1e-9);
-                assert!(
-                    (oos_evidence.probability_of_backtest_overfitting() - 0.15).abs() < 1e-9
-                );
+                assert!((oos_evidence.probability_of_backtest_overfitting() - 0.15).abs() < 1e-9);
                 assert_eq!(oos_evidence.strategy_id(), f.strategy_id);
             }
             other => panic!("expected Passed, got {other:?}"),
@@ -435,7 +438,10 @@ mod tests {
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
         );
-        assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
         unset_all_research_env();
     }
 
@@ -455,7 +461,10 @@ mod tests {
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
         );
-        assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
         unset_all_research_env();
     }
 
@@ -469,7 +478,10 @@ mod tests {
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
         );
-        assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
         unset_all_research_env();
     }
 
@@ -496,7 +508,9 @@ mod tests {
         );
         match outcome {
             ResearchEvidenceGateOutcome::Rejected { blockers } => {
-                assert!(blockers.iter().any(|b| b.contains("does not resolve inside")));
+                assert!(blockers
+                    .iter()
+                    .any(|b| b.contains("does not resolve inside")));
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
@@ -516,7 +530,10 @@ mod tests {
             f.evidence_dir.to_str().unwrap(),
             outside_judge.to_str().unwrap(),
         );
-        assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
         unset_all_research_env();
     }
 
@@ -538,7 +555,10 @@ mod tests {
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
         );
-        assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
         unset_all_research_env();
     }
 
@@ -552,7 +572,10 @@ mod tests {
             f.evidence_dir.to_str().unwrap(),
             f.judge_path.to_str().unwrap(),
         );
-        assert!(matches!(outcome, ResearchEvidenceGateOutcome::Rejected { .. }));
+        assert!(matches!(
+            outcome,
+            ResearchEvidenceGateOutcome::Rejected { .. }
+        ));
         unset_all_research_env();
     }
 }

@@ -71,7 +71,9 @@ use mqk_backtest::{
 };
 use mqk_daemon::{
     decision::{submit_internal_strategy_decision, InternalStrategyDecision},
-    promotion_evidence_validation::{compute_evidence_fingerprint_v2, validate_paper_candidate_evidence},
+    promotion_evidence_validation::{
+        compute_evidence_fingerprint_v2, validate_paper_candidate_evidence,
+    },
     routes, state,
 };
 use sqlx::Row;
@@ -229,12 +231,18 @@ fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
             1 => price *= 1.0017,
             _ => price *= 0.9960,
         }
-        let (hi_mult, lo_mult) = if leg == 1 { (1.09, 0.91) } else { (1.005, 0.995) };
+        let (hi_mult, lo_mult) = if leg == 1 {
+            (1.09, 0.91)
+        } else {
+            (1.005, 0.995)
+        };
         let o = (price * m as f64) as i64;
         let h = (price * hi_mult * m as f64) as i64;
         let l = (price * lo_mult * m as f64) as i64;
         let c = (price * m as f64) as i64;
-        bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+        bars.push(mqk_backtest::BacktestBar::new(
+            symbol, ts, o, h, l, c, 10_000,
+        ));
     }
     bars
 }
@@ -331,7 +339,10 @@ fn write_real_research_evidence_via_production_pipeline(
                 "fixture precondition: every real trial's DSR must be evaluable: {t}"
             );
             let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
-            let economic_eval_id = t["economic_eval_id"].as_str().expect("economic_eval_id").to_string();
+            let economic_eval_id = t["economic_eval_id"]
+                .as_str()
+                .expect("economic_eval_id")
+                .to_string();
             let economic_json_path =
                 PathBuf::from(t["economic_walk_forward_json"].as_str().expect("path"));
             let evidence_dir = economic_json_path
@@ -389,7 +400,10 @@ fn write_real_backtest_evidence(
 
     let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
     engine
-        .add_strategy(reg.instantiate("swing_momentum").expect("swing_momentum registered"))
+        .add_strategy(
+            reg.instantiate("swing_momentum")
+                .expect("swing_momentum registered"),
+        )
         .expect("add_strategy");
     let bars = smooth_uptrend_bars(symbol);
     let report = engine.run(&bars).expect("engine.run");
@@ -415,13 +429,15 @@ fn write_real_backtest_evidence(
         .expect("write_backtest_report");
 
     let stress_output = mqk_backtest::run_backtest_stress_suite(&report, &cfg, &bars, || {
-        reg.instantiate("swing_momentum").expect("swing_momentum registered")
+        reg.instantiate("swing_momentum")
+            .expect("swing_momentum registered")
     });
     mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
         .expect("write_canonical_stress_suite");
 
     let gauntlet_output = mqk_backtest::run_robustness_gauntlet(&report, &cfg, &bars, || {
-        reg.instantiate("swing_momentum").expect("swing_momentum registered")
+        reg.instantiate("swing_momentum")
+            .expect("swing_momentum registered")
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet");
@@ -460,12 +476,12 @@ fn write_real_backtest_evidence(
         research_economic_eval_id,
         &report.strategy_name,
         &artifact_root.join(format!("p7a_p7b_stress_{}", report.run_id)),
-        20,   // test-fixture-only stress knob; not asserted as accepted policy
-        50,   // test-fixture-only stress knob; not asserted as accepted policy
+        20,         // test-fixture-only stress knob; not asserted as accepted policy
+        50,         // test-fixture-only stress knob; not asserted as accepted policy
         Some(1000), // FINAL-P7A-P7B-REPLAY-AUTHORITY-01: baseline max_target_qty is
-                    // None -- None -> finite is a genuine P7B tightening, required by
-                    // the genuine-adversity validation (matches
-                    // scenario_strategy_promotion_routes_01.rs's identical fix).
+        // None -- None -> finite is a genuine P7B tightening, required by
+        // the genuine-adversity validation (matches
+        // scenario_strategy_promotion_routes_01.rs's identical fix).
         None, // test-fixture-only stress knob; not asserted as accepted policy
         0.30, // test-fixture-only threshold; not asserted as accepted policy
     );
@@ -473,7 +489,9 @@ fn write_real_backtest_evidence(
         &init_result.run_dir,
         &stress,
     )
-    .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)");
+    .expect(
+        "finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)",
+    );
 
     // FINAL-P9-ROBUSTNESS-SEMANTICS-01: SAME trial/registry as the two
     // scenarios above.
@@ -840,8 +858,9 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     let db_stress_sha256: Option<String> = row1.try_get("stress_artifact_sha256").unwrap();
     let db_robustness_protocol: Option<String> =
         row1.try_get("robustness_protocol_version").unwrap();
-    let db_robustness_sha256: Option<String> =
-        row1.try_get("finalized_robustness_artifact_sha256").unwrap();
+    let db_robustness_sha256: Option<String> = row1
+        .try_get("finalized_robustness_artifact_sha256")
+        .unwrap();
     let db_policy_fingerprint: Option<String> =
         row1.try_get("promotion_policy_fingerprint").unwrap();
 
@@ -860,7 +879,10 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         db_evidence_fingerprint_v2.as_deref(),
         Some(expected_evidence_fingerprint_v2.as_str())
     );
-    assert_eq!(db_research_trial_id.as_deref(), Some(verified_oos.trial_id()));
+    assert_eq!(
+        db_research_trial_id.as_deref(),
+        Some(verified_oos.trial_id())
+    );
     assert_eq!(
         db_research_economic_eval_id.as_deref(),
         Some(verified_oos.economic_eval_id())
@@ -885,11 +907,20 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     );
     assert_eq!(
         db_robustness_protocol.as_deref(),
-        Some(verified_backtest.robustness_evidence.protocol_version.as_str())
+        Some(
+            verified_backtest
+                .robustness_evidence
+                .protocol_version
+                .as_str()
+        )
     );
     assert_eq!(
         db_robustness_sha256.as_deref(),
-        Some(verified_backtest.finalized_robustness_artifact_sha256.as_str())
+        Some(
+            verified_backtest
+                .finalized_robustness_artifact_sha256
+                .as_str()
+        )
     );
     assert_eq!(
         db_policy_fingerprint.as_deref(),
@@ -1021,8 +1052,7 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
     .await
     .expect("readback of active_paper row");
     let active_paper_fp: Option<String> = active_paper_row.try_get("config_fingerprint").unwrap();
-    let active_paper_status: String =
-        active_paper_row.try_get("config_identity_status").unwrap();
+    let active_paper_status: String = active_paper_row.try_get("config_identity_status").unwrap();
     assert_eq!(
         active_paper_fp.as_deref(),
         Some(expected_config_fingerprint.as_str()),
@@ -1054,12 +1084,11 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
 
     // --- Step 5: exactly one synthetic outbox row after active_paper. -----
     let active_decision_id = unique_id("dec_active");
-    let active_outcome =
-        submit_internal_strategy_decision(
-            &st,
-            make_decision(&active_decision_id, &strategy_id, &symbol),
-        )
-        .await;
+    let active_outcome = submit_internal_strategy_decision(
+        &st,
+        make_decision(&active_decision_id, &strategy_id, &symbol),
+    )
+    .await;
     assert!(
         active_outcome.accepted,
         "active_paper + every other gate satisfied must create an outbox row; disposition={:?} blockers={:?}",

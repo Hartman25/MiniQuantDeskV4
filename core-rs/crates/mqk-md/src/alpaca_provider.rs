@@ -658,8 +658,16 @@ mod tests {
             end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
         };
         let bars = provider.fetch_bars(req).await.unwrap();
-        assert_eq!(bars.len(), 1, "must return the bar from the successful retry");
-        assert_eq!(AF01_CALL.load(Ordering::SeqCst), 2, "must have retried exactly once");
+        assert_eq!(
+            bars.len(),
+            1,
+            "must return the bar from the successful retry"
+        );
+        assert_eq!(
+            AF01_CALL.load(Ordering::SeqCst),
+            2,
+            "must have retried exactly once"
+        );
     }
 
     // AF-02: a retryable 503 that recovers on the next attempt succeeds.
@@ -790,10 +798,7 @@ mod tests {
     fn af06_retry_after_parsing_accepts_valid_and_falls_back_on_malformed() {
         assert_eq!(alpaca_md_parse_retry_after_secs(Some("7")), Some(7));
         assert_eq!(alpaca_md_parse_retry_after_secs(Some(" 7 ")), Some(7));
-        assert_eq!(
-            alpaca_md_parse_retry_after_secs(Some("not-a-number")),
-            None
-        );
+        assert_eq!(alpaca_md_parse_retry_after_secs(Some("not-a-number")), None);
         assert_eq!(alpaca_md_parse_retry_after_secs(Some("")), None);
         assert_eq!(alpaca_md_parse_retry_after_secs(None), None);
     }
@@ -876,7 +881,9 @@ mod tests {
             when.method(GET)
                 .path("/v2/stocks/bars")
                 .matches(|_req: &HttpMockRequest| AF10_CALL.fetch_add(1, Ordering::SeqCst) < 1);
-            then.status(429).header("Retry-After", "0").body("rate limited");
+            then.status(429)
+                .header("Retry-After", "0")
+                .body("rate limited");
         });
         let _mock_ok = server.mock(|when, then| {
             when.method(GET).path("/v2/stocks/bars");
@@ -901,7 +908,11 @@ mod tests {
         };
         let bars = provider.fetch_bars(req).await.unwrap();
         assert_eq!(bars.len(), 1, "must return the bar from the budgeted retry");
-        assert_eq!(AF10_CALL.load(Ordering::SeqCst), 2, "must have retried exactly once");
+        assert_eq!(
+            AF10_CALL.load(Ordering::SeqCst),
+            2,
+            "must have retried exactly once"
+        );
     }
 
     // AF-11: a numeric Retry-After that exceeds the in-call retry budget
@@ -933,7 +944,8 @@ mod tests {
         };
         let err = provider.fetch_bars(req).await.unwrap_err();
         assert!(
-            err.to_string().contains("exceeds the permitted in-call retry budget"),
+            err.to_string()
+                .contains("exceeds the permitted in-call retry budget"),
             "must fail closed naming the exceeded budget, got: {err}"
         );
         mock.assert_hits(1);

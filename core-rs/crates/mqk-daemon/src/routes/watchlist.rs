@@ -69,7 +69,15 @@ pub(crate) fn build_watchlist_status_response(
         max_concurrent,
     ) = match outcome.artifact() {
         Some(art) => artifact_fields(art),
-        None => (None, vec![], vec![], None, serde_json::json!({}), None, None),
+        None => (
+            None,
+            vec![],
+            vec![],
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        ),
     };
     // requested_symbols = symbols (admitted) ++ dropped_symbols, in that
     // order — reconstructs the artifact's originally-requested list.

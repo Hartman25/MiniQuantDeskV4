@@ -18,8 +18,8 @@
 //! violation at that sibling's own later physical row.
 
 use mqk_backtest::{
-    BacktestBar, BacktestConfig, BacktestEngine, BacktestError, CorporateActionPolicy,
-    ForbidEntry, OrderStatus,
+    BacktestBar, BacktestConfig, BacktestEngine, BacktestError, CorporateActionPolicy, ForbidEntry,
+    OrderStatus,
 };
 use mqk_execution::{StrategyOutput, TargetPosition};
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
@@ -92,7 +92,10 @@ fn wide_cfg() -> BacktestConfig {
 /// Test A: two bars for the same symbol at the same `end_ts` fail closed.
 #[test]
 fn duplicate_symbol_end_ts_fails_closed() {
-    let bars = vec![flat_bar("AAPL", 60, 100_000_000), flat_bar("AAPL", 60, 110_000_000)];
+    let bars = vec![
+        flat_bar("AAPL", 60, 100_000_000),
+        flat_bar("AAPL", 60, 110_000_000),
+    ];
 
     let mut engine = BacktestEngine::new(wide_cfg());
     engine.add_strategy(Box::new(Noop)).unwrap();
@@ -111,7 +114,10 @@ fn duplicate_symbol_end_ts_fails_closed() {
 /// identical typed error -- physical row order must not change the outcome.
 #[test]
 fn duplicate_symbol_end_ts_reversed_order_fails_with_same_error() {
-    let bars = vec![flat_bar("AAPL", 60, 110_000_000), flat_bar("AAPL", 60, 100_000_000)];
+    let bars = vec![
+        flat_bar("AAPL", 60, 110_000_000),
+        flat_bar("AAPL", 60, 100_000_000),
+    ];
 
     let mut engine = BacktestEngine::new(wide_cfg());
     engine.add_strategy(Box::new(Noop)).unwrap();
@@ -164,7 +170,9 @@ fn duplicate_bar_cannot_ambiguously_price_a_pending_fill() {
 
     for bars in [bars_low_first, bars_high_first] {
         let mut engine = BacktestEngine::new(wide_cfg());
-        engine.add_strategy(Box::new(TickScript::new(schedule()))).unwrap();
+        engine
+            .add_strategy(Box::new(TickScript::new(schedule())))
+            .unwrap();
         let err = engine.run(&bars).unwrap_err();
         assert_eq!(
             err,
@@ -242,8 +250,14 @@ fn corporate_action_forbidden_sibling_cannot_fill_pending_order_spy_row_first() 
 
     assert!(report.halted, "engine must halt on the forbidden AAPL bar");
     let reason = report.halt_reason.clone().expect("halt_reason must be set");
-    assert!(reason.contains("AAPL"), "halt reason must name AAPL; got: {reason}");
-    assert!(report.fills.is_empty(), "zero fill may use forbidden AAPL market data");
+    assert!(
+        reason.contains("AAPL"),
+        "halt reason must name AAPL; got: {reason}"
+    );
+    assert!(
+        report.fills.is_empty(),
+        "zero fill may use forbidden AAPL market data"
+    );
 
     let aapl_order = report
         .orders
@@ -259,8 +273,14 @@ fn corporate_action_forbidden_sibling_cannot_fill_pending_order_aapl_row_first()
 
     assert!(report.halted, "engine must halt on the forbidden AAPL bar");
     let reason = report.halt_reason.clone().expect("halt_reason must be set");
-    assert!(reason.contains("AAPL"), "halt reason must name AAPL; got: {reason}");
-    assert!(report.fills.is_empty(), "zero fill may use forbidden AAPL market data");
+    assert!(
+        reason.contains("AAPL"),
+        "halt reason must name AAPL; got: {reason}"
+    );
+    assert!(
+        report.fills.is_empty(),
+        "zero fill may use forbidden AAPL market data"
+    );
 
     let aapl_order = report
         .orders
@@ -342,9 +362,18 @@ fn run_integrity_adversarial(spy_first: bool) -> (mqk_backtest::BacktestReport, 
 fn integrity_invalid_sibling_cannot_fill_pending_order_spy_row_first() {
     let (report, engine) = run_integrity_adversarial(true);
 
-    assert!(report.execution_blocked, "gap-detected AAPL bar must block execution");
-    assert!(engine.integrity_state().halted, "integrity state must record the gap halt");
-    assert!(report.fills.is_empty(), "zero fill may use the gap-invalid AAPL bar");
+    assert!(
+        report.execution_blocked,
+        "gap-detected AAPL bar must block execution"
+    );
+    assert!(
+        engine.integrity_state().halted,
+        "integrity state must record the gap halt"
+    );
+    assert!(
+        report.fills.is_empty(),
+        "zero fill may use the gap-invalid AAPL bar"
+    );
 
     let aapl_order = report
         .orders
@@ -358,9 +387,18 @@ fn integrity_invalid_sibling_cannot_fill_pending_order_spy_row_first() {
 fn integrity_invalid_sibling_cannot_fill_pending_order_aapl_row_first() {
     let (report, engine) = run_integrity_adversarial(false);
 
-    assert!(report.execution_blocked, "gap-detected AAPL bar must block execution");
-    assert!(engine.integrity_state().halted, "integrity state must record the gap halt");
-    assert!(report.fills.is_empty(), "zero fill may use the gap-invalid AAPL bar");
+    assert!(
+        report.execution_blocked,
+        "gap-detected AAPL bar must block execution"
+    );
+    assert!(
+        engine.integrity_state().halted,
+        "integrity state must record the gap halt"
+    );
+    assert!(
+        report.fills.is_empty(),
+        "zero fill may use the gap-invalid AAPL bar"
+    );
 
     let aapl_order = report
         .orders

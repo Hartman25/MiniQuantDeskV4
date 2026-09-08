@@ -103,8 +103,12 @@ fn stress_suite_not_run_blocks_promotion() {
         report: good_report(),
         stress_suite: None,  // not run
         artifact_lock: None, // B6: not locked; test expects failure
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_not_run_trial")), // P7C: isolate stress gate
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("stress_not_run_trial")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "stress_not_run_trial",
+        )), // P7C: isolate stress gate
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "stress_not_run_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -132,9 +136,13 @@ fn zero_scenarios_run_is_invalid_stress_suite() {
         initial_equity_micros: 1_000_000_000,
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(0, REQUIRED_STRESS_PROTOCOL_VERSION)), // 0 scenarios — invalid
-        artifact_lock: None,                            // B6: not locked; test expects failure
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("zero_scenarios_trial")), // P7C: isolate stress gate
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("zero_scenarios_trial")),
+        artifact_lock: None, // B6: not locked; test expects failure
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "zero_scenarios_trial",
+        )), // P7C: isolate stress gate
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "zero_scenarios_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -172,8 +180,12 @@ fn stress_suite_failed_scenarios_block_promotion() {
         report: good_report(),
         stress_suite: Some(suite),
         artifact_lock: None, // B6: not locked; test expects failure
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_failed_trial")), // P7C: isolate stress gate
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("stress_failed_trial")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "stress_failed_trial",
+        )), // P7C: isolate stress gate
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "stress_failed_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -211,8 +223,12 @@ fn stress_suite_passed_with_good_metrics_allows_promotion() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(3, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_passed_trial")), // P7C
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("stress_passed_trial")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "stress_passed_trial",
+        )), // P7C
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "stress_passed_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -246,8 +262,12 @@ fn stress_suite_wrong_protocol_blocks_promotion_even_when_passed() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(3, "bkt_stress_suite_v0_fabricated")),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_wrong_protocol_trial")),
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("stress_wrong_protocol_trial")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "stress_wrong_protocol_trial",
+        )),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "stress_wrong_protocol_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -277,13 +297,20 @@ fn stress_suite_blank_protocol_blocks_promotion() {
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(3, "")),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
-        oos_evidence: Some(common::valid_oos_evidence_for_testing("stress_blank_protocol_trial")),
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("stress_blank_protocol_trial")),
+        oos_evidence: Some(common::valid_oos_evidence_for_testing(
+            "stress_blank_protocol_trial",
+        )),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "stress_blank_protocol_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
 
-    assert!(!decision.passed, "a blank stress protocol must block promotion");
+    assert!(
+        !decision.passed,
+        "a blank stress protocol must block promotion"
+    );
     let reasons = decision.fail_reasons.join("; ");
     assert!(
         reasons.contains("Stress suite protocol mismatch"),
@@ -341,8 +368,10 @@ fn partial_fills_profit_factor_computed_correctly() {
         report,
         stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: None, // B6: only checking metrics; decision.passed not tested
-        oos_evidence: None, // P7C: only checking metrics; decision.passed not tested
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("partial_fill_metrics_trial")),
+        oos_evidence: None,  // P7C: only checking metrics; decision.passed not tested
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "partial_fill_metrics_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -414,8 +443,10 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         report,
         stress_suite: Some(StressSuiteResult::pass(1, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: None, // B6: only checking metrics; decision.passed not tested
-        oos_evidence: None, // P7C: only checking metrics; decision.passed not tested
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing("cancel_partial_fill_trial")),
+        oos_evidence: None,  // P7C: only checking metrics; decision.passed not tested
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            "cancel_partial_fill_trial",
+        )),
     };
 
     let decision = evaluate_promotion(&config, &input);

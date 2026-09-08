@@ -45,7 +45,10 @@ use mqk_runtime::runtime_risk::{
 // LSF-01 — operator flatten action route has no LiveShadow support
 // ---------------------------------------------------------------------------
 
-async fn call_flatten(router: axum::Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+async fn call_flatten(
+    router: axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/api/v1/ops/action")
@@ -178,7 +181,8 @@ fn lsf02_flatten_on_halt_bypasses_sticky_max_drawdown_halt_via_real_alpaca_adapt
             }));
     });
 
-    let clock = TestClock::new(chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 15, 9, 0, 0).unwrap());
+    let clock =
+        TestClock::new(chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 15, 9, 0, 0).unwrap());
     let account = TestAccountAuthority::new(120_000 * 1_000_000);
     let risk_gate = RuntimeRiskGate::from_run_config_with_account_authority(
         &serde_json::json!({ "risk": { "daily_loss_limit": 0.50, "max_drawdown": 0.10 } }),
@@ -204,10 +208,7 @@ fn lsf02_flatten_on_halt_bypasses_sticky_max_drawdown_halt_via_real_alpaca_adapt
 
     let denied = gateway.submit(&claim("normal-order"), submit_req("normal-order"));
     assert!(
-        matches!(
-            denied,
-            Err(SubmitError::Gate(GateRefusal::RiskBlocked(_)))
-        ),
+        matches!(denied, Err(SubmitError::Gate(GateRefusal::RiskBlocked(_)))),
         "a normal order during a max-drawdown breach must be denied by the risk gate: {denied:?}"
     );
     mock.assert_hits(0);

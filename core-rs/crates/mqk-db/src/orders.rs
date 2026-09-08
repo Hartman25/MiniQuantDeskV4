@@ -1062,8 +1062,7 @@ pub async fn fetch_fill_strategy_lineage(
             );
 
             let sid_field = parse_lineage_field(&outbox.order_json, "strategy_id");
-            let fp_field =
-                parse_lineage_field(&outbox.order_json, "strategy_semantic_fingerprint");
+            let fp_field = parse_lineage_field(&outbox.order_json, "strategy_semantic_fingerprint");
 
             // Malformed values are refused unconditionally: a present-but-
             // corrupt value must never collapse into "genuinely absent".
@@ -1831,8 +1830,7 @@ mod order_json_schema_version_tests {
 
     #[test]
     fn sv01_stamp_writes_current_version_when_missing() {
-        let stamped =
-            stamp_order_json_schema_version(json!({"symbol": "SPY", "qty": 1})).unwrap();
+        let stamped = stamp_order_json_schema_version(json!({"symbol": "SPY", "qty": 1})).unwrap();
         assert_eq!(
             stamped.get("schema_version").and_then(Value::as_i64),
             Some(ORDER_JSON_SCHEMA_VERSION)
@@ -1880,8 +1878,7 @@ mod order_json_schema_version_tests {
     #[test]
     fn sv13_stamp_refuses_zero_and_negative_schema_version() {
         assert!(
-            stamp_order_json_schema_version(json!({"symbol": "SPY", "schema_version": 0}))
-                .is_err()
+            stamp_order_json_schema_version(json!({"symbol": "SPY", "schema_version": 0})).is_err()
         );
         assert!(
             stamp_order_json_schema_version(json!({"symbol": "SPY", "schema_version": -1}))
@@ -1897,7 +1894,8 @@ mod order_json_schema_version_tests {
 
     #[test]
     fn sv04_current_version_is_accepted() {
-        let current = json!({"symbol": "SPY", "qty": 1, "schema_version": ORDER_JSON_SCHEMA_VERSION});
+        let current =
+            json!({"symbol": "SPY", "qty": 1, "schema_version": ORDER_JSON_SCHEMA_VERSION});
         assert!(validate_order_json_schema_version(&current).is_ok());
     }
 
@@ -1932,8 +1930,7 @@ mod order_json_schema_version_tests {
 
     #[test]
     fn sv09_writer_reader_round_trip_in_memory() {
-        let written =
-            stamp_order_json_schema_version(json!({"symbol": "SPY", "qty": 1})).unwrap();
+        let written = stamp_order_json_schema_version(json!({"symbol": "SPY", "qty": 1})).unwrap();
         // Simulate the DB round trip: serialize/deserialize as postgres JSONB would.
         let round_tripped: Value = serde_json::from_str(&written.to_string()).unwrap();
         assert!(validate_order_json_schema_version(&round_tripped).is_ok());

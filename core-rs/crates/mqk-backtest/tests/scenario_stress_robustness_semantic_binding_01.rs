@@ -62,7 +62,11 @@ fn bars() -> Vec<BacktestBar> {
 
 /// Runs a real `BacktestEngine` with a `FingerprintedStrategy(fingerprint)`
 /// to produce a genuine baseline `BacktestReport` -- never hand-constructed.
-fn baseline_report(config: &BacktestConfig, bars: &[BacktestBar], fingerprint: &'static str) -> BacktestReport {
+fn baseline_report(
+    config: &BacktestConfig,
+    bars: &[BacktestBar],
+    fingerprint: &'static str,
+) -> BacktestReport {
     let mut engine = BacktestEngine::new(config.clone());
     engine
         .add_strategy(Box::new(FingerprintedStrategy::new(fingerprint)))
@@ -84,11 +88,15 @@ fn stress_suite_matching_factory_never_reports_identity_mismatch() {
     let bars = bars();
     let baseline = baseline_report(&config, &bars, "fp-a");
 
-    let output =
-        run_backtest_stress_suite(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-a")));
+    let output = run_backtest_stress_suite(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-a"))
+    });
 
     assert!(
-        output.scenarios.iter().all(|s| !reason_contains_mismatch(&s.reason)),
+        output
+            .scenarios
+            .iter()
+            .all(|s| !reason_contains_mismatch(&s.reason)),
         "matching factory must never be rejected as an identity mismatch: {:?}",
         output.scenarios
     );
@@ -105,11 +113,15 @@ fn robustness_gauntlet_matching_factory_never_reports_identity_mismatch() {
     let bars = bars();
     let baseline = baseline_report(&config, &bars, "fp-a");
 
-    let output =
-        run_robustness_gauntlet(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-a")));
+    let output = run_robustness_gauntlet(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-a"))
+    });
 
     assert!(
-        output.scenarios.iter().all(|s| !reason_contains_mismatch(&s.reason)),
+        output
+            .scenarios
+            .iter()
+            .all(|s| !reason_contains_mismatch(&s.reason)),
         "matching factory must never be rejected as an identity mismatch: {:?}",
         output.scenarios
     );
@@ -125,8 +137,9 @@ fn stress_suite_mismatched_factory_fails_closed() {
     let bars = bars();
     let baseline = baseline_report(&config, &bars, "fp-a");
 
-    let output =
-        run_backtest_stress_suite(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-b")));
+    let output = run_backtest_stress_suite(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-b"))
+    });
 
     assert!(
         !output.all_passed(),
@@ -154,8 +167,9 @@ fn robustness_gauntlet_mismatched_factory_fails_closed() {
     let bars = bars();
     let baseline = baseline_report(&config, &bars, "fp-a");
 
-    let output =
-        run_robustness_gauntlet(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-b")));
+    let output = run_robustness_gauntlet(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-b"))
+    });
 
     assert!(
         !output.all_applicable_passed(),
@@ -224,7 +238,10 @@ fn one_mismatched_invocation_among_matching_ones_fails_closed() {
         output.scenarios
     );
     assert!(
-        output.scenarios.iter().any(|s| reason_contains_mismatch(&s.reason)),
+        output
+            .scenarios
+            .iter()
+            .any(|s| reason_contains_mismatch(&s.reason)),
         "at least one scenario must attribute its failure to the identity mismatch: {:?}",
         output.scenarios
     );
@@ -247,8 +264,9 @@ fn delayed_strategy_scenarios_check_underlying_candidate_not_the_decorator() {
     // own (spec-only) default fingerprint were used instead of forwarding
     // the wrapped strategy's real fingerprint, these would incorrectly
     // report an identity mismatch even for a genuinely matching candidate.
-    let matching =
-        run_robustness_gauntlet(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-a")));
+    let matching = run_robustness_gauntlet(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-a"))
+    });
     for name in ["execution_delay_stress", "placebo_temporal_offset"] {
         let scenario = matching.scenarios.iter().find(|s| s.name == name).unwrap();
         assert!(
@@ -260,10 +278,15 @@ fn delayed_strategy_scenarios_check_underlying_candidate_not_the_decorator() {
     // Mismatched factory: the same two scenarios must still catch a real
     // mismatch through the wrapper, proving the delegation is genuinely
     // checked, not merely never-triggered.
-    let mismatched =
-        run_robustness_gauntlet(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-b")));
+    let mismatched = run_robustness_gauntlet(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-b"))
+    });
     for name in ["execution_delay_stress", "placebo_temporal_offset"] {
-        let scenario = mismatched.scenarios.iter().find(|s| s.name == name).unwrap();
+        let scenario = mismatched
+            .scenarios
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap();
         assert!(
             !scenario.passed && reason_contains_mismatch(&scenario.reason),
             "{name} must catch a real mismatch through the DelayedStrategy wrapper: {scenario:?}"
@@ -281,8 +304,9 @@ fn parameter_neighborhood_path_cannot_bypass_identity_check() {
     let bars = bars();
     let baseline = baseline_report(&config, &bars, "fp-a");
 
-    let output =
-        run_robustness_gauntlet(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-b")));
+    let output = run_robustness_gauntlet(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-b"))
+    });
 
     let scenario = output
         .scenarios
@@ -310,8 +334,9 @@ fn result_equivalent_instances_still_rejected_on_fingerprint_difference() {
     // are bit-identical. Only the declared semantic fingerprint differs.
     // The check below must reject this on identity alone, never by
     // comparing (and finding no difference in) result values.
-    let output =
-        run_backtest_stress_suite(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-b")));
+    let output = run_backtest_stress_suite(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-b"))
+    });
 
     assert!(
         !output.all_passed(),
@@ -319,7 +344,10 @@ fn result_equivalent_instances_still_rejected_on_fingerprint_difference() {
         output.scenarios
     );
     assert!(
-        output.scenarios.iter().all(|s| reason_contains_mismatch(&s.reason)),
+        output
+            .scenarios
+            .iter()
+            .all(|s| reason_contains_mismatch(&s.reason)),
         "rejection must be attributed to identity, not to a (nonexistent) result difference: {:?}",
         output.scenarios
     );
@@ -335,8 +363,9 @@ fn genuine_matching_candidate_stress_suite_still_passes() {
     let bars = bars();
     let baseline = baseline_report(&config, &bars, "fp-a");
 
-    let output =
-        run_backtest_stress_suite(&baseline, &config, &bars, || Box::new(FingerprintedStrategy::new("fp-a")));
+    let output = run_backtest_stress_suite(&baseline, &config, &bars, || {
+        Box::new(FingerprintedStrategy::new("fp-a"))
+    });
 
     assert!(
         output.all_passed(),

@@ -138,7 +138,8 @@ async fn fixture_order(
             strategy_semantic_fingerprint,
         } => {
             json["strategy_id"] = serde_json::json!(strategy_id);
-            json["strategy_semantic_fingerprint"] = serde_json::json!(strategy_semantic_fingerprint);
+            json["strategy_semantic_fingerprint"] =
+                serde_json::json!(strategy_semantic_fingerprint);
             json["signal_source"] = serde_json::json!("internal_strategy_decision");
         }
         StrategyShape::Legacy { strategy_id } => {
@@ -361,14 +362,32 @@ async fn ct01_simple_long_round_trip_attributed() {
         let sell_id = unique_id("sell");
 
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp },
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
             at(),
         )
         .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp },
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
             at(),
         )
         .await;
@@ -379,7 +398,11 @@ async fn ct01_simple_long_round_trip_attributed() {
             "projection must not fail closed on a clean single round trip; journal={journal}"
         );
         let rows = closed_trade_rows(&journal);
-        assert_eq!(rows.len(), 1, "expected exactly one closure fragment; rows={rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected exactly one closure fragment; rows={rows:?}"
+        );
         let row = &rows[0];
         assert_eq!(row["symbol"], "AAPL");
         assert_eq!(row["qty"], 10);
@@ -390,8 +413,14 @@ async fn ct01_simple_long_round_trip_attributed() {
         assert_eq!(row["attribution_state"], "attributed");
         assert_eq!(row["open_strategy_id"].as_str(), Some(sid.as_str()));
         assert_eq!(row["close_strategy_id"].as_str(), Some(sid.as_str()));
-        assert_eq!(row["open_strategy_semantic_fingerprint"].as_str(), Some(fp.as_str()));
-        assert_eq!(row["close_strategy_semantic_fingerprint"].as_str(), Some(fp.as_str()));
+        assert_eq!(
+            row["open_strategy_semantic_fingerprint"].as_str(),
+            Some(fp.as_str())
+        );
+        assert_eq!(
+            row["close_strategy_semantic_fingerprint"].as_str(),
+            Some(fp.as_str())
+        );
         assert_eq!(
             journal["closed_trades_lane"]["sum_gross_realized_pnl_micros"],
             100_000_000
@@ -420,21 +449,58 @@ async fn ct02_partial_close_produces_two_fifo_fragments() {
         let sell2_id = unique_id("sell2");
 
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell1_id, "AAPL", Side::Sell, 4, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell1_id,
+            "AAPL",
+            Side::Sell,
+            4,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell2_id, "AAPL", Side::Sell, 6, 105_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell2_id,
+            "AAPL",
+            Side::Sell,
+            6,
+            105_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         let rows = closed_trade_rows(&journal);
-        assert_eq!(rows.len(), 2, "expected two FIFO closure fragments; rows={rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected two FIFO closure fragments; rows={rows:?}"
+        );
 
         let f1 = find_closure(&journal, &sell1_id, 4);
         assert_eq!(f1["entry_price_micros"], 100_000_000);
@@ -476,29 +542,72 @@ async fn ct03_multiple_opening_lots_close_in_fifo_order() {
         let sell_id = unique_id("sell");
 
         place_and_fill(
-            &pool, run_id, &buy1_id, "AAPL", Side::Buy, 5, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy1_id,
+            "AAPL",
+            Side::Buy,
+            5,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &buy2_id, "AAPL", Side::Buy, 5, 120_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy2_id,
+            "AAPL",
+            Side::Buy,
+            5,
+            120_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 7, 130_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            7,
+            130_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         let rows = closed_trade_rows(&journal);
-        assert_eq!(rows.len(), 2, "expected two fragments (one per opening lot); rows={rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected two fragments (one per opening lot); rows={rows:?}"
+        );
 
         let f1 = find_closure(&journal, &sell_id, 5);
-        assert_eq!(f1["open_internal_order_id"], buy1_id, "first 5 must close against the 100 lot (oldest first)");
+        assert_eq!(
+            f1["open_internal_order_id"], buy1_id,
+            "first 5 must close against the 100 lot (oldest first)"
+        );
         assert_eq!(f1["entry_price_micros"], 100_000_000);
         assert_eq!(f1["gross_realized_pnl_micros"], 150_000_000);
 
         let f2 = find_closure(&journal, &sell_id, 2);
-        assert_eq!(f2["open_internal_order_id"], buy2_id, "remaining 2 must close against the 120 lot");
+        assert_eq!(
+            f2["open_internal_order_id"], buy2_id,
+            "remaining 2 must close against the 120 lot"
+        );
         assert_eq!(f2["entry_price_micros"], 120_000_000);
         assert_eq!(f2["gross_realized_pnl_micros"], 20_000_000);
     })
@@ -628,9 +737,18 @@ async fn ct05_cross_lane_duplicate_fill_produces_one_closure_not_two() {
 
         let buy_id = unique_id("buydup");
         fixture_order(
-            &pool, run_id, &buy_id, "AAPL", 10, "buy",
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp },
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            10,
+            "buy",
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+        )
+        .await;
 
         let ws_ev = BrokerEvent::PartialFill {
             broker_message_id: format!("alpaca:{buy_id}:partial_fill:ws-10"),
@@ -645,9 +763,17 @@ async fn ct05_cross_lane_duplicate_fill_produces_one_closure_not_two() {
             cum_qty_after: Some(10),
         };
         fixture_applied_event(
-            &pool, run_id, "alpaca:ws-10", None, &buy_id, &format!("bo:{buy_id}"),
-            "partial_fill", &ws_ev, at(),
-        ).await;
+            &pool,
+            run_id,
+            "alpaca:ws-10",
+            None,
+            &buy_id,
+            &format!("bo:{buy_id}"),
+            "partial_fill",
+            &ws_ev,
+            at(),
+        )
+        .await;
 
         let rest_ev = BrokerEvent::PartialFill {
             broker_message_id: "alpaca-rest-recovery:activity-ct05".to_string(),
@@ -662,9 +788,17 @@ async fn ct05_cross_lane_duplicate_fill_produces_one_closure_not_two() {
             cum_qty_after: Some(10),
         };
         fixture_applied_event(
-            &pool, run_id, "alpaca-rest-recovery:activity-ct05", Some("activity-ct05"),
-            &buy_id, &format!("bo:{buy_id}"), "partial_fill", &rest_ev, at(),
-        ).await;
+            &pool,
+            run_id,
+            "alpaca-rest-recovery:activity-ct05",
+            Some("activity-ct05"),
+            &buy_id,
+            &format!("bo:{buy_id}"),
+            "partial_fill",
+            &rest_ev,
+            at(),
+        )
+        .await;
 
         // Sell 20 -- double the true physical execution size. If the
         // duplicate collapsed correctly (true long = 10), only 10 close
@@ -674,18 +808,33 @@ async fn ct05_cross_lane_duplicate_fill_produces_one_closure_not_two() {
         // (which both a correct and a buggy model would satisfy alike).
         let sell_id = unique_id("selldup");
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 20, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            20,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
-        assert_ne!(journal["closed_trades_lane"]["truth_state"], "parity_failed");
+        assert_ne!(
+            journal["closed_trades_lane"]["truth_state"],
+            "parity_failed"
+        );
         let rows: Vec<&serde_json::Value> = closed_trade_rows(&journal)
             .iter()
             .filter(|r| r["close_internal_order_id"] == sell_id)
             .collect();
         assert_eq!(
-            rows.len(), 1,
+            rows.len(),
+            1,
             "one physical 10-share execution delivered on two transport lanes must produce \
              exactly one closure fragment, not two; rows={rows:?}"
         );
@@ -715,13 +864,35 @@ async fn ct06_two_strategies_same_symbol_is_cross_strategy_never_fabricated() {
         let buy_id = unique_id("buyxs");
         let sell_id = unique_id("sellxs");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid_a, strategy_semantic_fingerprint: &fp_a }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_a,
+                strategy_semantic_fingerprint: &fp_a,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fp_b }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_b,
+                strategy_semantic_fingerprint: &fp_b,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_closure(&journal, &sell_id, 10);
@@ -756,18 +927,43 @@ async fn ct07_same_strategy_id_different_fingerprint_is_semantic_identity_change
         let buy_id = unique_id("buydrift");
         let sell_id = unique_id("selldrift");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp_old }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp_old,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp_new }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp_new,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_closure(&journal, &sell_id, 10);
         assert_eq!(row["attribution_state"], "semantic_identity_changed");
-        assert_eq!(row["open_strategy_id"], row["close_strategy_id"], "same strategy_id on both sides");
+        assert_eq!(
+            row["open_strategy_id"], row["close_strategy_id"],
+            "same strategy_id on both sides"
+        );
         assert_ne!(
             row["open_strategy_semantic_fingerprint"], row["close_strategy_semantic_fingerprint"],
             "must never collapse a same-id/different-fingerprint pair into attributed"
@@ -794,19 +990,41 @@ async fn ct08_strategy_opens_manual_closes_is_manual_or_mixed() {
         let buy_id = unique_id("buymix");
         let sell_id = unique_id("sellmix");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Manual, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_closure(&journal, &sell_id, 10);
         assert_eq!(row["attribution_state"], "manual_or_mixed");
         assert_eq!(row["open_strategy_id"].as_str(), Some(sid.as_str()));
-        assert!(row["close_strategy_id"].is_null(), "manual closing side must have no strategy_id");
+        assert!(
+            row["close_strategy_id"].is_null(),
+            "manual closing side must have no strategy_id"
+        );
     })
     .await;
 }
@@ -829,24 +1047,49 @@ async fn ct09_legacy_missing_fingerprint_is_lineage_incomplete_never_invented() 
         let buy_id = unique_id("buylegacy");
         let sell_id = unique_id("selllegacy");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Legacy { strategy_id: &sid }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Legacy { strategy_id: &sid },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_closure(&journal, &sell_id, 10);
         assert_eq!(row["attribution_state"], "lineage_incomplete");
-        assert_eq!(row["gross_realized_pnl_micros"], 100_000_000, "gross math stays visible");
+        assert_eq!(
+            row["gross_realized_pnl_micros"], 100_000_000,
+            "gross math stays visible"
+        );
         assert_eq!(row["open_strategy_id"].as_str(), Some(sid.as_str()));
         assert!(
             row["open_strategy_semantic_fingerprint"].is_null(),
             "a legacy order's missing fingerprint must never be invented/reconstructed"
         );
-        assert_eq!(row["close_strategy_semantic_fingerprint"].as_str(), Some(fp.as_str()));
+        assert_eq!(
+            row["close_strategy_semantic_fingerprint"].as_str(),
+            Some(fp.as_str())
+        );
     })
     .await;
 }
@@ -869,13 +1112,32 @@ async fn ct10_malformed_lineage_never_upgraded_to_authoritative_attribution() {
         let buy_id = unique_id("buymalformed");
         let sell_id = unique_id("sellmalformed");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::MalformedStrategyId, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::MalformedStrategyId,
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fp_b }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_b,
+                strategy_semantic_fingerprint: &fp_b,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         let row = find_closure(&journal, &sell_id, 10);
@@ -911,27 +1173,76 @@ async fn ct11_summed_gross_pnl_matches_canonical_and_durable_accounting_truth() 
         let aapl_buy = unique_id("aaplbuy");
         let aapl_sell = unique_id("aaplsell");
         place_and_fill(
-            &pool, run_id, &aapl_buy, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &aapl_buy,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &aapl_sell, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &aapl_sell,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         // MSFT: buy5@50, sell3@60 (+30_000_000), sell2@55 (+10_000_000)
         let msft_buy = unique_id("msftbuy");
         let msft_sell1 = unique_id("msftsell1");
         let msft_sell2 = unique_id("msftsell2");
         place_and_fill(
-            &pool, run_id, &msft_buy, "MSFT", Side::Buy, 5, 50_000_000, StrategyShape::Manual, at(),
-        ).await;
+            &pool,
+            run_id,
+            &msft_buy,
+            "MSFT",
+            Side::Buy,
+            5,
+            50_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &msft_sell1, "MSFT", Side::Sell, 3, 60_000_000, StrategyShape::Manual, at(),
-        ).await;
+            &pool,
+            run_id,
+            &msft_sell1,
+            "MSFT",
+            Side::Sell,
+            3,
+            60_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &msft_sell2, "MSFT", Side::Sell, 2, 55_000_000, StrategyShape::Manual, at(),
-        ).await;
+            &pool,
+            run_id,
+            &msft_sell2,
+            "MSFT",
+            Side::Sell,
+            2,
+            55_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         let expected_total = 100_000_000 + 30_000_000 + 10_000_000;
 
@@ -946,7 +1257,10 @@ async fn ct11_summed_gross_pnl_matches_canonical_and_durable_accounting_truth() 
             journal["closed_trades_lane"]["sum_gross_realized_pnl_micros"],
             expected_total
         );
-        assert_eq!(journal["closed_trades_lane"]["accounting_epoch"], "complete");
+        assert_eq!(
+            journal["closed_trades_lane"]["accounting_epoch"],
+            "complete"
+        );
 
         let rows = closed_trade_rows(&journal);
         let summed: i64 = rows
@@ -980,25 +1294,54 @@ async fn ct12_incomplete_accounting_epoch_never_claims_authoritative_complete_pn
         let buy_id = unique_id("buyincomplete");
         let sell_id = unique_id("sellincomplete");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         // A broker position exists at the broker that this run's fill
         // history cannot explain -- classic inherited/adopted-position
         // incompleteness.
         seed_accounting_state(
-            &pool, run_id, 100_000_000, "incomplete",
+            &pool,
+            run_id,
+            100_000_000,
+            "incomplete",
             Some("broker_position_missing_fill_history:MSFT"),
-        ).await;
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
         assert_eq!(journal["closed_trades_lane"]["truth_state"], "incomplete");
-        assert_eq!(journal["closed_trades_lane"]["accounting_epoch"], "incomplete");
+        assert_eq!(
+            journal["closed_trades_lane"]["accounting_epoch"],
+            "incomplete"
+        );
         assert_eq!(
             journal["closed_trades_lane"]["accounting_epoch_reason"],
             "broker_position_missing_fill_history:MSFT"
@@ -1006,7 +1349,11 @@ async fn ct12_incomplete_accounting_epoch_never_claims_authoritative_complete_pn
         // Observed fills are still visible -- incompleteness is surfaced
         // via truth_state, not by hiding real closure evidence.
         let rows = closed_trade_rows(&journal);
-        assert_eq!(rows.len(), 1, "observed closure fragments must still be visible; rows={rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "observed closure fragments must still be visible; rows={rows:?}"
+        );
         assert_eq!(rows[0]["gross_realized_pnl_micros"], 100_000_000);
     })
     .await;
@@ -1030,20 +1377,51 @@ async fn ct13_short_open_then_cover_produces_short_closure_with_correct_pnl() {
         let short_open_id = unique_id("shortopen");
         let cover_id = unique_id("cover");
         place_and_fill(
-            &pool, run_id, &short_open_id, "AAPL", Side::Sell, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &short_open_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &cover_id, "AAPL", Side::Buy, 10, 90_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &cover_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            90_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         let journal = fetch_journal(&st).await;
-        assert_ne!(journal["closed_trades_lane"]["truth_state"], "parity_failed");
+        assert_ne!(
+            journal["closed_trades_lane"]["truth_state"],
+            "parity_failed"
+        );
         let row = find_closure(&journal, &cover_id, 10);
         assert_eq!(row["direction"], "short");
-        assert_eq!(row["entry_price_micros"], 100_000_000, "short lot entry is the sell-to-open price");
-        assert_eq!(row["exit_price_micros"], 90_000_000, "exit is the covering buy price");
+        assert_eq!(
+            row["entry_price_micros"], 100_000_000,
+            "short lot entry is the sell-to-open price"
+        );
+        assert_eq!(
+            row["exit_price_micros"], 90_000_000,
+            "exit is the covering buy price"
+        );
         assert_eq!(
             row["gross_realized_pnl_micros"], 100_000_000,
             "short profit = (entry_short - cover_price) * qty"
@@ -1080,13 +1458,35 @@ async fn ct14_stale_accounting_snapshot_must_not_appear_active() {
         let buy_id = unique_id("buyct14");
         let sell_id = unique_id("sellct14");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         let expected_realized_pnl = 100_000_000;
 
         // Durable snapshot S1 + accounting row pointing at it, realized P&L
@@ -1176,8 +1576,7 @@ async fn ct14_stale_accounting_snapshot_must_not_appear_active() {
         let rows = closed_trade_rows(&journal);
         assert_eq!(rows.len(), 1, "rows={rows:?}");
         assert_eq!(
-            journal["closed_trades_lane"]["sum_gross_realized_pnl_micros"],
-            expected_realized_pnl,
+            journal["closed_trades_lane"]["sum_gross_realized_pnl_micros"], expected_realized_pnl,
             "matching realized-P&L numbers must not be read as proof of currency"
         );
     })

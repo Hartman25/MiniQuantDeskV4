@@ -70,12 +70,13 @@ use mqk_daemon::state::{
     self, derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env, AppState,
     AutonomousDailyPlanTiming, AutonomousDailySessionPlan, AutonomousDailySessionPlanResolution,
-    MultiSymbolConfigSource, MultiSymbolRuntimeConfig, StrategyFleetEntry, SymbolStrategyAssignment,
+    MultiSymbolConfigSource, MultiSymbolRuntimeConfig, StrategyFleetEntry,
+    SymbolStrategyAssignment,
 };
 use mqk_db::{
     AutonomousDailyTransitionOutcome, CreateAutonomousDailyOperationArgs,
-    TransitionAutonomousDailyOperationArgs, STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA,
-    STATE_STOPPING,
+    TransitionAutonomousDailyOperationArgs, STATE_MANUAL_INTERVENTION_REQUIRED,
+    STATE_PREPARING_DATA, STATE_STOPPING,
 };
 use uuid::Uuid;
 
@@ -205,7 +206,12 @@ async fn resolve_active_identity(
         &assignment_identity,
         &runtime_binding_identity,
     );
-    (plan, assignment_identity, runtime_binding_identity, operation_id)
+    (
+        plan,
+        assignment_identity,
+        runtime_binding_identity,
+        operation_id,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

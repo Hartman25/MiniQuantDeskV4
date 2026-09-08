@@ -216,7 +216,10 @@ fn execution_model_change_still_changes_run_id() {
         "fingerprint-a",
     );
 
-    assert_ne!(id_a, id_b, "execution-model change must still change run_id");
+    assert_ne!(
+        id_a, id_b,
+        "execution-model change must still change run_id"
+    );
 }
 
 /// Test 7 -- economics change still changes `run_id`.

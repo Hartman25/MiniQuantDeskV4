@@ -99,13 +99,24 @@ fn assert_open_filled(report: &BacktestReport, open_qty: i64) {
     let opens: Vec<_> = report
         .orders
         .iter()
-        .filter(|o| o.qty == open_qty.abs() && o.side == expected_side && o.status == OrderStatus::Filled)
+        .filter(|o| {
+            o.qty == open_qty.abs() && o.side == expected_side && o.status == OrderStatus::Filled
+        })
         .collect();
-    assert_eq!(opens.len(), 1, "opening order must fill: {:?}", report.orders);
+    assert_eq!(
+        opens.len(),
+        1,
+        "opening order must fill: {:?}",
+        report.orders
+    );
 }
 
 fn assert_reversal_status(report: &BacktestReport, delta_qty: i64, expected: OrderStatus) {
-    let reversal: Vec<_> = report.orders.iter().filter(|o| o.qty == delta_qty).collect();
+    let reversal: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.qty == delta_qty)
+        .collect();
     assert_eq!(
         reversal.len(),
         1,
@@ -214,7 +225,12 @@ fn item7_pure_reduction_bypasses_cap_unchanged() {
         .iter()
         .filter(|o| o.qty == 40 && o.side == mqk_backtest::BacktestOrderSide::Sell)
         .collect();
-    assert_eq!(close.len(), 1, "expected exactly one closing SELL 40 order: {:?}", report.orders);
+    assert_eq!(
+        close.len(),
+        1,
+        "expected exactly one closing SELL 40 order: {:?}",
+        report.orders
+    );
     assert_eq!(
         close[0].status,
         OrderStatus::Filled,
@@ -279,11 +295,51 @@ fn item8_pure_increase_above_cap_rejects() {
 #[test]
 fn item9_unrelated_symbol_exposure_remains_counted() {
     let bars = vec![
-        BacktestBar::new("AAPL", 1_700_000_060, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("SPY", 1_700_000_060, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("AAPL", 1_700_000_120, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("SPY", 1_700_000_120, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("SPY", 1_700_000_180, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
+        BacktestBar::new(
+            "AAPL",
+            1_700_000_060,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_060,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "AAPL",
+            1_700_000_120,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_120,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_180,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
     ];
 
     let mut cfg = BacktestConfig::test_defaults();
@@ -292,21 +348,40 @@ fn item9_unrelated_symbol_exposure_remains_counted() {
     let mut engine = BacktestEngine::new(cfg);
     engine
         .add_strategy(Box::new(ScriptedStrategy::new(vec![
-            vec![("AAPL", 20)],           // call1 (AAPL@60): open AAPL signal
-            vec![],                       // call2 (SPY@60): AAPL still pending, safe to omit
-            vec![("AAPL", 20)],           // call3 (AAPL@120): AAPL just filled -- restate to avoid an implicit flatten
+            vec![("AAPL", 20)],               // call1 (AAPL@60): open AAPL signal
+            vec![],                           // call2 (SPY@60): AAPL still pending, safe to omit
+            vec![("AAPL", 20)], // call3 (AAPL@120): AAPL just filled -- restate to avoid an implicit flatten
             vec![("AAPL", 20), ("SPY", 100)], // call4 (SPY@120): keep AAPL, open SPY signal
-            vec![("AAPL", 20)],           // call5 (SPY@180): SPY rejects in this batch -- omit it (already 0), keep AAPL
+            vec![("AAPL", 20)], // call5 (SPY@180): SPY rejects in this batch -- omit it (already 0), keep AAPL
         ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
 
-    let aapl_open: Vec<_> = report.orders.iter().filter(|o| o.symbol == "AAPL").collect();
-    assert_eq!(aapl_open.len(), 1, "expected exactly one AAPL order: {:?}", report.orders);
-    assert_eq!(aapl_open[0].status, OrderStatus::Filled, "AAPL open must fill: {:?}", aapl_open);
+    let aapl_open: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "AAPL")
+        .collect();
+    assert_eq!(
+        aapl_open.len(),
+        1,
+        "expected exactly one AAPL order: {:?}",
+        report.orders
+    );
+    assert_eq!(
+        aapl_open[0].status,
+        OrderStatus::Filled,
+        "AAPL open must fill: {:?}",
+        aapl_open
+    );
 
     let spy_open: Vec<_> = report.orders.iter().filter(|o| o.symbol == "SPY").collect();
-    assert_eq!(spy_open.len(), 1, "expected exactly one SPY order: {:?}", report.orders);
+    assert_eq!(
+        spy_open.len(),
+        1,
+        "expected exactly one SPY order: {:?}",
+        report.orders
+    );
     assert_eq!(
         spy_open[0].status,
         OrderStatus::Rejected,
@@ -333,13 +408,56 @@ fn item9_unrelated_symbol_exposure_remains_counted() {
 /// signal or implicitly flattening it -- see the `ScriptedStrategy` doc
 /// comment. The test author picks `mult_micros` to know this outcome in
 /// advance; the strategy itself has no way to observe it.
-fn run_multi_symbol_reversal_case(mult_micros: i64, expect_reversal_filled: bool) -> BacktestReport {
+fn run_multi_symbol_reversal_case(
+    mult_micros: i64,
+    expect_reversal_filled: bool,
+) -> BacktestReport {
     let bars = vec![
-        BacktestBar::new("AAPL", 1_700_000_060, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("SPY", 1_700_000_060, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("AAPL", 1_700_000_120, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("SPY", 1_700_000_120, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
-        BacktestBar::new("SPY", 1_700_000_180, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1000),
+        BacktestBar::new(
+            "AAPL",
+            1_700_000_060,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_060,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "AAPL",
+            1_700_000_120,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_120,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_180,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            100_000_000,
+            1000,
+        ),
     ];
 
     let mut cfg = BacktestConfig::test_defaults();
@@ -350,10 +468,10 @@ fn run_multi_symbol_reversal_case(mult_micros: i64, expect_reversal_filled: bool
     let mut engine = BacktestEngine::new(cfg);
     engine
         .add_strategy(Box::new(ScriptedStrategy::new(vec![
-            vec![("AAPL", 20)],                    // call1 (AAPL@60): open AAPL signal
-            vec![("SPY", 40)],                      // call2 (SPY@60): AAPL still pending, safe to omit; open SPY signal
-            vec![("AAPL", 20), ("SPY", 40)],        // call3 (AAPL@120): both opens just filled -- restate both
-            vec![("AAPL", 20), ("SPY", -100)],      // call4 (SPY@120): keep AAPL, SPY reversal signal
+            vec![("AAPL", 20)],                     // call1 (AAPL@60): open AAPL signal
+            vec![("SPY", 40)], // call2 (SPY@60): AAPL still pending, safe to omit; open SPY signal
+            vec![("AAPL", 20), ("SPY", 40)], // call3 (AAPL@120): both opens just filled -- restate both
+            vec![("AAPL", 20), ("SPY", -100)], // call4 (SPY@120): keep AAPL, SPY reversal signal
             vec![("AAPL", 20), ("SPY", spy_final)], // call5 (SPY@180): reversal resolves -- restate its actual outcome
         ])))
         .unwrap();
@@ -364,16 +482,38 @@ fn run_multi_symbol_reversal_case(mult_micros: i64, expect_reversal_filled: bool
 fn item10_multi_symbol_reversal_exactly_cap_allows() {
     let report = run_multi_symbol_reversal_case(120_000, true); // 0.12x -> $12,000 cap
 
-    let aapl_open: Vec<_> = report.orders.iter().filter(|o| o.symbol == "AAPL").collect();
-    assert_eq!(aapl_open.len(), 1, "expected exactly one AAPL order: {:?}", report.orders);
+    let aapl_open: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "AAPL")
+        .collect();
+    assert_eq!(
+        aapl_open.len(),
+        1,
+        "expected exactly one AAPL order: {:?}",
+        report.orders
+    );
     assert_eq!(aapl_open[0].status, OrderStatus::Filled);
 
-    let spy_open: Vec<_> = report.orders.iter().filter(|o| o.symbol == "SPY" && o.qty == 40).collect();
+    let spy_open: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "SPY" && o.qty == 40)
+        .collect();
     assert_eq!(spy_open.len(), 1);
     assert_eq!(spy_open[0].status, OrderStatus::Filled);
 
-    let spy_reversal: Vec<_> = report.orders.iter().filter(|o| o.symbol == "SPY" && o.qty == 140).collect();
-    assert_eq!(spy_reversal.len(), 1, "expected exactly one SPY reversal order: {:?}", report.orders);
+    let spy_reversal: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "SPY" && o.qty == 140)
+        .collect();
+    assert_eq!(
+        spy_reversal.len(),
+        1,
+        "expected exactly one SPY reversal order: {:?}",
+        report.orders
+    );
     assert_eq!(
         spy_reversal[0].status,
         OrderStatus::Filled,
@@ -387,16 +527,38 @@ fn item10_multi_symbol_reversal_exactly_cap_allows() {
 fn item10_multi_symbol_reversal_above_cap_rejects() {
     let report = run_multi_symbol_reversal_case(110_000, false); // 0.11x -> $11,000 cap
 
-    let aapl_open: Vec<_> = report.orders.iter().filter(|o| o.symbol == "AAPL").collect();
-    assert_eq!(aapl_open.len(), 1, "expected exactly one AAPL order: {:?}", report.orders);
+    let aapl_open: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "AAPL")
+        .collect();
+    assert_eq!(
+        aapl_open.len(),
+        1,
+        "expected exactly one AAPL order: {:?}",
+        report.orders
+    );
     assert_eq!(aapl_open[0].status, OrderStatus::Filled);
 
-    let spy_open: Vec<_> = report.orders.iter().filter(|o| o.symbol == "SPY" && o.qty == 40).collect();
+    let spy_open: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "SPY" && o.qty == 40)
+        .collect();
     assert_eq!(spy_open.len(), 1);
     assert_eq!(spy_open[0].status, OrderStatus::Filled);
 
-    let spy_reversal: Vec<_> = report.orders.iter().filter(|o| o.symbol == "SPY" && o.qty == 140).collect();
-    assert_eq!(spy_reversal.len(), 1, "expected exactly one SPY reversal order: {:?}", report.orders);
+    let spy_reversal: Vec<_> = report
+        .orders
+        .iter()
+        .filter(|o| o.symbol == "SPY" && o.qty == 140)
+        .collect();
+    assert_eq!(
+        spy_reversal.len(),
+        1,
+        "expected exactly one SPY reversal order: {:?}",
+        report.orders
+    );
     assert_eq!(
         spy_reversal[0].status,
         OrderStatus::Rejected,

@@ -15,8 +15,8 @@ use std::sync::Arc;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
 use http_body_util::BodyExt;
-use mqk_daemon::{routes, state};
 use mqk_daemon::state::BrokerKind;
+use mqk_daemon::{routes, state};
 use mqk_execution::{BrokerEvent, Side};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -52,7 +52,11 @@ async fn fetch_performance(st: &Arc<state::AppState>, run_id: Uuid) -> serde_jso
         get(&format!("/api/v1/strategy/performance?run_id={run_id}")),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "strategy/performance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "strategy/performance must return 200"
+    );
     serde_json::from_slice(&body).expect("body is not valid JSON")
 }
 
@@ -66,14 +70,21 @@ fn coverage_buckets(perf: &serde_json::Value) -> &Vec<serde_json::Value> {
         .expect("attribution_coverage must be an array")
 }
 
-fn find_row<'a>(perf: &'a serde_json::Value, strategy_id: &str, fingerprint: &str) -> Option<&'a serde_json::Value> {
+fn find_row<'a>(
+    perf: &'a serde_json::Value,
+    strategy_id: &str,
+    fingerprint: &str,
+) -> Option<&'a serde_json::Value> {
     perf_rows(perf).iter().find(|r| {
         r["strategy_id"].as_str() == Some(strategy_id)
             && r["strategy_semantic_fingerprint"].as_str() == Some(fingerprint)
     })
 }
 
-fn find_bucket<'a>(perf: &'a serde_json::Value, attribution_state: &str) -> Option<&'a serde_json::Value> {
+fn find_bucket<'a>(
+    perf: &'a serde_json::Value,
+    attribution_state: &str,
+) -> Option<&'a serde_json::Value> {
     coverage_buckets(perf)
         .iter()
         .find(|b| b["attribution_state"].as_str() == Some(attribution_state))
@@ -157,7 +168,8 @@ async fn fixture_order(
             strategy_semantic_fingerprint,
         } => {
             json["strategy_id"] = serde_json::json!(strategy_id);
-            json["strategy_semantic_fingerprint"] = serde_json::json!(strategy_semantic_fingerprint);
+            json["strategy_semantic_fingerprint"] =
+                serde_json::json!(strategy_semantic_fingerprint);
             json["signal_source"] = serde_json::json!("internal_strategy_decision");
         }
         StrategyShape::Legacy { strategy_id } => {
@@ -343,20 +355,45 @@ async fn p3_01_exact_round_trip_produces_one_row() {
         let buy_id = unique_id("buy");
         let sell_id = unique_id("sell");
         place_and_fill(
-            &pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
         place_and_fill(
-            &pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at(),
-        ).await;
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         assert_eq!(perf["truth_state"], "active", "perf={perf}");
         assert_eq!(perf["pnl_basis"], "gross_realized_before_fees");
-        assert_eq!(perf["fee_allocation_state"], "not_allocated_to_strategy_close_events");
+        assert_eq!(
+            perf["fee_allocation_state"],
+            "not_allocated_to_strategy_close_events"
+        );
         assert_eq!(perf_rows(&perf).len(), 1, "rows={:?}", perf_rows(&perf));
         let row = find_row(&perf, &sid, &fp).expect("row must exist for sid/fp");
         assert_eq!(row["attributed_fragment_count"], 1);
@@ -390,24 +427,81 @@ async fn p3_02_same_strategy_id_different_fingerprint_remain_separate_rows() {
         // fp1 round trip on AAPL
         let buy1 = unique_id("buy1");
         let sell1 = unique_id("sell1");
-        place_and_fill(&pool, run_id, &buy1, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp1 }, at()).await;
-        place_and_fill(&pool, run_id, &sell1, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp1 }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy1,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp1,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell1,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp1,
+            },
+            at(),
+        )
+        .await;
 
         // fp2 round trip on MSFT
         let buy2 = unique_id("buy2");
         let sell2 = unique_id("sell2");
-        place_and_fill(&pool, run_id, &buy2, "MSFT", Side::Buy, 5, 50_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp2 }, at()).await;
-        place_and_fill(&pool, run_id, &sell2, "MSFT", Side::Sell, 5, 60_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp2 }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy2,
+            "MSFT",
+            Side::Buy,
+            5,
+            50_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp2,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell2,
+            "MSFT",
+            Side::Sell,
+            5,
+            60_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp2,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000 + 50_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         assert_eq!(perf["truth_state"], "active", "perf={perf}");
-        assert_eq!(perf_rows(&perf).len(), 2, "must never collapse two fingerprints under one strategy_id; rows={:?}", perf_rows(&perf));
+        assert_eq!(
+            perf_rows(&perf).len(),
+            2,
+            "must never collapse two fingerprints under one strategy_id; rows={:?}",
+            perf_rows(&perf)
+        );
         let row1 = find_row(&perf, &sid, &fp1).expect("fp1 row must exist");
         assert_eq!(row1["gross_realized_pnl_micros"], 100_000_000);
         let row2 = find_row(&perf, &sid, &fp2).expect("fp2 row must exist");
@@ -435,19 +529,52 @@ async fn p3_03_cross_strategy_contributes_to_coverage_not_either_row() {
 
         let buy_id = unique_id("buyxs");
         let sell_id = unique_id("sellxs");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid_a, strategy_semantic_fingerprint: &fp_a }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fp_b }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_a,
+                strategy_semantic_fingerprint: &fp_a,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_b,
+                strategy_semantic_fingerprint: &fp_b,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         assert_eq!(perf["truth_state"], "active", "perf={perf}");
-        assert!(find_row(&perf, &sid_a, &fp_a).is_none(), "sid_a must have no row");
-        assert!(find_row(&perf, &sid_b, &fp_b).is_none(), "sid_b must have no row");
+        assert!(
+            find_row(&perf, &sid_a, &fp_a).is_none(),
+            "sid_a must have no row"
+        );
+        assert!(
+            find_row(&perf, &sid_b, &fp_b).is_none(),
+            "sid_b must have no row"
+        );
         assert_eq!(perf_rows(&perf).len(), 0);
-        let bucket = find_bucket(&perf, "cross_strategy").expect("cross_strategy bucket must exist");
+        let bucket =
+            find_bucket(&perf, "cross_strategy").expect("cross_strategy bucket must exist");
         assert_eq!(bucket["fragment_count"], 1);
         assert_eq!(bucket["gross_realized_pnl_micros"], 100_000_000);
     })
@@ -472,10 +599,36 @@ async fn p3_04_semantic_identity_changed_contributes_to_coverage_not_metrics() {
 
         let buy_id = unique_id("buydrift");
         let sell_id = unique_id("selldrift");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp_old }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp_new }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp_old,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp_new,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
@@ -507,10 +660,33 @@ async fn p3_05_manual_or_mixed_contributes_to_coverage_not_metrics() {
 
         let buy_id = unique_id("buymix");
         let sell_id = unique_id("sellmix");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Manual, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
@@ -541,16 +717,42 @@ async fn p3_06_legacy_fingerprint_contributes_to_lineage_incomplete_not_row() {
 
         let buy_id = unique_id("buylegacy");
         let sell_id = unique_id("selllegacy");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Legacy { strategy_id: &sid }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Legacy { strategy_id: &sid },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         assert_eq!(perf["truth_state"], "active", "perf={perf}");
-        assert!(find_row(&perf, &sid, &fp).is_none(), "legacy-incomplete closure must never receive a performance row");
+        assert!(
+            find_row(&perf, &sid, &fp).is_none(),
+            "legacy-incomplete closure must never receive a performance row"
+        );
         assert_eq!(perf_rows(&perf).len(), 0);
         let bucket = find_bucket(&perf, "lineage_incomplete").expect("bucket must exist");
         assert_eq!(bucket["gross_realized_pnl_micros"], 100_000_000);
@@ -575,10 +777,33 @@ async fn p3_07_malformed_lineage_never_becomes_performance() {
 
         let buy_id = unique_id("buymalformed");
         let sell_id = unique_id("sellmalformed");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::MalformedStrategyId, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fp_b }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::MalformedStrategyId,
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_b,
+                strategy_semantic_fingerprint: &fp_b,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
@@ -610,12 +835,51 @@ async fn p3_08_multi_lot_single_close_counts_one_event_two_fragments() {
         let buy1 = unique_id("buy1ml");
         let buy2 = unique_id("buy2ml");
         let sell = unique_id("sellml");
-        place_and_fill(&pool, run_id, &buy1, "AAPL", Side::Buy, 5, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &buy2, "AAPL", Side::Buy, 5, 120_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &sell, "AAPL", Side::Sell, 10, 130_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy1,
+            "AAPL",
+            Side::Buy,
+            5,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy2,
+            "AAPL",
+            Side::Buy,
+            5,
+            120_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell,
+            "AAPL",
+            Side::Sell,
+            10,
+            130_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         // gross pnl = (130-100)*5 + (130-120)*5 = 150_000_000 + 50_000_000
         seed_accounting_state(&pool, run_id, 200_000_000, "complete", None).await;
@@ -623,8 +887,14 @@ async fn p3_08_multi_lot_single_close_counts_one_event_two_fragments() {
         let perf = fetch_performance(&st, run_id).await;
         assert_eq!(perf["truth_state"], "active", "perf={perf}");
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
-        assert_eq!(row["attributed_fragment_count"], 2, "two FIFO fragments closed this single sell");
-        assert_eq!(row["attributed_close_event_count"], 1, "one economic close order = one close event");
+        assert_eq!(
+            row["attributed_fragment_count"], 2,
+            "two FIFO fragments closed this single sell"
+        );
+        assert_eq!(
+            row["attributed_close_event_count"], 1,
+            "one economic close order = one close event"
+        );
         assert_eq!(row["attributed_closed_qty"], 10);
         assert_eq!(row["gross_realized_pnl_micros"], 200_000_000);
         assert_eq!(row["winning_close_event_count"], 1);
@@ -650,18 +920,70 @@ async fn p3_09_hit_rate_excludes_flat_events_from_denominator() {
         // Win: buy 1@100 sell 1@110 (+10_000_000)
         let win_buy = unique_id("winbuy");
         let win_sell = unique_id("winsell");
-        place_and_fill(&pool, run_id, &win_buy, "AAPL", Side::Buy, 1, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &win_sell, "AAPL", Side::Sell, 1, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &win_buy,
+            "AAPL",
+            Side::Buy,
+            1,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &win_sell,
+            "AAPL",
+            Side::Sell,
+            1,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         // Flat: buy 1@100 sell 1@100 (0)
         let flat_buy = unique_id("flatbuy");
         let flat_sell = unique_id("flatsell");
-        place_and_fill(&pool, run_id, &flat_buy, "AAPL", Side::Buy, 1, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &flat_sell, "AAPL", Side::Sell, 1, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &flat_buy,
+            "AAPL",
+            Side::Buy,
+            1,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &flat_sell,
+            "AAPL",
+            Side::Sell,
+            1,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 10_000_000, "complete", None).await;
 
@@ -671,7 +993,10 @@ async fn p3_09_hit_rate_excludes_flat_events_from_denominator() {
         assert_eq!(row["winning_close_event_count"], 1);
         assert_eq!(row["losing_close_event_count"], 0);
         assert_eq!(row["flat_close_event_count"], 1);
-        assert_eq!(row["hit_rate"], 1.0, "flat event must be excluded from the denominator, not counted as a loss");
+        assert_eq!(
+            row["hit_rate"], 1.0,
+            "flat event must be excluded from the denominator, not counted as a loss"
+        );
     })
     .await;
 }
@@ -693,17 +1018,47 @@ async fn p3_10_no_losses_profit_factor_is_null_never_inf() {
 
         let buy_id = unique_id("buynolo");
         let sell_id = unique_id("sellnolo");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         let row = find_row(&perf, &sid, &fp).expect("row must exist");
         assert_eq!(row["gross_loss_abs_micros"], 0);
-        assert_eq!(row["profit_factor"], serde_json::Value::Null, "must never be a fabricated infinity sentinel");
+        assert_eq!(
+            row["profit_factor"],
+            serde_json::Value::Null,
+            "must never be a fabricated infinity sentinel"
+        );
     })
     .await;
 }
@@ -733,10 +1088,36 @@ async fn p3_11_drawdown_matches_deterministic_sequence() {
             let exit_px: i64 = entry_px + d;
             let buy_id = unique_id(&format!("ddbuy{i}"));
             let sell_id = unique_id(&format!("ddsell{i}"));
-            place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 1, entry_px,
-                StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-            place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 1, exit_px,
-                StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+            place_and_fill(
+                &pool,
+                run_id,
+                &buy_id,
+                "AAPL",
+                Side::Buy,
+                1,
+                entry_px,
+                StrategyShape::Full {
+                    strategy_id: &sid,
+                    strategy_semantic_fingerprint: &fp,
+                },
+                at(),
+            )
+            .await;
+            place_and_fill(
+                &pool,
+                run_id,
+                &sell_id,
+                "AAPL",
+                Side::Sell,
+                1,
+                exit_px,
+                StrategyShape::Full {
+                    strategy_id: &sid,
+                    strategy_semantic_fingerprint: &fp,
+                },
+                at(),
+            )
+            .await;
             total += d;
         }
 
@@ -770,16 +1151,64 @@ async fn p3_12_attribution_coverage_sum_equals_account_closure_pnl() {
         // Attributed: +100_000_000
         let buy1 = unique_id("covbuy1");
         let sell1 = unique_id("covsell1");
-        place_and_fill(&pool, run_id, &buy1, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &sell1, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy1,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell1,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         // Manual: +30_000_000
         let buy2 = unique_id("covbuy2");
         let sell2 = unique_id("covsell2");
-        place_and_fill(&pool, run_id, &buy2, "MSFT", Side::Buy, 5, 50_000_000, StrategyShape::Manual, at()).await;
-        place_and_fill(&pool, run_id, &sell2, "MSFT", Side::Sell, 5, 56_000_000, StrategyShape::Manual, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy2,
+            "MSFT",
+            Side::Buy,
+            5,
+            50_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell2,
+            "MSFT",
+            Side::Sell,
+            5,
+            56_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         let expected_total = 100_000_000 + 30_000_000;
         seed_accounting_state(&pool, run_id, expected_total, "complete", None).await;
@@ -790,7 +1219,10 @@ async fn p3_12_attribution_coverage_sum_equals_account_closure_pnl() {
             .iter()
             .filter_map(|b| b["gross_realized_pnl_micros"].as_i64())
             .sum();
-        assert_eq!(coverage_sum, expected_total, "coverage must reconcile exactly to canonical account closure P&L");
+        assert_eq!(
+            coverage_sum, expected_total,
+            "coverage must reconcile exactly to canonical account closure P&L"
+        );
         assert_eq!(perf["total_gross_realized_pnl_micros"], expected_total);
     })
     .await;
@@ -880,20 +1312,60 @@ async fn p3_14_stale_accounting_watermark_yields_empty_rows() {
 
         let buy_id = unique_id("buyp314");
         let sell_id = unique_id("sellp314");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         // Advance the canonical replay watermark AFTER accounting persisted,
         // with zero incremental realized P&L (new MSFT long open).
         let msft_buy_id = unique_id("msftbuyp314");
-        place_and_fill(&pool, run_id, &msft_buy_id, "MSFT", Side::Buy, 5, 50_000_000, StrategyShape::Manual, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &msft_buy_id,
+            "MSFT",
+            Side::Buy,
+            5,
+            50_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         let perf = fetch_performance(&st, run_id).await;
-        assert_ne!(perf["truth_state"], "active", "P&L equality alone must never bypass a stale accounting watermark; perf={perf}");
+        assert_ne!(
+            perf["truth_state"], "active",
+            "P&L equality alone must never bypass a stale accounting watermark; perf={perf}"
+        );
         assert_eq!(perf_rows(&perf).len(), 0);
         assert_eq!(coverage_buckets(&perf).len(), 0);
     })
@@ -918,14 +1390,40 @@ async fn p3_15_authoritative_active_with_no_attributed_closures_is_valid_zero() 
         // authority can still be fully active.
         let buy_id = unique_id("buyzero");
         let sell_id = unique_id("sellzero");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000, StrategyShape::Manual, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000, StrategyShape::Manual, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         assert_eq!(perf["truth_state"], "active", "perf={perf}");
-        assert_eq!(perf_rows(&perf).len(), 0, "authoritative zero: no attributed closures exist");
+        assert_eq!(
+            perf_rows(&perf).len(),
+            0,
+            "authoritative zero: no attributed closures exist"
+        );
         let bucket = find_bucket(&perf, "manual_or_mixed").expect("bucket must exist");
         assert_eq!(bucket["gross_realized_pnl_micros"], 100_000_000);
         assert_eq!(perf["total_gross_realized_pnl_micros"], 100_000_000);
@@ -945,12 +1443,19 @@ async fn p3_invalid_run_id_is_bounded_invalid_request() {
             state::OperatorAuthMode::ExplicitDevNoToken,
         ));
         let router = routes::build_router(Arc::clone(&st));
-        let (status, body) = call(router, get("/api/v1/strategy/performance?run_id=not-a-uuid")).await;
+        let (status, body) = call(
+            router,
+            get("/api/v1/strategy/performance?run_id=not-a-uuid"),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid json");
         assert_eq!(json["error"], "invalid_request");
         let detail = json["detail"].as_str().expect("detail present");
-        assert!(!detail.contains("not-a-uuid"), "must never echo untrusted raw input; detail={detail}");
+        assert!(
+            !detail.contains("not-a-uuid"),
+            "must never echo untrusted raw input; detail={detail}"
+        );
     })
     .await;
 }
@@ -1016,31 +1521,70 @@ async fn cov_r1_only_attributed_still_emits_all_seven_states() {
 
         let buy_id = unique_id("covr1buy");
         let sell_id = unique_id("covr1sell");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         assert_eq!(perf["truth_state"], "active", "perf={perf}");
         let buckets = coverage_buckets(&perf);
-        assert_eq!(buckets.len(), 7, "all seven frozen states must always be present; buckets={buckets:?}");
+        assert_eq!(
+            buckets.len(),
+            7,
+            "all seven frozen states must always be present; buckets={buckets:?}"
+        );
         let present: std::collections::BTreeSet<&str> = buckets
             .iter()
             .filter_map(|b| b["attribution_state"].as_str())
             .collect();
         for state in ALL_ATTRIBUTION_STATES {
-            assert!(present.contains(state), "missing frozen state '{state}'; buckets={buckets:?}");
+            assert!(
+                present.contains(state),
+                "missing frozen state '{state}'; buckets={buckets:?}"
+            );
         }
         let attributed = find_bucket(&perf, "attributed").expect("attributed bucket must exist");
         assert_eq!(attributed["fragment_count"], 1);
         assert_eq!(attributed["gross_realized_pnl_micros"], 100_000_000);
-        for state in ALL_ATTRIBUTION_STATES.iter().filter(|&&s| s != "attributed") {
+        for state in ALL_ATTRIBUTION_STATES
+            .iter()
+            .filter(|&&s| s != "attributed")
+        {
             let bucket = find_bucket(&perf, state).expect("zero bucket must still exist");
             assert_eq!(bucket["fragment_count"], 0, "state={state} bucket={bucket}");
-            assert_eq!(bucket["gross_realized_pnl_micros"], 0, "state={state} bucket={bucket}");
+            assert_eq!(
+                bucket["gross_realized_pnl_micros"], 0,
+                "state={state} bucket={bucket}"
+            );
         }
     })
     .await;
@@ -1064,10 +1608,33 @@ async fn cov_r2_manual_or_mixed_still_emits_all_seven_states() {
 
         let buy_id = unique_id("covr2buy");
         let sell_id = unique_id("covr2sell");
-        place_and_fill(&pool, run_id, &buy_id, "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &sell_id, "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Manual, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &buy_id,
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &sell_id,
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
@@ -1078,10 +1645,16 @@ async fn cov_r2_manual_or_mixed_still_emits_all_seven_states() {
         let manual = find_bucket(&perf, "manual_or_mixed").expect("bucket must exist");
         assert_eq!(manual["fragment_count"], 1);
         assert_eq!(manual["gross_realized_pnl_micros"], 100_000_000);
-        for state in ALL_ATTRIBUTION_STATES.iter().filter(|&&s| s != "manual_or_mixed") {
+        for state in ALL_ATTRIBUTION_STATES
+            .iter()
+            .filter(|&&s| s != "manual_or_mixed")
+        {
             let bucket = find_bucket(&perf, state).expect("zero bucket must still exist");
             assert_eq!(bucket["fragment_count"], 0, "state={state} bucket={bucket}");
-            assert_eq!(bucket["gross_realized_pnl_micros"], 0, "state={state} bucket={bucket}");
+            assert_eq!(
+                bucket["gross_realized_pnl_micros"], 0,
+                "state={state} bucket={bucket}"
+            );
         }
     })
     .await;
@@ -1104,43 +1677,191 @@ async fn cov_r3_seven_bucket_sum_equals_canonical_closure_pnl() {
         // attributed: +100
         let sid_att = unique_id("strat_att");
         let fp_att = fingerprint('t');
-        place_and_fill(&pool, run_id, &unique_id("b1"), "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid_att, strategy_semantic_fingerprint: &fp_att }, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("s1"), "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid_att, strategy_semantic_fingerprint: &fp_att }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("b1"),
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_att,
+                strategy_semantic_fingerprint: &fp_att,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("s1"),
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_att,
+                strategy_semantic_fingerprint: &fp_att,
+            },
+            at(),
+        )
+        .await;
 
         // cross_strategy: +20
         let sid_a = unique_id("strat_a");
         let sid_b = unique_id("strat_b");
-        place_and_fill(&pool, run_id, &unique_id("b2"), "MSFT", Side::Buy, 5, 50_000_000,
-            StrategyShape::Full { strategy_id: &sid_a, strategy_semantic_fingerprint: &fingerprint('u') }, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("s2"), "MSFT", Side::Sell, 5, 54_000_000,
-            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fingerprint('v') }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("b2"),
+            "MSFT",
+            Side::Buy,
+            5,
+            50_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_a,
+                strategy_semantic_fingerprint: &fingerprint('u'),
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("s2"),
+            "MSFT",
+            Side::Sell,
+            5,
+            54_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_b,
+                strategy_semantic_fingerprint: &fingerprint('v'),
+            },
+            at(),
+        )
+        .await;
 
         // semantic_identity_changed: +30
         let sid_drift = unique_id("strat_drift");
-        place_and_fill(&pool, run_id, &unique_id("b3"), "GOOG", Side::Buy, 1, 1_000_000_000,
-            StrategyShape::Full { strategy_id: &sid_drift, strategy_semantic_fingerprint: &fingerprint('w') }, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("s3"), "GOOG", Side::Sell, 1, 1_000_000_030,
-            StrategyShape::Full { strategy_id: &sid_drift, strategy_semantic_fingerprint: &fingerprint('x') }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("b3"),
+            "GOOG",
+            Side::Buy,
+            1,
+            1_000_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_drift,
+                strategy_semantic_fingerprint: &fingerprint('w'),
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("s3"),
+            "GOOG",
+            Side::Sell,
+            1,
+            1_000_000_030,
+            StrategyShape::Full {
+                strategy_id: &sid_drift,
+                strategy_semantic_fingerprint: &fingerprint('x'),
+            },
+            at(),
+        )
+        .await;
 
         // manual_or_mixed: +40
-        place_and_fill(&pool, run_id, &unique_id("b4"), "TSLA", Side::Buy, 1, 1_000_000_000, StrategyShape::Manual, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("s4"), "TSLA", Side::Sell, 1, 1_000_000_040, StrategyShape::Manual, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("b4"),
+            "TSLA",
+            Side::Buy,
+            1,
+            1_000_000_000,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("s4"),
+            "TSLA",
+            Side::Sell,
+            1,
+            1_000_000_040,
+            StrategyShape::Manual,
+            at(),
+        )
+        .await;
 
         // lineage_incomplete: +50 (legacy open, full close)
         let sid_leg = unique_id("strat_leg");
-        place_and_fill(&pool, run_id, &unique_id("b5"), "NFLX", Side::Buy, 1, 1_000_000_000,
-            StrategyShape::Legacy { strategy_id: &sid_leg }, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("s5"), "NFLX", Side::Sell, 1, 1_000_000_050,
-            StrategyShape::Full { strategy_id: &sid_leg, strategy_semantic_fingerprint: &fingerprint('y') }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("b5"),
+            "NFLX",
+            Side::Buy,
+            1,
+            1_000_000_000,
+            StrategyShape::Legacy {
+                strategy_id: &sid_leg,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("s5"),
+            "NFLX",
+            Side::Sell,
+            1,
+            1_000_000_050,
+            StrategyShape::Full {
+                strategy_id: &sid_leg,
+                strategy_semantic_fingerprint: &fingerprint('y'),
+            },
+            at(),
+        )
+        .await;
 
         // lineage_invalid: +60 (malformed open, full close)
         let sid_inv = unique_id("strat_inv");
-        place_and_fill(&pool, run_id, &unique_id("b6"), "AMZN", Side::Buy, 1, 1_000_000_000,
-            StrategyShape::MalformedStrategyId, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("s6"), "AMZN", Side::Sell, 1, 1_000_000_060,
-            StrategyShape::Full { strategy_id: &sid_inv, strategy_semantic_fingerprint: &fingerprint('z') }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("b6"),
+            "AMZN",
+            Side::Buy,
+            1,
+            1_000_000_000,
+            StrategyShape::MalformedStrategyId,
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("s6"),
+            "AMZN",
+            Side::Sell,
+            1,
+            1_000_000_060,
+            StrategyShape::Full {
+                strategy_id: &sid_inv,
+                strategy_semantic_fingerprint: &fingerprint('z'),
+            },
+            at(),
+        )
+        .await;
 
         let expected_total = 100_000_000 + 20_000_000 + 30 + 40 + 50 + 60;
         seed_accounting_state(&pool, run_id, expected_total, "complete", None).await;
@@ -1153,7 +1874,10 @@ async fn cov_r3_seven_bucket_sum_equals_canonical_closure_pnl() {
             .iter()
             .filter_map(|b| b["gross_realized_pnl_micros"].as_i64())
             .sum();
-        assert_eq!(coverage_sum, expected_total, "coverage must reconcile exactly; buckets={buckets:?}");
+        assert_eq!(
+            coverage_sum, expected_total,
+            "coverage must reconcile exactly; buckets={buckets:?}"
+        );
         assert_eq!(perf["total_gross_realized_pnl_micros"], expected_total);
         // lineage_missing genuinely has zero evidence in this scenario.
         let missing = find_bucket(&perf, "lineage_missing").expect("bucket must still exist");
@@ -1179,10 +1903,36 @@ async fn cov_r4_zero_buckets_do_not_trigger_p5_coverage_flags() {
         let fp = fingerprint('1');
 
         // Only an attributed closure -- every other bucket is a genuine zero.
-        place_and_fill(&pool, run_id, &unique_id("covr4buy"), "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("covr4sell"), "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("covr4buy"),
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("covr4sell"),
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
@@ -1227,24 +1977,79 @@ async fn cov_r5_real_zero_pnl_cross_strategy_still_raises_flag() {
         // Attributed row we inspect for the flag.
         let sid = unique_id("strat_covr5");
         let fp = fingerprint('2');
-        place_and_fill(&pool, run_id, &unique_id("covr5buy"), "AAPL", Side::Buy, 10, 100_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("covr5sell"), "AAPL", Side::Sell, 10, 110_000_000,
-            StrategyShape::Full { strategy_id: &sid, strategy_semantic_fingerprint: &fp }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("covr5buy"),
+            "AAPL",
+            Side::Buy,
+            10,
+            100_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("covr5sell"),
+            "AAPL",
+            Side::Sell,
+            10,
+            110_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid,
+                strategy_semantic_fingerprint: &fp,
+            },
+            at(),
+        )
+        .await;
 
         // cross_strategy closure with EXACTLY zero gross P&L (open == close price).
         let sid_a = unique_id("strat_cxa");
         let sid_b = unique_id("strat_cxb");
-        place_and_fill(&pool, run_id, &unique_id("covr5xbuy"), "MSFT", Side::Buy, 5, 50_000_000,
-            StrategyShape::Full { strategy_id: &sid_a, strategy_semantic_fingerprint: &fingerprint('3') }, at()).await;
-        place_and_fill(&pool, run_id, &unique_id("covr5xsell"), "MSFT", Side::Sell, 5, 50_000_000,
-            StrategyShape::Full { strategy_id: &sid_b, strategy_semantic_fingerprint: &fingerprint('4') }, at()).await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("covr5xbuy"),
+            "MSFT",
+            Side::Buy,
+            5,
+            50_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_a,
+                strategy_semantic_fingerprint: &fingerprint('3'),
+            },
+            at(),
+        )
+        .await;
+        place_and_fill(
+            &pool,
+            run_id,
+            &unique_id("covr5xsell"),
+            "MSFT",
+            Side::Sell,
+            5,
+            50_000_000,
+            StrategyShape::Full {
+                strategy_id: &sid_b,
+                strategy_semantic_fingerprint: &fingerprint('4'),
+            },
+            at(),
+        )
+        .await;
 
         seed_accounting_state(&pool, run_id, 100_000_000, "complete", None).await;
 
         let perf = fetch_performance(&st, run_id).await;
         let cross_bucket = find_bucket(&perf, "cross_strategy").expect("bucket must exist");
-        assert_eq!(cross_bucket["fragment_count"], 1, "real zero-pnl evidence must still count; bucket={cross_bucket}");
+        assert_eq!(
+            cross_bucket["fragment_count"], 1,
+            "real zero-pnl evidence must still count; bucket={cross_bucket}"
+        );
         assert_eq!(cross_bucket["gross_realized_pnl_micros"], 0);
 
         let row = find_row(&perf, &sid, &fp).expect("row must exist");

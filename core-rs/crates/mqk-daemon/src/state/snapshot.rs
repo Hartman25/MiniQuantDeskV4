@@ -3182,7 +3182,9 @@ mod fill_economic_authority_closure_tests {
 mod f1_filled_qty_wiring_tests {
     use super::reconcile_broker_snapshot_from_schema;
     use chrono::{TimeZone, Utc};
-    use mqk_reconcile::{reconcile, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, ReconcileDiff, Side};
+    use mqk_reconcile::{
+        reconcile, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, ReconcileDiff, Side,
+    };
     use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
 
     fn schema_order(qty: &str, filled_qty: &str, status: &str) -> BrokerOrder {
@@ -3224,9 +3226,15 @@ mod f1_filled_qty_wiring_tests {
         let snap = schema_snapshot(schema_order("10", "4", "partially_filled"));
         let reconcile_snap =
             reconcile_broker_snapshot_from_schema(&snap).expect("valid snapshot must convert");
-        let order = reconcile_snap.orders.get("ord-1").expect("order must be present");
+        let order = reconcile_snap
+            .orders
+            .get("ord-1")
+            .expect("order must be present");
         assert_eq!(order.qty, 10);
-        assert_eq!(order.filled_qty, 4, "filled_qty must be the real broker value, not a fabricated zero");
+        assert_eq!(
+            order.filled_qty, 4,
+            "filled_qty must be the real broker value, not a fabricated zero"
+        );
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
     }
 
@@ -3236,16 +3244,32 @@ mod f1_filled_qty_wiring_tests {
         let mut local = LocalSnapshot::empty();
         local.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 10, 4, OrderStatus::PartiallyFilled),
+            OrderSnapshot::new(
+                "ord-1",
+                "AAPL",
+                Side::Buy,
+                10,
+                4,
+                OrderStatus::PartiallyFilled,
+            ),
         );
         let schema_snap = schema_snapshot(schema_order("10", "4", "partially_filled"));
-        let broker = reconcile_broker_snapshot_from_schema(&schema_snap).expect("valid snapshot must convert");
+        let broker = reconcile_broker_snapshot_from_schema(&schema_snap)
+            .expect("valid snapshot must convert");
 
         let report = reconcile(&local, &broker);
-        assert_eq!(report.action, ReconcileAction::Clean, "matching filled_qty must not drift: {:?}", report.diffs);
+        assert_eq!(
+            report.action,
+            ReconcileAction::Clean,
+            "matching filled_qty must not drift: {:?}",
+            report.diffs
+        );
         assert!(
-            !report.diffs.iter().any(|d| matches!(d, ReconcileDiff::OrderMismatch { field, .. } if field == "filled_qty")),
-            "no filled_qty OrderMismatch expected: {:?}", report.diffs
+            !report.diffs.iter().any(
+                |d| matches!(d, ReconcileDiff::OrderMismatch { field, .. } if field == "filled_qty")
+            ),
+            "no filled_qty OrderMismatch expected: {:?}",
+            report.diffs
         );
     }
 
@@ -3257,20 +3281,34 @@ mod f1_filled_qty_wiring_tests {
         let mut local = LocalSnapshot::empty();
         local.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 10, 4, OrderStatus::PartiallyFilled),
+            OrderSnapshot::new(
+                "ord-1",
+                "AAPL",
+                Side::Buy,
+                10,
+                4,
+                OrderStatus::PartiallyFilled,
+            ),
         );
         let schema_snap = schema_snapshot(schema_order("10", "5", "partially_filled"));
-        let broker = reconcile_broker_snapshot_from_schema(&schema_snap).expect("valid snapshot must convert");
+        let broker = reconcile_broker_snapshot_from_schema(&schema_snap)
+            .expect("valid snapshot must convert");
 
         let report = reconcile(&local, &broker);
-        assert_eq!(report.action, ReconcileAction::Halt, "genuine filled_qty drift must halt: {:?}", report.diffs);
+        assert_eq!(
+            report.action,
+            ReconcileAction::Halt,
+            "genuine filled_qty drift must halt: {:?}",
+            report.diffs
+        );
         assert!(
             report.diffs.iter().any(|d| matches!(
                 d,
                 ReconcileDiff::OrderMismatch { field, local, broker, .. }
                     if field == "filled_qty" && local == "4" && broker == "5"
             )),
-            "expected OrderMismatch(filled_qty, local=4, broker=5): {:?}", report.diffs
+            "expected OrderMismatch(filled_qty, local=4, broker=5): {:?}",
+            report.diffs
         );
     }
 
@@ -3283,10 +3321,16 @@ mod f1_filled_qty_wiring_tests {
             OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 10, 0, OrderStatus::Accepted),
         );
         let schema_snap = schema_snapshot(schema_order("10", "0", "accepted"));
-        let broker = reconcile_broker_snapshot_from_schema(&schema_snap).expect("valid snapshot must convert");
+        let broker = reconcile_broker_snapshot_from_schema(&schema_snap)
+            .expect("valid snapshot must convert");
 
         let report = reconcile(&local, &broker);
-        assert_eq!(report.action, ReconcileAction::Clean, "zero-fill order must remain clean: {:?}", report.diffs);
+        assert_eq!(
+            report.action,
+            ReconcileAction::Clean,
+            "zero-fill order must remain clean: {:?}",
+            report.diffs
+        );
     }
 
     // F1-T7: malformed broker filled_qty must fail closed, not panic and not

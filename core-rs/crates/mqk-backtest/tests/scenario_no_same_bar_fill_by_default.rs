@@ -309,7 +309,10 @@ fn sell_signal_and_fill_are_never_the_same_bar() {
         .iter()
         .find(|f| f.side == PfSide::Sell)
         .expect("no sell fill found");
-    assert_eq!(sell_fill.signal_ts, bar2.end_ts, "sell decision made on bar 2");
+    assert_eq!(
+        sell_fill.signal_ts, bar2.end_ts,
+        "sell decision made on bar 2"
+    );
     assert_ne!(
         sell_fill.fill_ts, sell_fill.signal_ts,
         "fill_ts must never equal signal_ts — same-bar fill is forbidden"

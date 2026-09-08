@@ -1220,7 +1220,9 @@ fn w36_cap_unrelated_failure_still_refuses_even_with_cap_exceeded() {
          cap truncation must not silently paper over it"
     );
     let reasons = outcome.failure_reasons();
-    assert!(reasons.iter().any(|r| r.contains("watchlist_mode_not_paper")));
+    assert!(reasons
+        .iter()
+        .any(|r| r.contains("watchlist_mode_not_paper")));
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,7 +1349,10 @@ fn w40_truncated_outcome_still_carries_approved_for_live_false() {
     cleanup(&path);
 
     assert_eq!(outcome.status_label(), "loaded_approved");
-    assert!(!outcome.approved_for_live(), "hard live lock must be untouched by truncation");
+    assert!(
+        !outcome.approved_for_live(),
+        "hard live lock must be untouched by truncation"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1495,9 +1500,12 @@ async fn w43_first_n_truncation_proven_through_real_runtime_dispatch_seam() {
     );
 
     // Real watchlist-to-MultiSymbolRuntimeConfig production seam.
-    let runtime_config =
-        build_multi_symbol_config_from_watchlist_artifact(&outcome, path.to_str().unwrap(), Some("1Min"))
-            .expect("truncated approved artifact must build a valid runtime config");
+    let runtime_config = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        path.to_str().unwrap(),
+        Some("1Min"),
+    )
+    .expect("truncated approved artifact must build a valid runtime config");
     let dispatched_symbols: Vec<&str> = runtime_config
         .symbols
         .iter()

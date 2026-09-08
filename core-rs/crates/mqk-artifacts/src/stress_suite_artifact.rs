@@ -130,7 +130,11 @@ impl From<&StressSuiteRunOutput> for StressSuiteArtifact {
             run_id: o.run_id,
             config_id: o.config_id,
             strategy_name: o.strategy_name.clone(),
-            scenarios: o.scenarios.iter().map(StressScenarioOutcomeDto::from).collect(),
+            scenarios: o
+                .scenarios
+                .iter()
+                .map(StressScenarioOutcomeDto::from)
+                .collect(),
         }
     }
 }
@@ -161,9 +165,18 @@ pub enum StressSuiteArtifactError {
     MissingRequiredScenario(String),
     /// The artifact recorded zero scenarios -- never valid evidence.
     ZeroScenarios,
-    RunIdMismatch { manifest: Uuid, artifact: Uuid },
-    StrategyNameMismatch { manifest: String, artifact: String },
-    ConfigIdMismatch { manifest_config_hash: String, artifact_config_id: String },
+    RunIdMismatch {
+        manifest: Uuid,
+        artifact: Uuid,
+    },
+    StrategyNameMismatch {
+        manifest: String,
+        artifact: String,
+    },
+    ConfigIdMismatch {
+        manifest_config_hash: String,
+        artifact_config_id: String,
+    },
     /// `audit.jsonl` does not contain a `stress_suite_completed` event, or
     /// is missing entirely.
     AuditEventMissing,
@@ -246,8 +259,8 @@ pub fn write_canonical_stress_suite(
     fs::create_dir_all(run_dir)
         .with_context(|| format!("create run dir failed: {}", run_dir.display()))?;
     let artifact = StressSuiteArtifact::from(output);
-    let json = serde_json::to_string_pretty(&artifact)
-        .context("serialize stress_suite.json failed")?;
+    let json =
+        serde_json::to_string_pretty(&artifact).context("serialize stress_suite.json failed")?;
     let contents = format!("{json}\n");
     let path = run_dir.join("stress_suite.json");
     fs::write(&path, &contents)
@@ -290,7 +303,12 @@ pub fn write_canonical_stress_suite(
     });
 
     writer
-        .append(output.run_id, "backtest", STRESS_SUITE_AUDIT_EVENT_TYPE, payload)
+        .append(
+            output.run_id,
+            "backtest",
+            STRESS_SUITE_AUDIT_EVENT_TYPE,
+            payload,
+        )
         .with_context(|| {
             format!(
                 "append stress suite completion audit event failed: {}",

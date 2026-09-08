@@ -79,7 +79,10 @@ pub async fn daemon_status(base_url: Option<String>) -> Result<()> {
     // as JSON) -- never a hand-copied/typed subset that could silently drop
     // a field the daemon added later.
     match serde_json::from_str::<Value>(&raw_text) {
-        Ok(json) => println!("{}", serde_json::to_string_pretty(&json).unwrap_or(raw_text)),
+        Ok(json) => println!(
+            "{}",
+            serde_json::to_string_pretty(&json).unwrap_or(raw_text)
+        ),
         Err(_) => println!("{raw_text}"),
     }
 
@@ -318,7 +321,10 @@ mod tests {
             .await
             .expect_err("unreachable daemon must fail");
         let msg = format!("{err:#}");
-        assert!(msg.contains("unreachable") || msg.contains("failed"), "message was: {msg}");
+        assert!(
+            msg.contains("unreachable") || msg.contains("failed"),
+            "message was: {msg}"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -436,7 +442,9 @@ mod tests {
 
         let _guard = lock_env().await;
         set_env("MQK_OPERATOR_TOKEN", "test-token");
-        daemon_arm(Some(server.base_url())).await.expect("arm must succeed");
+        daemon_arm(Some(server.base_url()))
+            .await
+            .expect("arm must succeed");
         mock.assert_hits(1);
     }
 
@@ -456,7 +464,9 @@ mod tests {
 
         let _guard = lock_env().await;
         set_env("MQK_OPERATOR_TOKEN", "test-token");
-        daemon_disarm(Some(server.base_url())).await.expect("disarm must succeed");
+        daemon_disarm(Some(server.base_url()))
+            .await
+            .expect("disarm must succeed");
         mock.assert_hits(1);
     }
 
@@ -476,7 +486,9 @@ mod tests {
 
         let _guard = lock_env().await;
         set_env("MQK_OPERATOR_TOKEN", "test-token");
-        daemon_halt(Some(server.base_url()), true).await.expect("halt --yes must succeed");
+        daemon_halt(Some(server.base_url()), true)
+            .await
+            .expect("halt --yes must succeed");
         mock.assert_hits(1);
     }
 
@@ -548,7 +560,9 @@ mod tests {
 
         let _guard = lock_env().await;
         remove_env("MQK_OPERATOR_TOKEN");
-        daemon_status(Some(server.base_url())).await.expect("status must succeed without a token");
+        daemon_status(Some(server.base_url()))
+            .await
+            .expect("status must succeed without a token");
         mock.assert_hits(1);
     }
 

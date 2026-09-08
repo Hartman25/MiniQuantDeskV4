@@ -276,12 +276,14 @@ pub async fn fetch_current_lease(pool: &PgPool) -> anyhow::Result<Option<Runtime
     .await
     .context("fetch_current_lease failed")?;
 
-    Ok(row.map(|(run_id, holder_id, epoch, lease_expires_at)| RuntimeLeaderLease {
-        run_id,
-        holder_id,
-        epoch,
-        lease_expires_at,
-    }))
+    Ok(row.map(
+        |(run_id, holder_id, epoch, lease_expires_at)| RuntimeLeaderLease {
+            run_id,
+            holder_id,
+            epoch,
+            lease_expires_at,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -426,13 +428,12 @@ pub async fn acquire_or_refresh_lease_for_running_run(
         .await
         .context("acquire_or_refresh_lease_for_running_run: begin tx failed")?;
 
-    let row: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT status, last_heartbeat_utc FROM runs WHERE run_id = $1 FOR UPDATE",
-    )
-    .bind(run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("acquire_or_refresh_lease_for_running_run: run lock failed")?;
+    let row: Option<(String, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT status, last_heartbeat_utc FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("acquire_or_refresh_lease_for_running_run: run lock failed")?;
 
     let Some((status, last_heartbeat_utc)) = row else {
         tx.rollback().await.ok();
@@ -503,8 +504,13 @@ pub async fn acquire_or_refresh_lease_for_running_run(
     .await
     .context("acquire_or_refresh_lease_for_running_run: fetch existing lease failed")?;
 
-    if let Some((existing_run_id, existing_holder, existing_epoch, existing_expires_at, existing_updated_at)) =
-        &existing
+    if let Some((
+        existing_run_id,
+        existing_holder,
+        existing_epoch,
+        existing_expires_at,
+        existing_updated_at,
+    )) = &existing
     {
         let lease_raw_expired = *existing_expires_at <= now_utc;
         if !lease_raw_expired {
@@ -566,14 +572,15 @@ pub async fn acquire_or_refresh_lease_for_running_run(
                 }
             }
             Some(other_run_id) => {
-                let other_status: Option<String> =
-                    sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1")
-                        .bind(other_run_id)
-                        .fetch_optional(&mut *tx)
-                        .await
-                        .context(
-                            "acquire_or_refresh_lease_for_running_run: other-run status lookup failed",
-                        )?;
+                let other_status: Option<String> = sqlx::query_scalar(
+                    "SELECT status FROM runs WHERE run_id = $1",
+                )
+                .bind(other_run_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context(
+                    "acquire_or_refresh_lease_for_running_run: other-run status lookup failed",
+                )?;
 
                 if matches!(other_status.as_deref(), Some("RUNNING")) {
                     tx.rollback().await.context(
@@ -953,7 +960,13 @@ mod tests {
         let run_id = make_run_with_status(&pool, "RUNNING").await;
 
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_id, "runtime-a", None, ts(12_000), 30, 30,
+            &pool,
+            run_id,
+            "runtime-a",
+            None,
+            ts(12_000),
+            30,
+            30,
         )
         .await
         .expect("first acquire");
@@ -1106,7 +1119,13 @@ mod tests {
         // claims`-only; the RUNNING/ARMED -> STOPPED path never deletes it).
         let run_a = make_run_with_status(&pool, "RUNNING").await;
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_a, "runtime-a", None, ts(30_000), 90, 120,
+            &pool,
+            run_a,
+            "runtime-a",
+            None,
+            ts(30_000),
+            90,
+            120,
         )
         .await
         .expect("run_a acquire")
@@ -1132,7 +1151,13 @@ mod tests {
         // evidence about run_a's holder, deadman_stale would evaluate false
         // and this would return HeldByOther, permanently blocking run_b.
         let outcome = acquire_or_refresh_lease_for_running_run(
-            &pool, run_b, "runtime-b", None, ts(30_121), 90, 120,
+            &pool,
+            run_b,
+            "runtime-b",
+            None,
+            ts(30_121),
+            90,
+            120,
         )
         .await
         .expect("run_b acquire must not error");
@@ -1165,7 +1190,13 @@ mod tests {
 
         let run_a = make_run_with_status(&pool, "RUNNING").await;
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_a, "runtime-a", None, ts(31_000), 90, 120,
+            &pool,
+            run_a,
+            "runtime-a",
+            None,
+            ts(31_000),
+            90,
+            120,
         )
         .await
         .expect("run_a acquire")
@@ -1186,7 +1217,13 @@ mod tests {
             .expect("run_b heartbeat");
 
         let outcome = acquire_or_refresh_lease_for_running_run(
-            &pool, run_b, "runtime-b", None, ts(31_121), 90, 120,
+            &pool,
+            run_b,
+            "runtime-b",
+            None,
+            ts(31_121),
+            90,
+            120,
         )
         .await
         .expect("run_b acquire must not error");
@@ -1207,7 +1244,13 @@ mod tests {
 
         let run_a = make_run_with_status(&pool, "RUNNING").await;
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_a, "runtime-a", None, ts(32_000), 90, 120,
+            &pool,
+            run_a,
+            "runtime-a",
+            None,
+            ts(32_000),
+            90,
+            120,
         )
         .await
         .expect("run_a acquire")
@@ -1227,7 +1270,13 @@ mod tests {
             .expect("run_b heartbeat");
 
         let outcome = acquire_or_refresh_lease_for_running_run(
-            &pool, run_b, "runtime-b", None, ts(32_121), 90, 120,
+            &pool,
+            run_b,
+            "runtime-b",
+            None,
+            ts(32_121),
+            90,
+            120,
         )
         .await
         .expect("run_b acquire attempt must not error");
@@ -1249,7 +1298,13 @@ mod tests {
 
         let run_a = make_run_with_status(&pool, "RUNNING").await;
         let first = acquire_or_refresh_lease_for_running_run(
-            &pool, run_a, "runtime-a", None, ts(33_000), 90, 120,
+            &pool,
+            run_a,
+            "runtime-a",
+            None,
+            ts(33_000),
+            90,
+            120,
         )
         .await
         .expect("run_a acquire");
@@ -1292,7 +1347,13 @@ mod tests {
 
         let run_a = make_run_with_status(&pool, "RUNNING").await;
         let first = acquire_or_refresh_lease_for_running_run(
-            &pool, run_a, "runtime-a", None, ts(34_000), 90, 120,
+            &pool,
+            run_a,
+            "runtime-a",
+            None,
+            ts(34_000),
+            90,
+            120,
         )
         .await
         .expect("run_a acquire");
@@ -1321,7 +1382,13 @@ mod tests {
 
         let run_a = make_run_with_status(&pool, "RUNNING").await;
         let first = acquire_or_refresh_lease_for_running_run(
-            &pool, run_a, "runtime-a", None, ts(35_000), 90, 120,
+            &pool,
+            run_a,
+            "runtime-a",
+            None,
+            ts(35_000),
+            90,
+            120,
         )
         .await
         .expect("run_a acquire");
@@ -1355,7 +1422,13 @@ mod tests {
             .expect("heartbeat_run");
 
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_id, "runtime-a", None, ts(36_000), 90, 120,
+            &pool,
+            run_id,
+            "runtime-a",
+            None,
+            ts(36_000),
+            90,
+            120,
         )
         .await
         .expect("acquire")
@@ -1364,7 +1437,13 @@ mod tests {
         // 100s later: the 90s lease is raw-expired, but the heartbeat is
         // only 100s old -- still within the 120s deadman TTL.
         let steal_attempt = acquire_or_refresh_lease_for_running_run(
-            &pool, run_id, "runtime-b", None, ts(36_100), 90, 120,
+            &pool,
+            run_id,
+            "runtime-b",
+            None,
+            ts(36_100),
+            90,
+            120,
         )
         .await
         .expect("steal attempt must not error");
@@ -1392,7 +1471,13 @@ mod tests {
             .expect("heartbeat_run");
 
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_id, "runtime-a", None, ts(37_000), 90, 120,
+            &pool,
+            run_id,
+            "runtime-a",
+            None,
+            ts(37_000),
+            90,
+            120,
         )
         .await
         .expect("acquire")
@@ -1401,7 +1486,13 @@ mod tests {
         // 121s later: both the 90s lease AND the 120s deadman window have
         // elapsed since the only heartbeat/refresh this run ever received.
         let steal_attempt = acquire_or_refresh_lease_for_running_run(
-            &pool, run_id, "runtime-b", None, ts(37_121), 90, 120,
+            &pool,
+            run_id,
+            "runtime-b",
+            None,
+            ts(37_121),
+            90,
+            120,
         )
         .await
         .expect("steal attempt must not error");
@@ -1426,7 +1517,13 @@ mod tests {
 
         let run_a = make_run_with_status(&pool, "RUNNING").await;
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_a, "runtime-a", None, ts(38_000), 90, 120,
+            &pool,
+            run_a,
+            "runtime-a",
+            None,
+            ts(38_000),
+            90,
+            120,
         )
         .await
         .expect("run_a acquire")
@@ -1444,7 +1541,13 @@ mod tests {
         // proving this path never reaches that check at all for a
         // different-run lease.
         let outcome = acquire_or_refresh_lease_for_running_run(
-            &pool, run_b, "runtime-b", None, ts(38_091), 90, 120,
+            &pool,
+            run_b,
+            "runtime-b",
+            None,
+            ts(38_091),
+            90,
+            120,
         )
         .await
         .expect("run_b acquire must not error");
@@ -1492,7 +1595,13 @@ mod tests {
         // now=39_100: 100s since the legacy row's updated_at -- past its 90s
         // lease TTL (raw-expired) but inside the 120s deadman window.
         let outcome = acquire_or_refresh_lease_for_running_run(
-            &pool, run_b, "runtime-b", None, ts(39_100), 90, 120,
+            &pool,
+            run_b,
+            "runtime-b",
+            None,
+            ts(39_100),
+            90,
+            120,
         )
         .await
         .expect("run_b acquire must not error");
@@ -1533,7 +1642,13 @@ mod tests {
         // now=40_121: 121s since the legacy row's updated_at, past both the
         // 90s lease TTL and the 120s deadman window.
         let outcome = acquire_or_refresh_lease_for_running_run(
-            &pool, run_b, "runtime-b", None, ts(40_121), 90, 120,
+            &pool,
+            run_b,
+            "runtime-b",
+            None,
+            ts(40_121),
+            90,
+            120,
         )
         .await
         .expect("run_b acquire must not error");
@@ -1559,7 +1674,13 @@ mod tests {
         let run_id = make_run_with_status(&pool, "RUNNING").await;
 
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_id, "runtime-a", None, ts(41_000), 90, 120,
+            &pool,
+            run_id,
+            "runtime-a",
+            None,
+            ts(41_000),
+            90,
+            120,
         )
         .await
         .expect("acquire")
@@ -1594,7 +1715,13 @@ mod tests {
         let run_id = make_run_with_status(&pool, "RUNNING").await;
 
         acquire_or_refresh_lease_for_running_run(
-            &pool, run_id, "runtime-a", None, ts(40_000), 300, 300,
+            &pool,
+            run_id,
+            "runtime-a",
+            None,
+            ts(40_000),
+            300,
+            300,
         )
         .await
         .expect("acquire")

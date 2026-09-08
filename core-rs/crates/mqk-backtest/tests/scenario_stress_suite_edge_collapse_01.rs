@@ -12,7 +12,15 @@ use mqk_strategy::{Strategy, StrategyContext, StrategyOutput, StrategySpec, Targ
 const M: i64 = 1_000_000;
 
 fn bar(end_ts: i64, price_micros: i64) -> BacktestBar {
-    BacktestBar::new("ES", end_ts, price_micros, price_micros, price_micros, price_micros, 1_000)
+    BacktestBar::new(
+        "ES",
+        end_ts,
+        price_micros,
+        price_micros,
+        price_micros,
+        price_micros,
+        1_000,
+    )
 }
 
 /// Buys `qty` shares at bar 0, holds, sells (goes flat) at bar 1 -- a single
@@ -51,15 +59,18 @@ fn edge_bars() -> Vec<BacktestBar> {
     // price; the flatten SIGNAL at bar1 fills at bar2's price. The genuine
     // $0.10/share edge is therefore the bar1->bar2 move, not bar0->bar1.
     vec![
-        bar(1_700_000_000, 100 * M),                  // signal bar (price irrelevant to the fill)
-        bar(1_700_000_060, 100 * M),                   // entry fill price $100.00
-        bar(1_700_000_120, 100 * M + 100_000),         // exit fill price $100.10
-        bar(1_700_000_180, 100 * M + 100_000),         // fold-end bar, unchanged
+        bar(1_700_000_000, 100 * M), // signal bar (price irrelevant to the fill)
+        bar(1_700_000_060, 100 * M), // entry fill price $100.00
+        bar(1_700_000_120, 100 * M + 100_000), // exit fill price $100.10
+        bar(1_700_000_180, 100 * M + 100_000), // fold-end bar, unchanged
     ]
 }
 
 fn make_strategy() -> Box<dyn Strategy> {
-    Box::new(OneRoundTrip { qty: 100, bar_idx: 0 })
+    Box::new(OneRoundTrip {
+        qty: 100,
+        bar_idx: 0,
+    })
 }
 
 fn run_baseline(config: &BacktestConfig, bars: &[BacktestBar]) -> mqk_backtest::BacktestReport {
@@ -89,13 +100,21 @@ fn cost_stress_2x_collapses_the_edge_and_fails() {
     let report = run_baseline(&config, &bars);
 
     let output = run_backtest_stress_suite(&report, &config, &bars, make_strategy);
-    let cost_2x = output.scenarios.iter().find(|s| s.name == "cost_stress_2x").unwrap();
+    let cost_2x = output
+        .scenarios
+        .iter()
+        .find(|s| s.name == "cost_stress_2x")
+        .unwrap();
     assert!(
         !cost_2x.passed,
         "2x transaction costs must exceed the thin real edge and fail: {cost_2x:?}"
     );
     assert!(
-        cost_2x.reason.as_deref().unwrap_or_default().contains("economic edge collapsed"),
+        cost_2x
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("economic edge collapsed"),
         "must fail via the edge-collapse reason specifically, not bankruptcy/drawdown: {cost_2x:?}"
     );
     // Never bankrupt, never breaches conservative drawdown -- proves this is
@@ -111,9 +130,20 @@ fn cost_stress_3x_also_collapses_the_edge_and_fails() {
     let report = run_baseline(&config, &bars);
 
     let output = run_backtest_stress_suite(&report, &config, &bars, make_strategy);
-    let cost_3x = output.scenarios.iter().find(|s| s.name == "cost_stress_3x").unwrap();
-    assert!(!cost_3x.passed, "3x transaction costs must a fortiori fail: {cost_3x:?}");
-    assert!(cost_3x.reason.as_deref().unwrap_or_default().contains("economic edge collapsed"));
+    let cost_3x = output
+        .scenarios
+        .iter()
+        .find(|s| s.name == "cost_stress_3x")
+        .unwrap();
+    assert!(
+        !cost_3x.passed,
+        "3x transaction costs must a fortiori fail: {cost_3x:?}"
+    );
+    assert!(cost_3x
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("economic edge collapsed"));
 }
 
 /// Positive control: a candidate with a genuinely large edge relative to
@@ -128,6 +158,9 @@ fn large_edge_survives_cost_stress() {
     let output = run_backtest_stress_suite(&report, &config, &bars, make_strategy);
     for name in ["cost_stress_2x", "cost_stress_3x"] {
         let outcome = output.scenarios.iter().find(|s| s.name == name).unwrap();
-        assert!(outcome.passed, "a genuinely large edge must survive {name}: {outcome:?}");
+        assert!(
+            outcome.passed,
+            "a genuinely large edge must survive {name}: {outcome:?}"
+        );
     }
 }

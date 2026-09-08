@@ -137,7 +137,9 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
                     config.min_deflated_sharpe_ratio
                 ));
             }
-            if ev.probability_of_backtest_overfitting() > config.max_probability_backtest_overfitting {
+            if ev.probability_of_backtest_overfitting()
+                > config.max_probability_backtest_overfitting
+            {
                 fail_reasons.push(format!(
                     "Probability of Backtest Overfitting {:.6} > max {:.6}",
                     ev.probability_of_backtest_overfitting(),
@@ -219,7 +221,10 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
     // it must be bound to the EXACT SAME Research trial as the P7C/OOS
     // evidence, never merely a scenario that happens to be present.
     if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
-        match re.p7a_p7b_economic_replay_stress_research_trial_id.as_deref() {
+        match re
+            .p7a_p7b_economic_replay_stress_research_trial_id
+            .as_deref()
+        {
             Some(bound_trial_id) if bound_trial_id == ev.trial_id() => {} // same trial -- OK
             Some(bound_trial_id) => {
                 fail_reasons.push(format!(
@@ -249,7 +254,10 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
     // otherwise supply P7C evidence from one economic result and replay
     // stress evidence from a different one under the SAME trial_id).
     if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
-        match re.p7a_p7b_economic_replay_stress_baseline_economic_eval_id.as_deref() {
+        match re
+            .p7a_p7b_economic_replay_stress_baseline_economic_eval_id
+            .as_deref()
+        {
             Some(bound_eval_id) if bound_eval_id == ev.economic_eval_id() => {} // same result -- OK
             Some(bound_eval_id) => {
                 fail_reasons.push(format!(
@@ -281,13 +289,17 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
     // A fabricated "evaluated, passed" scenario carrying only that one field
     // used to satisfy every prior canonical check; it must not anymore.
     if let Some(re) = &input.robustness_evidence {
-        if !re.p7a_p7b_economic_replay_stress_missing_required_evidence_fields.is_empty() {
+        if !re
+            .p7a_p7b_economic_replay_stress_missing_required_evidence_fields
+            .is_empty()
+        {
             fail_reasons.push(format!(
                 "P9 p7a_p7b_economic_replay_stress evidence incomplete: missing/invalid \
                  required field(s) [{}] -- an evidence-only scenario carrying only \
                  baseline_economic_eval_id (or any other partial evidence) can never satisfy \
                  canonical promotion",
-                re.p7a_p7b_economic_replay_stress_missing_required_evidence_fields.join(", ")
+                re.p7a_p7b_economic_replay_stress_missing_required_evidence_fields
+                    .join(", ")
             ));
         }
     }
@@ -319,7 +331,10 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
                 ));
             }
         }
-        match re.genuine_shuffled_placebo_baseline_economic_eval_id.as_deref() {
+        match re
+            .genuine_shuffled_placebo_baseline_economic_eval_id
+            .as_deref()
+        {
             Some(bound_eval_id) if bound_eval_id == ev.economic_eval_id() => {} // same result -- OK
             Some(bound_eval_id) => {
                 fail_reasons.push(format!(
@@ -343,7 +358,8 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
     }
     if let Some(re) = &input.robustness_evidence {
         match re.genuine_shuffled_placebo_protocol_id.as_deref() {
-            Some(protocol_id) if protocol_id == mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID => {} // OK
+            Some(protocol_id)
+                if protocol_id == mqk_backtest::GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID => {} // OK
             Some(protocol_id) => {
                 fail_reasons.push(format!(
                     "genuine_shuffled_placebo protocol mismatch: got {protocol_id:?}, required \
@@ -368,7 +384,10 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
     // trial-derived scope that could silently narrow (or widen) the
     // authoritative comparison population.
     if let (Some(ev), Some(re)) = (&input.oos_evidence, &input.robustness_evidence) {
-        match re.dsr_pbo_sensitivity_authoritative_judge_artifact_sha256.as_deref() {
+        match re
+            .dsr_pbo_sensitivity_authoritative_judge_artifact_sha256
+            .as_deref()
+        {
             Some(bound_judge_sha256) if bound_judge_sha256 == ev.judge_artifact_sha256() => {} // OK
             Some(bound_judge_sha256) => {
                 fail_reasons.push(format!(

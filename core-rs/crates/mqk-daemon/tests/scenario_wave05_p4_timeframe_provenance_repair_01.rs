@@ -24,7 +24,9 @@ use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use http_body_util::BodyExt;
 use mqk_daemon::{
-    decision::{submit_internal_strategy_decision, InternalDecisionOutcome, InternalStrategyDecision},
+    decision::{
+        submit_internal_strategy_decision, InternalDecisionOutcome, InternalStrategyDecision,
+    },
     routes, state,
 };
 use mqk_execution::{BrokerEvent, Side};
@@ -62,11 +64,19 @@ async fn fetch_performance(st: &Arc<state::AppState>, run_id: Uuid) -> serde_jso
         get(&format!("/api/v1/strategy/performance?run_id={run_id}")),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "strategy/performance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "strategy/performance must return 200"
+    );
     serde_json::from_slice(&body).expect("body is not valid JSON")
 }
 
-fn find_row<'a>(perf: &'a serde_json::Value, strategy_id: &str, fingerprint: &str) -> Option<&'a serde_json::Value> {
+fn find_row<'a>(
+    perf: &'a serde_json::Value,
+    strategy_id: &str,
+    fingerprint: &str,
+) -> Option<&'a serde_json::Value> {
     perf["rows"]
         .as_array()
         .expect("rows must be an array")
@@ -123,7 +133,12 @@ async fn seed_registry(pool: &sqlx::PgPool, strategy_id: &str, enabled: bool) {
 /// same `(strategy_id, symbol)` are independent identities -- used by
 /// TF-R2 to model a "current config" that has drifted from what an
 /// already-durable order actually recorded.
-async fn seed_active_paper_promotion(pool: &sqlx::PgPool, strategy_id: &str, symbol: &str, timeframe_secs: i64) {
+async fn seed_active_paper_promotion(
+    pool: &sqlx::PgPool,
+    strategy_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+) {
     let now = Utc::now();
     let seed = |suffix: &str| {
         Uuid::new_v5(
@@ -159,18 +174,31 @@ async fn seed_active_paper_promotion(pool: &sqlx::PgPool, strategy_id: &str, sym
             created_at_utc: effective_at,
         }
     };
-    mqk_db::insert_strategy_promotion_transition(pool, &step(seed("1"), None, "shadow_approved", now))
-        .await
-        .expect("seed shadow_approved");
     mqk_db::insert_strategy_promotion_transition(
         pool,
-        &step(seed("2"), Some("shadow_approved"), "paper_approved", now + Duration::milliseconds(1)),
+        &step(seed("1"), None, "shadow_approved", now),
+    )
+    .await
+    .expect("seed shadow_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("2"),
+            Some("shadow_approved"),
+            "paper_approved",
+            now + Duration::milliseconds(1),
+        ),
     )
     .await
     .expect("seed paper_approved");
     mqk_db::insert_strategy_promotion_transition(
         pool,
-        &step(seed("3"), Some("paper_approved"), "active_paper", now + Duration::milliseconds(2)),
+        &step(
+            seed("3"),
+            Some("paper_approved"),
+            "active_paper",
+            now + Duration::milliseconds(2),
+        ),
     )
     .await
     .expect("seed active_paper");
@@ -246,7 +274,11 @@ async fn submit_and_fill(
             .await
             .expect("mark outbox SENT should succeed");
 
-        let broker_side = if side.eq_ignore_ascii_case("buy") { Side::Buy } else { Side::Sell };
+        let broker_side = if side.eq_ignore_ascii_case("buy") {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         let bm = format!("bm:{decision_id}");
         let bo = format!("bo:{decision_id}");
         let ev = BrokerEvent::Fill {
@@ -261,9 +293,20 @@ async fn submit_and_fill(
             fee_micros: 0,
         };
         let json = serde_json::to_value(&ev).expect("serialize BrokerEvent");
-        let run_id = out.active_run_id.expect("accepted decision must echo active_run_id");
+        let run_id = out
+            .active_run_id
+            .expect("accepted decision must echo active_run_id");
         mqk_db::inbox_insert_deduped_with_identity(
-            pool, run_id, &bm, None, decision_id, &bo, "fill", &json, 0, at,
+            pool,
+            run_id,
+            &bm,
+            None,
+            decision_id,
+            &bo,
+            "fill",
+            &json,
+            0,
+            at,
         )
         .await
         .expect("inbox insert should succeed");
@@ -306,7 +349,10 @@ async fn seed_accounting_state(pool: &sqlx::PgPool, run_id: Uuid, realized_pnl_m
     )
     .await
     .expect("insert_or_confirm_paper_portfolio_snapshot failed");
-    assert!(matches!(insert_outcome, mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { .. }));
+    assert!(matches!(
+        insert_outcome,
+        mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { .. }
+    ));
 
     let last_applied_inbox_id = max_applied_inbox_id(pool, run_id).await;
     let upsert_outcome = mqk_db::upsert_paper_portfolio_accounting_state(
@@ -325,10 +371,19 @@ async fn seed_accounting_state(pool: &sqlx::PgPool, run_id: Uuid, realized_pnl_m
     )
     .await
     .expect("upsert_paper_portfolio_accounting_state failed");
-    assert!(matches!(upsert_outcome, mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Inserted { .. }));
+    assert!(matches!(
+        upsert_outcome,
+        mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Inserted { .. }
+    ));
 }
 
-async fn seed_md_bar(pool: &sqlx::PgPool, symbol: &str, timeframe: &str, end_ts: i64, close_micros: i64) {
+async fn seed_md_bar(
+    pool: &sqlx::PgPool,
+    symbol: &str,
+    timeframe: &str,
+    end_ts: i64,
+    close_micros: i64,
+) {
     sqlx::query(
         r#"
         insert into md_bars (symbol, timeframe, end_ts, open_micros, high_micros, low_micros, close_micros, volume, is_complete)
@@ -485,15 +540,46 @@ async fn tf_r3_p4_route_resolves_regime_from_real_production_provenance() {
             .expect("persist arm state");
         let run_id = seed_active_run(&st).await;
 
-        let buy = submit_and_fill(&st, &pool, &sid, "AAPL", 300, "buy", 10, 100_000_000, &unique_id("tf3buy"), at()).await;
+        let buy = submit_and_fill(
+            &st,
+            &pool,
+            &sid,
+            "AAPL",
+            300,
+            "buy",
+            10,
+            100_000_000,
+            &unique_id("tf3buy"),
+            at(),
+        )
+        .await;
         assert_eq!(buy.disposition, "accepted", "blockers={:?}", buy.blockers);
-        let sell = submit_and_fill(&st, &pool, &sid, "AAPL", 300, "sell", 10, 110_000_000, &unique_id("tf3sell"), at()).await;
+        let sell = submit_and_fill(
+            &st,
+            &pool,
+            &sid,
+            "AAPL",
+            300,
+            "sell",
+            10,
+            110_000_000,
+            &unique_id("tf3sell"),
+            at(),
+        )
+        .await;
         assert_eq!(sell.disposition, "accepted", "blockers={:?}", sell.blockers);
 
         seed_accounting_state(&pool, run_id, 100_000_000).await;
         // 20 completed 5m bars -- comfortably above the regime detector's min_bars.
         for i in 0..20 {
-            seed_md_bar(&pool, "AAPL", "5m", 1_700_000_000 + i * 300, 1_000_000 + i * 100).await;
+            seed_md_bar(
+                &pool,
+                "AAPL",
+                "5m",
+                1_700_000_000 + i * 300,
+                1_000_000 + i * 100,
+            )
+            .await;
         }
 
         let perf = fetch_performance(&st, run_id).await;
@@ -502,9 +588,18 @@ async fn tf_r3_p4_route_resolves_regime_from_real_production_provenance() {
         assert_eq!(row["attributed_close_event_count"], 1, "row={row}");
         assert_eq!(row["regime_context"]["symbol"], "AAPL", "row={row}");
         assert_eq!(row["regime_context"]["timeframe_secs"], 300, "row={row}");
-        assert_eq!(row["regime_context"]["regime_authority"], "research_only_observational");
-        assert_ne!(row["regime_context"]["regime_truth_state"], "context_unavailable", "row={row}");
-        assert_ne!(row["regime_context"]["regime_truth_state"], "query_failed", "row={row}");
+        assert_eq!(
+            row["regime_context"]["regime_authority"],
+            "research_only_observational"
+        );
+        assert_ne!(
+            row["regime_context"]["regime_truth_state"], "context_unavailable",
+            "row={row}"
+        );
+        assert_ne!(
+            row["regime_context"]["regime_truth_state"], "query_failed",
+            "row={row}"
+        );
     })
     .await;
 }

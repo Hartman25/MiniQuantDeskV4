@@ -800,10 +800,10 @@ mod message_json_schema_version_tests {
 
     #[test]
     fn sv12_stamp_refuses_malformed_schema_version() {
-        assert!(
-            stamp_message_json_schema_version(&json!({"type": "ack", "schema_version": "one"}))
-                .is_err()
-        );
+        assert!(stamp_message_json_schema_version(
+            &json!({"type": "ack", "schema_version": "one"})
+        )
+        .is_err());
     }
 
     #[test]

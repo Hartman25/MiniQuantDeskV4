@@ -144,7 +144,12 @@ fn resolve_identity_for_env(
         &assignment_identity,
         &runtime_binding_identity,
     );
-    (plan, assignment_identity, runtime_binding_identity, operation_id)
+    (
+        plan,
+        assignment_identity,
+        runtime_binding_identity,
+        operation_id,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -521,7 +526,11 @@ async fn t1_closed_session_evidence_degraded_never_reenters_stopping() -> anyhow
     let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert_eq!(
+        seeded.state,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        "fixture precondition"
+    );
     assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
     // Past both the effective close and the postclose_finalize_utc window,
     // matching the accepted t4_session_window_closed_never_recovers timing
@@ -916,7 +925,11 @@ async fn t5_resolution_failure_route_never_reenters_stopping() -> anyhow::Result
     let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert_eq!(
+        seeded.state,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        "fixture precondition"
+    );
     assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
 
     // Resolution failure: env no longer resolves to a valid assignment.
@@ -960,7 +973,11 @@ async fn t6_nontrading_day_route_never_reenters_stopping() -> anyhow::Result<()>
     let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert_eq!(
+        seeded.state,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        "fixture precondition"
+    );
     assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
 
     // 2026-07-25 is the Saturday following the fixture's Monday 2026-07-20 --
@@ -1005,7 +1022,11 @@ async fn t7_coverage_authority_failure_route_never_reenters_stopping() -> anyhow
     let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert_eq!(
+        seeded.state,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        "fixture precondition"
+    );
     assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
 
     let tick0 = seeded.postclose_finalize_utc + Duration::seconds(1);
@@ -1050,7 +1071,11 @@ async fn t8_identity_conflict_route_never_reenters_stopping() -> anyhow::Result<
     let seeded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    assert_eq!(seeded.state, mqk_db::STATE_EVIDENCE_DEGRADED, "fixture precondition");
+    assert_eq!(
+        seeded.state,
+        mqk_db::STATE_EVIDENCE_DEGRADED,
+        "fixture precondition"
+    );
     assert!(seeded.stopped_at_utc.is_some(), "fixture precondition");
 
     // Operator changes the resolvable symbol -- same market_date/deployment_

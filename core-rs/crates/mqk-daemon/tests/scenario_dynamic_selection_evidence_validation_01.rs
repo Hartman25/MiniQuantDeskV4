@@ -220,12 +220,18 @@ fn smooth_uptrend_bars(symbol: &str) -> Vec<mqk_backtest::BacktestBar> {
             1 => price *= 1.0017,
             _ => price *= 0.9960,
         }
-        let (hi_mult, lo_mult) = if leg == 1 { (1.09, 0.91) } else { (1.005, 0.995) };
+        let (hi_mult, lo_mult) = if leg == 1 {
+            (1.09, 0.91)
+        } else {
+            (1.005, 0.995)
+        };
         let o = (price * m as f64) as i64;
         let h = (price * hi_mult * m as f64) as i64;
         let l = (price * lo_mult * m as f64) as i64;
         let c = (price * m as f64) as i64;
-        bars.push(mqk_backtest::BacktestBar::new(symbol, ts, o, h, l, c, 10_000));
+        bars.push(mqk_backtest::BacktestBar::new(
+            symbol, ts, o, h, l, c, 10_000,
+        ));
     }
     bars
 }
@@ -315,7 +321,10 @@ fn write_real_research_evidence_via_production_pipeline(
                 "fixture precondition: every real trial's DSR must be evaluable: {t}"
             );
             let trial_id = t["trial_id"].as_str().expect("trial_id").to_string();
-            let economic_eval_id = t["economic_eval_id"].as_str().expect("economic_eval_id").to_string();
+            let economic_eval_id = t["economic_eval_id"]
+                .as_str()
+                .expect("economic_eval_id")
+                .to_string();
             let economic_json_path =
                 PathBuf::from(t["economic_walk_forward_json"].as_str().expect("path"));
             let evidence_dir = economic_json_path
@@ -363,7 +372,10 @@ fn write_real_backtest_evidence(
 
     let mut engine = mqk_backtest::BacktestEngine::new(cfg.clone());
     engine
-        .add_strategy(reg.instantiate("swing_momentum").expect("swing_momentum registered"))
+        .add_strategy(
+            reg.instantiate("swing_momentum")
+                .expect("swing_momentum registered"),
+        )
         .expect("add_strategy");
     let bars = smooth_uptrend_bars(symbol);
     let report = engine.run(&bars).expect("engine.run");
@@ -389,13 +401,15 @@ fn write_real_backtest_evidence(
         .expect("write_backtest_report");
 
     let stress_output = mqk_backtest::run_backtest_stress_suite(&report, &cfg, &bars, || {
-        reg.instantiate("swing_momentum").expect("swing_momentum registered")
+        reg.instantiate("swing_momentum")
+            .expect("swing_momentum registered")
     });
     mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
         .expect("write_canonical_stress_suite");
 
     let gauntlet_output = mqk_backtest::run_robustness_gauntlet(&report, &cfg, &bars, || {
-        reg.instantiate("swing_momentum").expect("swing_momentum registered")
+        reg.instantiate("swing_momentum")
+            .expect("swing_momentum registered")
     });
     mqk_artifacts::write_canonical_robustness_gauntlet(&init_result.run_dir, &gauntlet_output)
         .expect("write_canonical_robustness_gauntlet");
@@ -435,7 +449,9 @@ fn write_real_backtest_evidence(
         &init_result.run_dir,
         &stress,
     )
-    .expect("finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)");
+    .expect(
+        "finalize_canonical_robustness_gauntlet_with_sensitivity (p7a_p7b_economic_replay_stress)",
+    );
 
     let placebo = mqk_backtest::genuine_shuffled_placebo_scenario(
         "python",
@@ -549,10 +565,16 @@ async fn make_state_with_db(
     // plumbing, not promotion policy acceptance thresholds.
     let evidence = shared_evidence();
     std::env::set_var("MQK_RESEARCH_REGISTRY_DB", &evidence.research_registry_db);
-    std::env::set_var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT", &evidence.evidence_root);
+    std::env::set_var(
+        "MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT",
+        &evidence.evidence_root,
+    );
     std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.0");
     std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "1.0");
-    std::env::set_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT", &evidence.evidence_root);
+    std::env::set_var(
+        "MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT",
+        &evidence.evidence_root,
+    );
     std::env::set_var("MQK_PROMOTION_MIN_SHARPE", "0.0");
     std::env::set_var("MQK_PROMOTION_MAX_MDD", "1.0");
     std::env::set_var("MQK_PROMOTION_MIN_CAGR", "0.0");

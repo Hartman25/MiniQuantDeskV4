@@ -25,7 +25,9 @@ use std::sync::Arc;
 use axum::http::{Method, Request, StatusCode};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use http_body_util::BodyExt;
-use mqk_daemon::state::{self, AppState, AutonomousDailyScheduleSource, AutonomousDailySessionPlan};
+use mqk_daemon::state::{
+    self, AppState, AutonomousDailyScheduleSource, AutonomousDailySessionPlan,
+};
 use mqk_db::{
     AutonomousDailyTransitionOutcome, CreateAutonomousDailyOperationArgs,
     TransitionAutonomousDailyOperationArgs, STATE_EVIDENCE_DEGRADED, STATE_RUNNING,
@@ -82,7 +84,9 @@ fn fixed_plan(market_date: NaiveDate) -> AutonomousDailySessionPlan {
     let close = open + chrono::Duration::hours(6) + chrono::Duration::minutes(30);
     AutonomousDailySessionPlan {
         market_date: market_date.format("%Y-%m-%d").to_string(),
-        previous_trading_date: (market_date - chrono::Duration::days(1)).format("%Y-%m-%d").to_string(),
+        previous_trading_date: (market_date - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string(),
         exchange_session_open_utc: open,
         exchange_session_close_utc: close,
         exchange_is_early_close: false,
@@ -183,7 +187,10 @@ async fn cleanup_operation(pool: &sqlx::PgPool, operation_id: Uuid) {
         .await;
 }
 
-async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, serde_json::Value) {
+async fn call(
+    router: axum::Router,
+    req: Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let body = resp
@@ -208,7 +215,10 @@ fn finalize_req(operation_id: Uuid) -> Request<axum::body::Body> {
         .unwrap()
 }
 
-async fn fetch_row(pool: &sqlx::PgPool, operation_id: Uuid) -> mqk_db::AutonomousDailyOperationRecord {
+async fn fetch_row(
+    pool: &sqlx::PgPool,
+    operation_id: Uuid,
+) -> mqk_db::AutonomousDailyOperationRecord {
     mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id)
         .await
         .expect("fetch must not fail")
@@ -236,7 +246,15 @@ async fn n1_running_operation_is_refused() -> anyhow::Result<()> {
     // no direct `-> running` initial state. `awaiting_open -> start_retrying
     // -> running` is the real path, mirroring the same chain
     // `dispatch_by_state` drives in production.
-    seed_operation_row(&pool, &plan, operation_id, &adapter_id, now, "awaiting_open").await?;
+    seed_operation_row(
+        &pool,
+        &plan,
+        operation_id,
+        &adapter_id,
+        now,
+        "awaiting_open",
+    )
+    .await?;
     let start_retrying = real_transition(
         &pool,
         operation_id,
@@ -271,11 +289,18 @@ async fn n1_running_operation_is_refused() -> anyhow::Result<()> {
     )
     .await;
 
-    assert_eq!(status, StatusCode::CONFLICT, "running operation must be refused: {json:?}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "running operation must be refused: {json:?}"
+    );
     assert_eq!(json["truth_state"], "not_evidence_degraded");
 
     let row = fetch_row(&pool, operation_id).await;
-    assert_eq!(row.state, STATE_RUNNING, "state must be completely unchanged");
+    assert_eq!(
+        row.state, STATE_RUNNING,
+        "state must be completely unchanged"
+    );
 
     cleanup_operation(&pool, operation_id).await;
     Ok(())
@@ -304,9 +329,24 @@ async fn n2_evidence_degraded_without_stopped_at_is_refused() -> anyhow::Result<
     // also happens to carry a real run_id, so it is doubly ineligible; the
     // assertion below still isolates the stopped_at_utc gate specifically
     // by checking the exact refusal reason this route's ordering produces.
-    seed_operation_row(&pool, &plan, operation_id, &adapter_id, now, "awaiting_open").await?;
+    seed_operation_row(
+        &pool,
+        &plan,
+        operation_id,
+        &adapter_id,
+        now,
+        "awaiting_open",
+    )
+    .await?;
     let start_retrying = real_transition(
-        &pool, operation_id, "awaiting_open", 1, "start_retrying", None, None, now,
+        &pool,
+        operation_id,
+        "awaiting_open",
+        1,
+        "start_retrying",
+        None,
+        None,
+        now,
         "test: enter start_retrying",
     )
     .await;
@@ -345,11 +385,18 @@ async fn n2_evidence_degraded_without_stopped_at_is_refused() -> anyhow::Result<
     )
     .await;
 
-    assert_eq!(status, StatusCode::CONFLICT, "no stopped_at_utc must be refused: {json:?}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "no stopped_at_utc must be refused: {json:?}"
+    );
     assert_eq!(json["truth_state"], "not_stopped");
 
     let row = fetch_row(&pool, operation_id).await;
-    assert_eq!(row.state, STATE_EVIDENCE_DEGRADED, "state must be completely unchanged");
+    assert_eq!(
+        row.state, STATE_EVIDENCE_DEGRADED,
+        "state must be completely unchanged"
+    );
     assert!(row.stopped_at_utc.is_none());
 
     cleanup_operation(&pool, operation_id).await;
@@ -409,7 +456,10 @@ async fn n3_session_not_yet_closed_is_refused() -> anyhow::Result<()> {
         .await
         .expect("record_stopped_at must succeed");
     let stopping = fetch_row(&pool, operation_id).await;
-    assert!(stopping.stopped_at_utc.is_some(), "fixture precondition: record_stopped_at sets it");
+    assert!(
+        stopping.stopped_at_utc.is_some(),
+        "fixture precondition: record_stopped_at sets it"
+    );
     let degraded = real_transition(
         &pool,
         operation_id,
@@ -437,7 +487,11 @@ async fn n3_session_not_yet_closed_is_refused() -> anyhow::Result<()> {
     )
     .await;
 
-    assert_eq!(status, StatusCode::CONFLICT, "mid-session operation must be refused: {json:?}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "mid-session operation must be refused: {json:?}"
+    );
     assert_eq!(json["truth_state"], "session_not_closed");
 
     let row = fetch_row(&pool, operation_id).await;
@@ -457,7 +511,8 @@ async fn n3_session_not_yet_closed_is_refused() -> anyhow::Result<()> {
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn p1_stale_no_run_evidence_degraded_is_not_refused_by_this_routes_own_gates() -> anyhow::Result<()> {
+async fn p1_stale_no_run_evidence_degraded_is_not_refused_by_this_routes_own_gates(
+) -> anyhow::Result<()> {
     let pool = test_pool().await?;
     let adapter_id = format!("stale-fin-p1-{}", unique_suffix());
     let market_date = fixed_past_day();
@@ -472,7 +527,15 @@ async fn p1_stale_no_run_evidence_degraded_is_not_refused_by_this_routes_own_gat
     // stopping -> evidence_degraded, never touching running/start_retrying
     // -- the coordinator observed the window already closed before it ever
     // got a chance to start).
-    seed_operation_row(&pool, &plan, operation_id, &adapter_id, stopped_now, "awaiting_open").await?;
+    seed_operation_row(
+        &pool,
+        &plan,
+        operation_id,
+        &adapter_id,
+        stopped_now,
+        "awaiting_open",
+    )
+    .await?;
     let stopping = real_transition(
         &pool,
         operation_id,
@@ -503,8 +566,14 @@ async fn p1_stale_no_run_evidence_degraded_is_not_refused_by_this_routes_own_gat
     )
     .await;
     assert_eq!(degraded.state, STATE_EVIDENCE_DEGRADED);
-    assert!(degraded.run_id.is_none(), "fixture precondition: no run ever started");
-    assert!(degraded.stopped_at_utc.is_some(), "fixture precondition: stopped_at_utc set");
+    assert!(
+        degraded.run_id.is_none(),
+        "fixture precondition: no run ever started"
+    );
+    assert!(
+        degraded.stopped_at_utc.is_some(),
+        "fixture precondition: stopped_at_utc set"
+    );
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     st.set_daily_data_readiness_clock_override_for_test(Some(now_after_close))

@@ -76,8 +76,12 @@ fn register_never_attempted_trial(registry_db: &Path, trial_id: &str, strategy_i
 }
 
 fn write_bars_csv(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("mqk_cli_promo_evidence_{tag}_{}.csv", Uuid::new_v4()));
-    let mut body = String::from("symbol,end_ts,open_micros,high_micros,low_micros,close_micros,volume\n");
+    let path = std::env::temp_dir().join(format!(
+        "mqk_cli_promo_evidence_{tag}_{}.csv",
+        Uuid::new_v4()
+    ));
+    let mut body =
+        String::from("symbol,end_ts,open_micros,high_micros,low_micros,close_micros,volume\n");
     // 60 daily bars starting 2024-01-02 -- spans 2+ calendar months, a mild
     // uptrend so the real stress/robustness scenarios have genuine
     // (non-degenerate) equity/drawdown data to compute against.
@@ -97,7 +101,10 @@ fn write_bars_csv(tag: &str) -> PathBuf {
 }
 
 fn fresh_out_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("mqk_cli_promo_evidence_out_{tag}_{}", Uuid::new_v4()))
+    std::env::temp_dir().join(format!(
+        "mqk_cli_promo_evidence_out_{tag}_{}",
+        Uuid::new_v4()
+    ))
 }
 
 fn run_cli(args: &[&str]) -> std::process::Output {
@@ -156,15 +163,19 @@ fn backtest_csv_produces_stress_and_robustness_evidence() {
 
     let run_id = extract_run_id(&stdout);
     let run_dir = out_dir.join(&run_id);
-    assert!(run_dir.join("stress_suite.json").exists(), "stress_suite.json must be real");
+    assert!(
+        run_dir.join("stress_suite.json").exists(),
+        "stress_suite.json must be real"
+    );
     assert!(
         run_dir.join("robustness_gauntlet.json").exists(),
         "robustness_gauntlet.json must be real"
     );
 
-    let gauntlet: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(run_dir.join("robustness_gauntlet.json")).unwrap())
-            .unwrap();
+    let gauntlet: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("robustness_gauntlet.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(gauntlet["scenarios"].as_array().unwrap().len(), 6);
     // P7A-P7B-ECONOMIC-REPLAY-STRESS-01 / FINAL-P9-ROBUSTNESS-SEMANTICS-01
     // added two more required-but-separately-finalized deferred scenarios
@@ -211,8 +222,12 @@ fn backtest_evidence_finalizes_with_real_dsr_pbo_sensitivity() {
     ]);
     let run_id = extract_run_id(&stdout);
 
-    let registry_db = std::env::temp_dir().join(format!("mqk_cli_promo_evidence_registry_{}.sqlite3", Uuid::new_v4()));
-    let judge_sha256 = register_never_attempted_trial(&registry_db, "cli_it_trial", "swing_momentum");
+    let registry_db = std::env::temp_dir().join(format!(
+        "mqk_cli_promo_evidence_registry_{}.sqlite3",
+        Uuid::new_v4()
+    ));
+    let judge_sha256 =
+        register_never_attempted_trial(&registry_db, "cli_it_trial", "swing_momentum");
 
     let finalize_stdout = run_cli_ok(&[
         "backtest",
@@ -247,9 +262,10 @@ fn backtest_evidence_finalizes_with_real_dsr_pbo_sensitivity() {
     assert!(finalize_stdout.contains("scenarios_run=7"));
 
     let run_dir = out_dir.join(&run_id);
-    let gauntlet: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(run_dir.join("robustness_gauntlet.json")).unwrap())
-            .unwrap();
+    let gauntlet: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("robustness_gauntlet.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(gauntlet["scenarios"].as_array().unwrap().len(), 7);
     // P7A-P7B-ECONOMIC-REPLAY-STRESS-01 / FINAL-P9-ROBUSTNESS-SEMANTICS-01
     // added two more required-but-separately-finalized deferred scenarios
@@ -285,8 +301,12 @@ fn finalize_is_idempotent_across_two_runs() {
         &out_dir.to_string_lossy(),
     ]);
     let run_id = extract_run_id(&stdout);
-    let registry_db = std::env::temp_dir().join(format!("mqk_cli_promo_evidence_registry_{}.sqlite3", Uuid::new_v4()));
-    let judge_sha256 = register_never_attempted_trial(&registry_db, "cli_it_idem_trial", "swing_momentum");
+    let registry_db = std::env::temp_dir().join(format!(
+        "mqk_cli_promo_evidence_registry_{}.sqlite3",
+        Uuid::new_v4()
+    ));
+    let judge_sha256 =
+        register_never_attempted_trial(&registry_db, "cli_it_idem_trial", "swing_momentum");
 
     let out_dir_s = out_dir.to_string_lossy().to_string();
     let registry_db_s = registry_db.to_string_lossy().to_string();
@@ -320,8 +340,14 @@ fn finalize_is_idempotent_across_two_runs() {
 
     let run_dir = out_dir.join(&run_id);
     let audit = std::fs::read_to_string(run_dir.join("audit.jsonl")).unwrap();
-    let finalized_count = audit.lines().filter(|l| l.contains("robustness_gauntlet_finalized")).count();
-    assert_eq!(finalized_count, 1, "replay must not append a second finalized audit event");
+    let finalized_count = audit
+        .lines()
+        .filter(|l| l.contains("robustness_gauntlet_finalized"))
+        .count();
+    assert_eq!(
+        finalized_count, 1,
+        "replay must not append a second finalized audit event"
+    );
 }
 
 /// A Research trial genuinely registered under a DIFFERENT strategy is
@@ -348,9 +374,15 @@ fn finalize_rejects_research_trial_strategy_mismatch() {
         &out_dir.to_string_lossy(),
     ]);
     let run_id = extract_run_id(&stdout);
-    let registry_db = std::env::temp_dir().join(format!("mqk_cli_promo_evidence_registry_{}.sqlite3", Uuid::new_v4()));
-    let judge_sha256 =
-        register_never_attempted_trial(&registry_db, "cli_it_mismatch_trial", "a_totally_different_strategy");
+    let registry_db = std::env::temp_dir().join(format!(
+        "mqk_cli_promo_evidence_registry_{}.sqlite3",
+        Uuid::new_v4()
+    ));
+    let judge_sha256 = register_never_attempted_trial(
+        &registry_db,
+        "cli_it_mismatch_trial",
+        "a_totally_different_strategy",
+    );
 
     let output = run_cli(&[
         "backtest",
@@ -382,14 +414,18 @@ fn finalize_rejects_research_trial_strategy_mismatch() {
     // failure -- the command still exits 0 (a genuine result was recorded,
     // not a crash), but the merged evidence must show the rejection.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Research trial mismatch"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("Research trial mismatch"),
+        "stdout:\n{stdout}"
+    );
     assert!(stdout.contains("applicable=true"));
     assert!(stdout.contains("passed=false"));
 
     let run_dir = out_dir.join(&run_id);
-    let gauntlet: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(run_dir.join("robustness_gauntlet.json")).unwrap())
-            .unwrap();
+    let gauntlet: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("robustness_gauntlet.json")).unwrap(),
+    )
+    .unwrap();
     let sensitivity = gauntlet["scenarios"]
         .as_array()
         .unwrap()
@@ -397,7 +433,10 @@ fn finalize_rejects_research_trial_strategy_mismatch() {
         .find(|s| s["name"] == "dsr_pbo_sensitivity")
         .expect("dsr_pbo_sensitivity must be recorded even as a failure");
     assert_eq!(sensitivity["passed"], false);
-    assert!(sensitivity["reason"].as_str().unwrap().contains("Research trial mismatch"));
+    assert!(sensitivity["reason"]
+        .as_str()
+        .unwrap()
+        .contains("Research trial mismatch"));
 }
 
 /// Finalization requires the candidate's real inline evidence to already

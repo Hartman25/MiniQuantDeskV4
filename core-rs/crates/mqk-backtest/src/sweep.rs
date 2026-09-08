@@ -227,13 +227,26 @@ pub struct SweepRowResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SweepError {
     EmptyGrid,
-    TooManyCombinations { count: usize, limit: usize },
-    InvalidTargetQty { value: i64 },
-    NegativeSlippage { field: &'static str, value: i64 },
+    TooManyCombinations {
+        count: usize,
+        limit: usize,
+    },
+    InvalidTargetQty {
+        value: i64,
+    },
+    NegativeSlippage {
+        field: &'static str,
+        value: i64,
+    },
     /// BKT-BAR-VOLUME-CAPACITY-SWEEP-01 -- `max_participation_rate_bps` must
     /// satisfy `0..=10_000` (see `BacktestError::InvalidLiquidityConfig`).
-    InvalidLiquidityConfig { value: i64 },
-    RunFailed { point_index: usize, reason: String },
+    InvalidLiquidityConfig {
+        value: i64,
+    },
+    RunFailed {
+        point_index: usize,
+        reason: String,
+    },
 }
 
 impl core::fmt::Display for SweepError {

@@ -23,12 +23,12 @@ use common::{
     canonical_json_sha256, new_registry_db, register_judge_artifact, register_succeeded_attempt,
     register_trial, sha256_hex, RegistryDb,
 };
+use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 use mqk_promotion::{
     evaluate_promotion, pick_winner, select_best, verify_promotion_oos_evidence, ArtifactLock,
     Candidate, PromotionConfig, PromotionInput, StressSuiteResult, VerifiedPromotionOosEvidence,
     REQUIRED_STRESS_PROTOCOL_VERSION,
 };
-use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 
 // ---------------------------------------------------------------------------
 // Fixture JSON builders — mirror the REAL Python artifact schemas
@@ -127,7 +127,13 @@ fn valid_fixture(trial_id: &str) -> Fixture {
 }
 
 fn verify(f: &Fixture) -> Result<VerifiedPromotionOosEvidence, Vec<String>> {
-    verify_promotion_oos_evidence(&f.registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
+    verify_promotion_oos_evidence(
+        &f.registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
 }
 
 fn reasons_contain(errs: &[String], needle: &str) -> bool {
@@ -142,7 +148,8 @@ fn reasons_contain(errs: &[String], needle: &str) -> bool {
 #[test]
 fn valid_bundle_verifies_successfully() {
     let f = valid_fixture("trial_valid_001");
-    let ev = verify(&f).expect("structurally valid, hash-consistent, registered evidence must verify");
+    let ev =
+        verify(&f).expect("structurally valid, hash-consistent, registered evidence must verify");
     assert_eq!(ev.trial_id(), "trial_valid_001");
     assert_eq!(ev.economic_eval_id(), "econ_eval_trial_valid_001");
     assert_eq!(ev.folds_used(), 3);
@@ -171,7 +178,10 @@ fn missing_verified_evidence_fails_promotion() {
     let input = otherwise_valid_input("no_evidence", None);
     let decision = evaluate_promotion(&lenient_config(), &input);
     assert!(!decision.passed);
-    assert!(reasons_contain(&decision.fail_reasons, "OOS evidence missing"));
+    assert!(reasons_contain(
+        &decision.fail_reasons,
+        "OOS evidence missing"
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -181,9 +191,10 @@ fn missing_verified_evidence_fails_promotion() {
 #[test]
 fn wrong_economic_protocol_id_fails() {
     let mut f = valid_fixture("wrong_protocol_trial");
-    f.economic_json = f
-        .economic_json
-        .replace(r#""protocol_id":"economic_walk_forward_v1""#, r#""protocol_id":"ml_train_meta_v1""#);
+    f.economic_json = f.economic_json.replace(
+        r#""protocol_id":"economic_walk_forward_v1""#,
+        r#""protocol_id":"ml_train_meta_v1""#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "economic_protocol_id"));
 }
@@ -214,10 +225,7 @@ fn mutated_daily_returns_csv_fails_hash_binding() {
     let mut f = valid_fixture("mutated_csv_trial");
     f.daily_csv = b"date,net_daily_return\n2021-01-01,0.9999\n".to_vec();
     let errs = verify(&f).unwrap_err();
-    assert!(
-        reasons_contain(&errs, "daily-returns"),
-        "got: {errs:?}"
-    );
+    assert!(reasons_contain(&errs, "daily-returns"), "got: {errs:?}");
 }
 
 #[test]
@@ -264,9 +272,10 @@ fn judge_artifact_for_wrong_trial_fails() {
 #[test]
 fn candidate_excluded_from_judge_scope_fails() {
     let mut f = valid_fixture("excluded_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""included_trial_ids":["excluded_trial"]"#, r#""included_trial_ids":[]"#);
+    f.judge_json = f.judge_json.replace(
+        r#""included_trial_ids":["excluded_trial"]"#,
+        r#""included_trial_ids":[]"#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "judged comparison scope"));
 }
@@ -290,7 +299,9 @@ fn missing_dsr_row_for_trial_fails() {
 #[test]
 fn dsr_not_evaluable_fails() {
     let mut f = valid_fixture("dsr_not_evaluable_trial");
-    f.judge_json = f.judge_json.replace(r#""evaluable":true"#, r#""evaluable":false"#);
+    f.judge_json = f
+        .judge_json
+        .replace(r#""evaluable":true"#, r#""evaluable":false"#);
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "DSR result was not evaluable"));
 }
@@ -302,9 +313,10 @@ fn dsr_not_evaluable_fails() {
 #[test]
 fn pbo_not_evaluated_fails() {
     let mut f = valid_fixture("pbo_not_evaluated_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""pbo_result":{"status":"evaluated","pbo":0.15}"#, r#""pbo_result":{"status":"not_evaluable"}"#);
+    f.judge_json = f.judge_json.replace(
+        r#""pbo_result":{"status":"evaluated","pbo":0.15}"#,
+        r#""pbo_result":{"status":"not_evaluable"}"#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "PBO status"));
 }
@@ -316,7 +328,10 @@ fn pbo_not_evaluated_fails() {
 #[test]
 fn judge_not_evaluable_fails() {
     let mut f = valid_fixture("judge_not_evaluable_trial");
-    f.judge_json = f.judge_json.replace(r#""judge_status":"evaluated""#, r#""judge_status":"not_evaluable""#);
+    f.judge_json = f.judge_json.replace(
+        r#""judge_status":"evaluated""#,
+        r#""judge_status":"not_evaluable""#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "judge_status"));
 }
@@ -324,9 +339,10 @@ fn judge_not_evaluable_fails() {
 #[test]
 fn judge_partially_evaluable_fails() {
     let mut f = valid_fixture("judge_partial_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""judge_status":"evaluated""#, r#""judge_status":"partially_evaluable""#);
+    f.judge_json = f.judge_json.replace(
+        r#""judge_status":"evaluated""#,
+        r#""judge_status":"partially_evaluable""#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "judge_status"));
 }
@@ -338,9 +354,10 @@ fn judge_partially_evaluable_fails() {
 #[test]
 fn economic_holdout_wrong_state_fails() {
     let mut f = valid_fixture("econ_holdout_wrong_trial");
-    f.economic_json = f
-        .economic_json
-        .replace(r#""holdout":{"status":"reserved_not_evaluated"}"#, r#""holdout":{"status":"unknown"}"#);
+    f.economic_json = f.economic_json.replace(
+        r#""holdout":{"status":"reserved_not_evaluated"}"#,
+        r#""holdout":{"status":"unknown"}"#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "economic artifact holdout.status"));
 }
@@ -348,9 +365,10 @@ fn economic_holdout_wrong_state_fails() {
 #[test]
 fn economic_holdout_consumed_fails() {
     let mut f = valid_fixture("econ_holdout_consumed_trial");
-    f.economic_json = f
-        .economic_json
-        .replace(r#""holdout":{"status":"reserved_not_evaluated"}"#, r#""holdout":{"status":"consumed"}"#);
+    f.economic_json = f.economic_json.replace(
+        r#""holdout":{"status":"reserved_not_evaluated"}"#,
+        r#""holdout":{"status":"consumed"}"#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "economic artifact holdout.status"));
 }
@@ -358,9 +376,10 @@ fn economic_holdout_consumed_fails() {
 #[test]
 fn judge_holdout_consumed_fails() {
     let mut f = valid_fixture("judge_holdout_consumed_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""holdout":{"status":"reserved_not_evaluated"}"#, r#""holdout":{"status":"consumed"}"#);
+    f.judge_json = f.judge_json.replace(
+        r#""holdout":{"status":"reserved_not_evaluated"}"#,
+        r#""holdout":{"status":"consumed"}"#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "judge holdout.status"));
 }
@@ -372,9 +391,10 @@ fn judge_holdout_consumed_fails() {
 #[test]
 fn diagnostic_p7a_pricing_fails() {
     let mut f = valid_fixture("diagnostic_p7a_trial");
-    f.economic_json = f
-        .economic_json
-        .replace(r#""pricing_model_id":"rust_conservative_bar_range_v1""#, r#""pricing_model_id":"close_only_diagnostic_v1""#);
+    f.economic_json = f.economic_json.replace(
+        r#""pricing_model_id":"rust_conservative_bar_range_v1""#,
+        r#""pricing_model_id":"close_only_diagnostic_v1""#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "execution_pricing_protocol_id"));
 }
@@ -386,9 +406,10 @@ fn diagnostic_p7a_pricing_fails() {
 #[test]
 fn diagnostic_continuous_weight_only_p7b_fails() {
     let mut f = valid_fixture("diagnostic_p7b_trial");
-    f.economic_json = f
-        .economic_json
-        .replace(r#""weight_to_share":{"weight_to_share_protocol_id":"weight_to_share_v1"}"#, r#""weight_to_share":{"weight_to_share_protocol_id":null}"#);
+    f.economic_json = f.economic_json.replace(
+        r#""weight_to_share":{"weight_to_share_protocol_id":"weight_to_share_v1"}"#,
+        r#""weight_to_share":{"weight_to_share_protocol_id":null}"#,
+    );
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "weight_to_share_protocol_id"));
 }
@@ -409,7 +430,10 @@ fn missing_discrete_economics_marker_fails() {
         r#""folds":[{}]"#,
     );
     let errs = verify(&f).unwrap_err();
-    assert!(reasons_contain(&errs, "discrete_economics_protocol_id"), "got: {errs:?}");
+    assert!(
+        reasons_contain(&errs, "discrete_economics_protocol_id"),
+        "got: {errs:?}"
+    );
 }
 
 #[test]
@@ -434,12 +458,16 @@ fn empty_folds_array_fails() {
 #[test]
 fn wrong_judge_schema_version_fails() {
     let mut f = valid_fixture("wrong_judge_schema_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""schema_version":"multiple_testing_judge_v1""#, r#""schema_version":"some_other_v2""#);
+    f.judge_json = f.judge_json.replace(
+        r#""schema_version":"multiple_testing_judge_v1""#,
+        r#""schema_version":"some_other_v2""#,
+    );
     f.reregister_judge();
     let errs = verify(&f).unwrap_err();
-    assert!(reasons_contain(&errs, "judge schema_version"), "got: {errs:?}");
+    assert!(
+        reasons_contain(&errs, "judge schema_version"),
+        "got: {errs:?}"
+    );
 }
 
 #[test]
@@ -451,15 +479,19 @@ fn wrong_judge_protocol_id_fails() {
     );
     f.reregister_judge();
     let errs = verify(&f).unwrap_err();
-    assert!(reasons_contain(&errs, "judge protocol.protocol_id"), "got: {errs:?}");
+    assert!(
+        reasons_contain(&errs, "judge protocol.protocol_id"),
+        "got: {errs:?}"
+    );
 }
 
 #[test]
 fn missing_comparison_scope_fails() {
     let mut f = valid_fixture("missing_scope_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""comparison_scope":{"experiment_id":"exp_missing_scope_trial"},"#, "");
+    f.judge_json = f.judge_json.replace(
+        r#""comparison_scope":{"experiment_id":"exp_missing_scope_trial"},"#,
+        "",
+    );
     f.reregister_judge();
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "comparison_scope"), "got: {errs:?}");
@@ -468,9 +500,10 @@ fn missing_comparison_scope_fails() {
 #[test]
 fn empty_comparison_scope_object_fails() {
     let mut f = valid_fixture("empty_scope_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""comparison_scope":{"experiment_id":"exp_empty_scope_trial"}"#, r#""comparison_scope":{}"#);
+    f.judge_json = f.judge_json.replace(
+        r#""comparison_scope":{"experiment_id":"exp_empty_scope_trial"}"#,
+        r#""comparison_scope":{}"#,
+    );
     f.reregister_judge();
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "comparison_scope"), "got: {errs:?}");
@@ -479,9 +512,10 @@ fn empty_comparison_scope_object_fails() {
 #[test]
 fn null_comparison_scope_fails() {
     let mut f = valid_fixture("null_scope_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""comparison_scope":{"experiment_id":"exp_null_scope_trial"}"#, r#""comparison_scope":null"#);
+    f.judge_json = f.judge_json.replace(
+        r#""comparison_scope":{"experiment_id":"exp_null_scope_trial"}"#,
+        r#""comparison_scope":null"#,
+    );
     f.reregister_judge();
     let errs = verify(&f).unwrap_err();
     assert!(reasons_contain(&errs, "comparison_scope"), "got: {errs:?}");
@@ -549,11 +583,29 @@ fn registered_trial_wrong_economic_eval_id_fails() {
     register_trial(&registry.path, trial_id, &experiment_id, "hyp");
     // Registered attempt's result_id is a DIFFERENT id than the economic
     // artifact's own economic_eval_id.
-    register_succeeded_attempt(&registry.path, &format!("{trial_id}:att0001"), trial_id, "econ_eval_a_different_run");
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, Some(&judge_json));
+    register_succeeded_attempt(
+        &registry.path,
+        &format!("{trial_id}:att0001"),
+        trial_id,
+        "econ_eval_a_different_run",
+    );
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        "judge_x",
+        &experiment_id,
+        None,
+        Some(&judge_json),
+    );
 
-    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &judge_json)
-        .unwrap_err();
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        trial_id,
+        &economic_json,
+        &daily_csv,
+        &judge_json,
+    )
+    .unwrap_err();
     assert!(
         reasons_contain(&errs, "no succeeded research_attempts row"),
         "got: {errs:?}"
@@ -574,8 +626,14 @@ fn correct_economic_artifact_but_unregistered_judge_fails() {
         &f.trial_id,
         "econ_eval_unregistered_judge_trial",
     );
-    let errs = verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
-        .unwrap_err();
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .unwrap_err();
     assert!(
         reasons_contain(&errs, "no research_judge_artifacts row"),
         "got: {errs:?}"
@@ -609,8 +667,14 @@ fn registered_judge_wrong_experiment_hypothesis_fails() {
         Some(&f.judge_json),
     );
 
-    let errs = verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
-        .unwrap_err();
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .unwrap_err();
     assert!(
         reasons_contain(&errs, "wrong experiment/hypothesis"),
         "got: {errs:?}"
@@ -643,8 +707,14 @@ fn registered_judge_scoped_to_specific_hypothesis_must_match_trials_own() {
         Some(&f.judge_json),
     );
 
-    let errs = verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
-        .unwrap_err();
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .unwrap_err();
     assert!(
         reasons_contain(&errs, "wrong experiment/hypothesis"),
         "got: {errs:?}"
@@ -658,7 +728,12 @@ fn registered_judge_scoped_to_whole_experiment_covers_any_hypothesis() {
     // trial registered under ANY hypothesis_id within that experiment.
     let f = valid_fixture("experiment_scoped_trial");
     let registry = new_registry_db();
-    register_trial(&registry.path, &f.trial_id, &f.experiment_id, "hyp_whatever");
+    register_trial(
+        &registry.path,
+        &f.trial_id,
+        &f.experiment_id,
+        "hyp_whatever",
+    );
     register_succeeded_attempt(
         &registry.path,
         &format!("{}:att0001", f.trial_id),
@@ -666,10 +741,22 @@ fn registered_judge_scoped_to_whole_experiment_covers_any_hypothesis() {
         "econ_eval_experiment_scoped_trial",
     );
     let judge_sha = canonical_json_sha256(&f.judge_json);
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &f.experiment_id, None, Some(&f.judge_json));
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        "judge_x",
+        &f.experiment_id,
+        None,
+        Some(&f.judge_json),
+    );
 
-    let result =
-        verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json);
+    let result = verify_promotion_oos_evidence(
+        &registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    );
     assert!(result.is_ok(), "got: {result:?}");
 }
 
@@ -698,9 +785,20 @@ fn base_authority_fixture(trial_id: &str) -> (String, Vec<u8>, String, String, R
 
     let registry = new_registry_db();
     register_trial(&registry.path, trial_id, &experiment_id, "hyp");
-    register_succeeded_attempt(&registry.path, &format!("{trial_id}:att0001"), trial_id, &economic_eval_id);
+    register_succeeded_attempt(
+        &registry.path,
+        &format!("{trial_id}:att0001"),
+        trial_id,
+        &economic_eval_id,
+    );
 
-    (economic_json, daily_csv, economic_eval_id, experiment_id, registry)
+    (
+        economic_json,
+        daily_csv,
+        economic_eval_id,
+        experiment_id,
+        registry,
+    )
 }
 
 /// A fully structurally-valid judge JSON text for `trial_id`, with a
@@ -733,16 +831,38 @@ fn exponent_format_interoperability_positive_proof() {
     let economic_sha = sha256_hex(economic_json.as_bytes());
     let daily_sha = sha256_hex(&daily_csv);
 
-    let registered_text =
-        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "1e-06");
+    let registered_text = judge_json_with_dsr_literal(
+        trial_id,
+        &experiment_id,
+        &economic_eval_id,
+        &economic_sha,
+        &daily_sha,
+        "1e-06",
+    );
     let judge_sha = sha256_hex(registered_text.as_bytes());
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, Some(&registered_text));
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        "judge_x",
+        &experiment_id,
+        None,
+        Some(&registered_text),
+    );
 
     let supplied_text = registered_text.replace("1e-06", "1e-6");
-    assert_ne!(supplied_text, registered_text, "sanity: spelling actually differs");
+    assert_ne!(
+        supplied_text, registered_text,
+        "sanity: spelling actually differs"
+    );
 
-    let ev = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &supplied_text)
-        .expect("semantically-identical exponent-format spelling must verify");
+    let ev = verify_promotion_oos_evidence(
+        &registry.path,
+        trial_id,
+        &economic_json,
+        &daily_csv,
+        &supplied_text,
+    )
+    .expect("semantically-identical exponent-format spelling must verify");
     assert!((ev.deflated_sharpe_ratio() - 1e-6).abs() < 1e-15);
 }
 
@@ -756,15 +876,34 @@ fn semantic_numeric_mutation_fails() {
     let economic_sha = sha256_hex(economic_json.as_bytes());
     let daily_sha = sha256_hex(&daily_csv);
 
-    let registered_text =
-        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "1e-06");
+    let registered_text = judge_json_with_dsr_literal(
+        trial_id,
+        &experiment_id,
+        &economic_eval_id,
+        &economic_sha,
+        &daily_sha,
+        "1e-06",
+    );
     let judge_sha = sha256_hex(registered_text.as_bytes());
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, Some(&registered_text));
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        "judge_x",
+        &experiment_id,
+        None,
+        Some(&registered_text),
+    );
 
     let supplied_text = registered_text.replace("1e-06", "2e-6");
 
-    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &supplied_text)
-        .unwrap_err();
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        trial_id,
+        &economic_json,
+        &daily_csv,
+        &supplied_text,
+    )
+    .unwrap_err();
     assert!(
         reasons_contain(&errs, "no research_judge_artifacts row"),
         "a genuinely different numeric value must not verify: {errs:?}"
@@ -786,7 +925,10 @@ fn registered_canonical_text_field_order_does_not_alter_verification_result() {
         reversed.insert(k.clone(), v.clone());
     }
     let reversed_text = serde_json::to_string(&serde_json::Value::Object(reversed)).unwrap();
-    assert_ne!(reversed_text, f.judge_json, "sanity: ordering actually differs");
+    assert_ne!(
+        reversed_text, f.judge_json,
+        "sanity: ordering actually differs"
+    );
 
     let registry = new_registry_db();
     register_trial(&registry.path, &f.trial_id, &f.experiment_id, "hyp");
@@ -797,11 +939,24 @@ fn registered_canonical_text_field_order_does_not_alter_verification_result() {
         &format!("econ_eval_{}", f.trial_id),
     );
     let reversed_sha = sha256_hex(reversed_text.as_bytes());
-    register_judge_artifact(&registry.path, &reversed_sha, "judge_x", &f.experiment_id, None, Some(&reversed_text));
+    register_judge_artifact(
+        &registry.path,
+        &reversed_sha,
+        "judge_x",
+        &f.experiment_id,
+        None,
+        Some(&reversed_text),
+    );
 
     // Supply the ORIGINAL (non-reversed) judge_json -- must still match the
     // reversed-field-order REGISTERED text.
-    let result = verify_promotion_oos_evidence(&registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json);
+    let result = verify_promotion_oos_evidence(
+        &registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    );
     assert!(result.is_ok(), "got: {result:?}");
 }
 
@@ -815,7 +970,13 @@ fn insignificant_whitespace_does_not_alter_verification_result() {
     let pretty = serde_json::to_string_pretty(&value).unwrap();
     assert_ne!(pretty, f.judge_json, "sanity: whitespace actually differs");
 
-    let result = verify_promotion_oos_evidence(&f.registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &pretty);
+    let result = verify_promotion_oos_evidence(
+        &f.registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &pretty,
+    );
     assert!(result.is_ok(), "got: {result:?}");
 }
 
@@ -832,18 +993,46 @@ fn registry_canonical_text_hash_mismatch_fails_closed() {
     let economic_sha = sha256_hex(economic_json.as_bytes());
     let daily_sha = sha256_hex(&daily_csv);
 
-    let genuine_text =
-        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.85");
+    let genuine_text = judge_json_with_dsr_literal(
+        trial_id,
+        &experiment_id,
+        &economic_eval_id,
+        &economic_sha,
+        &daily_sha,
+        "0.85",
+    );
     let genuine_sha = sha256_hex(genuine_text.as_bytes());
-    let tampered_text =
-        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.99");
+    let tampered_text = judge_json_with_dsr_literal(
+        trial_id,
+        &experiment_id,
+        &economic_eval_id,
+        &economic_sha,
+        &daily_sha,
+        "0.99",
+    );
     // Registered under the CORRECT (genuine) sha, but the stored text does
     // not hash to it -- a corrupted/tampered row.
-    register_judge_artifact(&registry.path, &genuine_sha, "judge_x", &experiment_id, None, Some(&tampered_text));
+    register_judge_artifact(
+        &registry.path,
+        &genuine_sha,
+        "judge_x",
+        &experiment_id,
+        None,
+        Some(&tampered_text),
+    );
 
-    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &genuine_text)
-        .unwrap_err();
-    assert!(reasons_contain(&errs, "no research_judge_artifacts row"), "got: {errs:?}");
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        trial_id,
+        &economic_json,
+        &daily_csv,
+        &genuine_text,
+    )
+    .unwrap_err();
+    assert!(
+        reasons_contain(&errs, "no research_judge_artifacts row"),
+        "got: {errs:?}"
+    );
 }
 
 /// REQUIRED TEST 6 — same integrity contract as TEST 5, from the opposite
@@ -858,10 +1047,23 @@ fn registry_sha_tampered_after_registration_fails_closed() {
     let economic_sha = sha256_hex(economic_json.as_bytes());
     let daily_sha = sha256_hex(&daily_csv);
 
-    let genuine_text =
-        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.85");
+    let genuine_text = judge_json_with_dsr_literal(
+        trial_id,
+        &experiment_id,
+        &economic_eval_id,
+        &economic_sha,
+        &daily_sha,
+        "0.85",
+    );
     let genuine_sha = sha256_hex(genuine_text.as_bytes());
-    register_judge_artifact(&registry.path, &genuine_sha, "judge_x", &experiment_id, None, Some(&genuine_text));
+    register_judge_artifact(
+        &registry.path,
+        &genuine_sha,
+        "judge_x",
+        &experiment_id,
+        None,
+        Some(&genuine_text),
+    );
 
     {
         let conn = rusqlite::Connection::open(&registry.path).expect("open registry db");
@@ -872,9 +1074,18 @@ fn registry_sha_tampered_after_registration_fails_closed() {
         .expect("tamper with judge_artifact_sha256");
     }
 
-    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &genuine_text)
-        .unwrap_err();
-    assert!(reasons_contain(&errs, "no research_judge_artifacts row"), "got: {errs:?}");
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        trial_id,
+        &economic_json,
+        &daily_csv,
+        &genuine_text,
+    )
+    .unwrap_err();
+    assert!(
+        reasons_contain(&errs, "no research_judge_artifacts row"),
+        "got: {errs:?}"
+    );
 }
 
 /// REQUIRED TEST 7 — simulates a historical row written before
@@ -888,22 +1099,55 @@ fn missing_canonical_text_registry_row_fails_closed() {
     let economic_sha = sha256_hex(economic_json.as_bytes());
     let daily_sha = sha256_hex(&daily_csv);
 
-    let judge_text =
-        judge_json_with_dsr_literal(trial_id, &experiment_id, &economic_eval_id, &economic_sha, &daily_sha, "0.85");
+    let judge_text = judge_json_with_dsr_literal(
+        trial_id,
+        &experiment_id,
+        &economic_eval_id,
+        &economic_sha,
+        &daily_sha,
+        "0.85",
+    );
     let judge_sha = sha256_hex(judge_text.as_bytes());
-    register_judge_artifact(&registry.path, &judge_sha, "judge_x", &experiment_id, None, None);
+    register_judge_artifact(
+        &registry.path,
+        &judge_sha,
+        "judge_x",
+        &experiment_id,
+        None,
+        None,
+    );
 
-    let errs = verify_promotion_oos_evidence(&registry.path, trial_id, &economic_json, &daily_csv, &judge_text)
-        .unwrap_err();
-    assert!(reasons_contain(&errs, "no research_judge_artifacts row"), "got: {errs:?}");
+    let errs = verify_promotion_oos_evidence(
+        &registry.path,
+        trial_id,
+        &economic_json,
+        &daily_csv,
+        &judge_text,
+    )
+    .unwrap_err();
+    assert!(
+        reasons_contain(&errs, "no research_judge_artifacts row"),
+        "got: {errs:?}"
+    );
 }
 
 #[test]
 fn nonexistent_registry_database_fails_closed() {
     let f = valid_fixture("no_db_trial");
-    let bogus_path = f.registry.path.parent().unwrap().join("does_not_exist.sqlite3");
-    let errs = verify_promotion_oos_evidence(&bogus_path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
-        .unwrap_err();
+    let bogus_path = f
+        .registry
+        .path
+        .parent()
+        .unwrap()
+        .join("does_not_exist.sqlite3");
+    let errs = verify_promotion_oos_evidence(
+        &bogus_path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .unwrap_err();
     assert!(reasons_contain(&errs, "research registry"), "got: {errs:?}");
 }
 
@@ -918,9 +1162,15 @@ fn nonexistent_registry_database_fails_closed() {
 #[test]
 fn mutated_dsr_value_fails_authority_hash() {
     let mut f = valid_fixture("mutated_dsr_trial");
-    f.judge_json = f.judge_json.replace(r#""deflated_sharpe_ratio":0.85"#, r#""deflated_sharpe_ratio":0.99"#);
+    f.judge_json = f.judge_json.replace(
+        r#""deflated_sharpe_ratio":0.85"#,
+        r#""deflated_sharpe_ratio":0.99"#,
+    );
     let errs = verify(&f).unwrap_err();
-    assert!(reasons_contain(&errs, "judge_artifact_sha256"), "got: {errs:?}");
+    assert!(
+        reasons_contain(&errs, "judge_artifact_sha256"),
+        "got: {errs:?}"
+    );
 }
 
 /// mission Section 5F: same proof for PBO.
@@ -929,7 +1179,10 @@ fn mutated_pbo_value_fails_authority_hash() {
     let mut f = valid_fixture("mutated_pbo_trial");
     f.judge_json = f.judge_json.replace(r#""pbo":0.15"#, r#""pbo":0.01"#);
     let errs = verify(&f).unwrap_err();
-    assert!(reasons_contain(&errs, "judge_artifact_sha256"), "got: {errs:?}");
+    assert!(
+        reasons_contain(&errs, "judge_artifact_sha256"),
+        "got: {errs:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -942,11 +1195,15 @@ fn mutated_pbo_value_fails_authority_hash() {
 #[test]
 fn null_deflated_sharpe_ratio_fails() {
     let mut f = valid_fixture("null_dsr_trial");
-    f.judge_json = f
-        .judge_json
-        .replace(r#""deflated_sharpe_ratio":0.85"#, r#""deflated_sharpe_ratio":null"#);
+    f.judge_json = f.judge_json.replace(
+        r#""deflated_sharpe_ratio":0.85"#,
+        r#""deflated_sharpe_ratio":null"#,
+    );
     let errs = verify(&f).unwrap_err();
-    assert!(reasons_contain(&errs, "deflated_sharpe_ratio is missing or non-finite"));
+    assert!(reasons_contain(
+        &errs,
+        "deflated_sharpe_ratio is missing or non-finite"
+    ));
 }
 
 #[test]
@@ -954,7 +1211,10 @@ fn null_pbo_value_fails() {
     let mut f = valid_fixture("null_pbo_trial");
     f.judge_json = f.judge_json.replace(r#""pbo":0.15"#, r#""pbo":null"#);
     let errs = verify(&f).unwrap_err();
-    assert!(reasons_contain(&errs, "pbo_result.pbo is missing or non-finite"));
+    assert!(reasons_contain(
+        &errs,
+        "pbo_result.pbo is missing or non-finite"
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -981,12 +1241,27 @@ fn json_field_ordering_does_not_alter_verification_result() {
         reversed.insert(k.clone(), v.clone());
     }
     let judge_reordered = serde_json::to_string(&serde_json::Value::Object(reversed)).unwrap();
-    assert_ne!(judge_reordered, f.judge_json, "sanity: ordering actually differs");
+    assert_ne!(
+        judge_reordered, f.judge_json,
+        "sanity: ordering actually differs"
+    );
 
-    let a = verify_promotion_oos_evidence(&f.registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &f.judge_json)
-        .expect("original order verifies");
-    let b = verify_promotion_oos_evidence(&f.registry.path, &f.trial_id, &f.economic_json, &f.daily_csv, &judge_reordered)
-        .expect("reordered judge JSON must verify identically (canonical hash is order-invariant)");
+    let a = verify_promotion_oos_evidence(
+        &f.registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &f.judge_json,
+    )
+    .expect("original order verifies");
+    let b = verify_promotion_oos_evidence(
+        &f.registry.path,
+        &f.trial_id,
+        &f.economic_json,
+        &f.daily_csv,
+        &judge_reordered,
+    )
+    .expect("reordered judge JSON must verify identically (canonical hash is order-invariant)");
     assert_eq!(a, b);
 }
 
@@ -1014,7 +1289,10 @@ fn hand_typed_shortcut_json_missing_real_artifact_shape_fails() {
         &judge_json,
     )
     .unwrap_err();
-    assert!(errs.len() >= 5, "expected multiple independent structural failures, got: {errs:?}");
+    assert!(
+        errs.len() >= 5,
+        "expected multiple independent structural failures, got: {errs:?}"
+    );
     assert!(reasons_contain(&errs, "economic_protocol_id"));
     assert!(reasons_contain(&errs, "judge_status"));
 }
@@ -1031,7 +1309,10 @@ fn dsr_below_config_threshold_rejects() {
     let input = otherwise_valid_input("dsr_below_threshold", Some(ev));
     let decision = evaluate_promotion(&config, &input);
     assert!(!decision.passed);
-    assert!(reasons_contain(&decision.fail_reasons, "Deflated Sharpe Ratio"));
+    assert!(reasons_contain(
+        &decision.fail_reasons,
+        "Deflated Sharpe Ratio"
+    ));
 }
 
 #[test]
@@ -1042,7 +1323,10 @@ fn dsr_exactly_at_threshold_passes_dsr_portion() {
     let input = otherwise_valid_input("dsr_exact_threshold", Some(ev));
     let decision = evaluate_promotion(&config, &input);
     assert!(
-        !decision.fail_reasons.iter().any(|r| r.contains("Deflated Sharpe Ratio")),
+        !decision
+            .fail_reasons
+            .iter()
+            .any(|r| r.contains("Deflated Sharpe Ratio")),
         "DSR exactly at threshold must not itself fail: {:?}",
         decision.fail_reasons
     );
@@ -1056,7 +1340,10 @@ fn pbo_above_config_threshold_rejects() {
     let input = otherwise_valid_input("pbo_above_threshold", Some(ev));
     let decision = evaluate_promotion(&config, &input);
     assert!(!decision.passed);
-    assert!(reasons_contain(&decision.fail_reasons, "Probability of Backtest Overfitting"));
+    assert!(reasons_contain(
+        &decision.fail_reasons,
+        "Probability of Backtest Overfitting"
+    ));
 }
 
 #[test]
@@ -1067,7 +1354,10 @@ fn pbo_exactly_at_threshold_passes_pbo_portion() {
     let input = otherwise_valid_input("pbo_exact_threshold", Some(ev));
     let decision = evaluate_promotion(&config, &input);
     assert!(
-        !decision.fail_reasons.iter().any(|r| r.contains("Probability of Backtest Overfitting")),
+        !decision
+            .fail_reasons
+            .iter()
+            .any(|r| r.contains("Probability of Backtest Overfitting")),
         "PBO exactly at threshold must not itself fail: {:?}",
         decision.fail_reasons
     );
@@ -1081,7 +1371,10 @@ fn invalid_threshold_config_fails_closed() {
     let input = otherwise_valid_input("invalid_config", Some(ev));
     let decision = evaluate_promotion(&config, &input);
     assert!(!decision.passed);
-    assert!(reasons_contain(&decision.fail_reasons, "Invalid PromotionConfig"));
+    assert!(reasons_contain(
+        &decision.fail_reasons,
+        "Invalid PromotionConfig"
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,7 +1426,10 @@ fn verified_oos_evidence_does_not_weaken_stress_suite_gate() {
     input.stress_suite = None;
     let decision = evaluate_promotion(&lenient_config(), &input);
     assert!(!decision.passed);
-    assert!(reasons_contain(&decision.fail_reasons, "Stress suite not run"));
+    assert!(reasons_contain(
+        &decision.fail_reasons,
+        "Stress suite not run"
+    ));
 }
 
 #[test]
@@ -1143,7 +1439,10 @@ fn verified_oos_evidence_does_not_weaken_artifact_lock_gate() {
     input.artifact_lock = None;
     let decision = evaluate_promotion(&lenient_config(), &input);
     assert!(!decision.passed);
-    assert!(reasons_contain(&decision.fail_reasons, "Artifact not hash-locked"));
+    assert!(reasons_contain(
+        &decision.fail_reasons,
+        "Artifact not hash-locked"
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -1353,6 +1652,8 @@ fn otherwise_valid_input(
         stress_suite: Some(StressSuiteResult::pass(3, REQUIRED_STRESS_PROTOCOL_VERSION)),
         artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")),
         oos_evidence,
-        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(&robustness_trial_id)),
+        robustness_evidence: Some(common::valid_robustness_evidence_for_testing(
+            &robustness_trial_id,
+        )),
     }
 }

@@ -115,7 +115,11 @@ fn run_and_persist_full(
 
     let mut engine = BacktestEngine::new(config.clone());
     engine
-        .add_strategy(Box::new(BuyHoldSell::named(strategy_name, qty, sell_at_idx)))
+        .add_strategy(Box::new(BuyHoldSell::named(
+            strategy_name,
+            qty,
+            sell_at_idx,
+        )))
         .unwrap();
     let report = engine.run(&bars).expect("engine.run must succeed");
 
@@ -266,7 +270,10 @@ fn bes01m_missing_initial_equity_in_audit_event_rejected() {
     std::fs::write(&audit_path, format!("{rewritten}\n")).unwrap();
 
     let err = resolve_backtest_evidence(&root, report.run_id).unwrap_err();
-    assert_eq!(err, BacktestEvidenceResolveError::ReportInitialEquityMissing);
+    assert_eq!(
+        err,
+        BacktestEvidenceResolveError::ReportInitialEquityMissing
+    );
 
     cleanup(&root);
 }
@@ -333,11 +340,7 @@ fn bes01e_missing_lock_evidence_fails() {
     // no write_backtest_report (leaves audit.jsonl empty, exactly the
     // pre-BKT-PROMOTION-ARTIFACT-AUTHORITY-01 defect state).
     let seq = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let root = std::env::temp_dir().join(format!(
-        "mqk_bes01e_{}_{}",
-        std::process::id(),
-        seq
-    ));
+    let root = std::env::temp_dir().join(format!("mqk_bes01e_{}_{}", std::process::id(), seq));
     let _ = fs::remove_dir_all(&root);
     let run_id = uuid::Uuid::from_u128(0x1234);
     mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
@@ -467,10 +470,8 @@ fn bes01i_cross_candidate_evidence_directory_swap_fails() {
 
 #[test]
 fn bes01j_nonexistent_artifact_root_fails() {
-    let root = std::env::temp_dir().join(format!(
-        "mqk_bes01j_does_not_exist_{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("mqk_bes01j_does_not_exist_{}", std::process::id()));
     let _ = fs::remove_dir_all(&root); // ensure it genuinely does not exist
 
     let err = resolve_backtest_evidence(&root, uuid::Uuid::from_u128(1)).unwrap_err();

@@ -73,7 +73,8 @@ use std::sync::OnceLock;
 
 use chrono::{DateTime, TimeZone, Utc};
 use mqk_daemon::state::autonomous_retry_policy::{
-    classify_autonomous_reason, coordinator_reason_from_runtime_lifecycle_error, AutonomousRetryClass,
+    classify_autonomous_reason, coordinator_reason_from_runtime_lifecycle_error,
+    AutonomousRetryClass,
 };
 use mqk_daemon::state::{
     market_calendar::{resolve_market_session_schedule, NyseWeekdaysProvider},
@@ -105,7 +106,10 @@ const REF_INSTANT: i64 = 1_713_188_100; // 2024-04-15 13:35 UTC
 
 fn session_open() -> DateTime<Utc> {
     let provider = NyseWeekdaysProvider;
-    let ref_now = Utc.timestamp_opt(REF_INSTANT, 0).single().expect("valid ts");
+    let ref_now = Utc
+        .timestamp_opt(REF_INSTANT, 0)
+        .single()
+        .expect("valid ts");
     resolve_market_session_schedule(&provider, ref_now).session_open_utc
 }
 
@@ -501,4 +505,3 @@ async fn self_heal_02_t2_bar_due_but_missing_still_fails_closed() {
     cleanup_dir(&dir);
     cleanup_bars(&pool, symbol).await;
 }
-
