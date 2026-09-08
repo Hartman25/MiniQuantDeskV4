@@ -229,15 +229,14 @@ mod semantic_identity_tests {
                 .unwrap();
             r
         };
-        for name in ["intraday_scalper"] {
-            let a = default_caps.instantiate(name).unwrap();
-            let b = custom_caps.instantiate(name).unwrap();
-            assert_ne!(
-                a.semantic_fingerprint(),
-                b.semantic_fingerprint(),
-                "identity '{name}': sizing change did not change fingerprint"
-            );
-        }
+        let name = "intraday_scalper";
+        let a = default_caps.instantiate(name).unwrap();
+        let b = custom_caps.instantiate(name).unwrap();
+        assert_ne!(
+            a.semantic_fingerprint(),
+            b.semantic_fingerprint(),
+            "identity '{name}': sizing change did not change fingerprint"
+        );
     }
 
     fn build_registry_for(symbol: &str) -> PluginRegistry {
