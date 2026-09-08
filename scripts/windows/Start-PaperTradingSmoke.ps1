@@ -180,7 +180,7 @@ if ($StartRequiredUniverseScheduler -and $StartIntradayRefreshLoop) {
     exit 1
 }
 
-# MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-01 §14: the
+# MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-01 section 14: the
 # required-universe daemon scheduler is now the default data-freshness path
 # for a normal Paper startup -- an operator no longer has to remember
 # -StartRequiredUniverseScheduler. Ways to get the old/other behavior:
