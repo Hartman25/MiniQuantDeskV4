@@ -661,8 +661,9 @@ fn compute_attribution_coverage(
 // ---------------------------------------------------------------------------
 
 /// WAVE05-P5-SUPPRESSION-READ-FAIL-CLOSED-REPAIR-01 / P5.3 closed-vocabulary
-/// precedence: `unavailable` (upstream inactive OR suppression query failed)
-/// > `suppressed` > `insufficient_data` > `watch` > `normal`.
+/// precedence, highest to lowest:
+/// `unavailable` (upstream inactive OR suppression query failed), then `suppressed`,
+/// then `insufficient_data`, then `watch`, then `normal`.
 /// `upstream_active` is always `true` at the one call site in this file today
 /// (a row only exists when the response's own `truth_state == "active"`) --
 /// the parameter exists so this pure function's full precedence order stays
