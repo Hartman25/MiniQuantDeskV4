@@ -171,6 +171,10 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     .bind(run_id)
     .execute(pool)
     .await?;
+    sqlx::query("delete from runtime_leader_lease where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await?;
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
