@@ -754,7 +754,7 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
 async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
     // Proves that /api/v1/ops/catalog:
     // 1. Returns 200 with the canonical_route self-identifier.
-    // 2. Returns exactly the 7 supported action keys — no fantasy keys.
+    // 2. Returns exactly the 10 supported action keys — no fantasy keys.
     // 3. Does NOT include change-system-mode (returns 409 from dispatcher).
     // 4. Each entry has all required fields.
     // 5. Availability is state-correct: disarmed paper+paper test state means
@@ -765,7 +765,8 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
     //    stop-system=disabled (not running),
     //    kill-switch=enabled (not halted),
     //    request-mode-change=enabled (not halted),
-    //    cancel-mode-transition=disabled (no DB → no pending intent).
+    //    cancel-mode-transition=disabled (no DB → no pending intent),
+    //    recover-orphaned-run=disabled (no DB → orphan truth unavailable).
     let router = make_router();
 
     let req = Request::builder()
@@ -792,11 +793,11 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .as_array()
         .expect("/api/v1/ops/catalog must have an 'actions' array");
 
-    // Exactly 9 entries (PAPER-SAFE-FLATTEN-ROUTE-01: flatten-paper-positions added).
+    // Exactly 10 entries: recovery and paper-safe flatten are both canonical actions.
     assert_eq!(
         actions.len(),
-        9,
-        "catalog must have exactly 9 entries; got: {actions:?}"
+        10,
+        "catalog must have exactly 10 entries; got: {actions:?}"
     );
 
     // Collect action_key values.
@@ -805,7 +806,7 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .filter_map(|a| a["action_key"].as_str())
         .collect();
 
-    // All 9 supported keys must be present.
+    // All 10 supported keys must be present.
     for expected_key in &[
         "arm-execution",
         "disarm-execution",
@@ -815,6 +816,7 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         "request-mode-change",
         "cancel-mode-transition",
         "clear-halted-run",
+        "recover-orphaned-run",
         "flatten-paper-positions",
     ] {
         assert!(
@@ -919,8 +921,18 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         by_key("cancel-mode-transition")["disabled_reason"].is_string(),
         "cancel-mode-transition must have a disabled_reason when no pending intent"
     );
-}
 
+    // Orphan recovery requires durable run/lease truth. No DB must fail closed.
+    assert_eq!(
+        by_key("recover-orphaned-run")["enabled"],
+        false,
+        "recover-orphaned-run must be disabled when durable orphan truth is unavailable"
+    );
+    assert!(
+        by_key("recover-orphaned-run")["disabled_reason"].is_string(),
+        "recover-orphaned-run must explain why it is disabled when no DB is available"
+    );
+}
 #[tokio::test]
 async fn gui_contract_execution_orders_503_without_snapshot() {
     // /api/v1/execution/orders must return HTTP 503 when no execution snapshot exists.
