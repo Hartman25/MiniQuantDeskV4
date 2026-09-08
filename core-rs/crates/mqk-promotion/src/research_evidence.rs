@@ -251,7 +251,7 @@ fn str_array<'a>(v: &'a Value, path: &[&str]) -> Vec<&'a str> {
 }
 
 /// Fail-closed structural verification + hash-binding + AUTHORITY-anchoring
-/// + statistical-threshold extraction (P7C-REPAIR-01/-02 CORE RULE). Parses
+/// and statistical-threshold extraction (P7C-REPAIR-01/-02 CORE RULE). Parses
 /// `economic_walk_forward_json` and `judge_json` (the RAW text content of
 /// those real Research artifacts) and `economic_daily_returns_csv` (the raw
 /// bytes of the daily-returns CSV the economic artifact claims to have
