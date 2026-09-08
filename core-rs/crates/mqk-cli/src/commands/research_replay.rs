@@ -921,7 +921,7 @@ pub fn run_research_replay_backtest(args: ResearchReplayArgs) -> Result<Research
     };
 
     let stress_output =
-        mqk_backtest::run_backtest_stress_suite(&report, &base_config, &bars, &make_strategy);
+        mqk_backtest::run_backtest_stress_suite(&report, &base_config, &bars, make_strategy);
     mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output)
         .context("write_canonical_stress_suite failed")?;
 
@@ -1368,7 +1368,7 @@ mod tests {
         };
 
         let stress_output =
-            mqk_backtest::run_backtest_stress_suite(&report, &base_config, &bars, &make_strategy);
+            mqk_backtest::run_backtest_stress_suite(&report, &base_config, &bars, make_strategy);
         mqk_artifacts::write_canonical_stress_suite(&init_result.run_dir, &stress_output).unwrap();
 
         let gauntlet_output = mqk_backtest::run_robustness_gauntlet_with_symbol_loo_factory(
@@ -1612,8 +1612,8 @@ mod tests {
         let evidence =
             mqk_promotion::resolve_backtest_evidence(&dir.join("artifacts"), summary.run_id)
                 .expect("resolve_backtest_evidence failed");
-        assert_eq!(evidence.robustness_evidence.is_complete, true);
-        assert_eq!(evidence.robustness_evidence.all_applicable_passed, true);
+        assert!(evidence.robustness_evidence.is_complete);
+        assert!(evidence.robustness_evidence.all_applicable_passed);
 
         // R3.6: no Paper/Live/OMS/broker call is reachable from this
         // command -- structurally true by this module's own dependency
