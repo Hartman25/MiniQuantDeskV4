@@ -219,33 +219,82 @@ if ($DesignContent -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*CLOSED' -and
 }
 
 # -----------------------------------------------------------------------
-# G14: MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 (Patch 10, commit
-# e4fc73cac56bc2a21eac60af46a28ee62e2dd8e4) never touched the master patch
-# ledger or started BACKTEST-GUI-CLOSURE-01 -- proven against Patch 10's own
-# fixed historical commit diff, not against BACKTEST-GUI-CLOSURE-01's current
-# ledger status. BACKTEST-GUI-CLOSURE-01 was QUEUED when Patch 10 landed and
-# has since legitimately closed via unrelated later work; a permanent
-# premarket guard requiring it stay QUEUED forever would fail on every later
-# accepted patch that closes it, which is not a regression in this GUI-only
-# patch. The live diff check (this session's uncommitted changes) still
-# guards against *this* guard-repair patch touching the ledger.
+# G14: Patch-10 ledger-scope invariant.
+#
+# Two different facts are intentionally kept separate:
+#
+# G14a -- CURRENT PATCH INTEGRITY
+# The working/index diff must never touch the historical master patch ledger.
+# This is always locally enforceable, including in shallow CI checkouts.
+#
+# G14b -- FIXED HISTORICAL EVIDENCE
+# When Patch 10's immutable commit object is available locally, re-prove that
+# its committed path set did not touch the ledger. A depth-limited checkout
+# may legitimately omit that old commit object; in that specific case only,
+# absence of the object is reported as unavailable historical re-proof rather
+# than fabricated evidence of a Patch-10 violation. A missing commit in a
+# non-shallow repository remains a fail-closed error.
 # -----------------------------------------------------------------------
 $Patch10Commit = 'e4fc73cac56bc2a21eac60af46a28ee62e2dd8e4'
-$MasterLedgerTouched = @($DiffNames | Where-Object { $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$' })
+$MasterLedgerTouched = @(
+    $DiffNames |
+        Where-Object {
+            $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$'
+        }
+)
+
+if ($MasterLedgerTouched.Count -eq 0) {
+    Assert-Pass "G14a: current working/index diff does not touch the historical master patch ledger"
+} else {
+    Assert-Fail "G14a: current working/index diff touches the historical master patch ledger: $($MasterLedgerTouched -join ', ')"
+}
 
 Push-Location $RepoRoot
-$Patch10CommitExists = (git cat-file -t $Patch10Commit 2>$null) -eq 'commit'
+
+$ShallowText = @(
+    git rev-parse --is-shallow-repository 2>$null
+)
+
+$RepoIsShallow = (
+    $LASTEXITCODE -eq 0 -and
+    $ShallowText.Count -eq 1 -and
+    $ShallowText[0].Trim() -eq 'true'
+)
+
+git cat-file -e ($Patch10Commit + '^{commit}') 2>$null
+$Patch10CommitExists = ($LASTEXITCODE -eq 0)
+
 $Patch10DiffNames = if ($Patch10CommitExists) {
-    @(git show --name-only --format='' $Patch10Commit 2>$null) | Where-Object { $_ }
-} else { @() }
+    @(
+        git diff-tree `
+            --no-commit-id `
+            --name-only `
+            -r `
+            $Patch10Commit 2>$null
+    ) | Where-Object { $_ }
+} else {
+    @()
+}
+
 Pop-Location
 
-$Patch10TouchedLedger = @($Patch10DiffNames | Where-Object { $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$' })
+$Patch10TouchedLedger = @(
+    $Patch10DiffNames |
+        Where-Object {
+            $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$'
+        }
+)
 
-if ($Patch10CommitExists -and $MasterLedgerTouched.Count -eq 0 -and $Patch10TouchedLedger.Count -eq 0) {
-    Assert-Pass "G14: Patch 10 ($Patch10Commit) never touched the master patch ledger (fixed historical evidence), and this patch does not touch it either"
+if ($Patch10CommitExists) {
+    if ($Patch10TouchedLedger.Count -eq 0) {
+        Assert-Pass "G14b: Patch 10 ($Patch10Commit) historical path set is available locally and does not touch the master patch ledger"
+    } else {
+        Assert-Fail "G14b: Patch 10 historical commit touched the master patch ledger: $($Patch10TouchedLedger -join ', ')"
+    }
+} elseif ($RepoIsShallow) {
+    Assert-Pass "G14b: Patch 10 historical commit is unavailable in this shallow checkout; historical scope is not re-proven here, while G14a still enforces the current patch boundary"
 } else {
-    Assert-Fail "G14: master patch ledger touched by Patch 10's historical commit, by this patch's live diff, or Patch 10 commit not found"
+    Assert-Fail "G14b: Patch 10 historical commit is missing from a non-shallow repository"
 }
 
 Write-Host ''
