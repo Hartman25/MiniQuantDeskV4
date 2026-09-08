@@ -1,3 +1,11 @@
+// Shared integration-test helper module.
+//
+// Each `tests/scenario_*.rs` file is compiled as a separate integration-test
+// crate and includes this entire module via `mod common;`. A helper used by
+// one scenario therefore legitimately appears unused when this module is
+// compiled for another scenario. Keep dead-code suppression scoped to this
+// test-only shared module; production code remains fully linted.
+#![allow(dead_code)]
 //! P7C-REPAIR-02/-03 (mission Section 5A / FINAL WAVE-2 BLOCKER REPAIR Patch
 //! B): shared test-only helper replacing the removed
 //! `VerifiedPromotionOosEvidence::valid_for_testing` production bypass.
