@@ -24,7 +24,7 @@
 #               Postgres service, runs migrations from scratch, and executes a
 #               narrow set of DB-backed safety proofs on every merge.
 #
-#   windows   - CI-PLATFORM-01: fmt + clippy + workspace tests on windows-latest.
+#   windows   - CI-PLATFORM-01: fmt + clippy + compile-all tests + no-DB unit/bin execution on windows-latest.
 #               Proves the build is clean on the real operator platform class.
 #               No DB lanes (no Postgres service on windows-latest runners).
 #               CARGO_BUILD_JOBS=1 + CARGO_INCREMENTAL=0 + RUSTFLAGS=-C debuginfo=0
@@ -282,8 +282,10 @@ jobs:
     runs-on: windows-latest
     # CI-PLATFORM-01: Windows-class platform validation.
     #
-    # Proves: cargo fmt, clippy (deny warnings), and workspace tests compile and pass
-    #         on the same OS class as the real operator environment.
+    # Proves: cargo fmt and clippy pass on the operator OS class; every workspace test
+    #         target compiles on Windows; no-DB unit/bin tests execute on Windows.
+    #         DB-backed integration execution remains authoritative in the Ubuntu
+    #         Postgres-backed rust/db-proof jobs.
     # Does NOT prove: DB-backed lanes. GitHub Actions windows-latest runners do not
     #         expose Docker service containers, so Postgres is unavailable here.
     #         DB-backed proof is covered by the ubuntu db-proof job on every push.
@@ -365,5 +367,8 @@ jobs:
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test --workspace (no-DB, --test-threads=1)
-        run: cargo test --workspace -- --test-threads=1
+      - name: Compile all workspace test targets on Windows
+        run: cargo test --workspace --no-run
+
+      - name: Execute no-DB workspace unit and binary tests
+        run: cargo test --workspace --lib --bins -- --test-threads=1
