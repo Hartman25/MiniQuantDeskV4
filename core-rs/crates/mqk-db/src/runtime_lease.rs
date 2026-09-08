@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+type RuntimeLeaderLeaseStorageRow = (Option<Uuid>, String, i64, DateTime<Utc>, DateTime<Utc>);
+
 // ---------------------------------------------------------------------------
 // RUNTIME-LEASE-RUN-IDENTITY-AUTHORITY-01: canonical TTL constants
 // ---------------------------------------------------------------------------
@@ -497,7 +499,7 @@ pub async fn acquire_or_refresh_lease_for_running_run(
         };
     }
 
-    let existing: Option<(Option<Uuid>, String, i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+    let existing: Option<RuntimeLeaderLeaseStorageRow> = sqlx::query_as(
         "SELECT run_id, holder_id, epoch, lease_expires_at, updated_at FROM runtime_leader_lease WHERE id = 1",
     )
     .fetch_optional(&mut *tx)
