@@ -359,15 +359,15 @@ async fn oc_09_change_system_mode_legacy_still_returns_409() {
 // OPS-CONTROL-02 catalog tests (pure in-process)
 // ---------------------------------------------------------------------------
 
-/// OC-20: catalog has exactly 9 entries after PAPER-SAFE-FLATTEN-ROUTE-01 adds flatten-paper-positions.
+/// OC-20: catalog has exactly 10 entries after flatten and recovery-action expansion.
 #[tokio::test]
-async fn oc_20_catalog_has_exactly_9_entries() {
+async fn oc_20_catalog_has_exactly_10_entries() {
     let j = get_catalog(no_db_router()).await;
     let actions = j["actions"].as_array().expect("actions must be an array");
     assert_eq!(
         actions.len(),
-        9,
-        "OC-20: catalog must have exactly 9 entries; got: {:?}",
+        10,
+        "OC-20: catalog must have exactly 10 entries; got: {:?}",
         actions
             .iter()
             .filter_map(|a| a["action_key"].as_str())
