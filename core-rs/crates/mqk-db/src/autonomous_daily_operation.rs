@@ -1480,17 +1480,17 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 ///       (`status = 'ok'`, every mismatch counter is zero, and
 ///       `unmatched_broker_events = 0`; no row at all is never treated as
 ///       clean).
-///   A `controller_degraded`-repaired operation that reaches
-///   `evidence_degraded` after `reconcile_durable_run_without_local_owner`
-///   already proved these same facts (AUTONOMOUS-DAILY-CONTROLLER-
-///   DEGRADED-RECOVERY-01) is therefore released once its own market date
-///   has passed; a same-day row of this exact shape is unaffected (`now_utc`
-///   still falls inside its own persisted window via the next clause, so it
-///   still blocks exactly as conservatively as before); a genuinely mid-run
-///   degraded row (`running -> evidence_degraded` directly, `stopped_at_utc`
-///   never set) or one with any unresolved outbox/reconcile evidence stays
-///   unconditionally relevant forever, exactly like the unconditional
-///   states above.
+///       A `controller_degraded`-repaired operation that reaches
+///       `evidence_degraded` after `reconcile_durable_run_without_local_owner`
+///       already proved these same facts (AUTONOMOUS-DAILY-CONTROLLER-
+///       DEGRADED-RECOVERY-01) is therefore released once its own market date
+///       has passed; a same-day row of this exact shape is unaffected (`now_utc`
+///       still falls inside its own persisted window via the next clause, so it
+///       still blocks exactly as conservatively as before); a genuinely mid-run
+///       degraded row (`running -> evidence_degraded` directly, `stopped_at_utc`
+///       never set) or one with any unresolved outbox/reconcile evidence stays
+///       unconditionally relevant forever, exactly like the unconditional
+///       states above.
 /// - `now_utc` falls within its persisted
 ///   `preopen_start_utc ..= postclose_finalize_utc` window, or
 /// - it durably bound a run (`run_id is not null`) that has no durable
