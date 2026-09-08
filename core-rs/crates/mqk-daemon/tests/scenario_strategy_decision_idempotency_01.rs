@@ -113,10 +113,13 @@ use mqk_strategy::{
     IntentMode, StrategyBarResult, StrategyIntents, StrategyOutput, StrategySpec, TargetPosition,
 };
 
+const TEST_STRATEGY_SEMANTIC_FINGERPRINT: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 fn live_result(targets: Vec<TargetPosition>) -> StrategyBarResult {
     StrategyBarResult {
         spec: StrategySpec::new("test_strategy", 300),
-        semantic_fingerprint: "test-fixture:test_strategy".to_string(),
+        semantic_fingerprint: TEST_STRATEGY_SEMANTIC_FINGERPRINT.to_string(),
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput { targets },
@@ -451,6 +454,7 @@ async fn seed_active_paper_promotion(
     timeframe_secs: i64,
 ) {
     let now = chrono::Utc::now();
+
     let seed = |suffix: &str| {
         Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -467,8 +471,8 @@ async fn seed_active_paper_promotion(
             strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             timeframe_secs,
-            config_fingerprint: None,
-            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            config_fingerprint: Some(TEST_STRATEGY_SEMANTIC_FINGERPRINT.to_string()),
+            config_identity_status: "verified_v1".to_string(),
             previous_state: previous_state.map(|s| s.to_string()),
             new_state: new_state.to_string(),
             parent_transition_id: None,
