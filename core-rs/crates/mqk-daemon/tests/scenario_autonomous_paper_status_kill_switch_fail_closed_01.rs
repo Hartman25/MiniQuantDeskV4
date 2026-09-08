@@ -129,9 +129,8 @@ async fn apsks01b_paper_status_fails_closed_when_status_snapshot_unavailable() {
         "degraded",
         "status snapshot unavailable must surface truth_state=degraded"
     );
-    assert_eq!(
+    assert!(
         body["kill_switch_active"].as_bool().unwrap(),
-        true,
         "kill_switch_active must fail closed to true when current_status_snapshot is unavailable \
          -- unknown durable kill-switch truth must never be represented as a known-inactive kill switch"
     );
