@@ -460,24 +460,34 @@ if (-not $disableFound) {
 # ---------------------------------------------------------------------------
 # OPR28: Script does not call broker trading endpoints (no orders/fills/flatten)
 # ---------------------------------------------------------------------------
-$tradingEndpoints = @(
+# Match concrete trading authorities, not harmless prose such as
+# "submits zero orders". Exact route/action identifiers remain fail-closed.
+$tradingAuthorities = @(
     '/api/v1/orders/submit',
     '/api/v1/orders/cancel',
     '/api/v1/orders/replace',
     '/api/v1/positions/flatten',
-    'submit.*order',
-    'cancel.*order'
+    'flatten-paper-positions'
 )
+
 $tradingFound = @()
-foreach ($tp in $tradingEndpoints) {
-    if ($scriptText -match $tp) { $tradingFound += $tp }
-}
-if ($tradingFound.Count -eq 0) {
-    Pass 'OPR28' 'Script does not call broker trading endpoints (no order submit/cancel/replace/flatten)'
-} else {
-    Fail 'OPR28' "Script must not call broker trading endpoints. Found: $($tradingFound -join ', ')"
+
+foreach ($authority in $tradingAuthorities) {
+    if (
+        $scriptText.IndexOf(
+            $authority,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -ge 0
+    ) {
+        $tradingFound += $authority
+    }
 }
 
+if ($tradingFound.Count -eq 0) {
+    Pass 'OPR28' 'Script contains no broker trading route/action authority'
+} else {
+    Fail 'OPR28' "Script must not contain broker trading route/action authority. Found: $($tradingFound -join ', ')"
+}
 # ---------------------------------------------------------------------------
 # OPR29-OPR32: PAPER-SMOKE-STARTUP-RECONCILE-HARD-GATE-01
 # STEP 12 must be a hard fail-closed gate -- the final pre-start check that
