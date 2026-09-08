@@ -65,12 +65,14 @@ Assert-True ($NotifyContent -match '\.\s*status\s*\(\s*\)\s*\.\s*is_success\s*\(
 Assert-True ($NotifyContent -match 'status_code\s*=\s*summary\.status_code') 'Discord non-2xx failure logs use sanitized status_code'
 Assert-True ($NotifyContent -match 'status_class\s*=\s*summary\.status_class') 'Discord non-2xx failure logs use sanitized status_class'
 
-Assert-False ($NotifyContent -match '%\s*err') 'notify.rs does not format raw reqwest errors with %err'
-Assert-False ($NotifyContent -match '\berror\s*=\s*%\s*err') 'notify.rs does not log error = %err'
-Assert-False ($NotifyContent -match 'warn!\(\s*%\s*err') 'notify.rs does not call warn!(%err...)'
-Assert-False ($NotifyContent -match 'error!\(\s*%\s*err') 'notify.rs does not call error!(%err...)'
-Assert-False ($NotifyContent -match 'tracing::warn!\(\s*%\s*err') 'notify.rs does not call tracing::warn!(%err...)'
-Assert-False ($NotifyContent -match 'tracing::error!\(\s*%\s*err') 'notify.rs does not call tracing::error!(%err...)'
+# `err` is the reqwest delivery-error binding. Match it as a complete Rust
+# identifier so unrelated bindings such as `error` do not false-match.
+Assert-False ($NotifyContent -match '%\s*err\b') 'notify.rs does not format raw reqwest errors with %err'
+Assert-False ($NotifyContent -match '\berror\s*=\s*%\s*err\b') 'notify.rs does not log error = %err'
+Assert-False ($NotifyContent -match 'warn!\(\s*%\s*err\b') 'notify.rs does not call warn!(%err...)'
+Assert-False ($NotifyContent -match 'error!\(\s*%\s*err\b') 'notify.rs does not call error!(%err...)'
+Assert-False ($NotifyContent -match 'tracing::warn!\(\s*%\s*err\b') 'notify.rs does not call tracing::warn!(%err...)'
+Assert-False ($NotifyContent -match 'tracing::error!\(\s*%\s*err\b') 'notify.rs does not call tracing::error!(%err...)'
 Assert-False ($NotifyContent -match '\berr\s*\.\s*to_string\s*\(') 'notify.rs does not stringify raw reqwest errors'
 Assert-False ($NotifyContent -match '\berr\s*\.\s*url\s*\(') 'notify.rs does not read request URLs from reqwest errors'
 Assert-False ($NotifyContent -match '\berr\s*\.\s*url_mut\s*\(') 'notify.rs does not mutate/read request URLs from reqwest errors'
