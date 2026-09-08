@@ -10,11 +10,12 @@
 #   - still fails when an eligible untracked or tracked source/config file
 #     introduces genuine live-authority assignment syntax.
 #
-# This is a mutation self-test: it creates small, uniquely-named temporary
-# fixtures (and, for the tracked cases, stages them with `git add`) and
-# always removes/unstages them in `finally`. It never touches the real
-# smoke_logs/ evidence, the real updated-ledger file, or any other tracked
-# content.
+# This is a mutation self-test: it creates a disposable shallow clone under
+# the OS temporary directory, creates/stages all fixtures only inside that
+# clone, and removes the clone after verification. Fixture setup is fail-closed:
+# if required test state cannot be created, the case fails before G14 runs.
+# The source repository's smoke_logs/, index, and other operator evidence are
+# never mutation targets.
 #
 # No daemon, no DB, no live calls, no .env.local, no secrets printed.
 # Exit codes: 0 = all assertions pass, 1 = any assertion failed.
@@ -36,9 +37,43 @@ function Assert-Fail([string]$Msg) {
     Write-Host "  FAIL: $Msg" -ForegroundColor Red
 }
 
-$RepoRoot   = (Resolve-Path "$PSScriptRoot\..\..\").Path
-$GuardScript = Join-Path $PSScriptRoot 'test_pdt_cross_symbol_summation.ps1'
+$SourceRepoRoot = (Resolve-Path "$PSScriptRoot\..\..\").Path
 $Stamp = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$ScratchRepo = Join-Path $env:TEMP ("mqk-pdt-g14-selftest-" + $Stamp)
+
+if (Test-Path -LiteralPath $ScratchRepo) {
+    Write-Host "  FAIL: disposable self-test repo already exists: $ScratchRepo" -ForegroundColor Red
+    exit 1
+}
+
+git clone --quiet --depth 1 --no-local $SourceRepoRoot $ScratchRepo
+
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $ScratchRepo -PathType Container)) {
+    Write-Host "  FAIL: could not create disposable self-test repository" -ForegroundColor Red
+    exit 1
+}
+
+$RepoRoot = $ScratchRepo
+$GuardScript = Join-Path $RepoRoot 'tests\script_guards\test_pdt_cross_symbol_summation.ps1'
+$ScratchSmokeLogs = Join-Path $RepoRoot 'smoke_logs'
+
+try {
+    New-Item `
+        -ItemType Directory `
+        -Path $ScratchSmokeLogs `
+        -Force `
+        -ErrorAction Stop |
+        Out-Null
+}
+catch {
+    Write-Host "  FAIL: could not create disposable smoke_logs fixture root: $($_.Exception.Message)" -ForegroundColor Red
+    Remove-Item -LiteralPath $ScratchRepo -Recurse -Force -ErrorAction SilentlyContinue
+    exit 1
+}
+
+$SourceIndexBefore = @(
+    git -C $SourceRepoRoot diff --cached --name-only
+)
 
 Write-Host ''
 Write-Host '============================================================'
@@ -57,23 +92,89 @@ function Test-G14Case {
         [scriptblock]$Teardown,
         [bool]$ExpectFail
     )
+
+    $PreviousErrorActionPreference = $ErrorActionPreference
+
     try {
+        # Fixture creation is load-bearing test setup. Any PowerShell setup
+        # error must terminate this case before the production guard runs;
+        # otherwise a missing fixture can manufacture a false green.
+        $ErrorActionPreference = 'Stop'
+
         & $Setup
+
         $line = Invoke-GuardG14Line
+
         if (-not $line) {
             Assert-Fail "$Name -- G14 line not found in guard output"
-            return
         }
-        $failed = $line -match 'FAIL'
-        if ($failed -eq $ExpectFail) {
-            Assert-Pass "$Name (expected FAIL=$ExpectFail, got: $($line.Trim()))"
-        } else {
-            Assert-Fail "$Name -- expected FAIL=$ExpectFail but got: $($line.Trim())"
+        else {
+            $failed = $line -match 'FAIL'
+
+            if ($failed -eq $ExpectFail) {
+                Assert-Pass "$Name (expected FAIL=$ExpectFail, got: $($line.Trim()))"
+            }
+            else {
+                Assert-Fail "$Name -- expected FAIL=$ExpectFail but got: $($line.Trim())"
+            }
         }
-    } catch {
-        Assert-Fail "$Name -- exception: $($_.Exception.Message)"
-    } finally {
-        & $Teardown
+    }
+    catch {
+        Assert-Fail "$Name -- setup/guard exception: $($_.Exception.Message)"
+    }
+    finally {
+        try {
+            & $Teardown
+        }
+        catch {
+            Assert-Fail "$Name -- teardown exception: $($_.Exception.Message)"
+        }
+
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+}
+
+function Invoke-FixtureGitChecked {
+    param(
+        [string[]]$GitArguments,
+        [string]$FailureMessage
+    )
+
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $GitOutput = @()
+    $GitExit = $null
+
+    try {
+        # Windows PowerShell can promote native stderr to a terminating
+        # ErrorRecord when the caller uses ErrorActionPreference=Stop.
+        # Capture native stderr under Continue, then fail only on Git's
+        # actual process exit status.
+        $ErrorActionPreference = 'Continue'
+
+        $GitOutput = @(
+            & git @GitArguments 2>&1
+        )
+
+        $GitExit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+
+    if ($GitExit -ne 0) {
+        $Detail = @(
+            $GitOutput |
+                ForEach-Object {
+                    $_.ToString().Trim()
+                } |
+                Where-Object { $_ }
+        ) -join ' | '
+
+        if ($Detail) {
+            throw "$FailureMessage (git exit $GitExit): $Detail"
+        }
+
+        throw "$FailureMessage (git exit $GitExit)"
     }
 }
 
@@ -181,12 +282,20 @@ Test-G14Case -Name '7: untracked JSON config fixture ("live_routing_enabled": tr
 $f8 = Join-Path $RepoRoot "core-rs\_g14_selftest_tracked_tmp_$Stamp.rs"
 Test-G14Case -Name "8: tracked (staged) source fixture (approved_for_live: true)" -ExpectFail $true `
     -Setup {
-        Set-Content -Path $f8 -Value 'approved_for_live: true'
-        git -C $RepoRoot add -- $f8 2>&1 | Out-Null
+        Set-Content -LiteralPath $f8 -Value 'approved_for_live: true' -ErrorAction Stop
+
+        Invoke-FixtureGitChecked `
+            -GitArguments @('-C', $RepoRoot, 'add', '--', $f8) `
+            -FailureMessage 'git add failed for staged Rust fixture'
     } `
     -Teardown {
-        git -C $RepoRoot reset -- $f8 2>&1 | Out-Null
-        Remove-Item -Path $f8 -Force -ErrorAction SilentlyContinue
+        Invoke-FixtureGitChecked `
+            -GitArguments @('-C', $RepoRoot, 'restore', '--staged', '--', $f8) `
+            -FailureMessage 'git restore --staged failed for Rust fixture'
+
+        if (Test-Path -LiteralPath $f8) {
+            Remove-Item -LiteralPath $f8 -Force -ErrorAction Stop
+        }
     }
 
 # ---------------------------------------------------------------------------
@@ -198,31 +307,72 @@ Test-G14Case -Name "8: tracked (staged) source fixture (approved_for_live: true)
 $f9 = Join-Path $RepoRoot "tests\script_guards\_g14_selftest_comment_tmp_$Stamp.ps1"
 Test-G14Case -Name "9: tracked (staged) script_guards comment fixture" -ExpectFail $false `
     -Setup {
-        Set-Content -Path $f9 -Value '# no approved_for_live=true / live_routing_enabled=true allowed here'
-        git -C $RepoRoot add -- $f9 2>&1 | Out-Null
+        Set-Content -LiteralPath $f9 -Value '# no approved_for_live=true / live_routing_enabled=true allowed here' -ErrorAction Stop
+
+        Invoke-FixtureGitChecked `
+            -GitArguments @('-C', $RepoRoot, 'add', '--', $f9) `
+            -FailureMessage 'git add failed for staged script-guard fixture'
     } `
     -Teardown {
-        git -C $RepoRoot reset -- $f9 2>&1 | Out-Null
-        Remove-Item -Path $f9 -Force -ErrorAction SilentlyContinue
+        Invoke-FixtureGitChecked `
+            -GitArguments @('-C', $RepoRoot, 'restore', '--staged', '--', $f9) `
+            -FailureMessage 'git restore --staged failed for script-guard fixture'
+
+        if (Test-Path -LiteralPath $f9) {
+            Remove-Item -LiteralPath $f9 -Force -ErrorAction Stop
+        }
     }
 
 # ---------------------------------------------------------------------------
-# 10. Existing clean repository state (real smoke_logs/ + real untracked
-#     ledger file present, no fixtures) passes.
+# 10. Clean disposable repository state after the mutation fixtures passes.
 # ---------------------------------------------------------------------------
-Test-G14Case -Name '10: existing repo state with real untracked evidence present' -ExpectFail $false `
+Test-G14Case -Name '10: clean disposable repository state after fixtures' -ExpectFail $false `
     -Setup {} -Teardown {}
 
 # ---------------------------------------------------------------------------
-# Cleanup verification -- confirm no self-test fixtures or git index changes
-# were left behind.
+# Cleanup verification.
+#
+# All mutation state belongs to the disposable clone. The source repository
+# index must remain byte-for-byte outside this self-test's authority.
 # ---------------------------------------------------------------------------
 $Leftover = git -C $RepoRoot status --porcelain=v1 --untracked-files=all 2>$null |
     Where-Object { $_ -match '_g14_selftest_' }
+
 if (-not $Leftover) {
-    Assert-Pass "cleanup: no _g14_selftest_ fixtures left in git status"
-} else {
-    Assert-Fail "cleanup: leftover self-test fixtures detected: $($Leftover -join ' | ')"
+    Assert-Pass "cleanup: no _g14_selftest_ fixtures left in disposable git status"
+}
+else {
+    Assert-Fail "cleanup: leftover disposable self-test fixtures detected: $($Leftover -join ' | ')"
+}
+
+$SourceIndexAfter = @(
+    git -C $SourceRepoRoot diff --cached --name-only
+)
+
+$SourceIndexDelta = @(
+    Compare-Object `
+        -ReferenceObject $SourceIndexBefore `
+        -DifferenceObject $SourceIndexAfter
+)
+
+if ($SourceIndexDelta.Count -eq 0) {
+    Assert-Pass "cleanup: source repository index unchanged"
+}
+else {
+    Assert-Fail "cleanup: source repository index changed during self-test"
+}
+
+try {
+    Remove-Item `
+        -LiteralPath $ScratchRepo `
+        -Recurse `
+        -Force `
+        -ErrorAction Stop
+
+    Assert-Pass "cleanup: disposable self-test repository removed"
+}
+catch {
+    Assert-Fail "cleanup: could not remove disposable self-test repository: $($_.Exception.Message)"
 }
 
 # ---------------------------------------------------------------------------
