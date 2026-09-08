@@ -139,10 +139,12 @@ impl ReconcileGate for PassGate {
 /// `Clone` shares the SAME underlying `Arc` state — a clone handed to
 /// `BrokerGateway::for_test` and the original kept by the test observe the
 /// identical counter.
+type HermeticBrokerBehavior = Box<dyn Fn() -> Result<BrokerSubmitResponse, BrokerError> + Send>;
+
 #[derive(Clone)]
 struct HermeticBroker {
     submit_count: Arc<AtomicU32>,
-    behavior: Arc<Mutex<Box<dyn Fn() -> Result<BrokerSubmitResponse, BrokerError> + Send>>>,
+    behavior: Arc<Mutex<HermeticBrokerBehavior>>,
 }
 impl HermeticBroker {
     fn always_ok() -> Self {
