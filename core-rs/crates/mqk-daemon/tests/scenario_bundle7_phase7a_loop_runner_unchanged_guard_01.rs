@@ -1,133 +1,64 @@
-//! DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A structural guard.
+//! DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 historical structural guard.
 //!
-//! This patch (and the ATOMICITY-SINGLE-SNAPSHOT-REPAIR patch that follows
-//! it) own only run-start/run-stop/run-halt lifecycle integration of the
-//! dynamic-selection start gate. Neither must alter economic tick dispatch
-//! (loop_runner strategy dispatch, targets/decisions, Bundle 5/6 input/call
-//! counts, cap #6, outbox/broker writes).
+//! This file began as a patch-boundary guard for Bundle 7 Phase 7A and was
+//! narrowed again for Phase 7B. Its byte-equality claim is therefore a
+//! historical claim about those frozen patch boundaries, not a permanent
+//! prohibition on later accepted changes to `state/loop_runner.rs`.
 //!
-//! The original version of this guard proved the *entire file*
-//! byte-for-byte identical to the patch's starting HEAD. The
-//! ATOMICITY-SINGLE-SNAPSHOT-REPAIR patch legitimately changes
-//! `spawn_execution_loop`'s signature and prologue — it now receives the
-//! per-symbol dispatch assignment list as a parameter (frozen once by the
-//! caller's `StartAttemptAuthoritySnapshot`) instead of re-resolving it
-//! from env/watchlist state internally — so a whole-file byte-identical
-//! guard would fail on an in-scope, narrow, additive change.
+//! CI-R12 corrects the stale interpretation that compared the current
+//! working tree forever against the Phase-7A patch-start commit. Later
+//! independently accepted work legitimately added pre-B1C behavior such as
+//! execution heartbeat visibility, external snapshot refresh, and pre-event
+//! handling. Reverting that production behavior merely to satisfy an old
+//! patch-boundary test would be incorrect.
 //!
-//! BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 3
-//! (startup barrier) and DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-
-//! FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF (R6, "BARRIER LEADERSHIP/TRUTH")
-//! each legitimately moved this guard's start anchor / touched its
-//! prologue, for the same class of reason: lifecycle/exit-telemetry
-//! wiring, never economic dispatch.
+//! The durable proof is now split cleanly:
 //!
-//! PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1 goes further:
-//! it adds structured task-side leadership-release/join truth
-//! (`ExecutionLoopExit::leadership_release_outcome`) to *every* exit
-//! branch in this file — the two pre-barrier branches (in the prologue,
-//! already excluded), the mid-loop halt branches (deadman/heartbeat/tick-
-//! error/WS-gap, interleaved with the real dispatch code), and the final
-//! normal-stop exit (after the dispatch loop closes). A single contiguous
-//! "anchor line to end-of-file" comparison — this guard's design since its
-//! second revision — cannot exclude those mid-loop and post-loop exit
-//! branches from a economic-dispatch-only comparison, because they are
-//! interleaved with (not merely adjacent to) the real dispatch code.
+//! * `FROZEN_ECONOMIC_BASELINE` remains the immutable lineage origin.
+//! * `PATCH_START_HEAD` remains the Phase-7A R6 historical patch start.
+//! * `PHASE_7B_START_HEAD` and `PHASE_7B_CLOSURE_HEAD` are frozen historical
+//!   commits. The pre-B1C section is byte-compared between those two commits,
+//!   proving Phase 7B did not silently alter the section it declared frozen.
+//! * ancestry checks prove that full historical chain remains on current HEAD.
+//! * the current working tree is checked structurally by the prologue test;
+//!   it is deliberately not byte-compared to a months-old patch-start commit.
 //!
-//! This revision narrows the guard's scope to match its own stated intent
-//! precisely: it proves *only* the actual economic dispatch block — from
-//! the post-tick-success snapshot/outbox read through the last decision-
-//! dispatch statement, i.e. everything textually between
-//! `REQUIRED_DISPATCH_BODY_START_ANCHOR` and the matching close of the
-//! enclosing `loop { ... }` block (found by brace-depth counting, not a
-//! second literal anchor string, so it does not itself need bumping when
-//! unrelated trailing exit-branch text changes) — is byte-for-byte
-//! identical to `PATCH_START_HEAD`. Every exit branch (pre-barrier,
-//! mid-loop halt, and the final normal-stop exit) is deliberately excluded
-//! from this byte-diff; their behavior is proven by the crate's own
-//! extensive `state/loop_runner.rs` and `state/lifecycle.rs` unit/
-//! integration test suite instead (`cargo test -p mqk-daemon --lib`),
-//! matching this guard's own established philosophy that not everything
-//! needs to be a byte-diff to be proven.
+//! The B1C economic-dispatch section remains outside this historical
+//! pre-dispatch comparison. Phase 7B explicitly owned that section and its
+//! behavior is covered by its dedicated closure guards and runtime tests.
 //!
-//! It also renames the rolling comparison anchor from the misleadingly-
-//! permanent-sounding `STARTING_HEAD` to `PATCH_START_HEAD` — it was never
-//! the immutable baseline despite the name; it is, and always was,
-//! "whichever commit the currently-active patch most recently bumped it
-//! to." `FROZEN_ECONOMIC_BASELINE` is the true, never-bumped, original
-//! reference point this whole lineage traces back to — asserted as a real
-//! ancestor of `PATCH_START_HEAD` below (not byte-diffed against
-//! directly: even this newly-narrowed dispatch-only block cannot be
-//! usefully compared against a commit that predates every patch that has
-//! since resolved this crate's own strategy-dispatch/decision plumbing;
-//! ancestry is the honest, checkable claim that ownership traces back
-//! there, not a byte-for-byte identity that far back).
-//!
-//! If this test ever needs to change beyond bumping `PATCH_START_HEAD`,
-//! that is itself proof the patch scope was violated — fix the patch, not
-//! the guard.
-//!
-//! # PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE narrowing
-//!
-//! Bundle 7 Phase 7B is a *different*, explicitly wider-scoped patch than
-//! every patch this guard previously accommodated: its entire mandate is to
-//! wire the frozen dynamic-selection plan/host pool into the B1C economic
-//! dispatch section this guard protects — for the `PaperEnforcedAllowed`
-//! path only. Off/Shadow/legacy dispatch must remain provably unchanged;
-//! the `PaperEnforcedAllowed` path is now legitimately new code.
-//!
-//! This guard is narrowed one more time accordingly: the byte-identical
-//! comparison now covers only `REQUIRED_DISPATCH_BODY_START_ANCHOR` through
-//! (but not including) `PHASE_7B_OWNED_SECTION_ANCHOR` — the post-tick
-//! snapshot/outbox-reconciliation section, which Phase 7B does not touch.
-//! Everything from the B1C comment onward (dispatch-authority branching,
-//! selected-host dispatch, provenance validation, Bundle 6/5 calls, cap #6,
-//! submission) is Phase-7B-owned and proven instead by that section's own
-//! required invariants — `check_phase7b_selected_host_dispatch_closure.ps1`
-//! and the crate's `cargo test -p mqk-daemon --lib`/`--test` suite — never a
-//! byte-diff, since changing exactly that section is this patch's whole
-//! point.
+//! This keeps the original guard useful without allowing historical patch
+//! bookkeeping to veto later accepted production changes.
 
 use std::process::Command;
 
-/// The true, permanent, never-bumped origin of this guard's lineage —
-/// referenced for documentation and ancestry proof only, never as the
-/// byte-diff comparison target (see module doc above for why).
+/// Permanent origin of the Bundle-7 economic-dispatch guard lineage.
 const FROZEN_ECONOMIC_BASELINE: &str = "9323b7699af5e4c553522fa118a49c644a3611da";
 
-/// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01's required starting
-/// local HEAD / origin/main — the rolling anchor this patch's own narrow,
-/// documented change is byte-diffed against.
+/// Phase-7A R6 historical patch-start commit. Kept for ancestry truth only.
 const PATCH_START_HEAD: &str = "a0037af74ac725366b187b0f1bf7f8944bfac1ca";
+
+/// Frozen start of the accepted Phase-7B selected-host dispatch closure.
+const PHASE_7B_START_HEAD: &str = "e0e44d2b39b38ad0f2e65c2b71306c58c962140e";
+
+/// Frozen accepted Phase-7B closure commit.
+const PHASE_7B_CLOSURE_HEAD: &str = "ccfe067ec5302c64589695377be5e3d8cdf366cd";
+
 const LOOP_RUNNER_PATH: &str = "core-rs/crates/mqk-daemon/src/state/loop_runner.rs";
 
-/// The first line of the barrier-wait prologue — everything strictly above
-/// this line may differ (function signature, frozen-assignment injection,
-/// the startup barrier wait itself, both pre-barrier exit branches' now-
-/// structured leadership-release truth). Proven present by the companion
-/// test below, not byte-diffed.
+/// Current-source structural anchor for the execution-loop prologue.
 const REQUIRED_TICK_LOOP_ANCHOR: &str =
     "        let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);";
 
-/// The first line of the real economic dispatch body — post-tick-success
-/// snapshot read, outbox reconciliation, and per-symbol strategy decision
-/// dispatch (Bundle 5/6, cap #6, outbox/broker calls). Everything from
-/// this line to the matching close of the enclosing `loop { ... }` block
-/// (found by brace-depth counting below, not a second fixed anchor
-/// string) must be byte-identical to `PATCH_START_HEAD` — this is the
-/// actual economic logic this guard protects.
+/// Historical pre-B1C comparison start.
 const REQUIRED_DISPATCH_BODY_START_ANCHOR: &str =
     "                    match orchestrator.snapshot().await.context(\"snapshot failed\") {";
 
-/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE: the boundary where
-/// Phase 7B's authorized, wider-scoped ownership of the B1C economic
-/// dispatch section begins — excluded from this guard's byte-diff (see
-/// module doc). Everything from `REQUIRED_DISPATCH_BODY_START_ANCHOR` up to
-/// (not including) this line must still be byte-identical to
-/// `PATCH_START_HEAD`.
+/// Historical Phase-7B ownership boundary. Everything from this B1C marker
+/// onward was explicitly Phase-7B-owned and is excluded from the historical
+/// pre-dispatch byte comparison.
 const PHASE_7B_OWNED_SECTION_ANCHOR: &str =
     "                    // B1C: Dispatch pending strategy bar input and submit Live-intent";
-
 fn repo_root() -> std::path::PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     // CARGO_MANIFEST_DIR is .../core-rs/crates/mqk-daemon — three levels
@@ -139,23 +70,22 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-fn file_at_patch_start_head(repo_root: &std::path::Path) -> String {
+fn file_at_head(repo_root: &std::path::Path, head: &str, label: &str) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .arg("show")
-        .arg(format!("{PATCH_START_HEAD}:{LOOP_RUNNER_PATH}"))
+        .arg(format!("{head}:{LOOP_RUNNER_PATH}"))
         .output()
         .expect("failed to invoke git (required for this structural guard)");
     assert!(
         output.status.success(),
-        "failed to read {LOOP_RUNNER_PATH} at {PATCH_START_HEAD}: {}",
+        "failed to read {LOOP_RUNNER_PATH} at {label} ({head}): {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout)
-        .expect("loop_runner.rs at PATCH_START_HEAD must be valid UTF-8")
+        .unwrap_or_else(|_| panic!("{LOOP_RUNNER_PATH} at {label} must be valid UTF-8"))
 }
-
 /// Extracts the post-tick-success snapshot/outbox-reconciliation section:
 /// from `REQUIRED_DISPATCH_BODY_START_ANCHOR` up to (not including)
 /// `PHASE_7B_OWNED_SECTION_ANCHOR`. PHASE-7B-SELECTED-HOST-ECONOMIC-
@@ -190,50 +120,91 @@ fn dispatch_body_from(content: &str, label: &str) -> String {
 }
 
 #[test]
-fn loop_runner_pre_dispatch_section_is_byte_identical_to_patch_starting_head() {
+fn phase7b_pre_dispatch_section_is_historically_byte_identical_across_closure() {
     let repo_root = repo_root();
-    let patch_start_content = file_at_patch_start_head(&repo_root);
-    let current_content = std::fs::read_to_string(repo_root.join(LOOP_RUNNER_PATH))
-        .expect("failed to read current loop_runner.rs");
+    let phase7b_start_content =
+        file_at_head(&repo_root, PHASE_7B_START_HEAD, "PHASE_7B_START_HEAD");
+    let phase7b_closure_content =
+        file_at_head(&repo_root, PHASE_7B_CLOSURE_HEAD, "PHASE_7B_CLOSURE_HEAD");
 
-    let patch_start_body = dispatch_body_from(&patch_start_content, "PATCH_START_HEAD");
-    let current_body = dispatch_body_from(&current_content, "current working tree");
+    let phase7b_start_body = dispatch_body_from(&phase7b_start_content, "PHASE_7B_START_HEAD");
+    let phase7b_closure_body =
+        dispatch_body_from(&phase7b_closure_content, "PHASE_7B_CLOSURE_HEAD");
 
     assert_eq!(
-        current_body, patch_start_body,
-        "state/loop_runner.rs's post-tick-success snapshot/outbox-\
-         reconciliation section (strictly before the B1C dispatch section) \
-         differs from the required starting HEAD ({PATCH_START_HEAD}) — \
-         only Bundle 7 Phase 7B's B1C dispatch section may change; nothing \
-         before it may."
+        phase7b_closure_body, phase7b_start_body,
+        "Bundle 7 Phase 7B changed the historical post-tick-success \
+         snapshot/outbox-reconciliation section before its B1C-owned \
+         dispatch boundary; start={PHASE_7B_START_HEAD}, \
+         closure={PHASE_7B_CLOSURE_HEAD}"
     );
 }
 
-/// Ancestry proof: `PATCH_START_HEAD` must genuinely descend from
-/// `FROZEN_ECONOMIC_BASELINE` — the lineage this guard has traced since
-/// its introduction. Not a byte-diff (see module doc for why); a real
-/// `git merge-base --is-ancestor` check, so a rebase/history-rewrite that
-/// severed the lineage would be caught.
-#[test]
-fn patch_start_head_is_a_real_descendant_of_the_frozen_economic_baseline() {
-    let repo_root = repo_root();
+fn assert_ancestor(repo_root: &std::path::Path, ancestor: &str, descendant: &str, label: &str) {
     let status = Command::new("git")
         .arg("-C")
-        .arg(&repo_root)
+        .arg(repo_root)
         .arg("merge-base")
         .arg("--is-ancestor")
-        .arg(FROZEN_ECONOMIC_BASELINE)
-        .arg(PATCH_START_HEAD)
+        .arg(ancestor)
+        .arg(descendant)
         .status()
         .expect("failed to invoke git (required for this structural guard)");
     assert!(
         status.success(),
-        "FROZEN_ECONOMIC_BASELINE ({FROZEN_ECONOMIC_BASELINE}) must be a real \
-         ancestor of PATCH_START_HEAD ({PATCH_START_HEAD}) — this guard's lineage \
-         must trace back to the original frozen reference without interruption"
+        "{label}: expected {ancestor} to be an ancestor of {descendant}"
     );
 }
 
+fn current_head(repo_root: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .expect("failed to invoke git (required for this structural guard)");
+    assert!(
+        output.status.success(),
+        "failed to resolve current HEAD: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git rev-parse HEAD output must be UTF-8")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn historical_guard_commits_are_on_current_lineage() {
+    let repo_root = repo_root();
+    let head = current_head(&repo_root);
+
+    assert_ancestor(
+        &repo_root,
+        FROZEN_ECONOMIC_BASELINE,
+        PATCH_START_HEAD,
+        "frozen baseline -> Phase 7A patch start",
+    );
+    assert_ancestor(
+        &repo_root,
+        PATCH_START_HEAD,
+        PHASE_7B_START_HEAD,
+        "Phase 7A patch start -> Phase 7B start",
+    );
+    assert_ancestor(
+        &repo_root,
+        PHASE_7B_START_HEAD,
+        PHASE_7B_CLOSURE_HEAD,
+        "Phase 7B start -> Phase 7B closure",
+    );
+    assert_ancestor(
+        &repo_root,
+        PHASE_7B_CLOSURE_HEAD,
+        &head,
+        "Phase 7B closure -> current HEAD",
+    );
+}
 /// A narrower, explicit companion proof: only the function signature, the
 /// frozen-assignment-injection prologue, and the startup barrier wait may
 /// precede the dispatch body's own start; everything the dispatch body
