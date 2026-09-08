@@ -17,8 +17,9 @@
 #   5. decision.rs inserts a new Gate 1f between Gate 1 (day_signal_limit,
 #      account-wide) and Gate 1e (capital_budget), producing disposition
 #      "symbol_day_limit_reached" on trip.
-#   6. decision.rs Gate 7 Ok(true) arm increments both
-#      increment_day_signal_count and increment_symbol_day_order_count.
+#   6. decision.rs Gate 7 OutboxEnqueueOutcome::Enqueued arm increments both
+#      increment_day_signal_count and increment_symbol_day_order_count, while
+#      Duplicate does not consume either quota.
 #   7. Has the 9 D01..D09 proof tests in
 #      scenario_multi_symbol_day_order_cap_01.rs.
 #   8. This patch's diff introduces no broker/OMS/portfolio direct writes, no
@@ -165,37 +166,59 @@ if (Test-Path $DecisionRs) {
         Assert-Fail "G06: Gate 1f NOT found in expected position (between Gate 1 and Gate 1e) in decision.rs"
     }
 
-    # G07 -- Gate 7 Ok(true) increments both counters
+    # G07 -- Gate 7 Enqueued outcome increments both counters.
     #
-    # Scoped to the specific outbox-enqueue match statement rather than a
-    # first-occurrence 'Ok(true) => {' search, so a second, unrelated Ok(true)
-    # arm elsewhere in the file (e.g. added by a later patch) cannot cause
-    # this guard to inspect the wrong branch. The arm body is bounded to its
-    # own closing brace (up to the sibling 'Ok(false)' arm that follows in
-    # this match statement) rather than a fixed-size character window -- a
-    # fixed window can silently bleed past the arm's actual close brace and
-    # match content that was moved into the *next* arm, producing a false
-    # pass. The counter-increment match itself is whitespace-tolerant for the
-    # same rustfmt line-wrap reason as G06 above.
-    $Gate7AnchorMatch = [regex]::Match($DecisionContent, 'mqk_db::outbox_enqueue\(')
-    $OkTrueArmMatch = if ($Gate7AnchorMatch.Success) {
+    # The DB enqueue seam now returns OutboxEnqueueOutcome rather than the
+    # historical bool contract. Scope the proof to the Enqueued arm and bound
+    # it by the following Duplicate arm so increments elsewhere cannot create
+    # a false pass. Duplicate must not consume either quota.
+    $Gate7AnchorMatch = [regex]::Match(
+        $DecisionContent,
+        'mqk_db::outbox_enqueue_for_running_run\s*\('
+    )
+
+    $EnqueuedArmMatch = if ($Gate7AnchorMatch.Success) {
         [regex]::Match(
             $DecisionContent.Substring($Gate7AnchorMatch.Index),
-            '(?s)Ok\(true\)\s*=>\s*\{(.*?)\r?\n\s*\}\r?\n\s*Ok\(false\)'
+            '(?s)Ok\(\s*mqk_db::OutboxEnqueueOutcome::Enqueued\s*\)\s*=>\s*\{(.*?)\r?\n\s*\}\r?\n\s*Ok\(\s*mqk_db::OutboxEnqueueOutcome::Duplicate\s*\)'
         )
-    } else { [regex]::Match('', '(?!)') }
-    if ($OkTrueArmMatch.Success) {
-        $OkTrueBlock = $OkTrueArmMatch.Groups[1].Value
-        if ($OkTrueBlock -match 'state\s*\.\s*increment_day_signal_count\(\);' -and
-            $OkTrueBlock -match 'state\s*\.\s*increment_symbol_day_order_count\(&decision\.symbol\)\s*\.\s*await;') {
-            Assert-Pass "G07: decision.rs Gate 7 Ok(true) arm increments both increment_day_signal_count and increment_symbol_day_order_count"
-        } else {
-            Assert-Fail "G07: Gate 7 Ok(true) arm does NOT increment both day-order counters"
-        }
     } else {
-        Assert-Fail "G07: Gate 7 'Ok(true) => { ... } Ok(false)' arm (outbox_enqueue accepted branch) not found in decision.rs"
+        [regex]::Match('', '(?!)')
     }
 
+    $DuplicateArmMatch = if ($Gate7AnchorMatch.Success) {
+        [regex]::Match(
+            $DecisionContent.Substring($Gate7AnchorMatch.Index),
+            '(?s)Ok\(\s*mqk_db::OutboxEnqueueOutcome::Duplicate\s*\)\s*=>\s*(.*?)\r?\n\s*Ok\(\s*mqk_db::OutboxEnqueueOutcome::RunNotRunning'
+        )
+    } else {
+        [regex]::Match('', '(?!)')
+    }
+
+    if ($EnqueuedArmMatch.Success -and $DuplicateArmMatch.Success) {
+        $EnqueuedBlock = $EnqueuedArmMatch.Groups[1].Value
+        $DuplicateBlock = $DuplicateArmMatch.Groups[1].Value
+
+        $EnqueuedIncrementsBoth = (
+            $EnqueuedBlock -match
+                'state\s*\.\s*increment_day_signal_count\(\);' -and
+            $EnqueuedBlock -match
+                'state\s*\.\s*increment_symbol_day_order_count\(&decision\.symbol\)\s*\.\s*await;'
+        )
+
+        $DuplicateIncrementsQuota = (
+            $DuplicateBlock -match 'increment_day_signal_count' -or
+            $DuplicateBlock -match 'increment_symbol_day_order_count'
+        )
+
+        if ($EnqueuedIncrementsBoth -and -not $DuplicateIncrementsQuota) {
+            Assert-Pass "G07: Gate 7 Enqueued arm increments both day-order counters and Duplicate consumes neither quota"
+        } else {
+            Assert-Fail "G07: typed Gate 7 outcome arms do not preserve Enqueued-only day-order counter increments"
+        }
+    } else {
+        Assert-Fail "G07: typed outbox_enqueue_for_running_run Enqueued/Duplicate arms not found in decision.rs"
+    }
     # G08 -- module-doc gate sequence documents Gate 1f
     if ($DecisionContent -match '1f\.\s*symbol_day_order_cap') {
         Assert-Pass "G08: decision.rs module doc gate sequence documents Gate 1f (symbol_day_order_cap)"
