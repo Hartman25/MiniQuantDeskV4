@@ -15,24 +15,25 @@
 //!    never trusted from the request).
 //! 4. Prove current-state and history readback (`GET .../check`,
 //!    `GET .../history`) after every transition.
-//! 4b. RESEARCH-PROMOTION-DURABLE-LINEAGE-HTTP-PROOF-01: immediately after
-//!     the evidence-requiring `shadow_approved` transition, read the
-//!     durably persisted row back from Postgres by its exact
-//!     `transition_id` and prove exact identity/value agreement (never
-//!     merely non-null) against Research/Backtest/robustness authority
-//!     independently re-derived from the same real fixture files via the
-//!     same production functions the route itself calls: the full V3
-//!     lineage (`research_trial_id`, `research_economic_eval_id`,
-//!     `research_deflated_sharpe_ratio`,
-//!     `research_probability_backtest_overfitting`, `backtest_run_id`,
-//!     `research_judge_artifact_sha256`, `stress_protocol_version`,
-//!     `stress_artifact_sha256`, `robustness_protocol_version`,
-//!     `finalized_robustness_artifact_sha256`,
-//!     `promotion_policy_fingerprint`) plus the scanner/review evidence
-//!     binding (`evidence_transition_id`, `evidence_fingerprint`,
-//!     `evidence_fingerprint_v2`) — with a negative control proving these
-//!     assertions actually discriminate a different real Research trial's
-//!     identity, not merely a shared default/None.
+//!
+//! Step 4b (RESEARCH-PROMOTION-DURABLE-LINEAGE-HTTP-PROOF-01): immediately
+//! after the evidence-requiring `shadow_approved` transition, read the
+//! durably persisted row back from Postgres by its exact `transition_id`
+//! and prove exact identity/value agreement (never merely non-null) against
+//! Research/Backtest/robustness authority independently re-derived from the
+//! same real fixture files via the same production functions the route
+//! itself calls: the full V3 lineage (`research_trial_id`,
+//! `research_economic_eval_id`, `research_deflated_sharpe_ratio`,
+//! `research_probability_backtest_overfitting`, `backtest_run_id`,
+//! `research_judge_artifact_sha256`, `stress_protocol_version`,
+//! `stress_artifact_sha256`, `robustness_protocol_version`,
+//! `finalized_robustness_artifact_sha256`,
+//! `promotion_policy_fingerprint`) plus the scanner/review evidence binding
+//! (`evidence_transition_id`, `evidence_fingerprint`,
+//! `evidence_fingerprint_v2`) — with a negative control proving these
+//! assertions actually discriminate a different real Research trial's
+//! identity, not merely a shared default/None.
+//!
 //! 5. Prove no paper outbox row can be created before `active_paper`.
 //! 6. Prove exactly one synthetic outbox row is created once
 //!    `active_paper` is reached and every other existing gate
