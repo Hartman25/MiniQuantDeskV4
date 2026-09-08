@@ -219,7 +219,6 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
         max_drawdown_ceiling,
         research_trial_id,
     )
-    .unwrap_or_else(|e| e)
 }
 
 /// Pure dispatch of the parsed `mqk_research.ml.p7a_p7b_economic_replay_stress_cli`
@@ -228,10 +227,9 @@ pub fn p7a_p7b_economic_replay_stress_scenario(
 /// particular, FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section A's "MANDATORY
 /// MEANS MANDATORY": `not_evaluable` must map to `applicable: true`, never
 /// `applicable: false`) is directly unit-testable against a hand-built
-/// `serde_json::Value`, with no subprocess required. Infallible (always
-/// returns a `RobustnessScenarioOutcome`) -- the `Result`/`unwrap_or_else`
-/// wrapper at the call site exists only so this function's every branch can
-/// use ordinary `return`-free tail expressions.
+/// `serde_json::Value`, with no subprocess required. Infallible: every
+/// branch returns a [`RobustnessScenarioOutcome`] directly, including
+/// fail-closed identity/economic-evaluation mismatches.
 fn dispatch_cli_value(
     value: serde_json::Value,
     trial_id: &str,
@@ -239,7 +237,7 @@ fn dispatch_cli_value(
     expected_strategy_id: &str,
     max_drawdown_ceiling: f64,
     research_trial_id: Option<String>,
-) -> Result<RobustnessScenarioOutcome, RobustnessScenarioOutcome> {
+) -> RobustnessScenarioOutcome {
     let name = P7A_P7B_ECONOMIC_REPLAY_STRESS_SCENARIO_NAME.to_string();
 
     // Cross-candidate authority -- checked BEFORE the status dispatch, same
@@ -252,7 +250,7 @@ fn dispatch_cli_value(
                  strategy_id {expected_strategy_id:?} -- refusing to merge P7A/P7B replay \
                  stress evidence from an unrelated Research trial"
             );
-            return Err(RobustnessScenarioOutcome {
+            return RobustnessScenarioOutcome {
                 name,
                 applicable: true,
                 passed: false,
@@ -260,7 +258,7 @@ fn dispatch_cli_value(
                 detail: reason,
                 research_trial_id,
                 evidence: None,
-            });
+            };
         }
     }
 
@@ -280,7 +278,7 @@ fn dispatch_cli_value(
                  {actual_eval_id:?}, but caller required {economic_eval_id:?} -- refusing to \
                  merge P7A/P7B replay stress evidence bound to a different economic result"
             );
-            return Err(RobustnessScenarioOutcome {
+            return RobustnessScenarioOutcome {
                 name,
                 applicable: true,
                 passed: false,
@@ -288,15 +286,17 @@ fn dispatch_cli_value(
                 detail: reason,
                 research_trial_id,
                 evidence: Some(value),
-            });
+            };
         }
     }
 
     let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    Ok(match status {
+
+    match status {
         "evaluated" => {
             let passed = value.get("passed").and_then(|v| v.as_bool());
             let stressed_max_drawdown = value.get("stressed_max_drawdown").and_then(|v| v.as_f64());
+
             match (passed, stressed_max_drawdown) {
                 (Some(passed), Some(dd)) => RobustnessScenarioOutcome {
                     name,
@@ -322,6 +322,7 @@ fn dispatch_cli_value(
                 _ => {
                     let reason =
                         format!("evaluated result missing passed/stressed_max_drawdown: {value}");
+
                     RobustnessScenarioOutcome {
                         name,
                         applicable: true,
@@ -340,6 +341,7 @@ fn dispatch_cli_value(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
+
             // FINAL-P7A-P7B-REPLAY-AUTHORITY-01 Section A ("MANDATORY MEANS
             // MANDATORY"): a structural precondition this candidate's OWN
             // evidence does not meet (predates durable replay-input
@@ -365,7 +367,9 @@ fn dispatch_cli_value(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string();
+
             let full = format!("p7a_p7b_economic_replay_stress_cli error: {reason}");
+
             RobustnessScenarioOutcome {
                 name,
                 applicable: true,
@@ -376,9 +380,8 @@ fn dispatch_cli_value(
                 evidence: Some(value),
             }
         }
-    })
+    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,8 +506,7 @@ mod tests {
             "some_strategy",
             0.5,
             Some("some_trial".to_string()),
-        )
-        .unwrap_or_else(|e| e);
+        );
         assert!(
             outcome.applicable,
             "not_evaluable must never become applicable: false"
@@ -532,8 +534,7 @@ mod tests {
             "some_strategy",
             0.5,
             Some("some_trial".to_string()),
-        )
-        .unwrap_or_else(|e| e);
+        );
         assert!(outcome.applicable);
         assert!(!outcome.passed);
         assert!(outcome
@@ -554,8 +555,7 @@ mod tests {
             "passed": true,
             "stressed_max_drawdown": -0.01,
         });
-        let outcome = dispatch_cli_value(value, "some_trial", "e", "expected_strategy", 0.5, None)
-            .unwrap_or_else(|e| e);
+        let outcome = dispatch_cli_value(value, "some_trial", "e", "expected_strategy", 0.5, None);
         assert!(outcome.applicable);
         assert!(!outcome.passed);
         assert!(outcome.reason.unwrap().contains("Research trial mismatch"));
@@ -582,8 +582,7 @@ mod tests {
             "some_strategy",
             0.5,
             Some("some_trial".to_string()),
-        )
-        .unwrap_or_else(|e| e);
+        );
         assert!(outcome.applicable);
         assert!(outcome.passed);
         let evidence = outcome
@@ -612,8 +611,7 @@ mod tests {
             "passed": false,
             "stressed_max_drawdown": -0.9,
         });
-        let outcome = dispatch_cli_value(value, "some_trial", "e", "some_strategy", 0.3, None)
-            .unwrap_or_else(|e| e);
+        let outcome = dispatch_cli_value(value, "some_trial", "e", "some_strategy", 0.3, None);
         assert!(outcome.applicable);
         assert!(!outcome.passed);
         assert!(outcome
@@ -628,8 +626,7 @@ mod tests {
     #[test]
     fn error_status_fails_closed() {
         let value = serde_json::json!({"status": "error", "reason": "unknown trial_id"});
-        let outcome = dispatch_cli_value(value, "some_trial", "e", "some_strategy", 0.3, None)
-            .unwrap_or_else(|e| e);
+        let outcome = dispatch_cli_value(value, "some_trial", "e", "some_strategy", 0.3, None);
         assert!(outcome.applicable);
         assert!(!outcome.passed);
         assert!(outcome.reason.unwrap().contains("unknown trial_id"));
