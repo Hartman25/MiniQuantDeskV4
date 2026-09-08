@@ -741,15 +741,31 @@ async fn create_disposable_test_db_inner(
 /// and catching the join error before propagating the original panic, and
 /// including when the caller of `run_isolated` itself is cancelled after the
 /// disposable database was created (see `DisposableTestDb`'s cancellation
-/// safety doc-comment). This is the FULL-AUDIT-FAIL-017 replacement for
-/// global shared-DB deletion helpers and `Utc::now()`-based "latest row"
-/// racing: each caller gets an empty database, so there is no other test's
-/// row to collide with and no global query to race.
+/// safety doc-comment).
+///
+/// A platform lane with no configured `MQK_DATABASE_URL` cannot execute a
+/// database-backed proof. In that case this test-only helper emits an explicit
+/// skip marker and does not invoke the supplied test closure. DB-backed lanes
+/// set `MQK_DATABASE_URL` and therefore retain the full disposable-database
+/// behavior below. A no-DB skip is never behavioral or DB proof.
+///
+/// This is the FULL-AUDIT-FAIL-017 replacement for global shared-DB deletion
+/// helpers and `Utc::now()`-based "latest row" racing: each executing caller
+/// gets an empty database, so there is no other test's row to collide with
+/// and no global query to race.
 pub async fn run_isolated<F, Fut>(label: &str, test: F)
 where
     F: FnOnce(PgPool) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    match std::env::var(ENV_DB_URL) {
+        Ok(value) if !value.trim().is_empty() => {}
+        _ => {
+            eprintln!("SKIP_DB: run_isolated({label}) requires {ENV_DB_URL}");
+            return;
+        }
+    }
+
     let disposable = create_disposable_test_db(label)
         .await
         .expect("create_disposable_test_db");
