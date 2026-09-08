@@ -178,6 +178,22 @@ async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    // runtime_leader_lease.run_id is an integrity FK to runs.run_id.
+    // Release only this run's lease through the canonical fenced DB seam
+    // before removing the fixture run. A lease owned by another run is never
+    // deleted here; cross-run contamination must remain visible/fail-closed.
+    if let Some(lease) = mqk_db::runtime_lease::fetch_current_lease(pool).await? {
+        if lease.run_id == Some(run_id) {
+            mqk_db::runtime_lease::release_lease_for_run(
+                pool,
+                run_id,
+                &lease.holder_id,
+                lease.epoch,
+            )
+            .await?;
+        }
+    }
+
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
@@ -192,9 +208,20 @@ async fn cleanup_cursor(pool: &PgPool, adapter_id: &str) -> Result<()> {
     Ok(())
 }
 async fn cleanup_lease(pool: &PgPool) -> Result<()> {
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
-        .execute(pool)
-        .await?;
+    // The lease table is singleton test-fixture state, but cleanup must still
+    // use the same fenced release seams as production rather than bypassing
+    // runtime-leader integrity with a raw DELETE.
+    let Some(lease) = mqk_db::runtime_lease::fetch_current_lease(pool).await? else {
+        return Ok(());
+    };
+
+    if let Some(run_id) = lease.run_id {
+        mqk_db::runtime_lease::release_lease_for_run(pool, run_id, &lease.holder_id, lease.epoch)
+            .await?;
+    } else {
+        mqk_db::runtime_lease::release_lease(pool, &lease.holder_id, lease.epoch).await?;
+    }
+
     Ok(())
 }
 fn make_tracking_orch(
