@@ -56,12 +56,18 @@ use mqk_daemon::state::autonomous_daily_coverage_authority::{
 };
 use mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
 use mqk_daemon::state::{self, AppState, BrokerKind, DeploymentMode};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const STRATEGY_SYMBOL_ENV: &str = "MQK_STRATEGY_SYMBOL";
 const STRATEGY_IDS_ENV: &str = "MQK_STRATEGY_IDS";
 const STRATEGY_TIMEFRAME_ENV: &str = "MQK_STRATEGY_MD_TIMEFRAME";
 const GRACE_ENV: &str = daily_data_readiness::GRACE_SECS_ENV;
+
+// R26: DB-backed tests share the zze2a namespace cleaned by
+// maybe_db(), and several also mutate process-global strategy/grace
+// environment. Serialize only those DB-backed cases.
+static SHARED_FIXTURE_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -798,6 +804,7 @@ fn c08_validator_never_deduplicates_or_resorts_and_never_needs_a_row_cap() {
 
 #[tokio::test]
 async fn d01_first_write_persists_one_event_type_source_and_null_run_id() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d01").await else {
         return;
     };
@@ -820,6 +827,7 @@ async fn d01_first_write_persists_one_event_type_source_and_null_run_id() {
 
 #[tokio::test]
 async fn d02_exact_replay_under_later_caller_time_is_idempotent_and_ts_unchanged() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d02").await else {
         return;
     };
@@ -858,6 +866,7 @@ async fn d02_exact_replay_under_later_caller_time_is_idempotent_and_ts_unchanged
 
 #[tokio::test]
 async fn d03_conflicting_replay_does_not_overwrite_the_original_event() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d03").await else {
         return;
     };
@@ -889,6 +898,7 @@ async fn d03_conflicting_replay_does_not_overwrite_the_original_event() {
 
 #[tokio::test]
 async fn d04_missing_event_check_reports_not_bound() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d04").await else {
         return;
     };
@@ -943,6 +953,7 @@ async fn assert_tampered_row_rejected_and_preserved(
 
 #[tokio::test]
 async fn d05_write_and_confirm_rejects_tampered_event_type() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d05").await else {
         return;
     };
@@ -962,6 +973,7 @@ async fn d05_write_and_confirm_rejects_tampered_event_type() {
 
 #[tokio::test]
 async fn d06_write_and_confirm_rejects_tampered_source() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d06").await else {
         return;
     };
@@ -981,6 +993,7 @@ async fn d06_write_and_confirm_rejects_tampered_source() {
 
 #[tokio::test]
 async fn d07_write_and_confirm_rejects_tampered_run_id() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d07").await else {
         return;
     };
@@ -1000,6 +1013,7 @@ async fn d07_write_and_confirm_rejects_tampered_run_id() {
 
 #[tokio::test]
 async fn d08_write_and_confirm_rejects_tampered_resume_source() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d08").await else {
         return;
     };
@@ -1019,6 +1033,7 @@ async fn d08_write_and_confirm_rejects_tampered_resume_source() {
 
 #[tokio::test]
 async fn d09_write_and_confirm_rejects_tampered_detail_operation_id() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("d09").await else {
         return;
     };
@@ -1047,6 +1062,7 @@ async fn d09_write_and_confirm_rejects_tampered_detail_operation_id() {
 
 #[tokio::test]
 async fn e01_coordinator_binds_pristine_anchor_and_replays_on_second_tick() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("e01").await else {
         return;
     };
@@ -1112,6 +1128,7 @@ async fn e01_coordinator_binds_pristine_anchor_and_replays_on_second_tick() {
 
 #[tokio::test]
 async fn e02_prior_activity_running_missing_authority_reaches_evidence_degraded() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("e02").await else {
         return;
     };
@@ -1183,6 +1200,7 @@ async fn e02_prior_activity_running_missing_authority_reaches_evidence_degraded(
 
 #[tokio::test]
 async fn e03_prior_activity_pre_running_missing_authority_reaches_manual_intervention() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("e03").await else {
         return;
     };
@@ -1254,6 +1272,7 @@ async fn e03_prior_activity_pre_running_missing_authority_reaches_manual_interve
 
 #[tokio::test]
 async fn e04_close_priority_stops_runtime_even_with_a_coverage_conflict() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("e04").await else {
         return;
     };
@@ -1322,6 +1341,7 @@ async fn e04_close_priority_stops_runtime_even_with_a_coverage_conflict() {
 #[tokio::test]
 async fn f01_adapter_returns_not_bound_with_zero_side_effects_for_a_newly_visible_unanchored_operation(
 ) {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("f01").await else {
         return;
     };
@@ -1378,6 +1398,7 @@ async fn f01_adapter_returns_not_bound_with_zero_side_effects_for_a_newly_visibl
 
 #[tokio::test]
 async fn f02_adapter_proceeds_once_the_coordinator_has_bound_the_authority() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("f02").await else {
         return;
     };
@@ -1453,6 +1474,7 @@ async fn f02_adapter_proceeds_once_the_coordinator_has_bound_the_authority() {
 
 #[tokio::test]
 async fn f03_adapter_refuses_on_unreadable_and_conflicting_authority() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("f03").await else {
         return;
     };
@@ -1651,6 +1673,7 @@ async fn snapshot_authority_concurrency_evidence(
 /// ordinary eligible mode path instead of refusing.
 #[tokio::test]
 async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("f04").await else {
         return;
     };
@@ -1852,6 +1875,7 @@ async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_
 
 #[tokio::test]
 async fn g01_prepare_data_only_mid_day_drift_returns_conflict_and_invokes_no_driver() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("g01").await else {
         return;
     };
@@ -1921,6 +1945,7 @@ async fn g01_prepare_data_only_mid_day_drift_returns_conflict_and_invokes_no_dri
 
 #[tokio::test]
 async fn g02_running_dispatch_mid_day_drift_returns_conflict_and_invokes_no_driver() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("g02").await else {
         return;
     };
@@ -2005,6 +2030,7 @@ async fn g02_running_dispatch_mid_day_drift_returns_conflict_and_invokes_no_driv
 
 #[tokio::test]
 async fn h01_initial_and_recovery_run_lineage_read_and_validated() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("h01").await else {
         return;
     };
@@ -2089,6 +2115,7 @@ async fn h01_initial_and_recovery_run_lineage_read_and_validated() {
 
 #[tokio::test]
 async fn h02_duplicate_and_mismatched_run_id_fail_closed_against_real_rows() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
     let Some(pool) = maybe_db("h02").await else {
         return;
     };
