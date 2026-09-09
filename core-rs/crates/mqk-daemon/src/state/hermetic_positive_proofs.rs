@@ -533,7 +533,8 @@ mod tests {
         mqk_db::run_isolated("hermetic_order_disarmed", |pool| async move {
             let st = hermetic_order_daemon_state(pool).await;
             arm(&st).await;
-            start(&st).await;
+            let db = st.db.as_ref().expect("db configured");
+            let _run_id = seed_active_order_run_without_dispatch(&st, db).await;
 
             let pool = st.db.as_ref().expect("db configured");
             mqk_db::persist_arm_state(pool, "DISARMED", Some("IntegrityViolation"))
@@ -555,7 +556,8 @@ mod tests {
         mqk_db::run_isolated("hermetic_order_halted", |pool| async move {
             let st = hermetic_order_daemon_state(pool).await;
             arm(&st).await;
-            start(&st).await;
+            let db = st.db.as_ref().expect("db configured");
+            let _run_id = seed_active_order_run_without_dispatch(&st, db).await;
 
             let pool = st.db.as_ref().expect("db configured");
             mqk_db::persist_arm_state(pool, "DISARMED", Some("OperatorHalt"))
@@ -608,7 +610,8 @@ mod tests {
         mqk_db::run_isolated("hermetic_order_dup", |pool| async move {
             let st = hermetic_order_daemon_state(pool).await;
             arm(&st).await;
-            start(&st).await;
+            let db = st.db.as_ref().expect("db configured");
+            let _run_id = seed_active_order_run_without_dispatch(&st, db).await;
 
             let (first_status, first_json) = post_manual_order(&st, valid_order_request()).await;
             assert_eq!(
@@ -650,7 +653,8 @@ mod tests {
         mqk_db::run_isolated("hermetic_order_limit", |pool| async move {
             let st = hermetic_order_daemon_state(pool).await;
             arm(&st).await;
-            start(&st).await;
+            let db = st.db.as_ref().expect("db configured");
+            let _run_id = seed_active_order_run_without_dispatch(&st, db).await;
 
             let (status, json) = post_manual_order(
                 &st,
