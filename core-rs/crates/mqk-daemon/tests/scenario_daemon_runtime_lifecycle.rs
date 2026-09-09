@@ -447,6 +447,15 @@ async fn daemon_state() -> Arc<state::AppState> {
         std::env::set_var("ALPACA_API_SECRET_PAPER", "test-paper-secret");
         std::env::set_var("ALPACA_PAPER_BASE_URL", &mock_url);
 
+        // RUNTIME-PORTFOLIO-SEED-CONFIG-VALIDATION-01 / RRA-2:
+        // lifecycle tests exercise successful Paper start/stop ownership, not
+        // missing-risk-config refusal. Supply all three now-required bounded
+        // test-only risk inputs. Initial equity intentionally matches the
+        // synthetic broker account equity seeded below.
+        std::env::set_var("MQK_RISK_INITIAL_EQUITY_USD", "100000");
+        std::env::set_var("MQK_RISK_DAILY_LOSS_LIMIT", "0.02");
+        std::env::set_var("MQK_RISK_MAX_DRAWDOWN", "0.20");
+
         // STRATEGY-DORMANCY-01: Paper+Alpaca requires a non-dormant bootstrap.
         // intraday_scalper is a registered built-in; lifecycle_pool() upserts
         // it as enabled in sys_strategy_registry before any test calls
