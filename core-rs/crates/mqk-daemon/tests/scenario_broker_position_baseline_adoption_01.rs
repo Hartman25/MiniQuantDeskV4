@@ -29,7 +29,14 @@ use std::sync::Arc;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+// R31: every DB-backed test below mutates the singleton
+// sys_broker_position_baseline row via clear/adopt/clear.
+// Serialize exactly that DB-backed subset so one test cannot
+// erase another test's adopted baseline between write and proof.
+static BROKER_BASELINE_FIXTURE_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -268,6 +275,7 @@ async fn pba04_absent_broker_snapshot_refuses_adoption_fail_closed() {
 
 #[tokio::test]
 async fn pba05_confirmed_adoption_writes_baseline() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("pba05: skip — MQK_DATABASE_URL not set");
         return;
@@ -335,6 +343,7 @@ async fn pba05_confirmed_adoption_writes_baseline() {
 
 #[tokio::test]
 async fn pba06_adoption_clears_integrity_halt() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("pba06: skip — MQK_DATABASE_URL not set");
         return;
@@ -379,6 +388,7 @@ async fn pba06_adoption_clears_integrity_halt() {
 
 #[tokio::test]
 async fn pba07_adoption_does_not_submit_orders_or_fabricate_fills() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("pba07: skip — MQK_DATABASE_URL not set");
         return;
@@ -436,6 +446,7 @@ async fn pba07_adoption_does_not_submit_orders_or_fabricate_fills() {
 
 #[tokio::test]
 async fn pba08_adoption_is_idempotent() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("pba08: skip — MQK_DATABASE_URL not set");
         return;
@@ -588,6 +599,7 @@ async fn bsr02_no_fetcher_refuses_with_refresh_unavailable() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bsr03_fake_fetcher_success_writes_baseline() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("bsr03: skip — MQK_DATABASE_URL not set");
         return;
@@ -649,6 +661,7 @@ async fn bsr03_fake_fetcher_success_writes_baseline() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bsr04_fake_fetcher_failure_refuses_no_baseline_row() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("bsr04: skip — MQK_DATABASE_URL not set");
         return;
@@ -705,6 +718,7 @@ async fn bsr04_fake_fetcher_failure_refuses_no_baseline_row() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bsr05_authoritative_empty_snapshot_baselines_empty_truth() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("bsr05: skip — MQK_DATABASE_URL not set");
         return;
@@ -768,6 +782,7 @@ async fn bsr05_authoritative_empty_snapshot_baselines_empty_truth() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bsr06_on_demand_adoption_does_not_write_orders_or_fills() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("bsr06: skip — MQK_DATABASE_URL not set");
         return;
@@ -828,6 +843,7 @@ async fn bsr06_on_demand_adoption_does_not_write_orders_or_fills() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bsr07_on_demand_adoption_is_idempotent() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("bsr07: skip — MQK_DATABASE_URL not set");
         return;
@@ -879,6 +895,7 @@ async fn bsr07_on_demand_adoption_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bsr08_seed_broker_baseline_from_db_restores_baseline_at_boot() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("bsr08: skip — MQK_DATABASE_URL not set");
         return;
@@ -949,6 +966,7 @@ async fn bsr08_seed_broker_baseline_from_db_restores_baseline_at_boot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ir01_adoption_publishes_clean_reconcile_status() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("ir01: skip — MQK_DATABASE_URL not set");
         return;
@@ -1009,6 +1027,7 @@ async fn ir01_adoption_publishes_clean_reconcile_status() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ir06_adoption_clears_brk09r_blocker() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("ir06: skip — MQK_DATABASE_URL not set");
         return;
@@ -1133,6 +1152,7 @@ async fn ir07_refused_adoption_does_not_refresh_reconcile() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ir08_repeated_adoption_is_idempotent_reconcile_stays_clean() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
         eprintln!("ir08: skip — MQK_DATABASE_URL not set");
         return;
