@@ -168,6 +168,8 @@ jobs:
 
     env:
       MQK_DATABASE_URL: postgres://mqk:mqk@127.0.0.1:5432/mqk_test
+      CARGO_INCREMENTAL: 0
+      RUSTFLAGS: -C debuginfo=0
 
     defaults:
       run:
@@ -195,22 +197,27 @@ jobs:
           rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --profile minimal --component rustfmt --component clippy
           rustup default "${{ steps.toolchain.outputs.channel }}"
 
-      - name: Cache cargo artifacts
+      - name: Cache Cargo registry and git sources
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            core-rs/target
-          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/rust-toolchain.toml') }}-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v2-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/rust-toolchain.toml') }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
+            ${{ runner.os }}-cargo-registry-v2-${{ steps.toolchain.outputs.channel }}-
 
       - name: cargo fmt --check
         run: cargo fmt --check
 
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # CI-RUST-DISK-01: retain full Clippy and full test coverage while
+      # releasing the first complete build graph before compiling
+      # the second on the finite GitHub-hosted runner filesystem.
+      - name: Release Clippy build artifacts before workspace tests
+        run: cargo clean
 
       - name: cargo test --workspace
         run: cargo test --workspace
@@ -236,6 +243,8 @@ jobs:
 
     env:
       MQK_DATABASE_URL: postgres://mqk:mqk@127.0.0.1:5432/mqk_test
+      CARGO_INCREMENTAL: 0
+      RUSTFLAGS: -C debuginfo=0
 
     defaults:
       run:
@@ -263,16 +272,15 @@ jobs:
           rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --profile minimal --component rustfmt --component clippy
           rustup default "${{ steps.toolchain.outputs.channel }}"
 
-      - name: Cache cargo artifacts
+      - name: Cache Cargo registry and git sources
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            core-rs/target
-          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/rust-toolchain.toml') }}-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-v2-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/rust-toolchain.toml') }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
+            ${{ runner.os }}-cargo-registry-v2-${{ steps.toolchain.outputs.channel }}-
 
       - name: Run repo-native DB proof harness
         run: bash ../scripts/db_proof_bootstrap.sh
