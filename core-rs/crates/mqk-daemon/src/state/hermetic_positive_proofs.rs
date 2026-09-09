@@ -504,17 +504,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "arm failed: {json}");
     }
 
-    async fn start(st: &Arc<AppState>) -> serde_json::Value {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/run/start")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let (status, json) = call(routes::build_router(Arc::clone(st)), req).await;
-        assert_eq!(status, StatusCode::OK, "start failed: {json}");
-        json
-    }
-
     async fn post_manual_order(
         st: &Arc<AppState>,
         body: serde_json::Value,
