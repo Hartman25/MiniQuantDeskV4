@@ -159,7 +159,7 @@ jobs:
           POSTGRES_PASSWORD: mqk
           POSTGRES_DB: mqk_test
         ports:
-          - 5432:5432
+          - 5434:5432
         options: >-
           --health-cmd "pg_isready -U mqk -d mqk_test"
           --health-interval 5s
@@ -167,7 +167,7 @@ jobs:
           --health-retries 20
 
     env:
-      MQK_DATABASE_URL: postgres://mqk:mqk@127.0.0.1:5432/mqk_test
+      MQK_DATABASE_URL: postgres://mqk:mqk@127.0.0.1:5434/mqk_test
       CARGO_INCREMENTAL: 0
       RUSTFLAGS: -C debuginfo=0
 
