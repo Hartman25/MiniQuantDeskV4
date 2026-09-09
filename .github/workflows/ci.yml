@@ -178,6 +178,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # R32: this job executes historical structural guards that use
+          # git show / merge-base against frozen Bundle-7 commits.
+          fetch-depth: 0
 
       - name: Read canonical Rust toolchain channel
         id: toolchain
