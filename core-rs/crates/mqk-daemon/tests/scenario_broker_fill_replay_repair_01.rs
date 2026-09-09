@@ -37,7 +37,14 @@ use std::sync::Arc;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+// R27: cursor-evidence tests below all mutate the same canonical
+// broker_event_cursor row for adapter_id = "alpaca". Serialize
+// exactly those tests so save/seed/restore cannot erase another
+// test's evidence between classification and apply.
+static BROKER_CURSOR_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -564,6 +571,7 @@ async fn p05_dry_run_does_not_mark_inbox_applied() {
 
 #[tokio::test]
 async fn p06_cursor_only_fill_evidence() {
+    let _broker_cursor_guard = BROKER_CURSOR_LOCK.lock().await;
     let state = require_db!("P06");
     let pool = state.db.as_ref().expect("DB pool from state");
 
@@ -614,6 +622,7 @@ async fn p06_cursor_only_fill_evidence() {
 
 #[tokio::test]
 async fn p07_no_fill_evidence_classification() {
+    let _broker_cursor_guard = BROKER_CURSOR_LOCK.lock().await;
     let state = require_db!("P07");
     let pool = state.db.as_ref().expect("DB pool from state");
 
@@ -753,6 +762,7 @@ async fn a03_dry_run_false_without_confirmation_refuses() {
 
 #[tokio::test]
 async fn a02_cursor_only_dry_run_is_refused_no_mutation() {
+    let _broker_cursor_guard = BROKER_CURSOR_LOCK.lock().await;
     let state = require_db!("A02");
     let pool = state.db.as_ref().expect("DB pool");
 
@@ -814,6 +824,7 @@ async fn a02_cursor_only_dry_run_is_refused_no_mutation() {
 
 #[tokio::test]
 async fn a04_cursor_only_dry_run_false_still_refused() {
+    let _broker_cursor_guard = BROKER_CURSOR_LOCK.lock().await;
     let state = require_db!("A04");
     let pool = state.db.as_ref().expect("DB pool");
 
@@ -1001,6 +1012,7 @@ async fn a07_second_apply_returns_already_repaired() {
 
 #[tokio::test]
 async fn a08_cursor_only_no_inbox_row_never_marked_applied() {
+    let _broker_cursor_guard = BROKER_CURSOR_LOCK.lock().await;
     let state = require_db!("A08");
     let pool = state.db.as_ref().expect("DB pool");
 
@@ -1057,6 +1069,7 @@ async fn a08_cursor_only_no_inbox_row_never_marked_applied() {
 
 #[tokio::test]
 async fn a09_no_fill_evidence_apply_is_refused_no_mutation() {
+    let _broker_cursor_guard = BROKER_CURSOR_LOCK.lock().await;
     let state = require_db!("A09");
     let pool = state.db.as_ref().expect("DB pool");
 
