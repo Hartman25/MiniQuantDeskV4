@@ -224,7 +224,7 @@ jobs:
         run: cargo clean
 
       - name: cargo test --workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   db-proof:
     name: "DB Proof Lane (Postgres)"
