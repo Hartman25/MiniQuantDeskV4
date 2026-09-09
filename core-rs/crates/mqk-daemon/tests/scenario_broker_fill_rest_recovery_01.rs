@@ -24,7 +24,14 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_broker_alpaca::types::AlpacaOrderActivity;
 use mqk_daemon::{routes, state};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+// R29: these REST-recovery tests share the canonical
+// broker_event_cursor row for adapter_id = "alpaca". Serialize
+// exactly the tests that save/seed/restore that row so one test
+// cannot erase another test's cursor-only evidence mid-request.
+static REST_CURSOR_FIXTURE_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Fake fill activity fetcher for test isolation
@@ -437,6 +444,7 @@ fn r02_gate_ordering_documented() {
 
 #[tokio::test]
 async fn r03_cursor_only_no_fetcher_returns_503() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let state = require_db!("R03");
     let pool = state.db.as_ref().expect("DB pool");
 
@@ -483,6 +491,7 @@ async fn r03_cursor_only_no_fetcher_returns_503() {
 
 #[tokio::test]
 async fn r04_cursor_only_no_rest_match_returns_409() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
         {
             let url = match std::env::var(mqk_db::ENV_DB_URL) {
@@ -544,6 +553,7 @@ async fn r04_cursor_only_no_rest_match_returns_409() {
 
 #[tokio::test]
 async fn r05_cursor_only_ambiguous_rest_match_returns_409() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -608,6 +618,7 @@ async fn r05_cursor_only_ambiguous_rest_match_returns_409() {
 
 #[tokio::test]
 async fn r06_cursor_only_single_rest_match_returns_200_with_fill() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -776,6 +787,7 @@ async fn r07_unapplied_inbox_fill_classification_refused() {
 
 #[tokio::test]
 async fn r08_cursor_only_malformed_price_returns_409() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -893,6 +905,7 @@ async fn inbox_row_count(pool: &sqlx::PgPool, run_id: uuid::Uuid, msg_id: &str) 
 
 #[tokio::test]
 async fn a01_dry_run_true_no_inbox_insert() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -971,6 +984,7 @@ async fn a01_dry_run_true_no_inbox_insert() {
 
 #[tokio::test]
 async fn a02_dry_run_false_no_confirmation_refused() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -1052,6 +1066,7 @@ async fn a02_dry_run_false_no_confirmation_refused() {
 
 #[tokio::test]
 async fn a03_confirmed_apply_inserts_and_stamps_inbox() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -1161,6 +1176,7 @@ async fn a03_confirmed_apply_inserts_and_stamps_inbox() {
 
 #[tokio::test]
 async fn a04_second_apply_is_idempotent_already_repaired() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -1261,6 +1277,7 @@ async fn a04_second_apply_is_idempotent_already_repaired() {
 
 #[tokio::test]
 async fn a05_ambiguous_rest_match_with_confirmation_refused() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -1332,6 +1349,7 @@ async fn a05_ambiguous_rest_match_with_confirmation_refused() {
 
 #[tokio::test]
 async fn a06_malformed_rest_fill_with_confirmation_refused() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -1404,6 +1422,7 @@ async fn a06_malformed_rest_fill_with_confirmation_refused() {
 
 #[tokio::test]
 async fn a07_no_rest_match_with_confirmation_refused() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
@@ -1471,6 +1490,7 @@ async fn a07_no_rest_match_with_confirmation_refused() {
 
 #[tokio::test]
 async fn a08_cursor_only_no_fetcher_with_confirmation_refused() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let state = require_db!("A08");
     let pool = state.db.as_ref().expect("DB pool");
 
@@ -1527,6 +1547,7 @@ async fn a08_cursor_only_no_fetcher_with_confirmation_refused() {
 
 #[tokio::test]
 async fn r09_unrelated_order_activity_is_rejected_even_if_fetcher_returns_it() {
+    let _cursor_guard = REST_CURSOR_FIXTURE_LOCK.lock().await;
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
