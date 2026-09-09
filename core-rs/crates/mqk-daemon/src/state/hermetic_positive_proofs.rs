@@ -129,7 +129,39 @@ mod tests {
         *st.broker_snapshot.write().await = Some(fake_broker_snapshot());
     }
 
+    async fn seed_required_risk_created_run(pool: &sqlx::PgPool, seed: &str) {
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            format!("mqk.hermetic.required-risk.{seed}").as_bytes(),
+        );
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
+                started_at_utc: chrono::Utc::now(),
+                git_hash: "TEST".to_string(),
+                config_hash: "hermetic-required-risk".to_string(),
+                config_json: serde_json::json!({
+                    "runtime": "mqk-daemon",
+                    "adapter": "alpaca",
+                    "mode": DeploymentMode::LiveShadow.as_db_mode(),
+                    "risk": {
+                        "initial_equity_micros": 100_000_000_000_i64,
+                        "daily_loss_limit": 0.02,
+                        "max_drawdown": 0.20
+                    }
+                }),
+                host_fingerprint: "hermetic-test".to_string(),
+            },
+        )
+        .await
+        .expect("seed_required_risk_created_run: insert must succeed");
+    }
+
     async fn armed_live_shadow_state(pool: sqlx::PgPool) -> Arc<AppState> {
+        seed_required_risk_created_run(&pool, "armed-live-shadow").await;
         let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
             pool,
             DeploymentMode::LiveShadow,
@@ -373,6 +405,7 @@ mod tests {
         // bypasses both: deployment_mode-honest for +Alpaca, and
         // daily_data_readiness only applies to Paper mode. The hermetic
         // override (below) is what avoids needing real Alpaca credentials.
+        seed_required_risk_created_run(&pool, "order-daemon").await;
         let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
             pool,
             DeploymentMode::LiveShadow,
@@ -645,7 +678,13 @@ mod tests {
                     started_at_utc: chrono::Utc::now(),
                     git_hash: "TEST".to_string(),
                     config_hash: "test".to_string(),
-                    config_json: serde_json::json!({}),
+                    config_json: serde_json::json!({
+                        "risk": {
+                            "initial_equity_micros": 100_000_000_000_i64,
+                            "daily_loss_limit": 0.02,
+                            "max_drawdown": 0.20
+                        }
+                    }),
                     host_fingerprint: "test-node".to_string(),
                 },
             )
@@ -717,6 +756,7 @@ mod tests {
     async fn hermetic_override_without_seeded_snapshot_makes_no_network_call() {
         mqk_db::run_isolated("hermetic_network_deny", |pool| async move {
             seed_swing_momentum_registry(&pool).await;
+            seed_required_risk_created_run(&pool, "network-deny").await;
             let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
                 pool,
                 DeploymentMode::LiveShadow,
