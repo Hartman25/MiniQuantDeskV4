@@ -26,7 +26,14 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use state::{AlpacaWsContinuityState, BrokerKind};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+// AUTON-NO-TRADE-01 / R24: sys_arm_state is a singleton
+// (sentinel_id = 1). DB-backed cases in this test binary mutate
+// that same row, so serialize them across await points rather
+// than allowing one case to overwrite another case's fixture.
+static DB_ARM_STATE_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -123,6 +130,7 @@ async fn nd01_no_db_disarmed_memory_is_arm_pending() {
 
 #[tokio::test]
 async fn nd02_db_disarmed_surfaces_disarmed_db_arm_state() {
+    let _db_arm_state_guard = DB_ARM_STATE_LOCK.lock().await;
     let pool = match db_pool_or_skip("nd02").await {
         Some(p) => p,
         None => return,
@@ -208,6 +216,7 @@ async fn nd02_db_disarmed_surfaces_disarmed_db_arm_state() {
 
 #[tokio::test]
 async fn nd03_db_armed_disarmed_memory_is_arm_pending() {
+    let _db_arm_state_guard = DB_ARM_STATE_LOCK.lock().await;
     let pool = match db_pool_or_skip("nd03").await {
         Some(p) => p,
         None => return,
@@ -260,6 +269,7 @@ async fn nd03_db_armed_disarmed_memory_is_arm_pending() {
 
 #[tokio::test]
 async fn nd06_try_autonomous_arm_fails_when_db_disarmed() {
+    let _db_arm_state_guard = DB_ARM_STATE_LOCK.lock().await;
     let pool = match db_pool_or_skip("nd06").await {
         Some(p) => p,
         None => return,
