@@ -3484,6 +3484,38 @@ mod real_production_effects_matrix_tests {
             .await;
     }
 
+    /// Create/reuse the run through the real production identity path, then
+    /// supply only the risk inputs this production-effects matrix requires.
+    ///
+    /// This is test fixture setup, not a production fallback: ordinary
+    /// `create_or_reuse_run_for_start` remains minimal and production
+    /// `build_execution_orchestrator` still fails closed when neither the
+    /// run nor its authorized env configuration supplies these values.
+    async fn create_or_reuse_run_with_required_risk(
+        state: &Arc<AppState>,
+        pool: &PgPool,
+    ) -> Result<uuid::Uuid, RuntimeLifecycleError> {
+        let run_id = state.create_or_reuse_run_for_start(pool).await?;
+
+        sqlx::query(
+            r#"
+            update runs
+               set config_json = jsonb_set(
+                   config_json,
+                   '{risk}',
+                   '{"initial_equity_micros":100000000000,"daily_loss_limit":0.02,"max_drawdown":0.20}'::jsonb,
+                   true
+               )
+             where run_id = $1
+            "#,
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("R23 matrix required-risk fixture update must succeed");
+
+        Ok(run_id)
+    }
     /// A hermetic `Paper`+`Paper` `AppState` wired to the real test DB. Never
     /// start-able to a genuine `Active` loop through the real broker-
     /// construction path (`build_daemon_broker` refuses `BrokerKind::Paper`)
@@ -3581,8 +3613,7 @@ mod real_production_effects_matrix_tests {
         };
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -3820,8 +3851,7 @@ mod real_production_effects_matrix_tests {
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -3891,8 +3921,7 @@ mod real_production_effects_matrix_tests {
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -3976,8 +4005,7 @@ mod real_production_effects_matrix_tests {
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4058,8 +4086,7 @@ mod real_production_effects_matrix_tests {
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (result, _trace) = state
@@ -4109,8 +4136,7 @@ mod real_production_effects_matrix_tests {
             integrity.disarmed = false;
             integrity.halted = false;
         }
-        let run_id_2 = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id_2 = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("CLEANUP-HALT-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
@@ -4153,8 +4179,7 @@ mod real_production_effects_matrix_tests {
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (result, _trace) = state
@@ -4186,8 +4211,7 @@ mod real_production_effects_matrix_tests {
         ));
 
         // Restart after shutdown must succeed too.
-        let run_id_2 = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id_2 = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("CLEANUP-SHUTDOWN-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
@@ -4236,8 +4260,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::AfterOrchestratorConstruction,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4311,8 +4334,7 @@ mod real_production_effects_matrix_tests {
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         mqk_db::arm_run(&pool, run_id)
@@ -4368,8 +4390,7 @@ mod real_production_effects_matrix_tests {
         ));
 
         // Restart after this failure must succeed.
-        let restart_run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let restart_run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("FAULT-ARM-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
@@ -4418,8 +4439,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::PerturbRunStoppedBeforeBegin,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4491,8 +4511,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::PerturbRunStoppedBeforeInitialHeartbeat,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4565,8 +4584,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::AfterRunArmBeginInitialTick,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4642,8 +4660,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::AfterProcessLocalSelectionCommit,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4729,8 +4746,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::ImmediatelyBeforeLoopSpawn,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4810,8 +4826,7 @@ mod real_production_effects_matrix_tests {
         clear_any_preexisting_active_daemon_run(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let evaluation_id = uuid::Uuid::new_v5(
@@ -4871,8 +4886,7 @@ mod real_production_effects_matrix_tests {
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
         state.set_execution_loop_panic_for_test(true);
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -4932,8 +4946,7 @@ mod real_production_effects_matrix_tests {
         }
         mqk_db::clear_halted_run(&pool, run_id).await.ok();
         mqk_db::stop_run(&pool, run_id).await.ok();
-        let run_id_2 = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id_2 = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("TASK-PANIC-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
@@ -4999,8 +5012,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::DeleteRunRowBeforeArm,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -5073,8 +5085,7 @@ mod real_production_effects_matrix_tests {
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
         state.set_install_active_runtime_conflict_for_test(true);
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -5205,8 +5216,7 @@ mod real_production_effects_matrix_tests {
                 DynamicSelectionLifecycleFaultSeam::AfterOrchestratorConstruction,
             ))
             .await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
 
@@ -5522,8 +5532,7 @@ mod real_production_effects_matrix_tests {
         blocker3_clear_stale_runtime_leader_lease(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB301AAPL", "PB301MSFT");
@@ -5612,8 +5621,7 @@ mod real_production_effects_matrix_tests {
         state.set_per_symbol_bar_staleness_secs_for_test(Some(3600));
         state.loop_call_trace_clear_for_test();
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, aapl, msft);
@@ -5835,8 +5843,7 @@ mod real_production_effects_matrix_tests {
         blocker3_clear_stale_runtime_leader_lease(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB303AAPL", "PB303MSFT");
@@ -5894,8 +5901,7 @@ mod real_production_effects_matrix_tests {
         blocker3_clear_stale_runtime_leader_lease(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB304AAPL", "PB304MSFT");
@@ -5946,8 +5952,7 @@ mod real_production_effects_matrix_tests {
             integrity.disarmed = false;
             integrity.halted = false;
         }
-        let run_id_2 = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id_2 = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("BLOCKER3-04: restart run creation must succeed");
         assert_ne!(
@@ -6017,8 +6022,7 @@ mod real_production_effects_matrix_tests {
         blocker3_clear_stale_runtime_leader_lease(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB305AAPL", "PB305MSFT");
@@ -6053,8 +6057,7 @@ mod real_production_effects_matrix_tests {
             mqk_db::RunStatus::Stopped
         ));
 
-        let run_id_2 = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id_2 = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("BLOCKER3-05: restart run creation must succeed");
         let (plan_2, authority_2) =
@@ -6123,8 +6126,7 @@ mod real_production_effects_matrix_tests {
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
         state.set_execution_loop_panic_for_test(true);
-        let run_id = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_id = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB306AAPL", "PB306MSFT");
@@ -6204,8 +6206,7 @@ mod real_production_effects_matrix_tests {
         blocker3_clear_stale_runtime_leader_lease(&pool).await;
         let state = hermetic_paper_state(&pool);
         state.set_hermetic_test_broker_override_for_test(true).await;
-        let run_a = state
-            .create_or_reuse_run_for_start(&pool)
+        let run_a = create_or_reuse_run_with_required_risk(&state, &pool)
             .await
             .expect("run A creation must succeed");
         let (plan_a, authority_a) = blocker3_plan_and_authority(run_a, "PB307AAPL", "PB307MSFT");
