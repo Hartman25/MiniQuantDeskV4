@@ -375,6 +375,7 @@ mod tests {
     }
 
     fn unset_all_research_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MQK_RESEARCH_REGISTRY_DB");
         std::env::remove_var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT");
         std::env::remove_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO");
