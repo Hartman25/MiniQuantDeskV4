@@ -434,6 +434,66 @@ mod tests {
         st
     }
 
+    async fn seed_active_order_run_without_dispatch(
+        st: &Arc<AppState>,
+        pool: &sqlx::PgPool,
+    ) -> uuid::Uuid {
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk.hermetic.order-submit.enqueue-only",
+        );
+        let now = chrono::Utc::now();
+
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
+                started_at_utc: now,
+                git_hash: "TEST".to_string(),
+                config_hash: "hermetic-order-enqueue-only".to_string(),
+                config_json: serde_json::json!({
+                    "runtime": "mqk-daemon",
+                    "adapter": "alpaca",
+                    "mode": DeploymentMode::LiveShadow.as_db_mode(),
+                    "risk": {
+                        "initial_equity_micros": 100_000_000_000_i64,
+                        "daily_loss_limit": 0.02,
+                        "max_drawdown": 0.20
+                    }
+                }),
+                host_fingerprint: "hermetic-test".to_string(),
+            },
+        )
+        .await
+        .expect("insert enqueue-only run");
+
+        mqk_db::arm_run(pool, run_id)
+            .await
+            .expect("arm enqueue-only run");
+        mqk_db::begin_run(pool, run_id)
+            .await
+            .expect("begin enqueue-only run");
+        mqk_db::heartbeat_run(pool, run_id, now)
+            .await
+            .expect("heartbeat enqueue-only run");
+
+        // Existing test-only runtime-ownership seam. This supplies the
+        // exact local ownership the operator-order route requires without
+        // spawning a real execution loop that can race this enqueue proof.
+        st.inject_running_loop_for_test(run_id).await;
+
+        {
+            let mut execution = st.execution_snapshot.write().await;
+            let snapshot = execution.as_mut().expect("execution snapshot seeded");
+            snapshot.run_id = Some(run_id);
+            snapshot.snapshot_at_utc = now;
+        }
+
+        run_id
+    }
+
     async fn arm(st: &Arc<AppState>) {
         let req = Request::builder()
             .method("POST")
@@ -517,10 +577,8 @@ mod tests {
         mqk_db::run_isolated("hermetic_order_enqueue", |pool| async move {
             let st = hermetic_order_daemon_state(pool).await;
             arm(&st).await;
-            let started = start(&st).await;
-            let run_id =
-                uuid::Uuid::parse_str(started["active_run_id"].as_str().expect("run_id string"))
-                    .expect("valid run uuid");
+            let db = st.db.as_ref().expect("db configured");
+            let run_id = seed_active_order_run_without_dispatch(&st, db).await;
 
             let (status, json) = post_manual_order(&st, valid_order_request()).await;
             assert_eq!(status, StatusCode::OK, "submit failed: {json}");
@@ -534,19 +592,10 @@ mod tests {
                 .expect("fetch outbox row")
                 .expect("outbox row present");
             assert_eq!(row.run_id, run_id);
-            // The hermetic override makes this a genuinely live orchestrator
-            // loop (real LockedPaperBroker, real tick), unlike the retired
-            // external test this replaces (which never actually reached this
-            // assertion). CLAIMED means the live loop picked the row up
-            // before this check ran -- a stronger proof of a working
-            // hermetic path, not a false pass -- so both states are honest
-            // here; only a state proving the row was lost/rejected would not
-            // be.
-            assert!(
-                row.status == "PENDING" || row.status == "CLAIMED",
-                "expected PENDING or CLAIMED (live orchestrator may have already claimed it); got: {}",
-                row.status
-            );
+            // This proof intentionally owns a RUNNING runtime without
+            // spawning broker dispatch, so the enqueue state is deterministic:
+            // the real HTTP route must durably create exactly one PENDING row.
+            assert_eq!(row.status, "PENDING");
             assert_eq!(row.order_json["symbol"], "AAPL");
 
             st.stop_for_shutdown().await;
