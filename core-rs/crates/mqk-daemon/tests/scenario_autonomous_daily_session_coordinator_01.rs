@@ -36,6 +36,7 @@ use mqk_daemon::state::{
     SymbolStrategyAssignment,
 };
 use mqk_runtime::native_strategy::EffectiveRuntimeBinding;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const SESSION_START_ENV: &str = "MQK_SESSION_START_HH_MM";
@@ -43,6 +44,11 @@ const SESSION_STOP_ENV: &str = "MQK_SESSION_STOP_HH_MM";
 const STRATEGY_SYMBOL_ENV: &str = "MQK_STRATEGY_SYMBOL";
 const STRATEGY_IDS_ENV: &str = "MQK_STRATEGY_IDS";
 const STRATEGY_TIMEFRAME_ENV: &str = "MQK_STRATEGY_MD_TIMEFRAME";
+
+// R28: the three default-running tests share process-global
+// session/strategy environment. Serialize those normal workspace
+// tests; ignored DB proofs retain their documented serial contract.
+static DEFAULT_ENV_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -198,6 +204,7 @@ async fn fetch_slot_row(
 
 #[tokio::test]
 async fn a01_weekend_creates_no_operation_no_db_call() {
+    let _env_guard = DEFAULT_ENV_TEST_LOCK.lock().await;
     reset_env();
     // Saturday 2026-07-18.
     let now = Utc.with_ymd_and_hms(2026, 7, 18, 15, 0, 0).unwrap();
@@ -220,6 +227,7 @@ async fn a01_weekend_creates_no_operation_no_db_call() {
 
 #[tokio::test]
 async fn a02_holiday_creates_no_operation() {
+    let _env_guard = DEFAULT_ENV_TEST_LOCK.lock().await;
     reset_env();
     // Friday 2026-07-03 is the observed Independence Day market holiday.
     let now = Utc.with_ymd_and_hms(2026, 7, 3, 15, 0, 0).unwrap();
@@ -242,6 +250,7 @@ async fn a02_holiday_creates_no_operation() {
 
 #[tokio::test]
 async fn a03_invalid_fixed_window_override_blocks_calendar() {
+    let _env_guard = DEFAULT_ENV_TEST_LOCK.lock().await;
     reset_env();
     // Only one of the two required override env vars is set — invalid
     // configuration must never be silently treated as absent.
