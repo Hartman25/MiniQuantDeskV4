@@ -137,7 +137,7 @@ cargo test -p mqk-db runtime_lease -- --ignored --test-threads=1
 
 # CI-04: daemon deadman proofs
 echo "== CI-04: daemon deadman =="
-cargo test -p mqk-db --test scenario_deadman_enforces_halt -- --ignored --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_deadman_enforces_halt -- --ignored --test-threads=1
 
 # CI-03 + CI-04 + CI-02 + IR-01: all daemon runtime lifecycle proofs in one binary.
 # (cargo test accepts only one TESTNAME filter before --; run the whole file once
