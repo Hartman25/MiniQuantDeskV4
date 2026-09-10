@@ -120,10 +120,12 @@ MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev
 MQK_OPERATOR_TOKEN=<any strong token>
 
 # Risk gate — REQUIRED for any orders to be submitted (AUTON-PAPER-BLOCKER-01)
-# Without these the risk gate fails closed and NO orders will be placed even
-# when the run is active. Set both; use values appropriate to your paper account.
+# Without all three the risk gate fails closed and NO orders will be placed even
+# when the run is active. Set all three; use values appropriate to your paper
+# account and validation policy.
 MQK_RISK_INITIAL_EQUITY_USD=100000        # paper account equity in USD
 MQK_RISK_DAILY_LOSS_LIMIT=0.02            # fraction of equity (0 < r < 1)
+MQK_RISK_MAX_DRAWDOWN=0.05                # fraction of peak equity (0 < r < 1)
 
 # Native strategy fleet — REQUIRED for autonomous bar-driven signal generation
 MQK_STRATEGY_IDS=intraday_scalper         # built-in engine name
