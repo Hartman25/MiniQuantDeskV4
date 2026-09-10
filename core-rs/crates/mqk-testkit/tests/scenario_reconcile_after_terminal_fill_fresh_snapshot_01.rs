@@ -244,6 +244,38 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
+async fn release_rfs_runtime_leadership(
+    pool: &PgPool,
+    run_id: Uuid,
+    orch: &mut ExecutionOrchestrator<NullBroker, PassGate, PassGate, PassGate, FixedClock>,
+) -> Result<()> {
+    let lease_count_before_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_before_release, 1,
+        "RFS teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+    );
+
+    orch.release_runtime_leadership().await?;
+
+    let lease_count_after_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_after_release, 0,
+        "RFS teardown: canonical release must remove this run's runtime leadership lease"
+    );
+
+    Ok(())
+}
+
 fn make_orchestrator(
     pool: PgPool,
     run_id: Uuid,
@@ -329,6 +361,7 @@ async fn rfs01_fresh_clean_snapshot_prevents_halt_after_grace_expiry() -> Result
         result.unwrap_err()
     );
 
+    release_rfs_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -381,6 +414,7 @@ async fn rfs02_fresh_dirty_snapshot_still_halts_after_grace_expiry() -> Result<(
         "RFS-02: error must be RECONCILE_DRIFT; got: {msg}"
     );
 
+    release_rfs_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -432,6 +466,7 @@ async fn rfs03_refresher_failure_halts_fail_closed() -> Result<()> {
         "RFS-03: error must be RECONCILE_DRIFT when refresh unavailable; got: {msg}"
     );
 
+    release_rfs_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -482,6 +517,7 @@ async fn rfs04_no_refresher_configured_halts_fail_closed() -> Result<()> {
         "RFS-04: error must be RECONCILE_DRIFT with no refresher; got: {msg}"
     );
 
+    release_rfs_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -546,6 +582,7 @@ async fn rfs05_genuine_drift_halts_without_refresh() -> Result<()> {
         "RFS-05: refresher must NOT be called for genuine (direction-mismatched) drift"
     );
 
+    release_rfs_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -590,6 +627,7 @@ async fn rfs06_grace_active_still_defers_reconcile_drift() -> Result<()> {
         result.unwrap_err()
     );
 
+    release_rfs_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
