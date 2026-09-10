@@ -318,6 +318,41 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
+async fn release_dhd_runtime_leadership<B>(
+    pool: &PgPool,
+    run_id: Uuid,
+    orch: &mut ExecutionOrchestrator<B, BoolGate, BoolGate, BoolGate, FixedClock>,
+) -> Result<()>
+where
+    B: BrokerAdapter + Send + Sync + 'static,
+{
+    let lease_count_before_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_before_release, 1,
+        "DHD teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+    );
+
+    orch.release_runtime_leadership().await?;
+
+    let lease_count_after_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_after_release, 0,
+        "DHD teardown: canonical release must remove this run's runtime leadership lease"
+    );
+
+    Ok(())
+}
+
 /// Assert run is HALTED and arm state is DISARMED in DB.
 async fn assert_halted_and_disarmed(pool: &PgPool, run_id: Uuid) -> Result<()> {
     let run = mqk_db::fetch_run(pool, run_id).await?;
@@ -472,6 +507,7 @@ async fn dhd01_ambiguous_submit_halts_durably() -> Result<()> {
     // DB must show HALTED + DISARMED — proving persist_halt_and_disarm was mandatory.
     assert_halted_and_disarmed(&pool, run_id).await?;
 
+    release_dhd_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -517,6 +553,7 @@ async fn dhd02_auth_session_halts_durably() -> Result<()> {
 
     assert_halted_and_disarmed(&pool, run_id).await?;
 
+    release_dhd_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -605,6 +642,7 @@ async fn dhd03_cancel_halt_ambiguous_halts_durably() -> Result<()> {
     // DB must show HALTED + DISARMED — proving the cancel halt path is now mandatory.
     assert_halted_and_disarmed(&pool, run_id).await?;
 
+    release_dhd_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -655,6 +693,7 @@ async fn dhd04_halt_sticky_after_ambiguous_submit() -> Result<()> {
         "DHD-04: Phase-0 error must contain HALT_GUARD, got: {err2}"
     );
 
+    release_dhd_runtime_leadership(&pool, run_id, &mut orch1).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
