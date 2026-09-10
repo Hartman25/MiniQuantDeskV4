@@ -365,6 +365,33 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
     );
 
     // ── Post-test cleanup ─────────────────────────────────────────────────
+    // `orch` acquired runtime leadership during the successful WS-REB-01
+    // tick. `orch_fresh` is the HALT_GUARD negative control and is rejected
+    // before lease acquisition, so only the original orchestrator owns the
+    // FK-bound authority that must be released during teardown.
+    let lease_count_before_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_before_release, 1,
+        "C1/C2 teardown: expected exactly one runtime leadership lease bound to the halted run"
+    );
+
+    orch.release_runtime_leadership().await?;
+
+    let lease_count_after_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_after_release, 0,
+        "C1/C2 teardown: canonical release must remove this run's runtime leadership lease"
+    );
     cleanup_run(&pool, run_id).await?;
     sqlx::query("delete from sys_arm_state where sentinel_id = 1")
         .execute(&pool)
