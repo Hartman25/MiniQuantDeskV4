@@ -534,6 +534,43 @@ mod db_tests {
         )
     }
 
+    async fn release_test_runtime_leadership<B>(
+        pool: &PgPool,
+        run_id: Uuid,
+        orch: &mut ExecutionOrchestrator<B, PassGate, PassGate, PassGate, FixedClock>,
+    ) -> Result<()>
+    where
+        B: BrokerAdapter + Send + Sync + 'static,
+    {
+        let lease_count_before_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_before_release, 1,
+            "A3 test teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+        );
+
+        orch.release_runtime_leadership().await?;
+
+        let lease_count_after_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_after_release, 0,
+            "A3 test teardown: canonical release must remove this run's runtime leadership lease"
+        );
+
+        Ok(())
+    }
+
     async fn outbox_status(pool: &PgPool, idem_key: &str) -> Result<Option<String>> {
         let row: Option<(String,)> =
             sqlx::query_as("select status from oms_outbox where idempotency_key = $1")
@@ -598,6 +635,7 @@ mod db_tests {
             "Reject must not halt the run"
         );
 
+        release_test_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;
         Ok(())
@@ -652,6 +690,7 @@ mod db_tests {
             "expected PENDING after Transport, got {status:?}"
         );
 
+        release_test_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;
         Ok(())
@@ -737,6 +776,7 @@ mod db_tests {
             "expected disarm reason AmbiguousSubmit, got {arm:?}"
         );
 
+        release_test_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;
         Ok(())
@@ -812,6 +852,7 @@ mod db_tests {
             "expected DISARMED after AuthSession, got {arm:?}"
         );
 
+        release_test_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;
         Ok(())
@@ -859,6 +900,7 @@ mod db_tests {
         let run = mqk_db::fetch_run(&pool, run_id).await?;
         assert!(matches!(run.status, mqk_db::RunStatus::Halted));
 
+        release_test_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;
         Ok(())
@@ -943,7 +985,7 @@ mod db_tests {
             .expect_err("safe ratelimit returns submit error and resets row");
         let status_safe = outbox_status(&pool, idem_safe).await?;
         assert_eq!(status_safe.as_deref(), Some("PENDING"));
-        cleanup_runtime_lease(&pool).await?;
+        release_test_runtime_leadership(&pool, run_id_safe, &mut orch).await?;
 
         // Unknown-delivery rate limit -> ambiguous + halt/disarm.
         let run_id_amb: Uuid = B6_RUN_ID.parse().unwrap();
@@ -972,6 +1014,8 @@ mod db_tests {
 
         let run = mqk_db::fetch_run(&pool, run_id_amb).await?;
         assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+
+        release_test_runtime_leadership(&pool, run_id_amb, &mut orch).await?;
 
         cleanup_run(&pool, run_id_safe).await?;
         cleanup_run(&pool, run_id_amb).await?;
