@@ -317,6 +317,38 @@ fn aapl_broker_post_fill(ts_ms: i64) -> BrokerSnapshot {
     s
 }
 
+async fn release_rdf_runtime_leadership(
+    pool: &PgPool,
+    run_id: Uuid,
+    orch: &mut ExecutionOrchestrator<NullBroker, PassGate, PassGate, PassGate, FixedClock>,
+) -> Result<()> {
+    let lease_count_before_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_before_release, 1,
+        "RDF teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+    );
+
+    orch.release_runtime_leadership().await?;
+
+    let lease_count_after_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_after_release, 0,
+        "RDF teardown: canonical release must remove this run's runtime leadership lease"
+    );
+
+    Ok(())
+}
+
 fn make_orchestrator_with_snapshots(
     pool: PgPool,
     run_id: Uuid,
@@ -413,6 +445,7 @@ async fn rdf01_deferred_when_sent_mapped_in_grace_and_consistent() -> Result<()>
         run.status
     );
 
+    release_rdf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -478,6 +511,7 @@ async fn rdf02_halts_when_grace_expired() -> Result<()> {
         run.status
     );
 
+    release_rdf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -557,6 +591,7 @@ async fn rdf03_halts_immediately_on_unexpected_broker_drift() -> Result<()> {
         run.status
     );
 
+    release_rdf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -619,6 +654,7 @@ async fn rdf04_halts_immediately_when_no_sent_mapped_rows() -> Result<()> {
         run.status
     );
 
+    release_rdf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -701,6 +737,7 @@ async fn rdf05_clean_reconcile_after_fill_applied() -> Result<()> {
         run.status
     );
 
+    release_rdf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
