@@ -252,7 +252,16 @@ impl RuntimeRiskGate {
         request: RequestKind,
         is_risk_reducing: bool,
     ) -> mqk_execution::RiskDecision {
-        let mut guard = self.state.lock().expect("runtime risk gate lock");
+        // U01: a poisoned risk-state mutex means a prior panic occurred while
+        // this state was exclusively held. The state may have been only
+        // partially mutated, so recovering the inner value could authorize
+        // from untrustworthy state. Treat poison as risk-engine unavailable.
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return mqk_execution::RiskDecision::Deny(runtime_risk_fail_closed_denial());
+            }
+        };
         match &mut *guard {
             RuntimeRiskGateState::FailClosed { denial } => {
                 mqk_execution::RiskDecision::Deny(denial.clone())
@@ -297,7 +306,11 @@ impl RuntimeRiskGate {
     /// record into, and subsequent `evaluate_gate` calls already deny
     /// regardless of reject count.
     pub fn record_broker_reject(&self) {
-        let mut guard = self.state.lock().expect("runtime risk gate lock");
+        // U01: never mutate or recover state after mutex poison. Evaluation
+        // will independently fail closed on every subsequent request.
+        let Ok(mut guard) = self.state.lock() else {
+            return;
+        };
         if let RuntimeRiskGateState::Ready { state, clock, .. } = &mut *guard {
             let now = clock.now_utc();
             state.record_reject(reject_window_id_for(now));
@@ -316,7 +329,12 @@ impl RiskGate for RuntimeRiskGate {
     /// the currently-held `RiskState`. `FailClosed` gates have no `RiskState`
     /// to read, so they report `Unavailable` (not a claim of "not halted").
     fn sticky_halt_status(&self) -> mqk_execution::RiskEngineHaltStatus {
-        let state = self.state.lock().expect("runtime risk gate lock");
+        // U01: poisoned state is not authoritative halt truth. Surface it as
+        // unavailable instead of panicking or recovering possibly-corrupt state.
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => return mqk_execution::RiskEngineHaltStatus::Unavailable,
+        };
         match &*state {
             RuntimeRiskGateState::Ready { state, .. } => {
                 mqk_execution::RiskEngineHaltStatus::Known {
@@ -559,6 +577,16 @@ mod tests {
         }
     }
 
+    /// U01 regression collaborator: panics only after RuntimeRiskGate::for_test
+    /// has constructed the gate, so evaluate_with_request already holds the
+    /// gate mutex when now_utc() panics.
+    struct PanickingClock;
+
+    impl RuntimeClock for PanickingClock {
+        fn now_utc(&self) -> DateTime<Utc> {
+            panic!("U01_INJECTED_CLOCK_PANIC_WHILE_RISK_MUTEX_HELD");
+        }
+    }
     fn t(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
         chrono::TimeZone::with_ymd_and_hms(&Utc, y, mo, d, h, mi, 0).unwrap()
     }
@@ -573,6 +601,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn poisoned_runtime_risk_gate_fails_closed_without_secondary_panic() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let risk_gate = RuntimeRiskGate::for_test(
+            make_config(),
+            RiskState::new(20_260_910, 100_000 * 1_000_000, 600),
+            MutableEquityAuthority::new(100_000 * 1_000_000),
+            Arc::new(PanickingClock),
+        );
+
+        // The first injected collaborator panic occurs while the gate mutex is
+        // held and therefore poisons the mutex. This remains a panic: U01 is
+        // about deterministic behavior AFTER poison, not swallowing arbitrary
+        // collaborator panics.
+        let first = catch_unwind(AssertUnwindSafe(|| {
+            let _ = risk_gate.evaluate_gate();
+        }));
+        assert!(first.is_err(), "precondition: injected panic must occur");
+
+        // Once poisoned, no subsequent risk path may panic or recover the
+        // possibly-partially-mutated state.
+        let mqk_execution::RiskDecision::Deny(denial) = risk_gate.evaluate_gate() else {
+            panic!("poisoned risk mutex must deny");
+        };
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
+
+        assert_eq!(
+            risk_gate.sticky_halt_status(),
+            mqk_execution::RiskEngineHaltStatus::Unavailable
+        );
+
+        let mqk_execution::RiskDecision::Deny(flatten_denial) = risk_gate
+            .evaluate_gate_for_request(RiskRequestContext {
+                is_risk_reducing: true,
+            })
+        else {
+            panic!("poisoned risk mutex must deny risk-reducing requests too");
+        };
+        assert_eq!(
+            flatten_denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
+
+        // Reject recording is non-authoritative bookkeeping after poison and
+        // must not panic or mutate/recover the poisoned state.
+        risk_gate.record_broker_reject();
+
+        // Repeated evaluation remains fail closed.
+        let mqk_execution::RiskDecision::Deny(repeated) = risk_gate.evaluate_gate() else {
+            panic!("poisoned risk mutex must remain fail closed");
+        };
+        assert_eq!(
+            repeated.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable
+        );
+    }
     #[test]
     fn runtime_risk_gate_fails_closed_on_missing_or_ambiguous_input() {
         let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 0);
