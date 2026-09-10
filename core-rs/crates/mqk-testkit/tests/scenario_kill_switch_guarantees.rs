@@ -642,6 +642,33 @@ async fn i_orchestrator_triggered_halt_proves_mandatory_writes() -> Result<()> {
          got: {fresh_err_str}"
     );
 
+    // The original orchestrator acquired runtime leadership before triggering
+    // the invariant halt. The fresh orchestrator above is only the HALT_GUARD
+    // negative control and must not be treated as the authority owner.
+    let lease_count_before_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_before_release, 1,
+        "IMHP teardown: expected exactly one runtime leadership lease bound to the halted run"
+    );
+
+    orch.release_runtime_leadership().await?;
+
+    let lease_count_after_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_after_release, 0,
+        "IMHP teardown: canonical release must remove this run's runtime leadership lease"
+    );
+
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
