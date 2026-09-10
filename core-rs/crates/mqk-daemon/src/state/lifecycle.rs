@@ -4986,6 +4986,39 @@ mod real_production_effects_matrix_tests {
             ),
         }
 
+        // The fail-closed restart refusal above is the behavior under test.
+        // Fixture cleanup occurs only after proving that refusal. Before
+        // removing the singleton lease, prove it belongs to the exact
+        // original panic run so unrelated runtime authority cannot be erased.
+        let lingering_lease_run_id = sqlx::query_scalar::<_, uuid::Uuid>(
+            "select run_id from runtime_leader_lease",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect(
+            "TASK-PANIC-01: panic-owned runtime leader lease must remain after restart refusal",
+        );
+
+        assert_eq!(
+            lingering_lease_run_id, run_id,
+            "TASK-PANIC-01: lingering runtime leader lease must belong to the original panic run"
+        );
+
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+
+        let remaining_lease_count =
+            sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease")
+                .fetch_one(&pool)
+                .await
+                .expect(
+                    "TASK-PANIC-01: post-cleanup runtime leader lease count query must succeed",
+                );
+
+        assert_eq!(
+            remaining_lease_count, 0,
+            "TASK-PANIC-01: test-owned panic lease must be removed before run cleanup"
+        );
+
         delete_run_and_its_events(&pool, run_id).await;
         delete_run_and_its_events(&pool, run_id_2).await;
     }
