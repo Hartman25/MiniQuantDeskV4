@@ -6100,20 +6100,25 @@ mod real_production_effects_matrix_tests {
     // the finished loop first) must surface this as structured degraded
     // truth, never a false clean Idle, and must leave no detached
     // selected-host authority (the panicked task's own `dispatch_authority`
-    // — including its host pool — was dropped when the task unwound; no
+    // - including its host pool - was dropped when the task unwound; no
     // other owner ever held a clone).
     //
     // This test deliberately does NOT chain an immediate restart (unlike
     // BLOCKER3-04/05, which prove requirement 16 via halt/shutdown): a
     // panicked orchestrator's own `runtime_leader_lease` row is only
-    // released by its natural TTL expiry (the orchestrator instance that
-    // held it was dropped mid-unwind, never explicitly releasing it) — a
-    // real, pre-existing, out-of-scope safety property of the runtime
-    // leadership lease (unrelated to dynamic selection/provenance/signal
-    // journal), not something this patch touches. Requirement 16 (restart
-    // builds fresh run/plan/pool) is already fully proven by BLOCKER3-04
-    // and BLOCKER3-05 above via a clean halt/shutdown exit, which releases
-    // the lease immediately.
+    // released by its natural TTL expiry in production (the orchestrator
+    // instance that held it was dropped mid-unwind, never explicitly
+    // releasing it). That production safety behavior remains unchanged.
+    //
+    // Test-fixture cleanup occurs only after the panic/degraded behavior
+    // and lingering lease have both been asserted. The singleton lease
+    // must belong to this exact test run before the existing test-only
+    // cleanup seam removes it. Zero residue is then proven before the run
+    // row is deleted so this test cannot contaminate later test binaries.
+    //
+    // Requirement 16 (restart builds fresh run/plan/pool) is already fully
+    // proven by BLOCKER3-04 and BLOCKER3-05 above via clean halt/shutdown
+    // exits, which release the lease immediately.
     // -------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread")]
     async fn blocker3_06_panic_reports_degraded_and_leaves_no_detached_authority() {
@@ -6169,16 +6174,43 @@ mod real_production_effects_matrix_tests {
                  DynamicPaperEnforced task's join failure, got {other:?}"
             ),
         }
+
         assert!(
             state.dynamic_selection_runtime_snapshot().await.is_none(),
             "BLOCKER3-06: no detached selected-host authority/metadata may \
              survive a panicked task"
         );
 
+        let lingering_lease_run_id = sqlx::query_scalar::<_, uuid::Uuid>(
+            "select run_id from runtime_leader_lease",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("BLOCKER3-06: panicked orchestrator must leave its runtime leader lease present");
+
+        assert_eq!(
+            lingering_lease_run_id, run_id,
+            "BLOCKER3-06: lingering runtime leader lease must belong to this exact test run"
+        );
+
         {
             let mut lock = state.runtime_ownership.lock().await;
             *lock = crate::state::LocalRuntimeOwnership::Idle;
         }
+
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+
+        let remaining_lease_count =
+            sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease")
+                .fetch_one(&pool)
+                .await
+                .expect("BLOCKER3-06: post-cleanup runtime leader lease count query must succeed");
+
+        assert_eq!(
+            remaining_lease_count, 0,
+            "BLOCKER3-06: test-owned stale runtime leader lease must be removed before run cleanup"
+        );
+
         mqk_db::clear_halted_run(&pool, run_id).await.ok();
         mqk_db::stop_run(&pool, run_id).await.ok();
 
@@ -6188,7 +6220,6 @@ mod real_production_effects_matrix_tests {
         blocker3_cleanup_symbol_evidence(&pool, "PB306AAPL2").await;
         blocker3_cleanup_symbol_evidence(&pool, "PB306MSFT2").await;
     }
-
     // -------------------------------------------------------------------
     // BLOCKER3-07 (requirement 17): run A cannot clear run B. Run A reaches
     // real Active with a genuine DynamicPaperEnforced authority; a
