@@ -70,3 +70,24 @@ if manifest_paths != sql_paths:
 
 print("[migration-guard] OK: manifest matches authoritative SQL chain")
 PY
+# Guard 3: migration versions 0068+ must resolve to LF checkout bytes.
+#
+# Versions 0001-0067 predate this policy and are intentionally grandfathered
+# because deployed SQLx checksum identity may reflect their historical Windows
+# checkout bytes. Every migration from 0068 onward must be explicitly pinned
+# to LF before it enters the authoritative chain.
+mapfile -t sql_files < <(git ls-files "$AUTHORITATIVE_DIR" | awk '/\.sql$/')
+[[ ${#sql_files[@]} -gt 0 ]] || fail "no tracked SQL migration files found"
+
+for f in "${sql_files[@]}"; do
+  base="${f##*/}"
+  version="${base%%_*}"
+
+  if [[ "$version" =~ ^[0-9]+$ ]] && (( 10#$version >= 68 )); then
+    eol_attr="$(git check-attr eol -- "$f")"
+    [[ "$eol_attr" == "$f: eol: lf" ]] || \
+      fail "migration version >=0068 is not pinned to LF checkout bytes: $eol_attr"
+  fi
+done
+
+echo "[migration-guard] OK: migration versions 0068+ resolve to eol=lf"
