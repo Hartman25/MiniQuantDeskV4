@@ -349,6 +349,36 @@ mod db_tests {
             "disarm reason must be AmbiguousSubmit (durable, not silent), got {arm:?}"
         );
 
+        // The ambiguous-submit HALT/DISARM/AMBIGUOUS behavior above is the
+        // invariant under test. Teardown must release the exact production
+        // runtime leadership authority held by this orchestrator before its
+        // FK-bound run row is deleted.
+        let lease_count_before_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_before_release, 1,
+            "S1: expected exactly one runtime leadership lease bound to this run before teardown"
+        );
+
+        orch.release_runtime_leadership().await?;
+
+        let lease_count_after_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_after_release, 0,
+            "S1: canonical release must remove this run's runtime leadership lease"
+        );
+
         cleanup_run(&pool, run_id).await?;
         Ok(())
     }
