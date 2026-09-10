@@ -310,6 +310,46 @@ mod db_tests {
         )
     }
 
+    async fn release_rr4_runtime_leadership(
+        pool: &PgPool,
+        run_id: Uuid,
+        orch: &mut ExecutionOrchestrator<
+            ScriptedBroker,
+            PassGate,
+            RuntimeRiskGate,
+            PassGate,
+            DbFixedClock,
+        >,
+    ) -> Result<()> {
+        let lease_count_before_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_before_release, 1,
+            "RR4 teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+        );
+
+        orch.release_runtime_leadership().await?;
+
+        let lease_count_after_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_after_release, 0,
+            "RR4 teardown: canonical release must remove this run's runtime leadership lease"
+        );
+
+        Ok(())
+    }
+
     async fn enqueue_order(pool: &PgPool, run_id: Uuid, idem: &str) -> Result<()> {
         let created = mqk_db::outbox_enqueue(
             pool,
@@ -427,6 +467,7 @@ mod db_tests {
             "r3's outbox row must be marked FAILED via the RiskBlocked disposition path"
         );
 
+        release_rr4_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;
         Ok(())
@@ -488,6 +529,7 @@ mod db_tests {
             "the legitimate order must have reached the broker"
         );
 
+        release_rr4_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         cleanup_runtime_lease(&pool).await?;
         Ok(())
