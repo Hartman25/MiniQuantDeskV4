@@ -251,6 +251,38 @@ async fn clear_runtime_lease_rows(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn release_rtf_runtime_leadership(
+    pool: &PgPool,
+    run_id: Uuid,
+    orch: &mut ExecutionOrchestrator<NullBroker, PassGate, PassGate, PassGate, FixedClock>,
+) -> Result<()> {
+    let lease_count_before_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_before_release, 1,
+        "RTF teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+    );
+
+    orch.release_runtime_leadership().await?;
+
+    let lease_count_after_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_after_release, 0,
+        "RTF teardown: canonical release must remove this run's runtime leadership lease"
+    );
+
+    Ok(())
+}
+
 fn make_orchestrator(
     pool: PgPool,
     run_id: Uuid,
@@ -330,6 +362,7 @@ async fn rtf01_deferred_when_terminal_fill_within_grace_and_consistent() -> Resu
         run.status
     );
 
+    release_rtf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -387,6 +420,7 @@ async fn rtf02_halts_when_settle_grace_expired() -> Result<()> {
         run.status
     );
 
+    release_rtf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -446,6 +480,7 @@ async fn rtf03_halts_when_fresh_broker_snapshot_mismatches() -> Result<()> {
         run.status
     );
 
+    release_rtf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -501,6 +536,7 @@ async fn rtf04_halts_immediately_with_no_recent_fills_unexplained_drift() -> Res
         run.status
     );
 
+    release_rtf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -555,6 +591,7 @@ async fn rtf05_clean_reconcile_when_broker_snapshot_refreshes() -> Result<()> {
         run.status
     );
 
+    release_rtf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -613,6 +650,7 @@ async fn rtf06_deferred_for_sell_fill_within_grace() -> Result<()> {
         run.status
     );
 
+    release_rtf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -677,6 +715,7 @@ async fn rtf07_partial_plus_terminal_fill_cumulative_drift_deferred() -> Result<
         run.status
     );
 
+    release_rtf_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
