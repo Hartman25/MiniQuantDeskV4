@@ -231,6 +231,38 @@ async fn clear_runtime_lease_rows(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn release_asb_runtime_leadership(
+    pool: &PgPool,
+    run_id: Uuid,
+    orch: &mut ExecutionOrchestrator<NullBroker, PassGate, PassGate, PassGate, FixedClock>,
+) -> Result<()> {
+    let lease_count_before_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_before_release, 1,
+        "ASB teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+    );
+
+    orch.release_runtime_leadership().await?;
+
+    let lease_count_after_release =
+        sqlx::query_scalar::<_, i64>("select count(*) from runtime_leader_lease where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await?;
+
+    assert_eq!(
+        lease_count_after_release, 0,
+        "ASB teardown: canonical release must remove this run's runtime leadership lease"
+    );
+
+    Ok(())
+}
+
 /// Build a dirty reconcile snapshot pair: local has AAPL position, broker has none.
 ///
 /// This simulates the state where a fill arrived via WS and is reflected in the
@@ -343,6 +375,7 @@ async fn asb01_dirty_reconcile_deferred_when_inbox_has_pending_rows() -> Result<
         "ASB-01: inbox must be fully drained after tick"
     );
 
+    release_asb_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -402,6 +435,7 @@ async fn asb02_dirty_reconcile_halts_when_inbox_empty() -> Result<()> {
         "ASB-02: run must be HALTED after reconcile dirty tick"
     );
 
+    release_asb_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -482,6 +516,7 @@ async fn asb03_one_tick_deferral_then_genuine_halt() -> Result<()> {
         "ASB-03: run must be HALTED after tick 2 reconcile drift"
     );
 
+    release_asb_runtime_leadership(&pool, run_id, &mut orch).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
