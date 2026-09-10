@@ -221,6 +221,40 @@ mod db_tests {
         )
     }
 
+    async fn release_c1_runtime_leadership(
+        pool: &PgPool,
+        run_id: Uuid,
+        orch: &mut ExecutionOrchestrator<NeverCallBroker, PassGate, PassGate, PassGate, FixedClock>,
+    ) -> Result<()> {
+        let lease_count_before_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_before_release, 1,
+            "C1 teardown: expected exactly one runtime leadership lease bound to run {run_id}"
+        );
+
+        orch.release_runtime_leadership().await?;
+
+        let lease_count_after_release = sqlx::query_scalar::<_, i64>(
+            "select count(*) from runtime_leader_lease where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            lease_count_after_release, 0,
+            "C1 teardown: canonical release must remove this run's runtime leadership lease"
+        );
+
+        Ok(())
+    }
+
     async fn outbox_status(pool: &PgPool, idem: &str) -> Result<Option<String>> {
         let row: Option<(String,)> =
             sqlx::query_as("select status from oms_outbox where idempotency_key = $1")
@@ -320,6 +354,7 @@ mod db_tests {
             "C1-01: disarm reason must be CancelTargetMissing, got {arm:?}"
         );
 
+        release_c1_runtime_leadership(&pool, run_id, &mut orch).await?;
         cleanup_run(&pool, run_id).await?;
         Ok(())
     }
@@ -384,6 +419,7 @@ mod db_tests {
             "C1-02: second tick must be blocked by HALT_GUARD, got: {msg2}"
         );
 
+        release_c1_runtime_leadership(&pool, run_id, &mut orch1).await?;
         cleanup_run(&pool, run_id).await?;
         reset_c1_runtime_lease(&pool).await?;
         Ok(())
