@@ -7,7 +7,9 @@
 //   - re-exports that preserve the pre-refactor public API
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{
+    migrate::Migrate as SqlxMigrate, postgres::PgPoolOptions, Connection, PgConnection, PgPool,
+};
 
 pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 
@@ -145,11 +147,199 @@ pub async fn testkit_db_pool() -> Result<PgPool> {
 }
 
 /// Run embedded SQLx migrations.
+///
+/// M1-13C-MIGRATION-0069-HISTORICAL-UPGRADE-FENCE-01:
+/// migration 0069 is immutable deployed history. Its original reconciliation
+/// predicate can consider a RUNNING row with a stale/NULL heartbeat quiescent,
+/// while migration 0070 intentionally tightens that rule to treat every
+/// ARMED/RUNNING row as authority. Because SQLx executes 0069 before 0070, a
+/// database still below 0069 needs a runner-level fence so 0069 cannot delete
+/// an ambiguous legacy lease before 0070 gets a chance to enforce the stricter
+/// rule.
+///
+/// The fence acquires SQLx's normal Postgres migration advisory lock first,
+/// then (only while 0069 is pending and the relevant tables already exist)
+/// holds transaction-scoped table locks in production lock order: `runs`
+/// before `runtime_leader_lease`. This serializes run/lease mutation across
+/// the preflight and the complete pending migration chain. The embedded
+/// migrator then runs with its own locking disabled because this connection
+/// already owns SQLx's advisory migration lock.
 pub async fn migrate(pool: &PgPool) -> Result<()> {
-    sqlx::migrate!("./migrations")
-        .run(pool)
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("db migrate: acquire dedicated connection failed")?;
+
+    SqlxMigrate::lock(&mut *conn)
+        .await
+        .context("db migrate: acquire SQLx advisory migration lock failed")?;
+
+    let migration_result = migrate_while_sqlx_locked(&mut conn).await;
+    let unlock_result = SqlxMigrate::unlock(&mut *conn).await;
+
+    match (migration_result, unlock_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(()), Err(unlock_err)) => {
+            let _ = conn.close().await;
+            Err(anyhow::Error::new(unlock_err)
+                .context("db migrate: release SQLx advisory migration lock failed"))
+        }
+        (Err(err), Err(unlock_err)) => {
+            let _ = conn.close().await;
+            Err(err.context(format!(
+                "db migrate also failed to release SQLx advisory migration lock: {unlock_err}"
+            )))
+        }
+    }
+}
+
+async fn run_embedded_migrations_without_lock(conn: &mut PgConnection) -> Result<()> {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_locking(false);
+    // `Migrator::run` is generic over `Acquire` and makes callers that await
+    // mqk_db::migrate inside tokio::spawn fail the all-targets Send/HRTB
+    // compile gate ("implementation of Acquire is not general enough").
+    // We already hold a concrete PgConnection plus SQLx's advisory migration
+    // lock here, so use SQLx's direct-connection path deliberately.
+    migrator
+        .run_direct(conn)
         .await
         .context("db migrate failed")?;
+    Ok(())
+}
+
+async fn migrate_while_sqlx_locked(conn: &mut PgConnection) -> Result<()> {
+    let migration_table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await
+            .context("db migrate: inspect migration ledger presence failed")?;
+
+    if !migration_table_exists {
+        return run_embedded_migrations_without_lock(conn).await;
+    }
+
+    let migration_69_applied: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM _sqlx_migrations
+              WHERE version = 69
+                AND success = true
+         )",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .context("db migrate: inspect migration 0069 status failed")?;
+
+    if migration_69_applied {
+        return run_embedded_migrations_without_lock(conn).await;
+    }
+
+    let historical_tables_exist: bool = sqlx::query_scalar(
+        "SELECT to_regclass('runs') IS NOT NULL
+             AND to_regclass('runtime_leader_lease') IS NOT NULL",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .context("db migrate: inspect historical lease tables failed")?;
+
+    if !historical_tables_exist {
+        return run_embedded_migrations_without_lock(conn).await;
+    }
+
+    let mut tx = conn
+        .begin()
+        .await
+        .context("db migrate: begin historical-upgrade fence transaction failed")?;
+
+    // Production run lifecycle mutates `runs` before lease authority. Keep the
+    // same order here. SHARE ROW EXCLUSIVE conflicts with ordinary DML and
+    // with another fenced migrator, so no authority state can change between
+    // this preflight and commit of the pending migration chain.
+    sqlx::query("LOCK TABLE runs IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await
+        .context("db migrate: lock runs for historical-upgrade fence failed")?;
+
+    sqlx::query("LOCK TABLE runtime_leader_lease IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await
+        .context("db migrate: lock runtime_leader_lease for historical-upgrade fence failed")?;
+
+    let lease_has_run_id: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM information_schema.columns
+              WHERE table_schema = ANY(current_schemas(false))
+                AND table_name = 'runtime_leader_lease'
+                AND column_name = 'run_id'
+         )",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .context("db migrate: inspect runtime_leader_lease.run_id presence failed")?;
+
+    let legacy_lease_exists: bool = if lease_has_run_id {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM runtime_leader_lease
+                  WHERE id = 1
+                    AND run_id IS NULL
+             )",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .context("db migrate: inspect legacy unbound lease failed")?
+    } else {
+        // Before migration 0068 every extant singleton lease row is
+        // necessarily legacy/unbound because the run_id column does not yet
+        // exist.
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM runtime_leader_lease
+                  WHERE id = 1
+             )",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .context("db migrate: inspect pre-0068 legacy lease failed")?
+    };
+
+    if legacy_lease_exists {
+        let active_authority_count: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+               FROM runs
+              WHERE status IN ('ARMED', 'RUNNING')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .context("db migrate: inspect active run authority failed")?;
+
+        if active_authority_count > 0 {
+            tx.rollback()
+                .await
+                .context("db migrate: rollback historical-upgrade refusal failed")?;
+
+            anyhow::bail!(
+                "M1-13C-MIGRATION-0069-HISTORICAL-UPGRADE-FENCE-01:                  refusing to apply pending migration 0069 while a legacy/unbound                  runtime_leader_lease row exists and {active_authority_count} run(s)                  report ARMED or RUNNING. Heartbeat freshness is not authority evidence.                  Resolve active run lifecycle authority before retrying migration."
+            );
+        }
+    }
+
+    let migration_result = run_embedded_migrations_without_lock(&mut tx).await;
+
+    if let Err(err) = migration_result {
+        let _ = tx.rollback().await;
+        return Err(err);
+    }
+
+    tx.commit()
+        .await
+        .context("db migrate: commit historical-upgrade fence transaction failed")?;
+
     Ok(())
 }
 

@@ -703,33 +703,28 @@ if ($liveRoutingEnv -eq 'true' -or $liveRoutingEnv -eq '1') {
 # ---------------------------------------------------------------------------
 Write-Section "STEP 5: Run DB migrations"
 
-$migrationsPath = Join-Path $RepoRoot 'core-rs\crates\mqk-db\migrations'
+# M1-13C-MIGRATION-0069-HISTORICAL-UPGRADE-FENCE-01:
+# route every supported Paper migration through mqk_db::migrate so immutable
+# historical 0069 cannot run without the pre-0069 authority fence.
+try {
+    $cargo = (Get-Command 'cargo' -ErrorAction Stop).Source
+} catch {
+    Write-Fail "cargo command not found; cannot run fenced DB migrations."
+    exit 1
+}
 
-# Prefer sqlx CLI if available; fall back to cargo sqlx
-$sqlxCmd = $null
-try { $sqlxCmd = (Get-Command 'sqlx' -ErrorAction Stop).Source } catch {}
-
-if ($null -ne $sqlxCmd) {
-    Write-Step "Running: sqlx migrate run"
-    & $sqlxCmd migrate run --database-url $env:MQK_DATABASE_URL --source $migrationsPath 2>&1 | Out-Host
+Write-Step "Running fenced mqk-db migration runner"
+Push-Location (Join-Path $RepoRoot 'core-rs')
+try {
+    $local:ErrorActionPreference = 'Continue'
+    & $cargo run --quiet --locked -p mqk-db --bin mqk_db_migrate 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail "sqlx migrate run failed (exit $LASTEXITCODE). Check DB connectivity."
+        Write-Fail "fenced mqk-db migration runner failed (exit $LASTEXITCODE)."
         exit 1
     }
-} else {
-    Write-Step "sqlx CLI not found; running via cargo sqlx"
-    $cargo = (Get-Command 'cargo' -ErrorAction Stop).Source
-    Push-Location (Join-Path $RepoRoot 'core-rs')
-    try {
-        $local:ErrorActionPreference = 'Continue'
-        & $cargo run --quiet --bin sqlx -- migrate run --database-url $env:MQK_DATABASE_URL --source $migrationsPath 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Write-Fail "cargo sqlx migrate run failed (exit $LASTEXITCODE)."
-            exit 1
-        }
-    } finally { Pop-Location }
-}
-Write-Ok "DB migrations applied."
+} finally { Pop-Location }
+
+Write-Ok "DB migrations applied through fenced mqk-db runner."
 
 # ---------------------------------------------------------------------------
 # STEP 5B: Market-data context prep -- bars for strategy lookback

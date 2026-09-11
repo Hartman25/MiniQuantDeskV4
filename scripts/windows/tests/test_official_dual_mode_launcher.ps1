@@ -377,8 +377,8 @@ Assert-True 'Proof 15: Docker/container readiness path exists (docker inspect / 
 Assert-True 'Proof 15: full startup invokes the DB-prerequisites stage before delegating to Launch-VeritasLedger.ps1' `
     ($FullStartupBody -match '(?s)Invoke-PaperDbPrerequisites -RepoRoot \$RepoRoot.*?Launch-VeritasLedger\.ps1')
 
-Assert-True 'Proof 16: migration path exists (sqlx/cargo-sqlx migrate run against core-rs\crates\mqk-db\migrations)' `
-    ($LauncherText -match 'migrate run' -and $LauncherText -match 'mqk-db\\migrations')
+Assert-True 'Proof 16: migration path routes through the fenced mqk_db_migrate runner, not raw sqlx' `
+    ($LauncherText -match 'mqk_db_migrate' -and -not ($LauncherText -match 'sqlx migrate run'))
 
 Assert-True 'Proof 17: DB-prerequisite stage never runs in CheckOnly (no docker start / migration mutation on a read-only run)' `
     (-not ($CheckOnlyBlockText -match 'Invoke-PaperDbPrerequisites'))

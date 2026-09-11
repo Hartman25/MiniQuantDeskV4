@@ -932,39 +932,30 @@ function Invoke-PaperDbPrerequisites {
     $env:MQK_DATABASE_URL = $paperDbUrl
     Write-Ok 'MQK_DATABASE_URL reasserted to paper DB 127.0.0.1:5440/miniquantdesk_paper (value not printed).'
 
-    $migrationsPath = Join-Path $RepoRoot 'core-rs\crates\mqk-db\migrations'
-    $sqlxCmd = $null
-    try { $sqlxCmd = (Get-Command 'sqlx' -ErrorAction Stop).Source } catch {}
-
-    if ($null -ne $sqlxCmd) {
-        Write-Step 'Running: sqlx migrate run'
-        & $sqlxCmd migrate run --database-url $env:MQK_DATABASE_URL --source $migrationsPath 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            $result.Reason = "sqlx migrate run failed (exit $LASTEXITCODE)."
-            Write-Fail $result.Reason
-            return $result
-        }
-    } else {
-        Write-Step 'sqlx CLI not found; running via cargo sqlx'
-        try {
-            $cargo = (Get-Command 'cargo' -ErrorAction Stop).Source
-        } catch {
-            $result.Reason = 'Neither sqlx CLI nor cargo were found; cannot run DB migrations.'
-            Write-Fail $result.Reason
-            return $result
-        }
-        Push-Location (Join-Path $RepoRoot 'core-rs')
-        try {
-            $local:ErrorActionPreference = 'Continue'
-            & $cargo run --quiet --bin sqlx -- migrate run --database-url $env:MQK_DATABASE_URL --source $migrationsPath 2>&1 | Out-Host
-            if ($LASTEXITCODE -ne 0) {
-                $result.Reason = "cargo sqlx migrate run failed (exit $LASTEXITCODE)."
-                Write-Fail $result.Reason
-                return $result
-            }
-        } finally { Pop-Location }
+    # M1-13C-MIGRATION-0069-HISTORICAL-UPGRADE-FENCE-01:
+    # never invoke raw sqlx migration execution from an official startup path.
+    # The mqk-db runner owns the historical 0069 preflight/serialization fence.
+    try {
+        $cargo = (Get-Command 'cargo' -ErrorAction Stop).Source
+    } catch {
+        $result.Reason = 'cargo command not found; cannot run fenced DB migrations.'
+        Write-Fail $result.Reason
+        return $result
     }
-    Write-Ok 'DB migrations applied.'
+
+    Write-Step 'Running fenced mqk-db migration runner'
+    Push-Location (Join-Path $RepoRoot 'core-rs')
+    try {
+        $local:ErrorActionPreference = 'Continue'
+        & $cargo run --quiet --locked -p mqk-db --bin mqk_db_migrate 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            $result.Reason = "fenced mqk-db migration runner failed (exit $LASTEXITCODE)."
+            Write-Fail $result.Reason
+            return $result
+        }
+    } finally { Pop-Location }
+
+    Write-Ok 'DB migrations applied through fenced mqk-db runner.'
 
     $result.Ok = $true
     return $result

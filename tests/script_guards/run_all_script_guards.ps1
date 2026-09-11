@@ -23,6 +23,7 @@ $Guards = @(
     'test_check_unsafe_patterns_ps1.ps1',
     'test_deprecated_scripts_retired.ps1',
     'test_db_proof_bootstrap_coverage.ps1',
+    'test_migration_upgrade_fence.ps1',
     'test_capture_paper_smoke_evidence.ps1',
     'test_launcher_arm_paper.ps1',
     'test_exp_engine_guard.ps1',
