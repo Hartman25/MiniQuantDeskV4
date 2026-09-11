@@ -14,3 +14,4 @@
 # stable SQL EOL policy and retain their deployed checkout identities.
 core-rs/crates/mqk-db/migrations/0068_runtime_leader_lease_run_identity.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0069_runtime_leader_lease_legacy_unbound_migration_safety.sql text eol=lf
+core-rs/crates/mqk-db/migrations/0070_runtime_leader_lease_strict_quiescence_forward.sql text eol=lf
