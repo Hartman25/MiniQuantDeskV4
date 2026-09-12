@@ -2108,7 +2108,22 @@ impl AppState {
         self: &Arc<Self>,
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
         let _op = self.lifecycle_op.lock().await;
-        self.reap_finished_execution_loop().await?;
+
+        // CI599-R1: whether a panicked execution-loop task is already
+        // finished when stop begins is scheduler/platform timing, not
+        // operator-visible lifecycle truth. The direct stop/join path below
+        // already reports the aggregate "stop join or release failed" class.
+        // Normalize the reap-first join failure to that same stop contract
+        // while preserving the specific join-failure detail.
+        if let Err(err) = self.reap_finished_execution_loop().await {
+            if err.fault_class() == "loop join failed" {
+                return Err(RuntimeLifecycleError::internal(
+                    "stop join or release failed",
+                    format!("execution {err}"),
+                ));
+            }
+            return Err(err);
+        }
 
         // PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01: before tearing down local
         // ownership, prove every broker-reachable order for this run has
@@ -4909,10 +4924,11 @@ mod real_production_effects_matrix_tests {
         state.set_execution_loop_panic_for_test(false);
 
         // By the time `stop_execution_runtime` runs, the panicked task is
-        // already finished — `reap_finished_execution_loop` (called first,
-        // at the top of `stop_execution_runtime`) reaps it directly and
-        // surfaces the join failure itself, before `clear_currently_owned_
-        // local_runtime`'s own join-failure path would ever get a chance to.
+        // normally already finished, so the reap-first path may observe the
+        // JoinError before the direct stop/join path does. Scheduler/platform
+        // timing must not change the operator-visible stop contract: both
+        // paths report the aggregate stop/join/release fault class while
+        // retaining the specific execution-loop join failure in the detail.
         let stop_result = state.stop_execution_runtime().await;
         assert!(
             stop_result.is_err(),
@@ -4921,8 +4937,13 @@ mod real_production_effects_matrix_tests {
         let err = stop_result.unwrap_err();
         assert_eq!(
             err.fault_class(),
-            "loop join failed",
-            "TASK-PANIC-01: unexpected fault class: {err:?}"
+            "stop join or release failed",
+            "TASK-PANIC-01: unexpected normalized stop fault class: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("execution loop join failed"),
+            "TASK-PANIC-01: normalized stop error must retain the specific \
+             execution-loop join failure detail; got: {err}"
         );
 
         // Degraded truth, not a clean Idle.
@@ -6193,7 +6214,20 @@ mod real_production_effects_matrix_tests {
             "BLOCKER3-06: a joined panic must be reported as an error, not \
              silently absorbed"
         );
-        assert_eq!(stop_result.unwrap_err().fault_class(), "loop join failed");
+
+        let stop_err = stop_result.unwrap_err();
+
+        assert_eq!(
+            stop_err.fault_class(),
+            "stop join or release failed",
+            "BLOCKER3-06: stop must report the canonical aggregate stop/join/release fault class"
+        );
+
+        assert!(
+            stop_err.to_string().contains("execution loop join failed"),
+            "BLOCKER3-06: aggregate lifecycle failure must retain the specific \
+             execution-loop join failure in its structured error message; got: {stop_err}"
+        );
 
         match &*state.runtime_ownership.lock().await {
             crate::state::LocalRuntimeOwnership::Degraded {
