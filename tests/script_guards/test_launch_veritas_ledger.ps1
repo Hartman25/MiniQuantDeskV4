@@ -46,6 +46,22 @@
 #          guidance -- proves the three-way OR matches Start-MiniQuantDesk.
 #          ps1's real $needsHaltRecovery (M1-PAPER-READINESS-WAVE-01
 #          CORRECTION C2, independent self-review follow-up)
+#   C3-01..03  confirmed-halt guidance (runtime_status=halted,
+#          kill_switch_active=true, readiness arm_state=halted alone) each
+#          name Start-MiniQuantDesk.ps1 -Mode Paper explicitly
+#   C3-04  none of the halt/offline-DISARMED guidance strings present direct
+#          Launch-VeritasLedger.ps1 as an equivalent recovery authority
+#   C3-05  reconcile-dirty outranks generic DISARMED-without-halt guidance
+#   C3-06  an unknown/unavailable halt-truth signal (runtime_status,
+#          readiness arm_state, or kill_switch_active) fails closed to an
+#          explicit UNPROVEN result, never "no active halt was detected",
+#          and never recommends arm
+#   C3-07  reachable + all three halt signals observed non-halted + DISARMED
+#          may still use the generic DISARMED-without-halt guidance
+#   C3-08  offline persisted DISARMED never asserts a halt definitely exists
+#          and never presents Launch-VeritasLedger.ps1 as an equivalent
+#          recovery authority
+#          (M1-PAPER-READINESS-WAVE-01-CORRECTION-C3)
 # =============================================================================
 
 Set-StrictMode -Version Latest
@@ -206,19 +222,24 @@ Assert-True 'LVL28' '-CheckOnly reachable-daemon halt branch keys off the three-
     ($Content -match [regex]::Escape("(`$KillSwitchActive -eq `$true) -or (`$RuntimeStatus -eq 'halted') -or (`$ReadinessArmState -eq 'halted')") -and
      $Content -notmatch [regex]::Escape('$daemonReachable -and $armState -eq ''HALTED'''))
 
-# LVL29 (M1-PAPER-READINESS-WAVE-01 CORRECTION C2): no blanket "recovery is
-# never automatic / operator must explicitly clear then arm" wording remains
-# anywhere in the CheckOnly recovery guidance. That wording (introduced by
-# the original Patch C) conflated "mqk-daemon's autonomous coordinator does
-# not auto-retry" (true) with "an operator must manually intervene right
-# now" (false as an instruction -- the OFFICIAL launcher performs the
-# accepted disarm-execution -> clear-halted-run -> arm-execution recovery
-# sequence automatically as part of a normal full Paper startup).
+# LVL29 (M1-PAPER-READINESS-WAVE-01 CORRECTION C2, wording updated by
+# CORRECTION C3): no blanket "recovery is never automatic / operator must
+# explicitly clear then arm" wording remains anywhere in the CheckOnly
+# recovery guidance. That wording (introduced by the original Patch C)
+# conflated "mqk-daemon's autonomous coordinator does not auto-retry" (true)
+# with "an operator must manually intervene right now" (false as an
+# instruction -- Start-MiniQuantDesk.ps1 -Mode Paper performs the accepted
+# disarm-execution, clear-halt, then arm-execution recovery sequence
+# automatically as part of a normal full Paper startup). CORRECTION C3
+# replaced the earlier "official Paper startup (Start-MiniQuantDesk.ps1, or
+# Launch-VeritasLedger.ps1 without -CheckOnly)" wording (false: direct
+# Launch-VeritasLedger.ps1 has no halt-recovery stage) with the explicit
+# canonical command.
 Assert-True 'LVL29' 'No blanket "recovery is never automatic / operator must explicitly clear then arm" wording remains in CheckOnly guidance' `
     ($Content -notmatch 'Recovery requires explicit operator action \(clear the halted run, then arm-execution\) -- it is never automatic' -and
      $Content -notmatch 'an operator must explicitly clear the halted run, then arm-execution' -and
-     $Content -match [regex]::Escape('official Paper startup') -and
-     $Content -match [regex]::Escape('owns the accepted halt-recovery sequence'))
+     $Content -match [regex]::Escape('canonical full Paper startup/recovery command') -and
+     $Content -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
 
 # ---------------------------------------------------------------------------
 # Section: M1-PAPER-READINESS-WAVE-01 CORRECTION B2 functional proofs
@@ -306,23 +327,25 @@ $C2Base = @{
 }
 
 # LVL30: reachable daemon + runtime_status=halted -> halt-recovery guidance
-# pointing at the official launcher, regardless of arm state.
+# naming the canonical Start-MiniQuantDesk.ps1 -Mode Paper command,
+# regardless of arm state. (Wording updated by CORRECTION C3.)
 $lvl30 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'halted' -ReadinessArmState 'halted' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'clean' -DbStatus 'running'
-Assert-True 'LVL30' 'Reachable daemon + runtime_status=halted -> halt-recovery guidance naming the official Paper startup' `
-    ($lvl30 -match 'active halt' -and $lvl30 -match 'official Paper startup' -and $lvl30 -match 'owns the accepted halt-recovery sequence')
+Assert-True 'LVL30' 'Reachable daemon + runtime_status=halted -> halt-recovery guidance naming Start-MiniQuantDesk.ps1 -Mode Paper' `
+    ($lvl30 -match 'active halt' -and $lvl30 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
 
 # LVL31: reachable daemon + kill_switch_active=true -> same halt-recovery
 # guidance, even if runtime_status is not literally 'halted'.
 $lvl31 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $true -RuntimeStatus 'idle' -ReadinessArmState 'armed' -ArmState 'ARMED' -ArmReason $null -ReconcileStatus 'clean' -DbStatus 'running'
-Assert-True 'LVL31' 'Reachable daemon + kill_switch_active=true -> halt-recovery guidance naming the official Paper startup' `
-    ($lvl31 -match 'active halt' -and $lvl31 -match 'official Paper startup' -and $lvl31 -match 'owns the accepted halt-recovery sequence')
+Assert-True 'LVL31' 'Reachable daemon + kill_switch_active=true -> halt-recovery guidance naming Start-MiniQuantDesk.ps1 -Mode Paper' `
+    ($lvl31 -match 'active halt' -and $lvl31 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
 
 # LVL32: reachable daemon + DISARMED but NOT halted by ANY of the three
 # signals (kill switch false, runtime_status not 'halted', readiness
-# arm_state not 'halted') -> must NOT claim a halt or instruct
-# clear-halted-run; must surface DISARMED as observed fact only.
+# arm_state not 'halted', all three OBSERVED not unknown) -> must NOT claim
+# a halt or instruct clear-halted-run; must surface DISARMED as observed
+# fact only.
 $lvl32 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'disarmed_db' -ArmState 'DISARMED' -ArmReason 'operator_disarm' -ReconcileStatus 'clean' -DbStatus 'running'
-Assert-True 'LVL32' 'Reachable daemon + DISARMED-without-halt (all three signals clear) -> no halt claim, no clear-halted-run instruction' `
+Assert-True 'LVL32' 'Reachable daemon + DISARMED-without-halt (all three signals observed clear) -> no halt claim, no clear-halted-run instruction' `
     ($lvl32 -notmatch 'reports an active halt' -and $lvl32 -notmatch 'clear-halted-run' -and $lvl32 -notmatch 'clear the halted run' -and $lvl32 -match 'no active halt was detected')
 
 # LVL35 (independent self-review follow-up): reachable daemon where
@@ -335,15 +358,16 @@ Assert-True 'LVL32' 'Reachable daemon + DISARMED-without-halt (all three signals
 # Proves the third signal is load-bearing, not decorative.
 $lvl35 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'halted' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'clean' -DbStatus 'running'
 Assert-True 'LVL35' 'Reachable daemon + readiness arm_state=halted ALONE (kill_switch_active=false, runtime_status!=halted) -> halt-recovery guidance still fires' `
-    ($lvl35 -match 'active halt' -and $lvl35 -match 'official Paper startup' -and $lvl35 -match 'owns the accepted halt-recovery sequence')
+    ($lvl35 -match 'active halt' -and $lvl35 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
 
 # LVL33: offline daemon + persisted DISARMED -> must not assert a halted run
-# definitely exists, and must not instruct manual clear/arm now.
+# definitely exists, and must not instruct manual clear/arm now. Wording
+# updated by CORRECTION C3 to name the canonical command explicitly.
 $lvl33 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $false -KillSwitchActive $null -RuntimeStatus 'unknown' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'unknown' -DbStatus 'running'
 Assert-True 'LVL33' 'Offline daemon + persisted DISARMED -> reports observed fact only, never asserts a halt definitely exists, never instructs manual clear/arm now' `
     ($lvl33 -match 'this alone does not prove a halted run currently requires recovery' -and
      $lvl33 -notmatch 'clear-halted-run' -and $lvl33 -notmatch 'operator must explicitly clear' -and
-     $lvl33 -match 'official Paper startup')
+     $lvl33 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
 
 # LVL34: Get-StartupCheckOnlyNextAction itself performs zero daemon/DB/
 # docker/HTTP mutation -- it is a pure decision function over its own
@@ -356,6 +380,116 @@ Assert-True 'LVL34' 'Get-StartupCheckOnlyNextAction is a pure function (no docke
      $c2FnMatch.Value -notmatch 'docker inspect' -and
      $c2FnMatch.Value -notmatch 'Invoke-CheckOnlyDaemonGet' -and
      $c2FnMatch.Value -notmatch 'Invoke-JsonRequest')
+
+# ---------------------------------------------------------------------------
+# Section: M1-PAPER-READINESS-WAVE-01 CORRECTION C3 functional proofs
+#
+# Defect: Get-StartupCheckOnlyNextAction's confirmed-halt and offline-
+# persisted-DISARMED guidance told the operator that a direct
+# "Launch-VeritasLedger.ps1 without -CheckOnly" invocation is an equivalent
+# recovery authority to Start-MiniQuantDesk.ps1's full Paper startup. It is
+# not: direct Launch-VeritasLedger.ps1 has no halt-recovery stage of its own
+# (it only optionally calls Invoke-ArmPaper, which is arm-execution only).
+# This section proves the corrected guidance names Start-MiniQuantDesk.ps1
+# -Mode Paper explicitly and never presents Launch-VeritasLedger.ps1 as an
+# equivalent recovery path; that reconcile-dirty now outranks generic
+# DISARMED-without-halt guidance; and that an unknown/unavailable halt-truth
+# signal fails closed to an explicit UNPROVEN result rather than a false
+# "no active halt was detected" claim.
+#
+# Dot-sourcing is safe: MAIN DISPATCH is guarded by
+# `if ($MyInvocation.InvocationName -ne '.')`, so this only defines
+# functions -- no daemon start, no DB call, no exit.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "=== Section: M1-PAPER-READINESS-WAVE-01 CORRECTION C3 functional proofs ===" -ForegroundColor Cyan
+
+. $Target
+
+$C3Base = @{
+    EnvLocalPresent      = $true
+    DockerAvailable      = $true
+    LiveRoutingEnabled   = $false
+    PaperDbContainerName = 'mqk-paper-postgres'
+}
+
+# A guidance string is considered to falsely present direct
+# Launch-VeritasLedger.ps1 as an equivalent recovery authority if it either
+# (a) offers it as an alternative to Start-MiniQuantDesk.ps1 for
+# recovery/startup ("Start-MiniQuantDesk.ps1, or Launch-VeritasLedger.ps1
+# without -CheckOnly"), or (b) claims Launch-VeritasLedger.ps1 itself owns
+# or performs halt recovery.
+function Test-ClaimsLaunchVeritasLedgerOwnsRecovery {
+    param([string]$Guidance)
+    if ($Guidance -match [regex]::Escape('Start-MiniQuantDesk.ps1, or Launch-VeritasLedger.ps1 without -CheckOnly')) { return $true }
+    if ($Guidance -match '(?i)Launch-VeritasLedger\.ps1[^.]*\b(owns|performs)\b[^.]*\b(halt|recovery)\b') { return $true }
+    return $false
+}
+
+# C3-01: confirmed runtime halt (runtime_status=halted) guidance names
+# Start-MiniQuantDesk.ps1 -Mode Paper.
+$c301 = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'halted' -ReadinessArmState 'armed' -ArmState 'DISARMED' -ArmReason 'OperatorHalt' -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'C3-01' 'Confirmed runtime_status=halted guidance names Start-MiniQuantDesk.ps1 -Mode Paper' `
+    ($c301 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
+
+# C3-02: confirmed kill-switch halt guidance names Start-MiniQuantDesk.ps1
+# -Mode Paper.
+$c302 = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $true -RuntimeStatus 'idle' -ReadinessArmState 'armed' -ArmState 'ARMED' -ArmReason $null -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'C3-02' 'Confirmed kill_switch_active=true guidance names Start-MiniQuantDesk.ps1 -Mode Paper' `
+    ($c302 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
+
+# C3-03: readiness arm_state=halted ALONE names Start-MiniQuantDesk.ps1
+# -Mode Paper.
+$c303 = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'halted' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'C3-03' 'readiness arm_state=halted alone names Start-MiniQuantDesk.ps1 -Mode Paper' `
+    ($c303 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper'))
+
+# C3-08 fixture (offline persisted DISARMED) computed here so C3-04 can
+# check it alongside C3-01..03.
+$c308 = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $false -KillSwitchActive $null -RuntimeStatus 'unknown' -ReadinessArmState 'unknown' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'unknown' -DbStatus 'running'
+
+# C3-04: none of the halt/offline-DISARMED guidance strings present direct
+# Launch-VeritasLedger.ps1 as an equivalent recovery authority.
+Assert-True 'C3-04' 'None of the halt/offline-DISARMED guidance strings present direct Launch-VeritasLedger.ps1 as an equivalent recovery authority' `
+    (-not (Test-ClaimsLaunchVeritasLedgerOwnsRecovery -Guidance $c301) -and
+     -not (Test-ClaimsLaunchVeritasLedgerOwnsRecovery -Guidance $c302) -and
+     -not (Test-ClaimsLaunchVeritasLedgerOwnsRecovery -Guidance $c303) -and
+     -not (Test-ClaimsLaunchVeritasLedgerOwnsRecovery -Guidance $c308))
+
+# C3-05: reachable + DISARMED + reconcile dirty returns reconcile-dirty
+# guidance, not generic DISARMED guidance (reconcile-dirty must outrank
+# generic DISARMED-without-halt).
+$c305 = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'disarmed_db' -ArmState 'DISARMED' -ArmReason 'operator_disarm' -ReconcileStatus 'dirty' -DbStatus 'running'
+Assert-True 'C3-05' 'reachable + DISARMED + reconcile dirty returns reconcile-dirty guidance, not generic DISARMED guidance' `
+    ($c305 -match 'Reconcile status is dirty' -and $c305 -notmatch 'no active halt was detected')
+
+# C3-06: reachable + unknown/unavailable halt surfaces produce UNPROVEN
+# guidance, not "no active halt detected". Three independent negative
+# controls: each of the three signals unknown in turn, with the other two
+# observed non-halted.
+$c306a = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'unknown' -ReadinessArmState 'armed' -ArmState 'DISARMED' -ArmReason 'operator_disarm' -ReconcileStatus 'clean' -DbStatus 'running'
+$c306b = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'unknown' -ArmState 'DISARMED' -ArmReason 'operator_disarm' -ReconcileStatus 'clean' -DbStatus 'running'
+$c306c = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $null -RuntimeStatus 'idle' -ReadinessArmState 'armed' -ArmState 'DISARMED' -ArmReason 'operator_disarm' -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'C3-06' 'reachable + runtime_status=unknown produces UNPROVEN guidance, not "no active halt detected", and does not recommend arm' `
+    ($c306a -match 'UNPROVEN' -and $c306a -notmatch 'no active halt was detected' -and $c306a -notmatch 'deciding on arm-execution')
+Assert-True 'C3-06b' 'reachable + readiness arm_state=unknown produces UNPROVEN guidance, not "no active halt detected", and does not recommend arm' `
+    ($c306b -match 'UNPROVEN' -and $c306b -notmatch 'no active halt was detected' -and $c306b -notmatch 'deciding on arm-execution')
+Assert-True 'C3-06c' 'reachable + kill_switch_active=null/unknown produces UNPROVEN guidance, not "no active halt detected", and does not recommend arm' `
+    ($c306c -match 'UNPROVEN' -and $c306c -notmatch 'no active halt was detected' -and $c306c -notmatch 'deciding on arm-execution')
+
+# C3-07: reachable + all three authoritative halt signals observed non-
+# halted + DISARMED may use the generic DISARMED-without-halt guidance.
+$c307 = Get-StartupCheckOnlyNextAction @C3Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'disarmed_db' -ArmState 'DISARMED' -ArmReason 'operator_disarm' -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'C3-07' 'reachable + all three halt signals observed non-halted + DISARMED uses the generic DISARMED-without-halt guidance' `
+    ($c307 -match 'no active halt was detected' -and $c307 -notmatch 'UNPROVEN')
+
+# C3-08: offline persisted DISARMED still does not assert a halt definitely
+# exists, and does not present Launch-VeritasLedger.ps1 as an equivalent
+# recovery authority (fixture computed above as $c308).
+Assert-True 'C3-08' 'Offline persisted DISARMED does not assert a halt definitely exists and names Start-MiniQuantDesk.ps1 -Mode Paper, not Launch-VeritasLedger.ps1 directly' `
+    ($c308 -match 'this alone does not prove a halted run currently requires recovery' -and
+     $c308 -match [regex]::Escape('Start-MiniQuantDesk.ps1 -Mode Paper') -and
+     -not (Test-ClaimsLaunchVeritasLedgerOwnsRecovery -Guidance $c308))
 
 # ---------------------------------------------------------------------------
 # Section: STALE-DAEMON-BINARY-PROVENANCE-01 functional proofs

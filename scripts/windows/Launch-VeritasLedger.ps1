@@ -1568,6 +1568,16 @@ function Invoke-CheckOnlyDaemonGet {
 # itself does not auto-retry a durable non-ARMED run outside that
 # operator-authorized sequence -- a fact distinct from claiming recovery is
 # manual or "never automatic".
+#
+# M1-PAPER-READINESS-WAVE-01 CORRECTION C3: the canonical recovery/start
+# authority is named explicitly (Start-MiniQuantDesk.ps1 -Mode Paper), never
+# "Launch-VeritasLedger.ps1 without -CheckOnly" as an equivalent -- a direct
+# Launch-VeritasLedger.ps1 invocation has no halt-recovery stage of its own
+# (it only optionally calls Invoke-ArmPaper, which is arm-execution only).
+# Also: when reachable but one or more of the three halt-truth signals is
+# itself unknown/unavailable, this fails closed to an explicit UNPROVEN
+# result rather than falling through to a branch that asserts "no active
+# halt was detected" -- an unobserved signal is not evidence of absence.
 function Get-StartupCheckOnlyNextAction {
     param(
         [Parameter(Mandatory = $true)][bool]$EnvLocalPresent,
@@ -1601,7 +1611,27 @@ function Get-StartupCheckOnlyNextAction {
     # recompute in state.rs), so readiness's unfiltered in-memory
     # integrity.halted is required too.
     if ($DaemonReachable -and (($KillSwitchActive -eq $true) -or ($RuntimeStatus -eq 'halted') -or ($ReadinessArmState -eq 'halted'))) {
-        return "Daemon reports an active halt (kill_switch_active=$KillSwitchActive, runtime_status=$RuntimeStatus, readiness arm_state=$ReadinessArmState). Run the official Paper startup (Start-MiniQuantDesk.ps1, or Launch-VeritasLedger.ps1 without -CheckOnly) -- it owns the accepted halt-recovery sequence and performs it automatically as part of a normal startup. Run Get-PaperOperatorStatus.ps1 for full halt context first."
+        return "Daemon reports an active halt (kill_switch_active=$KillSwitchActive, runtime_status=$RuntimeStatus, readiness arm_state=$ReadinessArmState). Run the canonical full Paper startup/recovery command: Start-MiniQuantDesk.ps1 -Mode Paper. It reads halt truth and performs the accepted disarm-execution, clear-halt, then re-arm recovery sequence automatically as part of a normal Paper startup, delegating daemon/GUI bootstrap to Launch-VeritasLedger.ps1 internally. Do not run Launch-VeritasLedger.ps1 directly for recovery -- it has no halt-recovery stage of its own. Run Get-PaperOperatorStatus.ps1 for full halt context first."
+    }
+
+    # CORRECTION C3: an unobserved halt-truth signal is not evidence the
+    # signal is false. If the daemon is reachable but one or more of the
+    # three authoritative halt signals never resolved to a real value, fail
+    # closed to an explicit UNPROVEN result rather than letting a later
+    # branch imply "no active halt was detected".
+    $killSwitchUnknown = ($null -eq $KillSwitchActive) -or ($KillSwitchActive -eq 'unknown')
+    $runtimeStatusUnknown = [string]::IsNullOrWhiteSpace($RuntimeStatus) -or ($RuntimeStatus -eq 'unknown')
+    $readinessArmStateUnknown = [string]::IsNullOrWhiteSpace($ReadinessArmState) -or ($ReadinessArmState -eq 'unknown')
+    if ($DaemonReachable -and ($killSwitchUnknown -or $runtimeStatusUnknown -or $readinessArmStateUnknown)) {
+        return "Daemon is reachable but halt status is UNPROVEN -- one or more required halt-truth signals are unknown/unavailable (kill_switch_active=$KillSwitchActive, runtime_status=$RuntimeStatus, readiness arm_state=$ReadinessArmState). Do not assume no active halt and do not arm. Run Get-PaperOperatorStatus.ps1 to investigate before proceeding."
+    }
+
+    # CORRECTION C3: reconcile-dirty must outrank generic DISARMED-without-
+    # halt guidance -- a reachable+DISARMED daemon with a dirty reconcile is
+    # a known hard-gate failure and must not be masked by the generic
+    # DISARMED message below.
+    if ($DaemonReachable -and $ReconcileStatus -eq 'dirty') {
+        return 'Reconcile status is dirty. Run Get-PaperOperatorStatus.ps1 to review the mismatch before proceeding.'
     }
     if ($DaemonReachable -and $ArmState -eq 'DISARMED') {
         # DISARMED without any of the three live halt signals (kill switch,
@@ -1610,9 +1640,6 @@ function Get-StartupCheckOnlyNextAction {
         # operator disarm with no halted run at all. Do not tell the
         # operator to clear a halt that was never confirmed.
         return "Daemon is reachable and persisted arm state is DISARMED (reason=$ArmReason), but no active halt was detected (kill_switch_active=$KillSwitchActive, runtime_status=$RuntimeStatus, readiness arm_state=$ReadinessArmState). Run Get-PaperOperatorStatus.ps1 for full status before deciding on arm-execution."
-    }
-    if ($DaemonReachable -and $ReconcileStatus -eq 'dirty') {
-        return 'Reconcile status is dirty. Run Get-PaperOperatorStatus.ps1 to review the mismatch before proceeding.'
     }
     if ($DaemonReachable) {
         return 'Daemon is already reachable. Run Get-PaperOperatorStatus.ps1 for full live status, or run Launch-VeritasLedger.ps1 (no -CheckOnly) to attach the GUI.'
@@ -1625,7 +1652,7 @@ function Get-StartupCheckOnlyNextAction {
         # truth is available -- persisted DISARMED alone cannot prove a
         # halted run currently requires recovery. Do not claim a halt
         # definitely exists, and do not instruct manual clear/arm now.
-        return "Persisted arm state is DISARMED (reason=$ArmReason), last observed while the daemon was offline -- this alone does not prove a halted run currently requires recovery. Run the official Paper startup (Start-MiniQuantDesk.ps1, or Launch-VeritasLedger.ps1 without -CheckOnly): it establishes fresh daemon truth first, then its accepted startup workflow performs halt recovery/arming automatically when actually required."
+        return "Persisted arm state is DISARMED (reason=$ArmReason), last observed while the daemon was offline -- this alone does not prove a halted run currently requires recovery. Run the canonical full Paper startup/recovery command: Start-MiniQuantDesk.ps1 -Mode Paper -- it establishes fresh daemon truth first, then its accepted startup workflow performs halt recovery/arming automatically when actually required. Do not run Launch-VeritasLedger.ps1 directly for this -- it has no halt-recovery stage of its own."
     }
     return 'Prerequisites look OK. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before a smoke run, otherwise run Launch-VeritasLedger.ps1 (no -CheckOnly) for a normal startup.'
 }
