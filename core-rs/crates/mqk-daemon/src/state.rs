@@ -7240,6 +7240,50 @@ mod tests {
             "B07: a clean stop must not manufacture a critical reconcile failure"
         );
     }
+
+    // D02 (M1-CRITICAL-TASK-INTEGRATED-FAULT-PROOF-01): unlike B02/B03 above
+    // (which install a trivial stand-in task to prove the watchdog/ownership
+    // machinery in isolation), this drives the REAL `loop_runner::
+    // spawn_reconcile_tick` production seam end-to-end -- real ticker, real
+    // watermark, real match over `local_fn()` -- through to a genuine panic
+    // propagating out of a caller-supplied closure (exactly the shape
+    // `start_execution_runtime` builds), and confirms the real
+    // `install_reconcile_task_owner` + `supervise_reconcile_terminal_task`
+    // chain still fails closed. Proves reverting either the watchdog wiring
+    // in `install_reconcile_task_owner` or the `publish_reconcile_failure`
+    // call in `supervise_reconcile_terminal_task` (already independently
+    // mutation-tested above) would surface here too.
+    #[tokio::test]
+    async fn d02_real_spawn_reconcile_tick_closure_panic_fails_closed() {
+        let state = m1b_fresh_state();
+        let run_id = Uuid::new_v4();
+
+        let local_fn = || -> mqk_reconcile::LocalSnapshot {
+            panic!("simulated panic inside a real local_fn closure")
+        };
+        let broker_fn = || -> Option<mqk_reconcile::BrokerSnapshot> { None };
+        let settle_fn = || false;
+
+        let handle = loop_runner::spawn_reconcile_tick(
+            Arc::clone(&state),
+            local_fn,
+            broker_fn,
+            settle_fn,
+            Duration::from_millis(10),
+        );
+        state.install_reconcile_task_owner(run_id, handle).await;
+
+        // First tick fires at `interval` (10ms); give the real ticker and the
+        // real watchdog ample margin to both run.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            state.integrity.read().await.halted,
+            "D02: a panic inside the real spawn_reconcile_tick production seam \
+             must fail closed through the real ownership/watchdog chain"
+        );
+        assert!(state.integrity.read().await.disarmed);
+    }
 }
 
 // ---------------------------------------------------------------------------
