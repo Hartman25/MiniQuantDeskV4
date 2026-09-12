@@ -139,6 +139,46 @@ Assert-True 'OPS17' 'Script surfaces approved_for_live for watchlist status + ad
      $dangerAlertCount -eq 2)
 
 # ---------------------------------------------------------------------------
+# OPS18: The target script must actually PARSE under Windows PowerShell 5.1,
+# not merely contain the right regex patterns. This guard file itself runs
+# under `pwsh` (PowerShell 7) in CI (see .github/workflows/ci.yml), and pwsh 7
+# is lenient about BOM-less UTF-8 -- it would not catch a PS 5.1-specific
+# parse failure caused by non-ASCII content in a BOM-less file (PS 5.1 decodes
+# BOM-less .ps1 files using the system ANSI code page, not UTF-8). So this
+# assertion shells out to the real Windows PowerShell 5.1 host and parses the
+# target with the AST parser directly -- proof of the actual production path,
+# not a re-parse under the ambient (more forgiving) CI host.
+# ---------------------------------------------------------------------------
+$WinPS = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path $WinPS)) {
+    Write-Host "  FAIL [OPS18] Windows PowerShell 5.1 host not found at $WinPS -- cannot prove PS5.1 parseability" -ForegroundColor Red
+    $script:Failed++
+} else {
+    $parserProbeTemplate = @'
+$t = "__TARGET__"
+$errs = $null
+[System.Management.Automation.Language.Parser]::ParseFile($t, [ref]$null, [ref]$errs) | Out-Null
+if ($errs.Count -gt 0) {
+    foreach ($e in $errs) { Write-Output ("PARSE_ERROR line {0}: {1}" -f $e.Extent.StartLineNumber, $e.Message) }
+    exit 1
+}
+exit 0
+'@
+    $parserProbe = $parserProbeTemplate.Replace('__TARGET__', $Target)
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($parserProbe))
+    $probeOutput = & $WinPS -NoProfile -NonInteractive -EncodedCommand $encoded 2>&1
+    $probeExit = $LASTEXITCODE
+
+    Assert-True 'OPS18' 'Target script parses cleanly under real Windows PowerShell 5.1 (AST-level proof, not a static pattern match)' `
+        ($probeExit -eq 0)
+
+    if ($probeExit -ne 0) {
+        Write-Host "    PS5.1 parser output:" -ForegroundColor Red
+        $probeOutput | ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
+    }
+}
+
+# ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $Passed" -ForegroundColor Green
