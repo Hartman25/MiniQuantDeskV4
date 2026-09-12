@@ -3005,7 +3005,7 @@ mod tick_failure_diagnostic_tests {
     #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
     async fn diagnostic_write_failure_never_propagates() {
         mqk_db::run_isolated("tickdiag_writefail", |pool| async move {
-            let nonexistent_run_id = Uuid::new_v4();
+            let nonexistent_run_id = Uuid::from_u128(0xdead_beef_dead_beef_dead_beef_dead_beef);
             let err: anyhow::Error = BrokerError::Transient {
                 detail: SECRET_BEARING_DETAIL.to_string(),
             }
