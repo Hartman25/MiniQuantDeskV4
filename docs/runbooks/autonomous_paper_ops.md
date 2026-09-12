@@ -420,6 +420,26 @@ GET /api/v1/autonomous/readiness
 ```
 → `ws_continuity` field shows the current cursor-derived state.
 
+### Terminal WS transport task death (distinct from an ordinary gap)
+
+Everything above describes an *ordinary* disconnect: the WS transport
+task's own internal reconnect loop is still alive and working the problem.
+Separately, the outer WS transport task itself is supervised end-to-end —
+if that task ever returns or panics (not a normal disconnect, which never
+reaches this path), the daemon:
+1. Forces `alpaca_ws_continuity` to `GapDetected` through the same
+   continuity machinery an ordinary disconnect uses — the BRK-00R-04 halt
+   gate and the existing gap-detected Discord alert both apply unchanged.
+2. Records a distinct `autonomous_session_truth` of
+   `alpaca_ws_transport_exited`, so `GET /api/v1/autonomous/readiness` and
+   `GET /api/v1/alerts/active` both show this is not an ordinary
+   reconnect-in-progress but the transport task itself is gone.
+
+There is no automatic restart for this condition — restarting the outer
+task would risk masking a real defect. Recovery requires an operator
+restart of the daemon process; the ordinary boot-time WS reconnection
+described above then applies as normal.
+
 ---
 
 ## 9. Supervisor history and `autonomous_history_degraded`
@@ -442,6 +462,18 @@ If the DB is absent or a write fails, the event is dropped silently to execution
 | `true` | At least one event could not be persisted (no DB or write failure) | The events/feed history is incomplete; restart daemon with a working DB to restore durability |
 
 The flag is **sticky** — it is not cleared within the same daemon process lifetime. A clean restart with a working DB resets it.
+
+### Reconcile task supervision
+
+Each run's background reconcile-tick task is owned for the lifetime of
+that run, not left detached. If it ever returns or panics, the daemon
+disarms and halts (`GET /api/v1/system/status` → `state = "halted"`)
+through the same fail-closed path an ordinary reconcile drift or a missing
+broker snapshot already uses — a prior clean reconcile status can never be
+used to authorize new risk once the worker that produces it is known dead.
+A clean stop/halt/shutdown aborts the task itself; no false halt results
+from that. A subsequent run start always installs its own fresh reconcile
+task and can never inherit a previous run's.
 
 ---
 
