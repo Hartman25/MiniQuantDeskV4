@@ -36,8 +36,11 @@ skills section.
    helper that bypasses the wrapper the bug actually lived in. If no
    correct seam exists, that absence is itself a finding: report it.
 10. **Apply the fix only if the current mission/controller already
-    authorized implementation of this exact defect/patch.** Otherwise stop
-    here and report:
+    authorized implementation of this exact defect/patch.** If that
+    authorization is ambiguous, implicit, or inferred rather than explicit
+    in the current mission/controller, treat implementation as NOT
+    authorized and stop at defect + proposed repair + required proof.
+    Otherwise stop here and report:
     - CONFIRMED DEFECT
     - SMALLEST PROPOSED REPAIR
     - REQUIRED PROOF (which proof class, and what evidence would satisfy it)
