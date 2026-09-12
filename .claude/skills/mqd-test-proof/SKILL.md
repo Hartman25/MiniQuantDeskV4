@@ -6,9 +6,9 @@ description: Validate whether test/proof evidence actually proves the invariant 
 # mqd-test-proof
 
 Answers one question: does this evidence actually prove the invariant being
-claimed? This skill assigns evidentiary verdicts only — it does not assign
-project acceptance/closure states (`CLOSED`/`OPEN`/`PARKED` in
-`audit_repo_truth_rules.md` are controller/operator states).
+claimed? This skill assigns evidentiary verdicts only. Project
+acceptance/closure states remain owned by the current mission/controller
+and canonical program authority.
 
 ## Procedure
 
@@ -70,9 +70,8 @@ connection failure is the most common false-positive in this class.
 
 ## Hard stops
 
-- Never assign `CLOSED`, `ACCEPTED`, `INDEPENDENTLY ACCEPTED`,
-  `PUSHED-VERIFIED`, or `WAVE`/`MILESTONE CLOSED`. Those are
-  controller/operator states.
+- Never assign a project acceptance/closure state. Those remain owned by
+  the current mission/controller and canonical program authority.
 - Do not repair the evidence or the code yourself; report the verdict and
   the gap.
 - Do not invoke another skill; hand back to the mission/controller.

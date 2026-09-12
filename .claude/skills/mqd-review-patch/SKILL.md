@@ -6,7 +6,8 @@ description: Read-only review of a patch/diff along three separate axes — cont
 # mqd-review-patch
 
 Read-only. This skill inspects; it never fixes, commits, pushes, or assigns
-acceptance/closure status (`audit_repo_truth_rules.md` owns those states).
+acceptance/closure status. Project acceptance/closure states remain owned by
+the current mission/controller and canonical program authority.
 
 Review the diff between the stated fixed point (baseline SHA, branch, or
 `HEAD~N`) and `HEAD`, along three separate axes. Report them **separately**

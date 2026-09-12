@@ -19,17 +19,21 @@ NOT AUTHORITATIVE AFTER HEAD CHANGES
 
 1. Derive: `git rev-parse --abbrev-ref HEAD`, `git rev-parse HEAD`,
    `git rev-parse origin/main`, `git status --porcelain` (worktree state).
-2. Pull current milestone/patch/status from the current mission and the
-   canonical ledger (`MiniQuantDesk_Master_Patch_Ledger_v2.md`) — reference
-   it by name, do not copy its table into the handoff.
+2. Pull current milestone/patch/status from the current mission, current
+   Git truth, and the canonical program/status authority
+   (`MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md`) — reference it by
+   name, do not copy its table into the handoff.
 3. List accepted/frozen contracts and do-not-reopen items relevant to the
    active area by pointer (doc path or rule file under `.claude/rules/`),
    not by restating their text.
 4. List completed patches from the current session only: patch ID, commit
-   SHA, status (`CLOSED`/`OPEN`/`PARKED` per `audit_repo_truth_rules.md`),
-   proof type, acceptance status. An implementation agent's own "done"
-   claim is not acceptance — say so explicitly if acceptance is still
-   pending.
+   SHA, proof type, and acceptance status. Report acceptance status only
+   when it is explicitly recorded by the current controller/operator or the
+   canonical program authority — never infer it. Committed code, passing
+   focused tests, or an implementation agent's own "done" claim are not
+   acceptance; if no authoritative acceptance record exists, report
+   `ACCEPTANCE PENDING` (or another plainly non-acceptance factual
+   description) instead of assigning a status.
 5. State the current deterministic defect (if any), known
    blockers/dependencies, and the exact next mission, one paragraph each.
 6. State hard stops / authority limits still in force (e.g., no push, no
@@ -54,8 +58,9 @@ ACCEPTED/FROZEN CONTRACTS
 DO NOT REOPEN ITEMS
 
 COMPLETED PATCHES
-(patch ID / commit SHA / status / proof type / acceptance status — this
-session only)
+(patch ID / commit SHA / proof type / acceptance status — this session
+only; acceptance status is `ACCEPTANCE PENDING` unless explicitly recorded
+by the current controller/operator or canonical program authority)
 
 CURRENT DETERMINISTIC DEFECT
 
@@ -71,12 +76,18 @@ file unless the current mission explicitly asks for a persisted artifact.
 
 ## Hard stops
 
-- Never state or imply `INDEPENDENTLY ACCEPTED`, `PUSHED-VERIFIED`,
-  `WAVE CLOSED`, or `MILESTONE CLOSED` — those are controller/operator
-  states, not derivable from a handoff.
+- This skill reports status; it does not invent or reinterpret status.
+  Project acceptance/closure states remain owned by the current
+  mission/controller and the canonical program authority.
+- Never state or imply `CLOSED`, `INDEPENDENTLY ACCEPTED`,
+  `PUSHED-VERIFIED`, `WAVE CLOSED`, or `MILESTONE CLOSED` for a patch unless
+  that exact status is explicitly recorded by the current
+  controller/operator or the canonical program authority — not merely
+  because code is committed, focused tests pass, or an implementation agent
+  says done.
 - Never let this document become authoritative after HEAD changes; it is a
   snapshot, not a ledger.
 - No secrets (CLAUDE.md §23).
 - Do not invent readiness or copy large permanent status narratives —
-  reference the canonical ledger/runbook/contract doc instead.
+  reference the canonical program authority/runbook/contract doc instead.
 - Do not invoke another skill; hand back to the mission/controller.
