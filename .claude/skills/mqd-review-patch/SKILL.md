@@ -1,6 +1,6 @@
 ---
 name: mqd-review-patch
-description: Read-only review of a patch/diff along three separate axes — contract, quality, proof. Use at a patch or wave acceptance boundary, or whenever a diff needs review before it is trusted. Never edits, commits, or assigns acceptance status.
+description: Read-only review of a patch/diff along three separate axes — contract, quality, proof. Use only when the current mission/controller explicitly requests patch/wave review, or the current workflow has reached an explicitly defined acceptance boundary — not for routine/ordinary edits. Never edits, commits, or assigns acceptance status.
 ---
 
 # mqd-review-patch
@@ -8,6 +8,16 @@ description: Read-only review of a patch/diff along three separate axes — cont
 Read-only. This skill inspects; it never fixes, commits, pushes, or assigns
 acceptance/closure status. Project acceptance/closure states remain owned by
 the current mission/controller and canonical program authority.
+
+## When to use
+
+Use only when:
+
+- the current mission/controller explicitly requests patch/wave review; or
+- the current workflow has reached an explicitly defined acceptance
+  boundary.
+
+Do not auto-invoke this skill for every ordinary edit or diff.
 
 Review the diff between the stated fixed point (baseline SHA, branch, or
 `HEAD~N`) and `HEAD`, along three separate axes. Report them **separately**
