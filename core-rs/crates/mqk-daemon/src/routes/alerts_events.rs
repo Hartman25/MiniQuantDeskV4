@@ -258,6 +258,14 @@ are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth).
             detail: Some(detail),
             source: "daemon.autonomous_session".to_string(),
         }),
+        AutonomousSessionTruth::AlpacaWsTransportExited { detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.alpaca_ws_transport_exited".to_string(),
+            severity: "critical".to_string(),
+            class: "autonomous.session.alpaca_ws_transport_exited".to_string(),
+            summary: "Alpaca paper WS outer transport task has terminated unexpectedly; WS continuity is no longer being maintained by any live task. Operator intervention required.".to_string(),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
     }
 
     // AUTON-PAPER-01: Day signal limit alert.
@@ -980,6 +988,14 @@ are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth).
             "system",
             format!(
                 "Autonomous completed-bar driver task has permanently failed; unattended completed-bar dispatch is UNMANAGED. {detail}"
+            ),
+        )),
+        AutonomousSessionTruth::AlpacaWsTransportExited { detail } => extra_signals.push((
+            "autonomous.session.alpaca_ws_transport_exited",
+            "critical",
+            "system",
+            format!(
+                "Alpaca paper WS outer transport task has terminated unexpectedly; WS continuity is no longer being maintained by any live task. {detail}"
             ),
         )),
     }

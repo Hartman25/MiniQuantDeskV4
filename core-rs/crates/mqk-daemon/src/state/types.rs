@@ -798,6 +798,16 @@ pub enum AutonomousSessionTruth {
     CompletedBarDriverExited {
         detail: String,
     },
+    /// M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: the outer Alpaca paper WS
+    /// transport task returned or panicked unexpectedly (not an ordinary
+    /// disconnect — the inner reconnect loop owns those and never surfaces
+    /// them here). WS continuity is no longer being maintained by any live
+    /// task; continuity is separately forced to `GapDetected` so the
+    /// existing BRK-00R-04 halt gate blocks trading on this fact, not just
+    /// this observability signal.
+    AlpacaWsTransportExited {
+        detail: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

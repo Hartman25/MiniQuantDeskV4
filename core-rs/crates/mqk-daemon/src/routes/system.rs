@@ -637,6 +637,10 @@ pub(crate) fn autonomous_session_truth_to_api(
             "completed_bar_driver_exited".to_string(),
             Some(detail.clone()),
         ),
+        AutonomousSessionTruth::AlpacaWsTransportExited { detail } => (
+            "alpaca_ws_transport_exited".to_string(),
+            Some(detail.clone()),
+        ),
     }
 }
 
@@ -3151,6 +3155,10 @@ mod tests {
             (
                 AutonomousSessionTruth::CompletedBarDriverExited { detail: "x".into() },
                 "completed_bar_driver_exited",
+            ),
+            (
+                AutonomousSessionTruth::AlpacaWsTransportExited { detail: "x".into() },
+                "alpaca_ws_transport_exited",
             ),
         ];
         let mut seen = std::collections::HashSet::new();

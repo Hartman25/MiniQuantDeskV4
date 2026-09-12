@@ -75,7 +75,7 @@ use uuid::Uuid;
 use crate::notify::{CriticalAlertPayload, DiscordNotifier};
 pub use alpaca_ws_transport::{
     build_ws_auth_message, build_ws_subscribe_message, spawn_alpaca_paper_ws_task,
-    ws_url_from_base_url,
+    supervise_alpaca_ws_terminal_task, ws_url_from_base_url,
 };
 pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
@@ -453,6 +453,13 @@ pub struct AppState {
     /// gap persists across multiple signal POSTs — only the first refusal per
     /// gap window emits a Discord notification.
     gap_escalation_pending: Arc<AtomicBool>,
+    /// M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: `true` once the outer
+    /// Alpaca paper WS transport task has been observed to return or panic.
+    /// Sticky for the life of the process — the outer task is never
+    /// restarted (see `supervise_alpaca_ws_terminal_task`), so once set this
+    /// never clears. Drives the `autonomous_session_truth()` overlay so a
+    /// later session-controller write can never silently hide the failure.
+    alpaca_ws_task_exited: Arc<AtomicBool>,
     /// CC-01: Configured strategy fleet.
     strategy_fleet: Arc<RwLock<Option<Vec<StrategyFleetEntry>>>>,
     /// OPS-NOTIFY-01 / DISCORD-CHANNEL-ROUTING-01: Best-effort, per-channel
@@ -1939,6 +1946,7 @@ impl AppState {
             daily_data_readiness_attempt_seq: Arc::new(AtomicU64::new(0)),
             required_universe_calendar_override_for_test: Arc::new(RwLock::new(None)),
             gap_escalation_pending: Arc::new(AtomicBool::new(false)),
+            alpaca_ws_task_exited: Arc::new(AtomicBool::new(false)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
             day_signal_count: Arc::new(AtomicU32::new(0)),
@@ -2206,6 +2214,24 @@ impl AppState {
                     .to_string(),
             };
         }
+        // M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: same overlay pattern as
+        // the completed-bar driver above — the session controller's own
+        // per-tick truth writes must never be able to silently hide a
+        // terminal WS task failure.
+        if self.alpaca_ws_task_exited.load(Ordering::SeqCst) {
+            let stored = self.autonomous_session_truth.read().await.clone();
+            if matches!(
+                stored,
+                AutonomousSessionTruth::AlpacaWsTransportExited { .. }
+            ) {
+                return stored;
+            }
+            return AutonomousSessionTruth::AlpacaWsTransportExited {
+                detail: "Alpaca paper WS outer task terminated unexpectedly; WS continuity \
+                         is no longer being maintained by any live task"
+                    .to_string(),
+            };
+        }
         self.autonomous_session_truth.read().await.clone()
     }
 
@@ -2470,6 +2496,61 @@ operator_reconcile_or_repair_required"
             });
         }
         *self.alpaca_ws_continuity.write().await = new_state;
+    }
+
+    /// M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: record that the outer
+    /// Alpaca paper WS task has terminated (returned or panicked).
+    ///
+    /// Idempotent: only the first observation performs the projection. The
+    /// outer task can only terminate once in a real process, but this guards
+    /// against a duplicate watchdog invocation double-writing the gap cursor
+    /// or double-firing the (already deduplicated) gap-escalation alert.
+    ///
+    /// Deliberately reuses the existing GapDetected continuity machinery
+    /// (same DB-then-memory ordering as the inner reconnect loop's own
+    /// disconnect handling — WS-TRUTH-01) rather than a parallel truth
+    /// system: `update_ws_continuity` below is what actually makes this
+    /// fail-closed (via `ws_continuity_gap_requires_halt`) and is what fires
+    /// the existing deduplicated Discord gap alert (DIS-01). The
+    /// `AlpacaWsTransportExited` truth this sets is an additional
+    /// observability signal layered on top, distinguishing "the whole
+    /// transport task died" from an ordinary mid-reconnect gap.
+    pub async fn mark_alpaca_ws_task_exited(&self, detail: String) {
+        if self.alpaca_ws_task_exited.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        if let Some(pool) = self.db.as_ref() {
+            let last_cursor = alpaca_ws_transport::load_session_cursor_from_db(self).await;
+            if let Err(e) = mqk_runtime::alpaca_inbound::persist_ws_gap_cursor(
+                pool,
+                self.adapter_id(),
+                &last_cursor,
+                "alpaca_ws: outer task terminated unexpectedly",
+                Utc::now(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "mark_alpaca_ws_task_exited: failed to persist gap cursor to DB; \
+                     in-memory continuity still fails closed \
+                     (M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01)"
+                );
+            }
+        }
+
+        self.update_ws_continuity(AlpacaWsContinuityState::GapDetected {
+            last_message_id: None,
+            last_event_at: None,
+            detail: "alpaca_ws: outer transport task terminated unexpectedly".to_string(),
+        })
+        .await;
+
+        self.set_autonomous_session_truth(AutonomousSessionTruth::AlpacaWsTransportExited {
+            detail,
+        })
+        .await;
     }
 
     /// PT-AUTO-01: Returns `true` when the execution loop should self-halt due
@@ -5926,6 +6007,9 @@ fn autonomous_truth_event_parts(
         AutonomousSessionTruth::CompletedBarDriverExited { detail } => {
             Some(("completed_bar_driver_exited", None, detail.clone()))
         }
+        AutonomousSessionTruth::AlpacaWsTransportExited { detail } => {
+            Some(("alpaca_ws_transport_exited", None, detail.clone()))
+        }
     }
 }
 
@@ -6716,6 +6800,226 @@ mod tests {
             .unwrap()
             .fetch_fills_since(None);
         assert!(result.is_ok(), "dummy fetcher must return Ok");
+    }
+
+    // -------------------------------------------------------------------
+    // M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: mark_alpaca_ws_task_exited
+    // -------------------------------------------------------------------
+
+    fn m1_paper_alpaca_state() -> AppState {
+        AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca)
+    }
+
+    async fn m1_db_pool_or_skip(label: &str) -> Option<PgPool> {
+        let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
+            eprintln!("{label}: MQK_DATABASE_URL not set; skipped");
+            return None;
+        };
+        if !url.contains(":5434") {
+            eprintln!("{label}: MQK_DATABASE_URL must be the port-5434 local test DB; skipped");
+            return None;
+        }
+        match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+        {
+            Ok(pool) => Some(pool),
+            Err(e) => {
+                eprintln!("{label}: could not connect to MQK_DATABASE_URL: {e}; skipped");
+                None
+            }
+        }
+    }
+
+    // A03: a terminal outer-task exit must force continuity to GapDetected
+    // so the existing `ws_continuity_gap_requires_halt` gate fails closed --
+    // proving authority (not just an observability string) is affected.
+    #[tokio::test]
+    async fn m1a03_terminal_exit_forces_gap_detected_continuity_no_db() {
+        let state = m1_paper_alpaca_state();
+        assert!(matches!(
+            state.alpaca_ws_continuity().await,
+            AlpacaWsContinuityState::ColdStartUnproven
+        ));
+
+        state
+            .mark_alpaca_ws_task_exited("outer task panicked".to_string())
+            .await;
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "A03: a terminal outer-task exit must force continuity to GapDetected"
+        );
+        assert!(
+            state.ws_continuity_gap_requires_halt().await,
+            "A03: fail-closed halt gate must trip once continuity is GapDetected"
+        );
+
+        let truth = state.autonomous_session_truth().await;
+        assert!(
+            matches!(
+                truth,
+                AutonomousSessionTruth::AlpacaWsTransportExited { .. }
+            ),
+            "A10: terminal task death must surface as a distinct truth from an \
+             ordinary mid-reconnect gap; got: {truth:?}"
+        );
+    }
+
+    // A09 / idempotency mutation proof: the SECOND observation must be a true
+    // no-op, not merely "produces an equal result". Restore continuity to
+    // Live between the two calls (simulating an unrelated repair) and prove
+    // the second exit-projection call does not re-clobber it -- if the
+    // `swap(true, ...)` guard in `mark_alpaca_ws_task_exited` were removed,
+    // this test goes RED.
+    #[tokio::test]
+    async fn m1a09_second_observation_is_a_true_no_op() {
+        let state = m1_paper_alpaca_state();
+        state
+            .mark_alpaca_ws_task_exited("first exit".to_string())
+            .await;
+        assert!(matches!(
+            state.alpaca_ws_continuity().await,
+            AlpacaWsContinuityState::GapDetected { .. }
+        ));
+
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: "m1-test".to_string(),
+                last_event_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .await;
+
+        state
+            .mark_alpaca_ws_task_exited("second exit (must be a no-op)".to_string())
+            .await;
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::Live { .. }
+            ),
+            "A09: the outer task can only die once; a second observation must not \
+             re-write continuity or re-fire the (already deduplicated) gap alert"
+        );
+    }
+
+    // A04: a DB persist failure while projecting the terminal failure must
+    // not prevent the in-memory fail-closed continuity update. Uses a lazy
+    // pool pointed at an address nothing listens on (port 1) so the failure
+    // is deterministic and never touches a real Paper/Live/test database.
+    #[tokio::test]
+    async fn m1a04_db_persist_failure_still_fails_closed_in_memory() {
+        let pool = sqlx::PgPool::connect_lazy("postgresql://127.0.0.1:1/mqk_m1a04_stub")
+            .expect("connect_lazy URL parse must succeed");
+        let state = AppState::new_for_test_with_db_mode_and_broker(
+            pool,
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        );
+
+        state
+            .mark_alpaca_ws_task_exited("outer task panicked".to_string())
+            .await;
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "A04: DB persist failure must not prevent the in-memory fail-closed update"
+        );
+        assert!(matches!(
+            state.autonomous_session_truth().await,
+            AutonomousSessionTruth::AlpacaWsTransportExited { .. }
+        ));
+    }
+
+    // Overlay proof mirroring the existing CompletedBarDriverExited pattern:
+    // once the outer WS task has been observed dead, a later unrelated
+    // `set_autonomous_session_truth` write (as the session controller
+    // performs on every tick) must never hide it from the operator-facing
+    // getter, even though the raw stored value really was overwritten.
+    #[tokio::test]
+    async fn m1_overlay_survives_session_controller_clobber() {
+        let state = m1_paper_alpaca_state();
+        state
+            .mark_alpaca_ws_task_exited("outer task panicked".to_string())
+            .await;
+
+        state
+            .set_autonomous_session_truth(AutonomousSessionTruth::Clear)
+            .await;
+
+        assert!(
+            matches!(
+                state.stored_autonomous_session_truth().await,
+                AutonomousSessionTruth::Clear
+            ),
+            "sanity: the raw stored value really was overwritten"
+        );
+        assert!(
+            matches!(
+                state.autonomous_session_truth().await,
+                AutonomousSessionTruth::AlpacaWsTransportExited { .. }
+            ),
+            "the overlay must keep surfacing AlpacaWsTransportExited even after the \
+             session controller clobbers the stored value"
+        );
+    }
+
+    // Positive DB proof (mqd-test-proof requirement): prove the gap cursor
+    // is ACTUALLY persisted with the expected detail, not merely that no
+    // error was returned. Isolated port-5434 test DB only; skipped (never a
+    // hard failure) when unavailable.
+    #[tokio::test]
+    async fn m1_gap_cursor_is_actually_persisted_to_db() {
+        let Some(pool) = m1_db_pool_or_skip("m1_gap_cursor_persist").await else {
+            return;
+        };
+        let mut state = AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        );
+        state.set_adapter_id_for_test("m1_alpaca_ws_terminal_task_test");
+
+        state
+            .mark_alpaca_ws_task_exited("outer task panicked (db proof)".to_string())
+            .await;
+
+        let cursor_json = mqk_db::load_broker_cursor(&pool, state.adapter_id())
+            .await
+            .expect("load_broker_cursor query must succeed")
+            .expect("a gap cursor must have actually been persisted");
+        let cursor: AlpacaFetchCursor =
+            serde_json::from_str(&cursor_json).expect("persisted cursor must be valid JSON");
+        assert!(
+            matches!(
+                cursor.trade_updates,
+                mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::GapDetected { ref detail, .. }
+                    if detail.contains("outer task terminated")
+            ),
+            "positive DB proof: the persisted cursor must actually carry GapDetected \
+             with the outer-task-death detail; got: {:?}",
+            cursor.trade_updates
+        );
+    }
+
+    // A07: non-Alpaca broker on the Paper path must never spawn the WS task
+    // (structural precondition for "no false failure" -- the watchdog can
+    // only ever be spawned when this returns Some).
+    #[test]
+    fn m1a07_spawn_returns_none_for_non_alpaca_broker() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Paper,
+        ));
+        assert!(alpaca_ws_transport::spawn_alpaca_paper_ws_task(state).is_none());
     }
 }
 

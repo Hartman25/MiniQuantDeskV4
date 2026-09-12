@@ -161,6 +161,47 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
 }
 
 // ---------------------------------------------------------------------------
+// M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: outer task watchdog
+// ---------------------------------------------------------------------------
+
+/// Await the outer Alpaca paper WS task and project terminal failure into
+/// fail-closed continuity + operator truth if it ever returns or panics.
+///
+/// `alpaca_ws_loop` is an infinite `loop {}` with no break — in production
+/// this resolves only via panic (or, if a future caller adds one, explicit
+/// cancellation of the returned `JoinHandle`). The normal-`Ok(())`-return
+/// branch exists purely so a test can hand this function a handle to a
+/// short-lived task that returns without a real socket (BRK-00R-05 tests
+/// must never contact Alpaca).
+///
+/// An explicitly cancelled handle (`JoinError::is_cancelled()`) is treated
+/// as expected shutdown, never as a critical failure — this is what lets a
+/// future clean-shutdown path abort the task without manufacturing a false
+/// alert.
+pub async fn supervise_alpaca_ws_terminal_task(state: Arc<AppState>, handle: JoinHandle<()>) {
+    let result = handle.await;
+    let detail = match &result {
+        Ok(()) => "alpaca_ws: outer transport task returned unexpectedly (the reconnect \
+                   loop is designed to run forever)"
+            .to_string(),
+        Err(e) if e.is_cancelled() => {
+            tracing::info!(
+                "alpaca_ws: outer transport task cancelled (expected shutdown); not a \
+                 failure (M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01)"
+            );
+            return;
+        }
+        Err(e) => format!("alpaca_ws: outer transport task panicked: {e}"),
+    };
+    tracing::error!(
+        detail = %detail,
+        "alpaca_ws_task_exited: Alpaca paper WS outer task terminated unexpectedly; \
+         continuity can no longer be trusted (M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01)"
+    );
+    state.mark_alpaca_ws_task_exited(detail).await;
+}
+
+// ---------------------------------------------------------------------------
 // Reconnect loop
 // ---------------------------------------------------------------------------
 
@@ -1385,6 +1426,122 @@ mod tests {
         assert!(
             !cont.is_continuity_proven(),
             "NT-3: continuity must NOT be promoted to Live before listen ack is confirmed; got: {cont:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: supervise_alpaca_ws_terminal_task
+    //
+    // Uses fake tokio tasks (return / panic / abort) so these tests never
+    // open a socket and never contact Alpaca. This is the injected/
+    // deterministic seam required in place of the real infinite reconnect
+    // loop, which in production only ever resolves via panic.
+    // -------------------------------------------------------------------
+
+    use super::supervise_alpaca_ws_terminal_task;
+
+    // A01: an outer task that returns normally (never happens in production
+    // since `alpaca_ws_loop` has no break/return, but this is exactly the
+    // seam a future refactor could reach) must be projected as a terminal
+    // failure.
+    #[tokio::test]
+    async fn m1a01_normal_return_is_projected_as_terminal_failure() {
+        let state = paper_alpaca_state();
+        let handle = tokio::spawn(async {});
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "A01: normal outer-task return must be treated as terminal failure"
+        );
+        assert!(matches!(
+            state.autonomous_session_truth().await,
+            AutonomousSessionTruth::AlpacaWsTransportExited { .. }
+        ));
+    }
+
+    // A02: a panicking outer task must be projected as a terminal failure.
+    #[tokio::test]
+    async fn m1a02_panic_is_projected_as_terminal_failure() {
+        let state = paper_alpaca_state();
+        let handle = tokio::spawn(async {
+            panic!("simulated outer alpaca_ws_loop panic");
+        });
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "A02: a panicking outer task must be treated as terminal failure"
+        );
+        assert!(matches!(
+            state.autonomous_session_truth().await,
+            AutonomousSessionTruth::AlpacaWsTransportExited { .. }
+        ));
+    }
+
+    // A05: an explicitly cancelled (aborted) handle is expected shutdown, not
+    // a critical failure -- must NOT touch continuity or autonomous truth.
+    #[tokio::test]
+    async fn m1a05_cancelled_handle_is_not_a_critical_failure() {
+        let state = paper_alpaca_state();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        handle.abort();
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::ColdStartUnproven
+            ),
+            "A05: expected cancellation must not perturb continuity"
+        );
+        assert!(
+            matches!(
+                state.autonomous_session_truth().await,
+                AutonomousSessionTruth::Clear
+            ),
+            "A05: expected cancellation must not be reported as a critical failure"
+        );
+    }
+
+    // A10: an ordinary inner-session error (the reconnect loop's own,
+    // expected failure mode) must NOT be classified as outer task death --
+    // `alpaca_ws_session` returning `Err` never calls
+    // `mark_alpaca_ws_task_exited`; only the outer supervisor does, and only
+    // when the whole `JoinHandle` resolves.
+    #[tokio::test]
+    async fn m1a10_ordinary_session_error_is_not_outer_task_death() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            let _ = ws.next().await; // consume auth — then drop without responding
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_err(),
+            "sanity: this is an ordinary session failure"
+        );
+
+        assert!(
+            matches!(
+                state.autonomous_session_truth().await,
+                AutonomousSessionTruth::Clear
+            ),
+            "A10: an ordinary inner-session disconnect must never be classified as \
+             outer task death"
         );
     }
 }

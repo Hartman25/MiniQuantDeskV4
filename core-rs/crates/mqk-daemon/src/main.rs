@@ -112,7 +112,25 @@ async fn main() -> anyhow::Result<()> {
 
     // BRK-00R-05: Spawn the Alpaca paper WS transport if configured for paper+alpaca.
     // The handle is kept alive for the lifetime of the daemon.
-    let _alpaca_ws_handle = state::spawn_alpaca_paper_ws_task(Arc::clone(&shared));
+    let alpaca_ws_handle = state::spawn_alpaca_paper_ws_task(Arc::clone(&shared));
+    let ws_started = alpaca_ws_handle.is_some();
+
+    // M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: outer task death watchdog.
+    //
+    // `alpaca_ws_loop` is an infinite reconnect loop; the ordinary WS
+    // disconnect/reconnect cycle is owned entirely inside it and never
+    // reaches here. Without this watchdog, the OUTER task unexpectedly
+    // returning or panicking is silent: the daemon stays up, the last
+    // in-memory continuity value freezes, and nothing tells the operator
+    // the transport is actually gone. The watchdog awaits the handle and
+    // projects a fail-closed GapDetected continuity state plus a distinct
+    // AlpacaWsTransportExited operator truth on unexpected exit.
+    if let Some(handle) = alpaca_ws_handle {
+        tokio::spawn(state::supervise_alpaca_ws_terminal_task(
+            Arc::clone(&shared),
+            handle,
+        ));
+    }
 
     // AUTON-PAPER-01: Spawn the autonomous session controller for Paper+Alpaca.
     // No-op for non-paper-alpaca deployments or when session env vars are absent.
@@ -135,7 +153,6 @@ async fn main() -> anyhow::Result<()> {
     // autonomous paper execution will not self-manage and the operator would
     // otherwise see no indication of this from the startup logs.
     {
-        let ws_started = _alpaca_ws_handle.is_some();
         let ctrl_started = session_controller_handle.is_some();
         let completed_bar_task_started = matches!(
             completed_bar_task_outcome,
