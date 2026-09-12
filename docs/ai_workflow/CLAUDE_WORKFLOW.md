@@ -44,13 +44,28 @@ Claude Code operates on this repo through a four-layer instruction stack. Each l
 
 ### 4. `.claude/skills/` — Procedures
 
-**What belongs here:** Step-by-step procedures for recurring operator actions. Current skills: `write_patch.md` (how to scope, execute, and report a patch), `audit_repo.md` (how to read repo truth and classify findings), `verify_proof.md` (how to verify a specific proof claim against scenario tests).
+**What belongs here:** Step-by-step procedures for recurring operator actions. Current canonical tracked skills are the five MQD directory skills: `mqd-diagnose/` (deterministic defect isolation, implementation gated on explicit mission/controller authorization), `mqd-test-proof/` (validates whether proof evidence actually proves the claimed invariant), `mqd-review-patch/` (read-only patch/wave review, invoked only at an explicit review request or acceptance boundary — not on every routine edit), `mqd-handoff/` (SHA-bound session handoff; reports status, does not infer or assign it), and `mqd-external-research/` (external docs/papers used as evidence, never as an override of local behavior).
 
-**What does NOT belong here:** Invariants, constraints, status tables, architecture descriptions.
+The older flat files `write_patch.md`, `audit_repo.md`, and `verify_proof.md` remain as legacy/local helper notes only. They are not part of the current canonical tracked MQD skill set.
 
-**When to rely on it:** Invoke a skill when you need a repeatable, multi-step procedure. Skills reference `CLAUDE.md` and `.claude/rules/` for the rules they enforce — they do not restate rules inline.
+**What does NOT belong here:** Invariants, constraints, status tables, architecture descriptions. Skills do not define acceptance/closure vocabulary — that remains owned by the current mission/controller and the canonical program authority.
 
-**Maintenance rule:** Skills are procedural, not declarative. If a skill is acquiring rules or invariants, extract those to the right rule file.
+**When to rely on it:** Invoke a skill when you need a repeatable, multi-step procedure, per the skill's own stated trigger. Skills reference `CLAUDE.md` and `.claude/rules/` for the rules they enforce — they do not restate rules inline, do not expand their own authority, and do not invoke one another.
+
+**Maintenance rule:** Skills are procedural, not declarative. If a skill is acquiring rules or invariants, extract those to the right rule file. Update this section whenever the tracked skill set or skill type changes.
+
+---
+
+## Instruction Authority
+
+Layers 2–4 above form the repo-controlled authority stack. Resolution order:
+
+current authorized mission/controller
+→ `CLAUDE.md`
+→ applicable scoped `.claude/rules/`
+→ explicitly invoked skill
+
+The System Prompt (Layer 1) sits outside and above this stack; it is managed by Anthropic and the harness and is not redefined or reordered by repo-controlled layers.
 
 ---
 
@@ -60,7 +75,7 @@ Claude Code operates on this repo through a four-layer instruction stack. Each l
 |---|---|
 | Does this rule apply everywhere in the repo? | `CLAUDE.md` |
 | Does this constraint apply only to one subsystem? | `.claude/rules/<subsystem>_rules.md` |
-| Do I need a step-by-step procedure? | `.claude/skills/<skill>.md` |
+| Do I need a step-by-step procedure? | `.claude/skills/<skill>/SKILL.md` |
 | Is this a model behavior or tool-access setting? | System prompt (not operator-controlled) |
 
 **Do not overload any one layer.** `CLAUDE.md` must stay short enough to be fully loaded on every session. Rule files must stay local enough to be ignored when irrelevant. Skills must stay procedural enough to be followed without interpretation.

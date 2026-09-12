@@ -632,9 +632,11 @@ current code/tests/schema/Git/DB/proof
 → accepted current contracts/runbooks
 → historical material.
 
-INSTRUCTION AUTHORITY:
-current mission/controller
+INSTRUCTION AUTHORITY (repo-controlled layer only; the system prompt and
+harness sit above this stack and are not redefined by it):
+current authorized mission/controller
 → CLAUDE.md
+→ applicable scoped `.claude/rules/`
 → explicitly invoked skill.
 
 Skills:
