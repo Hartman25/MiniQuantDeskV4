@@ -621,3 +621,27 @@ When several correct approaches exist, prefer the one that:
 8. uses less context/tooling
 9. preserves future extensibility
 10. reaches completion sooner.
+
+## 31. Project-local skills
+
+Project-local skills under `.claude/skills/` are procedural helpers, not a
+second authority.
+
+TRUTH PRECEDENCE:
+current code/tests/schema/Git/DB/proof
+→ accepted current contracts/runbooks
+→ historical material.
+
+INSTRUCTION AUTHORITY:
+current mission/controller
+→ CLAUDE.md
+→ explicitly invoked skill.
+
+Skills:
+
+- refine procedure;
+- do not expand authority;
+- do not orchestrate one another;
+- do not reopen accepted work without deterministic contradiction;
+- do not assign independent acceptance/closure states;
+- stop/report conflicts.
