@@ -25,6 +25,8 @@
 #   LVL15  No new desktop-shortcut target introduced (Start-PaperOperatorConsole.ps1 not created)
 #   LVL16  -CheckOnly branch (with exit) runs before operator-token resolution and -ArmPaper
 #   LVL17  -CheckOnly does not invoke smoke runners (mention-only in Next action text)
+#   LVL27  -CheckOnly Paper DB port mismatch message does not claim a false
+#          "verify" action is needed (M1-PAPER-READINESS-WAVE-01)
 # =============================================================================
 
 Set-StrictMode -Version Latest
@@ -155,6 +157,17 @@ Assert-True 'LVL17' '-CheckOnly does not invoke smoke runners (no & call of Run-
     ($Content -notmatch '&\s*[''"]?[^\r\n]*Run-AAPL5mMarketSmoke\.ps1' -and
      $Content -notmatch '&\s*[''"]?[^\r\n]*Start-PaperTradingSmoke\.ps1' -and
      $Content -notmatch 'Invoke-ExternalCommand[^\r\n]*Smoke')
+
+# LVL27 (M1-PAPER-READINESS-WAVE-01): -CheckOnly's "Paper DB port" mismatch
+# message must not claim an operator "verify" action is needed when the
+# current shell's MQK_DATABASE_URL differs from 5440. Actual Paper startup
+# (Start-MiniQuantDesk.ps1 / Start-PaperTradingSmoke.ps1) unconditionally
+# reasserts MQK_DATABASE_URL to the hardcoded paper DB literal before any
+# DB-dependent step, so a shell-only mismatch never affects routing. The
+# message must say so instead of implying the operator must act.
+Assert-True 'LVL27' '-CheckOnly Paper DB port mismatch message does not claim an operator "verify" action is required' `
+    ($Content -notmatch 'does not match -- verify' -and
+     $Content -match [regex]::Escape('Paper startup unconditionally reasserts 5440'))
 
 # ---------------------------------------------------------------------------
 # Section: STALE-DAEMON-BINARY-PROVENANCE-01 functional proofs

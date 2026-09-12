@@ -1565,13 +1565,21 @@ function Invoke-StartupCheckOnly {
     Write-CheckField "Paper DB container ($PaperDbContainerName)" $dbStatusDisplay
 
     # 5. Paper DB port (cross-checked against MQK_DATABASE_URL if loaded)
+    #
+    # This reads the CURRENT SHELL's MQK_DATABASE_URL, which may differ from
+    # what actual Paper startup will use: the canonical Paper startup path
+    # unconditionally reasserts MQK_DATABASE_URL to the hardcoded
+    # 127.0.0.1:5440/miniquantdesk_paper literal ("PAPER DB HARD FENCE")
+    # immediately before any DB-dependent step, regardless of what the shell
+    # or .env.local contains. A mismatch here is informational only -- it
+    # never blocks or misroutes Paper.
     $dbUrl = $env:MQK_DATABASE_URL
     if (-not [string]::IsNullOrWhiteSpace($dbUrl) -and $dbUrl -match ':5440') {
-        Write-CheckField 'Paper DB port' 'expected localhost:5440 (confirmed in MQK_DATABASE_URL)'
+        Write-CheckField 'Paper DB port' 'expected localhost:5440 (confirmed in current-shell MQK_DATABASE_URL)'
     } elseif (-not [string]::IsNullOrWhiteSpace($dbUrl)) {
-        Write-CheckField 'Paper DB port' 'expected localhost:5440 (MQK_DATABASE_URL set but does not match -- verify)'
+        Write-CheckField 'Paper DB port' 'expected localhost:5440 (current-shell MQK_DATABASE_URL differs; Paper startup unconditionally reasserts 5440 before use, so this does not affect or misroute Paper)'
     } else {
-        Write-CheckField 'Paper DB port' 'expected localhost:5440 (MQK_DATABASE_URL not set)'
+        Write-CheckField 'Paper DB port' 'expected localhost:5440 (MQK_DATABASE_URL not set in current shell; Paper startup asserts it unconditionally)'
     }
 
     # 6. mqk-daemon binary (Test-Path only -- Resolve-DaemonBinary throws if missing)
