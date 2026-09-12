@@ -1538,6 +1538,98 @@ function Invoke-CheckOnlyDaemonGet {
     }
 }
 
+# M1-PAPER-READINESS-WAVE-01 CORRECTION C2: extracted as its own function
+# (rather than left inline in Invoke-StartupCheckOnly) specifically so the
+# recovery-guidance decision is unit-testable by dot-sourcing this file --
+# the same rationale as Assert-LiveShadowStartupPrerequisites above. Pure
+# function: no daemon/DB/HTTP calls, only the decision over already-observed
+# state.
+#
+# sys_arm_state.state is DB-constrained (sys_arm_state_state_check) to only
+# ever be 'ARMED' or 'DISARMED' -- 'HALTED' is exclusively a runs.status
+# value, so DISARMED is never by itself treated as proof of a halt. Live
+# daemon halt truth is a three-way OR -- kill_switch_active=true,
+# runtime_status='halted', or the /api/v1/autonomous/readiness endpoint's
+# arm_state='halted' -- exactly mirroring Start-MiniQuantDesk.ps1's own
+# $needsHaltRecovery condition. All three are required: runtime_status's
+# underlying locally_halted (state.rs current_status_snapshot) collapses to
+# false whenever the durable arm-state row's disarm reason is anything other
+# than the literal "OperatorHalt" string, while readiness's arm_state reads
+# the in-memory integrity.halted flag directly with no such reason filter --
+# so a halt disarmed for a different reason (e.g. ExecutionLoopTickFailure)
+# can only be detected via readiness. When the daemon is offline, no live
+# halt truth is available at all (from any of the three signals), so a
+# persisted DISARMED state is reported as observed fact, never asserted as a
+# current halt, and never paired with an instruction to manually clear/arm --
+# the official Paper startup (Start-MiniQuantDesk.ps1's full Paper startup)
+# establishes fresh daemon truth and performs its own accepted disarm,
+# clear-halt, then re-arm recovery sequence automatically when actually
+# required. mqk-daemon's autonomous coordinator
+# itself does not auto-retry a durable non-ARMED run outside that
+# operator-authorized sequence -- a fact distinct from claiming recovery is
+# manual or "never automatic".
+function Get-StartupCheckOnlyNextAction {
+    param(
+        [Parameter(Mandatory = $true)][bool]$EnvLocalPresent,
+        [Parameter(Mandatory = $true)][bool]$DockerAvailable,
+        [Parameter(Mandatory = $true)][bool]$DaemonReachable,
+        $LiveRoutingEnabled,
+        $KillSwitchActive,
+        [string]$RuntimeStatus = 'unknown',
+        [string]$ReadinessArmState = 'unknown',
+        $ArmState,
+        $ArmReason,
+        [string]$ReconcileStatus = 'unknown',
+        [string]$DbStatus = 'unknown',
+        [Parameter(Mandatory = $true)][string]$PaperDbContainerName
+    )
+
+    if (-not $EnvLocalPresent) {
+        return 'Copy .env.local.example to .env.local and fill in credentials, then re-run -CheckOnly.'
+    }
+    if (-not $DockerAvailable) {
+        return 'Start Docker Desktop, then re-run -CheckOnly.'
+    }
+    if ($LiveRoutingEnabled -eq $true) {
+        return 'DANGER: live_routing_enabled=true. Investigate immediately. Do not start, arm, or trade.'
+    }
+    # Three-way OR mirrors Start-MiniQuantDesk.ps1's real $needsHaltRecovery
+    # exactly (kill_switch_active, runtime_status=='halted', or the
+    # readiness endpoint's arm_state=='halted') -- runtime_status alone
+    # under-detects a halt whose durable disarm reason isn't the literal
+    # "OperatorHalt" string (current_status_snapshot's locally_halted
+    # recompute in state.rs), so readiness's unfiltered in-memory
+    # integrity.halted is required too.
+    if ($DaemonReachable -and (($KillSwitchActive -eq $true) -or ($RuntimeStatus -eq 'halted') -or ($ReadinessArmState -eq 'halted'))) {
+        return "Daemon reports an active halt (kill_switch_active=$KillSwitchActive, runtime_status=$RuntimeStatus, readiness arm_state=$ReadinessArmState). Run the official Paper startup (Start-MiniQuantDesk.ps1, or Launch-VeritasLedger.ps1 without -CheckOnly) -- it owns the accepted halt-recovery sequence and performs it automatically as part of a normal startup. Run Get-PaperOperatorStatus.ps1 for full halt context first."
+    }
+    if ($DaemonReachable -and $ArmState -eq 'DISARMED') {
+        # DISARMED without any of the three live halt signals (kill switch,
+        # runtime_status, readiness arm_state) is not proof a halted run
+        # exists -- a reachable daemon can be DISARMED from a normal
+        # operator disarm with no halted run at all. Do not tell the
+        # operator to clear a halt that was never confirmed.
+        return "Daemon is reachable and persisted arm state is DISARMED (reason=$ArmReason), but no active halt was detected (kill_switch_active=$KillSwitchActive, runtime_status=$RuntimeStatus, readiness arm_state=$ReadinessArmState). Run Get-PaperOperatorStatus.ps1 for full status before deciding on arm-execution."
+    }
+    if ($DaemonReachable -and $ReconcileStatus -eq 'dirty') {
+        return 'Reconcile status is dirty. Run Get-PaperOperatorStatus.ps1 to review the mismatch before proceeding.'
+    }
+    if ($DaemonReachable) {
+        return 'Daemon is already reachable. Run Get-PaperOperatorStatus.ps1 for full live status, or run Launch-VeritasLedger.ps1 (no -CheckOnly) to attach the GUI.'
+    }
+    if ($DbStatus -ne 'running') {
+        return "Paper DB container ($PaperDbContainerName) is not running. Start Docker Desktop / the container, then re-run -CheckOnly."
+    }
+    if ($ArmState -eq 'DISARMED') {
+        # Daemon is offline here, so no live kill_switch_active/runtime_status
+        # truth is available -- persisted DISARMED alone cannot prove a
+        # halted run currently requires recovery. Do not claim a halt
+        # definitely exists, and do not instruct manual clear/arm now.
+        return "Persisted arm state is DISARMED (reason=$ArmReason), last observed while the daemon was offline -- this alone does not prove a halted run currently requires recovery. Run the official Paper startup (Start-MiniQuantDesk.ps1, or Launch-VeritasLedger.ps1 without -CheckOnly): it establishes fresh daemon truth first, then its accepted startup workflow performs halt recovery/arming automatically when actually required."
+    }
+    return 'Prerequisites look OK. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before a smoke run, otherwise run Launch-VeritasLedger.ps1 (no -CheckOnly) for a normal startup.'
+}
+
 function Invoke-StartupCheckOnly {
     param([Parameter(Mandatory = $true)][string]$RepoRoot)
 
@@ -1694,6 +1786,21 @@ function Invoke-StartupCheckOnly {
     $runtimeStatus = 'unknown'
     $killSwitchActive = $null
     $reconcileStatus = 'unknown'
+    # M1-PAPER-READINESS-WAVE-01 CORRECTION C2 (self-review follow-up):
+    # Start-MiniQuantDesk.ps1's real halt-recovery trigger (its own
+    # $needsHaltRecovery) is a three-way OR: kill_switch_active, OR
+    # runtime_status=='halted', OR /api/v1/autonomous/readiness's arm_state
+    # =='halted'. That third signal is NOT redundant with the first two:
+    # current_status_snapshot (state.rs) recomputes runtime_status's
+    # underlying locally_halted from the durable arm-state row's *reason*,
+    # collapsing to false for any reason other than the literal string
+    # "OperatorHalt" (e.g. the ExecutionLoopTickFailure reason this wave's
+    # own incident was diagnosed against) -- while readiness's arm_state
+    # reads the in-memory integrity.halted flag directly, with no such
+    # reason filter (system.rs). Omitting this third signal would let
+    # CheckOnly silently miss exactly the kind of halt Start-MiniQuantDesk.
+    # ps1 would still catch and recover.
+    $readinessArmState = $null
     if ($daemonReachable) {
         $sysStatus = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/api/v1/system/status'
         $liveRoutingEnabled = Get-JsonField -Obj $sysStatus -Field 'live_routing_enabled' -Default 'unknown'
@@ -1703,15 +1810,20 @@ function Invoke-StartupCheckOnly {
         $reconcile = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/api/v1/reconcile/status'
         $reconcileStatus = Get-JsonField -Obj $reconcile -Field 'status' -Default 'unknown'
 
+        $readiness = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/api/v1/autonomous/readiness'
+        $readinessArmState = Get-JsonField -Obj $readiness -Field 'arm_state' -Default 'unknown'
+
         Write-CheckField 'Live routing' (Format-CheckOnlyBoolField $liveRoutingEnabled)
         Write-CheckField 'Runtime status' $runtimeStatus
         Write-CheckField 'Kill switch' (Format-CheckOnlyBoolField $killSwitchActive)
         Write-CheckField 'Reconcile' $reconcileStatus
+        Write-CheckField 'Readiness arm_state' $readinessArmState
     } else {
         Write-CheckField 'Live routing' 'unknown (daemon offline)'
         Write-CheckField 'Runtime status' 'unknown (daemon offline)'
         Write-CheckField 'Kill switch' 'unknown (daemon offline)'
         Write-CheckField 'Reconcile' 'unknown (daemon offline)'
+        Write-CheckField 'Readiness arm_state' 'unknown (daemon offline)'
     }
 
     if ($liveRoutingEnabled -eq $true) {
@@ -1722,35 +1834,19 @@ function Invoke-StartupCheckOnly {
 
     # 17. Next safe operator action (priority order, most urgent first)
     Write-Host ''
-    if (-not $envLocalPresent) {
-        $nextAction = 'Copy .env.local.example to .env.local and fill in credentials, then re-run -CheckOnly.'
-    } elseif (-not $dockerAvailable) {
-        $nextAction = 'Start Docker Desktop, then re-run -CheckOnly.'
-    } elseif ($liveRoutingEnabled -eq $true) {
-        $nextAction = 'DANGER: live_routing_enabled=true. Investigate immediately. Do not start, arm, or trade.'
-    } elseif ($daemonReachable -and $armState -eq 'DISARMED') {
-        # NOTE: sys_arm_state.state can only ever be 'ARMED' or 'DISARMED'
-        # (DB CHECK constraint sys_arm_state_state_check) -- 'HALTED' is a
-        # runs.status value, never an arm-state value. A prior version of
-        # this branch compared $armState to 'HALTED' and could never fire.
-        $nextAction = "Persisted arm state is DISARMED (reason=$armReason). Recovery requires explicit operator action (clear the halted run, then arm-execution) -- it is never automatic. Run Get-PaperOperatorStatus.ps1 for full halt context first."
-    } elseif ($daemonReachable -and $reconcileStatus -eq 'dirty') {
-        $nextAction = 'Reconcile status is dirty. Run Get-PaperOperatorStatus.ps1 to review the mismatch before proceeding.'
-    } elseif ($daemonReachable) {
-        $nextAction = 'Daemon is already reachable. Run Get-PaperOperatorStatus.ps1 for full live status, or run Launch-VeritasLedger.ps1 (no -CheckOnly) to attach the GUI.'
-    } elseif ($dbStatus -ne 'running') {
-        $nextAction = "Paper DB container ($PaperDbContainerName) is not running. Start Docker Desktop / the container, then re-run -CheckOnly."
-    } elseif ($armState -eq 'DISARMED') {
-        # A durably DISARMED arm state is never auto-recovered by a normal
-        # daemon startup: mqk-daemon's autonomous daily coordinator
-        # (check_terminated_run_safe_to_recover) explicitly treats a durable
-        # non-ARMED state as unsafe-to-recover and requires
-        # ManualInterventionRequired -- "this is never automatically
-        # retried" per its own doc comment. Do not imply otherwise here.
-        $nextAction = "Persisted arm state is DISARMED (reason=$armReason). This is not cleared by a normal startup -- production code never auto-retries a durably DISARMED run. After starting the daemon, an operator must explicitly clear the halted run, then arm-execution. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before smoke."
-    } else {
-        $nextAction = 'Prerequisites look OK. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before a smoke run, otherwise run Launch-VeritasLedger.ps1 (no -CheckOnly) for a normal startup.'
-    }
+    $nextAction = Get-StartupCheckOnlyNextAction `
+        -EnvLocalPresent $envLocalPresent `
+        -DockerAvailable $dockerAvailable `
+        -LiveRoutingEnabled $liveRoutingEnabled `
+        -DaemonReachable $daemonReachable `
+        -KillSwitchActive $killSwitchActive `
+        -RuntimeStatus $runtimeStatus `
+        -ReadinessArmState $readinessArmState `
+        -ArmState $armState `
+        -ArmReason $armReason `
+        -ReconcileStatus $reconcileStatus `
+        -DbStatus $dbStatus `
+        -PaperDbContainerName $PaperDbContainerName
     Write-CheckField 'Next action' $nextAction
 
     Write-Host ''

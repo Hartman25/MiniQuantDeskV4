@@ -36,6 +36,16 @@
 #          shell, restores the caller's original value via Restore-EnvSnapshot,
 #          and never touches a separately configured live-shadow DB URL
 #          (M1-PAPER-READINESS-WAVE-01 CORRECTION B2)
+#   LVL30..LVL34  Get-StartupCheckOnlyNextAction functional proofs: reachable-
+#          daemon halt truth (kill_switch_active/runtime_status=halted) drives
+#          halt-recovery guidance, DISARMED-without-halt never claims a halt,
+#          an offline daemon's persisted DISARMED never asserts a halt
+#          definitely exists, and the function itself is pure
+#   LVL35  readiness endpoint's arm_state=='halted' alone (independent of
+#          kill_switch_active/runtime_status) still drives halt-recovery
+#          guidance -- proves the three-way OR matches Start-MiniQuantDesk.
+#          ps1's real $needsHaltRecovery (M1-PAPER-READINESS-WAVE-01
+#          CORRECTION C2, independent self-review follow-up)
 # =============================================================================
 
 Set-StrictMode -Version Latest
@@ -178,28 +188,37 @@ Assert-True 'LVL27' '-CheckOnly Paper DB port mismatch message does not claim an
     ($Content -notmatch 'does not match -- verify' -and
      $Content -match [regex]::Escape('Paper startup unconditionally reasserts 5440'))
 
-# LVL28 (M1-PAPER-READINESS-WAVE-01): -CheckOnly's reachable-daemon "Next
-# action" branch must compare $armState to 'DISARMED', never 'HALTED'.
-# sys_arm_state.state is constrained at the DB level (CHECK
+# LVL28 (M1-PAPER-READINESS-WAVE-01 CORRECTION C2, extended per independent
+# self-review): -CheckOnly's reachable-daemon halt branch must key off the
+# same three-way live daemon halt truth Start-MiniQuantDesk.ps1's own
+# $needsHaltRecovery uses (kill_switch_active, runtime_status='halted', OR
+# the /api/v1/autonomous/readiness arm_state='halted'), never off bare
+# DISARMED. sys_arm_state.state is DB-constrained (CHECK
 # sys_arm_state_state_check) to only ever be 'ARMED' or 'DISARMED' --
-# 'HALTED' is exclusively a runs.status value. A branch comparing $armState
-# to 'HALTED' can never fire, silently falling through to the generic
-# "Daemon is already reachable" message even while a run is halted and the
-# system is disarmed.
-Assert-True 'LVL28' '-CheckOnly reachable-daemon branch compares $armState to DISARMED, not the unreachable HALTED literal' `
-    ($Content -match [regex]::Escape('$daemonReachable -and $armState -eq ''DISARMED''') -and
+# 'HALTED' is exclusively a runs.status value, and DISARMED alone (e.g. from
+# a normal operator disarm with no halted run) is not proof of an active
+# halt. The readiness arm_state signal is not redundant with runtime_status:
+# runtime_status's underlying locally_halted collapses to false whenever the
+# durable disarm reason isn't literally "OperatorHalt" (state.rs
+# current_status_snapshot), while readiness's arm_state reads
+# integrity.halted directly with no such filter.
+Assert-True 'LVL28' '-CheckOnly reachable-daemon halt branch keys off the three-way kill_switch_active/runtime_status=halted/readiness-arm_state=halted OR, and a separate DISARMED-without-halt branch never fires on bare $armState -eq ''HALTED''' `
+    ($Content -match [regex]::Escape("(`$KillSwitchActive -eq `$true) -or (`$RuntimeStatus -eq 'halted') -or (`$ReadinessArmState -eq 'halted')") -and
      $Content -notmatch [regex]::Escape('$daemonReachable -and $armState -eq ''HALTED'''))
 
-# LVL29 (M1-PAPER-READINESS-WAVE-01): -CheckOnly's DISARMED "Next action"
-# message must not claim a normal startup automatically clears/re-arms a
-# durably DISARMED state. mqk-daemon's autonomous daily coordinator
-# (check_terminated_run_safe_to_recover, autonomous_daily_coordinator.rs)
-# explicitly treats a durable non-ARMED state as unsafe-to-recover and
-# documents "this is never automatically retried" -- the operator message
-# must match that production truth, not contradict it.
-Assert-True 'LVL29' '-CheckOnly DISARMED message does not claim normal startup automatically clears/re-arms the state' `
-    ($Content -notmatch 'normal startup re-verifies fresh daemon state' -and
-     $Content -match [regex]::Escape('never auto-retries a durably DISARMED run'))
+# LVL29 (M1-PAPER-READINESS-WAVE-01 CORRECTION C2): no blanket "recovery is
+# never automatic / operator must explicitly clear then arm" wording remains
+# anywhere in the CheckOnly recovery guidance. That wording (introduced by
+# the original Patch C) conflated "mqk-daemon's autonomous coordinator does
+# not auto-retry" (true) with "an operator must manually intervene right
+# now" (false as an instruction -- the OFFICIAL launcher performs the
+# accepted disarm-execution -> clear-halted-run -> arm-execution recovery
+# sequence automatically as part of a normal full Paper startup).
+Assert-True 'LVL29' 'No blanket "recovery is never automatic / operator must explicitly clear then arm" wording remains in CheckOnly guidance' `
+    ($Content -notmatch 'Recovery requires explicit operator action \(clear the halted run, then arm-execution\) -- it is never automatic' -and
+     $Content -notmatch 'an operator must explicitly clear the halted run, then arm-execution' -and
+     $Content -match [regex]::Escape('official Paper startup') -and
+     $Content -match [regex]::Escape('owns the accepted halt-recovery sequence'))
 
 # ---------------------------------------------------------------------------
 # Section: M1-PAPER-READINESS-WAVE-01 CORRECTION B2 functional proofs
@@ -261,6 +280,82 @@ try {
     if ($null -eq $B2OriginalDbUrlEnv) { Remove-Item Env:MQK_DATABASE_URL -ErrorAction SilentlyContinue } else { $env:MQK_DATABASE_URL = $B2OriginalDbUrlEnv }
 }
 
+# ---------------------------------------------------------------------------
+# Section: M1-PAPER-READINESS-WAVE-01 CORRECTION C2 functional proofs
+#
+# Get-StartupCheckOnlyNextAction is a pure decision function (no daemon/DB/
+# HTTP/docker calls) extracted specifically so this recovery-guidance logic
+# is testable without mocking Invoke-CheckOnlyDaemonGet or docker/psql --
+# same rationale as the L1-L16 mocked-HTTP proofs in
+# test_official_dual_mode_launcher.ps1, but here no mocking is needed at
+# all because the function itself takes only already-observed state.
+# Dot-sourcing is safe: MAIN DISPATCH is guarded by
+# `if ($MyInvocation.InvocationName -ne '.')`, so this only defines
+# functions -- no daemon start, no DB call, no exit.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "=== Section: M1-PAPER-READINESS-WAVE-01 CORRECTION C2 functional proofs ===" -ForegroundColor Cyan
+
+. $Target
+
+$C2Base = @{
+    EnvLocalPresent      = $true
+    DockerAvailable      = $true
+    LiveRoutingEnabled   = $false
+    PaperDbContainerName = 'mqk-paper-postgres'
+}
+
+# LVL30: reachable daemon + runtime_status=halted -> halt-recovery guidance
+# pointing at the official launcher, regardless of arm state.
+$lvl30 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'halted' -ReadinessArmState 'halted' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'LVL30' 'Reachable daemon + runtime_status=halted -> halt-recovery guidance naming the official Paper startup' `
+    ($lvl30 -match 'active halt' -and $lvl30 -match 'official Paper startup' -and $lvl30 -match 'owns the accepted halt-recovery sequence')
+
+# LVL31: reachable daemon + kill_switch_active=true -> same halt-recovery
+# guidance, even if runtime_status is not literally 'halted'.
+$lvl31 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $true -RuntimeStatus 'idle' -ReadinessArmState 'armed' -ArmState 'ARMED' -ArmReason $null -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'LVL31' 'Reachable daemon + kill_switch_active=true -> halt-recovery guidance naming the official Paper startup' `
+    ($lvl31 -match 'active halt' -and $lvl31 -match 'official Paper startup' -and $lvl31 -match 'owns the accepted halt-recovery sequence')
+
+# LVL32: reachable daemon + DISARMED but NOT halted by ANY of the three
+# signals (kill switch false, runtime_status not 'halted', readiness
+# arm_state not 'halted') -> must NOT claim a halt or instruct
+# clear-halted-run; must surface DISARMED as observed fact only.
+$lvl32 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'disarmed_db' -ArmState 'DISARMED' -ArmReason 'operator_disarm' -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'LVL32' 'Reachable daemon + DISARMED-without-halt (all three signals clear) -> no halt claim, no clear-halted-run instruction' `
+    ($lvl32 -notmatch 'reports an active halt' -and $lvl32 -notmatch 'clear-halted-run' -and $lvl32 -notmatch 'clear the halted run' -and $lvl32 -match 'no active halt was detected')
+
+# LVL35 (independent self-review follow-up): reachable daemon where
+# kill_switch_active=false AND runtime_status != 'halted' (the exact
+# under-detection case the durable-disarm-reason-filtered locally_halted
+# recompute in state.rs produces for any reason other than the literal
+# "OperatorHalt" string -- e.g. this wave's own real-world
+# ExecutionLoopTickFailure incident), but the readiness endpoint's
+# unfiltered arm_state=='halted' -> halt-recovery guidance must still fire.
+# Proves the third signal is load-bearing, not decorative.
+$lvl35 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $true -KillSwitchActive $false -RuntimeStatus 'idle' -ReadinessArmState 'halted' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'clean' -DbStatus 'running'
+Assert-True 'LVL35' 'Reachable daemon + readiness arm_state=halted ALONE (kill_switch_active=false, runtime_status!=halted) -> halt-recovery guidance still fires' `
+    ($lvl35 -match 'active halt' -and $lvl35 -match 'official Paper startup' -and $lvl35 -match 'owns the accepted halt-recovery sequence')
+
+# LVL33: offline daemon + persisted DISARMED -> must not assert a halted run
+# definitely exists, and must not instruct manual clear/arm now.
+$lvl33 = Get-StartupCheckOnlyNextAction @C2Base -DaemonReachable $false -KillSwitchActive $null -RuntimeStatus 'unknown' -ArmState 'DISARMED' -ArmReason 'ExecutionLoopTickFailure' -ReconcileStatus 'unknown' -DbStatus 'running'
+Assert-True 'LVL33' 'Offline daemon + persisted DISARMED -> reports observed fact only, never asserts a halt definitely exists, never instructs manual clear/arm now' `
+    ($lvl33 -match 'this alone does not prove a halted run currently requires recovery' -and
+     $lvl33 -notmatch 'clear-halted-run' -and $lvl33 -notmatch 'operator must explicitly clear' -and
+     $lvl33 -match 'official Paper startup')
+
+# LVL34: Get-StartupCheckOnlyNextAction itself performs zero daemon/DB/
+# docker/HTTP mutation -- it is a pure decision function over its own
+# parameters (re-affirms CheckOnly stays read-only even after the C2
+# refactor moved this logic into its own function).
+$c2FnMatch = [regex]::Match($Content, '(?s)function Get-StartupCheckOnlyNextAction.*?\n}\r?\n')
+Assert-True 'LVL34' 'Get-StartupCheckOnlyNextAction is a pure function (no docker/psql/HTTP/Invoke- calls inside it)' `
+    ($c2FnMatch.Success -and
+     $c2FnMatch.Value -notmatch 'docker exec' -and
+     $c2FnMatch.Value -notmatch 'docker inspect' -and
+     $c2FnMatch.Value -notmatch 'Invoke-CheckOnlyDaemonGet' -and
+     $c2FnMatch.Value -notmatch 'Invoke-JsonRequest')
 
 # ---------------------------------------------------------------------------
 # Section: STALE-DAEMON-BINARY-PROVENANCE-01 functional proofs
