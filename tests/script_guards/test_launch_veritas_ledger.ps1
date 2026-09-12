@@ -31,6 +31,11 @@
 #          DISARMED, not the unreachable HALTED literal (M1-PAPER-READINESS-WAVE-01)
 #   LVL29  -CheckOnly DISARMED message does not claim automatic recovery
 #          on normal startup (M1-PAPER-READINESS-WAVE-01)
+#   B2-01..B2-05  Set-LauncherEnvironment hard-fences MQK_DATABASE_URL to the
+#          accepted Paper 5440 literal regardless of a contaminated caller
+#          shell, restores the caller's original value via Restore-EnvSnapshot,
+#          and never touches a separately configured live-shadow DB URL
+#          (M1-PAPER-READINESS-WAVE-01 CORRECTION B2)
 # =============================================================================
 
 Set-StrictMode -Version Latest
@@ -195,6 +200,67 @@ Assert-True 'LVL28' '-CheckOnly reachable-daemon branch compares $armState to DI
 Assert-True 'LVL29' '-CheckOnly DISARMED message does not claim normal startup automatically clears/re-arms the state' `
     ($Content -notmatch 'normal startup re-verifies fresh daemon state' -and
      $Content -match [regex]::Escape('never auto-retries a durably DISARMED run'))
+
+# ---------------------------------------------------------------------------
+# Section: M1-PAPER-READINESS-WAVE-01 CORRECTION B2 functional proofs
+#
+# Set-LauncherEnvironment is exercised for real (RepoRoot/OperatorToken here
+# are harmless fixture strings -- the function only assigns process env
+# vars, it never starts a daemon, reads a file, or makes a network call).
+# Every mutated env var is restored via the real Restore-EnvSnapshot,
+# mirroring the production MAIN DISPATCH try/finally call pattern. Dot-
+# sourcing is safe: MAIN DISPATCH is guarded by
+# `if ($MyInvocation.InvocationName -ne '.')`.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "=== Section: M1-PAPER-READINESS-WAVE-01 CORRECTION B2 functional proofs ===" -ForegroundColor Cyan
+
+. $Target
+
+$B2FakeTestDbUrl = 'postgres://postgres:postgres@127.0.0.1:5434/mqk_test'
+$B2FakeLiveShadowDbUrl = 'postgres://postgres:postgres@127.0.0.1:5432/mqk_live_shadow_fixture'
+$B2OriginalDbUrlEnv = [Environment]::GetEnvironmentVariable('MQK_DATABASE_URL', 'Process')
+
+# A/B/C: contaminated shell (fake 5434 test URL) + Paper mode -> effective
+# MQK_DATABASE_URL is unconditionally the accepted 5440 Paper DB literal,
+# never 5432 or 5434.
+try {
+    $env:MQK_DATABASE_URL = $B2FakeTestDbUrl
+    $b2Snapshot = Set-LauncherEnvironment -OperatorToken 'fake-test-token' -RepoRoot 'C:\fake-repo-root' -DeploymentMode 'paper'
+    $b2EffectivePaperUrl = $env:MQK_DATABASE_URL
+    Assert-True 'B2-01' 'Paper mode: Set-LauncherEnvironment overrides a contaminated 5434 shell value with the accepted 5440/miniquantdesk_paper literal' `
+        ($b2EffectivePaperUrl -match ':5440/miniquantdesk_paper')
+    Assert-True 'B2-02' 'Paper mode: effective MQK_DATABASE_URL can never be port 5432 or 5434' `
+        ($b2EffectivePaperUrl -notmatch ':5432' -and $b2EffectivePaperUrl -notmatch ':5434')
+
+    # D/E: restoring the snapshot returns the caller's original contaminated
+    # value -- the fence is scoped to the launcher's own session, not a
+    # permanent mutation of the caller's shell.
+    Restore-EnvSnapshot -Snapshot $b2Snapshot
+    Assert-True 'B2-03' 'Restore-EnvSnapshot restores the caller''s original (contaminated 5434) MQK_DATABASE_URL after a Paper-mode call' `
+        ($env:MQK_DATABASE_URL -eq $B2FakeTestDbUrl)
+} finally {
+    if ($null -eq $B2OriginalDbUrlEnv) { Remove-Item Env:MQK_DATABASE_URL -ErrorAction SilentlyContinue } else { $env:MQK_DATABASE_URL = $B2OriginalDbUrlEnv }
+}
+
+# F/G/H: live-shadow mode must never overwrite a separately configured
+# MQK_DATABASE_URL -- live-shadow's own required-config assertion
+# (Assert-LiveShadowStartupPrerequisites) is the sole authority there.
+try {
+    $env:MQK_DATABASE_URL = $B2FakeLiveShadowDbUrl
+    $b2LiveSnapshot = Set-LauncherEnvironment -OperatorToken 'fake-test-token' -RepoRoot 'C:\fake-repo-root' -DeploymentMode 'live-shadow'
+    Assert-True 'B2-04' 'live-shadow mode: Set-LauncherEnvironment does NOT overwrite a separately configured MQK_DATABASE_URL' `
+        ($env:MQK_DATABASE_URL -eq $B2FakeLiveShadowDbUrl)
+
+    # I: restore is still exercised for live-shadow (no-op since the value
+    # was never changed, but the snapshot/restore contract must still hold).
+    Restore-EnvSnapshot -Snapshot $b2LiveSnapshot
+    Assert-True 'B2-05' 'Restore-EnvSnapshot cleanly no-ops for live-shadow (MQK_DATABASE_URL was never changed, so it is unchanged after restore too)' `
+        ($env:MQK_DATABASE_URL -eq $B2FakeLiveShadowDbUrl)
+} finally {
+    if ($null -eq $B2OriginalDbUrlEnv) { Remove-Item Env:MQK_DATABASE_URL -ErrorAction SilentlyContinue } else { $env:MQK_DATABASE_URL = $B2OriginalDbUrlEnv }
+}
+
 
 # ---------------------------------------------------------------------------
 # Section: STALE-DAEMON-BINARY-PROVENANCE-01 functional proofs

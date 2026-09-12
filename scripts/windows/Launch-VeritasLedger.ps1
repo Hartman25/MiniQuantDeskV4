@@ -535,6 +535,14 @@ function Resolve-RequiredOperatorToken {
     return $token.Trim()
 }
 
+# M1-PAPER-READINESS-WAVE-01 CORRECTION B2: the accepted current-topology
+# Paper operating DB literal (127.0.0.1:5440/miniquantdesk_paper). Kept as a
+# single named constant so the hard fence below and any future caller share
+# one definition rather than duplicating the literal.
+function Get-AcceptedPaperDatabaseUrl {
+    return 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper'
+}
+
 function Set-LauncherEnvironment {
     param(
         [Parameter(Mandatory = $true)][string]$OperatorToken,
@@ -550,7 +558,8 @@ function Set-LauncherEnvironment {
         'MQK_GUI_DAEMON_URL',
         'MQK_GUI_OPERATOR_TOKEN',
         'MQK_OPERATOR_TOKEN',
-        'MQK_REPO_ROOT'
+        'MQK_REPO_ROOT',
+        'MQK_DATABASE_URL'
     )
 
     $snapshot = New-EnvSnapshot -Names $names
@@ -567,6 +576,20 @@ function Set-LauncherEnvironment {
     $env:MQK_GUI_OPERATOR_TOKEN = $OperatorToken
     $env:MQK_OPERATOR_TOKEN = $OperatorToken
     $env:MQK_REPO_ROOT = $RepoRoot
+
+    # M1-PAPER-READINESS-WAVE-01 CORRECTION B2 (PAPER DB HARD FENCE): a direct
+    # Launch-VeritasLedger.ps1 invocation is reachable from the desktop
+    # shortcut without going through Start-MiniQuantDesk.ps1's own fence, and
+    # Import-DotEnvIfPresent preserves an already-populated caller
+    # MQK_DATABASE_URL over .env.local -- so a contaminated shell (e.g. one
+    # pointed at the 5434 test DB) previously reached Start-DaemonIfNeeded's
+    # Start-Process unchanged. Paper mode unconditionally reasserts the
+    # accepted Paper DB literal here, regardless of shell/.env.local content.
+    # live-shadow keeps its own separately configured MQK_DATABASE_URL
+    # (enforced present by Assert-LiveShadowStartupPrerequisites) untouched.
+    if ($DeploymentMode -eq 'paper') {
+        $env:MQK_DATABASE_URL = Get-AcceptedPaperDatabaseUrl
+    }
 
     return $snapshot
 }
