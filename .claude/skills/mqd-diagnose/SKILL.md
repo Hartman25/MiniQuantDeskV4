@@ -64,6 +64,9 @@ CI-green run is CI proof, not Paper-operational proof.
   synthesizing fills/acks/cancels (CLAUDE.md §4, §22).
 - Do not invoke another skill from inside this one; hand back to the
   mission/controller.
+- Never assign `CLOSED`, `ACCEPTED`, `INDEPENDENTLY ACCEPTED`,
+  `PUSHED-VERIFIED`, or `WAVE`/`MILESTONE CLOSED` — those are
+  controller/operator states, not this skill's to grant.
 - Redact secrets in every shown command/output (CLAUDE.md §23).
 
 ## Output when stopped short of a fix
