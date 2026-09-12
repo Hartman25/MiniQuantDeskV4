@@ -414,6 +414,35 @@ fn now_fixture() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 8, 12, 15, 30, 0).unwrap()
 }
 
+/// MQD-CI-GREEN-01: an instant strictly *ahead* of the real wall clock whose
+/// ET time-of-day is pinned to a fixed mid-session hour.
+///
+/// `stop_start_generation_race_old_cycle_cannot_overwrite_new_owner` (below)
+/// cannot use the fixed-past `now_fixture()`: it drives the real
+/// `required_universe_scheduler_loop` end-to-end, and that loop always
+/// computes its wait against the REAL `Utc::now()` at wake-check time, so a
+/// `now_utc` in the real clock's past makes the loop's own next-cycle
+/// boundary already-overdue and fire an unwanted extra real-time cycle
+/// before the test's assertions/cleanup run. A literal `Utc::now()` avoids
+/// that but makes the test flaky a second, independent way: the immediate
+/// cycle's `past_close_grace` gate (`run_required_universe_cycle`,
+/// `SESSION_CLOSE_POLL_BUFFER_SECS` past `session_close_utc`) is derived
+/// from `now_utc`'s own ET time-of-day and is untouched by
+/// `trading_day_calendar()`'s fixed `is_trading_day` override, so the
+/// provider call is silently skipped whenever the suite happens to run
+/// outside 09:30-16:00 ET -- most of the day.
+///
+/// An instant one day ahead of real wall-clock time keeps the loop's
+/// `wait_secs` safely positive (same requirement `Utc::now()` satisfied) while
+/// pinning the ET time-of-day to 18:00 UTC, which falls inside the regular
+/// 09:30-16:00 ET session under both EST (14:30-21:00 UTC) and EDT
+/// (13:30-20:00 UTC), with margin on both sides of the 15-minute close
+/// buffer -- deterministic regardless of when the suite actually runs.
+fn deterministic_future_trading_instant() -> DateTime<Utc> {
+    let target_date = Utc::now().date_naive() + chrono::Duration::days(1);
+    target_date.and_hms_opt(18, 0, 0).unwrap().and_utc()
+}
+
 // ---------------------------------------------------------------------------
 // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01
 //
@@ -1904,18 +1933,12 @@ async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
     let instruments = instrument_registry_file(&[("ZZAUTOFRRACE", "alpaca", "5m")]);
     let providers = provider_registry_file(&["alpaca"]);
 
-    // Deliberately real `Utc::now()`, NOT the shared fixed `now_fixture()`:
-    // unlike every other test in this file, this one drives the real
-    // `start_required_universe_scheduler`/background-loop machinery
-    // end-to-end, and that loop always schedules its next real wake-up
-    // relative to actual wall-clock time (`required_universe_scheduler_loop`
-    // computes `wait_secs` against `Utc::now()`, independent of whatever
-    // `now_utc` the immediate cycle was called with). A stale fixed
-    // timestamp whose own 5-minute poll grid has already fallen behind real
-    // wall-clock would make the background loop fire an extra, genuine
-    // real-time cycle before this test's own assertions/cleanup run --
-    // flaky, and nothing to do with the generation race this test proves.
-    let now_a = Utc::now();
+    // Deliberately NOT the shared fixed `now_fixture()`, and deliberately
+    // NOT a literal `Utc::now()` either -- see
+    // `deterministic_future_trading_instant`'s doc comment for why both are
+    // wall-clock-dependent for this specific test (it drives the real
+    // background-loop machinery end-to-end).
+    let now_a = deterministic_future_trading_instant();
     let call_started = Arc::new(tokio::sync::Notify::new());
     let release_gate = Arc::new(tokio::sync::Notify::new());
     let provider = Arc::new(BarrierDelayedProvider::new(
@@ -1936,11 +1959,11 @@ async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
     st.set_latest_bar_provider_client_for_test(injected);
     let st = Arc::new(st);
     // PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01: force the immediate cycle's
-    // trading-day truth deterministically true, independent of the real
-    // wall-clock weekday/holiday `now_a`/`now_b` land on (see the doc
-    // comment above `now_a` for why `now_utc` itself must stay real
-    // `Utc::now()`). Independent review confirmed the prior flakiness was
-    // exactly this real-calendar dependency: run_required_universe_cycle's
+    // trading-day truth deterministically true, independent of whatever
+    // calendar date `now_a`/`now_b` land on (see `deterministic_future_
+    // trading_instant`'s doc comment for why `now_utc` itself cannot be a
+    // literal `Utc::now()` either). Independent review confirmed the prior
+    // flakiness was exactly this real-calendar dependency: run_required_universe_cycle's
     // `!schedule.is_trading_day` early return (required_market_data_
     // autofresh.rs) short-circuits before the injected provider is ever
     // called on a weekend/holiday, so BarrierDelayedProvider's
@@ -1980,8 +2003,8 @@ async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
     // Step 4/5: Start B. Its own historical-bootstrap call is the *second*
     // call to the shared provider, so it passes straight through the
     // barrier (does not block) and B establishes ownership synchronously.
-    // A fresh real `Utc::now()` again -- same reasoning as `now_a` above.
-    let now_b = Utc::now();
+    // Same reasoning as `now_a` above.
+    let now_b = deterministic_future_trading_instant();
     let report_b = start_required_universe_scheduler(&st, false, now_b)
         .await
         .expect("start B must succeed once A has stopped");
