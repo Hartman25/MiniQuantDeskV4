@@ -201,6 +201,136 @@ async fn persist_execution_loop_safety_halt(
 }
 
 // ---------------------------------------------------------------------------
+// EXECUTION-TICK-FAILURE-DURABLE-DIAGNOSTIC-01
+// ---------------------------------------------------------------------------
+
+/// Closed, allowlisted classification of the real cause behind an
+/// `ExecutionLoopTickFailure` safety halt. Returns a fixed `error_class` tag
+/// plus a small set of already-typed, non-secret fields lifted directly off
+/// a [`mqk_execution::BrokerError`] variant found anywhere in `err`'s
+/// `anyhow` source chain -- never free-form text. A broker adapter's
+/// `detail` field is adapter-authored free text that may itself embed a
+/// credential, URL, or connection string, so `detail` (and every other
+/// source-chain string, `Display`/`{:?}` rendering, and `persist_cursor`)
+/// is deliberately never read here, let alone persisted. No recognized
+/// `BrokerError` in the chain fails closed to `unclassified_tick_error`
+/// with no extra fields -- this is the correct outcome for a generic
+/// `anyhow` error, not a defect.
+fn classify_tick_failure(
+    err: &anyhow::Error,
+) -> (&'static str, Vec<(&'static str, serde_json::Value)>) {
+    let Some(broker_err) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<mqk_execution::BrokerError>())
+    else {
+        return ("unclassified_tick_error", Vec::new());
+    };
+    match broker_err {
+        mqk_execution::BrokerError::Transport {
+            non_delivery_proven,
+            ..
+        } => (
+            "broker_transport",
+            vec![(
+                "non_delivery_proven",
+                serde_json::Value::Bool(*non_delivery_proven),
+            )],
+        ),
+        mqk_execution::BrokerError::RateLimit {
+            non_delivery_proven,
+            retry_after_ms,
+            ..
+        } => (
+            "broker_rate_limit",
+            vec![
+                (
+                    "non_delivery_proven",
+                    serde_json::Value::Bool(*non_delivery_proven),
+                ),
+                (
+                    "retry_after_ms",
+                    retry_after_ms.map_or(serde_json::Value::Null, serde_json::Value::from),
+                ),
+            ],
+        ),
+        mqk_execution::BrokerError::AuthSession { .. } => ("broker_auth_session", Vec::new()),
+        mqk_execution::BrokerError::AmbiguousSubmit { .. } => {
+            ("broker_ambiguous_submit", Vec::new())
+        }
+        mqk_execution::BrokerError::Reject { .. } => ("broker_reject", Vec::new()),
+        mqk_execution::BrokerError::Transient { .. } => ("broker_transient", Vec::new()),
+        mqk_execution::BrokerError::InboundContinuityUnproven { .. } => {
+            ("broker_inbound_continuity_unproven", Vec::new())
+        }
+    }
+}
+
+/// Best-effort, run-correlated durable diagnostic for the real
+/// `orchestrator.tick()` failure behind an `ExecutionLoopTickFailure` safety
+/// halt. The canonical typed disarm reason
+/// (`sys_arm_state.reason = "ExecutionLoopTickFailure"`) is never replaced
+/// or duplicated by this -- this only makes a closed, allowlisted
+/// classification of the underlying failure queryable from the existing
+/// `audit_events` evidence table, closing the Sep11 incident's "had to grep
+/// raw daemon stdout" gap without ever persisting raw/free-form error text.
+/// Mirrors `mqk_runtime::orchestrator::persist_halt_and_disarm`'s own
+/// EVIDENCE-DURABILITY-01 halt-audit-event convention exactly: deterministic
+/// UUIDv5 `event_id` (never `Uuid::new_v4()` in an audit path), `topic =
+/// "orchestrator"`, and best-effort semantics -- a write failure here is
+/// logged and never propagated. The mandatory safety halt has always
+/// already committed (or been fenced/superseded) by the time this is
+/// called; this call can never affect that outcome.
+async fn persist_tick_failure_diagnostic(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+    err: &anyhow::Error,
+) {
+    let (error_class, extra_fields) = classify_tick_failure(err);
+    let event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.execution-loop-tick-failure-diagnostic.v1|{run_id}|{}",
+            now.timestamp_micros(),
+        )
+        .as_bytes(),
+    );
+    let mut payload = serde_json::json!({
+        "reason": "ExecutionLoopTickFailure",
+        "error_class": error_class,
+        "source": "mqk-daemon.state.loop_runner.spawn_execution_loop",
+    });
+    if let serde_json::Value::Object(ref mut map) = payload {
+        for (key, value) in extra_fields {
+            map.insert(key.to_string(), value);
+        }
+    }
+    if let Err(write_err) = mqk_db::insert_audit_event(
+        pool,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc: now,
+            topic: "orchestrator".to_string(),
+            event_type: "ExecutionLoopTickFailure".to_string(),
+            payload,
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            run_id = %run_id,
+            error_class,
+            error = %write_err,
+            "EXECUTION-TICK-FAILURE-DURABLE-DIAGNOSTIC-01: tick-failure diagnostic audit write \
+             failed (non-fatal; the safety halt itself is unaffected)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // spawn_execution_loop
 // ---------------------------------------------------------------------------
 
@@ -589,6 +719,13 @@ pub(super) fn spawn_execution_loop(
                                 )
                                 .await,
                             );
+                            // EXECUTION-TICK-FAILURE-DURABLE-DIAGNOSTIC-01: best-
+                            // effort, run-correlated diagnostic for the real
+                            // tick failure, regardless of the halt-persistence
+                            // outcome above -- the mandatory safety halt has
+                            // already been fully decided by this point, and
+                            // this call can neither block nor reverse it.
+                            persist_tick_failure_diagnostic(pool, run_id, now, &err).await;
                         }
                         if matches!(
                             halt_outcome,
@@ -2655,6 +2792,266 @@ mod supervisor_halt_fence_tests {
                     .is_none(),
                 "DSF-NEG-2: zero mutation — sys_arm_state must never have been written by the \
                  fenced stale decision"
+            );
+        })
+        .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EXECUTION-TICK-FAILURE-DURABLE-DIAGNOSTIC-01: proof tests
+// ---------------------------------------------------------------------------
+//
+// DB-backed; skip without `MQK_DATABASE_URL`. Run with:
+//   MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \
+//   cargo test -p mqk-daemon --lib state::loop_runner::tick_failure_diagnostic_tests \
+//   -- --include-ignored --test-threads=1
+//
+// Incident this closes: the Sep11 incident required grepping raw daemon
+// stdout to recover the real `orchestrator.tick()` failure detail behind an
+// `ExecutionLoopTickFailure` safety halt -- the canonical disarm reason
+// alone carries no queryable detail. The repair persists only a CLOSED
+// allowlisted projection (a fixed `error_class` tag plus a handful of
+// already-typed `BrokerError` fields) -- never the adapter's free-form
+// `detail`, never a `Display`/`{:?}` rendering of the error, and never any
+// other source-chain string. These tests exercise
+// `persist_tick_failure_diagnostic`/`classify_tick_failure` directly (the
+// actual new behavior), rather than standing up a full
+// `spawn_execution_loop` -- the call site's placement strictly inside the
+// tick-`Err` branch, after the mandatory safety halt (so the diagnostic is
+// unreachable on tick success), is verified by source inspection/diff
+// review, not re-proven here.
+#[cfg(test)]
+mod tick_failure_diagnostic_tests {
+    use super::*;
+    use mqk_execution::BrokerError;
+
+    fn ts(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    async fn make_run(pool: &sqlx::PgPool) -> Uuid {
+        let run_id = Uuid::new_v4(); // allow: test-only — isolated DB test fixture
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: format!("loop-runner-tickdiag-test-{run_id}"),
+                mode: "PAPER".to_string(),
+                started_at_utc: ts(0),
+                git_hash: "TEST".to_string(),
+                config_hash: format!("cfg-{run_id}"),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "TESTHOST".to_string(),
+            },
+        )
+        .await
+        .expect("insert_run");
+        run_id
+    }
+
+    async fn fetch_diagnostic_payload(
+        pool: &sqlx::PgPool,
+        run_id: Uuid,
+    ) -> Option<serde_json::Value> {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "select payload from audit_events where run_id = $1 and topic = 'orchestrator' \
+             and event_type = 'ExecutionLoopTickFailure' order by ts_utc desc limit 1",
+        )
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .expect("query audit_events")
+    }
+
+    /// Every common secret shape a broker adapter's free-form `detail`
+    /// might embed -- a bare `key=value` token, an HTTP header, a URL query
+    /// parameter, and a DB connection string.
+    const SECRET_BEARING_DETAIL: &str = "token=SUPERSECRET | \
+         Authorization: Bearer SUPERSECRET | \
+         https://provider.example/api?token=SUPERSECRET | \
+         postgres://user:SUPERSECRET@host/db";
+
+    fn assert_no_secret_leaked(payload: &serde_json::Value) {
+        let serialized = payload.to_string();
+        assert!(
+            !serialized.contains("SUPERSECRET"),
+            "the literal secret must never appear anywhere in the durable payload: {serialized}"
+        );
+        assert!(
+            payload.get("detail").is_none(),
+            "the adapter-authored detail field must never be persisted: {payload}"
+        );
+    }
+
+    /// Transport: a secret-bearing `detail` persists the typed
+    /// `broker_transport` classification and its `non_delivery_proven`
+    /// field, but never the `detail` field itself and never any of the
+    /// secret literals it carried, anywhere in the durable payload.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn transport_secret_bearing_detail_never_persisted() {
+        mqk_db::run_isolated("tickdiag_transport", |pool| async move {
+            let run_id = make_run(&pool).await;
+            let err: anyhow::Error = BrokerError::Transport {
+                non_delivery_proven: true,
+                detail: SECRET_BEARING_DETAIL.to_string(),
+            }
+            .into();
+            let err = err.context("orchestrator tick failed");
+
+            persist_tick_failure_diagnostic(&pool, run_id, ts(1_000), &err).await;
+
+            let payload = fetch_diagnostic_payload(&pool, run_id)
+                .await
+                .expect("a durable diagnostic row must exist for this run");
+
+            assert_eq!(payload["reason"], "ExecutionLoopTickFailure");
+            assert_eq!(payload["error_class"], "broker_transport");
+            assert_eq!(payload["non_delivery_proven"], true);
+            assert_no_secret_leaked(&payload);
+        })
+        .await;
+    }
+
+    /// AuthSession: the same secret-bearing detail must never appear for
+    /// this variant either -- only the fixed `broker_auth_session` class.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn auth_session_secret_bearing_detail_never_persisted() {
+        mqk_db::run_isolated("tickdiag_authsession", |pool| async move {
+            let run_id = make_run(&pool).await;
+            let err: anyhow::Error = BrokerError::AuthSession {
+                detail: SECRET_BEARING_DETAIL.to_string(),
+            }
+            .into();
+
+            persist_tick_failure_diagnostic(&pool, run_id, ts(1_100), &err).await;
+
+            let payload = fetch_diagnostic_payload(&pool, run_id)
+                .await
+                .expect("row must exist");
+            assert_eq!(payload["error_class"], "broker_auth_session");
+            assert_no_secret_leaked(&payload);
+        })
+        .await;
+    }
+
+    /// RateLimit: only the typed `non_delivery_proven`/`retry_after_ms`
+    /// fields survive -- `detail` is absent even when it carries a secret.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn rate_limit_preserves_only_safe_typed_fields() {
+        mqk_db::run_isolated("tickdiag_ratelimit", |pool| async move {
+            let run_id = make_run(&pool).await;
+            let err: anyhow::Error = BrokerError::RateLimit {
+                retry_after_ms: Some(2_500),
+                non_delivery_proven: false,
+                detail: SECRET_BEARING_DETAIL.to_string(),
+            }
+            .into();
+
+            persist_tick_failure_diagnostic(&pool, run_id, ts(1_200), &err).await;
+
+            let payload = fetch_diagnostic_payload(&pool, run_id)
+                .await
+                .expect("row must exist");
+            assert_eq!(payload["error_class"], "broker_rate_limit");
+            assert_eq!(payload["non_delivery_proven"], false);
+            assert_eq!(payload["retry_after_ms"], 2_500);
+            assert_no_secret_leaked(&payload);
+        })
+        .await;
+    }
+
+    /// A generic `anyhow` error with no `BrokerError` anywhere in its source
+    /// chain -- even one carrying secret-shaped literals directly in its own
+    /// message -- classifies only as `unclassified_tick_error`, with no
+    /// extra fields and no free text.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn generic_anyhow_error_persists_only_unclassified() {
+        mqk_db::run_isolated("tickdiag_unclassified", |pool| async move {
+            let run_id = make_run(&pool).await;
+            let err = anyhow::anyhow!("provider transport failed {SECRET_BEARING_DETAIL}");
+
+            persist_tick_failure_diagnostic(&pool, run_id, ts(1_300), &err).await;
+
+            let payload = fetch_diagnostic_payload(&pool, run_id)
+                .await
+                .expect("row must exist");
+            assert_eq!(payload["error_class"], "unclassified_tick_error");
+            assert_eq!(payload["reason"], "ExecutionLoopTickFailure");
+
+            let payload_obj = payload.as_object().expect("payload must be an object");
+            let mut keys: Vec<&str> = payload_obj.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec!["error_class", "reason", "source"],
+                "an unclassified error must carry only the three fixed fields, never any \
+                 free-form detail: {payload_obj:?}"
+            );
+            assert_no_secret_leaked(&payload);
+        })
+        .await;
+    }
+
+    /// A durable-write failure (here: a run_id with no matching `runs` row,
+    /// so `audit_events`'s FK on `run_id` rejects the insert) must never
+    /// panic or propagate -- the safety halt this call runs alongside can
+    /// never be made to depend on this call succeeding.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn diagnostic_write_failure_never_propagates() {
+        mqk_db::run_isolated("tickdiag_writefail", |pool| async move {
+            let nonexistent_run_id = Uuid::new_v4();
+            let err: anyhow::Error = BrokerError::Transient {
+                detail: SECRET_BEARING_DETAIL.to_string(),
+            }
+            .into();
+
+            // Must return normally (not panic), even though the FK-violating
+            // insert underneath fails and is only logged.
+            persist_tick_failure_diagnostic(&pool, nonexistent_run_id, ts(1_400), &err).await;
+
+            let payload = fetch_diagnostic_payload(&pool, nonexistent_run_id).await;
+            assert!(
+                payload.is_none(),
+                "no row can exist for a run_id that violates the FK constraint"
+            );
+        })
+        .await;
+    }
+
+    /// The canonical typed generic disarm reason is never replaced by
+    /// arbitrary free text -- this mechanism only ADDS a separate queryable
+    /// diagnostic row, never touches `sys_arm_state.reason`.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn canonical_disarm_reason_unchanged() {
+        mqk_db::run_isolated("tickdiag_disarmreason", |pool| async move {
+            let run_id = make_run(&pool).await;
+            mqk_db::arm_run(&pool, run_id).await.expect("arm_run");
+            mqk_db::begin_run(&pool, run_id).await.expect("begin_run");
+
+            let outcome = persist_execution_loop_safety_halt(
+                &pool,
+                run_id,
+                ts(1_500),
+                "ExecutionLoopTickFailure",
+            )
+            .await;
+            assert_eq!(outcome, SupervisorHaltOutcome::Halted);
+
+            let arm = mqk_db::load_arm_state(&pool)
+                .await
+                .expect("load_arm_state")
+                .expect("arm state row must exist");
+            assert_eq!(
+                arm.1.as_deref(),
+                Some("ExecutionLoopTickFailure"),
+                "the typed generic disarm reason must remain exactly this string"
             );
         })
         .await;

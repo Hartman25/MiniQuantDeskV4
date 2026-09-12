@@ -2856,3 +2856,62 @@ async fn rhf_neg1_stale_runtime_safety_halt_cannot_overwrite_successful_clear() 
         run_final.status
     );
 }
+
+// ---------------------------------------------------------------------------
+// EXECUTION-TICK-FAILURE-DURABLE-DIAGNOSTIC-01: real production error-wrapper
+// preserves the typed BrokerError source
+// ---------------------------------------------------------------------------
+
+/// `wrap_fetch_events_error` is the exact production conversion `tick()`'s
+/// `fetch_events` error path applies before returning -- not a
+/// reimplementation. A classifier-only test that constructs
+/// `BrokerError.into()` directly (as `mqk_daemon`'s own diagnostic-payload
+/// tests do) would never have caught the pre-fix defect, since the real bug
+/// was in this wrapper stringifying the error before `classify_tick_failure`
+/// ever saw it. This proves the wrapper itself keeps `BrokerError::Transport`
+/// downcastable via `anyhow::Error::chain()`, with its typed
+/// `non_delivery_proven` field intact, exactly the way `mqk_daemon::state::
+/// loop_runner::classify_tick_failure` walks the chain in production.
+///
+/// FAILS against the pre-fix `anyhow!("fetch_events failed: {}", err)`
+/// -- that call never wraps `err` as a source at all, so `chain()` would
+/// yield only the single formatted-string error and this downcast would
+/// find nothing.
+#[test]
+fn wrap_fetch_events_error_preserves_broker_error_as_downcastable_source() {
+    let secret_bearing_detail =
+        "connect timeout to https://broker.example/v2/orders?api_key=SECRET_SHOULD_NOT_LEAK";
+    let broker_err = BrokerError::Transport {
+        non_delivery_proven: true,
+        detail: secret_bearing_detail.to_string(),
+    };
+
+    let wrapped = wrap_fetch_events_error(broker_err);
+
+    // The production seam this proves: mqk_daemon::state::loop_runner::
+    // classify_tick_failure's exact lookup (`err.chain().find_map(|cause|
+    // cause.downcast_ref::<BrokerError>())`), reproduced here since
+    // mqk-runtime cannot depend on mqk-daemon.
+    let found = wrapped
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<BrokerError>())
+        .expect(
+            "the real BrokerError must survive in the anyhow source chain after the \
+             production fetch_events wrapper is applied",
+        );
+    match found {
+        BrokerError::Transport {
+            non_delivery_proven,
+            ..
+        } => assert!(
+            *non_delivery_proven,
+            "the typed non_delivery_proven field must survive unchanged"
+        ),
+        other => panic!("expected BrokerError::Transport, got {other:?}"),
+    }
+
+    // The context message is still present for human-readable logs -- this
+    // fix does not sacrifice that, it only stops relying on it as the sole
+    // carrier of the error.
+    assert!(wrapped.to_string().contains("fetch_events failed"));
+}

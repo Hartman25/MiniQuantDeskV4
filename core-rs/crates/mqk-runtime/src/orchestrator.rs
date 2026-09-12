@@ -1128,7 +1128,7 @@ where
                         err
                     ));
                 }
-                return Err(anyhow!("fetch_events failed: {}", err));
+                return Err(wrap_fetch_events_error(err));
             }
         };
         for event in &events {
@@ -1957,6 +1957,19 @@ async fn persist_halt_and_disarm(
         }
     }
     Ok(())
+}
+
+/// EXECUTION-TICK-FAILURE-DURABLE-DIAGNOSTIC-01: the real wrapping `tick()`'s
+/// `fetch_events` error path applies to a [`BrokerError`], factored out so
+/// the regression test exercises the exact production conversion rather than
+/// a duplicate. Preserves `err` as the real `anyhow` source (via
+/// `anyhow::Error::new` + `.context()`) rather than stringifying it into the
+/// message -- `mqk_daemon`'s `loop_runner::classify_tick_failure` downcasts
+/// this chain for `BrokerError` to persist a typed, allowlisted diagnostic.
+/// `format!("{err}")` here would destroy that entirely: the resulting
+/// `anyhow::Error` would carry no source at all, only the rendered string.
+fn wrap_fetch_events_error(err: BrokerError) -> anyhow::Error {
+    anyhow::Error::new(err).context("fetch_events failed")
 }
 
 // ---------------------------------------------------------------------------
