@@ -177,7 +177,7 @@ pub(crate) use types::{
     BoundedLifecycleDegradation, ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle,
     InstallActiveRuntimeError, InstallRuntimeTaskCleanup, LifecycleClearReason,
     LocalRuntimeClearOutcome, LocalRuntimeOwnership, PrepareStartingMetadataError,
-    RunStartMetadata,
+    ReconcileTaskOwnership, RunStartMetadata,
 };
 pub use ws_gap_recovery::WsGapRecoveryOutcome;
 // Internal (crate-visible) re-exports used across this module.
@@ -395,6 +395,17 @@ pub struct AppState {
     runtime_ownership: Arc<Mutex<LocalRuntimeOwnership>>,
     /// Serializes start/stop/halt transitions.
     lifecycle_op: Arc<Mutex<()>>,
+    /// M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: run-scoped ownership
+    /// of the background reconcile-tick task. Spawned after
+    /// `runtime_ownership` already committed `Active` for the run (the
+    /// reconcile tick is not part of the atomic start-commit sequence), so
+    /// it cannot live inside `ExecutionLoopHandle` without touching that
+    /// frozen sequence — this is a small, separate, equally run-scoped
+    /// record instead. Torn down from the same single unified cleanup
+    /// authority (`clear_local_runtime_for_run`) that already tears down
+    /// the execution loop, so a stopped/halted/shut-down run can never
+    /// leave an orphaned reconcile worker racing a later run's own.
+    reconcile_task_owner: Arc<Mutex<Option<ReconcileTaskOwnership>>>,
     /// Authoritative exchange calendar spec derived from deployment mode.
     calendar_spec: CalendarSpec,
     /// AP-04: How broker_snapshot is populated for this broker kind.
@@ -1936,6 +1947,7 @@ impl AppState {
             runtime_selection,
             runtime_ownership: Arc::new(Mutex::new(LocalRuntimeOwnership::Idle)),
             lifecycle_op: Arc::new(Mutex::new(())),
+            reconcile_task_owner: Arc::new(Mutex::new(None)),
             calendar_spec,
             broker_snapshot_source,
             strategy_market_data_source,
@@ -5396,8 +5408,70 @@ operator_reconcile_or_repair_required"
             }
         }
 
+        // M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: tear down this
+        // run's reconcile-tick task through the same single unified cleanup
+        // authority that already tears down the execution loop above, so
+        // stop/halt/shutdown can never leave an orphaned reconcile worker
+        // racing a later run's own. Guarded on `run_id` match: a run whose
+        // reconcile task was never spawned (e.g. a FailedStart rollback,
+        // before the atomic commit that would have led to it) simply finds
+        // nothing to abort here.
+        {
+            let mut owner = self.reconcile_task_owner.lock().await;
+            if matches!(owner.as_ref(), Some(o) if o.run_id == run_id) {
+                if let Some(taken) = owner.take() {
+                    taken.abort_handle.abort();
+                }
+            }
+        }
+
         self.clear_economic_mirrors_for_run(run_id).await;
         outcome
+    }
+
+    /// M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: install run-scoped
+    /// ownership of a freshly spawned reconcile-tick task and spawn its
+    /// terminal-failure watchdog.
+    ///
+    /// Aborts any previously-registered owner first — defense in depth
+    /// against a stale owner surviving into a new run if `clear_local_
+    /// runtime_for_run` was somehow bypassed; in the normal start/stop
+    /// lifecycle that record is already `None` by the time a new run
+    /// reaches this call, so this is a no-op abort of an already-finished
+    /// (or already-`None`) handle in practice.
+    pub(crate) async fn install_reconcile_task_owner(
+        self: &Arc<Self>,
+        run_id: Uuid,
+        handle: JoinHandle<()>,
+    ) {
+        let abort_handle = handle.abort_handle();
+        {
+            let mut owner = self.reconcile_task_owner.lock().await;
+            if let Some(prev) = owner.take() {
+                prev.abort_handle.abort();
+            }
+            *owner = Some(ReconcileTaskOwnership {
+                run_id,
+                abort_handle,
+            });
+        }
+
+        tokio::spawn(loop_runner::supervise_reconcile_terminal_task(
+            Arc::clone(self),
+            run_id,
+            handle,
+        ));
+    }
+
+    /// M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: `true` iff the
+    /// currently-registered reconcile task owner is exactly `run_id`. Used
+    /// by the terminal-task watchdog to avoid retroactively projecting a
+    /// superseded run's failure onto whichever run currently owns the slot.
+    pub(crate) async fn reconcile_task_owner_matches(&self, run_id: Uuid) -> bool {
+        matches!(
+            self.reconcile_task_owner.lock().await.as_ref(),
+            Some(o) if o.run_id == run_id
+        )
     }
 
     /// Peek the currently-owned run_id (if any) and fully clear it via
@@ -7020,6 +7094,151 @@ mod tests {
             BrokerKind::Paper,
         ));
         assert!(alpaca_ws_transport::spawn_alpaca_paper_ws_task(state).is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01
+    // -------------------------------------------------------------------
+
+    fn m1b_fresh_state() -> Arc<AppState> {
+        Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ))
+    }
+
+    // B01: the real production spawn seam yields owned task identity.
+    #[tokio::test]
+    async fn m1b01_install_records_owned_run_identity() {
+        let state = m1b_fresh_state();
+        let run_id = Uuid::new_v4();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        state.install_reconcile_task_owner(run_id, handle).await;
+
+        assert!(state.reconcile_task_owner_matches(run_id).await);
+        assert!(!state.reconcile_task_owner_matches(Uuid::new_v4()).await);
+    }
+
+    // B02 / B04: an injected unexpected return must fail closed even when
+    // the last-published reconcile status was clean -- proving authority
+    // (integrity disarm/halt), not just an observability string, is
+    // affected. If the mutation-proof below (which removes the
+    // publish_reconcile_failure call) is reinstated, this test goes RED.
+    #[tokio::test]
+    async fn m1b02_normal_return_fails_closed_over_prior_clean_status() {
+        let state = m1b_fresh_state();
+        let run_id = Uuid::new_v4();
+        state
+            .publish_reconcile_snapshot(ReconcileStatusSnapshot {
+                status: "ok".to_string(),
+                ..initial_reconcile_status()
+            })
+            .await;
+        assert!(!state.integrity.read().await.halted);
+
+        let handle = tokio::spawn(async {});
+        state.install_reconcile_task_owner(run_id, handle).await;
+        // Let the watchdog observe the already-finished task.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(
+            state.integrity.read().await.halted,
+            "B02/B04: prior clean reconcile status must not authorize new risk \
+             once the worker is known dead"
+        );
+        assert!(state.integrity.read().await.disarmed);
+    }
+
+    // B03: a panicking reconcile task must also fail closed.
+    #[tokio::test]
+    async fn m1b03_panic_fails_closed() {
+        let state = m1b_fresh_state();
+        let run_id = Uuid::new_v4();
+        let handle = tokio::spawn(async {
+            panic!("simulated reconcile tick panic");
+        });
+        state.install_reconcile_task_owner(run_id, handle).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(state.integrity.read().await.halted);
+        assert!(state.integrity.read().await.disarmed);
+    }
+
+    // B08 / B09: installing a new owner must supersede (abort) the prior
+    // one -- a restart can never inherit a stale owner, and a duplicate
+    // spawn can never leave two active workers.
+    #[tokio::test]
+    async fn m1b08_09_new_owner_supersedes_and_aborts_prior_worker() {
+        let state = m1b_fresh_state();
+        let run_a = Uuid::new_v4();
+        let run_b = Uuid::new_v4();
+
+        let handle_a = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        state.install_reconcile_task_owner(run_a, handle_a).await;
+        assert!(state.reconcile_task_owner_matches(run_a).await);
+        assert!(!state.integrity.read().await.halted);
+
+        let handle_b = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        state.install_reconcile_task_owner(run_b, handle_b).await;
+
+        // Give both watchdogs a moment: A's must resolve Cancelled (aborted
+        // by B's install) and must NOT fail closed; B remains the live owner.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(
+            state.reconcile_task_owner_matches(run_b).await,
+            "B08: the new run must own the slot"
+        );
+        assert!(
+            !state.reconcile_task_owner_matches(run_a).await,
+            "B09: the superseded run must no longer be the registered owner"
+        );
+        assert!(
+            !state.integrity.read().await.halted,
+            "B07/B08: aborting a superseded worker must not be reported as a \
+             critical failure"
+        );
+    }
+
+    // B07: the real teardown authority (`clear_local_runtime_for_run`, used
+    // by stop/halt/shutdown) must abort this run's reconcile task without
+    // producing a false failure.
+    #[tokio::test]
+    async fn m1b07_clear_local_runtime_for_run_aborts_reconcile_task_cleanly() {
+        let state = m1b_fresh_state();
+        let run_id = Uuid::new_v4();
+        state
+            .reserve_runtime_ownership(run_id)
+            .await
+            .expect("reservation on fresh Idle state must succeed");
+
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        state.install_reconcile_task_owner(run_id, handle).await;
+        assert!(state.reconcile_task_owner_matches(run_id).await);
+
+        state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::OperatorStop)
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(
+            !state.reconcile_task_owner_matches(run_id).await,
+            "B07: a clean stop must clear the reconcile task ownership record"
+        );
+        assert!(
+            !state.integrity.read().await.halted,
+            "B07: a clean stop must not manufacture a critical reconcile failure"
+        );
     }
 }
 

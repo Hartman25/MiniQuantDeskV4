@@ -18,6 +18,7 @@ use anyhow::Context;
 use chrono::Utc;
 use mqk_reconcile::SnapshotWatermark;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::env::uptime_secs;
@@ -2122,13 +2123,19 @@ fn drop_outside_async_context<T: Send + 'static>(val: T) {
 /// window is active (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01).  When true and
 /// reconcile is dirty, the background tick defers the disarm rather than
 /// immediately halting, mirroring the orchestrator's Phase 0c deferral.
+///
+/// M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: returns the task's
+/// `JoinHandle` (previously discarded) so the caller can give it run-scoped
+/// ownership via `AppState::install_reconcile_task_owner` instead of leaving
+/// it fully detached.
 pub fn spawn_reconcile_tick<L, B, S>(
     state: Arc<AppState>,
     local_fn: L,
     broker_fn: B,
     settle_fn: S,
     interval: Duration,
-) where
+) -> JoinHandle<()>
+where
     L: Fn() -> mqk_reconcile::LocalSnapshot + Send + 'static,
     B: Fn() -> Option<mqk_reconcile::BrokerSnapshot> + Send + 'static,
     S: Fn() -> bool + Send + 'static,
@@ -2241,7 +2248,75 @@ pub fn spawn_reconcile_tick<L, B, S>(
                 }
             }
         }
-    });
+    })
+}
+
+// ---------------------------------------------------------------------------
+// M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: terminal task watchdog
+// ---------------------------------------------------------------------------
+
+/// Await the reconcile-tick task and, if it ever returns or panics, fail
+/// closed rather than let the last-published reconcile status (possibly
+/// `"ok"`) keep silently authorizing new risk.
+///
+/// The inner loop is infinite by construction (`loop { ticker.tick()... }`)
+/// — in production this resolves only via panic. The normal-`Ok(())`-return
+/// branch exists purely so a test can hand this function a handle to a
+/// short-lived task, exactly mirroring `supervise_alpaca_ws_terminal_task`.
+///
+/// An aborted handle (`is_cancelled()`) means this task was either
+/// deliberately superseded by a newer run's reconcile task or cancelled
+/// during a clean stop (`AppState::clear_local_runtime_for_run`) — expected,
+/// never a failure. The ownership check after that guards a narrower race:
+/// a genuine panic whose watchdog is scheduled late, after a new run has
+/// already installed its own (healthy) reconcile owner, must not retroactively
+/// halt that unrelated, currently-healthy run.
+pub(super) async fn supervise_reconcile_terminal_task(
+    state: Arc<AppState>,
+    run_id: Uuid,
+    handle: JoinHandle<()>,
+) {
+    let result = handle.await;
+    if matches!(&result, Err(e) if e.is_cancelled()) {
+        tracing::info!(
+            run_id = %run_id,
+            "reconcile_tick: task cancelled (expected shutdown/supersession); not a failure \
+             (M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01)"
+        );
+        return;
+    }
+
+    if !state.reconcile_task_owner_matches(run_id).await {
+        tracing::info!(
+            run_id = %run_id,
+            "reconcile_tick: terminal resolution for a superseded run; ignoring \
+             (M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01)"
+        );
+        return;
+    }
+
+    let detail = match &result {
+        Ok(()) => {
+            "reconcile tick task returned unexpectedly (the tick loop is designed to run forever)"
+                .to_string()
+        }
+        Err(e) => format!("reconcile tick task panicked: {e}"),
+    };
+    tracing::error!(
+        run_id = %run_id,
+        detail = %detail,
+        "reconcile_task_exited: reconcile worker terminated unexpectedly; prior clean \
+         reconcile truth is no longer authoritative (M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01)"
+    );
+    publish_reconcile_failure(
+        &state,
+        reconcile_unknown_status(format!(
+            "reconcile worker task terminated unexpectedly: {detail}"
+        )),
+        "reconcile worker task terminated - system disarmed \
+         (M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01)",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------

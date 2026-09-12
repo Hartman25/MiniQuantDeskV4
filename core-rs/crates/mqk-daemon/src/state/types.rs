@@ -251,6 +251,17 @@ pub(crate) struct ExecutionLoopHandle {
     pub(crate) join_handle: JoinHandle<ExecutionLoopExit>,
 }
 
+/// M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: run-scoped ownership
+/// record for the background reconcile-tick task. `abort_handle` (not the
+/// `JoinHandle` itself) so the owning run can cancel the task from
+/// `clear_local_runtime_for_run` while a separate watchdog task still holds
+/// the `JoinHandle` to await its terminal resolution.
+#[derive(Debug)]
+pub(crate) struct ReconcileTaskOwnership {
+    pub(crate) run_id: Uuid,
+    pub(crate) abort_handle: tokio::task::AbortHandle,
+}
+
 /// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 2:
 /// immutable metadata bound to a run the instant local ownership moves from
 /// `Reserved` to `Starting`. Never mutated in place after construction — a

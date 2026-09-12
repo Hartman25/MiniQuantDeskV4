@@ -1979,13 +1979,18 @@ impl AppState {
                     .and_then(|g| g.as_ref().map(|s| s.has_recent_terminal_fill))
                     .unwrap_or(false)
             };
-            spawn_reconcile_tick(
+            let reconcile_handle = spawn_reconcile_tick(
                 Arc::clone(self),
                 local_fn,
                 broker_fn,
                 settle_fn,
                 RECONCILE_TICK_INTERVAL,
             );
+            // M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: give this
+            // run explicit ownership of its reconcile task instead of
+            // leaving the JoinHandle fully detached.
+            self.install_reconcile_task_owner(run_id, reconcile_handle)
+                .await;
         }
 
         let snapshot = StatusSnapshot {
