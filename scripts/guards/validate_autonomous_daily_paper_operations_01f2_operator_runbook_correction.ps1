@@ -257,11 +257,28 @@ foreach ($Forbidden in @(
 
 # -----------------------------------------------------------------------
 # [13] Operating-database port table; forbidden ports excluded.
+#
+# M1-PAPER-READINESS-WAVE-01 CORRECTION E1: the current production topology
+# is Paper=5440 (mqk-paper-postgres/miniquantdesk_paper), Test=5434
+# (mqk_test), Live=5432 (mqk-live-postgres) -- confirmed against
+# Launch-VeritasLedger.ps1 / Start-MiniQuantDesk.ps1's own hard-fenced
+# 5440/miniquantdesk_paper literal, Invoke-Bundle7Phase7cPremarketValidation.
+# ps1's ActiveCommit usage example, and
+# MiniQuantDesk_Master_Patch_Ledger_v2.md's explicit
+# "mqk-paper-postgres/5440 and mqk-live-postgres/5432" statement. This check
+# previously proved the OLD (now-inverted) topology, where 5432 was
+# documented as the operating Paper DB and 5440 as a forbidden reality-test
+# lane -- that direction is now itself the defect this check must catch.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [13] Operating-database port table exists; forbidden ports excluded from operating use ---"
-Test-ContentContains "runbook documents the operating DB on port 5432" $RunbookContent "5432" | Out-Null
-Test-ContentContains "runbook excludes port 5434 and 5440 from operating-database use" $RunbookContent "as the operating paper database" | Out-Null
+Show-Info "--- [13] Operating-database port table exists; current topology proven, obsolete topology excluded ---"
+Test-ContentContains "runbook documents the operating Paper DB on port 5440" $RunbookContent "5440" | Out-Null
+Test-ContentContains "runbook documents the accepted Paper DB literal (5440/miniquantdesk_paper)" $RunbookContent "5440/miniquantdesk_paper" | Out-Null
+Test-ContentContains "runbook documents the isolated test DB on port 5434" $RunbookContent "5434" | Out-Null
+Test-ContentContains "runbook documents the live DB on port 5432 (mqk-live-postgres)" $RunbookContent "mqk-live-postgres" | Out-Null
+Test-ContentContains "runbook states Paper must never point at the live or test DB" $RunbookContent "Paper must never point at" | Out-Null
+Test-ContentDoesNotContain "runbook no longer claims 5440 is a forbidden reality-test lane" $RunbookContent "reality-test database" | Out-Null
+Test-ContentDoesNotContain "runbook no longer claims the operating Paper DB runs on port 5432" $RunbookContent 'operating paper database** runs on host port `5432`' | Out-Null
 
 # -----------------------------------------------------------------------
 # [14] Patch-scope: no production Rust, migration, or GUI production file.

@@ -51,7 +51,7 @@ Verify before starting a session:
 |---|---|
 | Supported host | Windows, PowerShell available (this runbook's commands are PowerShell-first) |
 | Repository / commit | `git status` clean or intentionally dirty as expected; `git rev-parse HEAD` matches the commit you intend to run |
-| Docker / Postgres (operating DB) | The **operating paper database** runs on host port `5432` (container name and image per `README_TECHNICAL.md` §"Postgres via Docker"), reachable via `MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev` (or your configured equivalent). This is **not** the isolated port-`5434` test database and **not** the port-`5440` reality-test lane — see §0b. |
+| Docker / Postgres (operating DB) | The **operating paper database** runs on host port `5440` (container `mqk-paper-postgres`), reachable via `MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper`. The official launcher (`Launch-VeritasLedger.ps1` / `Start-MiniQuantDesk.ps1`) unconditionally reasserts this URL before any Paper DB-dependent step, regardless of shell/`.env.local` content ("PAPER DB HARD FENCE"). This is **not** the isolated port-`5434` test database and **not** the port-`5432` live database (`mqk-live-postgres`) — see §0b. |
 | Paper credentials | `ALPACA_API_KEY_PAPER` / `ALPACA_API_SECRET_PAPER` are set in `.env.local` (never printed; never committed). Never use live Alpaca credentials on this lane. |
 | Configuration files | `.env.local` present at repo root (copy from `.env.local.example`); its contents are never displayed by any command in this runbook |
 | Daemon | Buildable/runnable via `cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon`; binds `127.0.0.1:8899` by default |
@@ -62,17 +62,22 @@ Verify before starting a session:
 Never display `.env.local` contents in any command output, log, or evidence
 capture — see §15.8's read-only capture tooling for the enforced equivalent.
 
-### 0b. Operating database vs. test/reality-test databases (do not confuse these)
+### 0b. Operating database vs. test/live databases (do not confuse these)
 
-| Lane | Host port | Purpose | Use for operator sessions? |
-|---|---|---|---|
-| Operating paper DB | `5432` | The durable database an actual daemon session in this runbook reads/writes | **Yes — this is the one** |
-| Isolated test DB | `5434` | Used only by `cargo test` scenario binaries and CI guards | No — never point a running operator daemon at this |
-| Manual proof DB | `55432` | Manual one-off proof/bootstrap work (`scripts/db_proof_bootstrap.sh`) | No |
-| Reality-test DB | `5440` | `autonomous_reality_test_paper.ps1.ps1`'s own isolated snapshot/crash-recovery harness | No — never use as the operating paper database |
+Current production topology (superseding the port assignments this section
+previously documented):
 
-Before trusting any of the ports above, run `docker ps` and confirm what is
-actually listening — see `README_TECHNICAL.md` §"Verify ports before
+| Lane | Host port | Container | Purpose | Use for operator paper sessions? |
+|---|---|---|---|---|
+| Operating paper DB | `5440` | `mqk-paper-postgres` | The durable `miniquantdesk_paper` database a real Paper daemon session in this runbook reads/writes. The official launcher unconditionally reasserts `MQK_DATABASE_URL` to this literal before any DB-dependent step ("PAPER DB HARD FENCE") | **Yes — this is the one** |
+| Isolated test DB | `5434` | (per `cargo test` harness) | `mqk_test`, used only by `cargo test` scenario binaries and CI guards | No — never point a running operator Paper daemon at this |
+| Live DB | `5432` | `mqk-live-postgres` | The separate live-capital database. Never Paper's database, under any circumstance | No — never point a running operator Paper daemon at this |
+| Manual proof DB | `55432` | (per `scripts/db_proof_bootstrap.sh`) | Manual one-off proof/bootstrap work | No |
+
+Paper must never point at the `5432` live database or the `5434` test
+database — `5440`/`miniquantdesk_paper` is the only accepted Paper operating
+DB. Before trusting any of the ports above, run `docker ps` and confirm what
+is actually listening — see `README_TECHNICAL.md` §"Verify ports before
 trusting any default above" for the full caution (a stale host-side port
 forward can otherwise make a correct password look like an authentication
 failure).
@@ -113,8 +118,11 @@ ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets
 # Adapter selection
 MQK_DAEMON_ADAPTER_ID=alpaca
 
-# Database — required for durable arm state, run records, supervisor history
-MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev
+# Database — required for durable arm state, run records, supervisor history.
+# Operating Paper DB (§0b) — the official launcher reasserts this literal
+# unconditionally regardless of shell/.env.local content; never 5432 (live)
+# or 5434 (test).
+MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper
 
 # Operator auth — required for all mutating routes
 MQK_OPERATOR_TOKEN=<any strong token>
@@ -627,17 +635,18 @@ process memory — is the lifecycle authority for everything in this part.
 
 Run these in order at the start of every supervised paper day.
 
-1. **Start or verify the operating database** (host port `5432`, §0b):
+1. **Start or verify the operating Paper database** (host port `5440`,
+   container `mqk-paper-postgres`, §0b):
    ```powershell
-   docker ps --filter "name=mqk-postgres-dev"
+   docker ps --filter "name=mqk-paper-postgres"
    ```
-   If not running, start it per `README_TECHNICAL.md` §"Postgres via
+   If not running, start it per §0b / `README_TECHNICAL.md` §"Postgres via
    Docker". Do not start or point at the port-`5434` test container or the
-   port-`5440` reality-test container.
+   port-`5432` live container (`mqk-live-postgres`).
 
 2. **Check schema/migration readiness (read-only)**:
    ```powershell
-   $env:MQK_DATABASE_URL = "postgres://postgres:postgres@localhost:5432/mqk_dev"
+   $env:MQK_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper"
    cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- db status
    ```
    `db status` reports pending migrations without applying them. Only run
@@ -647,10 +656,14 @@ Run these in order at the start of every supervised paper day.
 
 3. **Start the daemon**:
    ```powershell
-   $env:MQK_DATABASE_URL = "postgres://postgres:postgres@localhost:5432/mqk_dev"
+   $env:MQK_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper"
    cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --bin mqk-daemon
    ```
-   Binds `127.0.0.1:8899` by default.
+   Binds `127.0.0.1:8899` by default. The official launcher
+   (`Launch-VeritasLedger.ps1` / `Start-MiniQuantDesk.ps1`) performs steps
+   1–4 for you and hard-fences this same DB URL — prefer it over the manual
+   sequence below unless you have a specific reason to start the daemon by
+   hand.
 
 4. **Start the GUI**:
    ```powershell
@@ -999,8 +1012,8 @@ this is expected, not a discrepancy to reconcile.
 
 - Do not use live Alpaca credentials on this lane, under any circumstance.
 - Do not enable live mode / live routing.
-- Do not use the port-`5434` test database, or the port-`5440`
-  reality-test database, as the operating paper database (§0b).
+- Do not use the port-`5434` test database, or the port-`5432` live
+  database (`mqk-live-postgres`), as the operating paper database (§0b).
 - Do not bypass a preflight, evidence, or finalization blocker.
 - Do not manually rewrite `sys_autonomous_daily_operations` rows or invent
   a manual finalization command.
@@ -1071,7 +1084,9 @@ operation (§15–§17) that follows the **formal two-stage gate sequence**
 1. Run `Invoke-Bundle7Phase7cPremarketValidation.ps1 -Stage PreStart` to a
    genuine `FINAL: PASS` before the runtime starts a run, using the
    operator-supplied paper database (`-AllowNonTestDbPort -Environment
-   Paper`, never port 5434 or 5440 — §0b, §23). A PreStart PASS proves it is
+   Paper`, pointed at the accepted `5440`/`miniquantdesk_paper` Paper DB —
+   never the `5434` test-only default without explicit override, and never
+   `5432` live — §0b, §23). A PreStart PASS proves it is
    safe to start; it writes only a `bundle7_prestart_readiness_manifest.json`
    artifact, which explicitly states `run_id`/`plan_id` are not yet
    committed and cannot authorize or count a session on its own.

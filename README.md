@@ -665,7 +665,7 @@ The repo now has a more explicit local Docker/DB split than older docs suggested
 
 ### Runtime/operator DB
 
-For real local daemon, GUI, and autonomous paper work, use a **runtime DB** that matches your local env configuration.
+For general local daemon/GUI coding work, use a **runtime DB** that matches your local env configuration.
 
 The repo ships `.env.local.example` as the starting point for this workflow.
 It defines a default runtime URL of:
@@ -674,7 +674,16 @@ It defines a default runtime URL of:
 MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev
 ```
 
-Many local workflows keep separate runtime, proof, and reality-test DBs.
+**Real autonomous Paper trading operations are a separate lane and do not
+use this DB.** The accepted operating Paper database is
+`postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper` (container
+`mqk-paper-postgres`) — the official launcher (`Launch-VeritasLedger.ps1` /
+`Start-MiniQuantDesk.ps1`) unconditionally reasserts this URL before any
+Paper DB-dependent step, regardless of what `.env.local` or the shell
+contains. See `docs/runbooks/autonomous_paper_ops.md` §0b for the full
+operating-DB-vs-test-vs-live topology.
+
+Many local workflows keep separate runtime, proof, and Paper DBs.
 That separation is healthy.
 
 ### Proof DB
