@@ -129,8 +129,18 @@ foreach ($File in (Get-SrcFiles)) {
 if ($CancelledCount -lt 2) {
     $Violations += "expected at least 2 is_cancelled() guards (one per watchdog: WS + reconcile), found $CancelledCount"
 }
-if (-not (Test-FileContains "state\lifecycle.rs" 'reconcile_task_owner')) {
-    $Violations += "state/lifecycle.rs's clear_local_runtime_for_run no longer aborts the reconcile task owner on stop/halt/shutdown"
+# clear_local_runtime_for_run (the single unified stop/halt/shutdown
+# teardown authority) lives in state.rs, not lifecycle.rs -- check the file
+# that actually contains it. `taken.abort_handle.abort()` is the specific
+# teardown-site call (distinct from install_reconcile_task_owner's own
+# defensive `prev.abort_handle.abort()` re-abort, which this pattern does
+# NOT match) -- checking the field name alone would pass by coincidence
+# even if this exact call were deleted, since the field name also appears
+# unrelatedly near install_reconcile_task_owner in lifecycle.rs.
+if (-not (Test-FileContains "state.rs" 'fn clear_local_runtime_for_run')) {
+    $Violations += "state.rs: clear_local_runtime_for_run not found"
+} elseif (-not (Test-FileContains "state.rs" 'taken\.abort_handle\.abort\(\)')) {
+    $Violations += "state.rs's clear_local_runtime_for_run no longer aborts the reconcile task owner on stop/halt/shutdown"
 }
 
 # ---------------------------------------------------------------------------
