@@ -1705,8 +1705,12 @@ function Invoke-StartupCheckOnly {
         $nextAction = 'Start Docker Desktop, then re-run -CheckOnly.'
     } elseif ($liveRoutingEnabled -eq $true) {
         $nextAction = 'DANGER: live_routing_enabled=true. Investigate immediately. Do not start, arm, or trade.'
-    } elseif ($daemonReachable -and $armState -eq 'HALTED') {
-        $nextAction = "Persisted arm state is HALTED (reason=$armReason). Do not manually clear or arm. Run Get-PaperOperatorStatus.ps1 for full halt context first."
+    } elseif ($daemonReachable -and $armState -eq 'DISARMED') {
+        # NOTE: sys_arm_state.state can only ever be 'ARMED' or 'DISARMED'
+        # (DB CHECK constraint sys_arm_state_state_check) -- 'HALTED' is a
+        # runs.status value, never an arm-state value. A prior version of
+        # this branch compared $armState to 'HALTED' and could never fire.
+        $nextAction = "Persisted arm state is DISARMED (reason=$armReason). Recovery requires explicit operator action (clear the halted run, then arm-execution) -- it is never automatic. Run Get-PaperOperatorStatus.ps1 for full halt context first."
     } elseif ($daemonReachable -and $reconcileStatus -eq 'dirty') {
         $nextAction = 'Reconcile status is dirty. Run Get-PaperOperatorStatus.ps1 to review the mismatch before proceeding.'
     } elseif ($daemonReachable) {
@@ -1714,7 +1718,13 @@ function Invoke-StartupCheckOnly {
     } elseif ($dbStatus -ne 'running') {
         $nextAction = "Paper DB container ($PaperDbContainerName) is not running. Start Docker Desktop / the container, then re-run -CheckOnly."
     } elseif ($armState -eq 'DISARMED') {
-        $nextAction = "Persisted arm state is DISARMED (reason=$armReason). Do not manually clear or arm -- normal startup re-verifies fresh daemon state. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before smoke."
+        # A durably DISARMED arm state is never auto-recovered by a normal
+        # daemon startup: mqk-daemon's autonomous daily coordinator
+        # (check_terminated_run_safe_to_recover) explicitly treats a durable
+        # non-ARMED state as unsafe-to-recover and requires
+        # ManualInterventionRequired -- "this is never automatically
+        # retried" per its own doc comment. Do not imply otherwise here.
+        $nextAction = "Persisted arm state is DISARMED (reason=$armReason). This is not cleared by a normal startup -- production code never auto-retries a durably DISARMED run. After starting the daemon, an operator must explicitly clear the halted run, then arm-execution. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before smoke."
     } else {
         $nextAction = 'Prerequisites look OK. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before a smoke run, otherwise run Launch-VeritasLedger.ps1 (no -CheckOnly) for a normal startup.'
     }

@@ -27,6 +27,10 @@
 #   LVL17  -CheckOnly does not invoke smoke runners (mention-only in Next action text)
 #   LVL27  -CheckOnly Paper DB port mismatch message does not claim a false
 #          "verify" action is needed (M1-PAPER-READINESS-WAVE-01)
+#   LVL28  -CheckOnly reachable-daemon branch compares arm state to
+#          DISARMED, not the unreachable HALTED literal (M1-PAPER-READINESS-WAVE-01)
+#   LVL29  -CheckOnly DISARMED message does not claim automatic recovery
+#          on normal startup (M1-PAPER-READINESS-WAVE-01)
 # =============================================================================
 
 Set-StrictMode -Version Latest
@@ -168,6 +172,29 @@ Assert-True 'LVL17' '-CheckOnly does not invoke smoke runners (no & call of Run-
 Assert-True 'LVL27' '-CheckOnly Paper DB port mismatch message does not claim an operator "verify" action is required' `
     ($Content -notmatch 'does not match -- verify' -and
      $Content -match [regex]::Escape('Paper startup unconditionally reasserts 5440'))
+
+# LVL28 (M1-PAPER-READINESS-WAVE-01): -CheckOnly's reachable-daemon "Next
+# action" branch must compare $armState to 'DISARMED', never 'HALTED'.
+# sys_arm_state.state is constrained at the DB level (CHECK
+# sys_arm_state_state_check) to only ever be 'ARMED' or 'DISARMED' --
+# 'HALTED' is exclusively a runs.status value. A branch comparing $armState
+# to 'HALTED' can never fire, silently falling through to the generic
+# "Daemon is already reachable" message even while a run is halted and the
+# system is disarmed.
+Assert-True 'LVL28' '-CheckOnly reachable-daemon branch compares $armState to DISARMED, not the unreachable HALTED literal' `
+    ($Content -match [regex]::Escape('$daemonReachable -and $armState -eq ''DISARMED''') -and
+     $Content -notmatch [regex]::Escape('$daemonReachable -and $armState -eq ''HALTED'''))
+
+# LVL29 (M1-PAPER-READINESS-WAVE-01): -CheckOnly's DISARMED "Next action"
+# message must not claim a normal startup automatically clears/re-arms a
+# durably DISARMED state. mqk-daemon's autonomous daily coordinator
+# (check_terminated_run_safe_to_recover, autonomous_daily_coordinator.rs)
+# explicitly treats a durable non-ARMED state as unsafe-to-recover and
+# documents "this is never automatically retried" -- the operator message
+# must match that production truth, not contradict it.
+Assert-True 'LVL29' '-CheckOnly DISARMED message does not claim normal startup automatically clears/re-arms the state' `
+    ($Content -notmatch 'normal startup re-verifies fresh daemon state' -and
+     $Content -match [regex]::Escape('never auto-retries a durably DISARMED run'))
 
 # ---------------------------------------------------------------------------
 # Section: STALE-DAEMON-BINARY-PROVENANCE-01 functional proofs
