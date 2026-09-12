@@ -350,6 +350,18 @@ async fn log_coordinator_outcome(
                 })
                 .await;
         }
+        // CONTROL-DEGRADED-LIVE-OWNER-RECOVERY-01: the local runtime never
+        // stopped here -- only its Control blocker was genuinely re-proven
+        // cleared -- so this must never be logged/notified as a recovery
+        // from termination (unlike `Recovered`, above).
+        Outcome::ControllerDegradedRecovered { run_id } => {
+            info!(
+                run_id = %run_id,
+                "autonomous_daily_coordinator: controller_degraded blocker cleared; live local \
+                 owner resumed running with the same run_id"
+            );
+            clear_truth_preserving_gap_recovery(state).await;
+        }
         Outcome::RecoveryScheduled => {
             state
                 .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {

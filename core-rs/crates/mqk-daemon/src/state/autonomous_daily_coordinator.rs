@@ -303,6 +303,18 @@ pub enum AutonomousDailyCoordinatorTickOutcome {
     /// classification would have produced -- never rewritten, no repeated
     /// notification.
     OutcomeFinalizationConflict,
+    /// CONTROL-DEGRADED-LIVE-OWNER-RECOVERY-01: a `controller_degraded`
+    /// operation whose local runtime never stopped and still genuinely owns
+    /// `run_id` had its original Control blocker re-proven cleared, and
+    /// legally recovered `controller_degraded -> running` with the same
+    /// `run_id` -- no new runtime, no new run. Distinct from [`Self::
+    /// Recovered`], which reports recovery of a run that had actually ended
+    /// unexpectedly (`recovery_retrying -> running`); this variant's local
+    /// runtime was never lost, so it must never be logged/notified as if a
+    /// termination occurred.
+    ControllerDegradedRecovered {
+        run_id: Uuid,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,18 +2157,28 @@ pub async fn dispatch_by_state(
                 outcome_reason_code: operation.outcome.clone(),
             },
         ),
-        // AUTONOMOUS-DAILY-CONTROLLER-DEGRADED-RECOVERY-01: `controller_degraded`
-        // must not be a permanent re-projection stub. Every applicable tick
-        // re-reads the authoritative durable run row via the same
-        // `reconcile_durable_run_without_local_owner` helper `handle_session_
-        // close`/`retry_stop` already use for this exact question ("is the
-        // run genuinely terminal, or still active without a local owner?"),
-        // and selects the existing legal next transition from current truth
-        // -- never a hardcoded favorable outcome. A run still armed/running,
-        // an unacked outbox row, or a dirty global reconcile status all fail
-        // closed (to `manual_intervention_required`, a legal edge from
-        // `controller_degraded`); only a terminal run with zero unresolved
-        // economic evidence legally advances to `stopping`.
+        // AUTONOMOUS-DAILY-CONTROLLER-DEGRADED-RECOVERY-01 /
+        // CONTROL-DEGRADED-LIVE-OWNER-RECOVERY-01: `controller_degraded`
+        // must not be a permanent re-projection stub, and it must never
+        // falsely assert ownership loss for a runtime that never stopped.
+        // `reconcile_durable_run_without_local_owner` answers exactly one
+        // question -- "is it safe to treat this run as stopped?" -- and has
+        // no `AppState`/local-owner input at all, so it must never be
+        // reached while a local runtime still genuinely owns
+        // `expected_run_id`. That case is routed to
+        // `attempt_controller_degraded_recovery` instead, which may only
+        // recover to `running` once the original Control blocker is
+        // genuinely re-proven cleared -- never on a timer, and never merely
+        // because a local owner exists. A local runtime owning a
+        // *different* run_id is its own contradiction and fails closed
+        // (`runtime_run_id_mismatch`, mirroring `attempt_evidence_degraded_
+        // recovery`'s identical guard). Only when no local runtime owns any
+        // run at all does the original stopped/orphan question apply, and
+        // `reconcile_durable_run_without_local_owner` runs unchanged: a run
+        // still armed/running, an unacked outbox row, or a dirty global
+        // reconcile status all fail closed to `manual_intervention_
+        // required`; only a terminal run with zero unresolved economic
+        // evidence legally advances to `stopping`.
         mqk_db::STATE_CONTROLLER_DEGRADED => {
             let Some(expected_run_id) = operation.run_id else {
                 let newly_applied = apply_manual_if_changed(
@@ -2177,8 +2199,48 @@ pub async fn dispatch_by_state(
                     },
                 );
             };
-            reconcile_durable_run_without_local_owner(pool, &operation, expected_run_id, now_utc)
-                .await
+
+            match state.locally_owned_run_id().await {
+                Some(local_run_id) if local_run_id == expected_run_id => {
+                    attempt_controller_degraded_recovery(
+                        state,
+                        pool,
+                        &operation,
+                        expected_run_id,
+                        now_utc,
+                    )
+                    .await
+                }
+                Some(_mismatched_local_run_id) => {
+                    let newly_applied = apply_manual_if_changed(
+                        pool,
+                        &operation,
+                        "runtime_run_id_mismatch",
+                        None,
+                        now_utc,
+                        "a local runtime handle exists for a different run_id than this \
+                         operation's durable controller_degraded truth expects; failing \
+                         closed rather than assuming which side is stale",
+                        STATE_MANUAL_INTERVENTION_REQUIRED,
+                    )
+                    .await?;
+                    Ok(
+                        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                            reason_code: "runtime_run_id_mismatch",
+                            newly_applied,
+                        },
+                    )
+                }
+                None => {
+                    reconcile_durable_run_without_local_owner(
+                        pool,
+                        &operation,
+                        expected_run_id,
+                        now_utc,
+                    )
+                    .await
+                }
+            }
         }
         // E3.2: `evidence_degraded` with a durable `stopped_at_utc` is the
         // post-stop finalization-evidence-gap case (E1 contract §3.3) --
@@ -3459,6 +3521,257 @@ async fn attempt_evidence_degraded_recovery(
         )
         .await?,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// CONTROL-DEGRADED-LIVE-OWNER-RECOVERY-01
+// ---------------------------------------------------------------------------
+
+/// A `controller_degraded` operation whose local runtime still genuinely
+/// owns `expected_run_id` (already proven by the caller). Recovery back to
+/// `running` requires the ORIGINAL Control blocker to be genuinely
+/// re-proven cleared -- never a timer, and never the mere existence of a
+/// live local owner.
+///
+/// Only a [`crate::daily_data_readiness::DailyDataReadinessReasonClass::
+/// DataRepairable`] blocker (the closed four-member subset -- e.g.
+/// `interior_gap`, `market_data_missing` -- never the broader "parses as any
+/// known reason" set) has an existing safe re-evaluation seam reachable from
+/// this state: the same `evaluate_readiness_with_binding` authority
+/// `attempt_manual_intervention_recovery` already reuses for its own
+/// sibling recovery (`manual_intervention_required -> preparing_data`).
+/// Every `NonData`-classified reason (a registry/binding/provenance/
+/// calendar/config defect such as `provider_disabled`, runtime-dispatch-
+/// not-ready, exchange-session-truth-missing, binding/registry/provider-
+/// setup rejections, terminal poll failures, unexpected/future bar, or any
+/// unrecognized reason string) has no such re-evaluation seam available here
+/// and never auto-recovers through this path -- it stays
+/// `controller_degraded`, fail-closed, exactly as before this patch. This
+/// never invents a second readiness authority and never re-runs the
+/// completed-bar driver from the coordinator.
+async fn attempt_controller_degraded_recovery(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    expected_run_id: Uuid,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
+    // The durable run row must still agree this run is genuinely active --
+    // a terminal run row while local ownership claims otherwise is its own
+    // contradiction, never silently trusted either way.
+    let run_row = mqk_db::fetch_run(pool, expected_run_id)
+        .await
+        .context("attempt_controller_degraded_recovery: fetch_run failed")?;
+    if !matches!(run_row.status, mqk_db::RunStatus::Running) {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "controller_degraded_local_owner_run_not_active",
+            None,
+            now_utc,
+            "a local runtime claims ownership of this run but its durable run row is not \
+             exactly RUNNING; failing closed rather than assuming which side is stale",
+            STATE_MANUAL_INTERVENTION_REQUIRED,
+        )
+        .await?;
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "controller_degraded_local_owner_run_not_active",
+                newly_applied,
+            },
+        );
+    }
+
+    // No independent safety blocker requires halt/manual intervention: an
+    // integrity kill-switch halt/disarm always fails closed regardless of
+    // this arm's own verdict (enforced at dispatch/arm time, not
+    // duplicated here); this arm only ever adds an ADDITIONAL fail-closed
+    // condition, never removes one.
+    let is_data_repairable = operation
+        .state_reason_code
+        .as_deref()
+        .is_some_and(|reason_code| {
+            crate::daily_data_readiness::classify_reason_str(reason_code)
+                == crate::daily_data_readiness::DailyDataReadinessReasonClass::DataRepairable
+        });
+    if !is_data_repairable {
+        // Not a DataRepairable-classified blocker (e.g. a NonData reason
+        // such as `provider_disabled`, or an unrecognized string, which
+        // `classify_reason_str` also fails closed to `NonData`): no existing
+        // safe revalidation seam reachable from this state can re-prove it
+        // cleared. Never auto-recover; remain degraded exactly as before
+        // this patch (a same-state refresh, not a mutation).
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "controller_degraded",
+                newly_applied: false,
+            },
+        );
+    }
+
+    let config = match crate::state::build_multi_symbol_runtime_config_from_env() {
+        Ok(config) => config,
+        Err(_) => {
+            return Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "controller_degraded",
+                    newly_applied: false,
+                },
+            )
+        }
+    };
+    let runtime_context = match resolve_autonomous_runtime_context(state).await {
+        Ok(ctx) => ctx,
+        Err(_) => {
+            return Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "controller_degraded",
+                    newly_applied: false,
+                },
+            )
+        }
+    };
+
+    // §15/§17 (same convention `attempt_manual_intervention_recovery`
+    // follows): re-run the canonical read-only readiness evaluation --
+    // never a watered-down duplicate, never a cached/stale verdict.
+    let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
+    let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
+        Some(pool),
+        &config,
+        &runtime_context.effective_runtime_binding,
+        &readiness_context,
+        now_utc,
+    )
+    .await;
+    if !report.start_allowed {
+        // The original blocker (or a different one) is still genuinely
+        // true -- never clear on a timer or on local-owner existence
+        // alone.
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "controller_degraded",
+                newly_applied: false,
+            },
+        );
+    }
+
+    // Local ownership can change during the awaits above (config/binding
+    // resolution, the readiness re-evaluation call) just as durable run
+    // status can -- re-prove it immediately before entering the atomic
+    // run+operation authority seam below rather than trusting the ownership
+    // check `dispatch_by_state` performed before any of this async work
+    // ran.
+    if state.locally_owned_run_id().await != Some(expected_run_id) {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "controller_degraded_local_owner_lost_before_commit",
+            None,
+            now_utc,
+            "local runtime ownership of this run_id changed while readiness was being \
+             re-evaluated; failing closed rather than committing recovery against a \
+             possibly-stale ownership assumption",
+            STATE_MANUAL_INTERVENTION_REQUIRED,
+        )
+        .await?;
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "controller_degraded_local_owner_lost_before_commit",
+                newly_applied,
+            },
+        );
+    }
+
+    // Genuinely proven cleared: legally recover controller_degraded ->
+    // running, gated on the bound run still being durably RUNNING under the
+    // same serialized DB authority that commits the operation transition
+    // (PATCH-A-RUN-STATUS-TOCTOU-CLOSE) -- never a new run, never a
+    // duplicated runtime. Clearing the stale blocker fields happens through
+    // this same authoritative transition, never a second write.
+    let recovery_outcome = mqk_db::recover_controller_degraded_operation_with_run_authority(
+        pool,
+        &mqk_db::RecoverControllerDegradedArgs {
+            operation_id: operation.operation_id,
+            expected_state_version: operation.state_version,
+            expected_run_id,
+            occurred_at_utc: now_utc,
+            bounded_detail: bounded_detail(
+                "controller_degraded blocker genuinely revalidated as cleared via the \
+                 canonical readiness authority; live local owner unchanged; recovering to \
+                 running with the same run_id, gated on the bound run still being durably \
+                 RUNNING under the same serialized authority as this commit",
+            ),
+        },
+    )
+    .await
+    .context(
+        "attempt_controller_degraded_recovery: \
+         recover_controller_degraded_operation_with_run_authority failed",
+    )?;
+
+    match recovery_outcome {
+        mqk_db::ControllerDegradedRecoveryOutcome::Applied(_) => Ok(
+            AutonomousDailyCoordinatorTickOutcome::ControllerDegradedRecovered {
+                run_id: expected_run_id,
+            },
+        ),
+        mqk_db::ControllerDegradedRecoveryOutcome::RunNotRunning { actual_status } => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "controller_degraded_run_authority_lost_race",
+                None,
+                now_utc,
+                &format!(
+                    "the bound run's durable status changed to {actual_status} between this \
+                     tick's readiness re-evaluation and the atomic recovery commit; refusing \
+                     to recover to running against a run that is no longer RUNNING"
+                ),
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
+            Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "controller_degraded_run_authority_lost_race",
+                    newly_applied,
+                },
+            )
+        }
+        mqk_db::ControllerDegradedRecoveryOutcome::RunMissing => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "controller_degraded_run_missing_at_recovery",
+                None,
+                now_utc,
+                "the bound run row no longer exists at the atomic recovery commit point; \
+                 failing closed rather than assuming which side is stale",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
+            Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "controller_degraded_run_missing_at_recovery",
+                    newly_applied,
+                },
+            )
+        }
+        mqk_db::ControllerDegradedRecoveryOutcome::StaleOperation {
+            actual_state,
+            actual_state_version,
+        } => {
+            anyhow::bail!(
+                "attempt_controller_degraded_recovery: stale operation transition for {}: \
+                 expected {}@{}, actual {}@{}",
+                operation.operation_id,
+                mqk_db::STATE_CONTROLLER_DEGRADED,
+                operation.state_version,
+                actual_state,
+                actual_state_version
+            )
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

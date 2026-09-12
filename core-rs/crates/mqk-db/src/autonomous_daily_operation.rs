@@ -1202,6 +1202,222 @@ pub async fn transition_autonomous_daily_operation_to_running(
 }
 
 // ---------------------------------------------------------------------------
+// PATCH-A-RUN-STATUS-TOCTOU-CLOSE — run-authority-fenced controller_degraded
+// recovery
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`recover_controller_degraded_operation_with_run_authority`].
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum ControllerDegradedRecoveryOutcome {
+    /// The operation transitioned `controller_degraded -> running` with its
+    /// exact bound `run_id` preserved; the run row was proven durably
+    /// `RUNNING` inside the same transaction that committed the operation
+    /// CAS.
+    Applied(AutonomousDailyOperationRecord),
+    /// The `runs` row for the expected `run_id` is no longer exactly
+    /// `RUNNING` (e.g. a concurrent safety halt won the serialization race)
+    /// -- recovery refused, no mutation to either row.
+    RunNotRunning { actual_status: String },
+    /// No `runs` row exists for the expected `run_id` at all -- recovery
+    /// refused, no mutation.
+    RunMissing,
+    /// `operation_id`'s current `(state, state_version, run_id)` no longer
+    /// matches `(controller_degraded, expected_state_version,
+    /// expected_run_id)` together -- a concurrent transition already moved
+    /// the operation. No mutation.
+    StaleOperation {
+        actual_state: String,
+        actual_state_version: i64,
+    },
+}
+
+/// Arguments for [`recover_controller_degraded_operation_with_run_authority`].
+#[derive(Debug, Clone)]
+pub struct RecoverControllerDegradedArgs {
+    pub operation_id: Uuid,
+    pub expected_state_version: i64,
+    /// The exact run_id this operation is durably bound to, and the exact
+    /// run whose `runs` row status is proven under this same authority.
+    /// Never `coalesce`d -- the operation's `run_id` column is not touched
+    /// by the CAS update, only read back for the CAS guard.
+    pub expected_run_id: Uuid,
+    pub occurred_at_utc: DateTime<Utc>,
+    /// Pre-bounded by the caller's own detail-length policy -- this
+    /// function only re-validates the length, it does not truncate.
+    pub bounded_detail: String,
+}
+
+/// Recover `controller_degraded -> running` only while the exact bound run
+/// is durably `RUNNING` under the same serialized DB authority that commits
+/// the operation transition.
+///
+/// # Why this exists
+///
+/// The caller previously proved the durable run `RUNNING` via a plain,
+/// unlocked `fetch_run`, then awaited unrelated readiness-evaluation work
+/// (network/DB calls, no lock held), and only afterward CAS-transitioned
+/// the operation row alone via [`transition_autonomous_daily_operation`] --
+/// which has no notion of run status at all. A concurrent execution-loop
+/// safety halt could move the same run `RUNNING -> HALTED` in that window,
+/// letting the operation recover to `running` while its bound run was
+/// already halted. This closes that gap the same way
+/// [`crate::orders::outbox_claim_batch_for_run_with_lease_authority`]
+/// closes the analogous lease-authority gap: by re-verifying run status and
+/// committing the dependent mutation inside one transaction, never by
+/// trusting an earlier, separate check.
+///
+/// # Authority proof
+///
+/// Inside one transaction:
+/// 1. Locks the `runs` row for `expected_run_id` (`SELECT ... FOR UPDATE`)
+///    -- the same row-level serialization boundary `halt_run`'s own
+///    unconditional `UPDATE` participates in, so a concurrent halt cannot
+///    interleave with this recovery (whichever statement reaches the row
+///    first runs to completion before the other proceeds).
+/// 2. Requires `runs.status = 'RUNNING'` exactly; `RunMissing` if no such
+///    row exists, `RunNotRunning` otherwise -- either way, zero mutation.
+/// 3. CAS-guards `sys_autonomous_daily_operations` by `(operation_id, state
+///    = controller_degraded, state_version = expected_state_version, run_id
+///    = expected_run_id)` together.
+/// 4. On a match: transitions to `running`, clears `state_reason_code`/
+///    `state_blocker_signature`, preserves `run_id` verbatim, increments
+///    `state_version`, and inserts the matching transition event -- all in
+///    the same transaction as the run-row lock.
+///
+/// If a concurrent halt wins the run-row lock first, this call observes
+/// `HALTED` and refuses with zero mutation. If this call wins the lock
+/// first, a later halt is an ordinary subsequent lifecycle event against
+/// the now-`running` operation, never a race with this transition.
+pub async fn recover_controller_degraded_operation_with_run_authority(
+    pool: &PgPool,
+    args: &RecoverControllerDegradedArgs,
+) -> Result<ControllerDegradedRecoveryOutcome> {
+    if args.expected_state_version < 1 {
+        anyhow::bail!(
+            "recover_controller_degraded_operation_with_run_authority: expected_state_version \
+             must be >= 1"
+        );
+    }
+    if args.bounded_detail.len() > 4000 {
+        anyhow::bail!(
+            "recover_controller_degraded_operation_with_run_authority: bounded_detail exceeds \
+             4000 chars"
+        );
+    }
+
+    let mut tx = pool.begin().await.context(
+        "recover_controller_degraded_operation_with_run_authority: begin transaction failed",
+    )?;
+
+    let run_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(args.expected_run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("recover_controller_degraded_operation_with_run_authority: run lock failed")?;
+
+    let Some(run_status) = run_status else {
+        tx.rollback().await.ok();
+        return Ok(ControllerDegradedRecoveryOutcome::RunMissing);
+    };
+
+    if run_status != "RUNNING" {
+        tx.rollback().await.context(
+            "recover_controller_degraded_operation_with_run_authority: rollback (run not \
+             running) failed",
+        )?;
+        return Ok(ControllerDegradedRecoveryOutcome::RunNotRunning {
+            actual_status: run_status,
+        });
+    }
+
+    let new_version = args.expected_state_version + 1;
+
+    let updated_row = sqlx::query(&format!(
+        r#"
+        update sys_autonomous_daily_operations
+        set state = $1,
+            state_reason_code = null,
+            state_blocker_signature = null,
+            state_version = $2,
+            updated_at_utc = $3
+        where operation_id = $4 and state = $5 and state_version = $6 and run_id = $7
+        returning {OPERATION_COLUMNS}
+        "#
+    ))
+    .bind(STATE_RUNNING)
+    .bind(new_version)
+    .bind(args.occurred_at_utc)
+    .bind(args.operation_id)
+    .bind(STATE_CONTROLLER_DEGRADED)
+    .bind(args.expected_state_version)
+    .bind(args.expected_run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("recover_controller_degraded_operation_with_run_authority: CAS update failed")?;
+
+    let Some(row) = updated_row else {
+        let current_row = sqlx::query(&format!(
+            "select {OPERATION_COLUMNS} from sys_autonomous_daily_operations where operation_id = $1"
+        ))
+        .bind(args.operation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context(
+            "recover_controller_degraded_operation_with_run_authority: current-row re-read \
+             failed",
+        )?;
+
+        tx.rollback().await.context(
+            "recover_controller_degraded_operation_with_run_authority: rollback (no-op read) \
+             failed",
+        )?;
+
+        return match current_row {
+            None => anyhow::bail!(
+                "recover_controller_degraded_operation_with_run_authority: operation {} not \
+                 found during transition",
+                args.operation_id
+            ),
+            Some(row) => {
+                let current = row_to_operation_record(row)?;
+                Ok(ControllerDegradedRecoveryOutcome::StaleOperation {
+                    actual_state: current.state,
+                    actual_state_version: current.state_version,
+                })
+            }
+        };
+    };
+
+    let record = row_to_operation_record(row)?;
+
+    sqlx::query(&format!(
+        r#"
+        insert into sys_autonomous_daily_operation_events ({EVENT_COLUMNS})
+        values ($1,$2,$3,$4,$5,$6,$7,$8)
+        "#
+    ))
+    .bind(args.operation_id)
+    .bind(new_version)
+    .bind(STATE_CONTROLLER_DEGRADED)
+    .bind(STATE_RUNNING)
+    .bind(None::<String>)
+    .bind(args.occurred_at_utc)
+    .bind(Some(args.expected_run_id))
+    .bind(&args.bounded_detail)
+    .execute(&mut *tx)
+    .await
+    .context("recover_controller_degraded_operation_with_run_authority: insert event failed")?;
+
+    tx.commit().await.context(
+        "recover_controller_degraded_operation_with_run_authority: commit (applied) failed",
+    )?;
+
+    Ok(ControllerDegradedRecoveryOutcome::Applied(record))
+}
+
+// ---------------------------------------------------------------------------
 // Reads (bounded, read-only)
 // ---------------------------------------------------------------------------
 
