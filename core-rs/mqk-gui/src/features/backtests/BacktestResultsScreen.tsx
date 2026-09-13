@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { EvidenceChart } from "../../components/evidence/EvidenceChart.tsx";
+import { buildEvidenceChartModel } from "../../components/evidence/evidenceChartModel.ts";
 import { formatDateTime } from "../../lib/format";
 import {
   classifyAlpha,
@@ -2045,6 +2047,7 @@ function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: 
       )}
       <EquityCurveSection result={bundle.equityCurve} />
       <DrawdownSection result={bundle.equityCurve} />
+      <EvidenceChart model={buildEvidenceChartModel(bundle)} />
 
       <div className="bt-group-heading">Execution &amp; costs</div>
       {bundle.metrics.kind === "ok" && (
