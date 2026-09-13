@@ -35,8 +35,10 @@ function worstTone(tones: CsTone[]): CsTone {
 
 // A HealthState of "unknown" or "disconnected" is a truth gap, not a clean
 // bill of health — it must rank strictly above "good" so it can never be
-// silently rendered as healthy.
-function healthTone(state: HealthState): CsTone {
+// silently rendered as healthy. Exported so the presentation layer maps the
+// same handful of raw HealthState fields to tone without a second copy of
+// this switch.
+export function healthTone(state: HealthState): CsTone {
   switch (state) {
     case "ok":
       return "good";

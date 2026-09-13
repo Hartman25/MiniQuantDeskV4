@@ -69,6 +69,17 @@ test("strategyScanner is registered and reachable from the left rail", () => {
   );
 });
 
+// GUI-CS-01B: controlStation screen is reachable.
+test("controlStation is registered and reachable from the left rail", () => {
+  assert.equal(SCREEN_REGISTRY.controlStation.title, "Control Station");
+  assert.equal(SCREEN_REGISTRY.controlStation.monitorGroup, "operator");
+  assert.ok(
+    MONITOR_GROUPS.operator.includes("controlStation"),
+    "controlStation is not reachable in the operator monitor group",
+  );
+  assert.ok(ALL_LEFT_RAIL.includes("controlStation"), "controlStation was not added to the left rail — screen is unreachable");
+});
+
 test("strategyScanner is adjacent to backtests in LEFT_RAIL_SECONDARY", () => {
   const bIdx = LEFT_RAIL_SECONDARY.indexOf("backtests");
   const sIdx = LEFT_RAIL_SECONDARY.indexOf("strategyScanner");

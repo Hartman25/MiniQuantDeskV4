@@ -23,6 +23,7 @@ export interface ExplicitSurfaceTruth {
 }
 
 export const CORE_PANEL_KEYS = [
+  "controlStation",
   "dashboard",
   "metrics",
   "execution",

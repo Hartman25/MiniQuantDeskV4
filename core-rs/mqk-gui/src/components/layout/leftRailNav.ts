@@ -1,7 +1,7 @@
 import type { ScreenKey } from "../../features/screens/screenRegistry";
 
 export const LEFT_RAIL_PRIMARY: readonly ScreenKey[] = [
-  "dashboard", "execution", "risk", "portfolio", "reconcile", "ops", "runtime",
+  "controlStation", "dashboard", "execution", "risk", "portfolio", "reconcile", "ops", "runtime",
 ];
 
 export const LEFT_RAIL_SECONDARY: readonly ScreenKey[] = [

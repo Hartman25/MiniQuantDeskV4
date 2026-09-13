@@ -3,6 +3,7 @@ import { AutonomousDailyOperationsScreen } from "../autonomousDailyOperations/Au
 import { AuditScreen } from "../audit/AuditScreen";
 import { BacktestResultsScreen } from "../backtests/BacktestResultsScreen";
 import { StrategyScannerScreen } from "../strategyScanner/StrategyScannerScreen";
+import { ControlStationScreen } from "../controlStation/ControlStationScreen";
 import { DashboardScreen } from "../dashboard/DashboardScreen";
 import { ExecutionScreen } from "../execution/ExecutionScreen";
 import { AlertsScreen } from "../alerts/AlertsScreen";
@@ -26,6 +27,7 @@ import { OperatorTimelineScreen } from "../operatorTimeline/OperatorTimelineScre
 import type { OperatorActionDefinition, SystemModel } from "../system/types";
 
 export type ScreenKey =
+  | "controlStation"
   | "dashboard"
   | "metrics"
   | "execution"
@@ -84,7 +86,7 @@ export interface ScreenDefinition {
  * LeftCommandRail primary/secondary split is derived from operator vs diagnostics groups.
  */
 export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
-  operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "dailyOperations", "config", "marketData", "ingest", "settings"],
+  operator:    ["controlStation", "dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "dailyOperations", "config", "marketData", "ingest", "settings"],
   execution:   ["execution"],
   diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "strategyScanner", "risk"],
 };
@@ -102,6 +104,12 @@ export const ROLE_SCREENS: Record<"execution" | "oversight", readonly ScreenKey[
 };
 
 export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
+  controlStation: {
+    title: "Control Station",
+    description: "Consolidated read-only operator workstation: system, trading domain, portfolio, autonomy, and incident truth in one view.",
+    monitorGroup: "operator",
+    render: ({ model }) => <ControlStationScreen model={model} />,
+  },
   dashboard: {
     title: "Dashboard",
     description: "Answer in seconds whether the system is alive, safe, and behaving correctly.",

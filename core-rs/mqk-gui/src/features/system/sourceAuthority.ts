@@ -76,6 +76,15 @@ export const FIELD_EVIDENCE_HINTS: Record<
 };
 
 const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
+  // Control Station consolidates dashboard/portfolio/execution/incidents/
+  // autonomy truth into one read-only view — inherently mixed, same as
+  // dashboard, plus the incident and daily-operation DB surfaces it also reads.
+  controlStation: {
+    db: ["/reconcile/status", "/incidents", "/autonomous/daily-operation"],
+    runtime: ["/system/status", "/system/preflight", "/execution/summary"],
+    broker: ["/portfolio/positions", "/portfolio/orders/open", "/trading/account"],
+    placeholder: ["status", "preflight", "positions", "openOrders", "incidents"],
+  },
   // Dashboard is a summary of multiple source types: inherently mixed in a healthy system.
   dashboard: {
     db: ["/reconcile/status"],
