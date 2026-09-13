@@ -4,6 +4,7 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { EvidenceChart } from "../../components/evidence/EvidenceChart.tsx";
 import { buildEvidenceChartModel } from "../../components/evidence/evidenceChartModel.ts";
+import { useWorkspaceContext } from "../workspace/WorkspaceContext.tsx";
 import { formatDateTime } from "../../lib/format";
 import {
   classifyAlpha,
@@ -2022,6 +2023,52 @@ function FillsContent({ data }: { data: ParsedCsvResult<FillRow> }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// OT-MQD-02: workspace link control — presentation-only. Publishes this
+// run's identity (symbol/strategy/timeframe/run id, executionDomain
+// "backtest") into the shared workspace context on explicit operator click.
+// Never called automatically on load, and never sets any field this screen
+// cannot identify honestly (no fabricated strategyId/runId).
+// ---------------------------------------------------------------------------
+
+function WorkspaceLinkControl({ bundle }: { bundle: ArtifactBundle }) {
+  const { linked, setLinked } = useWorkspaceContext();
+
+  const manifest = bundle.manifest.kind === "ok" ? bundle.manifest.data : null;
+  const metrics = bundle.metrics.kind === "ok" ? bundle.metrics.data : null;
+  if (!manifest && !metrics) return null;
+
+  const runId = manifest?.run_id ?? metrics?.run_id ?? null;
+  const symbol = metrics?.symbols && metrics.symbols.length > 0 ? metrics.symbols[0] : null;
+  const strategyId = manifest?.strategy_name ?? metrics?.strategy_name ?? null;
+  const timeframe = manifestTimeframeLabel(manifest?.timeframe, manifest?.timeframe_secs);
+  const isLinked = runId !== null && linked.runId === runId;
+
+  return (
+    <div className="workspace-link-row">
+      <button
+        type="button"
+        className="workspace-link-button"
+        onClick={() =>
+          setLinked({
+            symbol,
+            timeframe,
+            strategyId,
+            runId,
+            backtestJobId: null,
+            artifactId: null,
+            evaluationSlice: null,
+            executionDomain: "backtest",
+          })
+        }
+      >
+        {isLinked ? "Linked to workspace" : "Link this run to workspace"}
+      </button>
+      {isLinked && <span className="legend-pill status-good">LINKED</span>}
+    </div>
+  );
+}
+
 function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: string }) {
   return (
     <>
@@ -2030,6 +2077,8 @@ function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: 
           <span aria-hidden="true">▸</span> {source}
         </div>
       )}
+
+      <WorkspaceLinkControl bundle={bundle} />
 
       <div className="bt-group-heading">Overview</div>
       <OperatorReviewSection bundle={bundle} />

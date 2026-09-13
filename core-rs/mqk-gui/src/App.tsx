@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AppShell } from "./app/AppShell";
+import { WorkspaceProvider } from "./features/workspace/WorkspaceContext.tsx";
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { caught: Error | null }> {
   constructor(props: { children: ReactNode }) {
@@ -66,7 +67,9 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { caught: Erro
 export default function App() {
   return (
     <AppErrorBoundary>
-      <AppShell />
+      <WorkspaceProvider>
+        <AppShell />
+      </WorkspaceProvider>
     </AppErrorBoundary>
   );
 }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
@@ -5,10 +6,64 @@ import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
+import { useWorkspaceContext } from "../workspace/WorkspaceContext.tsx";
+import {
+  initialPanelLinkState,
+  isSymbolCompatible,
+  pinPanel,
+  resolvePanelIdentity,
+  unpinPanel,
+  type PanelLinkState,
+} from "../workspace/workspaceModel.ts";
+
+// ---------------------------------------------------------------------------
+// OT-MQD-02: linked/pinned consumer surface. LINKED (default) follows the
+// global workspace symbol; PINNED freezes this panel's own resolved symbol
+// so a later global update elsewhere does not silently change what this
+// screen highlights. Never filters/hides rows — only highlights matches and
+// reports an explicit neutral notice when the linked symbol has no matching
+// rows, so an incompatible context fails visibly rather than silently
+// showing unrelated data as though it were linked.
+// ---------------------------------------------------------------------------
+
+function WorkspaceSymbolStrip({
+  panelLink,
+  effectiveSymbol,
+  onTogglePin,
+}: {
+  panelLink: PanelLinkState;
+  effectiveSymbol: string | null;
+  onTogglePin: () => void;
+}) {
+  return (
+    <div className="workspace-panel-strip">
+      <span className="legend-pill status-neutral">{panelLink.pinned ? "PINNED" : "LINKED"}</span>
+      <span>
+        Symbol: <strong>{effectiveSymbol ?? "none in workspace context"}</strong>
+      </span>
+      <button
+        type="button"
+        className={`workspace-pin-button ${panelLink.pinned ? "is-pinned" : ""}`.trim()}
+        onClick={onTogglePin}
+      >
+        {panelLink.pinned ? "Unpin (follow workspace)" : "Pin current symbol"}
+      </button>
+    </div>
+  );
+}
 
 export function MarketDataScreen({ model }: { model: SystemModel }) {
   const q = model.marketDataQuality;
   const truthState = panelTruthRenderState(model, "marketData");
+  const { linked } = useWorkspaceContext();
+  const [panelLink, setPanelLink] = useState<PanelLinkState>(initialPanelLinkState());
+
+  const effectiveIdentity = resolvePanelIdentity(linked, panelLink);
+  const effectiveSymbol = isSymbolCompatible(effectiveIdentity) ? effectiveIdentity.symbol : null;
+
+  const togglePin = () => {
+    setPanelLink((prev) => (prev.pinned ? unpinPanel() : pinPanel(effectiveIdentity)));
+  };
 
   if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
@@ -34,8 +89,21 @@ export function MarketDataScreen({ model }: { model: SystemModel }) {
     return aS - bS;
   });
 
+  const matchingIssueCount = effectiveSymbol == null ? null : q.issues.filter((i) => i.symbol === effectiveSymbol).length;
+  const symbolCell = (symbol: string | null) => (
+    <span style={effectiveSymbol != null && symbol === effectiveSymbol ? { color: "var(--accent)", fontWeight: 700 } : undefined}>
+      {symbol ?? "—"}
+    </span>
+  );
+
   return (
     <div className="screen-grid desk-screen-grid">
+      <WorkspaceSymbolStrip panelLink={panelLink} effectiveSymbol={effectiveSymbol} onTogglePin={togglePin} />
+      {effectiveSymbol != null && matchingIssueCount === 0 && (
+        <div className="unavailable-notice">
+          No market-data issues match linked symbol '{effectiveSymbol}' — showing unfiltered data below.
+        </div>
+      )}
 
       {/* Primary pressure signals — strategy blocks and disagreement lead */}
       <div className="summary-grid summary-grid-four">
@@ -78,7 +146,7 @@ export function MarketDataScreen({ model }: { model: SystemModel }) {
               { key: "severity", title: "Severity", render: (row) => row.severity },
               { key: "scope", title: "Scope", render: (row) => row.scope },
               { key: "type", title: "Issue Type", render: (row) => row.issue_type },
-              { key: "symbol", title: "Symbol", render: (row) => row.symbol ?? "—" },
+              { key: "symbol", title: "Symbol", render: (row) => symbolCell(row.symbol) },
               { key: "venue", title: "Venue", render: (row) => row.venue ?? "—" },
               { key: "lag", title: "Freshness Lag", render: (row) => row.freshness_lag_ms != null ? formatDurationMs(row.freshness_lag_ms) : "—" },
               { key: "strategies", title: "Blocked Strategies", render: (row) => row.affected_strategies.join(", ") },
@@ -128,7 +196,7 @@ export function MarketDataScreen({ model }: { model: SystemModel }) {
               { key: "severity", title: "Severity", render: (row) => row.severity },
               { key: "scope", title: "Scope", render: (row) => row.scope },
               { key: "type", title: "Issue Type", render: (row) => row.issue_type },
-              { key: "symbol", title: "Symbol", render: (row) => row.symbol ?? "—" },
+              { key: "symbol", title: "Symbol", render: (row) => symbolCell(row.symbol) },
               { key: "venue", title: "Venue", render: (row) => row.venue ?? "—" },
               { key: "lag", title: "Freshness Lag", render: (row) => row.freshness_lag_ms != null ? formatDurationMs(row.freshness_lag_ms) : "—" },
               { key: "strategies", title: "Affected Strategies", render: (row) => row.affected_strategies.length > 0 ? row.affected_strategies.join(", ") : "—" },

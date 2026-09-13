@@ -11,6 +11,7 @@ import { BottomEventRail } from "../components/layout/BottomEventRail";
 import { LeftCommandRail } from "../components/layout/LeftCommandRail";
 import { RightOpsRail } from "../components/layout/RightOpsRail";
 import { RoleCommandStrip } from "../components/layout/RoleCommandStrip";
+import { WorkspaceContextStrip } from "../components/layout/WorkspaceContextStrip";
 import { WorkspaceFrame } from "../components/layout/WorkspaceFrame";
 import { WorkspaceToolbar } from "../components/layout/WorkspaceToolbar";
 import { PreflightGate } from "../components/preflight/PreflightGate";
@@ -234,6 +235,8 @@ export function AppShell() {
               onDeskModeChange={(mode) => void handleDeskModeChange(mode)}
               onRefresh={() => void refresh()}
             />
+
+            <WorkspaceContextStrip />
 
             {(deskRole === "execution" || deskRole === "oversight") ? (
               <RoleCommandStrip

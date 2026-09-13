@@ -1143,6 +1143,21 @@ ul {
 .evidence-chart-legend .legend-pill.status-neutral { background: rgba(148,163,184,0.10); border-color:var(--border); color: var(--muted); }
 .evidence-chart-provenance { border-top:1px dashed var(--border); padding-top:10px; }
 
+/* === OT-MQD-02: workspace linked/pinned context === */
+.workspace-context-strip { display:flex; align-items:center; gap:6px; padding:5px 10px; margin:6px 0; border:1px solid var(--border); border-radius:2px; background:var(--surface); font-size:11px; font-family:var(--font-mono, monospace); color:var(--muted); flex-wrap:wrap; }
+.workspace-context-field { color:var(--text); font-weight:600; }
+.workspace-context-sep { color:var(--muted); opacity:0.6; }
+.workspace-context-reset { margin-left:auto; border:1px solid var(--border); background:transparent; color:var(--muted); border-radius:2px; padding:2px 8px; font-size:10px; cursor:pointer; font-family:var(--font-mono, monospace); }
+.workspace-context-reset:hover { color:var(--text); border-color:var(--accent); }
+.workspace-link-row { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+.workspace-link-button { border:1px solid var(--border); background:var(--surface); color:var(--text); border-radius:2px; padding:5px 10px; font-size:11px; cursor:pointer; font-family:var(--font-mono, monospace); }
+.workspace-link-button:hover { border-color:var(--accent); }
+.workspace-panel-strip { display:flex; align-items:center; gap:8px; margin-bottom:10px; font-size:11px; font-family:var(--font-mono, monospace); color:var(--muted); }
+.workspace-panel-strip strong { color:var(--text); }
+.workspace-pin-button { border:1px solid var(--border); background:var(--surface); color:var(--muted); border-radius:2px; padding:3px 8px; font-size:10px; cursor:pointer; font-family:var(--font-mono, monospace); }
+.workspace-pin-button:hover { color:var(--text); border-color:var(--accent); }
+.workspace-pin-button.is-pinned { border-color:var(--accent); color:var(--accent); }
+
 /* ===== Phase 6 convergence additions ===== */
 
 .rail-section {
