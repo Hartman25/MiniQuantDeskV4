@@ -2275,6 +2275,7 @@ pub(super) async fn supervise_reconcile_terminal_task(
     state: Arc<AppState>,
     run_id: Uuid,
     handle: JoinHandle<()>,
+    completion_tx: watch::Sender<bool>,
 ) {
     let result = handle.await;
     if matches!(&result, Err(e) if e.is_cancelled()) {
@@ -2283,6 +2284,7 @@ pub(super) async fn supervise_reconcile_terminal_task(
             "reconcile_tick: task cancelled (expected shutdown/supersession); not a failure \
              (M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01)"
         );
+        let _ = completion_tx.send(true);
         return;
     }
 
@@ -2292,6 +2294,7 @@ pub(super) async fn supervise_reconcile_terminal_task(
             "reconcile_tick: terminal resolution for a superseded run; ignoring \
              (M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01)"
         );
+        let _ = completion_tx.send(true);
         return;
     }
 
@@ -2331,6 +2334,11 @@ pub(super) async fn supervise_reconcile_terminal_task(
          (M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01)",
     )
     .await;
+
+    // Signal only after fail-closed projection is complete. A caller
+    // waiting to replace this worker cannot race a still-pending
+    // terminal-failure authority update.
+    let _ = completion_tx.send(true);
 }
 
 // ---------------------------------------------------------------------------

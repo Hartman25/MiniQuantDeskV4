@@ -5444,14 +5444,7 @@ operator_reconcile_or_repair_required"
         // reconcile task was never spawned (e.g. a FailedStart rollback,
         // before the atomic commit that would have led to it) simply finds
         // nothing to abort here.
-        {
-            let mut owner = self.reconcile_task_owner.lock().await;
-            if matches!(owner.as_ref(), Some(o) if o.run_id == run_id) {
-                if let Some(taken) = owner.take() {
-                    taken.abort_handle.abort();
-                }
-            }
-        }
+        self.clear_reconcile_task_owner_for_run(run_id).await;
 
         self.clear_economic_mirrors_for_run(run_id).await;
         outcome
@@ -5467,20 +5460,76 @@ operator_reconcile_or_repair_required"
     /// lifecycle that record is already `None` by the time a new run
     /// reaches this call, so this is a no-op abort of an already-finished
     /// (or already-`None`) handle in practice.
+    /// Wait until the reconcile watchdog has observed terminal resolution
+    /// of the task whose abort handle was owned by this record.
+    async fn wait_for_reconcile_task_completion(mut completion_rx: watch::Receiver<bool>) {
+        while !*completion_rx.borrow() {
+            if completion_rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Abort one owned reconcile task and do not return until its
+    /// terminal resolution has been observed by the watchdog.
+    async fn abort_and_wait_reconcile_task_owner(taken: ReconcileTaskOwnership) {
+        taken.abort_handle.abort();
+        Self::wait_for_reconcile_task_completion(taken.completion_rx).await;
+    }
+
+    /// Cleanly remove the reconcile owner for one exact run. Used by the
+    /// unified stop/halt/shutdown cleanup path.
+    pub(crate) async fn clear_reconcile_task_owner_for_run(&self, run_id: Uuid) {
+        let taken = {
+            let mut owner = self.reconcile_task_owner.lock().await;
+            if matches!(owner.as_ref(), Some(o) if o.run_id == run_id) {
+                owner.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(taken) = taken {
+            Self::abort_and_wait_reconcile_task_owner(taken).await;
+        }
+    }
+
+    /// M1-RECONCILE-CANCELLATION-COMPLETION-01: Paper start calls this
+    /// before spawning its next reconcile worker. Any stale prior owner
+    /// is cancelled and fully terminal before the new worker exists,
+    /// eliminating the old/new-worker overlap window.
+    pub(crate) async fn prepare_reconcile_task_spawn(&self) {
+        let taken = { self.reconcile_task_owner.lock().await.take() };
+
+        if let Some(taken) = taken {
+            Self::abort_and_wait_reconcile_task_owner(taken).await;
+        }
+    }
+
     pub(crate) async fn install_reconcile_task_owner(
         self: &Arc<Self>,
         run_id: Uuid,
         handle: JoinHandle<()>,
     ) {
+        // Production Paper start has already called
+        // prepare_reconcile_task_spawn() before this handle was spawned.
+        // Keep the prior-owner path below as defense in depth for internal
+        // callers, but wait for its actual terminal resolution rather than
+        // treating AbortHandle::abort() as synchronous completion.
+        let previous = { self.reconcile_task_owner.lock().await.take() };
+        if let Some(prev) = previous {
+            prev.abort_handle.abort();
+            Self::wait_for_reconcile_task_completion(prev.completion_rx).await;
+        }
+
         let abort_handle = handle.abort_handle();
+        let (completion_tx, completion_rx) = watch::channel(false);
         {
             let mut owner = self.reconcile_task_owner.lock().await;
-            if let Some(prev) = owner.take() {
-                prev.abort_handle.abort();
-            }
             *owner = Some(ReconcileTaskOwnership {
                 run_id,
                 abort_handle,
+                completion_rx,
             });
         }
 
@@ -5488,6 +5537,7 @@ operator_reconcile_or_repair_required"
             Arc::clone(self),
             run_id,
             handle,
+            completion_tx,
         ));
     }
 
@@ -7742,6 +7792,100 @@ mod tests {
         );
     }
 
+    // M1-RECONCILE-CANCELLATION-COMPLETION-01: a Drop flag lives
+    // inside the spawned future itself. Each proof first waits for a
+    // one-shot "started" signal emitted only after this sentinel is
+    // constructed, so a later true flag proves actual task-future
+    // destruction rather than merely proving abort was requested.
+    struct M1ReconcileTaskDropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for M1ReconcileTaskDropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn m1b10_clear_waits_for_actual_worker_termination() {
+        let state = m1b_fresh_state();
+        let run_id = m1_test_uuid("m1b10.run_id");
+        state
+            .reserve_runtime_ownership(run_id)
+            .await
+            .expect("reservation on fresh Idle state must succeed");
+
+        let terminated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_terminated = std::sync::Arc::clone(&terminated);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            let _drop_flag = M1ReconcileTaskDropFlag(task_terminated);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        started_rx
+            .await
+            .expect("m1b10 worker must start before cancellation");
+
+        state.install_reconcile_task_owner(run_id, handle).await;
+        state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::OperatorStop)
+            .await;
+
+        assert!(
+            terminated.load(std::sync::atomic::Ordering::SeqCst),
+            "B10: clear_local_runtime_for_run must not return until the \
+             already-started reconcile worker future has actually terminated"
+        );
+        assert!(!state.reconcile_task_owner_matches(run_id).await);
+        assert!(!state.integrity.read().await.halted);
+    }
+
+    #[tokio::test]
+    async fn m1b11_prepare_spawn_waits_for_prior_worker_termination() {
+        let state = m1b_fresh_state();
+        let run_a = m1_test_uuid("m1b11.run_a");
+        let run_b = m1_test_uuid("m1b11.run_b");
+
+        let terminated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_terminated = std::sync::Arc::clone(&terminated);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let handle_a = tokio::spawn(async move {
+            let _drop_flag = M1ReconcileTaskDropFlag(task_terminated);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        started_rx
+            .await
+            .expect("m1b11 worker must start before cancellation");
+
+        state.install_reconcile_task_owner(run_a, handle_a).await;
+        assert!(state.reconcile_task_owner_matches(run_a).await);
+
+        // This is the exact production pre-spawn seam used by Paper.
+        state.prepare_reconcile_task_spawn().await;
+
+        assert!(
+            terminated.load(std::sync::atomic::Ordering::SeqCst),
+            "B11: pre-spawn preparation must observe actual prior-worker \
+             termination before a replacement worker can be spawned"
+        );
+        assert!(!state.reconcile_task_owner_matches(run_a).await);
+
+        // Only after prior-worker terminal completion is observed does
+        // the replacement worker exist.
+        let handle_b = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        state.install_reconcile_task_owner(run_b, handle_b).await;
+        assert!(state.reconcile_task_owner_matches(run_b).await);
+        assert!(!state.integrity.read().await.halted);
+
+        state.prepare_reconcile_task_spawn().await;
+    }
     // D02 (M1-CRITICAL-TASK-INTEGRATED-FAULT-PROOF-01): unlike B02/B03 above
     // (which install a trivial stand-in task to prove the watchdog/ownership
     // machinery in isolation), this drives the REAL `loop_runner::

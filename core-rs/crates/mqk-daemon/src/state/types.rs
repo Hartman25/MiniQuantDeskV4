@@ -260,6 +260,10 @@ pub(crate) struct ExecutionLoopHandle {
 pub(crate) struct ReconcileTaskOwnership {
     pub(crate) run_id: Uuid,
     pub(crate) abort_handle: tokio::task::AbortHandle,
+    /// Resolves only after the watchdog has observed terminal task
+    /// resolution. Teardown awaits this before permitting a replacement
+    /// Paper reconcile worker to be spawned.
+    pub(crate) completion_rx: watch::Receiver<bool>,
 }
 
 /// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 2:

@@ -2002,6 +2002,14 @@ impl AppState {
                     .and_then(|g| g.as_ref().map(|s| s.has_recent_terminal_fill))
                     .unwrap_or(false)
             };
+            let supervise_reconcile = reconcile_supervision_is_paper_only(self.deployment_mode());
+            if supervise_reconcile {
+                // M1-RECONCILE-CANCELLATION-COMPLETION-01: the prior
+                // Paper worker must be fully terminal before the next
+                // worker is even spawned.
+                self.prepare_reconcile_task_spawn().await;
+            }
+
             let reconcile_handle = spawn_reconcile_tick(
                 Arc::clone(self),
                 local_fn,
@@ -2013,7 +2021,7 @@ impl AppState {
             // receives the new run-scoped ownership/watchdog semantics.
             // Dropping the JoinHandle in non-Paper modes preserves the
             // pre-wave detached reconcile-task behavior there.
-            if reconcile_supervision_is_paper_only(self.deployment_mode()) {
+            if supervise_reconcile {
                 self.install_reconcile_task_owner(run_id, reconcile_handle)
                     .await;
             }
