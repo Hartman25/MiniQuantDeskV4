@@ -12,7 +12,8 @@ import { TruthStateBanner } from "../../components/common/TruthStateBanner";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatLabel } from "../../lib/format";
 import type { HealthState, SystemModel } from "../system/types";
-import { isTruthHardBlock, panelTruthRenderState, type TruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, type TruthRenderState } from "../system/truthRendering";
+import { controlStationDisposition } from "./controlStationTruthGate";
 import { buildControlStationViewModel, healthTone, type CsTone } from "./viewModel";
 
 function csToneToStatTone(tone: CsTone): "neutral" | "good" | "warn" | "bad" {
@@ -60,19 +61,24 @@ function TruthGatedSection({ truth, children }: { truth: TruthRenderState | null
 }
 
 export function ControlStationScreen({ model }: { model: SystemModel }) {
-  // A fully unreachable daemon leaves nothing on this page trustworthy —
-  // hard-block the whole station rather than render any section. Any other
-  // truth state (stale/degraded/no_snapshot/unimplemented) is handled per
-  // section below so a partial degradation stays visibly distinct instead of
-  // hiding the whole workstation.
-  if (panelTruthRenderState(model, "dashboard") === "unavailable") {
-    return <TruthStateNotice state="unavailable" />;
+  // Consume the Control Station's OWN panel truth (not the Dashboard's).
+  // Hard-block states (unavailable/no_snapshot/unimplemented/not_wired) leave
+  // nothing on this page trustworthy — including mock/placeholder truth,
+  // which must never render as a plausible live operator surface. Non-hard
+  // states (stale/degraded) are surfaced with a prominent banner while the
+  // page still renders, so section-level gates below stay visibly distinct
+  // rather than hiding the whole workstation.
+  const disposition = controlStationDisposition(model);
+  if (disposition.kind === "hard_block") {
+    return <TruthStateNotice state={disposition.state} />;
   }
 
   const vm = buildControlStationViewModel(model);
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {disposition.kind === "compromised" && <TruthStateBanner state={disposition.state} />}
+
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Daemon"
