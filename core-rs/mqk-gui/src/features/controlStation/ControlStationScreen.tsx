@@ -111,14 +111,14 @@ export function ControlStationScreen({ model }: { model: SystemModel }) {
           <div><span>Daemon reachable</span><strong className={boolClass(!vm.system.daemonOnline)}>{boolLabel(vm.system.daemonOnline, "Yes", "No")}</strong></div>
           <div><span>DB status</span><strong className={healthClass(vm.system.dbStatus)}>{formatLabel(vm.system.dbStatus)}</strong></div>
           <div><span>Broker status</span><strong className={healthClass(vm.system.brokerStatus)}>{formatLabel(vm.system.brokerStatus)}</strong></div>
-          <div><span>Market data health</span><strong className={healthClass(vm.system.marketDataHealth)}>{formatLabel(vm.system.marketDataHealth)}</strong></div>
+          <div><span>Market data health</span><strong className={csToneToClass(vm.system.marketDataTone)}>{formatLabel(vm.system.marketDataHealth)}</strong></div>
           <div><span>Reconcile status</span><strong className={healthClass(vm.system.reconcileStatus)}>{formatLabel(vm.system.reconcileStatus)}</strong></div>
           <div><span>Integrity status</span><strong className={healthClass(vm.system.integrityStatus)}>{formatLabel(vm.system.integrityStatus)}</strong></div>
-          <div><span>WS continuity</span><strong>{formatLabel(vm.system.wsContinuity)}</strong></div>
+          <div><span>WS continuity</span><strong className={csToneToClass(vm.system.wsTone)}>{formatLabel(vm.system.wsContinuity)}</strong></div>
           <div><span>Kill switch</span><strong className={boolClass(vm.system.killSwitchActive)}>{boolLabel(vm.system.killSwitchActive, "Active", "Inactive")}</strong></div>
           <div><span>Integrity halt</span><strong className={boolClass(vm.system.integrityHaltActive)}>{boolLabel(vm.system.integrityHaltActive, "Active", "Inactive")}</strong></div>
           <div><span>Risk halt</span><strong className={boolClass(vm.system.riskHaltActive)}>{boolLabel(vm.system.riskHaltActive, "Active", "Inactive")}</strong></div>
-          <div><span>Deadman watchdog</span><strong className={vm.system.deadmanStatus === "ok" ? "val-ok" : vm.system.deadmanStatus === "expired" ? "val-warn" : "val-muted"}>{formatLabel(vm.system.deadmanStatus)}</strong></div>
+          <div><span>Deadman watchdog</span><strong className={csToneToClass(vm.system.deadmanTone)}>{formatLabel(vm.system.deadmanStatus)}</strong></div>
         </div>
       </Panel>
 

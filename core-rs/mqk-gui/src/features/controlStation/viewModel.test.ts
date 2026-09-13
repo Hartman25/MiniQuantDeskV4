@@ -157,10 +157,206 @@ test("all-ok health fields with no halts yields a good system tone", () => {
   model.status.kill_switch_active = false;
   model.status.integrity_halt_active = false;
   model.status.risk_halt_active = false;
+  // GUI-CS-01D: MOCK_MODEL's defaults (has_warning=true, deadman_status="ok",
+  // a non-production string) are not an honest "all healthy" state under the
+  // fuller tone derivation — pin them explicitly rather than relying on
+  // incidental mock defaults.
+  model.status.has_warning = false;
+  model.status.has_critical = false;
+  model.status.broker_snapshot_source = "synthetic";
+  model.status.alpaca_ws_continuity = "not_applicable";
+  model.status.runtime_status = "idle";
+  model.status.deadman_status = "inactive";
 
   const vm = buildControlStationViewModel(model);
 
   assert.equal(vm.system.tone, "good");
+});
+
+// ---------------------------------------------------------------------------
+// GUI-CS-01D: fail-closed system-health headline.
+//
+// buildSystemSection() previously derived tone from only db/broker/
+// market_data/reconcile/integrity health plus kill-switch/halt flags — it
+// ignored alpaca_ws_continuity, deadman_status, and status.has_warning/
+// has_critical entirely, and market_data_health's real daemon values
+// ("not_configured" | "signal_ingestion_ready") fell through the generic
+// HealthState switch as neither good nor bad. Each "otherwise healthy"
+// fixture below pins every other field to its cleanest state so only the
+// field under test can be responsible for the resulting tone.
+// ---------------------------------------------------------------------------
+
+function otherwiseHealthyModel(): SystemModel {
+  const model = baseModel();
+  model.connected = true;
+  model.status.daemon_reachable = true;
+  model.status.runtime_status = "idle";
+  model.status.db_status = "ok";
+  model.status.broker_status = "ok";
+  model.status.market_data_health = "ok";
+  model.status.reconcile_status = "ok";
+  model.status.integrity_status = "ok";
+  model.status.kill_switch_active = false;
+  model.status.integrity_halt_active = false;
+  model.status.risk_halt_active = false;
+  model.status.has_warning = false;
+  model.status.has_critical = false;
+  model.status.broker_snapshot_source = "synthetic";
+  model.status.alpaca_ws_continuity = "not_applicable";
+  model.status.deadman_status = "inactive";
+  return model;
+}
+
+test("all-ok otherwise-healthy fixture yields a good system tone (baseline sanity)", () => {
+  const vm = buildControlStationViewModel(otherwiseHealthyModel());
+  assert.equal(vm.system.tone, "good");
+});
+
+// --- A/B/C: external WS continuity gate --------------------------------
+
+test("negative control: external broker with WS gap_detected never yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.broker_snapshot_source = "external";
+  model.status.alpaca_ws_continuity = "gap_detected";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.notEqual(vm.system.tone, "good");
+  assert.equal(vm.system.tone, "bad");
+  assert.equal(vm.system.wsTone, "bad");
+});
+
+test("negative control: external broker with WS cold_start_unproven never yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.broker_snapshot_source = "external";
+  model.status.alpaca_ws_continuity = "cold_start_unproven";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.notEqual(vm.system.tone, "good");
+  assert.equal(vm.system.wsTone, "warn");
+});
+
+test("positive control: external broker with WS live and otherwise healthy yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.broker_snapshot_source = "external";
+  model.status.alpaca_ws_continuity = "live";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.equal(vm.system.tone, "good");
+  assert.equal(vm.system.wsTone, "good");
+});
+
+test("positive control: synthetic broker with WS not_applicable and otherwise healthy yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.broker_snapshot_source = "synthetic";
+  model.status.alpaca_ws_continuity = "not_applicable";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.equal(vm.system.tone, "good");
+  assert.equal(vm.system.wsTone, "good");
+});
+
+// --- E/F/G: deadman watchdog gate ---------------------------------------
+
+test("negative control: deadman expired never yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.runtime_status = "running";
+  model.status.deadman_status = "expired";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.notEqual(vm.system.tone, "good");
+  assert.equal(vm.system.deadmanTone, "bad");
+});
+
+test("negative control: running runtime with non-healthy deadman never silently yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.runtime_status = "running";
+  model.status.deadman_status = "inactive";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.notEqual(vm.system.tone, "good");
+  assert.equal(vm.system.deadmanTone, "unknown");
+});
+
+test("positive control: idle runtime with deadman inactive is legitimate and yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.runtime_status = "idle";
+  model.status.deadman_status = "inactive";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.equal(vm.system.tone, "good");
+  assert.equal(vm.system.deadmanTone, "good");
+});
+
+test("positive control: running runtime with deadman healthy yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.runtime_status = "running";
+  model.status.deadman_status = "healthy";
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.equal(vm.system.tone, "good");
+  assert.equal(vm.system.deadmanTone, "good");
+});
+
+// --- H/I: aggregate backend warning/critical -----------------------------
+
+test("negative control: has_warning=true never yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.has_warning = true;
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.notEqual(vm.system.tone, "good");
+});
+
+test("negative control: has_critical=true yields a bad system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.has_critical = true;
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.equal(vm.system.tone, "bad");
+});
+
+// --- J/K: unrecognized health strings must fail closed -------------------
+
+test("negative control: an unrecognized market_data_health string never yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  // Simulates an arbitrary/unexpected daemon string arriving over JSON —
+  // TypeScript's HealthState typing cannot prevent this at runtime.
+  model.status.market_data_health = "totally_unrecognized_value" as SystemModel["status"]["market_data_health"];
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.notEqual(vm.system.tone, "good");
+  assert.equal(vm.system.marketDataTone, "unknown");
+});
+
+test("positive control: market_data_health=signal_ingestion_ready on an otherwise-healthy Paper+Alpaca state yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.market_data_health = "signal_ingestion_ready" as SystemModel["status"]["market_data_health"];
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.equal(vm.system.tone, "good");
+  assert.equal(vm.system.marketDataTone, "good");
+});
+
+test("positive control: market_data_health=not_configured on an otherwise-healthy state yields a good system tone", () => {
+  const model = otherwiseHealthyModel();
+  model.status.market_data_health = "not_configured" as SystemModel["status"]["market_data_health"];
+
+  const vm = buildControlStationViewModel(model);
+
+  assert.equal(vm.system.tone, "good");
+  assert.equal(vm.system.marketDataTone, "good");
 });
 
 // ---------------------------------------------------------------------------

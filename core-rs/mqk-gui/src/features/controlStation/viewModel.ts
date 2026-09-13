@@ -38,7 +38,14 @@ function worstTone(tones: CsTone[]): CsTone {
 // silently rendered as healthy. Exported so the presentation layer maps the
 // same handful of raw HealthState fields to tone without a second copy of
 // this switch.
-export function healthTone(state: HealthState): CsTone {
+//
+// Takes `string` rather than `HealthState`: these fields are raw JSON off
+// the wire, and the daemon has shipped values outside the declared union
+// (e.g. STATUS-TRUTH-01's broker_status="stale"). A switch keyed on the
+// narrow union type would let such a value silently match no case and fall
+// through as neither good nor bad — the explicit default below fails closed
+// instead.
+export function healthTone(state: string): CsTone {
   switch (state) {
     case "ok":
       return "good";
@@ -48,6 +55,70 @@ export function healthTone(state: HealthState): CsTone {
       return "bad";
     case "disconnected":
     case "unknown":
+      return "unknown";
+    default:
+      return "unknown";
+  }
+}
+
+// AP-04B: market_data_health's real daemon vocabulary is
+// "not_configured" | "signal_ingestion_ready" (StrategyMarketDataSource::
+// as_health_str in mqk-daemon/src/state/types.rs) — not the generic
+// HealthState union. Both are ordinary, non-fault states on the current
+// path; anything else falls back to the generic fail-closed classifier
+// rather than a bespoke default that could silently mean "good".
+function marketDataHealthTone(state: string): CsTone {
+  switch (state) {
+    case "not_configured":
+    case "signal_ingestion_ready":
+      return "good";
+    default:
+      return healthTone(state);
+  }
+}
+
+// AP-05: WS continuity truth is only meaningful for an external (Alpaca)
+// broker snapshot — a synthetic/paper broker reporting "not_applicable" is
+// ordinary operation, not a fault (mirrors GlobalStatusBar's DESKTOP-12
+// not_applicable guard). For an external broker, only "live" is proven
+// continuity; "cold_start_unproven" and "gap_detected" must never render as
+// good, and an external broker reporting "not_applicable" (or any other
+// unrecognized value) contradicts broker_snapshot_source=external and fails
+// closed rather than being treated as proven.
+function wsContinuityTone(
+  brokerSnapshotSource: SystemStatus["broker_snapshot_source"],
+  continuity: SystemStatus["alpaca_ws_continuity"],
+): CsTone {
+  if (brokerSnapshotSource !== "external") return "good";
+  switch (continuity) {
+    case "live":
+      return "good";
+    case "cold_start_unproven":
+      return "warn";
+    case "gap_detected":
+      return "bad";
+    case "not_applicable":
+    default:
+      return "unknown";
+  }
+}
+
+// Deadman heartbeat truth (mqk-daemon/src/state/deadman.rs): "healthy" only
+// while a run is actively ticking; "expired" is a fired watchdog and never
+// good. "inactive" is legitimate for an idle/stopped runtime — do not
+// manufacture a warning merely because the watchdog is off duty — but is a
+// truth gap while runtime_status is "running" (a running runtime should have
+// a healthy watchdog, not an inactive one). Any other value (e.g.
+// "unavailable", "unknown") fails closed.
+function deadmanStatusTone(runtimeStatus: RuntimeStatus, deadmanStatus: string): CsTone {
+  switch (deadmanStatus) {
+    case "healthy":
+      return "good";
+    case "expired":
+      return "bad";
+    case "inactive":
+      return runtimeStatus === "running" ? "unknown" : "good";
+    default:
       return "unknown";
   }
 }
@@ -62,13 +133,18 @@ export interface ControlStationSystemSection {
   dbStatus: HealthState;
   brokerStatus: HealthState;
   marketDataHealth: HealthState;
+  marketDataTone: CsTone;
   reconcileStatus: HealthState;
   integrityStatus: HealthState;
   wsContinuity: SystemStatus["alpaca_ws_continuity"];
+  wsTone: CsTone;
   killSwitchActive: boolean;
   integrityHaltActive: boolean;
   riskHaltActive: boolean;
   deadmanStatus: string;
+  deadmanTone: CsTone;
+  hasWarning: boolean;
+  hasCritical: boolean;
   tone: CsTone;
 }
 
@@ -78,12 +154,25 @@ function buildSystemSection(model: SystemModel): ControlStationSystemSection {
   // an unconnected fallback model must never read as "daemon online".
   const daemonOnline = model.connected && status.daemon_reachable;
 
+  const marketDataTone = marketDataHealthTone(status.market_data_health);
+  const wsTone = wsContinuityTone(status.broker_snapshot_source, status.alpaca_ws_continuity);
+  const deadmanTone = deadmanStatusTone(status.runtime_status, status.deadman_status);
+
+  // GUI-CS-01D: has_warning/has_critical are the daemon's own aggregate
+  // truth and may carry warning/critical information not duplicated by any
+  // of the individual fields above (e.g. a risk-truth read failure) — they
+  // must contribute to the headline tone in their own right, not only
+  // through the fields the GUI happens to enumerate.
   let tone = worstTone([
     healthTone(status.db_status),
     healthTone(status.broker_status),
-    healthTone(status.market_data_health),
+    marketDataTone,
     healthTone(status.reconcile_status),
     healthTone(status.integrity_status),
+    wsTone,
+    deadmanTone,
+    status.has_critical ? "bad" : "good",
+    status.has_warning ? "warn" : "good",
   ]);
   if (!daemonOnline) tone = worstTone([tone, "unknown"]);
   if (status.kill_switch_active || status.integrity_halt_active || status.risk_halt_active) tone = "bad";
@@ -94,13 +183,18 @@ function buildSystemSection(model: SystemModel): ControlStationSystemSection {
     dbStatus: status.db_status,
     brokerStatus: status.broker_status,
     marketDataHealth: status.market_data_health,
+    marketDataTone,
     reconcileStatus: status.reconcile_status,
     integrityStatus: status.integrity_status,
     wsContinuity: status.alpaca_ws_continuity,
+    wsTone,
     killSwitchActive: status.kill_switch_active,
     integrityHaltActive: status.integrity_halt_active,
     riskHaltActive: status.risk_halt_active,
     deadmanStatus: status.deadman_status,
+    deadmanTone,
+    hasWarning: status.has_warning,
+    hasCritical: status.has_critical,
     tone,
   };
 }
