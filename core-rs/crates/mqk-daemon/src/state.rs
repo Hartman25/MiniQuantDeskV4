@@ -7371,11 +7371,11 @@ mod tests {
             "m1_gap_cursor_persist: H04 positive indicator -- executing the real DB-backed branch"
         );
 
-        let adapter_id = format!("m1-gap-cursor-persist-{}", Uuid::new_v4());
+        let adapter_id = format!("m1-gap-cursor-persist-{}", Uuid::new_v4()); // allow: process-local transient job identifier
 
         // H02 noise: a different adapter_id with a row that would satisfy
         // the assertion below if the readback were not correctly scoped.
-        let noise_adapter_id = format!("m1-gap-cursor-persist-noise-{}", Uuid::new_v4());
+        let noise_adapter_id = format!("m1-gap-cursor-persist-noise-{}", Uuid::new_v4()); // allow: process-local transient job identifier
         let noise_cursor = AlpacaFetchCursor::gap_detected(
             None,
             None,
