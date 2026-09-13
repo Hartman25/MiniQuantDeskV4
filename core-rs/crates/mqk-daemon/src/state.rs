@@ -2187,8 +2187,32 @@ impl AppState {
             .store(now_secs, Ordering::SeqCst);
     }
 
+    /// The authoritative WS continuity view every safety/admission/readiness
+    /// caller must consume.
+    ///
+    /// M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01: `mark_alpaca_ws_task_exited`
+    /// sets the sticky `alpaca_ws_task_exited` flag before it awaits DB cursor
+    /// persistence. During that await window the raw stored continuity can
+    /// still read `Live`. This overlay closes that window immediately —
+    /// once the outer WS task is known dead, this getter cannot return
+    /// anything but `GapDetected` for the remainder of the process, even
+    /// before the DB-first persistence in `mark_alpaca_ws_task_exited`
+    /// completes or if a later write races the raw field back to `Live`.
     pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {
-        self.alpaca_ws_continuity.read().await.clone()
+        let raw = self.alpaca_ws_continuity.read().await.clone();
+        if self.alpaca_ws_task_exited.load(Ordering::SeqCst)
+            && !matches!(raw, AlpacaWsContinuityState::GapDetected { .. })
+        {
+            return AlpacaWsContinuityState::GapDetected {
+                last_message_id: None,
+                last_event_at: None,
+                detail: "alpaca_ws: outer transport task terminated unexpectedly; \
+                         authoritative continuity fails closed immediately \
+                         (M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01)"
+                    .to_string(),
+            };
+        }
+        raw
     }
 
     /// The autonomous-session truth every operator read surface consumes.
@@ -2585,8 +2609,12 @@ operator_reconcile_or_repair_required"
         if self.strategy_market_data_source != StrategyMarketDataSource::ExternalSignalIngestion {
             return false;
         }
+        // M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01: consume the same
+        // authoritative overlay as `alpaca_ws_continuity()` rather than the
+        // raw field, so this gate trips immediately on terminal task death
+        // too, not only after DB persistence completes.
         matches!(
-            *self.alpaca_ws_continuity.read().await,
+            self.alpaca_ws_continuity().await,
             AlpacaWsContinuityState::GapDetected { .. }
         )
     }
@@ -6944,12 +6972,17 @@ mod tests {
         );
     }
 
-    // A09 / idempotency mutation proof: the SECOND observation must be a true
-    // no-op, not merely "produces an equal result". Restore continuity to
-    // Live between the two calls (simulating an unrelated repair) and prove
-    // the second exit-projection call does not re-clobber it -- if the
-    // `swap(true, ...)` guard in `mark_alpaca_ws_task_exited` were removed,
-    // this test goes RED.
+    // A09 / idempotency mutation proof, revised for Correction F09
+    // (M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01): the raw stored continuity
+    // field can still be clobbered back to Live by an unrelated write (e.g. a
+    // stale in-flight session task that had not yet observed the exit), but
+    // the AUTHORITATIVE alpaca_ws_continuity() getter must never surface
+    // Live again once the sticky task-dead fact is set -- proving the
+    // overlay is what keeps authority fail-closed, not merely the raw field.
+    // Separately, the swap guard's idempotency is proven by asserting a
+    // second `mark_alpaca_ws_task_exited` call does not re-write the stored
+    // truth (no duplicate persistence/alerting) -- if the `swap(true, ...)`
+    // guard were removed, this test goes RED.
     #[tokio::test]
     async fn m1a09_second_observation_is_a_true_no_op() {
         let state = m1_paper_alpaca_state();
@@ -6961,6 +6994,7 @@ mod tests {
             AlpacaWsContinuityState::GapDetected { .. }
         ));
 
+        // Simulate an unrelated write racing the raw field back to Live.
         state
             .update_ws_continuity(AlpacaWsContinuityState::Live {
                 last_message_id: "m1-test".to_string(),
@@ -6968,17 +7002,257 @@ mod tests {
             })
             .await;
 
+        // F09: authoritative continuity must NOT become Live while the
+        // sticky task-dead fact remains true, regardless of the raw write.
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "F09: authoritative continuity must stay GapDetected while \
+             alpaca_ws_task_exited is true, even after a raw Live write"
+        );
+
+        let truth_before = state.stored_autonomous_session_truth().await;
+
         state
             .mark_alpaca_ws_task_exited("second exit (must be a no-op)".to_string())
+            .await;
+
+        assert_eq!(
+            state.stored_autonomous_session_truth().await,
+            truth_before,
+            "A09: the outer task can only die once; a second observation must not \
+             re-write stored truth or re-fire the (already deduplicated) gap alert"
+        );
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "authoritative continuity must remain GapDetected after the no-op \
+             second observation"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01 (Correction F)
+    // -------------------------------------------------------------------
+    //
+    // F01/F02: raw continuity Live + sticky task-dead=true must force both
+    // the authoritative getter and the halt gate to fail closed. Simulates
+    // the persistence-delay race window directly (no DB needed) by forcing
+    // the raw field back to Live after the sticky flag is already set --
+    // the same technique the revised A09 test above uses.
+    #[tokio::test]
+    async fn f01_f02_authoritative_continuity_and_halt_gate_fail_closed_on_raw_live_race() {
+        let state = m1_paper_alpaca_state();
+        state
+            .mark_alpaca_ws_task_exited("f01/f02: outer task panicked".to_string())
+            .await;
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: "f01f02-raw-race".to_string(),
+                last_event_at: "2026-01-01T00:00:00Z".to_string(),
+            })
             .await;
 
         assert!(
             matches!(
                 state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "F01: authoritative continuity must be GapDetected even though the \
+             raw stored field reads Live"
+        );
+        assert!(
+            state.ws_continuity_gap_requires_halt().await,
+            "F02: halt gate must trip from the same authoritative overlay"
+        );
+    }
+
+    // F06: ordinary inner disconnect/reconnect while the outer task is still
+    // alive (sticky flag never set) must behave exactly as before the
+    // overlay was introduced -- Live and GapDetected transitions from the
+    // normal reconnect path are unaffected.
+    #[tokio::test]
+    async fn f06_ordinary_reconnect_cycle_unaffected_by_overlay_when_task_alive() {
+        let state = m1_paper_alpaca_state();
+
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: "f06-live".to_string(),
+                last_event_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .await;
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
                 AlpacaWsContinuityState::Live { .. }
             ),
-            "A09: the outer task can only die once; a second observation must not \
-             re-write continuity or re-fire the (already deduplicated) gap alert"
+            "F06: Live must pass through unmodified when the task is alive"
+        );
+        assert!(!state.ws_continuity_gap_requires_halt().await);
+
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::GapDetected {
+                last_message_id: None,
+                last_event_at: None,
+                detail: "f06: ordinary mid-reconnect gap".to_string(),
+            })
+            .await;
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "F06: an ordinary reconnect gap must still surface normally"
+        );
+        assert!(state.ws_continuity_gap_requires_halt().await);
+
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: "f06-live-again".to_string(),
+                last_event_at: "2026-01-01T00:00:01Z".to_string(),
+            })
+            .await;
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::Live { .. }
+            ),
+            "F06: re-establishing Live after an ordinary reconnect gap must \
+             still work when the outer task was never marked dead"
+        );
+        assert!(!state.ws_continuity_gap_requires_halt().await);
+    }
+
+    // F07: ColdStartUnproven before the outer task has ever died must behave
+    // exactly as before -- the overlay must not fire on the sticky flag's
+    // default `false` state.
+    #[tokio::test]
+    async fn f07_cold_start_unproven_before_task_death_unaffected() {
+        let state = m1_paper_alpaca_state();
+        assert!(matches!(
+            state.alpaca_ws_continuity().await,
+            AlpacaWsContinuityState::ColdStartUnproven
+        ));
+        assert!(!state.ws_continuity_gap_requires_halt().await);
+    }
+
+    // F08: non-Alpaca brokers never spawn (or supervise) the Alpaca WS task,
+    // so `alpaca_ws_task_exited` structurally never becomes true for them --
+    // the overlay must never affect their NotApplicable continuity.
+    #[tokio::test]
+    async fn f08_non_alpaca_broker_continuity_remains_not_applicable() {
+        let state = AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Paper,
+        );
+        assert!(matches!(
+            state.alpaca_ws_continuity().await,
+            AlpacaWsContinuityState::NotApplicable
+        ));
+        assert!(!state.ws_continuity_gap_requires_halt().await);
+    }
+
+    // F10: positive proof that authoritative fail-closed authority holds
+    // DURING the DB persistence delay itself, not only after it completes.
+    //
+    // Uses a real Postgres row lock (not a sleep) as the rendezvous: a
+    // concurrent transaction holds `SELECT ... FOR UPDATE` on the seeded
+    // `broker_event_cursor` row for this adapter_id, which blocks the
+    // production `advance_broker_cursor` upsert inside
+    // `mark_alpaca_ws_task_exited` until the lock is released. While
+    // blocked, the sticky flag is already true (set synchronously before
+    // the first await) but the raw field has not yet been updated --
+    // exactly the window Correction F closes.
+    #[tokio::test]
+    async fn f10_authoritative_fail_closed_during_db_persistence_delay() {
+        let Some(pool) = m1_db_pool_or_skip("f10_persist_delay").await else {
+            return;
+        };
+        mqk_db::migrate(&pool).await.expect("F10: migration failed");
+        let adapter_id = "m1-f10-persist-delay-test";
+
+        // Seed a Live row so the FOR UPDATE lock below has a row to hold.
+        let seed_cursor = AlpacaFetchCursor::live(
+            None,
+            "alpaca:f10-seed:new:2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        mqk_db::advance_broker_cursor(
+            &pool,
+            adapter_id,
+            &serde_json::to_string(&seed_cursor).expect("F10: serialize seed cursor"),
+            Utc::now(),
+        )
+        .await
+        .expect("F10: seed cursor write must succeed");
+
+        // Hold a row lock on the seeded adapter row from a separate
+        // transaction so the daemon's own upsert blocks on it.
+        let mut lock_tx = pool.begin().await.expect("F10: begin lock transaction");
+        sqlx::query("SELECT cursor_value FROM broker_event_cursor WHERE adapter_id = $1 FOR UPDATE")
+            .bind(adapter_id)
+            .fetch_one(&mut *lock_tx)
+            .await
+            .expect("F10: lock query must succeed");
+
+        let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        );
+        state_inner.set_adapter_id_for_test(adapter_id);
+        let state = Arc::new(state_inner);
+
+        let bg_state = Arc::clone(&state);
+        let handle = tokio::spawn(async move {
+            bg_state
+                .mark_alpaca_ws_task_exited("f10: outer task panicked (persist delay)".to_string())
+                .await;
+        });
+
+        // Give the spawned task a chance to run past the synchronous
+        // swap(true) and reach the blocked DB upsert. The lock -- not this
+        // delay -- is what makes the subsequent assertions deterministic.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            !handle.is_finished(),
+            "F10: the task must still be blocked on the held row lock at this point \
+             (otherwise this test proves nothing about the persistence-delay window)"
+        );
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "F10: authoritative continuity must already be GapDetected while \
+             DB persistence is still blocked"
+        );
+        assert!(
+            state.ws_continuity_gap_requires_halt().await,
+            "F10: halt gate must already be tripped while DB persistence is \
+             still blocked"
+        );
+
+        // Release the lock and let persistence complete.
+        lock_tx
+            .rollback()
+            .await
+            .expect("F10: releasing the lock must succeed");
+        handle
+            .await
+            .expect("F10: mark_alpaca_ws_task_exited task must not panic");
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "F10: continuity must remain GapDetected once persistence completes"
         );
     }
 

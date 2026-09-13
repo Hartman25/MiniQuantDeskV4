@@ -295,6 +295,42 @@ async fn obs04_gate1b_gap_detected_disposition_is_unique() {
 }
 
 // ---------------------------------------------------------------------------
+// F03 — M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01 (Correction F03)
+//
+// Gate 1b must refuse (not accept) once the outer Alpaca WS task is known
+// dead, even if an unrelated raw write races continuity back to Live
+// afterward. Gate 1b consumes the authoritative alpaca_ws_continuity()
+// getter, so it must never observe Live once the sticky task-dead fact
+// is set in this process.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn f03_gate1b_sticky_task_dead_refuses_signal_even_with_raw_live() {
+    let st = paper_alpaca_state();
+    st.mark_alpaca_ws_task_exited("f03: outer task terminated".to_string())
+        .await;
+    // Force the raw field back to Live, simulating an unrelated write racing
+    // in after the sticky task-dead fact is set.
+    st.update_ws_continuity(live_ws()).await;
+
+    let router = routes::build_router(st);
+    let (status, json) = call(router, signal_req(valid_signal_body("f03-sig-001"))).await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "F03: signal must be refused once the outer WS task is known dead, \
+         even though the raw continuity field reads Live; got: {status}"
+    );
+    assert_eq!(
+        json["disposition"], "continuity_gap",
+        "F03: refusal must be the continuity-gap disposition, not silent \
+         acceptance of the raced-back Live value"
+    );
+    assert_eq!(json["accepted"], false, "F03: accepted must be false");
+}
+
+// ---------------------------------------------------------------------------
 // OBS-05: Gate 1c outside session → 409 + "outside_session" + NYSE text
 // ---------------------------------------------------------------------------
 //

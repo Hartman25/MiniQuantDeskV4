@@ -292,6 +292,65 @@ async fn brk00r04_p05_live_shadow_alpaca_unaffected_reaches_db_gate() {
 }
 
 // ---------------------------------------------------------------------------
+// BRK00R04-P07 — M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01 (Correction F04)
+//
+// A sticky outer-task-death fact must block start even if an unrelated raw
+// write races continuity back to Live afterward -- the runtime start gate
+// consumes the authoritative alpaca_ws_continuity() getter, so it must
+// never observe Live once the outer WS task is known dead in this process.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn brk00r04_p07_sticky_task_dead_blocks_start_even_with_raw_live() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+
+    // Arm integrity gate so it is not the blocker.
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (arm_status, _) = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+    assert_eq!(arm_status, StatusCode::OK, "P07: arm must succeed");
+
+    st.mark_alpaca_ws_task_exited("p07: outer task terminated".to_string())
+        .await;
+    // Force the raw field back to Live, simulating an unrelated write racing
+    // in after the sticky task-dead fact is set.
+    st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
+        last_message_id: "p07-raw-race".to_string(),
+        last_event_at: "2026-01-01T00:00:00Z".to_string(),
+    })
+    .await;
+
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "P07: start must be refused once the outer WS task is known dead, \
+         even if the raw continuity field reads Live; got: {status}"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["gate"], "alpaca_ws_continuity",
+        "P07: gate must be alpaca_ws_continuity; got: {json}"
+    );
+    assert_eq!(
+        json["fault_class"], "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
+        "P07: fault_class must identify paper+alpaca continuity refusal; got: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // BRK00R04-P06 — paper+paper still blocked at deployment readiness (unchanged)
 //
 // PT-TRUTH-01 blocking must not be weakened by BRK-00R-04.

@@ -254,6 +254,37 @@ async fn ps06b_gap_detected_surfaces_in_ws_continuity() {
     );
 }
 
+// F05 — M1-WS-IMMEDIATE-FAIL-CLOSED-AUTHORITY-01 (Correction F05): readiness
+// must report blocked/degraded truth once the outer WS task is known dead,
+// even if an unrelated raw write races continuity back to Live afterward.
+#[tokio::test]
+async fn f05_readiness_reports_gap_detected_when_task_dead_even_with_raw_live() {
+    let st = paper_alpaca_state();
+    st.mark_alpaca_ws_task_exited("f05: outer task terminated".to_string())
+        .await;
+    st.update_ws_continuity(AlpacaWsContinuityState::Live {
+        last_message_id: "f05-raw-race".to_string(),
+        last_event_at: "2026-01-01T00:00:00Z".to_string(),
+    })
+    .await;
+
+    let router = build_router(st);
+    let (status, body) = get_paper_status(router).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["ws_continuity"].as_str().unwrap(),
+        "gap_detected",
+        "F05: readiness must report gap_detected once the outer WS task is \
+         known dead, even though the raw continuity field reads Live; got: {body}"
+    );
+    assert_eq!(
+        body["readiness_classification"].as_str().unwrap(),
+        "blocked",
+        "F05: readiness_classification must be blocked; got: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PS07: Flatten unavailable when no active run → flatten_blockers non-empty
 // ---------------------------------------------------------------------------
