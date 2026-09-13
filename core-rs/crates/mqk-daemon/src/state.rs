@@ -7459,11 +7459,23 @@ mod tests {
         ))
     }
 
+    /// M1-TEST-ID-DETERMINISM-01: these `run_id` values only ever identify a
+    /// task-ownership slot inside one test's own isolated in-memory
+    /// `AppState` — never a shared DB row or cross-process fixture — so a
+    /// deterministic UUIDv5 keyed on a unique per-call-site label satisfies
+    /// the identity requirement without any real per-execution randomness.
+    fn m1_test_uuid(label: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("mqd/m1-critical-task-supervision/{label}").as_bytes(),
+        )
+    }
+
     // B01: the real production spawn seam yields owned task identity.
     #[tokio::test]
     async fn m1b01_install_records_owned_run_identity() {
         let state = m1b_fresh_state();
-        let run_id = Uuid::new_v4();
+        let run_id = m1_test_uuid("m1b01.run_id");
         let handle = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
@@ -7471,7 +7483,11 @@ mod tests {
         state.install_reconcile_task_owner(run_id, handle).await;
 
         assert!(state.reconcile_task_owner_matches(run_id).await);
-        assert!(!state.reconcile_task_owner_matches(Uuid::new_v4()).await);
+        assert!(
+            !state
+                .reconcile_task_owner_matches(m1_test_uuid("m1b01.other_run_id"))
+                .await
+        );
     }
 
     // B02 / B04: an injected unexpected return must fail closed even when
@@ -7482,7 +7498,7 @@ mod tests {
     #[tokio::test]
     async fn m1b02_normal_return_fails_closed_over_prior_clean_status() {
         let state = m1b_fresh_state();
-        let run_id = Uuid::new_v4();
+        let run_id = m1_test_uuid("m1b02.run_id");
         state
             .publish_reconcile_snapshot(ReconcileStatusSnapshot {
                 status: "ok".to_string(),
@@ -7508,7 +7524,7 @@ mod tests {
     #[tokio::test]
     async fn m1b03_panic_fails_closed() {
         let state = m1b_fresh_state();
-        let run_id = Uuid::new_v4();
+        let run_id = m1_test_uuid("m1b03.run_id");
         let handle = tokio::spawn(async {
             panic!("simulated reconcile tick panic");
         });
@@ -7526,7 +7542,7 @@ mod tests {
     async fn g02_reconcile_panic_payload_sentinel_never_reaches_snapshot_note() {
         const SENTINEL: &str = "M1_SECRET_SENTINEL_DO_NOT_SURFACE";
         let state = m1b_fresh_state();
-        let run_id = Uuid::new_v4();
+        let run_id = m1_test_uuid("g02.run_id");
         let handle = tokio::spawn(async move {
             panic!("{SENTINEL}");
         });
@@ -7552,8 +7568,8 @@ mod tests {
     #[tokio::test]
     async fn m1b08_09_new_owner_supersedes_and_aborts_prior_worker() {
         let state = m1b_fresh_state();
-        let run_a = Uuid::new_v4();
-        let run_b = Uuid::new_v4();
+        let run_a = m1_test_uuid("m1b08_09.run_a");
+        let run_b = m1_test_uuid("m1b08_09.run_b");
 
         let handle_a = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -7592,7 +7608,7 @@ mod tests {
     #[tokio::test]
     async fn m1b07_clear_local_runtime_for_run_aborts_reconcile_task_cleanly() {
         let state = m1b_fresh_state();
-        let run_id = Uuid::new_v4();
+        let run_id = m1_test_uuid("m1b07.run_id");
         state
             .reserve_runtime_ownership(run_id)
             .await
@@ -7635,7 +7651,7 @@ mod tests {
     #[tokio::test]
     async fn d02_real_spawn_reconcile_tick_closure_panic_fails_closed() {
         let state = m1b_fresh_state();
-        let run_id = Uuid::new_v4();
+        let run_id = m1_test_uuid("d02.run_id");
 
         let local_fn = || -> mqk_reconcile::LocalSnapshot {
             panic!("simulated panic inside a real local_fn closure")
