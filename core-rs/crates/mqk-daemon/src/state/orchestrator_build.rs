@@ -431,6 +431,7 @@ impl AppState {
             ),
             ReconcileTruthGate {
                 reconcile_status: Arc::clone(&self.reconcile_status),
+                reconcile_task_owner: Arc::clone(&self.reconcile_task_owner),
             },
         );
 

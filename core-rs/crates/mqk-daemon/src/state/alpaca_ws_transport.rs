@@ -63,11 +63,13 @@
 //! gap window must be recovered via the REST polling path
 //! (`BrokerAdapter::fetch_events`) on the next run restart.
 
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use mqk_broker_alpaca::types::AlpacaTradeUpdatesResume;
 use mqk_broker_alpaca::{parse_ws_message, AlpacaWsMessage};
 use mqk_runtime::alpaca_inbound::{
@@ -114,6 +116,30 @@ pub use handshake_messages::{
 ///
 /// The caller MUST retain the returned `JoinHandle`; dropping it aborts the task.
 /// In `main.rs` the handle is kept alive for the lifetime of the daemon.
+/// M1-TERMINAL-TASK-AUTHORITY-TIMING-01: spawn the ACTUAL outer task
+/// inside a panic-catching shell whose synchronous terminal marker is
+/// written before this JoinHandle can resolve.
+///
+/// Tokio cancellation drops this wrapper future and therefore never
+/// reaches the marker below. Expected cancellation remains non-failure.
+fn spawn_alpaca_ws_outer_task<F>(state: Arc<AppState>, future: F) -> JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let outcome = AssertUnwindSafe(future).catch_unwind().await;
+
+        // Synchronous, no-await authority transition. This executes in the
+        // same task poll that observed return/panic, before JoinHandle
+        // terminal state can become externally observable.
+        state.mark_alpaca_ws_task_terminal_observed();
+
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    })
+}
+
 pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>> {
     if state.deployment_mode() != DeploymentMode::Paper {
         return None;
@@ -157,7 +183,11 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
         ws_url,
         "alpaca_ws: spawning paper WS transport (BRK-00R-05)"
     );
-    Some(tokio::spawn(alpaca_ws_loop(state, ws_url, key, secret)))
+    let loop_state = Arc::clone(&state);
+    Some(spawn_alpaca_ws_outer_task(
+        state,
+        alpaca_ws_loop(loop_state, ws_url, key, secret),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1456,7 +1486,105 @@ mod tests {
     // loop, which in production only ever resolves via panic.
     // -------------------------------------------------------------------
 
-    use super::supervise_alpaca_ws_terminal_task;
+    use super::{spawn_alpaca_ws_outer_task, supervise_alpaca_ws_terminal_task};
+
+    async fn patch17_wait_for_outer_task_terminal(handle: &tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Patch17: synthetic WS outer task must become terminal");
+    }
+
+    #[tokio::test]
+    async fn patch17_ws_normal_return_marks_authority_before_watchdog() {
+        let state = paper_alpaca_state();
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: "patch17-live".to_string(),
+                last_event_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .await;
+
+        let handle = spawn_alpaca_ws_outer_task(Arc::clone(&state), async {});
+        patch17_wait_for_outer_task_terminal(&handle).await;
+
+        // No external watchdog has run yet.
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "Patch17: normal terminal return must invalidate Live before watchdog scheduling"
+        );
+        assert!(matches!(
+            state.autonomous_session_truth().await,
+            AutonomousSessionTruth::AlpacaWsTransportExited { .. }
+        ));
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+    }
+
+    #[tokio::test]
+    async fn patch17_ws_panic_marks_authority_before_watchdog() {
+        let state = paper_alpaca_state();
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: "patch17-panic-live".to_string(),
+                last_event_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .await;
+
+        let handle = spawn_alpaca_ws_outer_task(Arc::clone(&state), async {
+            panic!("patch17 synthetic outer-task panic");
+        });
+        patch17_wait_for_outer_task_terminal(&handle).await;
+
+        // The panic payload remains in the JoinError for the existing local
+        // watchdog log, but authority is already fail-closed.
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::GapDetected { .. }
+            ),
+            "Patch17: panic terminal state must invalidate Live before watchdog scheduling"
+        );
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+    }
+
+    #[tokio::test]
+    async fn patch17_ws_cancellation_does_not_mark_terminal_failure() {
+        let state = paper_alpaca_state();
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: "patch17-cancel-live".to_string(),
+                last_event_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .await;
+
+        let handle = spawn_alpaca_ws_outer_task(Arc::clone(&state), async {
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        handle.abort();
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+
+        assert!(
+            matches!(
+                state.alpaca_ws_continuity().await,
+                AlpacaWsContinuityState::Live { .. }
+            ),
+            "Patch17 negative control: expected cancellation must not manufacture WS failure"
+        );
+        assert!(matches!(
+            state.autonomous_session_truth().await,
+            AutonomousSessionTruth::Clear
+        ));
+    }
 
     // A01: an outer task that returns normally (never happens in production
     // since `alpaca_ws_loop` has no break/return, but this is exactly the

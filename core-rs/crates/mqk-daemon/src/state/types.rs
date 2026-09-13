@@ -13,7 +13,7 @@ use std::sync::Arc;
 use mqk_execution::{IntegrityGate, ReconcileGate};
 use mqk_integrity::IntegrityState;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -201,10 +201,30 @@ impl IntegrityGate for StateIntegrityGate {
 #[derive(Clone)]
 pub(crate) struct ReconcileTruthGate {
     pub(crate) reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
+    pub(crate) reconcile_task_owner: Arc<Mutex<Option<ReconcileTaskOwnership>>>,
 }
 
 impl ReconcileGate for ReconcileTruthGate {
     fn is_clean(&self) -> bool {
+        // M1-TERMINAL-TASK-AUTHORITY-TIMING-01: `AbortHandle::is_finished`
+        // is task state, not watchdog state. Once the owned worker has
+        // terminated, this gate refuses immediately even when its async
+        // watchdog has not yet been scheduled to overwrite the last "ok"
+        // reconcile snapshot. Lock contention also fails closed.
+        let worker_terminal = self
+            .reconcile_task_owner
+            .try_lock()
+            .map(|owner| {
+                owner
+                    .as_ref()
+                    .is_some_and(|owned| owned.abort_handle.is_finished())
+            })
+            .unwrap_or(true);
+
+        if worker_terminal {
+            return false;
+        }
+
         self.reconcile_status
             .try_read()
             .map(|snapshot| snapshot.status == "ok")

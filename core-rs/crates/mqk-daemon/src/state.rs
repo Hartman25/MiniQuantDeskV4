@@ -464,6 +464,12 @@ pub struct AppState {
     /// gap persists across multiple signal POSTs — only the first refusal per
     /// gap window emits a Discord notification.
     gap_escalation_pending: Arc<AtomicBool>,
+    /// M1-TERMINAL-TASK-AUTHORITY-TIMING-01: set synchronously by the
+    /// actual Alpaca WS outer task before that task may resolve normally
+    /// or unwind from panic. This closes the scheduler window before the
+    /// external JoinHandle watchdog is polled. Expected task cancellation
+    /// never executes the marker.
+    alpaca_ws_task_terminal_observed: Arc<AtomicBool>,
     /// M1-ALPACA-WS-TERMINAL-TASK-SUPERVISION-01: `true` once the outer
     /// Alpaca paper WS transport task has been observed to return or panic.
     /// Sticky for the life of the process — the outer task is never
@@ -1958,6 +1964,7 @@ impl AppState {
             daily_data_readiness_attempt_seq: Arc::new(AtomicU64::new(0)),
             required_universe_calendar_override_for_test: Arc::new(RwLock::new(None)),
             gap_escalation_pending: Arc::new(AtomicBool::new(false)),
+            alpaca_ws_task_terminal_observed: Arc::new(AtomicBool::new(false)),
             alpaca_ws_task_exited: Arc::new(AtomicBool::new(false)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
@@ -2187,6 +2194,20 @@ impl AppState {
             .store(now_secs, Ordering::SeqCst);
     }
 
+    /// M1-TERMINAL-TASK-AUTHORITY-TIMING-01: record the terminal fact
+    /// synchronously inside the actual outer WS task. No DB, lock, or
+    /// other await is allowed here: the marker must become visible before
+    /// that task's JoinHandle can report completion.
+    pub(crate) fn mark_alpaca_ws_task_terminal_observed(&self) {
+        self.alpaca_ws_task_terminal_observed
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn alpaca_ws_terminal_authority_failed(&self) -> bool {
+        self.alpaca_ws_task_terminal_observed.load(Ordering::SeqCst)
+            || self.alpaca_ws_task_exited.load(Ordering::SeqCst)
+    }
+
     /// The authoritative WS continuity view every safety/admission/readiness
     /// caller must consume.
     ///
@@ -2200,7 +2221,7 @@ impl AppState {
     /// completes or if a later write races the raw field back to `Live`.
     pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {
         let raw = self.alpaca_ws_continuity.read().await.clone();
-        if self.alpaca_ws_task_exited.load(Ordering::SeqCst)
+        if self.alpaca_ws_terminal_authority_failed()
             && !matches!(raw, AlpacaWsContinuityState::GapDetected { .. })
         {
             return AlpacaWsContinuityState::GapDetected {
@@ -2254,7 +2275,7 @@ impl AppState {
         // the completed-bar driver above — the session controller's own
         // per-tick truth writes must never be able to silently hide a
         // terminal WS task failure.
-        if self.alpaca_ws_task_exited.load(Ordering::SeqCst) {
+        if self.alpaca_ws_terminal_authority_failed() {
             let stored = self.autonomous_session_truth.read().await.clone();
             if matches!(
                 stored,
@@ -2552,6 +2573,7 @@ operator_reconcile_or_repair_required"
     /// observability signal layered on top, distinguishing "the whole
     /// transport task died" from an ordinary mid-reconnect gap.
     pub async fn mark_alpaca_ws_task_exited(&self, detail: String) {
+        self.mark_alpaca_ws_task_terminal_observed();
         if self.alpaca_ws_task_exited.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -2662,6 +2684,7 @@ operator_reconcile_or_repair_required"
         };
         let reconcile_gate = types::ReconcileTruthGate {
             reconcile_status: Arc::clone(&self.reconcile_status),
+            reconcile_task_owner: Arc::clone(&self.reconcile_task_owner),
         };
         let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
@@ -4630,6 +4653,27 @@ operator_reconcile_or_repair_required"
     }
 
     pub async fn current_reconcile_snapshot(&self) -> ReconcileStatusSnapshot {
+        // M1-TERMINAL-TASK-AUTHORITY-TIMING-01: avoid even entering a
+        // DB read when the currently-owned Paper reconcile worker is
+        // already terminal.
+        if self.reconcile_task_terminal_requires_fail_closed().await {
+            let snapshot = self.reconcile_status.read().await.clone();
+            return Self::reconcile_task_terminal_overlay(snapshot);
+        }
+
+        let snapshot = self.raw_current_reconcile_snapshot().await;
+
+        // Re-check after the raw DB/memory read. The worker can terminate
+        // while a durable clean snapshot is being loaded; that old "ok"
+        // row must never win the race.
+        if self.reconcile_task_terminal_requires_fail_closed().await {
+            return Self::reconcile_task_terminal_overlay(snapshot);
+        }
+
+        snapshot
+    }
+
+    async fn raw_current_reconcile_snapshot(&self) -> ReconcileStatusSnapshot {
         if let Some(db) = self.db.as_ref() {
             if let Ok(Some(durable)) = mqk_db::load_reconcile_status_state(db).await {
                 return ReconcileStatusSnapshot {
@@ -5320,6 +5364,7 @@ operator_reconcile_or_repair_required"
         };
         let reconcile_gate = types::ReconcileTruthGate {
             reconcile_status: Arc::clone(&self.reconcile_status),
+            reconcile_task_owner: Arc::clone(&self.reconcile_task_owner),
         };
         let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
@@ -5550,6 +5595,31 @@ operator_reconcile_or_repair_required"
             self.reconcile_task_owner.lock().await.as_ref(),
             Some(o) if o.run_id == run_id
         )
+    }
+
+    /// M1-TERMINAL-TASK-AUTHORITY-TIMING-01: true when the currently
+    /// registered reconcile worker has already reached terminal task
+    /// state, even if its separately scheduled watchdog has not run yet.
+    ///
+    /// Patch 16 removes ownership BEFORE expected abort/cancellation, so
+    /// `is_finished()` here cannot manufacture a clean-shutdown failure.
+    pub(crate) async fn reconcile_task_terminal_requires_fail_closed(&self) -> bool {
+        let owner = self.reconcile_task_owner.lock().await;
+        owner
+            .as_ref()
+            .is_some_and(|owned| owned.abort_handle.is_finished())
+    }
+
+    fn reconcile_task_terminal_overlay(
+        mut snapshot: ReconcileStatusSnapshot,
+    ) -> ReconcileStatusSnapshot {
+        snapshot.status = "stale".to_string();
+        snapshot.note = Some(
+            "reconcile worker task is terminal; watchdog fail-closed projection pending \
+             (M1-TERMINAL-TASK-AUTHORITY-TIMING-01)"
+                .to_string(),
+        );
+        snapshot
     }
 
     /// Peek the currently-owned run_id (if any) and fully clear it via
@@ -6795,6 +6865,7 @@ mod tests {
         let reconcile_status = Arc::new(RwLock::new(initial_reconcile_status()));
         let gate = ReconcileTruthGate {
             reconcile_status: Arc::clone(&reconcile_status),
+            reconcile_task_owner: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         assert!(!gate.is_clean(), "unknown reconcile must fail closed");
@@ -7886,6 +7957,86 @@ mod tests {
 
         state.prepare_reconcile_task_spawn().await;
     }
+    // M1-TERMINAL-TASK-AUTHORITY-TIMING-01: prove the canonical
+    // synchronous order-submission ReconcileGate fails closed from the
+    // task handle's own terminal state BEFORE the async watchdog gets
+    // any opportunity to rewrite reconcile/integrity truth.
+    #[tokio::test]
+    async fn patch17_reconcile_finished_owner_blocks_gate_before_watchdog() {
+        let state = m1b_fresh_state();
+        let run_id = m1_test_uuid("patch17.reconcile_finished_owner");
+
+        state
+            .publish_reconcile_snapshot(ReconcileStatusSnapshot {
+                status: "ok".to_string(),
+                ..initial_reconcile_status()
+            })
+            .await;
+
+        let gate = ReconcileTruthGate {
+            reconcile_status: Arc::clone(&state.reconcile_status),
+            reconcile_task_owner: Arc::clone(&state.reconcile_task_owner),
+        };
+
+        // Negative control: no owned worker preserves the prior status-only
+        // behavior; a raw clean snapshot remains clean.
+        assert!(
+            mqk_execution::ReconcileGate::is_clean(&gate),
+            "Patch17 negative control: no owner must preserve clean status behavior"
+        );
+
+        // Lock contention itself must fail closed rather than optimistically
+        // assume the worker is healthy.
+        {
+            let _held = state.reconcile_task_owner.lock().await;
+            assert!(
+                !mqk_execution::ReconcileGate::is_clean(&gate),
+                "Patch17: owner-lock contention must fail closed"
+            );
+        }
+
+        let handle = tokio::spawn(async {});
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Patch17: synthetic reconcile worker must reach terminal state");
+
+        let abort_handle = handle.abort_handle();
+        let (_completion_tx, completion_rx) = watch::channel(false);
+        *state.reconcile_task_owner.lock().await = Some(ReconcileTaskOwnership {
+            run_id,
+            abort_handle,
+            completion_rx,
+        });
+
+        // No watchdog exists in this proof. The ONLY new fact is that the
+        // canonical owner's AbortHandle says the task is finished.
+        assert!(
+            !mqk_execution::ReconcileGate::is_clean(&gate),
+            "Patch17: a terminal owned worker must block new risk before watchdog scheduling"
+        );
+
+        let snapshot = state.current_reconcile_snapshot().await;
+        assert_eq!(
+            snapshot.status, "stale",
+            "Patch17: read authority must overlay stale over prior clean truth"
+        );
+        assert!(
+            snapshot
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("terminal"),
+            "Patch17: operator reconcile truth must explain terminal-worker authority"
+        );
+
+        let _ = handle.await;
+        *state.reconcile_task_owner.lock().await = None;
+    }
+
     // D02 (M1-CRITICAL-TASK-INTEGRATED-FAULT-PROOF-01): unlike B02/B03 above
     // (which install a trivial stand-in task to prove the watchdog/ownership
     // machinery in isolation), this drives the REAL `loop_runner::
@@ -8572,6 +8723,7 @@ mod ownership_state_machine_tests {
         };
         let reconcile_gate = types::ReconcileTruthGate {
             reconcile_status: Arc::clone(&state.reconcile_status),
+            reconcile_task_owner: Arc::clone(&state.reconcile_task_owner),
         };
         let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
