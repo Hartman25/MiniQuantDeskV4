@@ -40,6 +40,29 @@ use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
 use mqk_runtime::native_strategy::{bootstrap_with_effective_binding, NativeStrategyBootstrap};
 
+// M1-RECONCILE-SUPERVISION-PAPER-SCOPE-01: this wave is scoped to
+// the US equity/ETF Paper path. LiveShadow and LiveCapital retain
+// their pre-wave detached reconcile-task behavior.
+fn reconcile_supervision_is_paper_only(mode: DeploymentMode) -> bool {
+    matches!(mode, DeploymentMode::Paper)
+}
+
+#[cfg(test)]
+mod patch15_reconcile_supervision_scope_tests {
+    use super::*;
+
+    #[test]
+    fn patch15_reconcile_supervision_scope_is_paper_only() {
+        assert!(reconcile_supervision_is_paper_only(DeploymentMode::Paper));
+        assert!(!reconcile_supervision_is_paper_only(
+            DeploymentMode::LiveShadow
+        ));
+        assert!(!reconcile_supervision_is_paper_only(
+            DeploymentMode::LiveCapital
+        ));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01
 // ---------------------------------------------------------------------------
@@ -1986,11 +2009,14 @@ impl AppState {
                 settle_fn,
                 RECONCILE_TICK_INTERVAL,
             );
-            // M1-RECONCILE-TASK-OWNERSHIP-AND-SUPERVISION-01: give this
-            // run explicit ownership of its reconcile task instead of
-            // leaving the JoinHandle fully detached.
-            self.install_reconcile_task_owner(run_id, reconcile_handle)
-                .await;
+            // M1-RECONCILE-SUPERVISION-PAPER-SCOPE-01: only Paper
+            // receives the new run-scoped ownership/watchdog semantics.
+            // Dropping the JoinHandle in non-Paper modes preserves the
+            // pre-wave detached reconcile-task behavior there.
+            if reconcile_supervision_is_paper_only(self.deployment_mode()) {
+                self.install_reconcile_task_owner(run_id, reconcile_handle)
+                    .await;
+            }
         }
 
         let snapshot = StatusSnapshot {
