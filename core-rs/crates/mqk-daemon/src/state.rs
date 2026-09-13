@@ -6912,21 +6912,44 @@ mod tests {
         AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca)
     }
 
-    /// M1-WS-DB-PROOF-HARDENING-01.
+    /// M1-TEST-DB-EXACT-AUTHORITY-01 (Correction K).
+    ///
+    /// Structural authority for `MQK_DATABASE_URL`, replacing a prior
+    /// substring check (`url.contains(":5434")`) that a crafted URL such as
+    /// `postgresql://127.0.0.1:5440/miniquantdesk_paper?application_name=:5434`
+    /// could satisfy while actually resolving to Paper. Accepts a URL only
+    /// when it structurally parses to host in {127.0.0.1, localhost}, port
+    /// exactly 5434, and database exactly `mqk_test` -- nothing in a query,
+    /// username, or password component can manufacture authority. A parse
+    /// failure refuses (fail closed), never panics.
+    fn m1_is_accepted_isolated_test_db_url(url: &str) -> bool {
+        let Ok(opts) = url.parse::<sqlx::postgres::PgConnectOptions>() else {
+            return false;
+        };
+        matches!(opts.get_host(), "127.0.0.1" | "localhost")
+            && opts.get_port() == 5434
+            && opts.get_database() == Some("mqk_test")
+    }
+
+    /// M1-WS-DB-PROOF-HARDENING-01 / M1-TEST-DB-EXACT-AUTHORITY-01.
     ///
     /// Skip is only safe in two cases: no `MQK_DATABASE_URL` at all (a local
-    /// no-DB invocation), or one that does not name the accepted isolated
-    /// test DB (:5434) -- refuse rather than risk touching Paper (:5440) or
-    /// Live (:5432). Once :5434 is explicitly named, a connection failure
-    /// must fail the test, not silently skip it: a silently-skipped "OK"
-    /// result on a broken local Postgres is not positive DB proof.
+    /// no-DB invocation), or one that does not structurally resolve to the
+    /// accepted isolated test DB -- refuse rather than risk touching Paper
+    /// (:5440) or Live (:5432). Once the accepted identity is explicitly
+    /// named, a connection failure must fail the test, not silently skip
+    /// it: a silently-skipped "OK" result on a broken local Postgres is not
+    /// positive DB proof.
     async fn m1_db_pool_or_skip(label: &str) -> Option<PgPool> {
         let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
             eprintln!("{label}: MQK_DATABASE_URL not set; skipped");
             return None;
         };
-        if !url.contains(":5434") {
-            eprintln!("{label}: MQK_DATABASE_URL must be the port-5434 local test DB; skipped");
+        if !m1_is_accepted_isolated_test_db_url(&url) {
+            eprintln!(
+                "{label}: MQK_DATABASE_URL must structurally resolve to the accepted \
+                 isolated test DB (127.0.0.1|localhost:5434/mqk_test); skipped"
+            );
             return None;
         }
         Some(m1_connect_or_fail_closed(&url, label).await)
@@ -6963,6 +6986,82 @@ mod tests {
             "h01_test",
         )
         .await;
+    }
+
+    // -------------------------------------------------------------------
+    // M1-TEST-DB-EXACT-AUTHORITY-01 (Correction K)
+    // -------------------------------------------------------------------
+    //
+    // K05 is the load-bearing adversarial case: a query parameter carrying
+    // the literal text ":5434" on a URL that actually targets Paper (5440)
+    // must never manufacture authority. This is exactly what the prior
+    // `url.contains(":5434")` substring check would have gotten wrong.
+    //
+    // K10 (exact accepted identity but server unreachable => hard failure,
+    // never skip) is proven by composition rather than a dedicated live
+    // test: case K01 below proves the literal accepted URL
+    // ("postgresql://127.0.0.1:5434/mqk_test") passes authority, and H01
+    // above proves `m1_connect_or_fail_closed` panics on ANY connection
+    // failure -- its body has no url-shape-conditional branching, so H01's
+    // proof already covers this exact url. A dedicated live test would only
+    // add nondeterminism (pass/fail depending on whether mqk-test-postgres
+    // happens to be running in this environment) without proving anything
+    // new; CLAUDE.md's determinism invariant outranks test count here.
+    #[test]
+    fn k01_to_k09_structural_test_db_authority_table() {
+        let cases: &[(&str, bool, &str)] = &[
+            (
+                "postgresql://127.0.0.1:5434/mqk_test",
+                true,
+                "K01: 127.0.0.1:5434/mqk_test must accept",
+            ),
+            (
+                "postgresql://localhost:5434/mqk_test",
+                true,
+                "K02: localhost:5434/mqk_test must accept",
+            ),
+            (
+                "postgresql://127.0.0.1:5440/miniquantdesk_paper",
+                false,
+                "K03: Paper (5440) must refuse",
+            ),
+            (
+                "postgresql://127.0.0.1:5432/miniquantdesk_live",
+                false,
+                "K04: Live (5432) must refuse",
+            ),
+            (
+                "postgresql://127.0.0.1:5440/miniquantdesk_paper?application_name=:5434",
+                false,
+                "K05: a query param containing the literal text ':5434' on a \
+                 Paper (5440) URL must never manufacture authority",
+            ),
+            (
+                "postgresql://remote.example.com:5434/mqk_test",
+                false,
+                "K06: a remote host on port 5434 must refuse",
+            ),
+            (
+                "postgresql://127.0.0.1:5434/not_mqk_test",
+                false,
+                "K07: the wrong database name on the right host/port must refuse",
+            ),
+            (
+                "not a url at all",
+                false,
+                "K08: a malformed URL must refuse, not panic",
+            ),
+            (
+                "postgresql://user%3A5434:pw@127.0.0.1:5440/mqk_test",
+                false,
+                "K09: a username containing the literal text ':5434' while the \
+                 actual port is 5440 must refuse",
+            ),
+        ];
+
+        for (url, expected, msg) in cases {
+            assert_eq!(m1_is_accepted_isolated_test_db_url(url), *expected, "{msg}");
+        }
     }
 
     // A03: a terminal outer-task exit must force continuity to GapDetected
