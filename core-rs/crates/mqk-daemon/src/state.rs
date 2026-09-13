@@ -7176,10 +7176,8 @@ mod tests {
     // the overlay must never affect their NotApplicable continuity.
     #[tokio::test]
     async fn f08_non_alpaca_broker_continuity_remains_not_applicable() {
-        let state = AppState::new_for_test_with_mode_and_broker(
-            DeploymentMode::Paper,
-            BrokerKind::Paper,
-        );
+        let state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Paper);
         assert!(matches!(
             state.alpaca_ws_continuity().await,
             AlpacaWsContinuityState::NotApplicable
@@ -7224,11 +7222,13 @@ mod tests {
         // Hold a row lock on the seeded adapter row from a separate
         // transaction so the daemon's own upsert blocks on it.
         let mut lock_tx = pool.begin().await.expect("F10: begin lock transaction");
-        sqlx::query("SELECT cursor_value FROM broker_event_cursor WHERE adapter_id = $1 FOR UPDATE")
-            .bind(adapter_id)
-            .fetch_one(&mut *lock_tx)
-            .await
-            .expect("F10: lock query must succeed");
+        sqlx::query(
+            "SELECT cursor_value FROM broker_event_cursor WHERE adapter_id = $1 FOR UPDATE",
+        )
+        .bind(adapter_id)
+        .fetch_one(&mut *lock_tx)
+        .await
+        .expect("F10: lock query must succeed");
 
         let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(
             pool.clone(),
@@ -7367,7 +7367,9 @@ mod tests {
         let Some(pool) = m1_db_pool_or_skip("m1_gap_cursor_persist").await else {
             return;
         };
-        eprintln!("m1_gap_cursor_persist: H04 positive indicator -- executing the real DB-backed branch");
+        eprintln!(
+            "m1_gap_cursor_persist: H04 positive indicator -- executing the real DB-backed branch"
+        );
 
         let adapter_id = format!("m1-gap-cursor-persist-{}", Uuid::new_v4());
 
@@ -7403,8 +7405,10 @@ mod tests {
         let cursor_json = mqk_db::load_broker_cursor(&pool, state.adapter_id())
             .await
             .expect("load_broker_cursor query must succeed")
-            .expect("a gap cursor must have actually been persisted under THIS \
-                     execution's unique adapter_id");
+            .expect(
+                "a gap cursor must have actually been persisted under THIS \
+                     execution's unique adapter_id",
+            );
         let cursor: AlpacaFetchCursor =
             serde_json::from_str(&cursor_json).expect("persisted cursor must be valid JSON");
         assert!(
