@@ -6912,6 +6912,14 @@ mod tests {
         AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca)
     }
 
+    /// M1-WS-DB-PROOF-HARDENING-01.
+    ///
+    /// Skip is only safe in two cases: no `MQK_DATABASE_URL` at all (a local
+    /// no-DB invocation), or one that does not name the accepted isolated
+    /// test DB (:5434) -- refuse rather than risk touching Paper (:5440) or
+    /// Live (:5432). Once :5434 is explicitly named, a connection failure
+    /// must fail the test, not silently skip it: a silently-skipped "OK"
+    /// result on a broken local Postgres is not positive DB proof.
     async fn m1_db_pool_or_skip(label: &str) -> Option<PgPool> {
         let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
             eprintln!("{label}: MQK_DATABASE_URL not set; skipped");
@@ -6921,17 +6929,40 @@ mod tests {
             eprintln!("{label}: MQK_DATABASE_URL must be the port-5434 local test DB; skipped");
             return None;
         }
+        Some(m1_connect_or_fail_closed(&url, label).await)
+    }
+
+    /// Split out from `m1_db_pool_or_skip` so the panic-on-failure behavior
+    /// itself is directly testable (H01) without depending on whether a real
+    /// :5434 server happens to be reachable.
+    async fn m1_connect_or_fail_closed(url: &str, label: &str) -> PgPool {
         match sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
-            .connect(&url)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(url)
             .await
         {
-            Ok(pool) => Some(pool),
-            Err(e) => {
-                eprintln!("{label}: could not connect to MQK_DATABASE_URL: {e}; skipped");
-                None
-            }
+            Ok(pool) => pool,
+            Err(e) => panic!(
+                "{label}: MQK_DATABASE_URL explicitly targets the accepted isolated \
+                 test DB (:5434) but the connection failed -- this must fail the \
+                 test, not skip it (M1-WS-DB-PROOF-HARDENING-01): {e}"
+            ),
         }
+    }
+
+    // H01: once :5434 is explicitly configured, a connection failure must
+    // fail the test outright, never silently skip it. Uses an address
+    // nothing listens on so the failure is deterministic regardless of
+    // whether a real :5434 test DB happens to be running elsewhere.
+    #[tokio::test]
+    #[should_panic(expected = "M1-WS-DB-PROOF-HARDENING-01")]
+    async fn h01_5434_configured_but_unreachable_must_fail_not_skip() {
+        let _ = m1_connect_or_fail_closed(
+            "postgresql://postgres:postgres@127.0.0.1:1/mqk_h01_unreachable",
+            "h01_test",
+        )
+        .await;
     }
 
     // A03: a terminal outer-task exit must force continuity to GapDetected
@@ -7323,18 +7354,47 @@ mod tests {
     // Positive DB proof (mqd-test-proof requirement): prove the gap cursor
     // is ACTUALLY persisted with the expected detail, not merely that no
     // error was returned. Isolated port-5434 test DB only; skipped (never a
-    // hard failure) when unavailable.
+    // hard failure other than H01's unreachable-:5434 case) when unavailable.
+    //
+    // H02/H03 (M1-WS-DB-PROOF-HARDENING-01): uses a per-execution-unique
+    // adapter_id (not a fixed literal) so a stale row from a prior test run
+    // under the same adapter_id can never satisfy this readback. Also seeds
+    // a noise row under a DIFFERENT adapter_id carrying the exact same
+    // detail text this test looks for, and confirms the readback is scoped
+    // to THIS execution's adapter_id only (cross-adapter isolation, H02).
     #[tokio::test]
     async fn m1_gap_cursor_is_actually_persisted_to_db() {
         let Some(pool) = m1_db_pool_or_skip("m1_gap_cursor_persist").await else {
             return;
         };
+        eprintln!("m1_gap_cursor_persist: H04 positive indicator -- executing the real DB-backed branch");
+
+        let adapter_id = format!("m1-gap-cursor-persist-{}", Uuid::new_v4());
+
+        // H02 noise: a different adapter_id with a row that would satisfy
+        // the assertion below if the readback were not correctly scoped.
+        let noise_adapter_id = format!("m1-gap-cursor-persist-noise-{}", Uuid::new_v4());
+        let noise_cursor = AlpacaFetchCursor::gap_detected(
+            None,
+            None,
+            None,
+            "alpaca_ws: outer task terminated unexpectedly",
+        );
+        mqk_db::advance_broker_cursor(
+            &pool,
+            &noise_adapter_id,
+            &serde_json::to_string(&noise_cursor).expect("H02: serialize noise cursor"),
+            Utc::now(),
+        )
+        .await
+        .expect("H02: seed noise row write must succeed");
+
         let mut state = AppState::new_for_test_with_db_mode_and_broker(
             pool.clone(),
             DeploymentMode::Paper,
             BrokerKind::Alpaca,
         );
-        state.set_adapter_id_for_test("m1_alpaca_ws_terminal_task_test");
+        state.set_adapter_id_for_test(&adapter_id);
 
         state
             .mark_alpaca_ws_task_exited("outer task panicked (db proof)".to_string())
@@ -7343,7 +7403,8 @@ mod tests {
         let cursor_json = mqk_db::load_broker_cursor(&pool, state.adapter_id())
             .await
             .expect("load_broker_cursor query must succeed")
-            .expect("a gap cursor must have actually been persisted");
+            .expect("a gap cursor must have actually been persisted under THIS \
+                     execution's unique adapter_id");
         let cursor: AlpacaFetchCursor =
             serde_json::from_str(&cursor_json).expect("persisted cursor must be valid JSON");
         assert!(
@@ -7355,6 +7416,19 @@ mod tests {
             "positive DB proof: the persisted cursor must actually carry GapDetected \
              with the outer-task-death detail; got: {:?}",
             cursor.trade_updates
+        );
+
+        // H02: the noise row under a different adapter_id must be entirely
+        // untouched by this test's write (proves the write path is scoped
+        // per-adapter, not a coincidence of the assertion above).
+        let noise_json = mqk_db::load_broker_cursor(&pool, &noise_adapter_id)
+            .await
+            .expect("H02: noise row load must succeed")
+            .expect("H02: noise row must still exist, untouched");
+        assert_eq!(
+            noise_json,
+            serde_json::to_string(&noise_cursor).expect("H02: re-serialize noise cursor"),
+            "H02: a different adapter_id's row must be unaffected by this test's write"
         );
     }
 
