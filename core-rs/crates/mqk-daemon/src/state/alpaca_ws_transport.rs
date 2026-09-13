@@ -178,6 +178,14 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
 /// as expected shutdown, never as a critical failure — this is what lets a
 /// future clean-shutdown path abort the task without manufacturing a false
 /// alert.
+///
+/// M1-CRITICAL-TASK-BOUNDED-DIAGNOSTICS-01: the `detail` passed to
+/// `mark_alpaca_ws_task_exited` becomes durable autonomous-session truth
+/// (readiness/preflight/alert-facing operator evidence). A panic payload is
+/// not bounded operator authority — it may contain arbitrary text from
+/// wherever the panic originated. The raw `JoinError` (panic payload
+/// included) is logged locally via `tracing::error!` only; the value handed
+/// to `mark_alpaca_ws_task_exited` is always fixed, bounded text.
 pub async fn supervise_alpaca_ws_terminal_task(state: Arc<AppState>, handle: JoinHandle<()>) {
     let result = handle.await;
     let detail = match &result {
@@ -191,7 +199,17 @@ pub async fn supervise_alpaca_ws_terminal_task(state: Arc<AppState>, handle: Joi
             );
             return;
         }
-        Err(e) => format!("alpaca_ws: outer transport task panicked: {e}"),
+        Err(e) => {
+            // Raw panic payload: local trace log only, never durable truth.
+            tracing::error!(
+                error = %e,
+                "alpaca_ws: outer transport task panicked (raw detail is local-log-only; \
+                 M1-CRITICAL-TASK-BOUNDED-DIAGNOSTICS-01)"
+            );
+            "alpaca_ws: outer transport task panicked (raw panic detail withheld from \
+             durable truth; see local trace logs)"
+                .to_string()
+        }
     };
     tracing::error!(
         detail = %detail,
@@ -1485,6 +1503,61 @@ mod tests {
             state.autonomous_session_truth().await,
             AutonomousSessionTruth::AlpacaWsTransportExited { .. }
         ));
+    }
+
+    // G01 (M1-CRITICAL-TASK-BOUNDED-DIAGNOSTICS-01): a panic payload must
+    // never reach durable operator truth -- only fixed, bounded text may.
+    #[tokio::test]
+    async fn g01_panic_payload_sentinel_never_reaches_durable_truth() {
+        const SENTINEL: &str = "M1_SECRET_SENTINEL_DO_NOT_SURFACE";
+        let state = paper_alpaca_state();
+        let handle = tokio::spawn(async move {
+            panic!("{SENTINEL}");
+        });
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+
+        // Sanity: the failure was still detected and fails closed.
+        assert!(matches!(
+            state.alpaca_ws_continuity().await,
+            AlpacaWsContinuityState::GapDetected { .. }
+        ));
+
+        let truth = state.autonomous_session_truth().await;
+        match &truth {
+            AutonomousSessionTruth::AlpacaWsTransportExited { detail } => {
+                assert!(
+                    !detail.contains(SENTINEL),
+                    "G01: durable truth detail must never contain the raw panic \
+                     payload; got: {detail}"
+                );
+            }
+            other => panic!("G01: expected AlpacaWsTransportExited; got: {other:?}"),
+        }
+    }
+
+    // G03: a normal (non-panic) unexpected return must produce the same
+    // fixed, bounded outward classification -- proving the outward text is
+    // uniform static content, never derived from a dynamic/error value.
+    #[tokio::test]
+    async fn g03_normal_return_also_uses_bounded_outward_text() {
+        let state = paper_alpaca_state();
+        let handle = tokio::spawn(async {});
+
+        supervise_alpaca_ws_terminal_task(Arc::clone(&state), handle).await;
+
+        let truth = state.autonomous_session_truth().await;
+        match &truth {
+            AutonomousSessionTruth::AlpacaWsTransportExited { detail } => {
+                assert_eq!(
+                    detail,
+                    "alpaca_ws: outer transport task returned unexpectedly (the reconnect \
+                     loop is designed to run forever)",
+                    "G03: normal-return detail text must be the fixed bounded string"
+                );
+            }
+            other => panic!("G03: expected AlpacaWsTransportExited; got: {other:?}"),
+        }
     }
 
     // A05: an explicitly cancelled (aborted) handle is expected shutdown, not

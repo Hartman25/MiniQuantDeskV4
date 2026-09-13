@@ -7441,6 +7441,33 @@ mod tests {
         assert!(state.integrity.read().await.disarmed);
     }
 
+    // G02 (M1-CRITICAL-TASK-BOUNDED-DIAGNOSTICS-01): a panic payload in the
+    // reconcile-tick task must never reach the durable reconcile snapshot
+    // note -- only fixed, bounded text may.
+    #[tokio::test]
+    async fn g02_reconcile_panic_payload_sentinel_never_reaches_snapshot_note() {
+        const SENTINEL: &str = "M1_SECRET_SENTINEL_DO_NOT_SURFACE";
+        let state = m1b_fresh_state();
+        let run_id = Uuid::new_v4();
+        let handle = tokio::spawn(async move {
+            panic!("{SENTINEL}");
+        });
+        state.install_reconcile_task_owner(run_id, handle).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Sanity: the failure was still detected and fails closed.
+        assert!(state.integrity.read().await.halted);
+        assert!(state.integrity.read().await.disarmed);
+
+        let snapshot = state.current_reconcile_snapshot().await;
+        let note = snapshot.note.unwrap_or_default();
+        assert!(
+            !note.contains(SENTINEL),
+            "G02: reconcile snapshot note must never contain the raw panic \
+             payload; got: {note}"
+        );
+    }
+
     // B08 / B09: installing a new owner must supersede (abort) the prior
     // one -- a restart can never inherit a stale owner, and a duplicate
     // spawn can never leave two active workers.

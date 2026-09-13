@@ -2295,12 +2295,26 @@ pub(super) async fn supervise_reconcile_terminal_task(
         return;
     }
 
+    // M1-CRITICAL-TASK-BOUNDED-DIAGNOSTICS-01: `detail` here becomes the
+    // reconcile snapshot's durable operator-facing `note`. A raw panic
+    // payload is not bounded operator authority -- it is logged locally via
+    // `tracing::error!` only, never folded into `detail`/`note`.
     let detail = match &result {
         Ok(()) => {
             "reconcile tick task returned unexpectedly (the tick loop is designed to run forever)"
                 .to_string()
         }
-        Err(e) => format!("reconcile tick task panicked: {e}"),
+        Err(e) => {
+            tracing::error!(
+                run_id = %run_id,
+                error = %e,
+                "reconcile_tick: task panicked (raw detail is local-log-only; \
+                 M1-CRITICAL-TASK-BOUNDED-DIAGNOSTICS-01)"
+            );
+            "reconcile tick task panicked (raw panic detail withheld from durable truth; \
+             see local trace logs)"
+                .to_string()
+        }
     };
     tracing::error!(
         run_id = %run_id,
