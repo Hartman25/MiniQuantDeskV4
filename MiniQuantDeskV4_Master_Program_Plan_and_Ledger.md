@@ -414,6 +414,272 @@ Moving an item from `MILESTONE_CANDIDATE` or `OPTIONAL_V4` to `MILESTONE_REQUIRE
 | `ML-SIGNAL-01` | Specialist ML signal scoring | Research layer | `RESEARCH_HYPOTHESIS` | Potential research model for candidate scoring. | Never direct Live execution authority. |
 | `ML-COUNCIL-01` | Multi-agent/model signal council | Research layer | `RESEARCH_HYPOTHESIS` | Explore ensemble/specialist research decisions without giving LLMs unilateral broker authority. | Research-only unless separately promoted through normal evidence gates. |
 | `STRAT-TIME-FILTER-01` | Time-of-day trading filters | Research campaigns | `RESEARCH_HYPOTHESIS` | Can test whether opening volatility or other intraday windows degrade a particular strategy. | Strategy hypothesis, not platform infrastructure. |
+| `MOBILE-OPERATOR-COMPANION-01` | MiniQuantDesk Mobile / Operator Companion — Windows-first iPhone/iPad/Android companion using React Native + Expo + TypeScript + EAS | Post-V4 companion product; may consume M9/M10 operator/read APIs | `POST_V4` | Preserve a mobile observability/alerts/portfolio/risk/operator-status path without creating a second trading engine. | Does not block V4. Backend remains authoritative; dangerous actions require explicit server-side fail-closed authorization. |
+
+### I2A. Windows → Apple App Development Plan — `MOBILE-OPERATOR-COMPANION-01`
+
+**Status:** NOT STARTED / PLANNED
+**Milestone mapping:** POST-V4 companion product; may consume operator/read surfaces built during M9/M10, but does not block any V4 milestone.
+**Disposition:** `POST_V4`
+**Invariant:** The mobile application is an operator/observability client. It must never become a second trading engine or an alternate source of trading truth.
+**Dependency:** Stable authenticated MiniQuantDesk operator/read APIs; backend remains authoritative for all economic and safety state.
+**Acceptance / finish condition:** A bounded mobile V1 can be built, tested, and distributed without changing trading authority, with all dangerous actions authenticated and authorized fail-closed by the server.
+**Implementation status:** NOT STARTED.
+**Proof / commit:** None yet; this entry preserves the approved future development plan only.
+
+#### Goal
+
+Build one or more iPhone/iPad applications for MiniQuantDeskV4 and/or related personal infrastructure projects while continuing to use the Windows laptop as the primary development machine.
+
+For MiniQuantDesk, the preferred first product is:
+
+`MiniQuantDesk Mobile / Operator Companion`
+
+The initial product should emphasize observability, alerts, portfolio/risk/operator status, and tightly controlled operator actions rather than reproducing the entire desktop product.
+
+#### Recommended technical stack
+
+Use:
+
+```text
+TypeScript
+React Native
+Expo
+GitHub
+Expo EAS Build
+```
+
+Primary development remains on Windows.
+
+Apple-specific compiling and signing occur remotely on macOS infrastructure through Expo EAS. Under this plan, a Mac is therefore not required for normal day-to-day development.
+
+#### Development flow
+
+```text
+Windows laptop
+    |
+    +-- VS Code / Claude Code
+    +-- TypeScript
+    +-- React Native
+    +-- Expo
+    +-- Git
+    |
+    v
+GitHub repository
+    |
+    v
+Expo EAS Build
+    |
+    +-- cloud macOS
+    +-- Xcode
+    +-- Apple signing
+    |
+    v
+iPhone / iPad build
+    |
+    +-- development testing
+    +-- TestFlight
+    +-- App Store
+```
+
+#### Testing
+
+Use a physical iPhone as the primary iOS test device.
+
+For early/simple development:
+
+`Expo Go`
+
+For applications that require custom native capabilities:
+
+`Expo Development Build`
+
+This avoids depending on the Apple iOS Simulator from the Windows development machine.
+
+#### Publishing
+
+The Windows machine remains the primary workflow controller.
+
+Expo EAS may be used to:
+
+- build the signed iOS application;
+- produce the `.ipa`;
+- upload builds to TestFlight / App Store Connect.
+
+An Apple Developer account will eventually be required for normal TestFlight/App Store distribution.
+
+#### Why this stack
+
+React Native + Expo is preferred because:
+
+- it works well with a Windows-first development workflow;
+- one codebase can support iPhone and Android;
+- TypeScript/React fits the existing development ecosystem;
+- the ecosystem and library surface are large;
+- cloud iOS builds remove the immediate need for a Mac;
+- GitHub/Claude workflows remain normal;
+- tablet and selected web targets may be added later where useful.
+
+#### MiniQuantDesk mobile capability envelope
+
+Potential V1/V2 capabilities include:
+
+- dashboard;
+- Paper status;
+- Live status;
+- portfolio;
+- P&L;
+- orders;
+- fills;
+- strategy status;
+- risk state;
+- alerts;
+- incidents;
+- runtime/system health.
+
+The architectural boundary is:
+
+```text
+Mobile App
+    |
+    v
+authenticated operator/read API
+    |
+    v
+MiniQuantDesk daemon / authoritative backend
+```
+
+The phone must **not** become a second trading engine.
+
+MiniQuantDesk backend authority remains canonical for:
+
+- orders;
+- fills;
+- positions;
+- cash / P&L;
+- risk;
+- strategy state;
+- Paper/Live authority;
+- runtime ownership;
+- reconciliation;
+- broker/account identity.
+
+The app should primarily provide:
+
+- visibility;
+- alerts;
+- review;
+- tightly controlled operator actions.
+
+Any dangerous operation — including Live arm, flatten, halt override, capital/risk changes, or similar actions — must require explicit authentication and must still pass fail-closed server-side authorization. Passing a mobile UI check must never itself grant execution authority.
+
+#### Cross-project Jellyfin_Automation companion note
+
+A separate future application may be built for the media-server project:
+
+`Hartman Media / Server Companion`
+
+Potential capabilities include:
+
+- server status;
+- library status;
+- recent intake;
+- failed items;
+- inventory/reconciliation status;
+- storage health;
+- VPN/qBittorrent status;
+- alerts;
+- media search;
+- admin functions.
+
+A larger future version could potentially become a custom media client/front end.
+
+Preferred architecture:
+
+```text
+Mobile App
+    |
+    +-- Jellyfin API
+    |
+    +-- Jellyfin_Automation API/status service
+    |
+    v
+Windows media server
+```
+
+The Jellyfin_Automation backend/filesystem remains authoritative. The mobile application must not directly manipulate files on `Z:\`.
+
+This Jellyfin application is **not MiniQuantDeskV4 scope**. It is preserved here only as a cross-project development-plan note and belongs in the Jellyfin_Automation planning ledger if implementation begins.
+
+#### One codebase or two?
+
+Do **not** combine MiniQuantDesk and Jellyfin into one application.
+
+If both products are built, use separate apps/repos:
+
+```text
+MiniQuantDesk-Mobile
+Hartman-Media-Mobile
+```
+
+They solve materially different security and operational problems.
+
+Both may use the same technical stack:
+
+```text
+React Native
+Expo
+TypeScript
+EAS
+```
+
+#### Cross-platform benefit
+
+Each application's codebase may eventually target:
+
+- iPhone;
+- iPad;
+- Android phones;
+- Android tablets;
+- selected web functionality where appropriate.
+
+Building an Apple application therefore does not require locking the project into Apple-only development.
+
+#### What is not required now
+
+Do not acquire or introduce these merely to begin the companion-app work:
+
+- MacBook;
+- Hackintosh;
+- local Xcode;
+- local iOS Simulator;
+- Swift-only codebase;
+- separate Android and iPhone codebases.
+
+These remain later options if a future application requires deep Apple-native functionality that the chosen stack cannot satisfy cleanly.
+
+#### Recommended implementation plan
+
+1. Decide which project receives the first mobile application.
+2. Freeze a small V1 feature set.
+3. Create the dedicated GitHub repository.
+4. Establish the React Native + Expo + TypeScript foundation.
+5. Build authenticated **read-only/status** API integration first.
+6. Test continuously on the physical iPhone.
+7. Add bounded safe operator/admin actions only after read-only truth is stable.
+8. Produce an EAS development build.
+9. Move to TestFlight.
+10. Publish through the App Store only if desired.
+
+For MiniQuantDesk, start with:
+
+`observability + alerts + portfolio/risk/operator status`
+
+For Jellyfin_Automation, start with:
+
+`server/intake/admin dashboard`
+
+Expand toward richer mobile functionality only after those foundations are reliable.
 
 ### I3. Multi-asset backlog disposition
 
