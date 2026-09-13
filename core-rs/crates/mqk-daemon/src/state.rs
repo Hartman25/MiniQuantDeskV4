@@ -6926,7 +6926,8 @@ mod tests {
         let Ok(opts) = url.parse::<sqlx::postgres::PgConnectOptions>() else {
             return false;
         };
-        matches!(opts.get_host(), "127.0.0.1" | "localhost")
+        opts.get_socket().is_none()
+            && matches!(opts.get_host(), "127.0.0.1" | "localhost")
             && opts.get_port() == 5434
             && opts.get_database() == Some("mqk_test")
     }
@@ -7008,7 +7009,7 @@ mod tests {
     // happens to be running in this environment) without proving anything
     // new; CLAUDE.md's determinism invariant outranks test count here.
     #[test]
-    fn k01_to_k09_structural_test_db_authority_table() {
+    fn k01_to_k11_structural_test_db_authority_table() {
         let cases: &[(&str, bool, &str)] = &[
             (
                 "postgresql://127.0.0.1:5434/mqk_test",
@@ -7056,6 +7057,12 @@ mod tests {
                 false,
                 "K09: a username containing the literal text ':5434' while the \
                  actual port is 5440 must refuse",
+            ),
+            (
+                "postgresql://127.0.0.1:5434/mqk_test?host=/var/run/postgresql",
+                false,
+                "K11: a Unix-domain socket override must refuse even when \
+                 host/port/database otherwise match the accepted test DB",
             ),
         ];
 
