@@ -135,6 +135,11 @@ function addOrFocusPanel(api: DockviewApi, id: ScreenKey) {
     component: "panelHost",
     title: meta?.title ?? id,
     params: { panelId: id } satisfies PanelHostParams,
+    // GUI-LAYOUT-06: enforces each panel's registry-declared minimum
+    // footprint (panelRegistry.ts) directly in dockview, so a panel can
+    // never be resized/split down to an unreadable sliver.
+    minimumWidth: meta?.minWidth,
+    minimumHeight: meta?.minHeight,
   });
 }
 
@@ -158,13 +163,7 @@ export interface WorkstationProps {
 
 function buildDefaultLayout(api: DockviewApi, initialPanelId: ScreenKey) {
   api.clear();
-  const meta = getPanelMetadata(initialPanelId);
-  api.addPanel({
-    id: initialPanelId,
-    component: "panelHost",
-    title: meta?.title ?? initialPanelId,
-    params: { panelId: initialPanelId } satisfies PanelHostParams,
-  });
+  addOrFocusPanel(api, initialPanelId);
 }
 
 /** Replaces the whole layout with exactly these panels, in order. Used by presets and by the pending-preset seed. */

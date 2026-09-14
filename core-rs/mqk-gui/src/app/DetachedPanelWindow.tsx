@@ -3,7 +3,7 @@
 // is rendered unconditionally, exactly as in the main desk-role windows —
 // detaching a panel never removes safety truth from view.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ScreenErrorBoundary } from "../components/common/ScreenErrorBoundary";
 import { GlobalStatusBar } from "../components/status/GlobalStatusBar";
 import { WorkspaceFrame } from "../components/layout/WorkspaceFrame";
@@ -14,10 +14,17 @@ import { useWorkspaceContext, WorkspaceScopeProvider } from "../features/workspa
 import { initialPanelLinkState, pinPanel, resolvePanelIdentity, unpinPanel, type PanelLinkState } from "../features/workspace/workspaceModel.ts";
 import type { DetachedPanelBootstrap } from "../features/workstation/detachedWindow";
 import { reattachAndClose } from "../features/workstation/detachedWindow";
+import { recoverCurrentWindowIfStranded } from "../features/workstation/windowRecovery";
 
 export function DetachedPanelWindow({ bootstrap }: { bootstrap: DetachedPanelBootstrap }) {
   const { model, refresh, selectTimeline, timelineLoading, runAction } = useOperatorModel();
   const workspace = useWorkspaceContext();
+
+  // GUI-LAYOUT-06: a detached window is exactly as susceptible to monitor
+  // loss as any other — validate its geometry once at startup too.
+  useEffect(() => {
+    void recoverCurrentWindowIfStranded();
+  }, []);
   // GUI-LAYOUT-05: seeded pinned if the panel was pinned at detach time —
   // same PanelLinkState model PanelHost uses, so pin/unpin behaves
   // identically whether the panel is docked or detached.

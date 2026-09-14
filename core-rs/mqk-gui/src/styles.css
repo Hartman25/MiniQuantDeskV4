@@ -16,6 +16,19 @@
   --shadow: 0 4px 20px rgba(0, 0, 0, 0.7);
   --content-pad: clamp(12px, 1.5vw, 22px);
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  /* GUI-LAYOUT-06: readable type scale. Applied to the highest-traffic,
+     safety/operator-facing text (Tier-0 status, panel/page titles, panel
+     descriptions) — not a blanket rewrite of every micro-label in the
+     stylesheet (dense chart tick/axis annotations intentionally stay small;
+     that is a data-density choice, not the "text too tiny to read"
+     complaint this scale addresses). */
+  --text-page-title: 26px;
+  --text-heading: 19px;
+  --text-primary-value: 17px;
+  --text-body: 15px;
+  --text-secondary: 13px;
+  --text-label-floor: 12px;
 }
 
 * {
@@ -38,6 +51,19 @@ input {
 
 button {
   cursor: pointer;
+}
+
+/* GUI-LAYOUT-06: guaranteed-visible keyboard focus ring for every
+   interactive control (panel actions — Detach/Pin/preset/saved-layout
+   buttons included — nav buttons, toggles), rather than relying on a
+   browser default that may not read clearly against this dark theme. Only
+   shown for keyboard/programmatic focus (:focus-visible), not mouse clicks. */
+button:focus-visible,
+select:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 h1,
@@ -250,11 +276,14 @@ ul {
 .check-card p {
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  font-size: 0.72rem;
+  /* GUI-LAYOUT-06: was 0.72rem (11.5px) — below the 12px readable floor for
+     operator-facing metadata (this includes the Tier-0 Heartbeat/Loop
+     Latency/Account/Config row in GlobalStatusBar). */
+  font-size: var(--text-label-floor);
 }
 
 .metric-value {
-  font-size: 0.88rem;
+  font-size: var(--text-secondary);
 }
 
 .workspace-layout {
@@ -401,6 +430,12 @@ ul {
   overflow: hidden;
 }
 
+/* GUI-LAYOUT-06: page title (browser default h2 ~24px already fell inside
+   the 24-28px target — made explicit/tokenized rather than left implicit). */
+.workspace-toolbar h2 {
+  font-size: var(--text-page-title);
+}
+
 .workspace-toolbar {
   padding: 10px 14px;
   display: flex;
@@ -437,6 +472,13 @@ ul {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
+}
+
+/* GUI-LAYOUT-06: panel/section title (browser default h3 ~18.7px already
+   fell inside the 18-20px target — made explicit/tokenized). Touches every
+   Tier-2 panel across the whole workstation via one selector. */
+.panel-head h3 {
+  font-size: var(--text-heading);
 }
 
 .panel-head-actions {

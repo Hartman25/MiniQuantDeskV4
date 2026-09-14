@@ -29,6 +29,7 @@ import {
   writePendingPresetPayload,
   type WorkstationPreset,
 } from "../features/workstation/presets";
+import { recoverCurrentWindowIfStranded, recoverWindowIfStranded } from "../features/workstation/windowRecovery";
 import { DetachedPanelWindow } from "./DetachedPanelWindow";
 import { formatDateTime } from "../lib/format";
 import type { DeskMode, DeskRole } from "./shellTypes";
@@ -109,6 +110,10 @@ async function ensureWindow(
 
   if (existing) {
     console.log(`${label} window already exists`);
+    // GUI-LAYOUT-06: re-validate this window's geometry every time it's
+    // re-surfaced — covers a monitor having disappeared (e.g. laptop
+    // undocked) while it sat hidden/behind other windows.
+    await recoverWindowIfStranded(existing);
     await existing.show();
     await existing.setFocus();
     return;
@@ -228,6 +233,13 @@ function ControlWorkstationShell() {
   useEffect(() => {
     window.localStorage.setItem(RIGHT_DRAWER_OPEN_STORAGE_KEY, String(rightDrawerOpen));
   }, [rightDrawerOpen]);
+
+  // GUI-LAYOUT-06: validate this window's own geometry once at startup —
+  // covers reopening after the monitor it was last placed on disappeared.
+  // No-ops outside Tauri and never moves a window that's already visible.
+  useEffect(() => {
+    void recoverCurrentWindowIfStranded();
+  }, []);
 
   const handleDeskModeChange = async (mode: DeskMode) => {
     setDeskMode(mode);
