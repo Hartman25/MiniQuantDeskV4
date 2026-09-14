@@ -34,7 +34,7 @@ import { ScreenErrorBoundary } from "../../components/common/ScreenErrorBoundary
 import { useWorkspaceContext, WorkspaceScopeProvider } from "../workspace/WorkspaceContext.tsx";
 import { initialPanelLinkState, parsePanelLinkStatePayload, pinPanel, resolvePanelIdentity, unpinPanel, type PanelLinkState } from "../workspace/workspaceModel.ts";
 import { getPanelMetadata, isKnownPanelId, panelRendererFor } from "./panelRegistry";
-import { detachPanel, REATTACH_EVENT } from "./detachedWindow";
+import { detachPanel, REATTACH_EVENT, resolveReattachCollision } from "./detachedWindow";
 import { APPLY_PRESET_EVENT, pendingPresetStorageKey, readPendingPresetPanelIds } from "./presets";
 import { containsDisallowedOperatorSingleton, panelAllowedInRole } from "./operatorSingletonGuard";
 import type { DeskRole } from "../../app/shellTypes";
@@ -184,6 +184,39 @@ function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole) {
     // backgrounded, so its local pin state survives a tab switch.
     renderer: panelRendererFor(id),
   });
+}
+
+/**
+ * WAVE-02-FINAL-REPAIR-01 R3 collision repair: the REATTACH_EVENT listener's
+ * own choke point, parallel to addOrFocusPanel but aware that a reattach may
+ * collide with an already-open local instance of the same panel id (see
+ * resolveReattachCollision in detachedWindow.ts for the collision policy).
+ * Stages `linkState` into `pendingLinkState` only immediately before a panel
+ * creation that will actually consume it — never before a focus-only
+ * short-circuit, which is what let the R3 bug's staged value survive to be
+ * consumed by a later, unrelated panel creation.
+ */
+function reattachOrReplacePanel(
+  api: DockviewApi,
+  id: ScreenKey,
+  role: DeskRole,
+  linkState: PanelLinkState,
+  pendingLinkState: Map<ScreenKey, PanelLinkState>,
+) {
+  if (!panelAllowedInRole(id, role)) return;
+  const existing = api.getPanel(id);
+  switch (resolveReattachCollision(existing !== undefined, id)) {
+    case "focus-existing-singleton":
+      existing?.api.setActive();
+      return;
+    case "replace-existing":
+      if (existing) api.removePanel(existing);
+      break;
+    case "create":
+      break;
+  }
+  pendingLinkState.set(id, linkState);
+  addOrFocusPanel(api, id, role);
 }
 
 function currentWindowLabelOrDefault(): string {
@@ -375,8 +408,13 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
             // (lose a pin) rather than smuggle in an unvalidated identity.
             // Staged in memory (never in dockview's params) so it seeds only
             // this one panel creation, not the auto-persisted layout.
-            pendingLinkStateRef.current.set(id, parsePanelLinkStatePayload(event.payload?.linkState));
-            addOrFocusPanel(api, id, role);
+            //
+            // WAVE-02-FINAL-REPAIR-01 R3 collision repair: routed through
+            // reattachOrReplacePanel (not addOrFocusPanel directly) so a
+            // collision with an already-open local instance of this panel id
+            // is resolved deterministically instead of staging a value that
+            // no panel creation goes on to consume.
+            reattachOrReplacePanel(api, id, role, parsePanelLinkStatePayload(event.payload?.linkState), pendingLinkStateRef.current);
           }
         });
         if (cancelled) stop();

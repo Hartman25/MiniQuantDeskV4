@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { panelWindowLabel, parsePanelIdFromLabel, readDetachedPanelBootstrap, detachPanel } from "../detachedWindow.ts";
+import { panelWindowLabel, parsePanelIdFromLabel, readDetachedPanelBootstrap, detachPanel, resolveReattachCollision } from "../detachedWindow.ts";
 import { PANEL_REGISTRY } from "../panelRegistry.ts";
+import { parsePanelLinkStatePayload, pinPanel, type WorkspaceIdentity } from "../../workspace/workspaceModel.ts";
 
 test("panelWindowLabel/parsePanelIdFromLabel round-trip for a known panel", () => {
   const label = panelWindowLabel("marketData");
@@ -66,4 +67,52 @@ test("readDetachedPanelBootstrap rejects a non-detachable (operator-singleton) p
 test("detachPanel refuses a non-detachable panel id even if called directly (defense in depth)", async () => {
   const result = await detachPanel("ops", "control", null);
   assert.deepEqual(result, { ok: false, reason: "error" });
+});
+
+// WAVE-02-FINAL-REPAIR-01 R3 collision repair: pendingLinkStateRef must
+// never survive the exact panel creation it belongs to. These cover the
+// collision-decision policy at resolveReattachCollision's own level (the
+// pure choke point Workstation.tsx's REATTACH_EVENT listener routes
+// through), matching Negative Controls A/C/D/E from the mission.
+
+test("resolveReattachCollision replaces an already-open ordinary panel instead of leaving it in place (control A/C: collision must not orphan the staged linkState)", () => {
+  assert.equal(PANEL_REGISTRY.marketData.detachable, true, "precondition: marketData is detachable/contextAware");
+  assert.equal(PANEL_REGISTRY.marketData.authority, "read-only");
+  assert.equal(resolveReattachCollision(true, "marketData"), "replace-existing");
+  // Same decision regardless of whether the reattaching linkState is pinned
+  // or Linked — the collision itself, not the payload's content, is what
+  // determines replacement.
+  assert.equal(resolveReattachCollision(true, "backtests"), "replace-existing");
+});
+
+test("resolveReattachCollision creates fresh when no local instance is open (the ordinary, non-colliding reattach path is unchanged)", () => {
+  assert.equal(resolveReattachCollision(false, "marketData"), "create");
+});
+
+test("a well-formed pinned linkState survives the collision/replace path unchanged (control A: reattaching AAPL pin over a local duplicate)", () => {
+  assert.equal(resolveReattachCollision(true, "marketData"), "replace-existing");
+  const identity: WorkspaceIdentity = {
+    symbol: "AAPL",
+    timeframe: null,
+    strategyId: null,
+    runId: null,
+    backtestJobId: null,
+    artifactId: null,
+    evaluationSlice: null,
+    executionDomain: null,
+  };
+  const linkState = parsePanelLinkStatePayload({ pinned: true, pinnedIdentity: identity });
+  assert.deepEqual(linkState, pinPanel(identity), "the validated pin must reach the replacement panel intact");
+});
+
+test("a malformed reattach linkState payload still fails closed on the collision/replace path (control D)", () => {
+  assert.equal(resolveReattachCollision(true, "marketData"), "replace-existing");
+  const linkState = parsePanelLinkStatePayload({ pinned: true, pinnedIdentity: { symbol: "AAPL", armed: true } });
+  assert.equal(linkState.pinned, false, "a smuggled/foreign payload must fail closed to unpinned, not partially trust it, even when the reattach also collides locally");
+});
+
+test("resolveReattachCollision never replaces an operator-singleton panel, collision or not (control E: ops behavior unchanged)", () => {
+  assert.equal(PANEL_REGISTRY.ops.authority, "operator-singleton");
+  assert.equal(resolveReattachCollision(true, "ops"), "focus-existing-singleton");
+  assert.equal(resolveReattachCollision(false, "ops"), "create");
 });

@@ -14,6 +14,7 @@
 
 import { isDesktopShell } from "../../desktop/bootstrap";
 import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
+import { isOperatorSingletonPanelId } from "./operatorSingletonGuard";
 import { centeredDefaultGeometry, reconcileWindowGeometry, toLogicalWindowGeometry, type MonitorDescriptor, type WindowGeometry } from "./monitorModel";
 import { parseWorkspaceIdentityPayload, type PanelLinkState, type WorkspaceIdentity } from "../workspace/workspaceModel.ts";
 import type { ScreenKey } from "../screens/screenRegistry";
@@ -169,4 +170,31 @@ export async function reattachAndClose(bootstrap: DetachedPanelBootstrap, linkSt
   } catch {
     // Best-effort: if emit/close fails (e.g. opener window gone), the operator can still close this window manually via the OS chrome.
   }
+}
+
+export type ReattachCollisionResolution = "create" | "replace-existing" | "focus-existing-singleton";
+
+/**
+ * WAVE-02-FINAL-REPAIR-01 R3 collision repair: decides what the opener's
+ * REATTACH_EVENT listener must do when a panel with the reattaching id is
+ * already open locally (e.g. the operator reopened Market Data in the
+ * opener while the detached instance was still live).
+ *
+ * Reattach means "move the detached panel back into its opener", so an
+ * existing local instance of an ordinary (non-singleton) panel is stale and
+ * must be replaced by the reattached one — never left standing while the
+ * reattach's linkState is staged for a panel creation that a
+ * focus-only/no-op path would then never trigger. That mismatch was exactly
+ * the R3 collision bug: the staged linkState survived in memory and was
+ * silently consumed by a later, unrelated creation of the same panel id.
+ *
+ * Operator-singleton panels are excluded from replacement: they are already
+ * non-detachable (panelRegistry.ts), so this collision cannot arise for them
+ * through any legitimate reattach, and an untrusted/malformed cross-window
+ * event must never be allowed to tear down and recreate an authority-class
+ * panel — it resolves to a focus-only no-op instead.
+ */
+export function resolveReattachCollision(panelExists: boolean, id: ScreenKey): ReattachCollisionResolution {
+  if (!panelExists) return "create";
+  return isOperatorSingletonPanelId(id) ? "focus-existing-singleton" : "replace-existing";
 }
