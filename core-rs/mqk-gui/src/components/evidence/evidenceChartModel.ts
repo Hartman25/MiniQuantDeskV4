@@ -31,7 +31,7 @@ import type {
   OrderRow,
   ParsedCsvResult,
 } from "../../features/backtests/types.ts";
-import { computeDrawdownSeries, manifestTimeframeLabel } from "../../features/backtests/parsers.ts";
+import { computeDrawdownSeries, manifestTimeframeLabel, reconcileIdentityField } from "../../features/backtests/parsers.ts";
 
 // ---------------------------------------------------------------------------
 // Status vocabulary
@@ -54,6 +54,13 @@ export type LaneStatus =
 export interface LaneProvenance {
   artifact: string;
   runId: string | null;
+  /**
+   * True when manifest.run_id and metrics.run_id both exist but disagree.
+   * `runId` is already null in that case (neither side is authoritative) —
+   * this flag lets the UI show "CONFLICT" instead of the indistinguishable
+   * "not reported" for a run that genuinely has no id anywhere.
+   */
+  runIdConflict: boolean;
   symbol: string | null;
   timeframe: string | null;
 }
@@ -108,7 +115,15 @@ function parseTsMs(ts: string | null | undefined): number | null {
 
 export interface EvidenceChartIdentity {
   runId: string | null;
-  strategyId: string | null;
+  /** manifest.run_id and metrics.run_id both exist and disagree — runId is null, never one side picked silently. */
+  runIdConflict: boolean;
+  /**
+   * Presentation label only (source: manifest.strategy_name / metrics.strategy_name).
+   * Never a durable strategy_id — this bundle carries no strategy_id source,
+   * so this field must not be consumed as one.
+   */
+  strategyName: string | null;
+  strategyNameConflict: boolean;
   symbols: string[];
   timeframeLabel: string | null;
   engineId: string | null;
@@ -119,9 +134,13 @@ function buildIdentity(
   manifest: BacktestManifest | null,
   metrics: BacktestMetrics | null,
 ): EvidenceChartIdentity {
+  const runIdField = reconcileIdentityField(manifest?.run_id, metrics?.run_id);
+  const strategyNameField = reconcileIdentityField(manifest?.strategy_name, metrics?.strategy_name);
   return {
-    runId: manifest?.run_id ?? metrics?.run_id ?? null,
-    strategyId: manifest?.strategy_name ?? metrics?.strategy_name ?? null,
+    runId: runIdField.value,
+    runIdConflict: runIdField.conflict,
+    strategyName: strategyNameField.value,
+    strategyNameConflict: strategyNameField.conflict,
     symbols: metrics?.symbols ?? [],
     timeframeLabel: manifestTimeframeLabel(manifest?.timeframe, manifest?.timeframe_secs),
     engineId: manifest?.engine_id ?? null,
@@ -156,15 +175,23 @@ function buildTimeRange(equityResult: FileResult<ParsedCsvResult<EquityCurveRow>
 
 /**
  * Maps a timestamp into [0, 1] within the chart's authoritative time range.
- * Returns null (never a guessed position) when the range or the timestamp
- * itself cannot be resolved to a finite instant.
+ * Returns null — meaning "do not plot", never a guessed/relocated position —
+ * whenever the event does not genuinely belong inside the plotted range:
+ *   - unparsable/missing timestamp or range (null inputs)
+ *   - reversed/invalid range (end before start) — fails closed entirely
+ *   - degenerate range (start == end) and the timestamp isn't that exact instant
+ *   - a real, known timestamp that falls outside [startMs, endMs]
+ * An out-of-range timestamp is a distinct fact from a missing one, and
+ * neither may be silently repositioned onto the chart's boundary — callers
+ * must render both as an explicit "not placed" notice, never drop them mute.
  */
 export function timeFraction(range: EvidenceChartTimeRange, tsMs: number | null): number | null {
   if (tsMs == null || range.startMs == null || range.endMs == null) return null;
-  if (range.endMs === range.startMs) return 0.5;
+  if (range.endMs < range.startMs) return null;
+  if (range.endMs === range.startMs) return tsMs === range.startMs ? 0.5 : null;
+  if (tsMs < range.startMs || tsMs > range.endMs) return null;
   const f = (tsMs - range.startMs) / (range.endMs - range.startMs);
-  if (!Number.isFinite(f)) return null;
-  return Math.min(1, Math.max(0, f));
+  return Number.isFinite(f) ? f : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +220,7 @@ function buildEquityLane(
   const provenance: LaneProvenance = {
     artifact: "equity_curve.csv",
     runId: identity.runId,
+    runIdConflict: identity.runIdConflict,
     symbol: identity.symbols.length > 0 ? identity.symbols.join(",") : null,
     timeframe: identity.timeframeLabel,
   };
@@ -222,6 +250,7 @@ function buildDrawdownLane(
   const provenance: LaneProvenance = {
     artifact: "equity_curve.csv (derived: drawdown)",
     runId: identity.runId,
+    runIdConflict: identity.runIdConflict,
     symbol: identity.symbols.length > 0 ? identity.symbols.join(",") : null,
     timeframe: identity.timeframeLabel,
   };
@@ -333,6 +362,7 @@ function buildOrderIntentLane(
       provenance: {
         artifact: "orders.csv",
         runId: identity.runId,
+        runIdConflict: identity.runIdConflict,
         symbol: r.symbol || null,
         timeframe: identity.timeframeLabel,
       },
@@ -369,6 +399,7 @@ function buildFillAndCostLanes(
     const provenance: LaneProvenance = {
       artifact: "fills.csv",
       runId: identity.runId,
+      runIdConflict: identity.runIdConflict,
       symbol: r.symbol || null,
       timeframe: identity.timeframeLabel,
     };

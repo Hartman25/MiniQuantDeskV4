@@ -126,6 +126,12 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
 
   const knownMarkers = allMarkers.filter((m) => m.timeStatus === "known");
   const unknownMarkers = allMarkers.filter((m) => m.timeStatus === "unknown");
+  // A known timestamp is not automatically plottable: timeFraction fails
+  // closed for a value genuinely outside the authoritative range. This is a
+  // distinct truth from "unknown/unparsable" and must never be conflated
+  // with it or silently dropped — it gets its own notice below.
+  const plottableMarkers = knownMarkers.filter((m) => timeFraction(model.timeRange, m.tsMs) != null);
+  const outOfRangeMarkers = knownMarkers.filter((m) => timeFraction(model.timeRange, m.tsMs) == null);
 
   const handleMouseMove = (e: MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -158,12 +164,14 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
         <div>
           <span>Run ID</span>
           <strong className="bt-mono-wrap" style={{ fontFamily: "monospace", fontSize: "0.8rem" }}>
-            {model.identity.runId ?? "not reported"}
+            {model.identity.runIdConflict ? "IDENTITY CONFLICT" : model.identity.runId ?? "not reported"}
           </strong>
         </div>
         <div>
           <span>Strategy</span>
-          <strong>{model.identity.strategyId ?? "not reported"}</strong>
+          <strong>
+            {model.identity.strategyNameConflict ? "IDENTITY CONFLICT" : model.identity.strategyName ?? "not reported"}
+          </strong>
         </div>
         <div>
           <span>Symbol(s)</span>
@@ -199,6 +207,19 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
               <span className="eyebrow">max drawdown (window)</span> {drawdownLine.max.toFixed(2)}%
             </span>
           )}
+        </div>
+      )}
+
+      {(model.identity.runIdConflict || model.identity.strategyNameConflict) && (
+        <div className="unavailable-notice" style={{ marginTop: 8 }}>
+          IDENTITY CONFLICT: manifest and metrics report different{" "}
+          {[
+            model.identity.runIdConflict ? "run_id" : null,
+            model.identity.strategyNameConflict ? "strategy_name" : null,
+          ]
+            .filter(Boolean)
+            .join(" and ")}{" "}
+          values for this run — neither is treated as authoritative provenance.
         </div>
       )}
 
@@ -251,7 +272,7 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
           <svg viewBox={`0 0 ${WIDTH} ${EVENTS_HEIGHT}`} preserveAspectRatio="none" className="evidence-chart-svg evidence-chart-events" aria-label="Order/fill/cost events">
             <rect x="0" y="0" width={WIDTH} height={EVENTS_HEIGHT} className="chart-bg" />
             <line x1={0} x2={WIDTH} y1={EVENTS_HEIGHT / 2} y2={EVENTS_HEIGHT / 2} className="chart-gridline" />
-            {knownMarkers.map((m) => {
+            {plottableMarkers.map((m) => {
               const f = timeFraction(model.timeRange, m.tsMs);
               if (f == null) return null;
               const x = f * WIDTH;
@@ -315,6 +336,13 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
         </div>
       )}
 
+      {outOfRangeMarkers.length > 0 && (
+        <div className="unavailable-notice" style={{ marginTop: 8 }}>
+          {outOfRangeMarkers.length} event(s) have a known timestamp outside the plotted time range and
+          are not placed on the chart (never relocated to the start/end): {outOfRangeMarkers.map((m) => m.id).join(", ")}
+        </div>
+      )}
+
       {selectedMarker && (
         <div className="evidence-chart-provenance timeline-meta-grid" style={{ marginTop: 10 }}>
           <div>
@@ -352,7 +380,7 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
           <div>
             <span>Run ID</span>
             <strong className="bt-mono-wrap" style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>
-              {selectedMarker.provenance.runId ?? "—"}
+              {selectedMarker.provenance.runIdConflict ? "IDENTITY CONFLICT" : selectedMarker.provenance.runId ?? "—"}
             </strong>
           </div>
         </div>

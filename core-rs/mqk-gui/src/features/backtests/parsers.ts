@@ -254,6 +254,37 @@ export function manifestTimeframeLabel(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-artifact identity reconciliation
+// ---------------------------------------------------------------------------
+
+export interface ReconciledIdentityField {
+  value: string | null;
+  conflict: boolean;
+}
+
+/**
+ * Reconciles one logical identity field (e.g. run_id, strategy_name) as
+ * independently reported by two artifacts (typically manifest vs metrics).
+ * Both absent -> absent. Exactly one present -> that value, honest but
+ * partial. Both present and equal -> authoritative. Both present and
+ * different -> neither is authoritative: value is null and conflict is
+ * true, so a caller can render "IDENTITY CONFLICT" instead of silently
+ * preferring one source over the other.
+ */
+export function reconcileIdentityField(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): ReconciledIdentityField {
+  const av = a ?? null;
+  const bv = b ?? null;
+  if (av == null && bv == null) return { value: null, conflict: false };
+  if (av == null) return { value: bv, conflict: false };
+  if (bv == null) return { value: av, conflict: false };
+  if (av === bv) return { value: av, conflict: false };
+  return { value: null, conflict: true };
+}
+
+// ---------------------------------------------------------------------------
 // GUI-BACKTEST-RUN-COMPARISON-01: side-by-side comparison snapshot
 // ---------------------------------------------------------------------------
 

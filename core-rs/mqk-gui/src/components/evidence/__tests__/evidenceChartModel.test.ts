@@ -348,7 +348,7 @@ test("H: authoritative empty orders.csv is distinct from unavailable orders.csv"
 test("identity is derived from manifest, falling back to metrics when manifest is unavailable", () => {
   const withManifest = buildEvidenceChartModel(baseBundle());
   assert.equal(withManifest.identity.runId, "run-1");
-  assert.equal(withManifest.identity.strategyId, "swing_momentum");
+  assert.equal(withManifest.identity.strategyName, "swing_momentum");
 
   const noManifest = buildEvidenceChartModel(baseBundle({ manifest: { kind: "missing" } }));
   assert.equal(noManifest.identity.runId, "run-1"); // falls back to metrics.run_id
@@ -395,7 +395,115 @@ test("timeFraction never guesses: unresolved range or timestamp yields null, not
   const resolvedRange = { status: "authoritative" as const, startTsUtc: "a", endTsUtc: "b", startMs: 0, endMs: 1000 };
   assert.equal(timeFraction(resolvedRange, null), null);
   assert.equal(timeFraction(resolvedRange, 500), 0.5);
-  // Out-of-range values are clamped, never extrapolated off-chart.
-  assert.equal(timeFraction(resolvedRange, -500), 0);
-  assert.equal(timeFraction(resolvedRange, 1500), 1);
+});
+
+// ---------------------------------------------------------------------------
+// OT-MQD-01R: timeFraction fail-closed chronology negative/positive controls.
+// An event outside the authoritative range must never be relocated onto the
+// chart boundary — it must not plot at all.
+// ---------------------------------------------------------------------------
+
+const RANGE_0_1000 = { status: "authoritative" as const, startTsUtc: "a", endTsUtc: "b", startMs: 0, endMs: 1000 };
+const REVERSED_RANGE = { status: "authoritative" as const, startTsUtc: "b", endTsUtc: "a", startMs: 1000, endMs: 0 };
+const DEGENERATE_RANGE = { status: "authoritative" as const, startTsUtc: "a", endTsUtc: "a", startMs: 500, endMs: 500 };
+
+test("A1: a timestamp before the range does not plot (never relocated to start)", () => {
+  assert.equal(timeFraction(RANGE_0_1000, -500), null);
+});
+
+test("A2: a timestamp after the range does not plot (never relocated to end)", () => {
+  assert.equal(timeFraction(RANGE_0_1000, 1500), null);
+});
+
+test("A3: a missing timestamp does not plot", () => {
+  assert.equal(timeFraction(RANGE_0_1000, null), null);
+});
+
+test("A4: a reversed/invalid range fails closed — no timestamp plots, including one inside the numeric bounds", () => {
+  assert.equal(timeFraction(REVERSED_RANGE, 500), null);
+  assert.equal(timeFraction(REVERSED_RANGE, 0), null);
+  assert.equal(timeFraction(REVERSED_RANGE, 1000), null);
+});
+
+test("A5: a degenerate range (start == end) does not plot a different timestamp", () => {
+  assert.equal(timeFraction(DEGENERATE_RANGE, 501), null);
+  assert.equal(timeFraction(DEGENERATE_RANGE, 499), null);
+});
+
+test("A6: exact range start resolves to fraction 0", () => {
+  assert.equal(timeFraction(RANGE_0_1000, 0), 0);
+});
+
+test("A7: exact range end resolves to fraction 1", () => {
+  assert.equal(timeFraction(RANGE_0_1000, 1000), 1);
+});
+
+test("A8: a midpoint timestamp resolves to the correct fractional position", () => {
+  assert.equal(timeFraction(RANGE_0_1000, 250), 0.25);
+  assert.equal(timeFraction(RANGE_0_1000, 750), 0.75);
+});
+
+test("A9: a degenerate range resolves the exact matching timestamp to the midpoint", () => {
+  assert.equal(timeFraction(DEGENERATE_RANGE, 500), 0.5);
+});
+
+// ---------------------------------------------------------------------------
+// OT-MQD-01R: identity provenance conflict — manifest vs metrics disagreement
+// must never silently pick a side.
+// ---------------------------------------------------------------------------
+
+test("B1: matching manifest/metrics run_id is accepted as authoritative", () => {
+  const model = buildEvidenceChartModel(baseBundle());
+  assert.equal(model.identity.runId, "run-1");
+  assert.equal(model.identity.runIdConflict, false);
+});
+
+test("B2: manifest-only run_id is honest but partial", () => {
+  const model = buildEvidenceChartModel(baseBundle({ metrics: { kind: "missing" } }));
+  assert.equal(model.identity.runId, "run-1");
+  assert.equal(model.identity.runIdConflict, false);
+});
+
+test("B3: metrics-only run_id is honest but partial", () => {
+  const model = buildEvidenceChartModel(baseBundle({ manifest: { kind: "missing" } }));
+  assert.equal(model.identity.runId, "run-1");
+  assert.equal(model.identity.runIdConflict, false);
+});
+
+test("B4: conflicting run_id yields no selected run ID and a visible conflict flag", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ manifest: { kind: "ok", data: baseManifest({ run_id: "run-manifest" }) } }),
+  );
+  assert.equal(model.identity.runId, null);
+  assert.equal(model.identity.runIdConflict, true);
+  // Marker provenance must not carry the contested run id either.
+  const withOrders = buildEvidenceChartModel(
+    baseBundle({
+      manifest: { kind: "ok", data: baseManifest({ run_id: "run-manifest" }) },
+      orders: { kind: "ok", data: { rows: [orderRow()], malformed: 0 } },
+    }),
+  );
+  const marker = withOrders.orderIntentMarkers.markers[0];
+  assert.equal(marker.provenance.runId, null);
+  assert.equal(marker.provenance.runIdConflict, true);
+});
+
+test("B5: matching strategy_name produces an honest label, no conflict", () => {
+  const model = buildEvidenceChartModel(baseBundle());
+  assert.equal(model.identity.strategyName, "swing_momentum");
+  assert.equal(model.identity.strategyNameConflict, false);
+});
+
+test("B6: conflicting strategy_name is a conflict, not a silent preference", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ manifest: { kind: "ok", data: baseManifest({ strategy_name: "mean_reversion" }) } }),
+  );
+  assert.equal(model.identity.strategyName, null);
+  assert.equal(model.identity.strategyNameConflict, true);
+});
+
+test("B7: strategy_name is never exposed as a field named strategyId", () => {
+  const model = buildEvidenceChartModel(baseBundle());
+  assert.ok(!("strategyId" in model.identity));
+  assert.ok("strategyName" in model.identity);
 });
