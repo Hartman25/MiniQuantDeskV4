@@ -38,12 +38,13 @@ export interface DetachedPanelBootstrap {
   pinnedIdentity: WorkspaceIdentity | null;
 }
 
-/** Parses the detached-window URL query. Malformed/unknown values fail closed to null (for pinnedIdentity) or to the whole bootstrap (for panelId/opener) so the window falls back to normal rendering rather than crash. */
+/** Parses the detached-window URL query. Malformed/unknown values fail closed to null (for pinnedIdentity) or to the whole bootstrap (for panelId/opener) so the window falls back to normal rendering rather than crash. A non-detachable panel id (e.g. the operator-singleton `ops`) is rejected here too — a stale or hand-crafted URL must not bootstrap a detached window for a panel that was never allowed to leave its owning window (see panelRegistry.ts's `detachable` and operatorSingletonGuard.ts). */
 export function readDetachedPanelBootstrap(search: string): DetachedPanelBootstrap | null {
   const params = new URLSearchParams(search);
   const panelId = params.get("detachedPanel");
   const openerLabel = params.get("opener");
   if (!panelId || !openerLabel || !isKnownPanelId(panelId)) return null;
+  if (getPanelMetadata(panelId)?.detachable !== true) return null;
 
   const rawPinned = params.get("pinnedIdentity");
   let pinnedIdentity: WorkspaceIdentity | null = null;
@@ -66,6 +67,12 @@ function toMonitorDescriptor(m: { name: string | null; position: { x: number; y:
 
 /** Opens (or focuses, if it already exists) a detached window for `id`. Never creates a second detached window for the same panel id. `pinnedIdentity` is carried across for a panel that was pinned at detach time — null for an unpinned (globally-linked) panel. */
 export async function detachPanel(id: ScreenKey, openerLabel: string, pinnedIdentity: WorkspaceIdentity | null): Promise<DetachResult> {
+  // Defense in depth: Workstation.tsx only wires a Detach control when
+  // meta.detachable is true, but this function must independently refuse a
+  // non-detachable panel (e.g. the operator-singleton `ops`) rather than
+  // trust every caller to have checked first — checked before the
+  // desktop-shell probe so the refusal holds regardless of Tauri context.
+  if (getPanelMetadata(id)?.detachable !== true) return { ok: false, reason: "error" };
   if (!isDesktopShell()) return { ok: false, reason: "tauri-unavailable" };
 
   try {

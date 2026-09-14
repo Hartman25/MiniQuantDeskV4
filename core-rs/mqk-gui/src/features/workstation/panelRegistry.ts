@@ -65,6 +65,14 @@ export interface PanelMetadata {
 // operator-authority action surface. `contextAware: true` is set only for
 // backtests and marketData, the only two screens that currently call
 // useWorkspaceContext().
+//
+// WAVE-02-FINAL-REPAIR-01 R2: `ops` is non-detachable. Detaching it would
+// remove it from the control window's local Dockview instance while leaving
+// it live in a separate Tauri window; reopening it from control navigation
+// would then create a second `ops` instance — two authority surfaces for the
+// same guarded operator-action panel. See operatorSingletonGuard.ts for the
+// rest of the cross-window enforcement (restored/custom layouts, presets,
+// detached-window bootstrap all independently reject `ops` outside control).
 const PANEL_CONTRACTS: Record<ScreenKey, RawPanelContract> = {
   controlStation:   { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 420, minHeight: 340 },
   dashboard:        { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 420, minHeight: 340 },
@@ -75,7 +83,7 @@ const PANEL_CONTRACTS: Record<ScreenKey, RawPanelContract> = {
   reconcile:        { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },
   strategy:         { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },
   audit:            { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },
-  ops:              { tier: "tier1", authority: "operator-singleton", detachable: true, contextAware: false, minWidth: 380, minHeight: 320 },
+  ops:              { tier: "tier1", authority: "operator-singleton", detachable: false, contextAware: false, minWidth: 380, minHeight: 320 },
   settings:         { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },
   topology:         { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },
   transport:        { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },

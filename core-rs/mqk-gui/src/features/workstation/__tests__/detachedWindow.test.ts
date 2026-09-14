@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { panelWindowLabel, parsePanelIdFromLabel, readDetachedPanelBootstrap } from "../detachedWindow.ts";
+import { panelWindowLabel, parsePanelIdFromLabel, readDetachedPanelBootstrap, detachPanel } from "../detachedWindow.ts";
+import { PANEL_REGISTRY } from "../panelRegistry.ts";
 
 test("panelWindowLabel/parsePanelIdFromLabel round-trip for a known panel", () => {
   const label = panelWindowLabel("marketData");
@@ -53,4 +54,16 @@ test("readDetachedPanelBootstrap fails closed on a malformed/foreign pinnedIdent
 
   const invalidJson = readDetachedPanelBootstrap("?detachedPanel=marketData&opener=control&pinnedIdentity=not-json");
   assert.deepEqual(invalidJson, { panelId: "marketData", openerLabel: "control", pinnedIdentity: null });
+});
+
+// WAVE-02-FINAL-REPAIR-01 R2: panel-ops bootstrap fails closed.
+test("readDetachedPanelBootstrap rejects a non-detachable (operator-singleton) panel id even from a well-formed URL", () => {
+  assert.equal(PANEL_REGISTRY.ops.detachable, false, "precondition: ops must be non-detachable");
+  assert.equal(readDetachedPanelBootstrap("?detachedPanel=ops&opener=control"), null);
+  assert.equal(readDetachedPanelBootstrap("?detachedPanel=ops&opener=execution"), null, "even a stale/manual URL claiming a different opener must fail closed");
+});
+
+test("detachPanel refuses a non-detachable panel id even if called directly (defense in depth)", async () => {
+  const result = await detachPanel("ops", "control", null);
+  assert.deepEqual(result, { ok: false, reason: "error" });
 });

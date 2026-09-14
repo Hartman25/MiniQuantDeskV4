@@ -615,9 +615,15 @@ test("DESKTOP-12: WS continuity pill present with warning tone for cold_start_un
     }),
   );
   assert.match(html, /WS Continuity/i, "cold_start_unproven: WS Continuity pill must be present");
-  assert.match(html, /tone-warning/, "cold_start_unproven: pill must carry warning tone");
+  // Scoped to the WS Continuity pill's own div — GlobalStatusBar renders
+  // other fixed Tier-0 pills (e.g. Connection) that may legitimately carry
+  // emphasis-loud of their own (WAVE-02-FINAL-REPAIR-01 R1), so a whole-string
+  // check would false-positive on those unrelated pills.
+  const wsPillMatch = html.match(/<div class="status-pill ([^"]+)"><span class="status-pill-label">WS Continuity<\/span>/);
+  assert.ok(wsPillMatch, "cold_start_unproven: WS Continuity pill div not found");
+  assert.match(wsPillMatch![1], /tone-warning/, "cold_start_unproven: pill must carry warning tone");
   // cold_start_unproven is a warning, not loud — operator must see it but it is not terminal.
-  assert.doesNotMatch(html, /emphasis-loud.*Cold Start Unproven|Cold Start Unproven.*emphasis-loud/, "cold_start_unproven: pill must not carry loud emphasis");
+  assert.doesNotMatch(wsPillMatch![1], /emphasis-loud/, "cold_start_unproven: pill must not carry loud emphasis");
 });
 
 test("DESKTOP-12: WS continuity pill present with critical+loud emphasis for gap_detected", () => {

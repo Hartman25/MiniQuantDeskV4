@@ -36,6 +36,7 @@ import { initialPanelLinkState, pinPanel, resolvePanelIdentity, unpinPanel, type
 import { getPanelMetadata, isKnownPanelId, panelRendererFor } from "./panelRegistry";
 import { detachPanel, REATTACH_EVENT } from "./detachedWindow";
 import { APPLY_PRESET_EVENT, pendingPresetStorageKey, readPendingPresetPanelIds } from "./presets";
+import { containsDisallowedOperatorSingleton, panelAllowedInRole } from "./operatorSingletonGuard";
 import type { DeskRole } from "../../app/shellTypes";
 import {
   allDockviewPanelIdsKnown,
@@ -123,7 +124,16 @@ export interface WorkstationHandle {
   applyLayoutDoc: (doc: PersistedWorkstationLayoutV1) => boolean;
 }
 
-function addOrFocusPanel(api: DockviewApi, id: ScreenKey) {
+/**
+ * WAVE-02-FINAL-REPAIR-01 R2: the single choke point every panel-add path
+ * routes through (default layout, preset seed/event, reattach, imperative
+ * openPanel). Refuses to add an operator-singleton panel to any window that
+ * isn't the control/operator authority window — fails closed by no-op'ing
+ * rather than adding it, since a caller here has no other panel to fall
+ * back to.
+ */
+function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole) {
+  if (!panelAllowedInRole(id, role)) return;
   const existing = api.getPanel(id);
   if (existing) {
     existing.api.setActive();
@@ -165,15 +175,15 @@ export interface WorkstationProps {
   onActivePanelChange?: (id: ScreenKey | null) => void;
 }
 
-function buildDefaultLayout(api: DockviewApi, initialPanelId: ScreenKey) {
+function buildDefaultLayout(api: DockviewApi, initialPanelId: ScreenKey, role: DeskRole) {
   api.clear();
-  addOrFocusPanel(api, initialPanelId);
+  addOrFocusPanel(api, initialPanelId, role);
 }
 
 /** Replaces the whole layout with exactly these panels, in order. Used by presets and by the pending-preset seed. */
-function buildPanelSet(api: DockviewApi, ids: readonly ScreenKey[]) {
+function buildPanelSet(api: DockviewApi, ids: readonly ScreenKey[], role: DeskRole) {
   api.clear();
-  for (const id of ids) addOrFocusPanel(api, id);
+  for (const id of ids) addOrFocusPanel(api, id, role);
 }
 
 function persistLayout(api: DockviewApi, storageKey: string) {
@@ -189,10 +199,11 @@ function persistLayout(api: DockviewApi, storageKey: string) {
   }
 }
 
-/** Attempts to apply a layout document (persisted-auto or user-saved custom); returns true only if fully applied and every resulting panel id is known. Any disagreement/corruption/exception falls through to false and leaves `api` untouched (never partially applied) so the caller can fall back to a known-good layout. */
-function tryApplyLayoutDocument(api: DockviewApi, persisted: PersistedWorkstationLayoutV1): boolean {
+/** Attempts to apply a layout document (persisted-auto or user-saved custom); returns true only if fully applied and every resulting panel id is known. Any disagreement/corruption/exception falls through to false and leaves `api` untouched (never partially applied) so the caller can fall back to a known-good layout. Rejects the whole document (rather than partially applying it) if it would grant an operator-singleton panel to a non-authority window — a stale/hand-edited localStorage value or saved custom layout must not smuggle `ops` into execution/oversight. */
+function tryApplyLayoutDocument(api: DockviewApi, persisted: PersistedWorkstationLayoutV1, role: DeskRole): boolean {
   const summary = sanitizeLayoutSummary(persisted);
   if (summary.panelIds.length === 0) return false;
+  if (containsDisallowedOperatorSingleton(summary.panelIds, role)) return false;
 
   const dockviewIds = extractDockviewPanelIds(persisted.dockviewLayout);
   if (dockviewIds === null) return false;
@@ -213,12 +224,12 @@ function tryApplyLayoutDocument(api: DockviewApi, persisted: PersistedWorkstatio
 }
 
 /** Attempts to restore this window's own auto-persisted layout from storage. */
-function tryRestoreLayout(api: DockviewApi, storageKey: string): boolean {
+function tryRestoreLayout(api: DockviewApi, storageKey: string, role: DeskRole): boolean {
   const persisted = parsePersistedLayout(window.localStorage.getItem(storageKey));
-  return persisted !== null && tryApplyLayoutDocument(api, persisted);
+  return persisted !== null && tryApplyLayoutDocument(api, persisted, role);
 }
 
-/** Consumes (reads-then-clears) a one-shot pending-preset seed written by the control window for a not-yet-open target window. Returns true only if a valid seed was found and applied. */
+/** Consumes (reads-then-clears) a one-shot pending-preset seed written by the control window for a not-yet-open target window. Returns true only if a valid seed was found and applied. Drops (rather than rejects outright) any operator-singleton id the seed carries for a non-authority role, consistent with buildPanelSet's existing drop-unknown-ids behavior — presets are starting arrangements, not a reason to strand the window with zero panels. */
 function tryApplyPendingPreset(api: DockviewApi, role: DeskRole): boolean {
   const key = pendingPresetStorageKey(role);
   const raw = window.localStorage.getItem(key);
@@ -230,7 +241,9 @@ function tryApplyPendingPreset(api: DockviewApi, role: DeskRole): boolean {
   }
   const panelIds = readPendingPresetPanelIds(raw);
   if (!panelIds) return false;
-  buildPanelSet(api, panelIds);
+  const allowed = panelIds.filter((id) => panelAllowedInRole(id, role));
+  if (allowed.length === 0) return false;
+  buildPanelSet(api, allowed, role);
   return true;
 }
 
@@ -253,9 +266,9 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
       // layout — it is the explicit reason this window was opened.
       const appliedPreset = tryApplyPendingPreset(api, role);
       if (!appliedPreset) {
-        const restored = tryRestoreLayout(api, storageKey);
+        const restored = tryRestoreLayout(api, storageKey, role);
         if (!restored) {
-          buildDefaultLayout(api, initialPanelId);
+          buildDefaultLayout(api, initialPanelId, role);
         }
       }
 
@@ -292,8 +305,8 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
           const api = apiRef.current;
           const ids = event.payload?.panelIds;
           if (api && Array.isArray(ids)) {
-            const known = ids.filter(isKnownPanelId);
-            if (known.length > 0) buildPanelSet(api, known);
+            const known = ids.filter(isKnownPanelId).filter((id) => panelAllowedInRole(id, role));
+            if (known.length > 0) buildPanelSet(api, known, role);
           }
         });
         if (cancelled) stop();
@@ -306,7 +319,7 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [role]);
 
   // GUI-LAYOUT-03: listens for a detached window asking to be reattached.
   // Scoped to THIS window's own webview (getCurrentWebviewWindow().listen),
@@ -322,7 +335,7 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
         const stop = await getCurrentWebviewWindow().listen<{ panelId: string }>(REATTACH_EVENT, (event) => {
           const id = event.payload?.panelId;
           const api = apiRef.current;
-          if (api && id && isKnownPanelId(id)) addOrFocusPanel(api, id);
+          if (api && id && isKnownPanelId(id)) addOrFocusPanel(api, id, role);
         });
         if (cancelled) stop();
         else unlisten = stop;
@@ -334,7 +347,7 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [role]);
 
   const actions = useMemo<WorkstationActions>(
     () => ({
@@ -352,12 +365,12 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
           // — restore the panel locally rather than silently lose it.
           if (!result.ok) {
             const liveApi = apiRef.current;
-            if (liveApi) addOrFocusPanel(liveApi, id);
+            if (liveApi) addOrFocusPanel(liveApi, id, role);
           }
         });
       },
     }),
-    [],
+    [role],
   );
 
   useImperativeHandle(
@@ -365,7 +378,7 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
     () => ({
       openPanel: (id: ScreenKey) => {
         const api = apiRef.current;
-        if (api) addOrFocusPanel(api, id);
+        if (api) addOrFocusPanel(api, id, role);
       },
       resetLayout: () => {
         const api = apiRef.current;
@@ -375,11 +388,11 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
         } catch {
           // ignore storage failures on reset — clearing the in-memory layout still succeeds below.
         }
-        buildDefaultLayout(api, initialPanelId);
+        buildDefaultLayout(api, initialPanelId, role);
       },
       applyPanelSet: (ids: readonly ScreenKey[]) => {
         const api = apiRef.current;
-        if (api) buildPanelSet(api, ids);
+        if (api) buildPanelSet(api, ids, role);
       },
       getCurrentLayoutDoc: () => {
         const api = apiRef.current;
@@ -391,10 +404,10 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
       },
       applyLayoutDoc: (doc: PersistedWorkstationLayoutV1) => {
         const api = apiRef.current;
-        return api !== null && tryApplyLayoutDocument(api, doc);
+        return api !== null && tryApplyLayoutDocument(api, doc, role);
       },
     }),
-    [storageKey, initialPanelId],
+    [storageKey, initialPanelId, role],
   );
 
   return (

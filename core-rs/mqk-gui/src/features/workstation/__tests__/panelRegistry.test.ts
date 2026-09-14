@@ -57,6 +57,16 @@ test("operator-singleton panels are never duplicable — derived, not independen
   }
 });
 
+// WAVE-02-FINAL-REPAIR-01 R2: an operator-singleton panel must never be
+// detachable — detaching would remove it from the authority window's local
+// Dockview instance while it stays live in a separate Tauri window, letting
+// the authority window's navigation create a second instance on reopen.
+test("operator-singleton panels are never detachable", () => {
+  for (const id of OPERATOR_SINGLETON_PANEL_IDS) {
+    assert.equal(PANEL_REGISTRY[id].detachable, false, `${id}: operator-singleton panel must not be detachable`);
+  }
+});
+
 test("duplicable is always exactly (authority === read-only) for every panel", () => {
   for (const id of PANEL_IDS) {
     const meta = PANEL_REGISTRY[id];
