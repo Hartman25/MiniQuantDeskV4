@@ -18,8 +18,32 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { EMPTY_WORKSPACE_IDENTITY, mergeWorkspaceIdentity, type WorkspaceIdentity } from "./workspaceModel.ts";
-import { WORKSPACE_SYNC_EVENT, isNewerRevision, nextRevision, parseWorkspaceSyncMessage } from "./workspaceSync.ts";
+import {
+  INITIAL_SYNC_REVISION,
+  WORKSPACE_SYNC_EVENT,
+  isNewerRevision,
+  nextLocalRevision,
+  parseWorkspaceSyncMessage,
+  type WorkspaceSyncRevision,
+} from "./workspaceSync.ts";
+
+/**
+ * WAVE-02-FINAL-REPAIR-01 R5: this window's own identifier for the Lamport
+ * tie-break — carries no authority, used only so two windows racing to the
+ * same counter resolve to the same winner everywhere. Synchronous, same
+ * try/catch-fails-closed pattern as Workstation.tsx's
+ * currentWindowLabelOrDefault(); falls back to a fixed label outside Tauri,
+ * where there is no other window to race against anyway.
+ */
+function currentWindowOrigin(): string {
+  try {
+    return getCurrentWebviewWindow().label;
+  } catch {
+    return "single-window";
+  }
+}
 
 export interface WorkspaceContextValue {
   linked: WorkspaceIdentity;
@@ -31,10 +55,19 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [linked, setLinkedState] = useState<WorkspaceIdentity>(EMPTY_WORKSPACE_IDENTITY);
-  const revisionRef = useRef(0);
+  // The revision of the identity CURRENTLY applied in this window — whether
+  // that came from this window's own last local write or from the last
+  // incoming message that won its comparison. Doubles as this window's
+  // Lamport clock: nextLocalRevision always stamps strictly past
+  // revisionRef.current.counter, and a REJECTED incoming message never
+  // carries a counter greater than revisionRef.current.counter already
+  // (that is exactly why it was rejected) — so revisionRef.current.counter
+  // is always the max counter this window has observed, accepted or not,
+  // with no separate clock variable needed.
+  const revisionRef = useRef<WorkspaceSyncRevision>(INITIAL_SYNC_REVISION);
 
   const broadcast = useCallback((identity: WorkspaceIdentity) => {
-    const revision = nextRevision(revisionRef.current);
+    const revision = nextLocalRevision(revisionRef.current.counter, currentWindowOrigin());
     revisionRef.current = revision;
     void (async () => {
       try {
@@ -63,11 +96,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     broadcast(EMPTY_WORKSPACE_IDENTITY);
   }, [broadcast]);
 
-  // Receives identity changes broadcast by OTHER windows. A message that is
-  // malformed, carries an unrecognized field, or is stale/out-of-order
-  // (revision <= this window's own last-applied revision) is dropped
-  // outright — never partially applied, never allowed to override a newer
-  // local change.
+  // Receives identity changes broadcast by OTHER windows (including this
+  // window's own echo of its last broadcast — isNewerRevision correctly
+  // rejects that as a tie on both counter and origin). A message that is
+  // malformed, carries an unrecognized field, or loses the (counter, origin)
+  // comparison against revisionRef.current is dropped outright — never
+  // partially applied. Whether accepted or rejected, revisionRef.current
+  // already reflects the max counter observed (see the ref's own comment
+  // above), so no separate Lamport-clock-advance step is needed here.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
