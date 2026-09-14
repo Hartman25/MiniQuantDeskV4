@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyAlpha,
+  deriveBacktestWorkspaceIdentity,
   deriveStrategyFitGateFlags,
   describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
@@ -29,11 +30,13 @@ import {
   parsePremarketRevalidation,
   parseStrategyFit,
   parseWatchlistPromotion,
+  reconcileIdentityField,
   timeframeLabelFromSecs,
 } from "../parsers.ts";
 import type {
   ArtifactBundle,
   BacktestEconomicsSuggestionResponse,
+  BacktestManifest,
   BacktestMetrics,
   InstrumentRegistryV2SourceStatusResponse,
 } from "../types.ts";
@@ -80,6 +83,18 @@ function baseMetrics(overrides: Partial<BacktestMetrics> = {}): BacktestMetrics 
     sortino_ratio: null,
     exposure_bars: 0,
     exposure_time_pct: 0,
+    ...overrides,
+  };
+}
+
+function baseManifest(overrides: Partial<BacktestManifest> = {}): BacktestManifest {
+  return {
+    schema_version: 1,
+    run_id: "r1",
+    strategy_name: "swing_momentum",
+    engine_id: "mqk-backtest",
+    mode: "backtest",
+    created_at_utc: "2026-01-01T00:00:00Z",
     ...overrides,
   };
 }
@@ -2406,4 +2421,116 @@ test("DISCORD_WORKFLOWS: no command or note references .env.local or a webhook U
     assert.ok(!text.includes(".env.local"), `${workflow.name}: references .env.local`);
     assert.ok(!/discord(?:app)?\.com\/api\/webhooks\//i.test(text), `${workflow.name}: references a webhook URL`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// reconcileIdentityField
+// ---------------------------------------------------------------------------
+
+test("reconcileIdentityField: both absent -> absent, no conflict", () => {
+  assert.deepEqual(reconcileIdentityField(null, undefined), { value: null, conflict: false });
+});
+
+test("reconcileIdentityField: only one present -> that value, honest but partial", () => {
+  assert.deepEqual(reconcileIdentityField("run-1", null), { value: "run-1", conflict: false });
+  assert.deepEqual(reconcileIdentityField(null, "run-1"), { value: "run-1", conflict: false });
+});
+
+test("reconcileIdentityField: both present and equal -> authoritative", () => {
+  assert.deepEqual(reconcileIdentityField("run-1", "run-1"), { value: "run-1", conflict: false });
+});
+
+test("reconcileIdentityField: both present and different -> conflict, neither chosen", () => {
+  assert.deepEqual(reconcileIdentityField("run-1", "run-2"), { value: null, conflict: true });
+});
+
+// ---------------------------------------------------------------------------
+// OT-MQD-02R: deriveBacktestWorkspaceIdentity — fail-closed symbol/strategy/
+// run-id derivation for the "Link this run to workspace" control.
+// ---------------------------------------------------------------------------
+
+test("C1: a multi-symbol run has no operator-selected singular symbol — never metrics.symbols[0]", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "ok", data: baseManifest() },
+    metrics: { kind: "ok", data: baseMetrics({ symbols: ["AAPL", "MSFT"] }) },
+  });
+  const { identity } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.symbol, null);
+});
+
+test("D1: strategy_name alone never populates strategyId", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "ok", data: baseManifest({ strategy_name: "swing_momentum" }) },
+    metrics: { kind: "ok", data: baseMetrics({ strategy_name: "swing_momentum" }) },
+  });
+  const { identity } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.strategyId, null);
+});
+
+test("D2: a single-symbol backtest links the correct symbol", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "ok", data: baseManifest() },
+    metrics: { kind: "ok", data: baseMetrics({ symbols: ["AAPL"] }) },
+  });
+  const { identity } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.symbol, "AAPL");
+});
+
+test("D3: a multi-symbol backtest links symbol null (mirrors C1 at the identity level)", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "ok", data: baseManifest() },
+    metrics: { kind: "ok", data: baseMetrics({ symbols: ["AAPL", "MSFT", "GOOG"] }) },
+  });
+  const { identity } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.symbol, null);
+});
+
+test("D4: conflicting manifest/metrics run_id -> runId null and the conflict is reported explicitly", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "ok", data: baseManifest({ run_id: "run-manifest" }) },
+    metrics: { kind: "ok", data: baseMetrics({ run_id: "run-metrics" }) },
+  });
+  const { identity, runIdConflict } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.runId, null);
+  assert.equal(runIdConflict, true);
+});
+
+test("D5: no identity data anywhere -> no synthetic defaults", () => {
+  const bundle = baseBundle({ manifest: { kind: "missing" }, metrics: { kind: "missing" } });
+  const { identity, runIdConflict } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.symbol, null);
+  assert.equal(identity.runId, null);
+  assert.equal(identity.strategyId, null);
+  assert.equal(identity.timeframe, null);
+  assert.equal(runIdConflict, false);
+});
+
+test("D6: executionDomain is 'backtest' without granting any deployment authority field", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "ok", data: baseManifest() },
+    metrics: { kind: "ok", data: baseMetrics({ symbols: ["AAPL"] }) },
+  });
+  const { identity } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.executionDomain, "backtest");
+  assert.deepEqual(Object.keys(identity).sort(), [
+    "artifactId",
+    "backtestJobId",
+    "evaluationSlice",
+    "executionDomain",
+    "runId",
+    "strategyId",
+    "symbol",
+    "timeframe",
+  ]);
+});
+
+test("positive: matching manifest/metrics run_id and a single symbol produce a fully resolved, non-conflicted identity", () => {
+  const bundle = baseBundle({
+    manifest: { kind: "ok", data: baseManifest({ run_id: "run-1" }) },
+    metrics: { kind: "ok", data: baseMetrics({ run_id: "run-1", symbols: ["AAPL"] }) },
+  });
+  const { identity, runIdConflict } = deriveBacktestWorkspaceIdentity(bundle);
+  assert.equal(identity.runId, "run-1");
+  assert.equal(identity.symbol, "AAPL");
+  assert.equal(runIdConflict, false);
 });

@@ -1,3 +1,4 @@
+import type { WorkspaceIdentity } from "../workspace/workspaceModel.ts";
 import type {
   ArtifactBundle,
   BacktestEconomicsSuggestionResponse,
@@ -282,6 +283,50 @@ export function reconcileIdentityField(
   if (bv == null) return { value: av, conflict: false };
   if (av === bv) return { value: av, conflict: false };
   return { value: null, conflict: true };
+}
+
+// ---------------------------------------------------------------------------
+// OT-MQD-02R: fail-closed backtest -> workspace identity derivation
+// ---------------------------------------------------------------------------
+
+export interface BacktestWorkspaceLinkResult {
+  identity: WorkspaceIdentity;
+  runIdConflict: boolean;
+}
+
+/**
+ * Pure derivation of the WorkspaceIdentity a backtest run's artifacts may
+ * honestly publish when an operator links the run to the workspace. Fails
+ * closed rather than guessing:
+ *   - a multi-symbol run has no operator-selected singular symbol (this
+ *     bundle exposes only metrics.symbols[], never a manifest-specific
+ *     singular symbol) -> symbol is null, not metrics.symbols[0].
+ *   - strategy_name is a presentation label, never a durable strategy_id ->
+ *     strategyId stays null; this bundle has no genuine strategy_id source
+ *     tied to this run.
+ *   - a run_id conflict between manifest and metrics never picks a side.
+ */
+export function deriveBacktestWorkspaceIdentity(bundle: ArtifactBundle): BacktestWorkspaceLinkResult {
+  const manifest = bundle.manifest.kind === "ok" ? bundle.manifest.data : null;
+  const metrics = bundle.metrics.kind === "ok" ? bundle.metrics.data : null;
+
+  const runIdField = reconcileIdentityField(manifest?.run_id, metrics?.run_id);
+  const symbols = metrics?.symbols ?? [];
+  const symbol = symbols.length === 1 ? symbols[0] : null;
+
+  return {
+    identity: {
+      symbol,
+      timeframe: manifestTimeframeLabel(manifest?.timeframe, manifest?.timeframe_secs),
+      strategyId: null,
+      runId: runIdField.value,
+      backtestJobId: null,
+      artifactId: null,
+      evaluationSlice: null,
+      executionDomain: "backtest",
+    },
+    runIdConflict: runIdField.conflict,
+  };
 }
 
 // ---------------------------------------------------------------------------

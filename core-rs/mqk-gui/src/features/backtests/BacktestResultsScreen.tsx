@@ -9,6 +9,7 @@ import { formatDateTime } from "../../lib/format";
 import {
   classifyAlpha,
   computeDrawdownSeries,
+  deriveBacktestWorkspaceIdentity,
   describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
   describeNoTradeActivity,
@@ -2024,11 +2025,16 @@ function FillsContent({ data }: { data: ParsedCsvResult<FillRow> }) {
 }
 
 // ---------------------------------------------------------------------------
-// OT-MQD-02: workspace link control — presentation-only. Publishes this
-// run's identity (symbol/strategy/timeframe/run id, executionDomain
-// "backtest") into the shared workspace context on explicit operator click.
-// Never called automatically on load, and never sets any field this screen
-// cannot identify honestly (no fabricated strategyId/runId).
+// OT-MQD-02 / OT-MQD-02R: workspace link control — presentation-only.
+// Publishes this run's identity into the shared workspace context on
+// explicit operator click. Never called automatically on load, and never
+// sets any field this screen cannot identify honestly:
+//   - symbol comes only from deriveBacktestWorkspaceIdentity, which is null
+//     for a multi-symbol run (never metrics.symbols[0]).
+//   - strategyId is never populated from strategy_name (presentation label
+//     only, not a durable strategy_id).
+//   - a manifest/metrics run_id conflict never picks a side, and the button
+//     surfaces that conflict rather than pretending a full link exists.
 // ---------------------------------------------------------------------------
 
 function WorkspaceLinkControl({ bundle }: { bundle: ArtifactBundle }) {
@@ -2038,33 +2044,20 @@ function WorkspaceLinkControl({ bundle }: { bundle: ArtifactBundle }) {
   const metrics = bundle.metrics.kind === "ok" ? bundle.metrics.data : null;
   if (!manifest && !metrics) return null;
 
-  const runId = manifest?.run_id ?? metrics?.run_id ?? null;
-  const symbol = metrics?.symbols && metrics.symbols.length > 0 ? metrics.symbols[0] : null;
-  const strategyId = manifest?.strategy_name ?? metrics?.strategy_name ?? null;
-  const timeframe = manifestTimeframeLabel(manifest?.timeframe, manifest?.timeframe_secs);
-  const isLinked = runId !== null && linked.runId === runId;
+  const { identity, runIdConflict } = deriveBacktestWorkspaceIdentity(bundle);
+  const isLinked = identity.runId !== null && linked.runId === identity.runId;
 
   return (
     <div className="workspace-link-row">
-      <button
-        type="button"
-        className="workspace-link-button"
-        onClick={() =>
-          setLinked({
-            symbol,
-            timeframe,
-            strategyId,
-            runId,
-            backtestJobId: null,
-            artifactId: null,
-            evaluationSlice: null,
-            executionDomain: "backtest",
-          })
-        }
-      >
+      <button type="button" className="workspace-link-button" onClick={() => setLinked(identity)}>
         {isLinked ? "Linked to workspace" : "Link this run to workspace"}
       </button>
       {isLinked && <span className="legend-pill status-good">LINKED</span>}
+      {runIdConflict && (
+        <span className="legend-pill status-bad">
+          RUN ID CONFLICT — manifest/metrics disagree; link is not fully authoritative
+        </span>
+      )}
     </div>
   );
 }
