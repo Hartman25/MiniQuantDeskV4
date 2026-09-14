@@ -168,6 +168,13 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
   }, [hoverFraction, model.timeRange, model.equitySeries.points]);
 
   const priceNotice = `PRICE: ${model.priceSeries.reason}`;
+  const sourceNotices = [
+    { label: "Equity", malformed: model.equitySeries.malformedRowCount, reason: model.equitySeries.reason },
+    { label: "Drawdown", malformed: model.drawdownSeries.malformedRowCount, reason: model.drawdownSeries.reason },
+    { label: "Order intents", malformed: model.orderIntentMarkers.malformedRowCount, reason: model.orderIntentMarkers.reason },
+    { label: "Fills", malformed: model.fillMarkers.malformedRowCount, reason: model.fillMarkers.reason },
+    { label: "Costs", malformed: model.costEvents.malformedRowCount, reason: model.costEvents.reason },
+  ].filter((notice) => notice.malformed > 0 || notice.reason != null);
 
   return (
     <Panel
@@ -241,11 +248,11 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
         {priceNotice}
       </div>
 
-      {model.timeRange.status !== "artifact_present" ? (
+      {model.timeRange.status !== "artifact_present" && model.timeRange.status !== "partial" ? (
         <div className="empty-state" style={{ marginTop: 8 }}>
           {model.timeRange.status === "artifact_empty"
-            ? "Equity curve reported zero bars — no time range to chart."
-            : "No plotted time range available (equity_curve.csv unavailable) — chart cannot be rendered."}
+            ? "Equity curve reported zero usable rows — no time range to chart."
+            : "No usable plotted time range available from equity_curve.csv — chart cannot be rendered."}
         </div>
       ) : (
         <div className="evidence-chart-wrap" onMouseMove={handleMouseMove} onMouseLeave={() => setHoverFraction(null)}>
@@ -342,6 +349,12 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
           </span>
         ))}
       </div>
+
+      {sourceNotices.map((notice) => (
+        <div key={`${notice.label}-evidence-notice`} className="unavailable-notice" style={{ marginTop: 8 }}>
+          {notice.label}: {notice.reason ?? `${notice.malformed} malformed source row(s) were excluded.`}
+        </div>
+      ))}
 
       {unknownMarkers.length > 0 && (
         <div className="unavailable-notice" style={{ marginTop: 8 }}>

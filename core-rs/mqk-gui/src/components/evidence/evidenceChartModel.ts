@@ -79,21 +79,52 @@ export interface LaneProvenance {
   timeframe: string | null;
 }
 
-function laneStatusFromFileResult<T>(
-  result: FileResult<T>,
-  isEmpty: (data: T) => boolean,
-): LaneStatus {
+interface ParsedCsvDisposition {
+  status: LaneStatus;
+  malformedRowCount: number;
+  reason: string | null;
+}
+
+/**
+ * Fail-closed disposition for parsed CSV evidence. `ParsedCsvResult.malformed`
+ * is part of source truth: malformed-only input is not an empty artifact, and
+ * a mixture of usable + malformed rows is partial evidence, never complete.
+ */
+function parsedCsvDisposition<T>(
+  result: FileResult<ParsedCsvResult<T>>,
+  artifactLabel: string,
+): ParsedCsvDisposition {
   switch (result.kind) {
     case "idle":
-      return "idle";
+      return { status: "idle", malformedRowCount: 0, reason: null };
     case "loading":
-      return "loading";
-    case "ok":
-      return isEmpty(result.data) ? "artifact_empty" : "artifact_present";
+      return { status: "loading", malformedRowCount: 0, reason: null };
     case "missing":
     case "parse_error":
     case "read_error":
-      return "unavailable";
+      return { status: "unavailable", malformedRowCount: 0, reason: unavailableReason(result, artifactLabel) };
+    case "ok": {
+      const usable = result.data.rows.length;
+      const malformed = result.data.malformed;
+      if (usable === 0 && malformed === 0) {
+        return { status: "artifact_empty", malformedRowCount: 0, reason: null };
+      }
+      if (usable > 0 && malformed === 0) {
+        return { status: "artifact_present", malformedRowCount: 0, reason: null };
+      }
+      if (usable > 0) {
+        return {
+          status: "partial",
+          malformedRowCount: malformed,
+          reason: `${usable} usable ${artifactLabel} row(s); ${malformed} malformed row(s) excluded.`,
+        };
+      }
+      return {
+        status: "unavailable",
+        malformedRowCount: malformed,
+        reason: `${artifactLabel} contained ${malformed} malformed row(s) and no usable evidence.`,
+      };
+    }
   }
 }
 
@@ -171,15 +202,15 @@ export interface EvidenceChartTimeRange {
 }
 
 function buildTimeRange(equityResult: FileResult<ParsedCsvResult<EquityCurveRow>>): EvidenceChartTimeRange {
-  const status = laneStatusFromFileResult(equityResult, (d) => d.rows.length === 0);
+  const disposition = parsedCsvDisposition(equityResult, "equity_curve.csv");
   if (equityResult.kind !== "ok" || equityResult.data.rows.length === 0) {
-    return { status, startTsUtc: null, endTsUtc: null, startMs: null, endMs: null };
+    return { status: disposition.status, startTsUtc: null, endTsUtc: null, startMs: null, endMs: null };
   }
   const rows = equityResult.data.rows;
   const startTsUtc = rows[0].ts_utc || null;
   const endTsUtc = rows[rows.length - 1].ts_utc || null;
   return {
-    status,
+    status: disposition.status,
     startTsUtc,
     endTsUtc,
     startMs: parseTsMs(startTsUtc),
@@ -259,7 +290,7 @@ function buildEquityLane(
   equityResult: FileResult<ParsedCsvResult<EquityCurveRow>>,
   identity: EvidenceChartIdentity,
 ): EvidenceSeriesLane {
-  const status = laneStatusFromFileResult(equityResult, (d) => d.rows.length === 0);
+  const disposition = parsedCsvDisposition(equityResult, "equity_curve.csv");
   const provenance: LaneProvenance = {
     artifact: "equity_curve.csv",
     runId: identity.runId,
@@ -268,14 +299,26 @@ function buildEquityLane(
     timeframe: identity.timeframeLabel,
   };
   if (equityResult.kind !== "ok") {
-    return { status, points: [], malformedRowCount: 0, provenance, reason: unavailableReason(equityResult, "equity_curve.csv") };
+    return {
+      status: disposition.status,
+      points: [],
+      malformedRowCount: disposition.malformedRowCount,
+      provenance,
+      reason: disposition.reason,
+    };
   }
   const points = equityResult.data.rows.map((r) => ({
     tsUtc: r.ts_utc,
     tsMs: parseTsMs(r.ts_utc),
     value: r.equity,
   }));
-  return { status, points, malformedRowCount: equityResult.data.malformed, provenance, reason: null };
+  return {
+    status: disposition.status,
+    points,
+    malformedRowCount: disposition.malformedRowCount,
+    provenance,
+    reason: disposition.reason,
+  };
 }
 
 /**
@@ -289,7 +332,7 @@ function buildDrawdownLane(
   equityResult: FileResult<ParsedCsvResult<EquityCurveRow>>,
   identity: EvidenceChartIdentity,
 ): EvidenceSeriesLane {
-  const status = laneStatusFromFileResult(equityResult, (d) => d.rows.length === 0);
+  const disposition = parsedCsvDisposition(equityResult, "equity_curve.csv");
   const provenance: LaneProvenance = {
     artifact: "equity_curve.csv (derived: drawdown)",
     runId: identity.runId,
@@ -298,7 +341,13 @@ function buildDrawdownLane(
     timeframe: identity.timeframeLabel,
   };
   if (equityResult.kind !== "ok") {
-    return { status, points: [], malformedRowCount: 0, provenance, reason: unavailableReason(equityResult, "equity_curve.csv") };
+    return {
+      status: disposition.status,
+      points: [],
+      malformedRowCount: disposition.malformedRowCount,
+      provenance,
+      reason: disposition.reason,
+    };
   }
   const series = computeDrawdownSeries(equityResult.data.rows);
   const points = series.map((p) => ({
@@ -306,14 +355,14 @@ function buildDrawdownLane(
     tsMs: parseTsMs(p.ts_utc),
     value: p.drawdown_pct,
   }));
+  const derivedReason =
+    "Derived from equity_curve.csv (display-only) — not a substitute for metrics.json's own reported max_drawdown_pct.";
   return {
-    status,
+    status: disposition.status,
     points,
-    malformedRowCount: equityResult.data.malformed,
+    malformedRowCount: disposition.malformedRowCount,
     provenance,
-    reason: status === "artifact_present" || status === "artifact_empty"
-      ? "Derived from equity_curve.csv (display-only) — not a substitute for metrics.json's own reported max_drawdown_pct."
-      : null,
+    reason: disposition.reason ? `${disposition.reason} ${derivedReason}` : derivedReason,
   };
 }
 
@@ -385,9 +434,14 @@ function buildOrderIntentLane(
   ordersResult: FileResult<ParsedCsvResult<OrderRow>>,
   identity: EvidenceChartIdentity,
 ): EvidenceMarkerLane {
-  const status = laneStatusFromFileResult(ordersResult, (d) => d.rows.length === 0);
+  const disposition = parsedCsvDisposition(ordersResult, "orders.csv");
   if (ordersResult.kind !== "ok") {
-    return { status, markers: [], malformedRowCount: 0, reason: unavailableReason(ordersResult, "orders.csv") };
+    return {
+      status: disposition.status,
+      markers: [],
+      malformedRowCount: disposition.malformedRowCount,
+      reason: disposition.reason,
+    };
   }
   const markers: EvidenceMarker[] = ordersResult.data.rows.map((r) => {
     const tsMs = parseTsMs(r.ts_utc);
@@ -417,7 +471,12 @@ function buildOrderIntentLane(
       },
     };
   });
-  return { status, markers, malformedRowCount: ordersResult.data.malformed, reason: null };
+  return {
+    status: disposition.status,
+    markers,
+    malformedRowCount: disposition.malformedRowCount,
+    reason: disposition.reason,
+  };
 }
 
 /**
@@ -437,12 +496,21 @@ function buildFillAndCostLanes(
   fillsResult: FileResult<ParsedCsvResult<FillRow>>,
   identity: EvidenceChartIdentity,
 ): { fillLane: EvidenceMarkerLane; costLane: EvidenceMarkerLane } {
-  const fillStatus = laneStatusFromFileResult(fillsResult, (d) => d.rows.length === 0);
+  const fillDisposition = parsedCsvDisposition(fillsResult, "fills.csv");
   if (fillsResult.kind !== "ok") {
-    const reason = unavailableReason(fillsResult, "fills.csv");
     return {
-      fillLane: { status: fillStatus, markers: [], malformedRowCount: 0, reason },
-      costLane: { status: fillStatus, markers: [], malformedRowCount: 0, reason },
+      fillLane: {
+        status: fillDisposition.status,
+        markers: [],
+        malformedRowCount: fillDisposition.malformedRowCount,
+        reason: fillDisposition.reason,
+      },
+      costLane: {
+        status: fillDisposition.status,
+        markers: [],
+        malformedRowCount: fillDisposition.malformedRowCount,
+        reason: fillDisposition.reason,
+      },
     };
   }
 
@@ -504,28 +572,45 @@ function buildFillAndCostLanes(
     }
   }
 
+  const malformedSourceRows = fillsResult.data.malformed;
   let costStatus: LaneStatus;
   let costReason: string | null;
-  if (fillsResult.data.rows.length === 0) {
+  if (fillsResult.data.rows.length === 0 && malformedSourceRows === 0) {
     costStatus = "artifact_empty";
     costReason = null;
-  } else if (rowsWithoutFee === 0) {
+  } else if (fillsResult.data.rows.length === 0) {
+    costStatus = "unavailable";
+    costReason = `${malformedSourceRows} malformed fills.csv row(s) were excluded and no usable fee evidence remains.`;
+  } else if (rowsWithoutFee === 0 && malformedSourceRows === 0) {
     costStatus = "artifact_present";
     costReason = null;
   } else if (rowsWithFee === 0) {
     costStatus = "unavailable";
-    costReason = `${rowsWithoutFee} fill row(s) have no parseable fee value — cost evidence is missing, not zero.`;
+    const feePart = rowsWithoutFee > 0
+      ? `${rowsWithoutFee} usable fill row(s) have no parseable fee value`
+      : "no usable fill row carries fee evidence";
+    const malformedPart = malformedSourceRows > 0
+      ? `; ${malformedSourceRows} malformed fills.csv row(s) were excluded`
+      : "";
+    costReason = `${feePart}${malformedPart} — cost evidence is missing, not zero.`;
   } else {
     costStatus = "partial";
-    costReason = `${rowsWithFee} of ${rowsWithFee + rowsWithoutFee} fill row(s) have a parseable fee value; ${rowsWithoutFee} do not.`;
+    costReason =
+      `${rowsWithFee} usable fill row(s) have parseable fee evidence; ` +
+      `${rowsWithoutFee} usable row(s) do not; ${malformedSourceRows} malformed fills.csv row(s) were excluded.`;
   }
 
   return {
-    fillLane: { status: fillStatus, markers: fillMarkers, malformedRowCount: fillsResult.data.malformed, reason: null },
+    fillLane: {
+      status: fillDisposition.status,
+      markers: fillMarkers,
+      malformedRowCount: fillDisposition.malformedRowCount,
+      reason: fillDisposition.reason,
+    },
     costLane: {
       status: costStatus,
       markers: costMarkers,
-      malformedRowCount: fillsResult.data.malformed,
+      malformedRowCount: malformedSourceRows,
       reason: costReason,
       invalidFeeCount: rowsWithoutFee,
     },

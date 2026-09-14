@@ -706,3 +706,122 @@ test("Finding C7: missing fills artifact -> Costs lane unavailable", () => {
   const model = buildEvidenceChartModel(baseBundle({ fills: { kind: "missing" } }));
   assert.equal(model.costEvents.status, "unavailable");
 });
+
+// ---------------------------------------------------------------------------
+// FINAL MALFORMED-EVIDENCE REPAIR: ParsedCsvResult.malformed is part of
+// evidence completeness. Malformed-only input is never EMPTY, and mixed
+// usable/malformed input is never complete artifact evidence.
+// ---------------------------------------------------------------------------
+
+test("Malformed E1: orders rows=[] malformed=1 is unavailable, never artifact_empty", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ orders: { kind: "ok", data: { rows: [], malformed: 1 } } }),
+  );
+  assert.equal(model.orderIntentMarkers.status, "unavailable");
+  assert.notEqual(model.orderIntentMarkers.status, "artifact_empty");
+  assert.equal(model.orderIntentMarkers.malformedRowCount, 1);
+  assert.match(model.orderIntentMarkers.reason ?? "", /malformed/i);
+});
+
+test("Malformed E2: orders valid=1 malformed=1 is partial", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ orders: { kind: "ok", data: { rows: [orderRow()], malformed: 1 } } }),
+  );
+  assert.equal(model.orderIntentMarkers.status, "partial");
+  assert.equal(model.orderIntentMarkers.markers.length, 1);
+  assert.equal(model.orderIntentMarkers.malformedRowCount, 1);
+});
+
+test("Malformed E3: fills rows=[] malformed=1 is unavailable, never artifact_empty", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [], malformed: 1 } } }),
+  );
+  assert.equal(model.fillMarkers.status, "unavailable");
+  assert.notEqual(model.fillMarkers.status, "artifact_empty");
+  assert.equal(model.fillMarkers.malformedRowCount, 1);
+});
+
+test("Malformed E4: fills valid=1 malformed=1 is partial", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow()], malformed: 1 } } }),
+  );
+  assert.equal(model.fillMarkers.status, "partial");
+  assert.equal(model.fillMarkers.markers.length, 1);
+  assert.equal(model.fillMarkers.malformedRowCount, 1);
+});
+
+test("Malformed E5: equity rows=[] malformed=1 is unavailable, never artifact_empty", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ equityCurve: { kind: "ok", data: { rows: [], malformed: 1 } } }),
+  );
+  assert.equal(model.equitySeries.status, "unavailable");
+  assert.equal(model.drawdownSeries.status, "unavailable");
+  assert.equal(model.timeRange.status, "unavailable");
+  assert.notEqual(model.equitySeries.status, "artifact_empty");
+});
+
+test("Malformed E6: equity valid rows + malformed rows is partial and preserves usable points/range", () => {
+  const rows = [
+    equityRow("2026-01-01T00:00:00Z", 100_000_000),
+    equityRow("2026-01-01T01:00:00Z", 101_000_000),
+  ];
+  const model = buildEvidenceChartModel(
+    baseBundle({ equityCurve: { kind: "ok", data: { rows, malformed: 1 } } }),
+  );
+  assert.equal(model.equitySeries.status, "partial");
+  assert.equal(model.drawdownSeries.status, "partial");
+  assert.equal(model.timeRange.status, "partial");
+  assert.equal(model.equitySeries.points.length, 2);
+  assert.equal(model.equitySeries.malformedRowCount, 1);
+  assert.notEqual(model.timeRange.startMs, null);
+  assert.notEqual(model.timeRange.endMs, null);
+});
+
+test("Malformed E7: valid fee evidence + malformed fill row makes Costs partial", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow({ fee: "1000000" })], malformed: 1 } } }),
+  );
+  assert.equal(model.costEvents.status, "partial");
+  assert.equal(model.costEvents.markers.length, 1);
+  assert.equal(model.costEvents.malformedRowCount, 1);
+  assert.match(model.costEvents.reason ?? "", /malformed/i);
+});
+
+test("Malformed E8: no valid fills + malformed fill row makes Costs unavailable, never empty", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [], malformed: 1 } } }),
+  );
+  assert.equal(model.costEvents.status, "unavailable");
+  assert.notEqual(model.costEvents.status, "artifact_empty");
+  assert.equal(model.costEvents.malformedRowCount, 1);
+});
+
+test("Malformed E9: blank fee + malformed fill row remains unavailable/incomplete", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow({ fee: "" })], malformed: 1 } } }),
+  );
+  assert.equal(model.costEvents.status, "unavailable");
+  assert.equal(model.costEvents.invalidFeeCount, 1);
+  assert.equal(model.costEvents.malformedRowCount, 1);
+  assert.match(model.costEvents.reason ?? "", /malformed/i);
+});
+
+test("Malformed E10/E11: zero rows malformed=0 is empty; valid rows malformed=0 is present", () => {
+  const empty = buildEvidenceChartModel(
+    baseBundle({ orders: { kind: "ok", data: { rows: [], malformed: 0 } } }),
+  );
+  const present = buildEvidenceChartModel(
+    baseBundle({ orders: { kind: "ok", data: { rows: [orderRow()], malformed: 0 } } }),
+  );
+  assert.equal(empty.orderIntentMarkers.status, "artifact_empty");
+  assert.equal(present.orderIntentMarkers.status, "artifact_present");
+});
+
+test("Malformed E12: zero numeric fee with malformed=0 remains complete real fee evidence", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow({ fee: "0" })], malformed: 0 } } }),
+  );
+  assert.equal(model.costEvents.status, "artifact_present");
+  assert.equal(model.costEvents.markers.length, 1);
+  assert.equal(model.costEvents.markers[0].feeUsd, 0);
+});
