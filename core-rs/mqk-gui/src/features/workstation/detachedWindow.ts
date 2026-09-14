@@ -15,7 +15,7 @@
 import { isDesktopShell } from "../../desktop/bootstrap";
 import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
 import { centeredDefaultGeometry, reconcileWindowGeometry, type MonitorDescriptor, type WindowGeometry } from "./monitorModel";
-import { parseWorkspaceIdentityPayload, type WorkspaceIdentity } from "../workspace/workspaceModel.ts";
+import { parseWorkspaceIdentityPayload, type PanelLinkState, type WorkspaceIdentity } from "../workspace/workspaceModel.ts";
 import type { ScreenKey } from "../screens/screenRegistry";
 
 const DETACHED_PANEL_LABEL_PREFIX = "panel-";
@@ -131,13 +131,25 @@ export async function detachPanel(id: ScreenKey, openerLabel: string, pinnedIden
   }
 }
 
-/** Called from inside a detached panel window: asks the opener to re-add the panel, then closes this window. Never leaves the panel unreachable — if the opener has since closed, the panel is simply lost from the workstation until reopened from a live window's nav, same as any screen that isn't currently open anywhere. */
-export async function reattachAndClose(bootstrap: DetachedPanelBootstrap): Promise<void> {
+/**
+ * Called from inside a detached panel window: asks the opener to re-add the
+ * panel, then closes this window. Never leaves the panel unreachable — if
+ * the opener has since closed, the panel is simply lost from the
+ * workstation until reopened from a live window's nav, same as any screen
+ * that isn't currently open anywhere.
+ *
+ * WAVE-02-FINAL-REPAIR-01 R3: carries the detached window's CURRENT
+ * linkState (not bootstrap.pinnedIdentity, which is frozen at detach time
+ * and doesn't reflect a pin/unpin/re-pin the operator made while detached)
+ * so the opener can restore the panel's exact linked/pinned state instead
+ * of resetting it to Linked on every reattach.
+ */
+export async function reattachAndClose(bootstrap: DetachedPanelBootstrap, linkState: PanelLinkState): Promise<void> {
   if (!isDesktopShell()) return;
   try {
     const { emitTo } = await import("@tauri-apps/api/event");
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await emitTo(bootstrap.openerLabel, REATTACH_EVENT, { panelId: bootstrap.panelId });
+    await emitTo(bootstrap.openerLabel, REATTACH_EVENT, { panelId: bootstrap.panelId, linkState });
     await getCurrentWindow().close();
   } catch {
     // Best-effort: if emit/close fails (e.g. opener window gone), the operator can still close this window manually via the OS chrome.

@@ -50,7 +50,7 @@ export function DetachedPanelWindow({ bootstrap }: { bootstrap: DetachedPanelBoo
               <button
                 type="button"
                 className="action-button ghost"
-                onClick={() => void reattachAndClose(bootstrap)}
+                onClick={() => void reattachAndClose(bootstrap, linkState)}
                 title="Move this panel back to its originating window"
               >
                 Reattach

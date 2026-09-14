@@ -6,6 +6,7 @@ import {
   initialPanelLinkState,
   isSymbolCompatible,
   mergeWorkspaceIdentity,
+  parsePanelLinkStatePayload,
   parseWorkspaceIdentityPayload,
   pinPanel,
   resolvePanelIdentity,
@@ -203,4 +204,48 @@ test("positive: a fully populated identity patch round-trips every field exactly
   };
   const identity = mergeWorkspaceIdentity(EMPTY_WORKSPACE_IDENTITY, full);
   assert.deepEqual(identity, full);
+});
+
+// ---------------------------------------------------------------------------
+// J — parsePanelLinkStatePayload: WAVE-02-FINAL-REPAIR-01 R3 reattach payload
+// validation. Unlike parseWorkspaceIdentityPayload, this never returns null:
+// any malformed/foreign shape fails closed to initialPanelLinkState()
+// (unpinned/Linked) — the safe default a brand-new panel already starts in.
+// ---------------------------------------------------------------------------
+
+test("J: parsePanelLinkStatePayload accepts a well-formed pinned payload", () => {
+  const identity = mergeWorkspaceIdentity(EMPTY_WORKSPACE_IDENTITY, { symbol: "AAPL" });
+  const result = parsePanelLinkStatePayload({ pinned: true, pinnedIdentity: identity });
+  assert.deepEqual(result, pinPanel(identity));
+});
+
+test("J: parsePanelLinkStatePayload accepts a well-formed unpinned payload", () => {
+  const result = parsePanelLinkStatePayload({ pinned: false, pinnedIdentity: EMPTY_WORKSPACE_IDENTITY });
+  assert.deepEqual(result, initialPanelLinkState());
+});
+
+test("J: parsePanelLinkStatePayload ignores pinnedIdentity when pinned is false, even if it's garbage", () => {
+  const result = parsePanelLinkStatePayload({ pinned: false, pinnedIdentity: { armed: true } });
+  assert.deepEqual(result, initialPanelLinkState());
+});
+
+test("J: parsePanelLinkStatePayload fails closed to unpinned on a non-object, null, or missing/extra key", () => {
+  assert.deepEqual(parsePanelLinkStatePayload(null), initialPanelLinkState());
+  assert.deepEqual(parsePanelLinkStatePayload(undefined), initialPanelLinkState());
+  assert.deepEqual(parsePanelLinkStatePayload("pinned"), initialPanelLinkState());
+  assert.deepEqual(parsePanelLinkStatePayload({ pinned: true }), initialPanelLinkState(), "missing pinnedIdentity");
+  assert.deepEqual(
+    parsePanelLinkStatePayload({ pinned: true, pinnedIdentity: EMPTY_WORKSPACE_IDENTITY, armed: true }),
+    initialPanelLinkState(),
+    "an extra authority-shaped key must void the whole payload, not just be dropped",
+  );
+});
+
+test("J: parsePanelLinkStatePayload fails closed to unpinned on a non-boolean pinned or an invalid pinnedIdentity", () => {
+  assert.deepEqual(parsePanelLinkStatePayload({ pinned: "true", pinnedIdentity: EMPTY_WORKSPACE_IDENTITY }), initialPanelLinkState());
+  assert.deepEqual(
+    parsePanelLinkStatePayload({ pinned: true, pinnedIdentity: { ...EMPTY_WORKSPACE_IDENTITY, armed: true } }),
+    initialPanelLinkState(),
+    "an invalid nested identity must not leave the panel pinned to garbage",
+  );
 });

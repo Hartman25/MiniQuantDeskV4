@@ -32,7 +32,7 @@ import { SCREEN_REGISTRY, type ScreenKey, type ScreenRenderContext } from "../sc
 import { WorkspaceFrame } from "../../components/layout/WorkspaceFrame";
 import { ScreenErrorBoundary } from "../../components/common/ScreenErrorBoundary";
 import { useWorkspaceContext, WorkspaceScopeProvider } from "../workspace/WorkspaceContext.tsx";
-import { initialPanelLinkState, pinPanel, resolvePanelIdentity, unpinPanel, type PanelLinkState } from "../workspace/workspaceModel.ts";
+import { initialPanelLinkState, parsePanelLinkStatePayload, pinPanel, resolvePanelIdentity, unpinPanel, type PanelLinkState } from "../workspace/workspaceModel.ts";
 import { getPanelMetadata, isKnownPanelId, panelRendererFor } from "./panelRegistry";
 import { detachPanel, REATTACH_EVENT } from "./detachedWindow";
 import { APPLY_PRESET_EVENT, pendingPresetStorageKey, readPendingPresetPanelIds } from "./presets";
@@ -50,6 +50,13 @@ import {
 
 interface PanelHostParams {
   panelId: ScreenKey;
+  /**
+   * WAVE-02-FINAL-REPAIR-01 R3: seeds this panel instance's linked/pinned
+   * state at creation (e.g. restoring exactly what a detached panel had
+   * when it was reattached). Only consulted on first mount — read once by
+   * useState's lazy initializer, same as initialPanelLinkState() itself.
+   */
+  initialLinkState?: PanelLinkState;
 }
 
 const ScreenRenderCtx = createContext<ScreenRenderContext | null>(null);
@@ -64,7 +71,7 @@ function PanelHost({ params }: IDockviewPanelProps<PanelHostParams>) {
   const ctx = useContext(ScreenRenderCtx);
   const actions = useContext(WorkstationActionsCtx);
   const workspace = useWorkspaceContext();
-  const [linkState, setLinkState] = useState<PanelLinkState>(initialPanelLinkState);
+  const [linkState, setLinkState] = useState<PanelLinkState>(() => params.initialLinkState ?? initialPanelLinkState());
   const panelId = params.panelId;
   const screen = isKnownPanelId(panelId) ? SCREEN_REGISTRY[panelId] : null;
   const meta = isKnownPanelId(panelId) ? getPanelMetadata(panelId) : null;
@@ -132,7 +139,7 @@ export interface WorkstationHandle {
  * rather than adding it, since a caller here has no other panel to fall
  * back to.
  */
-function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole) {
+function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole, initialLinkState?: PanelLinkState) {
   if (!panelAllowedInRole(id, role)) return;
   const existing = api.getPanel(id);
   if (existing) {
@@ -144,7 +151,7 @@ function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole) {
     id,
     component: "panelHost",
     title: meta?.title ?? id,
-    params: { panelId: id } satisfies PanelHostParams,
+    params: { panelId: id, initialLinkState } satisfies PanelHostParams,
     // GUI-LAYOUT-06: enforces each panel's registry-declared minimum
     // footprint (panelRegistry.ts) directly in dockview, so a panel can
     // never be resized/split down to an unreadable sliver.
@@ -332,10 +339,16 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
     let cancelled = false;
     (async () => {
       try {
-        const stop = await getCurrentWebviewWindow().listen<{ panelId: string }>(REATTACH_EVENT, (event) => {
+        const stop = await getCurrentWebviewWindow().listen<{ panelId: string; linkState?: unknown }>(REATTACH_EVENT, (event) => {
           const id = event.payload?.panelId;
           const api = apiRef.current;
-          if (api && id && isKnownPanelId(id)) addOrFocusPanel(api, id, role);
+          if (api && id && isKnownPanelId(id)) {
+            // WAVE-02-FINAL-REPAIR-01 R3: parsePanelLinkStatePayload fails
+            // closed to unpinned/Linked on a malformed/foreign payload, so a
+            // stale or hand-crafted reattach event can only ever under-restore
+            // (lose a pin) rather than smuggle in an unvalidated identity.
+            addOrFocusPanel(api, id, role, parsePanelLinkStatePayload(event.payload?.linkState));
+          }
         });
         if (cancelled) stop();
         else unlisten = stop;

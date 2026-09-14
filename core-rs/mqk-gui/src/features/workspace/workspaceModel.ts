@@ -152,3 +152,30 @@ export function parseWorkspaceIdentityPayload(value: unknown): WorkspaceIdentity
   }
   return record as unknown as WorkspaceIdentity;
 }
+
+const PANEL_LINK_STATE_FIELDS = ["pinned", "pinnedIdentity"] as const;
+
+/**
+ * Validates an untrusted value (e.g. a cross-window reattach event payload)
+ * as a PanelLinkState. Same closed-set discipline as
+ * parseWorkspaceIdentityPayload: the value must have exactly {pinned,
+ * pinnedIdentity} and nothing else — a smuggled extra key (e.g. an
+ * authority-shaped field) fails the whole payload. Never throws and never
+ * returns null: any malformed shape, a non-boolean `pinned`, or an invalid
+ * `pinnedIdentity` fails closed to initialPanelLinkState() (unpinned/Linked)
+ * — the same safe default a brand-new panel starts in — rather than half
+ * applying a corrupted pin.
+ */
+export function parsePanelLinkStatePayload(value: unknown): PanelLinkState {
+  if (typeof value !== "object" || value === null) return initialPanelLinkState();
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== PANEL_LINK_STATE_FIELDS.length) return initialPanelLinkState();
+  for (const key of keys) {
+    if (!(PANEL_LINK_STATE_FIELDS as readonly string[]).includes(key)) return initialPanelLinkState();
+  }
+  if (typeof record.pinned !== "boolean") return initialPanelLinkState();
+  if (!record.pinned) return initialPanelLinkState();
+  const identity = parseWorkspaceIdentityPayload(record.pinnedIdentity);
+  return identity === null ? initialPanelLinkState() : pinPanel(identity);
+}
