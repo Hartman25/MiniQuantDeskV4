@@ -34,6 +34,7 @@ pub(crate) mod autonomous_daily_operations;
 pub(crate) mod autonomous_daily_operator;
 pub(crate) mod autonomous_paper_status;
 pub(crate) mod backtests;
+pub(crate) mod completed_bar_task_status;
 pub mod control;
 pub(crate) mod control_plane;
 pub(crate) mod durable_portfolio;
@@ -273,6 +274,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use backtests::{
         backtest_economics_suggestion, backtest_job_status, backtest_job_submit, backtest_jobs_list,
     };
+    use completed_bar_task_status::completed_bar_task_status;
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
         run_halt, run_start, run_stop,
@@ -626,6 +628,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/autonomous/paper-status",
             get(autonomous_paper_status),
+        )
+        // M1-COMPLETED-BAR-PIPELINE-REPAIR-01 (PATCH C): read-only projection
+        // of the supervised completed-bar task's process-local truth. No DB
+        // call, no broker/provider call, no mutation of any kind.
+        .route(
+            "/api/v1/autonomous/completed-bar-task-status",
+            get(completed_bar_task_status),
         )
         // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
         // PROJECTION: read-only projection of durable daily-operation outcome

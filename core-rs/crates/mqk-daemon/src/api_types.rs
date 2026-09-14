@@ -7263,3 +7263,41 @@ pub struct DailyDataReadinessResponse {
     pub session_close_utc: Option<String>,
     pub assignments: Vec<DailyDataReadinessAssignmentResponse>,
 }
+
+// ---------------------------------------------------------------------------
+// M1-COMPLETED-BAR-PIPELINE-REPAIR-01 (PATCH C):
+// GET /api/v1/autonomous/completed-bar-task-status
+// ---------------------------------------------------------------------------
+
+/// Read-only projection of the process-local supervised completed-bar task's
+/// own truth (`AppState::completed_bar_task_truth()`). Operator can read
+/// this; nothing on this route can start, stop, or restart the task.
+///
+/// `truth_state` is always `"active"` — this is process-local, in-memory
+/// truth that exists as soon as the daemon is up, whether or not the task
+/// has ever been spawned (`liveness` distinguishes that case as
+/// `"not_started"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletedBarTaskStatusResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// Monotonically increasing per-restart worker generation; 0 before the
+    /// task has ever been spawned.
+    pub generation: u64,
+    /// `"not_started"` | `"running"` | `"waiting"` | `"blocked"` |
+    /// `"stopped"` | `"failed"`.
+    pub liveness: String,
+    /// `"prepare_data_only"` | `"running_dispatch"`, or `null` before any
+    /// tick has recorded a mode.
+    pub mode: Option<String>,
+    pub operation_id: Option<Uuid>,
+    pub last_tick_utc: Option<String>,
+    /// Bounded static outcome code from the most recent tick (e.g.
+    /// `"bar_observed"`, `"coverage_authority_conflict"`,
+    /// `"no_new_completed_bar"`) — never free-form provider/SQL text.
+    pub last_outcome_code: Option<String>,
+    pub consecutive_error_count: u32,
+    pub restart_count: u32,
+    pub last_error_code: Option<String>,
+    pub now_utc: String,
+}
