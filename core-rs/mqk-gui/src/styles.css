@@ -416,9 +416,10 @@ ul {
   padding: 8px 2px;
 }
 
-.rail-nav-abbrev {
-  font-weight: 700;
-  letter-spacing: 0.03em;
+.rail-nav-icon {
+  flex-shrink: 0;
+  color: inherit;
+  margin-top: 1px;
 }
 
 .workspace-column {
@@ -1458,6 +1459,13 @@ ul {
   border-left: 3px solid rgba(245, 166, 35, 0.85);
   color: var(--text);
   padding-left: 8px;
+}
+
+.rail-nav-label-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
 }
 
 .rail-nav-label {

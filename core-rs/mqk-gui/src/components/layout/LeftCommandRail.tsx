@@ -1,15 +1,9 @@
 import shieldLogo from "../../../../../assets/logo/veritas_ledger_shield.png";
 import { SCREEN_REGISTRY, type ScreenKey } from "../../features/screens/screenRegistry";
 import { LEFT_RAIL_PRIMARY, LEFT_RAIL_SECONDARY } from "./leftRailNav";
+import { RAIL_NAV_ICONS } from "./railNavIcons";
 
 export { LEFT_RAIL_PRIMARY, LEFT_RAIL_SECONDARY };
-
-/** Short, non-ambiguous abbreviation for collapsed/icon-mode rail buttons — no icon asset library is in this repo, so this is a real, honest substitute rather than a placeholder glyph. */
-function railAbbreviation(title: string): string {
-  const words = title.split(/[\s/]+/).filter(Boolean);
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
-  return title.slice(0, 2).toUpperCase();
-}
 
 export function LeftCommandRail({
   activeScreen,
@@ -25,24 +19,31 @@ export function LeftCommandRail({
   const primary = LEFT_RAIL_PRIMARY;
   const secondary = LEFT_RAIL_SECONDARY;
 
-  const renderButton = (screen: ScreenKey) => (
-    <button
-      key={screen}
-      type="button"
-      className={`rail-nav-button ${activeScreen === screen ? "is-active" : ""}`}
-      onClick={() => onSelect(screen)}
-      title={SCREEN_REGISTRY[screen].title}
-    >
-      {collapsed ? (
-        <span className="rail-nav-abbrev">{railAbbreviation(SCREEN_REGISTRY[screen].title)}</span>
-      ) : (
-        <>
-          <span className="rail-nav-label">{SCREEN_REGISTRY[screen].title}</span>
-          <small className="rail-nav-key">{screen}</small>
-        </>
-      )}
-    </button>
-  );
+  const renderButton = (screen: ScreenKey) => {
+    const Icon = RAIL_NAV_ICONS[screen];
+    return (
+      <button
+        key={screen}
+        type="button"
+        className={`rail-nav-button ${activeScreen === screen ? "is-active" : ""}`}
+        onClick={() => onSelect(screen)}
+        title={SCREEN_REGISTRY[screen].title}
+        aria-label={SCREEN_REGISTRY[screen].title}
+      >
+        {collapsed ? (
+          <Icon className="rail-nav-icon" aria-hidden="true" size={18} strokeWidth={2} />
+        ) : (
+          <>
+            <span className="rail-nav-label-group">
+              <Icon className="rail-nav-icon" aria-hidden="true" size={16} strokeWidth={2} />
+              <span className="rail-nav-label">{SCREEN_REGISTRY[screen].title}</span>
+            </span>
+            <small className="rail-nav-key">{screen}</small>
+          </>
+        )}
+      </button>
+    );
+  };
 
   return (
     <aside className="left-rail">

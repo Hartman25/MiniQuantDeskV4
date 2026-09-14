@@ -1,0 +1,63 @@
+import {
+  Archive,
+  Bell,
+  Blocks,
+  BrainCircuit,
+  CalendarCheck,
+  CandlestickChart,
+  ChartColumn,
+  Clock,
+  Cpu,
+  DatabaseZap,
+  FlaskConical,
+  Gauge,
+  History,
+  LayoutDashboard,
+  Network,
+  PlayCircle,
+  Radar,
+  RefreshCw,
+  ScrollText,
+  Settings2,
+  ShieldAlert,
+  ShieldCheck,
+  SlidersHorizontal,
+  TriangleAlert,
+  Wallet,
+  type LucideIcon,
+} from "lucide-react";
+import type { ScreenKey } from "../../features/screens/screenRegistry";
+
+/**
+ * One semantic icon per sidebar section. Substitutions from the closest
+ * unavailable match are noted where the section has no single obvious glyph:
+ * - session: no session-specific icon in lucide-react; Clock matches "market-state/trading-window".
+ * - settings: Settings2 is already used for Config, so SlidersHorizontal (secondary choice) disambiguates.
+ */
+export const RAIL_NAV_ICONS: Record<ScreenKey, LucideIcon> = {
+  controlStation: LayoutDashboard,
+  dashboard: Gauge,
+  execution: PlayCircle,
+  risk: ShieldAlert,
+  portfolio: Wallet,
+  reconcile: RefreshCw,
+  ops: ShieldCheck,
+  runtime: Cpu,
+  metrics: ChartColumn,
+  transport: Network,
+  topology: Blocks,
+  alerts: Bell,
+  incidents: TriangleAlert,
+  operatorTimeline: History,
+  session: Clock,
+  dailyOperations: CalendarCheck,
+  config: Settings2,
+  marketData: CandlestickChart,
+  ingest: DatabaseZap,
+  strategy: BrainCircuit,
+  audit: ScrollText,
+  artifacts: Archive,
+  backtests: FlaskConical,
+  strategyScanner: Radar,
+  settings: SlidersHorizontal,
+};
