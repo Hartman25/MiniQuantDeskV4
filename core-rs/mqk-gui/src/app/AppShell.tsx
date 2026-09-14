@@ -21,7 +21,7 @@ import type { OperatorActionDefinition } from "../features/system/types";
 import { confirmAndRunOperatorAction } from "../features/system/runOperatorAction";
 import { Workstation, type WorkstationHandle } from "../features/workstation/Workstation";
 import { readDetachedPanelBootstrap } from "../features/workstation/detachedWindow";
-import { centeredDefaultGeometry, type MonitorDescriptor } from "../features/workstation/monitorModel";
+import { centeredDefaultGeometry, toLogicalWindowGeometry, type MonitorDescriptor } from "../features/workstation/monitorModel";
 import {
   APPLY_PRESET_EVENT,
   pendingPresetStorageKey,
@@ -78,6 +78,13 @@ async function getWindowByLabel(label: "execution" | "oversight") {
  * contract, reusing the same reconciliation primitives proven in
  * monitorModel.test.ts. Returns null (letting the OS pick placement) if the
  * monitor query fails entirely (e.g. browser-only preview).
+ *
+ * WAVE-02-FINAL-REPAIR-01 R4: `width`/`height` are the desired LOGICAL
+ * window size (what the caller ultimately hands to WebviewWindow); Tauri's
+ * Monitor.position/size are physical, so centering happens in physical
+ * space against the target monitor's own physical bounds and the result is
+ * converted back to logical (via that same monitor's scaleFactor) before
+ * returning — never mixing the two spaces in one geometry.
  */
 async function geometryForSlot(slot: number, width: number, height: number): Promise<{ x: number; y: number; width: number; height: number } | null> {
   try {
@@ -93,7 +100,9 @@ async function geometryForSlot(slot: number, width: number, height: number): Pro
       scaleFactor: m.scaleFactor,
     }));
     const index = Math.min(slot, descriptors.length - 1);
-    return centeredDefaultGeometry(descriptors[index], width, height);
+    const targetMonitor = descriptors[index];
+    const physicalGeometry = centeredDefaultGeometry(targetMonitor, width * targetMonitor.scaleFactor, height * targetMonitor.scaleFactor);
+    return toLogicalWindowGeometry(physicalGeometry, targetMonitor.scaleFactor);
   } catch {
     return null;
   }

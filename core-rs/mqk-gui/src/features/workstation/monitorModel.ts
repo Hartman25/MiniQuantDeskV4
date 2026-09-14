@@ -8,6 +8,22 @@
 // plain-data flattening of Tauri's `Monitor` type so this module has no
 // runtime dependency on the Tauri API and is fully testable with simulated
 // descriptors.
+//
+// WAVE-02-FINAL-REPAIR-01 R4 — coordinate-space contract: every
+// MonitorDescriptor and every WindowGeometry produced by this module's own
+// math (overlapArea/findContainingMonitor/isGeometryVisible/
+// clampGeometryToMonitor/reconcileWindowGeometry/centeredDefaultGeometry) is
+// PHYSICAL pixels, matching what Tauri's own `Monitor.position`/`.size`
+// report (per @tauri-apps/api's javascript/api/namespacewindow and
+// namespacedpi reference: "Monitor properties such as size, position, and
+// workArea are measured in physical pixels"). Callers that construct an
+// actual `WebviewWindow`/`Window` MUST convert the final geometry to logical
+// pixels with `toLogicalWindowGeometry` first — the `x`/`y`/`width`/`height`
+// creation options on `WebviewOptions`/`WindowOptions` are logical, not
+// physical. windowRecovery.ts is the one exception: it reads/writes an
+// already-open window's geometry via `outerPosition()`/`outerSize()`/
+// `PhysicalPosition`/`PhysicalSize`, which are physical end-to-end, so it
+// intentionally never calls toLogicalWindowGeometry.
 
 export interface MonitorDescriptor {
   name: string | null;
@@ -23,6 +39,23 @@ export interface WindowGeometry {
   y: number;
   width: number;
   height: number;
+}
+
+/**
+ * Converts a physical-pixel WindowGeometry (this module's native space) into
+ * logical pixels for a WebviewWindow/Window creation options object. A
+ * non-positive scaleFactor (malformed monitor data) falls back to 1 (i.e.
+ * treats the input as already logical) rather than dividing by zero or a
+ * negative number and producing a nonsensical/off-screen position.
+ */
+export function toLogicalWindowGeometry(geometry: WindowGeometry, scaleFactor: number): WindowGeometry {
+  const factor = scaleFactor > 0 ? scaleFactor : 1;
+  return {
+    x: Math.round(geometry.x / factor),
+    y: Math.round(geometry.y / factor),
+    width: Math.round(geometry.width / factor),
+    height: Math.round(geometry.height / factor),
+  };
 }
 
 /** Fraction of a geometry's own area that must overlap the monitor union to count as "on-screen" — a one-pixel sliver does not. */

@@ -7,7 +7,9 @@ import {
   isGeometryVisible,
   overlapArea,
   reconcileWindowGeometry,
+  toLogicalWindowGeometry,
   type MonitorDescriptor,
+  type WindowGeometry,
 } from "../monitorModel.ts";
 
 const MONITOR_1: MonitorDescriptor = { name: "Monitor 1", x: 0, y: 0, width: 1920, height: 1080, scaleFactor: 1 };
@@ -98,4 +100,102 @@ test("centeredDefaultGeometry centers within the monitor and never exceeds its s
   const oversized = centeredDefaultGeometry(MONITOR_3_FAR_RIGHT, 4000, 3000);
   assert.equal(oversized.width, MONITOR_3_FAR_RIGHT.width);
   assert.equal(oversized.height, MONITOR_3_FAR_RIGHT.height);
+});
+
+// ---------------------------------------------------------------------------
+// WAVE-02-FINAL-REPAIR-01 R4: physical -> logical coordinate-space
+// normalization. Tauri's Monitor.position/size (and therefore every
+// MonitorDescriptor/WindowGeometry this module's own math produces) are
+// physical pixels; WebviewWindow/Window creation options are logical.
+// toLogicalWindowGeometry is the one conversion boundary — these tests prove
+// it (and the geometryForSlot/detachPanel call sites that use it) actually
+// center a new window inside its INTENDED monitor's own logical bounds
+// across a range of scale factors, negative monitor coordinates, and
+// mixed-DPI multi-monitor layouts.
+// ---------------------------------------------------------------------------
+
+function logicalBounds(m: MonitorDescriptor): { x: number; y: number; width: number; height: number } {
+  return { x: m.x / m.scaleFactor, y: m.y / m.scaleFactor, width: m.width / m.scaleFactor, height: m.height / m.scaleFactor };
+}
+
+/** Simulates the geometryForSlot/detachPanel pattern: center a LOGICAL desired size on a PHYSICAL monitor, then convert back to logical. */
+function centeredLogicalGeometryOnMonitor(monitor: MonitorDescriptor, desiredWidthLogical: number, desiredHeightLogical: number): WindowGeometry {
+  const physical = centeredDefaultGeometry(monitor, desiredWidthLogical * monitor.scaleFactor, desiredHeightLogical * monitor.scaleFactor);
+  return toLogicalWindowGeometry(physical, monitor.scaleFactor);
+}
+
+function assertCenteredWithinLogicalBounds(geometry: WindowGeometry, monitor: MonitorDescriptor, expectedWidth: number, expectedHeight: number) {
+  const bounds = logicalBounds(monitor);
+  assert.equal(geometry.width, expectedWidth);
+  assert.equal(geometry.height, expectedHeight);
+  // Fully within the monitor's own LOGICAL bounds — the defect this repairs
+  // is a window centered using the wrong (physical) numbers landing on the
+  // wrong monitor or partly off-screen once interpreted as logical.
+  assert.ok(geometry.x >= bounds.x - 1 && geometry.x + geometry.width <= bounds.x + bounds.width + 1, `x=${geometry.x} must be within monitor logical bounds [${bounds.x}, ${bounds.x + bounds.width}]`);
+  assert.ok(geometry.y >= bounds.y - 1 && geometry.y + geometry.height <= bounds.y + bounds.height + 1, `y=${geometry.y} must be within monitor logical bounds [${bounds.y}, ${bounds.y + bounds.height}]`);
+  // Centered: window's logical midpoint within 1px of the monitor's logical midpoint.
+  const geoMidX = geometry.x + geometry.width / 2;
+  const geoMidY = geometry.y + geometry.height / 2;
+  const monitorMidX = bounds.x + bounds.width / 2;
+  const monitorMidY = bounds.y + bounds.height / 2;
+  assert.ok(Math.abs(geoMidX - monitorMidX) <= 1, `x center off by ${geoMidX - monitorMidX}`);
+  assert.ok(Math.abs(geoMidY - monitorMidY) <= 1, `y center off by ${geoMidY - monitorMidY}`);
+}
+
+test("toLogicalWindowGeometry converts physical pixels to logical using the scale factor", () => {
+  const physical: WindowGeometry = { x: 200, y: 100, width: 1600, height: 1000 };
+  assert.deepEqual(toLogicalWindowGeometry(physical, 1), { x: 200, y: 100, width: 1600, height: 1000 });
+  assert.deepEqual(toLogicalWindowGeometry(physical, 2), { x: 100, y: 50, width: 800, height: 500 });
+});
+
+test("toLogicalWindowGeometry falls back to scaleFactor 1 on non-positive input rather than dividing by zero/negative", () => {
+  const physical: WindowGeometry = { x: 200, y: 100, width: 1600, height: 1000 };
+  assert.deepEqual(toLogicalWindowGeometry(physical, 0), physical);
+  assert.deepEqual(toLogicalWindowGeometry(physical, -1), physical);
+});
+
+for (const scaleFactor of [1, 1.25, 1.5, 2]) {
+  test(`centering at ${scaleFactor * 100}% scale lands inside the monitor's logical bounds`, () => {
+    const monitor: MonitorDescriptor = { name: "M", x: 0, y: 0, width: Math.round(1920 * scaleFactor), height: Math.round(1080 * scaleFactor), scaleFactor };
+    const geometry = centeredLogicalGeometryOnMonitor(monitor, 1024, 768);
+    assertCenteredWithinLogicalBounds(geometry, monitor, 1024, 768);
+  });
+}
+
+test("negative monitor coordinates (a monitor positioned left of/above the primary) still center correctly in logical space", () => {
+  // A secondary monitor to the left of and above the primary (x=0,y=0) at 150% scale.
+  const monitor: MonitorDescriptor = { name: "Left", x: -2880, y: -1620, width: 2880, height: 1620, scaleFactor: 1.5 };
+  const geometry = centeredLogicalGeometryOnMonitor(monitor, 1024, 768);
+  assertCenteredWithinLogicalBounds(geometry, monitor, 1024, 768);
+  assert.ok(geometry.x < 0, "must resolve to a negative logical x on a monitor left of the origin");
+  assert.ok(geometry.y < 0, "must resolve to a negative logical y on a monitor above the origin");
+});
+
+test("mixed-DPI dual monitor: each monitor's own scale factor is used, never the other monitor's", () => {
+  // Monitor A: 100% scale, physical == logical, 1920x1080 at x=0.
+  const monitorA: MonitorDescriptor = { name: "A", x: 0, y: 0, width: 1920, height: 1080, scaleFactor: 1 };
+  // Monitor B: 200% scale, physically 3840 wide (logical 1920), placed right after A.
+  const monitorB: MonitorDescriptor = { name: "B", x: 1920, y: 0, width: 3840, height: 2160, scaleFactor: 2 };
+
+  const geoA = centeredLogicalGeometryOnMonitor(monitorA, 1024, 768);
+  assertCenteredWithinLogicalBounds(geoA, monitorA, 1024, 768);
+
+  const geoB = centeredLogicalGeometryOnMonitor(monitorB, 1024, 768);
+  assertCenteredWithinLogicalBounds(geoB, monitorB, 1024, 768);
+  // Using monitor A's scale factor (1) instead of B's (2) would place this
+  // window far outside B's logical bounds [1920, 3840) — assert it lands
+  // strictly inside B's own logical region, not A's or off past B's right edge.
+  const boundsB = logicalBounds(monitorB);
+  assert.ok(geoB.x >= boundsB.x && geoB.x + geoB.width <= boundsB.x + boundsB.width);
+});
+
+test("mixed-DPI triple monitor: three different scale factors each center independently and correctly", () => {
+  const monitorA: MonitorDescriptor = { name: "A", x: 0, y: 0, width: 1920, height: 1080, scaleFactor: 1 };
+  const monitorB: MonitorDescriptor = { name: "B", x: 1920, y: 0, width: 2880, height: 1620, scaleFactor: 1.5 };
+  const monitorC: MonitorDescriptor = { name: "C", x: 3840, y: 0, width: 3200, height: 2000, scaleFactor: 2 };
+
+  for (const monitor of [monitorA, monitorB, monitorC]) {
+    const geometry = centeredLogicalGeometryOnMonitor(monitor, 1500, 960);
+    assertCenteredWithinLogicalBounds(geometry, monitor, 1500, 960);
+  }
 });

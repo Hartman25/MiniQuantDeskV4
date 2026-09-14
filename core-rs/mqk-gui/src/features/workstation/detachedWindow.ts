@@ -14,7 +14,7 @@
 
 import { isDesktopShell } from "../../desktop/bootstrap";
 import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
-import { centeredDefaultGeometry, reconcileWindowGeometry, type MonitorDescriptor, type WindowGeometry } from "./monitorModel";
+import { centeredDefaultGeometry, reconcileWindowGeometry, toLogicalWindowGeometry, type MonitorDescriptor, type WindowGeometry } from "./monitorModel";
 import { parseWorkspaceIdentityPayload, type PanelLinkState, type WorkspaceIdentity } from "../workspace/workspaceModel.ts";
 import type { ScreenKey } from "../screens/screenRegistry";
 
@@ -99,10 +99,25 @@ export async function detachPanel(id: ScreenKey, openerLabel: string, pinnedIden
       ? [primaryDescriptor, ...monitors.filter((m) => !(m.x === primaryDescriptor.x && m.y === primaryDescriptor.y))]
       : monitors;
 
-    const desiredWidth = Math.max((meta?.minWidth ?? 480) * 1.6, 640);
-    const desiredHeight = Math.max((meta?.minHeight ?? 360) * 1.6, 480);
-    const fallback: WindowGeometry = centeredDefaultGeometry(orderedMonitors[0], desiredWidth, desiredHeight);
-    const geometry = reconcileWindowGeometry(null, orderedMonitors, fallback);
+    // WAVE-02-FINAL-REPAIR-01 R4: meta.minWidth/minHeight (and the desired
+    // size derived from them below) are logical pixels — the same values
+    // passed straight through as minWidth/minHeight window-creation options
+    // further down. orderedMonitors' position/size are physical (Tauri's
+    // Monitor contract). centeredDefaultGeometry/reconcileWindowGeometry are
+    // pure math with no space of their own, so the desired size is scaled up
+    // to physical first to center correctly against the physical monitor
+    // bounds, and the final result is converted back to logical (via that
+    // same primary monitor's scaleFactor) immediately before window creation.
+    const primaryScaleFactor = orderedMonitors[0].scaleFactor;
+    const desiredWidthLogical = Math.max((meta?.minWidth ?? 480) * 1.6, 640);
+    const desiredHeightLogical = Math.max((meta?.minHeight ?? 360) * 1.6, 480);
+    const fallback: WindowGeometry = centeredDefaultGeometry(
+      orderedMonitors[0],
+      desiredWidthLogical * primaryScaleFactor,
+      desiredHeightLogical * primaryScaleFactor,
+    );
+    const physicalGeometry = reconcileWindowGeometry(null, orderedMonitors, fallback);
+    const geometry = toLogicalWindowGeometry(physicalGeometry, primaryScaleFactor);
 
     let url = `index.html?detachedPanel=${encodeURIComponent(id)}&opener=${encodeURIComponent(openerLabel)}`;
     if (pinnedIdentity) {
