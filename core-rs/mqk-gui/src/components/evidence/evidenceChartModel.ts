@@ -1,14 +1,22 @@
 // OT-MQD-01: Interactive Evidence Chart — pure adapter from ArtifactBundle to
 // a provenance-aware chart model. No I/O, no daemon calls, no fabrication.
 //
+// TRUTH MODEL: per core-rs/crates/mqk-artifacts/src/backtest_report_artifact.rs,
+// backtest_report.json (not wired to this GUI in this wave) is the canonical,
+// schema-versioned, lossless authority. equity_curve.csv/orders.csv/
+// fills.csv/metrics.json are derived, lossy views — real evidence when
+// loaded, but never the canonical backtest authority. Lane status vocabulary
+// reflects this: "artifact_present"/"artifact_empty" mean a derived GUI
+// artifact loaded (with/without rows), not "this is canonical truth".
+//
 // EVIDENCE-SOURCE MAP (ArtifactBundle, as loaded by BacktestResultsScreen):
-//   AUTHORITATIVE NOW — equity_curve.csv (equity), orders.csv (order intents),
+//   ARTIFACT EVIDENCE — equity_curve.csv (equity), orders.csv (order intents),
 //     fills.csv (fills + fee-derived cost events), manifest.json/metrics.json
 //     (run/strategy/symbol/timeframe identity).
-//   PARTIAL — drawdown is a client-derived display series computed from
-//     equity_curve.csv (mirrors the existing DrawdownSection/
+//   DERIVED DISPLAY-ONLY — drawdown is a client-derived display series
+//     computed from equity_curve.csv (mirrors the existing DrawdownSection/
 //     computeDrawdownSeries pattern) — never a substitute for metrics.json's
-//     authoritative max_drawdown_pct.
+//     own reported max_drawdown_pct.
 //   NOT WIRED — OHLC price bars (no bars artifact is exposed to this screen),
 //     strategy signal events, entry/exit classification (orders/fills carry
 //     `side`, not a distinct entry/exit tag), walk-forward fold boundaries,
@@ -16,7 +24,7 @@
 //     PASS/FAIL only, never boundary timestamps), risk events. These lanes
 //     are backend/artifact prerequisites deferred out of this GUI-only wave.
 //
-// Every lane function that has no authoritative source in this wave (price,
+// Every lane function that has no artifact source in this wave (price,
 // signals, entry/exit, fold/OOS regions) takes NO bundle argument at all —
 // it is structurally impossible for it to derive a marker from input data,
 // which is the strongest available proof it cannot manufacture evidence.
@@ -38,14 +46,20 @@ import { computeDrawdownSeries, manifestTimeframeLabel, reconcileIdentityField }
 // ---------------------------------------------------------------------------
 
 /**
- * "authoritative_empty" is distinct from "unavailable": an artifact that
- * loaded successfully and reported zero rows is a true authoritative empty
- * result, not a truth gap. Collapsing the two would let a read failure
- * silently render as "no events occurred".
+ * These lanes render derived, lossy GUI artifacts (metrics.json/orders.csv/
+ * fills.csv/equity_curve.csv) per the mqk-artifacts backtest_report_artifact
+ * contract — backtest_report.json, not these files, is the canonical,
+ * schema-versioned authority. "artifact_present" therefore means "this
+ * derived file loaded and contains real evidence", never "this is the
+ * canonical BacktestReport". "artifact_empty" is distinct from
+ * "unavailable": an artifact that loaded successfully and reported zero rows
+ * is a true empty result, not a truth gap. Collapsing the two would let a
+ * read failure silently render as "no events occurred".
  */
 export type LaneStatus =
-  | "authoritative"
-  | "authoritative_empty"
+  | "artifact_present"
+  | "artifact_empty"
+  | "partial"
   | "not_wired"
   | "unavailable"
   | "idle"
@@ -75,7 +89,7 @@ function laneStatusFromFileResult<T>(
     case "loading":
       return "loading";
     case "ok":
-      return isEmpty(result.data) ? "authoritative_empty" : "authoritative";
+      return isEmpty(result.data) ? "artifact_empty" : "artifact_present";
     case "missing":
     case "parse_error":
     case "read_error":
@@ -194,6 +208,35 @@ export function timeFraction(range: EvidenceChartTimeRange, tsMs: number | null)
   return Number.isFinite(f) ? f : null;
 }
 
+export type MarkerPlacementDisposition =
+  | "plottable"
+  | "unknown_timestamp"
+  | "range_unavailable"
+  | "range_invalid"
+  | "outside_range";
+
+/**
+ * Explains WHY a marker can or cannot be placed on the chart, without
+ * collapsing every non-plottable case into "outside range". timeFraction()
+ * correctly returns null for all of these (that's the right plotting
+ * decision), but an operator-facing notice that says "known timestamp
+ * outside the plotted range" is false when the range itself was never
+ * resolvable (missing/unparsable start or end) or is internally invalid
+ * (reversed start/end) — those are range failures, not placement facts
+ * about this specific marker.
+ */
+export function classifyMarkerPlacement(
+  range: EvidenceChartTimeRange,
+  tsMs: number | null,
+): MarkerPlacementDisposition {
+  if (tsMs == null) return "unknown_timestamp";
+  if (range.startMs == null || range.endMs == null) return "range_unavailable";
+  if (range.endMs < range.startMs) return "range_invalid";
+  if (range.endMs === range.startMs) return tsMs === range.startMs ? "plottable" : "outside_range";
+  if (tsMs < range.startMs || tsMs > range.endMs) return "outside_range";
+  return "plottable";
+}
+
 // ---------------------------------------------------------------------------
 // Series lanes (equity, drawdown, price)
 // ---------------------------------------------------------------------------
@@ -268,8 +311,8 @@ function buildDrawdownLane(
     points,
     malformedRowCount: equityResult.data.malformed,
     provenance,
-    reason: status === "authoritative" || status === "authoritative_empty"
-      ? "Derived from equity_curve.csv (display-only) — not a substitute for metrics.json's authoritative max_drawdown_pct."
+    reason: status === "artifact_present" || status === "artifact_empty"
+      ? "Derived from equity_curve.csv (display-only) — not a substitute for metrics.json's own reported max_drawdown_pct."
       : null,
   };
 }
@@ -322,6 +365,12 @@ export interface EvidenceMarkerLane {
   markers: EvidenceMarker[];
   malformedRowCount: number;
   reason: string | null;
+  /**
+   * Cost lane only: count of fills.csv rows with a fill_id but no parseable
+   * finite fee value. undefined on lanes where fee evidence isn't a concept
+   * (orders/fills themselves).
+   */
+  invalidFeeCount?: number;
 }
 
 function parseFiniteNumber(raw: string | undefined): number | null {
@@ -377,22 +426,30 @@ function buildOrderIntentLane(
  * this is what makes negative controls B/D structurally true: a fill marker
  * (or a cost event) can only ever originate from an actual fills.csv row,
  * never from an order intent or a research recommendation artifact.
+ *
+ * The two lanes' STATUS is deliberately NOT shared beyond this: a fill row
+ * is genuine fill evidence even when its fee field is blank/malformed, but
+ * that same row is an absence of cost evidence, not a zero-cost fact. Cost
+ * status is therefore derived from how many rows actually carry a parseable
+ * fee, never from the raw fill row count.
  */
 function buildFillAndCostLanes(
   fillsResult: FileResult<ParsedCsvResult<FillRow>>,
   identity: EvidenceChartIdentity,
 ): { fillLane: EvidenceMarkerLane; costLane: EvidenceMarkerLane } {
-  const status = laneStatusFromFileResult(fillsResult, (d) => d.rows.length === 0);
+  const fillStatus = laneStatusFromFileResult(fillsResult, (d) => d.rows.length === 0);
   if (fillsResult.kind !== "ok") {
     const reason = unavailableReason(fillsResult, "fills.csv");
     return {
-      fillLane: { status, markers: [], malformedRowCount: 0, reason },
-      costLane: { status, markers: [], malformedRowCount: 0, reason },
+      fillLane: { status: fillStatus, markers: [], malformedRowCount: 0, reason },
+      costLane: { status: fillStatus, markers: [], malformedRowCount: 0, reason },
     };
   }
 
   const fillMarkers: EvidenceMarker[] = [];
   const costMarkers: EvidenceMarker[] = [];
+  let rowsWithFee = 0;
+  let rowsWithoutFee = 0;
   for (const r of fillsResult.data.rows) {
     const tsMs = parseTsMs(r.ts_utc);
     const timeStatus: MarkerTimeStatus = tsMs == null ? "unknown" : "known";
@@ -424,7 +481,9 @@ function buildFillAndCostLanes(
 
     // Only a literal, parsable fee value becomes a cost event — a blank or
     // unparsable fee is a malformed field, not a fabricated zero-cost fact.
+    // A numeric zero (feeUsd === 0) is real fee evidence and counts here.
     if (feeUsd != null) {
+      rowsWithFee += 1;
       costMarkers.push({
         id: `cost:${r.fill_id}`,
         kind: "cost",
@@ -440,12 +499,36 @@ function buildFillAndCostLanes(
         orderStatus: null,
         provenance,
       });
+    } else {
+      rowsWithoutFee += 1;
     }
   }
 
+  let costStatus: LaneStatus;
+  let costReason: string | null;
+  if (fillsResult.data.rows.length === 0) {
+    costStatus = "artifact_empty";
+    costReason = null;
+  } else if (rowsWithoutFee === 0) {
+    costStatus = "artifact_present";
+    costReason = null;
+  } else if (rowsWithFee === 0) {
+    costStatus = "unavailable";
+    costReason = `${rowsWithoutFee} fill row(s) have no parseable fee value — cost evidence is missing, not zero.`;
+  } else {
+    costStatus = "partial";
+    costReason = `${rowsWithFee} of ${rowsWithFee + rowsWithoutFee} fill row(s) have a parseable fee value; ${rowsWithoutFee} do not.`;
+  }
+
   return {
-    fillLane: { status, markers: fillMarkers, malformedRowCount: fillsResult.data.malformed, reason: null },
-    costLane: { status, markers: costMarkers, malformedRowCount: fillsResult.data.malformed, reason: null },
+    fillLane: { status: fillStatus, markers: fillMarkers, malformedRowCount: fillsResult.data.malformed, reason: null },
+    costLane: {
+      status: costStatus,
+      markers: costMarkers,
+      malformedRowCount: fillsResult.data.malformed,
+      reason: costReason,
+      invalidFeeCount: rowsWithoutFee,
+    },
   };
 }
 

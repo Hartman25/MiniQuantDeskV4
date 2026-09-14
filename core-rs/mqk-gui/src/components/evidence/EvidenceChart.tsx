@@ -8,6 +8,7 @@
 import { useMemo, useState, type MouseEvent } from "react";
 import { Panel } from "../common/Panel";
 import {
+  classifyMarkerPlacement,
   timeFraction,
   type EvidenceChartModel,
   type EvidenceChartTimeRange,
@@ -32,10 +33,12 @@ const LAYER_LABELS: Record<LayerKey, string> = {
 
 function statusLabel(status: LaneStatus): string {
   switch (status) {
-    case "authoritative":
-      return "AUTHORITATIVE";
-    case "authoritative_empty":
-      return "EMPTY (authoritative)";
+    case "artifact_present":
+      return "ARTIFACT EVIDENCE";
+    case "artifact_empty":
+      return "EMPTY (artifact loaded)";
+    case "partial":
+      return "PARTIAL ARTIFACT EVIDENCE";
     case "not_wired":
       return "NOT WIRED";
     case "unavailable":
@@ -49,9 +52,11 @@ function statusLabel(status: LaneStatus): string {
 
 function statusToneClass(status: LaneStatus): string {
   switch (status) {
-    case "authoritative":
+    case "artifact_present":
       return "good";
-    case "authoritative_empty":
+    case "artifact_empty":
+      return "neutral";
+    case "partial":
       return "neutral";
     case "not_wired":
       return "neutral";
@@ -127,11 +132,20 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
   const knownMarkers = allMarkers.filter((m) => m.timeStatus === "known");
   const unknownMarkers = allMarkers.filter((m) => m.timeStatus === "unknown");
   // A known timestamp is not automatically plottable: timeFraction fails
-  // closed for a value genuinely outside the authoritative range. This is a
-  // distinct truth from "unknown/unparsable" and must never be conflated
-  // with it or silently dropped — it gets its own notice below.
+  // closed for a value that cannot be placed. classifyMarkerPlacement
+  // explains WHY — "outside range" is only one of several distinct reasons
+  // (the range itself may be unavailable or invalid) and must never be used
+  // as a catch-all for the others.
   const plottableMarkers = knownMarkers.filter((m) => timeFraction(model.timeRange, m.tsMs) != null);
-  const outOfRangeMarkers = knownMarkers.filter((m) => timeFraction(model.timeRange, m.tsMs) == null);
+  const outOfRangeMarkers = knownMarkers.filter(
+    (m) => classifyMarkerPlacement(model.timeRange, m.tsMs) === "outside_range",
+  );
+  const rangeUnavailableMarkers = knownMarkers.filter(
+    (m) => classifyMarkerPlacement(model.timeRange, m.tsMs) === "range_unavailable",
+  );
+  const rangeInvalidMarkers = knownMarkers.filter(
+    (m) => classifyMarkerPlacement(model.timeRange, m.tsMs) === "range_invalid",
+  );
 
   const handleMouseMove = (e: MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -227,11 +241,11 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
         {priceNotice}
       </div>
 
-      {model.timeRange.status !== "authoritative" ? (
+      {model.timeRange.status !== "artifact_present" ? (
         <div className="empty-state" style={{ marginTop: 8 }}>
-          {model.timeRange.status === "authoritative_empty"
+          {model.timeRange.status === "artifact_empty"
             ? "Equity curve reported zero bars — no time range to chart."
-            : "No authoritative time range available (equity_curve.csv unavailable) — chart cannot be rendered."}
+            : "No plotted time range available (equity_curve.csv unavailable) — chart cannot be rendered."}
         </div>
       ) : (
         <div className="evidence-chart-wrap" onMouseMove={handleMouseMove} onMouseLeave={() => setHoverFraction(null)}>
@@ -340,6 +354,20 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
         <div className="unavailable-notice" style={{ marginTop: 8 }}>
           {outOfRangeMarkers.length} event(s) have a known timestamp outside the plotted time range and
           are not placed on the chart (never relocated to the start/end): {outOfRangeMarkers.map((m) => m.id).join(", ")}
+        </div>
+      )}
+
+      {rangeUnavailableMarkers.length > 0 && (
+        <div className="unavailable-notice" style={{ marginTop: 8 }}>
+          {rangeUnavailableMarkers.length} event(s) have a known timestamp but cannot be placed because no
+          plotted time range is available (never relocated to the start/end): {rangeUnavailableMarkers.map((m) => m.id).join(", ")}
+        </div>
+      )}
+
+      {rangeInvalidMarkers.length > 0 && (
+        <div className="unavailable-notice" style={{ marginTop: 8 }}>
+          {rangeInvalidMarkers.length} event(s) have a known timestamp but cannot be placed because the
+          plotted time range is invalid (reversed start/end): {rangeInvalidMarkers.map((m) => m.id).join(", ")}
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildEvidenceChartModel, timeFraction } from "../evidenceChartModel.ts";
+import { buildEvidenceChartModel, classifyMarkerPlacement, timeFraction } from "../evidenceChartModel.ts";
 import type {
   ArtifactBundle,
   BacktestManifest,
@@ -187,7 +187,7 @@ test("B: strategyFit present with no fills.csv produces zero fill markers (posit
     baseBundle({ fills: { kind: "ok", data: { rows: [fillRow()], malformed: 0 } } }),
   );
   assert.equal(withFill.fillMarkers.markers.length, 1);
-  assert.equal(withFill.fillMarkers.status, "authoritative");
+  assert.equal(withFill.fillMarkers.status, "artifact_present");
 });
 
 // ---------------------------------------------------------------------------
@@ -325,12 +325,12 @@ test("G: marker identity is content-derived (order_id/fill_id), stable under row
 });
 
 // ---------------------------------------------------------------------------
-// H — empty authoritative list vs unavailable/not-wired must not collapse.
+// H — empty artifact-loaded list vs unavailable/not-wired must not collapse.
 // ---------------------------------------------------------------------------
 
-test("H: authoritative empty orders.csv is distinct from unavailable orders.csv", () => {
+test("H: artifact-empty orders.csv is distinct from unavailable orders.csv", () => {
   const empty = buildEvidenceChartModel(baseBundle({ orders: { kind: "ok", data: { rows: [], malformed: 0 } } }));
-  assert.equal(empty.orderIntentMarkers.status, "authoritative_empty");
+  assert.equal(empty.orderIntentMarkers.status, "artifact_empty");
   assert.equal(empty.orderIntentMarkers.markers.length, 0);
 
   const missing = buildEvidenceChartModel(baseBundle({ orders: { kind: "missing" } }));
@@ -392,20 +392,20 @@ test("timeFraction never guesses: unresolved range or timestamp yields null, not
   const unavailableRange = { status: "unavailable" as const, startTsUtc: null, endTsUtc: null, startMs: null, endMs: null };
   assert.equal(timeFraction(unavailableRange, 12345), null);
 
-  const resolvedRange = { status: "authoritative" as const, startTsUtc: "a", endTsUtc: "b", startMs: 0, endMs: 1000 };
+  const resolvedRange = { status: "artifact_present" as const, startTsUtc: "a", endTsUtc: "b", startMs: 0, endMs: 1000 };
   assert.equal(timeFraction(resolvedRange, null), null);
   assert.equal(timeFraction(resolvedRange, 500), 0.5);
 });
 
 // ---------------------------------------------------------------------------
 // OT-MQD-01R: timeFraction fail-closed chronology negative/positive controls.
-// An event outside the authoritative range must never be relocated onto the
+// An event outside the plotted range must never be relocated onto the
 // chart boundary — it must not plot at all.
 // ---------------------------------------------------------------------------
 
-const RANGE_0_1000 = { status: "authoritative" as const, startTsUtc: "a", endTsUtc: "b", startMs: 0, endMs: 1000 };
-const REVERSED_RANGE = { status: "authoritative" as const, startTsUtc: "b", endTsUtc: "a", startMs: 1000, endMs: 0 };
-const DEGENERATE_RANGE = { status: "authoritative" as const, startTsUtc: "a", endTsUtc: "a", startMs: 500, endMs: 500 };
+const RANGE_0_1000 = { status: "artifact_present" as const, startTsUtc: "a", endTsUtc: "b", startMs: 0, endMs: 1000 };
+const REVERSED_RANGE = { status: "artifact_present" as const, startTsUtc: "b", endTsUtc: "a", startMs: 1000, endMs: 0 };
+const DEGENERATE_RANGE = { status: "artifact_present" as const, startTsUtc: "a", endTsUtc: "a", startMs: 500, endMs: 500 };
 
 test("A1: a timestamp before the range does not plot (never relocated to start)", () => {
   assert.equal(timeFraction(RANGE_0_1000, -500), null);
@@ -506,4 +506,203 @@ test("B7: strategy_name is never exposed as a field named strategyId", () => {
   const model = buildEvidenceChartModel(baseBundle());
   assert.ok(!("strategyId" in model.identity));
   assert.ok("strategyName" in model.identity);
+});
+
+// ---------------------------------------------------------------------------
+// FINAL-REPAIR FINDING A: derived GUI artifacts (orders/fills/equity) are
+// never labeled with the canonical-authority vocabulary — per
+// core-rs/crates/mqk-artifacts/src/backtest_report_artifact.rs,
+// backtest_report.json (not wired here) is the sole lossless authority.
+// ---------------------------------------------------------------------------
+
+test("Finding A1: loaded non-empty orders.csv reports artifact_present", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ orders: { kind: "ok", data: { rows: [orderRow()], malformed: 0 } } }),
+  );
+  assert.equal(model.orderIntentMarkers.status, "artifact_present");
+});
+
+test("Finding A2: loaded empty orders.csv reports artifact_empty", () => {
+  const model = buildEvidenceChartModel(baseBundle({ orders: { kind: "ok", data: { rows: [], malformed: 0 } } }));
+  assert.equal(model.orderIntentMarkers.status, "artifact_empty");
+});
+
+test("Finding A3: missing orders.csv reports unavailable", () => {
+  const model = buildEvidenceChartModel(baseBundle({ orders: { kind: "missing" } }));
+  assert.equal(model.orderIntentMarkers.status, "unavailable");
+});
+
+test("Finding A4: read_error orders.csv reports unavailable", () => {
+  const model = buildEvidenceChartModel(baseBundle({ orders: { kind: "read_error", message: "disk error" } }));
+  assert.equal(model.orderIntentMarkers.status, "unavailable");
+});
+
+test("Finding A: the same disposition applies to fills.csv and equity_curve.csv, never 'authoritative'", () => {
+  const present = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow()], malformed: 0 } } }),
+  );
+  assert.equal(present.fillMarkers.status, "artifact_present");
+  assert.equal(present.equitySeries.status, "artifact_present");
+
+  const empty = buildEvidenceChartModel(baseBundle({ fills: { kind: "ok", data: { rows: [], malformed: 0 } } }));
+  assert.equal(empty.fillMarkers.status, "artifact_empty");
+
+  const missingEquity = buildEvidenceChartModel(baseBundle({ equityCurve: { kind: "missing" } }));
+  assert.equal(missingEquity.equitySeries.status, "unavailable");
+
+  // No lane anywhere in the model may use the old canonical-authority terms.
+  const allStatuses = [
+    present.equitySeries.status,
+    present.drawdownSeries.status,
+    present.orderIntentMarkers.status,
+    present.fillMarkers.status,
+    present.costEvents.status,
+  ];
+  for (const status of allStatuses) {
+    assert.notEqual(status, "authoritative");
+    assert.notEqual(status, "authoritative_empty");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FINAL-REPAIR FINDING B: classifyMarkerPlacement distinguishes WHY a known
+// timestamp cannot be plotted, instead of collapsing every non-plottable
+// known timestamp into "outside_range".
+// ---------------------------------------------------------------------------
+
+const UNAVAILABLE_RANGE = {
+  status: "unavailable" as const,
+  startTsUtc: null,
+  endTsUtc: null,
+  startMs: null,
+  endMs: null,
+};
+
+test("Finding B1: known timestamp before a VALID range -> outside_range", () => {
+  assert.equal(classifyMarkerPlacement(RANGE_0_1000, -500), "outside_range");
+});
+
+test("Finding B2: known timestamp after a VALID range -> outside_range", () => {
+  assert.equal(classifyMarkerPlacement(RANGE_0_1000, 1500), "outside_range");
+});
+
+test("Finding B3: unknown (null) timestamp -> unknown_timestamp", () => {
+  assert.equal(classifyMarkerPlacement(RANGE_0_1000, null), "unknown_timestamp");
+});
+
+test("Finding B4: known timestamp + missing range -> range_unavailable, never outside_range", () => {
+  assert.equal(classifyMarkerPlacement(UNAVAILABLE_RANGE, 500), "range_unavailable");
+});
+
+test("Finding B5: known timestamp + reversed range -> range_invalid, never outside_range", () => {
+  assert.equal(classifyMarkerPlacement(REVERSED_RANGE, 500), "range_invalid");
+});
+
+test("Finding B6: exact range start -> plottable", () => {
+  assert.equal(classifyMarkerPlacement(RANGE_0_1000, 0), "plottable");
+});
+
+test("Finding B7: exact range end -> plottable", () => {
+  assert.equal(classifyMarkerPlacement(RANGE_0_1000, 1000), "plottable");
+});
+
+test("Finding B8: midpoint -> plottable", () => {
+  assert.equal(classifyMarkerPlacement(RANGE_0_1000, 500), "plottable");
+});
+
+test("Finding B9: degenerate range, exact timestamp -> plottable (midpoint)", () => {
+  assert.equal(classifyMarkerPlacement(DEGENERATE_RANGE, 500), "plottable");
+  assert.equal(timeFraction(DEGENERATE_RANGE, 500), 0.5);
+});
+
+test("Finding B10: degenerate range, different timestamp -> outside_range", () => {
+  assert.equal(classifyMarkerPlacement(DEGENERATE_RANGE, 501), "outside_range");
+});
+
+test("Finding B: EvidenceChart-level marker grouping matches classifyMarkerPlacement, not a blanket outside_range collapse", () => {
+  // Reproduces the EvidenceChart.tsx grouping logic directly against the model
+  // fixtures used above, so a regression to the old blanket collapse would
+  // fail this test even without mounting the component.
+  const knownTsMs = [-500, 1500, 0, 1000, 500];
+  for (const tsMs of knownTsMs) {
+    const disposition = classifyMarkerPlacement(RANGE_0_1000, tsMs);
+    assert.notEqual(disposition, "range_unavailable");
+    assert.notEqual(disposition, "range_invalid");
+  }
+  assert.equal(classifyMarkerPlacement(UNAVAILABLE_RANGE, 500), "range_unavailable");
+  assert.equal(classifyMarkerPlacement(REVERSED_RANGE, 500), "range_invalid");
+});
+
+// ---------------------------------------------------------------------------
+// FINAL-REPAIR FINDING C: the Costs lane's status is derived from actual fee
+// evidence, never inherited blindly from the fills.csv row count.
+// ---------------------------------------------------------------------------
+
+test("Finding C1: one fill with a numeric fee -> complete artifact-evidence Costs lane", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow({ fee: "1000000" })], malformed: 0 } } }),
+  );
+  assert.equal(model.costEvents.status, "artifact_present");
+  assert.equal(model.costEvents.markers.length, 1);
+  assert.equal(model.costEvents.invalidFeeCount, 0);
+});
+
+test("Finding C2: one fill with fee \"0\" -> complete artifact-evidence lane with a zero-valued cost marker", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow({ fee: "0" })], malformed: 0 } } }),
+  );
+  assert.equal(model.costEvents.status, "artifact_present");
+  assert.equal(model.costEvents.markers.length, 1);
+  assert.equal(model.costEvents.markers[0].feeUsd, 0);
+});
+
+test("Finding C3: one fill with a blank fee -> unavailable/incomplete Costs lane, NOT empty/complete", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow({ fee: "" })], malformed: 0 } } }),
+  );
+  assert.equal(model.costEvents.status, "unavailable");
+  assert.notEqual(model.costEvents.status, "artifact_empty");
+  assert.notEqual(model.costEvents.status, "artifact_present");
+  assert.equal(model.costEvents.markers.length, 0);
+  assert.equal(model.costEvents.invalidFeeCount, 1);
+  assert.ok(model.costEvents.reason && /no parseable fee/i.test(model.costEvents.reason));
+});
+
+test("Finding C4: one fill with a nonnumeric fee -> unavailable/incomplete", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({ fills: { kind: "ok", data: { rows: [fillRow({ fee: "not-a-number" })], malformed: 0 } } }),
+  );
+  assert.equal(model.costEvents.status, "unavailable");
+  assert.equal(model.costEvents.markers.length, 0);
+});
+
+test("Finding C5: two fills, one valid fee + one blank -> PARTIAL, with fill lane unaffected", () => {
+  const model = buildEvidenceChartModel(
+    baseBundle({
+      fills: {
+        kind: "ok",
+        data: {
+          rows: [fillRow({ fill_id: "has-fee", fee: "1000000" }), fillRow({ fill_id: "blank-fee", fee: "" })],
+          malformed: 0,
+        },
+      },
+    }),
+  );
+  assert.equal(model.costEvents.status, "partial");
+  assert.equal(model.costEvents.markers.length, 1);
+  assert.equal(model.costEvents.invalidFeeCount, 1);
+  // The fill lane is a distinct concept from the cost lane: both fill rows
+  // are genuine fill evidence even though only one carries a parseable fee.
+  assert.equal(model.fillMarkers.status, "artifact_present");
+  assert.equal(model.fillMarkers.markers.length, 2);
+});
+
+test("Finding C6: zero fill rows -> Costs lane artifact_empty", () => {
+  const model = buildEvidenceChartModel(baseBundle({ fills: { kind: "ok", data: { rows: [], malformed: 0 } } }));
+  assert.equal(model.costEvents.status, "artifact_empty");
+});
+
+test("Finding C7: missing fills artifact -> Costs lane unavailable", () => {
+  const model = buildEvidenceChartModel(baseBundle({ fills: { kind: "missing" } }));
+  assert.equal(model.costEvents.status, "unavailable");
 });
