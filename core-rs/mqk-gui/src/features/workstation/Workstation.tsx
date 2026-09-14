@@ -50,19 +50,33 @@ import {
 
 interface PanelHostParams {
   panelId: ScreenKey;
-  /**
-   * WAVE-02-FINAL-REPAIR-01 R3: seeds this panel instance's linked/pinned
-   * state at creation (e.g. restoring exactly what a detached panel had
-   * when it was reattached). Only consulted on first mount — read once by
-   * useState's lazy initializer, same as initialPanelLinkState() itself.
-   */
-  initialLinkState?: PanelLinkState;
 }
 
 const ScreenRenderCtx = createContext<ScreenRenderContext | null>(null);
 
 interface WorkstationActions {
   detach: (id: ScreenKey, pinState: PanelLinkState) => void;
+  /**
+   * WAVE-02-FINAL-REPAIR-01 R3: staging for a panel's restored linked/pinned
+   * state (e.g. from a reattach). Deliberately OUT-OF-BAND from dockview's
+   * own `params` — params round-trip through dockview's own
+   * toJSON()/fromJSON() and get captured by persistLayout's auto-save, so
+   * anything placed there would unintentionally survive a full app restart,
+   * not just this reattach. This ref-backed handoff exists only in memory,
+   * from the instant addOrFocusPanel creates the panel until PanelHost
+   * clears it after mount.
+   *
+   * Split into a pure peek + a separate clear (rather than one
+   * read-then-delete) because React 18 StrictMode double-invokes a
+   * useState lazy initializer in development to catch exactly this kind of
+   * impurity — a destructive delete inside the initializer would silently
+   * lose the staged state on the second invocation. peek is idempotent
+   * (safe to call any number of times); clear only needs to run once after
+   * commit, in a useEffect, and is itself idempotent (Map.delete on an
+   * already-cleared key is a no-op).
+   */
+  peekPendingLinkState: (id: ScreenKey) => PanelLinkState | undefined;
+  clearPendingLinkState: (id: ScreenKey) => void;
 }
 
 const WorkstationActionsCtx = createContext<WorkstationActions | null>(null);
@@ -71,8 +85,16 @@ function PanelHost({ params }: IDockviewPanelProps<PanelHostParams>) {
   const ctx = useContext(ScreenRenderCtx);
   const actions = useContext(WorkstationActionsCtx);
   const workspace = useWorkspaceContext();
-  const [linkState, setLinkState] = useState<PanelLinkState>(() => params.initialLinkState ?? initialPanelLinkState());
+  const [linkState, setLinkState] = useState<PanelLinkState>(
+    () => actions?.peekPendingLinkState(params.panelId) ?? initialPanelLinkState(),
+  );
   const panelId = params.panelId;
+  useEffect(() => {
+    actions?.clearPendingLinkState(panelId);
+    // panelId is this dockview panel's fixed identity for its lifetime, and
+    // clearPendingLinkState is idempotent, so re-running this on an actions
+    // identity change (role switch) is harmless.
+  }, [panelId, actions]);
   const screen = isKnownPanelId(panelId) ? SCREEN_REGISTRY[panelId] : null;
   const meta = isKnownPanelId(panelId) ? getPanelMetadata(panelId) : null;
 
@@ -139,7 +161,7 @@ export interface WorkstationHandle {
  * rather than adding it, since a caller here has no other panel to fall
  * back to.
  */
-function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole, initialLinkState?: PanelLinkState) {
+function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole) {
   if (!panelAllowedInRole(id, role)) return;
   const existing = api.getPanel(id);
   if (existing) {
@@ -151,7 +173,7 @@ function addOrFocusPanel(api: DockviewApi, id: ScreenKey, role: DeskRole, initia
     id,
     component: "panelHost",
     title: meta?.title ?? id,
-    params: { panelId: id, initialLinkState } satisfies PanelHostParams,
+    params: { panelId: id } satisfies PanelHostParams,
     // GUI-LAYOUT-06: enforces each panel's registry-declared minimum
     // footprint (panelRegistry.ts) directly in dockview, so a panel can
     // never be resized/split down to an unreadable sliver.
@@ -260,6 +282,10 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
 ) {
   const apiRef = useRef<DockviewApi | null>(null);
   const disposablesRef = useRef<Array<{ dispose(): void }>>([]);
+  // WAVE-02-FINAL-REPAIR-01 R3: in-memory-only staging for a panel's restored
+  // linked/pinned state (see WorkstationActions.peekPendingLinkState's
+  // comment on why this deliberately bypasses dockview's own params).
+  const pendingLinkStateRef = useRef<Map<ScreenKey, PanelLinkState>>(new Map());
   const onActivePanelChangeRef = useRef(onActivePanelChange);
   onActivePanelChangeRef.current = onActivePanelChange;
 
@@ -347,7 +373,10 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
             // closed to unpinned/Linked on a malformed/foreign payload, so a
             // stale or hand-crafted reattach event can only ever under-restore
             // (lose a pin) rather than smuggle in an unvalidated identity.
-            addOrFocusPanel(api, id, role, parsePanelLinkStatePayload(event.payload?.linkState));
+            // Staged in memory (never in dockview's params) so it seeds only
+            // this one panel creation, not the auto-persisted layout.
+            pendingLinkStateRef.current.set(id, parsePanelLinkStatePayload(event.payload?.linkState));
+            addOrFocusPanel(api, id, role);
           }
         });
         if (cancelled) stop();
@@ -381,6 +410,10 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
             if (liveApi) addOrFocusPanel(liveApi, id, role);
           }
         });
+      },
+      peekPendingLinkState: (id: ScreenKey) => pendingLinkStateRef.current.get(id),
+      clearPendingLinkState: (id: ScreenKey) => {
+        pendingLinkStateRef.current.delete(id);
       },
     }),
     [role],
