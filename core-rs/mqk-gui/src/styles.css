@@ -450,8 +450,20 @@ ul {
   padding: 18px;
 }
 
+/* GUI-VIEWPORT-FIT-01: the Preflight/Autonomous-Readiness checklist is
+   high-volume content with no natural cap — left as a plain block it grew
+   to its full content height and, with nothing below it able to shrink far
+   enough to compensate, pushed the workstation area to zero height with the
+   excess silently clipped by .workspace-column's overflow:hidden (never
+   reachable, not even by scrolling). Made a shrinkable flex sibling of
+   .workstation-root with its own bounded internal scroll, same pattern as
+   .bottom-rail below it. */
 .preflight-panel {
   padding: 12px 16px;
+  flex: 0 1 auto;
+  max-height: clamp(160px, 27vh, 400px);
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .toolbar-metrics {
@@ -459,12 +471,20 @@ ul {
   justify-content: space-between;
 }
 
+/* GUI-VIEWPORT-FIT-01: dockview's own panel-content wrapper (.dv-react-part)
+   is a plain block box, not a flex container, so `flex: 1` here has no
+   effect — this section was sizing to its own content instead of the fixed
+   height dockview already computed for it, which is what let a panel's
+   content extend past the visible dockview group instead of scrolling
+   inside .workspace-body below. */
 .workspace-frame {
   display: flex;
   flex-direction: column;
   gap: 10px;
   flex: 1;
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .panel-head {
@@ -643,9 +663,13 @@ ul {
   margin-bottom: 6px;
 }
 
+/* GUI-VIEWPORT-FIT-01: auto-fit so the checklist uses however many columns
+   the available width actually supports (rather than a fixed 3, stepped
+   down by width-only breakpoints below) — cuts row count, and therefore
+   height, at typical desktop widths. */
 .checklist-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 8px;
 }
 
@@ -750,7 +774,6 @@ ul {
   }
 
   .summary-grid-four,
-  .checklist-grid,
   .two-column-grid,
   .preflight-notes {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -768,7 +791,6 @@ ul {
   }
 
   .summary-grid-four,
-  .checklist-grid,
   .two-column-grid,
   .preflight-notes,
   .right-rail {
@@ -777,6 +799,42 @@ ul {
 
   .event-row {
     grid-template-columns: 1fr;
+  }
+}
+
+/* GUI-VIEWPORT-FIT-01: height-responsive budgeting — a short client area
+   (window chrome + taskbar eating into a 900px-class display) needs the
+   fixed chrome above the workstation to give back space via spacing, not
+   type size (the Wave-02 readability floor stays fixed). */
+@media (max-height: 860px) {
+  .workspace-layout {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .workspace-column {
+    gap: 6px;
+  }
+
+  .preflight-panel {
+    padding: 8px 12px;
+  }
+
+  .checklist-grid {
+    gap: 6px;
+  }
+
+  .check-card {
+    padding: 6px 10px;
+  }
+
+  .bottom-rail {
+    max-height: 84px;
+  }
+
+  .workstation-preset-bar {
+    padding: 6px 12px;
+    gap: 10px;
   }
 }
 
