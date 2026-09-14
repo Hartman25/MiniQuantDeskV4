@@ -16,6 +16,88 @@ function wsContinuityTone(state: SystemStatus["alpaca_ws_continuity"]): "info" |
   }
 }
 
+// WAVE-02-FINAL-REPAIR-01 R1: fixed Tier-0 safety truth for kill-switch,
+// live-routing, critical/warning incidents, and daemon reachability.
+// status.kill_switch_active / live_routing_enabled / has_critical /
+// has_warning are plain booleans that fail open to a "safe-looking" default
+// (see DEFAULT_STATUS) while the daemon is unreachable — so every derivation
+// below is gated on status.daemon_reachable first and must render "unknown",
+// never the boolean's face value, once reachability is lost.
+
+export type KillSwitchDisplayState = "active" | "inactive" | "unknown";
+
+export function killSwitchDisplayState(status: SystemStatus): KillSwitchDisplayState {
+  if (!status.daemon_reachable) return "unknown";
+  return status.kill_switch_active ? "active" : "inactive";
+}
+
+// An active kill switch means trading is halted — alarming but safe; render
+// loud/critical so it cannot be mistaken for a quiet "all clear".
+function killSwitchTone(state: KillSwitchDisplayState): "info" | "warning" | "critical" {
+  switch (state) {
+    case "active":
+      return "critical";
+    case "unknown":
+      return "warning";
+    case "inactive":
+    default:
+      return "info";
+  }
+}
+
+export type LiveRoutingDisplayState = "enabled" | "disabled" | "unknown";
+
+export function liveRoutingDisplayState(status: SystemStatus): LiveRoutingDisplayState {
+  if (!status.daemon_reachable) return "unknown";
+  return status.live_routing_enabled ? "enabled" : "disabled";
+}
+
+// Live routing enabled is the single most safety-critical truth in this
+// system (real broker order routing) — always render it loud when enabled.
+function liveRoutingTone(state: LiveRoutingDisplayState): "info" | "warning" | "critical" {
+  switch (state) {
+    case "enabled":
+      return "critical";
+    case "unknown":
+      return "warning";
+    case "disabled":
+    default:
+      return "info";
+  }
+}
+
+export type IncidentDisplayState = "critical" | "warning" | "clear" | "unknown";
+
+export function incidentDisplayState(status: SystemStatus): IncidentDisplayState {
+  if (!status.daemon_reachable) return "unknown";
+  if (status.has_critical) return "critical";
+  if (status.has_warning) return "warning";
+  return "clear";
+}
+
+function incidentTone(state: IncidentDisplayState): "info" | "warning" | "critical" {
+  switch (state) {
+    case "critical":
+      return "critical";
+    case "warning":
+    case "unknown":
+      return "warning";
+    case "clear":
+    default:
+      return "info";
+  }
+}
+
+export type ConnectivityDisplayState = "online" | "offline";
+
+export function connectivityDisplayState(status: SystemStatus): ConnectivityDisplayState {
+  return status.daemon_reachable ? "online" : "offline";
+}
+
+function connectivityTone(state: ConnectivityDisplayState): "info" | "warning" | "critical" {
+  return state === "online" ? "info" : "critical";
+}
+
 interface GlobalStatusBarProps {
   status: SystemStatus;
   dataSource?: DataSourceDetail;
@@ -54,9 +136,38 @@ function dataSourceSummary(dataSource?: DataSourceDetail): string {
 }
 
 export function GlobalStatusBar({ status, dataSource }: GlobalStatusBarProps) {
+  const killSwitchState = killSwitchDisplayState(status);
+  const liveRoutingState = liveRoutingDisplayState(status);
+  const incidentState = incidentDisplayState(status);
+  const connectivityState = connectivityDisplayState(status);
+
   return (
     <header className="global-status-bar">
       <div className="global-status-primary">
+        <StatusPill
+          label="Connection"
+          value={connectivityState}
+          tone={connectivityTone(connectivityState)}
+          emphasis={connectivityState === "offline" ? "loud" : "normal"}
+        />
+        <StatusPill
+          label="Kill Switch"
+          value={killSwitchState}
+          tone={killSwitchTone(killSwitchState)}
+          emphasis={killSwitchState === "active" ? "loud" : "normal"}
+        />
+        <StatusPill
+          label="Live Routing"
+          value={liveRoutingState}
+          tone={liveRoutingTone(liveRoutingState)}
+          emphasis={liveRoutingState === "enabled" ? "loud" : "normal"}
+        />
+        <StatusPill
+          label="Incidents"
+          value={incidentState}
+          tone={incidentTone(incidentState)}
+          emphasis={incidentState === "critical" ? "loud" : "normal"}
+        />
         <StatusPill
           label="Environment"
           value={status.environment}

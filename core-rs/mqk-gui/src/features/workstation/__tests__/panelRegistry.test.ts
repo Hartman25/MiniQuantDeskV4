@@ -84,6 +84,35 @@ test("Tier-0 status fields are fixed, non-empty, and distinct — never a movabl
   }
 });
 
+// WAVE-02-FINAL-REPAIR-01 R1: the fixed Tier-0 surface must expose
+// kill-switch truth, live-routing truth, critical/warning incident-alert
+// indication, and daemon reachability alongside the original health fields
+// — these may not silently disappear when the field list is edited again.
+test("Tier-0 status fields include the full required fixed safety surface", () => {
+  const required = [
+    "environment",
+    "runtime_status",
+    "broker_status",
+    "alpaca_ws_continuity",
+    "db_status",
+    "market_data_health",
+    "reconcile_status",
+    "integrity_status",
+    "audit_writer_status",
+    "kill_switch_active",
+    "live_routing_enabled",
+    "has_critical",
+    "has_warning",
+    "daemon_reachable",
+  ];
+  for (const field of required) {
+    assert.ok(
+      (TIER0_STATUS_FIELDS as readonly string[]).includes(field),
+      `${field}: required fixed Tier-0 safety truth is missing from TIER0_STATUS_FIELDS`,
+    );
+  }
+});
+
 test("contextAware is only set for panels with current WorkspaceContext evidence (marketData, backtests)", () => {
   const contextAwareIds = PANEL_IDS.filter((id) => PANEL_REGISTRY[id].contextAware).sort();
   assert.deepEqual(contextAwareIds, ["backtests", "marketData"]);

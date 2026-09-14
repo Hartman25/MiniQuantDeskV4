@@ -8,9 +8,11 @@
 // needs to place, duplicate-guard, and fail closed on panels.
 //
 // Tier 0 (fixed safety truth: environment/runtime/broker/db/market-data/
-// reconcile/integrity/audit health) is rendered directly by GlobalStatusBar
-// from SystemStatus and is never a movable panel — TIER0_STATUS_FIELDS below
-// is a compile-time-checked contract, not a registry entry.
+// reconcile/integrity/audit health, kill-switch and live-routing truth,
+// critical/warning incident-alert indication, and daemon reachability) is
+// rendered directly by GlobalStatusBar from SystemStatus and is never a
+// movable panel — TIER0_STATUS_FIELDS below is a compile-time-checked
+// contract, not a registry entry.
 //
 // Every screen is a Tier 1 or Tier 2 *panel*:
 //   tier1 — must remain reachable without a full workspace switch (e.g. via a
@@ -157,6 +159,12 @@ export function panelRendererFor(id: string): "always" | undefined {
  * Fixed Tier-0 safety-truth fields, always rendered by GlobalStatusBar
  * directly from SystemStatus. Not user-hideable, not part of the panel
  * registry, never movable/detachable/duplicable.
+ *
+ * kill_switch_active, live_routing_enabled, has_critical, has_warning, and
+ * daemon_reachable were added by the WAVE-02-FINAL-REPAIR-01 R1 repair: the
+ * original 9-field list omitted kill-switch truth, live-routing truth,
+ * critical/warning incident-alert indication, and stale/offline/unavailable
+ * indication, none of which may disappear when movable panels are hidden.
  */
 export const TIER0_STATUS_FIELDS = [
   "environment",
@@ -168,6 +176,11 @@ export const TIER0_STATUS_FIELDS = [
   "reconcile_status",
   "integrity_status",
   "audit_writer_status",
+  "kill_switch_active",
+  "live_routing_enabled",
+  "has_critical",
+  "has_warning",
+  "daemon_reachable",
 ] as const;
 
 export type Tier0StatusField = (typeof TIER0_STATUS_FIELDS)[number];
