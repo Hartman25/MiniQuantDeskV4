@@ -446,9 +446,15 @@ ul {
   flex-shrink: 0;
 }
 
-.panel-detach-button {
+.panel-detach-button,
+.panel-pin-button {
   font-size: 0.72rem;
   padding: 4px 10px;
+}
+
+.panel-pin-button.is-selected {
+  border-color: rgba(245, 166, 35, 0.55);
+  color: var(--accent);
 }
 
 .workspace-body,

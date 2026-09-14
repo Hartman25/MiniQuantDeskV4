@@ -15,6 +15,7 @@
 import { isDesktopShell } from "../../desktop/bootstrap";
 import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
 import { centeredDefaultGeometry, reconcileWindowGeometry, type MonitorDescriptor, type WindowGeometry } from "./monitorModel";
+import { parseWorkspaceIdentityPayload, type WorkspaceIdentity } from "../workspace/workspaceModel.ts";
 import type { ScreenKey } from "../screens/screenRegistry";
 
 const DETACHED_PANEL_LABEL_PREFIX = "panel-";
@@ -33,15 +34,28 @@ export function parsePanelIdFromLabel(label: string): ScreenKey | null {
 export interface DetachedPanelBootstrap {
   panelId: ScreenKey;
   openerLabel: string;
+  /** GUI-LAYOUT-05: the panel's frozen identity at the moment it was detached, if it was pinned. Null means the detached window follows the global linked identity like any unpinned panel. */
+  pinnedIdentity: WorkspaceIdentity | null;
 }
 
-/** Parses the detached-window URL query. Malformed/unknown values fail closed to null so the window falls back to normal desk-role rendering rather than crash. */
+/** Parses the detached-window URL query. Malformed/unknown values fail closed to null (for pinnedIdentity) or to the whole bootstrap (for panelId/opener) so the window falls back to normal rendering rather than crash. */
 export function readDetachedPanelBootstrap(search: string): DetachedPanelBootstrap | null {
   const params = new URLSearchParams(search);
   const panelId = params.get("detachedPanel");
   const openerLabel = params.get("opener");
   if (!panelId || !openerLabel || !isKnownPanelId(panelId)) return null;
-  return { panelId, openerLabel };
+
+  const rawPinned = params.get("pinnedIdentity");
+  let pinnedIdentity: WorkspaceIdentity | null = null;
+  if (rawPinned) {
+    try {
+      pinnedIdentity = parseWorkspaceIdentityPayload(JSON.parse(rawPinned));
+    } catch {
+      pinnedIdentity = null;
+    }
+  }
+
+  return { panelId, openerLabel, pinnedIdentity };
 }
 
 export type DetachResult = { ok: true } | { ok: false; reason: "tauri-unavailable" | "no-monitors" | "error" };
@@ -50,8 +64,8 @@ function toMonitorDescriptor(m: { name: string | null; position: { x: number; y:
   return { name: m.name, x: m.position.x, y: m.position.y, width: m.size.width, height: m.size.height, scaleFactor: m.scaleFactor };
 }
 
-/** Opens (or focuses, if it already exists) a detached window for `id`. Never creates a second detached window for the same panel id. */
-export async function detachPanel(id: ScreenKey, openerLabel: string): Promise<DetachResult> {
+/** Opens (or focuses, if it already exists) a detached window for `id`. Never creates a second detached window for the same panel id. `pinnedIdentity` is carried across for a panel that was pinned at detach time — null for an unpinned (globally-linked) panel. */
+export async function detachPanel(id: ScreenKey, openerLabel: string, pinnedIdentity: WorkspaceIdentity | null): Promise<DetachResult> {
   if (!isDesktopShell()) return { ok: false, reason: "tauri-unavailable" };
 
   try {
@@ -83,8 +97,13 @@ export async function detachPanel(id: ScreenKey, openerLabel: string): Promise<D
     const fallback: WindowGeometry = centeredDefaultGeometry(orderedMonitors[0], desiredWidth, desiredHeight);
     const geometry = reconcileWindowGeometry(null, orderedMonitors, fallback);
 
+    let url = `index.html?detachedPanel=${encodeURIComponent(id)}&opener=${encodeURIComponent(openerLabel)}`;
+    if (pinnedIdentity) {
+      url += `&pinnedIdentity=${encodeURIComponent(JSON.stringify(pinnedIdentity))}`;
+    }
+
     const win = new WebviewWindow(label, {
-      url: `index.html?detachedPanel=${encodeURIComponent(id)}&opener=${encodeURIComponent(openerLabel)}`,
+      url,
       title: meta?.title ?? id,
       x: geometry.x,
       y: geometry.y,

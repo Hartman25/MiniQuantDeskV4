@@ -17,6 +17,7 @@ import {
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import {
   DockviewReact,
@@ -30,6 +31,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SCREEN_REGISTRY, type ScreenKey, type ScreenRenderContext } from "../screens/screenRegistry";
 import { WorkspaceFrame } from "../../components/layout/WorkspaceFrame";
 import { ScreenErrorBoundary } from "../../components/common/ScreenErrorBoundary";
+import { useWorkspaceContext, WorkspaceScopeProvider } from "../workspace/WorkspaceContext.tsx";
+import { initialPanelLinkState, pinPanel, resolvePanelIdentity, unpinPanel, type PanelLinkState } from "../workspace/workspaceModel.ts";
 import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
 import { detachPanel, REATTACH_EVENT } from "./detachedWindow";
 import { APPLY_PRESET_EVENT, pendingPresetStorageKey, readPendingPresetPanelIds } from "./presets";
@@ -51,7 +54,7 @@ interface PanelHostParams {
 const ScreenRenderCtx = createContext<ScreenRenderContext | null>(null);
 
 interface WorkstationActions {
-  detach: (id: ScreenKey) => void;
+  detach: (id: ScreenKey, pinState: PanelLinkState) => void;
 }
 
 const WorkstationActionsCtx = createContext<WorkstationActions | null>(null);
@@ -59,6 +62,8 @@ const WorkstationActionsCtx = createContext<WorkstationActions | null>(null);
 function PanelHost({ params }: IDockviewPanelProps<PanelHostParams>) {
   const ctx = useContext(ScreenRenderCtx);
   const actions = useContext(WorkstationActionsCtx);
+  const workspace = useWorkspaceContext();
+  const [linkState, setLinkState] = useState<PanelLinkState>(initialPanelLinkState);
   const panelId = params.panelId;
   const screen = isKnownPanelId(panelId) ? SCREEN_REGISTRY[panelId] : null;
   const meta = isKnownPanelId(panelId) ? getPanelMetadata(panelId) : null;
@@ -71,17 +76,35 @@ function PanelHost({ params }: IDockviewPanelProps<PanelHostParams>) {
     return <div className="workstation-panel-unavailable">Panel unavailable.</div>;
   }
 
+  // GUI-LAYOUT-05: only a contextAware panel (marketData, backtests — see
+  // panelRegistry.ts) participates in linked/pinned identity at all. Every
+  // other panel is rendered under the ambient global context unchanged.
+  const contextAware = meta?.contextAware ?? false;
+  const resolved = contextAware ? resolvePanelIdentity(workspace.linked, linkState) : workspace.linked;
+  const togglePin = () => setLinkState((prev) => (prev.pinned ? unpinPanel() : pinPanel(resolved)));
+
+  const body = (
+    <ScreenErrorBoundary key={panelId} screenKey={panelId}>
+      {screen.render(ctx)}
+    </ScreenErrorBoundary>
+  );
+
   return (
     <WorkspaceFrame
       title={screen.title}
       description={screen.description}
       panelKey={panelId}
       authority={ctx.model.panelSources[panelId]}
-      onDetach={meta?.detachable && actions ? () => actions.detach(panelId) : undefined}
+      onDetach={meta?.detachable && actions ? () => actions.detach(panelId, linkState) : undefined}
+      pinState={contextAware ? { pinned: linkState.pinned, onToggle: togglePin } : undefined}
     >
-      <ScreenErrorBoundary key={panelId} screenKey={panelId}>
-        {screen.render(ctx)}
-      </ScreenErrorBoundary>
+      {contextAware ? (
+        <WorkspaceScopeProvider value={{ linked: resolved, setLinked: workspace.setLinked, resetLinked: workspace.resetLinked }}>
+          {body}
+        </WorkspaceScopeProvider>
+      ) : (
+        body
+      )}
     </WorkspaceFrame>
   );
 }
@@ -312,13 +335,16 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
 
   const actions = useMemo<WorkstationActions>(
     () => ({
-      detach: (id: ScreenKey) => {
+      detach: (id: ScreenKey, pinState: PanelLinkState) => {
         const api = apiRef.current;
         if (!api) return;
         const panel = api.getPanel(id);
         if (panel) api.removePanel(panel);
         const openerLabel = currentWindowLabelOrDefault();
-        void detachPanel(id, openerLabel).then((result) => {
+        // GUI-LAYOUT-05: a pinned panel carries its frozen identity across
+        // the detach boundary so the detached window shows the same
+        // context, not a reset-to-global one.
+        void detachPanel(id, openerLabel, pinState.pinned ? pinState.pinnedIdentity : null).then((result) => {
           // Detach genuinely failed (e.g. browser-only preview, no monitors)
           // — restore the panel locally rather than silently lose it.
           if (!result.ok) {

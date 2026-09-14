@@ -111,3 +111,44 @@ export function unpinPanel(): PanelLinkState {
 export function isSymbolCompatible(identity: WorkspaceIdentity): boolean {
   return typeof identity.symbol === "string" && identity.symbol.trim() !== "";
 }
+
+// ---------------------------------------------------------------------------
+// Cross-window transport validation — GUI-LAYOUT-05
+// ---------------------------------------------------------------------------
+
+const EXECUTION_DOMAIN_VALUES: ReadonlySet<string | null> = new Set(["backtest", "paper", "live", null]);
+
+function isStringOrNull(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
+/**
+ * Validates an untrusted value (e.g. from a cross-window event payload or a
+ * detached-window URL parameter) as a WorkspaceIdentity. The check is a
+ * CLOSED set: the value must have exactly WORKSPACE_IDENTITY_FIELDS.length
+ * keys, every key must be one of WORKSPACE_IDENTITY_FIELDS, and every value
+ * must be the right type — an extra key (e.g. a smuggled `armed` or
+ * `live_routing_enabled`) or a wrong-typed value fails the whole payload
+ * rather than being silently dropped or coerced. This is what keeps a
+ * cross-window message from ever introducing an authority field: the type
+ * system only exists on WorkspaceIdentity, but this closed-set runtime check
+ * is what enforces it on data crossing a process boundary.
+ */
+export function parseWorkspaceIdentityPayload(value: unknown): WorkspaceIdentity | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== WORKSPACE_IDENTITY_FIELDS.length) return null;
+  for (const key of keys) {
+    if (!(WORKSPACE_IDENTITY_FIELDS as readonly string[]).includes(key)) return null;
+  }
+  for (const field of WORKSPACE_IDENTITY_FIELDS) {
+    const fieldValue = record[field];
+    if (field === "executionDomain") {
+      if (!EXECUTION_DOMAIN_VALUES.has(fieldValue as string | null)) return null;
+    } else if (!isStringOrNull(fieldValue)) {
+      return null;
+    }
+  }
+  return record as unknown as WorkspaceIdentity;
+}

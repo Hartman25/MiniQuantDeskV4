@@ -6,6 +6,7 @@ import {
   initialPanelLinkState,
   isSymbolCompatible,
   mergeWorkspaceIdentity,
+  parseWorkspaceIdentityPayload,
   pinPanel,
   resolvePanelIdentity,
   unpinPanel,
@@ -140,6 +141,54 @@ test("H: isSymbolCompatible is false for an unset identity, true once a symbol i
 // Positive control: a fully populated identity resolves and merges exactly
 // as supplied across every field, with no field silently dropped.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// I — GUI-LAYOUT-05: cross-window/cross-process payload validation. This is
+// the boundary check for any untrusted WorkspaceIdentity-shaped value
+// arriving over a Tauri event or a detached-window URL parameter.
+// ---------------------------------------------------------------------------
+
+test("I: parseWorkspaceIdentityPayload accepts a well-formed, fully-null identity", () => {
+  assert.deepEqual(parseWorkspaceIdentityPayload(EMPTY_WORKSPACE_IDENTITY), EMPTY_WORKSPACE_IDENTITY);
+});
+
+test("I: parseWorkspaceIdentityPayload accepts a fully populated identity", () => {
+  const full = mergeWorkspaceIdentity(EMPTY_WORKSPACE_IDENTITY, { symbol: "AAPL", executionDomain: "live" });
+  assert.deepEqual(parseWorkspaceIdentityPayload(full), full);
+});
+
+test("I: parseWorkspaceIdentityPayload rejects a non-object and null", () => {
+  assert.equal(parseWorkspaceIdentityPayload(null), null);
+  assert.equal(parseWorkspaceIdentityPayload(undefined), null);
+  assert.equal(parseWorkspaceIdentityPayload("AAPL"), null);
+  assert.equal(parseWorkspaceIdentityPayload(42), null);
+  assert.equal(parseWorkspaceIdentityPayload([]), null);
+});
+
+test("I: parseWorkspaceIdentityPayload rejects an extra/unrecognized key — no authority field can enter through a message", () => {
+  const smuggled = { ...EMPTY_WORKSPACE_IDENTITY, armed: true };
+  assert.equal(parseWorkspaceIdentityPayload(smuggled), null);
+  const smuggled2 = { ...EMPTY_WORKSPACE_IDENTITY, live_routing_enabled: true };
+  assert.equal(parseWorkspaceIdentityPayload(smuggled2), null);
+});
+
+test("I: parseWorkspaceIdentityPayload rejects a missing field (not treated as implicitly null)", () => {
+  const { symbol: _symbol, ...withoutSymbol } = EMPTY_WORKSPACE_IDENTITY;
+  assert.equal(parseWorkspaceIdentityPayload(withoutSymbol), null);
+});
+
+test("I: parseWorkspaceIdentityPayload rejects a wrong-typed field value", () => {
+  assert.equal(parseWorkspaceIdentityPayload({ ...EMPTY_WORKSPACE_IDENTITY, symbol: 123 }), null);
+  assert.equal(parseWorkspaceIdentityPayload({ ...EMPTY_WORKSPACE_IDENTITY, symbol: undefined }), null);
+});
+
+test("I: parseWorkspaceIdentityPayload rejects an executionDomain value outside the closed enum", () => {
+  assert.equal(parseWorkspaceIdentityPayload({ ...EMPTY_WORKSPACE_IDENTITY, executionDomain: "live_armed" }), null);
+  assert.equal(parseWorkspaceIdentityPayload({ ...EMPTY_WORKSPACE_IDENTITY, executionDomain: "" }), null);
+  for (const value of ["backtest", "paper", "live", null] as const) {
+    assert.ok(parseWorkspaceIdentityPayload({ ...EMPTY_WORKSPACE_IDENTITY, executionDomain: value }) !== null);
+  }
+});
 
 test("positive: a fully populated identity patch round-trips every field exactly", () => {
   const full: WorkspaceIdentity = {
