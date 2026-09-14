@@ -14,12 +14,21 @@ import { WorkspaceContextStrip } from "../components/layout/WorkspaceContextStri
 import { WorkspaceToolbar } from "../components/layout/WorkspaceToolbar";
 import { PreflightGate } from "../components/preflight/PreflightGate";
 import { GlobalStatusBar } from "../components/status/GlobalStatusBar";
+import { WorkstationPresetBar } from "../components/layout/WorkstationPresetBar";
 import { ROLE_SCREENS, SCREEN_REGISTRY, type ScreenKey } from "../features/screens/screenRegistry";
 import { useOperatorModel } from "../features/system/useOperatorModel";
 import type { OperatorActionDefinition } from "../features/system/types";
 import { confirmAndRunOperatorAction } from "../features/system/runOperatorAction";
 import { Workstation, type WorkstationHandle } from "../features/workstation/Workstation";
 import { readDetachedPanelBootstrap } from "../features/workstation/detachedWindow";
+import { centeredDefaultGeometry, type MonitorDescriptor } from "../features/workstation/monitorModel";
+import {
+  APPLY_PRESET_EVENT,
+  pendingPresetStorageKey,
+  rolesUsedByPreset,
+  writePendingPresetPayload,
+  type WorkstationPreset,
+} from "../features/workstation/presets";
 import { DetachedPanelWindow } from "./DetachedPanelWindow";
 import { formatDateTime } from "../lib/format";
 import type { DeskMode, DeskRole } from "./shellTypes";
@@ -60,9 +69,39 @@ async function getWindowByLabel(label: "execution" | "oversight") {
   return windows.find((w) => w.label === label) ?? null;
 }
 
+/**
+ * GUI-LAYOUT-04: best-effort monitor assignment for a secondary window.
+ * `slot` is a preference order (1 = second monitor, 2 = third monitor);
+ * clamped to the last available monitor when fewer monitors exist than
+ * requested — this is the "current monitor unavailable -> visible fallback"
+ * contract, reusing the same reconciliation primitives proven in
+ * monitorModel.test.ts. Returns null (letting the OS pick placement) if the
+ * monitor query fails entirely (e.g. browser-only preview).
+ */
+async function geometryForSlot(slot: number, width: number, height: number): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  try {
+    const { availableMonitors } = await import("@tauri-apps/api/window");
+    const raw = await availableMonitors();
+    if (raw.length === 0) return null;
+    const descriptors: MonitorDescriptor[] = raw.map((m) => ({
+      name: m.name,
+      x: m.position.x,
+      y: m.position.y,
+      width: m.size.width,
+      height: m.size.height,
+      scaleFactor: m.scaleFactor,
+    }));
+    const index = Math.min(slot, descriptors.length - 1);
+    return centeredDefaultGeometry(descriptors[index], width, height);
+  } catch {
+    return null;
+  }
+}
+
 async function ensureWindow(
   label: "execution" | "oversight",
   title: string,
+  monitorSlot: number,
   width: number,
   height: number,
 ) {
@@ -76,12 +115,14 @@ async function ensureWindow(
   }
 
   console.log(`Creating ${label} window`);
+  const geometry = await geometryForSlot(monitorSlot, width, height);
 
   const win = new WebviewWindow(label, {
     title,
     url: "index.html",
-    width,
-    height,
+    width: geometry?.width ?? width,
+    height: geometry?.height ?? height,
+    ...(geometry ? { x: geometry.x, y: geometry.y } : {}),
     minWidth: 1100,
     minHeight: 700,
     resizable: true,
@@ -120,15 +161,15 @@ async function applyDeskMode(mode: DeskMode) {
   }
 
   if (mode === "two") {
-    await ensureWindow("execution", "Veritas Ledger — Execution", 1600, 1000);
+    await ensureWindow("execution", "Veritas Ledger — Execution", 1, 1600, 1000);
     await closeWindow("oversight");
     console.log("Ensured execution, closed oversight");
     return;
   }
 
   if (mode === "three") {
-    await ensureWindow("execution", "Veritas Ledger — Execution", 1600, 1000);
-    await ensureWindow("oversight", "Veritas Ledger — Oversight", 1500, 960);
+    await ensureWindow("execution", "Veritas Ledger — Execution", 1, 1600, 1000);
+    await ensureWindow("oversight", "Veritas Ledger — Oversight", 2, 1500, 960);
     console.log("Ensured execution + oversight");
     return;
   }
@@ -211,6 +252,68 @@ function ControlWorkstationShell() {
     workstationRef.current?.openPanel(key);
   };
 
+  // GUI-LAYOUT-04: applies a Single/Dual/Triple preset as a STARTING
+  // ARRANGEMENT — never a safety/runtime change. Only the control window
+  // orchestrates sibling windows (execution/oversight); each window's own
+  // panel set is either applied in-process (control) or handed to that
+  // window via a live event (already open) or a one-shot pending-preset seed
+  // consumed on its first mount (not yet open) — see presets.ts.
+  //
+  // The LOCAL (control) panel set is applied first and unconditionally: a
+  // Tauri IPC failure while orchestrating a sibling window (e.g. this is a
+  // browser-only preview with no window/monitor APIs) must never prevent
+  // this window's own preset from taking effect. Each sibling-window step is
+  // independently try/caught for the same reason — one failure must not
+  // abort the rest, matching the existing handleDeskModeChange convention.
+  const applyPreset = (preset: WorkstationPreset) => {
+    if (deskRole !== "control") return;
+
+    setDeskMode(preset.deskMode);
+    window.localStorage.setItem(DESK_MODE_STORAGE_KEY, preset.deskMode);
+
+    for (const windowSpec of preset.windows) {
+      if (windowSpec.role === "control") {
+        workstationRef.current?.applyPanelSet(windowSpec.panelIds);
+      }
+    }
+
+    void applyPresetToSiblingWindows(preset);
+  };
+
+  const applyPresetToSiblingWindows = async (preset: WorkstationPreset) => {
+    const usedRoles = new Set(rolesUsedByPreset(preset));
+
+    for (const label of ["execution", "oversight"] as const) {
+      if (usedRoles.has(label)) continue;
+      try {
+        await closeWindow(label);
+      } catch (error) {
+        console.error(`Failed to close ${label} window for preset ${preset.id}:`, error);
+      }
+    }
+
+    for (const windowSpec of preset.windows) {
+      if (windowSpec.role === "control") continue;
+      const label = windowSpec.role;
+      const title = label === "execution" ? "Veritas Ledger — Execution" : "Veritas Ledger — Oversight";
+      const monitorSlot = label === "execution" ? 1 : 2;
+
+      try {
+        const alreadyOpen = (await getWindowByLabel(label)) !== null;
+        if (!alreadyOpen) {
+          window.localStorage.setItem(pendingPresetStorageKey(windowSpec.role), writePendingPresetPayload(windowSpec.panelIds));
+        }
+        await ensureWindow(label, title, monitorSlot, 1600, 1000);
+        if (alreadyOpen) {
+          const { emitTo } = await import("@tauri-apps/api/event");
+          await emitTo(label, APPLY_PRESET_EVENT, { panelIds: windowSpec.panelIds });
+        }
+      } catch (error) {
+        console.error(`Failed to apply preset ${preset.id} to ${label} window:`, error);
+      }
+    }
+  };
+
   const handleRunAction = (action: OperatorActionDefinition) =>
     confirmAndRunOperatorAction(action, { status: model.status, runAction, refresh, targetScope: activeScreen });
 
@@ -266,6 +369,12 @@ function ControlWorkstationShell() {
 
             <WorkspaceContextStrip />
 
+            <WorkstationPresetBar
+              deskRole={deskRole}
+              workstationRef={workstationRef}
+              onApplyPreset={deskRole === "control" ? (preset) => void applyPreset(preset) : undefined}
+            />
+
             {(deskRole === "execution" || deskRole === "oversight") ? (
               <RoleCommandStrip
                 deskRole={deskRole}
@@ -291,6 +400,7 @@ function ControlWorkstationShell() {
             <Workstation
               ref={workstationRef}
               storageKey={`mqd.workstation.layout.${deskRole}`}
+              role={deskRole}
               initialPanelId={activeScreen}
               ctx={{
                 model,

@@ -321,6 +321,39 @@ ul {
   color: var(--muted);
 }
 
+.workstation-preset-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 12px;
+}
+
+.preset-bar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.preset-bar-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.72rem;
+  margin-right: 2px;
+}
+
+.preset-bar-select {
+  background: rgba(12, 12, 12, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 0.8rem;
+  max-width: 180px;
+}
+
 .rail-collapse-toggle {
   align-self: stretch;
   background: rgba(12, 12, 12, 0.95);

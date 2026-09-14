@@ -32,6 +32,8 @@ import { WorkspaceFrame } from "../../components/layout/WorkspaceFrame";
 import { ScreenErrorBoundary } from "../../components/common/ScreenErrorBoundary";
 import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
 import { detachPanel, REATTACH_EVENT } from "./detachedWindow";
+import { APPLY_PRESET_EVENT, pendingPresetStorageKey, readPendingPresetPanelIds } from "./presets";
+import type { DeskRole } from "../../app/shellTypes";
 import {
   allDockviewPanelIdsKnown,
   extractDockviewPanelIds,
@@ -39,6 +41,7 @@ import {
   sameIdSet,
   sanitizeLayoutSummary,
   serializeLayout,
+  type PersistedWorkstationLayoutV1,
 } from "./layoutModel";
 
 interface PanelHostParams {
@@ -89,6 +92,12 @@ export interface WorkstationHandle {
   /** Focuses the panel if already open; otherwise opens it. Never creates a second instance of an already-open panel (this is what keeps an operator-singleton panel from duplicating). */
   openPanel: (id: ScreenKey) => void;
   resetLayout: () => void;
+  /** GUI-LAYOUT-04: replaces the entire layout with exactly this panel set (a preset's starting arrangement). */
+  applyPanelSet: (ids: readonly ScreenKey[]) => void;
+  /** GUI-LAYOUT-04: snapshot of the current layout for "Save layout as...". Null before dockview has finished initializing. */
+  getCurrentLayoutDoc: () => PersistedWorkstationLayoutV1 | null;
+  /** GUI-LAYOUT-04: applies a previously-saved custom layout document, through the same validation as restoring a persisted layout. Returns false (leaving the current layout untouched) if the document is malformed or resolves to zero known panels. */
+  applyLayoutDoc: (doc: PersistedWorkstationLayoutV1) => boolean;
 }
 
 function addOrFocusPanel(api: DockviewApi, id: ScreenKey) {
@@ -117,6 +126,8 @@ function currentWindowLabelOrDefault(): string {
 export interface WorkstationProps {
   /** Unique per desk-role/window persistence key, e.g. "mqd.workstation.layout.control". */
   storageKey: string;
+  /** This window's desk role — used to look up a pending-preset seed and to scope the live apply-preset event. */
+  role: DeskRole;
   initialPanelId: ScreenKey;
   ctx: ScreenRenderContext;
   onActivePanelChange?: (id: ScreenKey | null) => void;
@@ -133,6 +144,12 @@ function buildDefaultLayout(api: DockviewApi, initialPanelId: ScreenKey) {
   });
 }
 
+/** Replaces the whole layout with exactly these panels, in order. Used by presets and by the pending-preset seed. */
+function buildPanelSet(api: DockviewApi, ids: readonly ScreenKey[]) {
+  api.clear();
+  for (const id of ids) addOrFocusPanel(api, id);
+}
+
 function persistLayout(api: DockviewApi, storageKey: string) {
   const panelIds = api.panels.map((p) => p.id).filter(isKnownPanelId);
   const activeId = api.activePanel?.id;
@@ -146,11 +163,8 @@ function persistLayout(api: DockviewApi, storageKey: string) {
   }
 }
 
-/** Attempts to restore a persisted layout; returns true only if fully restored and every resulting panel id is known. Any disagreement/corruption/exception falls through to false so the caller rebuilds the default. */
-function tryRestoreLayout(api: DockviewApi, storageKey: string): boolean {
-  const persisted = parsePersistedLayout(window.localStorage.getItem(storageKey));
-  if (!persisted) return false;
-
+/** Attempts to apply a layout document (persisted-auto or user-saved custom); returns true only if fully applied and every resulting panel id is known. Any disagreement/corruption/exception falls through to false and leaves `api` untouched (never partially applied) so the caller can fall back to a known-good layout. */
+function tryApplyLayoutDocument(api: DockviewApi, persisted: PersistedWorkstationLayoutV1): boolean {
   const summary = sanitizeLayoutSummary(persisted);
   if (summary.panelIds.length === 0) return false;
 
@@ -172,8 +186,30 @@ function tryRestoreLayout(api: DockviewApi, storageKey: string): boolean {
   return true;
 }
 
+/** Attempts to restore this window's own auto-persisted layout from storage. */
+function tryRestoreLayout(api: DockviewApi, storageKey: string): boolean {
+  const persisted = parsePersistedLayout(window.localStorage.getItem(storageKey));
+  return persisted !== null && tryApplyLayoutDocument(api, persisted);
+}
+
+/** Consumes (reads-then-clears) a one-shot pending-preset seed written by the control window for a not-yet-open target window. Returns true only if a valid seed was found and applied. */
+function tryApplyPendingPreset(api: DockviewApi, role: DeskRole): boolean {
+  const key = pendingPresetStorageKey(role);
+  const raw = window.localStorage.getItem(key);
+  if (!raw) return false;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // best-effort cleanup only
+  }
+  const panelIds = readPendingPresetPanelIds(raw);
+  if (!panelIds) return false;
+  buildPanelSet(api, panelIds);
+  return true;
+}
+
 export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(function Workstation(
-  { storageKey, initialPanelId, ctx, onActivePanelChange },
+  { storageKey, role, initialPanelId, ctx, onActivePanelChange },
   ref,
 ) {
   const apiRef = useRef<DockviewApi | null>(null);
@@ -186,9 +222,15 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
       const api = event.api;
       apiRef.current = api;
 
-      const restored = tryRestoreLayout(api, storageKey);
-      if (!restored) {
-        buildDefaultLayout(api, initialPanelId);
+      // A pending preset seed (written by the control window for a window it
+      // just created) always wins over the window's own auto-persisted
+      // layout — it is the explicit reason this window was opened.
+      const appliedPreset = tryApplyPendingPreset(api, role);
+      if (!appliedPreset) {
+        const restored = tryRestoreLayout(api, storageKey);
+        if (!restored) {
+          buildDefaultLayout(api, initialPanelId);
+        }
       }
 
       const layoutSub = api.onDidLayoutChange(() => persistLayout(api, storageKey));
@@ -201,7 +243,7 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
       const activeId = api.activePanel?.id;
       onActivePanelChangeRef.current?.(activeId && isKnownPanelId(activeId) ? activeId : null);
     },
-    [storageKey, initialPanelId],
+    [storageKey, role, initialPanelId],
   );
 
   useEffect(
@@ -211,6 +253,34 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
     },
     [],
   );
+
+  // GUI-LAYOUT-04: live apply-preset for an already-open window (the
+  // pending-preset seed above only covers a window that didn't exist yet).
+  // Scoped to this window's own webview, same as the reattach listener.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const stop = await getCurrentWebviewWindow().listen<{ panelIds: string[] }>(APPLY_PRESET_EVENT, (event) => {
+          const api = apiRef.current;
+          const ids = event.payload?.panelIds;
+          if (api && Array.isArray(ids)) {
+            const known = ids.filter(isKnownPanelId);
+            if (known.length > 0) buildPanelSet(api, known);
+          }
+        });
+        if (cancelled) stop();
+        else unlisten = stop;
+      } catch {
+        // Not in a Tauri context — no cross-window preset application is possible.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // GUI-LAYOUT-03: listens for a detached window asking to be reattached.
   // Scoped to THIS window's own webview (getCurrentWebviewWindow().listen),
@@ -277,6 +347,22 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
           // ignore storage failures on reset — clearing the in-memory layout still succeeds below.
         }
         buildDefaultLayout(api, initialPanelId);
+      },
+      applyPanelSet: (ids: readonly ScreenKey[]) => {
+        const api = apiRef.current;
+        if (api) buildPanelSet(api, ids);
+      },
+      getCurrentLayoutDoc: () => {
+        const api = apiRef.current;
+        if (!api) return null;
+        const panelIds = api.panels.map((p) => p.id).filter(isKnownPanelId);
+        const activeId = api.activePanel?.id;
+        const activePanelId = activeId && isKnownPanelId(activeId) ? activeId : null;
+        return serializeLayout(panelIds, activePanelId, api.toJSON());
+      },
+      applyLayoutDoc: (doc: PersistedWorkstationLayoutV1) => {
+        const api = apiRef.current;
+        return api !== null && tryApplyLayoutDocument(api, doc);
       },
     }),
     [storageKey, initialPanelId],
