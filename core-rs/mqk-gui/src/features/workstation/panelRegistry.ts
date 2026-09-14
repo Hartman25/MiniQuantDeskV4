@@ -138,6 +138,22 @@ export function filterKnownPanelIds(ids: readonly string[]): ScreenKey[] {
 }
 
 /**
+ * GUI-LAYOUT-05 repair: which dockview panel-render mode a panel needs.
+ * dockview's default ("onlyWhenVisible") destroys a panel's component
+ * instance whenever its tab isn't the active one and recreates it fresh —
+ * which silently erases any panel-local React state (e.g. pin/unpin) on
+ * every tab switch. Only a contextAware panel owns that kind of local
+ * state (see PanelHost in Workstation.tsx), so only it opts into "always"
+ * (kept mounted, hidden via CSS) to survive being backgrounded; every other
+ * panel keeps the default and its lower DOM/memory footprint. Returns a
+ * bare string rather than dockview's own type so this module stays free of
+ * a dockview import — Workstation.tsx passes the result straight through.
+ */
+export function panelRendererFor(id: string): "always" | undefined {
+  return getPanelMetadata(id)?.contextAware ? "always" : undefined;
+}
+
+/**
  * Fixed Tier-0 safety-truth fields, always rendered by GlobalStatusBar
  * directly from SystemStatus. Not user-hideable, not part of the panel
  * registry, never movable/detachable/duplicable.

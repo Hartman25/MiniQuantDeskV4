@@ -11,6 +11,7 @@ import {
   filterKnownPanelIds,
   getPanelMetadata,
   isKnownPanelId,
+  panelRendererFor,
 } from "../panelRegistry.ts";
 
 test("panel registry covers exactly the screen registry, with no duplicates", () => {
@@ -94,4 +95,31 @@ test("every panel declares a positive minimum footprint", () => {
     assert.ok(meta.minWidth > 0, `${id}: minWidth must be positive`);
     assert.ok(meta.minHeight > 0, `${id}: minHeight must be positive`);
   }
+});
+
+// GUI-LAYOUT-05 repair: dockview's default "onlyWhenVisible" render mode
+// destroys a backgrounded panel's React instance, wiping local state like
+// pin/unpin. panelRendererFor opts a panel into "always" (stays mounted)
+// specifically to survive that — this must apply to exactly the
+// contextAware class (the only panels with pin/unpin local state) and to
+// no one else, or every other panel would pay the DOM/memory cost of
+// staying mounted in the background for no reason.
+test("panelRendererFor requests 'always' for exactly the contextAware panels, and the default for every other panel", () => {
+  for (const id of PANEL_IDS) {
+    const meta = PANEL_REGISTRY[id];
+    const renderer = panelRendererFor(id);
+    if (meta.contextAware) {
+      assert.equal(renderer, "always", `${id}: contextAware panel must opt into "always" so its pin state survives a tab switch`);
+    } else {
+      assert.equal(renderer, undefined, `${id}: non-contextAware panel must keep dockview's default renderer, not "always"`);
+    }
+  }
+  // Anchors the exact expected set so this test would fail if contextAware
+  // classification ever silently drifted (see the contextAware test above).
+  const alwaysRenderedIds = PANEL_IDS.filter((id) => panelRendererFor(id) === "always").sort();
+  assert.deepEqual(alwaysRenderedIds, ["backtests", "marketData"]);
+});
+
+test("panelRendererFor fails closed (default renderer, not 'always') for an unknown panel id", () => {
+  assert.equal(panelRendererFor("not-a-real-panel"), undefined);
 });

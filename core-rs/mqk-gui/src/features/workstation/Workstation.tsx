@@ -33,7 +33,7 @@ import { WorkspaceFrame } from "../../components/layout/WorkspaceFrame";
 import { ScreenErrorBoundary } from "../../components/common/ScreenErrorBoundary";
 import { useWorkspaceContext, WorkspaceScopeProvider } from "../workspace/WorkspaceContext.tsx";
 import { initialPanelLinkState, pinPanel, resolvePanelIdentity, unpinPanel, type PanelLinkState } from "../workspace/workspaceModel.ts";
-import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
+import { getPanelMetadata, isKnownPanelId, panelRendererFor } from "./panelRegistry";
 import { detachPanel, REATTACH_EVENT } from "./detachedWindow";
 import { APPLY_PRESET_EVENT, pendingPresetStorageKey, readPendingPresetPanelIds } from "./presets";
 import type { DeskRole } from "../../app/shellTypes";
@@ -140,6 +140,10 @@ function addOrFocusPanel(api: DockviewApi, id: ScreenKey) {
     // never be resized/split down to an unreadable sliver.
     minimumWidth: meta?.minWidth,
     minimumHeight: meta?.minHeight,
+    // GUI-LAYOUT-05 repair: see panelRendererFor's doc comment
+    // (panelRegistry.ts) — only a contextAware panel is kept mounted while
+    // backgrounded, so its local pin state survives a tab switch.
+    renderer: panelRendererFor(id),
   });
 }
 
