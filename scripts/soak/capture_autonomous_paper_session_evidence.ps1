@@ -227,7 +227,33 @@ function Invoke-DaemonGetOnly {
         $fixtureFile = Join-Path $FixturePath ($PathNoQuery.TrimStart('/').Replace('/', '_') + '.json')
         if (Test-Path $fixtureFile) {
             try {
-                return (Get-Content -Raw -Path $fixtureFile | ConvertFrom-Json)
+                $fixtureResp = Get-Content -Raw -Path $fixtureFile | ConvertFrom-Json
+                # Two distinct Windows PowerShell 5.1 hazards, both proven
+                # experimentally against the real production runtime
+                # (`powershell.exe`, not `pwsh`):
+                #   1. A parsed JSON array must never cross this function's
+                #      `return` as bare pipeline output. Zero emitted
+                #      objects collapses to AutomationNull (indistinguishable
+                #      from $null at the caller), and exactly one emitted
+                #      object collapses to that bare element instead of a
+                #      one-item array. The unary comma operator emits the
+                #      array as a single pipeline object, preserving its
+                #      exact shape (including zero-length) for any count.
+                #   2. Independent of (1): an array object produced directly
+                #      by ConvertFrom-Json (or Invoke-RestMethod, which uses
+                #      the same deserializer) carries hidden PS 5.1 adapter
+                #      state that makes ConvertTo-Json serialize it as
+                #      `{"value": [...], "Count": N}` instead of a plain
+                #      JSON array -- reproduced for every element count,
+                #      including zero. Re-wrapping with `@(...)` builds a
+                #      clean .NET array without that adapter state.
+                # Non-array responses are returned unchanged; neither hazard
+                # applies to them.
+                if ($fixtureResp -is [System.Array]) {
+                    $fixtureResp = @($fixtureResp)
+                    return ,$fixtureResp
+                }
+                return $fixtureResp
             } catch {
                 $script:CaptureErrors += (New-BoundedErrorRecord -Route $Path -ErrorClass 'fixture_parse_error')
                 $script:MissingEndpoints += $Path
@@ -240,6 +266,14 @@ function Invoke-DaemonGetOnly {
     }
     try {
         $resp = Invoke-RestMethod -Uri "${DaemonBaseUrl}${Path}" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        # Same pair of hazards as the fixture branch above -- a successful
+        # GET that authoritatively returns `[]` must remain `[]` in the
+        # manifest, never collapse to AutomationNull/$null and never
+        # serialize as `{"value": [...], "Count": N}`.
+        if ($resp -is [System.Array]) {
+            $resp = @($resp)
+            return ,$resp
+        }
         return $resp
     } catch {
         $cls = Get-BoundedErrorClass -ErrorRecord $_
@@ -359,7 +393,10 @@ $OperatorNotesValue = if ($OperatorNotes -eq '') { $null } else { $OperatorNotes
 function Get-JsonSha256 {
     param($Value)
     if ($null -eq $Value) { return $null }
-    $json = $Value | ConvertTo-Json -Depth 20 -Compress
+    # -InputObject (not a pipe) so a zero-length array is hashed as `[]`
+    # instead of being enumerated into zero pipeline objects (which would
+    # leave $json unset and crash GetBytes below).
+    $json = ConvertTo-Json -InputObject $Value -Depth 20 -Compress
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {

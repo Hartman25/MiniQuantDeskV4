@@ -612,6 +612,164 @@ try {
         $InvalidRepoValidateExit = Invoke-ChildScript -ScriptPath $ValidatorScriptPath -ScriptArgs @('-ManifestPath', $InvalidRepoManifestPath)
         Assert-ExitNonZero -Label "invalid RepoRoot -- validator rejects the resulting manifest (null repository_commit)" -Actual $InvalidRepoValidateExit
     }
+
+    # =====================================================================
+    # M1-EVIDENCE-EMPTY-ARRAY-CAPTURE-REPAIR-01 (EC-01..EC-07):
+    #
+    # A successful authoritative GET that returns a JSON array must survive
+    # Invoke-DaemonGetOnly's function-return boundary with its exact shape,
+    # including zero-length. `return $resp` unrolls array output across the
+    # pipeline; zero or one emitted objects collapse ambiguously at the
+    # caller ($OrdersSummary = Invoke-DaemonGetOnly ...), historically
+    # indistinguishable from a genuine fetch failure even though no
+    # exception was thrown and missing_endpoints/capture_errors were never
+    # populated. These cases write literal raw JSON array bytes to fixture
+    # files and drive them through -FixturePath -- the SAME
+    # Invoke-DaemonGetOnly branch a live daemon array response takes --
+    # deliberately never via the New-BaselineFixtureSet/Write-JsonFixture
+    # object-literal helper above, whose own pipe-based `$Object |
+    # ConvertTo-Json` has an unrelated enumeration quirk that would mask
+    # exactly the top-level array shapes these cases need to prove.
+    # =====================================================================
+    function Write-RawJsonFixture {
+        param([string]$Dir, [string]$FileName, [string]$RawJson)
+        New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+        Set-Content -Path (Join-Path $Dir $FileName) -Value $RawJson -Encoding UTF8 -NoNewline
+    }
+
+    function Test-ArrayShapePreserved {
+        param(
+            [string]$TestRoot,
+            [string]$CaseName,
+            [string]$CaseSlug,
+            [string]$RawJson,
+            [int]$ExpectedCount
+        )
+        Write-Host ""
+        Show-Info "--- $CaseName ---"
+        $variantDir = Join-Path $TestRoot ("fx_ec_" + $CaseSlug)
+        Copy-Item -Path $BaselineFixtures -Destination $variantDir -Recurse -Force
+        Write-RawJsonFixture -Dir $variantDir -FileName 'api_v1_execution_orders.json' -RawJson $RawJson
+        $outDir = New-CaseOutputDir -TestRoot $TestRoot -CaseSlug ("ec_" + $CaseSlug)
+        $captureArgs = @(
+            '-OutputDirectory', $outDir,
+            '-CapturePhase', 'pre_session',
+            '-DaemonBaseUrl', 'http://127.0.0.1:8899',
+            '-FixturePath', $variantDir
+        )
+        $captureExit = Invoke-ChildScript -ScriptPath $CaptureScriptPath -ScriptArgs $captureArgs
+        $manifestPath = Join-Path $outDir 'autonomous_paper_session_manifest.json'
+        Assert-ExitCode -Label "$CaseName -- capture exits 0" -Expected 0 -Actual $captureExit
+        Assert-True -Label "$CaseName -- manifest file was written" -Condition (Test-Path $manifestPath)
+        if (Test-Path $manifestPath) {
+            $manifest = Get-Content -Raw -Path $manifestPath | ConvertFrom-Json
+            $actualCount = @($manifest.orders_summary).Count
+            Assert-True -Label "$CaseName -- orders_summary is not null" -Condition ($null -ne $manifest.orders_summary)
+            Assert-True -Label "$CaseName -- orders_summary count is $ExpectedCount" -Condition ($actualCount -eq $ExpectedCount)
+            # Count alone does not distinguish a genuine array from a bare
+            # object collapsed from a one-element array (both wrap to
+            # @(...).Count -eq 1) -- assert the JSON shape explicitly.
+            Assert-True -Label "$CaseName -- orders_summary is an array (not a collapsed bare object)" -Condition ($manifest.orders_summary -is [System.Array])
+            $inMissing = @($manifest.missing_endpoints) -contains '/api/v1/execution/orders'
+            Assert-True -Label "$CaseName -- /api/v1/execution/orders is NOT in missing_endpoints" -Condition (-not $inMissing)
+            $hasCaptureError = $false
+            foreach ($e in @($manifest.capture_errors)) { if ($e.route -eq '/api/v1/execution/orders') { $hasCaptureError = $true } }
+            Assert-True -Label "$CaseName -- no capture_errors entry for the orders route" -Condition (-not $hasCaptureError)
+            $validateExit = Invoke-ChildScript -ScriptPath $ValidatorScriptPath -ScriptArgs @('-ManifestPath', $manifestPath)
+            Assert-ExitCode -Label "$CaseName -- validator accepts the manifest" -Expected 0 -Actual $validateExit
+        }
+    }
+
+    # EC-01 / EC-05: authoritative empty array `[]` -- the exact shape the
+    # real Day-01 mid-session daemon response took. Routed through
+    # -FixturePath, proving the fixture-file branch and a live daemon `[]`
+    # response are governed by the identical fix (both call sites in
+    # Invoke-DaemonGetOnly share the same `-is [System.Array]` guard).
+    Test-ArrayShapePreserved -TestRoot $TestRoot -CaseName 'EC-01/EC-05 authoritative empty array []' -CaseSlug 'empty' -RawJson '[]' -ExpectedCount 0
+
+    # EC-02: single-element and multi-element arrays preserve every element
+    # and gain no extra nesting level -- count=1 is the other collapse edge
+    # (a bare `return $resp` unrolls a 1-element array into a lone scalar
+    # object at the caller); count=3 proves the fix does not regress the
+    # already-working multi-element case.
+    Test-ArrayShapePreserved -TestRoot $TestRoot -CaseName 'EC-02 single-element array' -CaseSlug 'one' -RawJson '[{"order_id":"o1"}]' -ExpectedCount 1
+    Test-ArrayShapePreserved -TestRoot $TestRoot -CaseName 'EC-02 multi-element array' -CaseSlug 'three' -RawJson '[{"order_id":"o1"},{"order_id":"o2"},{"order_id":"o3"}]' -ExpectedCount 3
+
+    # EC-03: a successful object response (the overwhelming majority of
+    # routes) is unaffected by the array-preservation branch.
+    Write-Host ""
+    Show-Info "--- EC-03: successful object response preserves its original shape ---"
+    $objVariantDir = Join-Path $TestRoot 'fx_ec_object'
+    Copy-Item -Path $BaselineFixtures -Destination $objVariantDir -Recurse -Force
+    Write-RawJsonFixture -Dir $objVariantDir -FileName 'api_v1_execution_orders.json' -RawJson '{"snapshot_state":"active","rows":[]}'
+    $objOutDir = New-CaseOutputDir -TestRoot $TestRoot -CaseSlug 'ec_object'
+    $objCaptureExit = Invoke-ChildScript -ScriptPath $CaptureScriptPath -ScriptArgs @(
+        '-OutputDirectory', $objOutDir, '-CapturePhase', 'pre_session',
+        '-DaemonBaseUrl', 'http://127.0.0.1:8899', '-FixturePath', $objVariantDir
+    )
+    $objManifestPath = Join-Path $objOutDir 'autonomous_paper_session_manifest.json'
+    Assert-ExitCode -Label "EC-03 -- capture exits 0" -Expected 0 -Actual $objCaptureExit
+    if (Test-Path $objManifestPath) {
+        $objManifest = Get-Content -Raw -Path $objManifestPath | ConvertFrom-Json
+        Assert-True -Label "EC-03 -- orders_summary retains object shape (snapshot_state property present)" -Condition ($objManifest.orders_summary.snapshot_state -eq 'active')
+        Assert-True -Label "EC-03 -- orders_summary is not an array" -Condition (-not ($objManifest.orders_summary -is [System.Array]))
+    }
+
+    # EC-04: a genuinely unreachable route (no fixture file present -- the
+    # FixturePath-mode equivalent of a live GET that throws) still fails
+    # closed: null in the manifest AND recorded in both missing_endpoints
+    # and capture_errors. Unaffected by the fix -- this is the catch/else
+    # branches, never the success branch the fix touches.
+    Write-Host ""
+    Show-Info "--- EC-04: a genuinely unreachable route still fails closed into missing_endpoints + capture_errors ---"
+    $missingVariantDir = Join-Path $TestRoot 'fx_ec_missing_route'
+    Copy-Item -Path $BaselineFixtures -Destination $missingVariantDir -Recurse -Force
+    Remove-Item -Path (Join-Path $missingVariantDir 'api_v1_execution_orders.json') -Force
+    $missingOutDir = New-CaseOutputDir -TestRoot $TestRoot -CaseSlug 'ec_missing_route'
+    $missingCaptureExit = Invoke-ChildScript -ScriptPath $CaptureScriptPath -ScriptArgs @(
+        '-OutputDirectory', $missingOutDir, '-CapturePhase', 'pre_session',
+        '-DaemonBaseUrl', 'http://127.0.0.1:8899', '-FixturePath', $missingVariantDir
+    )
+    $missingManifestPath = Join-Path $missingOutDir 'autonomous_paper_session_manifest.json'
+    Assert-ExitCode -Label "EC-04 -- capture exits 0 (an unreachable route is bounded, not fatal)" -Expected 0 -Actual $missingCaptureExit
+    if (Test-Path $missingManifestPath) {
+        $missingManifest = Get-Content -Raw -Path $missingManifestPath | ConvertFrom-Json
+        Assert-True -Label "EC-04 -- orders_summary is null" -Condition ($null -eq $missingManifest.orders_summary)
+        Assert-True -Label "EC-04 -- /api/v1/execution/orders IS in missing_endpoints" -Condition (@($missingManifest.missing_endpoints) -contains '/api/v1/execution/orders')
+    }
+
+    # EC-06: two independent empty-array routes (orders, fills) in the SAME
+    # capture both validate as authoritative empty arrays, and the whole
+    # manifest passes the real validator end to end.
+    Write-Host ""
+    Show-Info "--- EC-06: orders AND fills both authoritative empty arrays in one capture ---"
+    $bothVariantDir = Join-Path $TestRoot 'fx_ec_both_empty'
+    Copy-Item -Path $BaselineFixtures -Destination $bothVariantDir -Recurse -Force
+    Write-RawJsonFixture -Dir $bothVariantDir -FileName 'api_v1_execution_orders.json' -RawJson '[]'
+    Write-RawJsonFixture -Dir $bothVariantDir -FileName 'api_v1_portfolio_fills.json' -RawJson '[]'
+    $bothOutDir = New-CaseOutputDir -TestRoot $TestRoot -CaseSlug 'ec_both_empty'
+    $bothCaptureExit = Invoke-ChildScript -ScriptPath $CaptureScriptPath -ScriptArgs @(
+        '-OutputDirectory', $bothOutDir, '-CapturePhase', 'pre_session',
+        '-DaemonBaseUrl', 'http://127.0.0.1:8899', '-FixturePath', $bothVariantDir
+    )
+    $bothManifestPath = Join-Path $bothOutDir 'autonomous_paper_session_manifest.json'
+    Assert-ExitCode -Label "EC-06 -- capture exits 0" -Expected 0 -Actual $bothCaptureExit
+    if (Test-Path $bothManifestPath) {
+        $bothManifest = Get-Content -Raw -Path $bothManifestPath | ConvertFrom-Json
+        Assert-True -Label "EC-06 -- orders_summary count is 0 and not null" -Condition (($null -ne $bothManifest.orders_summary) -and (@($bothManifest.orders_summary).Count -eq 0))
+        Assert-True -Label "EC-06 -- fills_summary count is 0 and not null" -Condition (($null -ne $bothManifest.fills_summary) -and (@($bothManifest.fills_summary).Count -eq 0))
+        $bothValidateExit = Invoke-ChildScript -ScriptPath $ValidatorScriptPath -ScriptArgs @('-ManifestPath', $bothManifestPath)
+        Assert-ExitCode -Label "EC-06 -- validator accepts the manifest" -Expected 0 -Actual $bothValidateExit
+    }
+
+    # EC-07: secret scanning and bounded-error behavior are unaffected --
+    # a secret-shaped string embedded inside an array element is still
+    # caught by the existing capture-level refusal, reusing the same
+    # Test-CaptureLevelRejection helper already proven above for objects.
+    $secretArrayDir = Join-Path $TestRoot 'fx_ec_secret_in_array'
+    Copy-Item -Path $BaselineFixtures -Destination $secretArrayDir -Recurse -Force
+    Write-RawJsonFixture -Dir $secretArrayDir -FileName 'api_v1_execution_orders.json' -RawJson '[{"note":"leaked ALPACA_API_KEY=abcdef123456"}]'
+    Test-CaptureLevelRejection -TestRoot $TestRoot -CaseName 'EC-07 secret-shaped content inside an array element' -CaseSlug 'ec_secret_array' -FixtureDir $secretArrayDir
 }
 finally {
     Remove-Item -Path $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
