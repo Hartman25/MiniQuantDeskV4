@@ -9,6 +9,9 @@ type WorkspaceToolbarProps = {
   deskMode: DeskMode;
   onDeskModeChange: (mode: DeskMode) => void;
   onRefresh: () => void;
+  rightDrawerOpen: boolean;
+  onToggleRightDrawer: () => void;
+  onResetLayout: () => void;
 };
 
 export function WorkspaceToolbar({
@@ -20,6 +23,9 @@ export function WorkspaceToolbar({
   deskMode,
   onDeskModeChange,
   onRefresh,
+  rightDrawerOpen,
+  onToggleRightDrawer,
+  onResetLayout,
 }: WorkspaceToolbarProps) {
   return (
     <div className="workspace-toolbar panel">
@@ -60,6 +66,19 @@ export function WorkspaceToolbar({
 
         <button className="action-button ghost" onClick={onRefresh}>
           Refresh
+        </button>
+
+        <button
+          type="button"
+          className={`action-button ghost ${rightDrawerOpen ? "is-selected" : ""}`}
+          onClick={onToggleRightDrawer}
+          aria-pressed={rightDrawerOpen}
+        >
+          Context
+        </button>
+
+        <button type="button" className="action-button ghost" onClick={onResetLayout}>
+          Reset layout
         </button>
       </div>
     </div>

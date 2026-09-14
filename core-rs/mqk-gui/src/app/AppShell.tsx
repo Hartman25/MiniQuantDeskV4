@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   WebviewWindow,
   getAllWebviewWindows,
@@ -6,23 +6,24 @@ import {
 } from "@tauri-apps/api/webviewWindow";
 import { getDaemonUrl } from "../config";
 import { ActionReceiptBanner } from "../components/common/ActionReceiptBanner";
-import { ScreenErrorBoundary } from "../components/common/ScreenErrorBoundary";
 import { BottomEventRail } from "../components/layout/BottomEventRail";
 import { LeftCommandRail } from "../components/layout/LeftCommandRail";
 import { RightOpsRail } from "../components/layout/RightOpsRail";
 import { RoleCommandStrip } from "../components/layout/RoleCommandStrip";
 import { WorkspaceContextStrip } from "../components/layout/WorkspaceContextStrip";
-import { WorkspaceFrame } from "../components/layout/WorkspaceFrame";
 import { WorkspaceToolbar } from "../components/layout/WorkspaceToolbar";
 import { PreflightGate } from "../components/preflight/PreflightGate";
 import { GlobalStatusBar } from "../components/status/GlobalStatusBar";
 import { ROLE_SCREENS, SCREEN_REGISTRY, type ScreenKey } from "../features/screens/screenRegistry";
 import { useOperatorModel } from "../features/system/useOperatorModel";
 import type { OperatorActionDefinition } from "../features/system/types";
+import { Workstation, type WorkstationHandle } from "../features/workstation/Workstation";
 import { formatDateTime } from "../lib/format";
 import type { DeskMode, DeskRole } from "./shellTypes";
 
 const DESK_MODE_STORAGE_KEY = "mqd.desktop.deskMode";
+const LEFT_RAIL_COLLAPSED_STORAGE_KEY = "mqd.workstation.leftRailCollapsed";
+const RIGHT_DRAWER_OPEN_STORAGE_KEY = "mqd.workstation.rightDrawerOpen";
 
 function detectDeskRole(): DeskRole {
   try {
@@ -134,6 +135,9 @@ export function AppShell() {
   const deskRole = useMemo(() => detectDeskRole(), []);
   const [deskMode, setDeskMode] = useState<DeskMode>("single");
   const [activeScreen, setActiveScreen] = useState<ScreenKey>(defaultScreenForRole(deskRole));
+  const [leftRailCollapsed, setLeftRailCollapsed] = useState(false);
+  const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
+  const workstationRef = useRef<WorkstationHandle>(null);
 
   const {
     model,
@@ -152,11 +156,21 @@ export function AppShell() {
     if (stored === "single" || stored === "two" || stored === "three") {
       setDeskMode(stored);
     }
+    setLeftRailCollapsed(window.localStorage.getItem(LEFT_RAIL_COLLAPSED_STORAGE_KEY) === "true");
+    setRightDrawerOpen(window.localStorage.getItem(RIGHT_DRAWER_OPEN_STORAGE_KEY) === "true");
   }, []);
 
   useEffect(() => {
     window.localStorage.setItem(DESK_MODE_STORAGE_KEY, deskMode);
   }, [deskMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(LEFT_RAIL_COLLAPSED_STORAGE_KEY, String(leftRailCollapsed));
+  }, [leftRailCollapsed]);
+
+  useEffect(() => {
+    window.localStorage.setItem(RIGHT_DRAWER_OPEN_STORAGE_KEY, String(rightDrawerOpen));
+  }, [rightDrawerOpen]);
 
   const handleDeskModeChange = async (mode: DeskMode) => {
     setDeskMode(mode);
@@ -172,6 +186,14 @@ export function AppShell() {
     }
   };
 
+
+  // Opens a Tier-2 panel in the workstation (focusing it if already open —
+  // never a second instance) and mirrors it as the "active screen" for
+  // toolbar title, PreflightGate gating, and action target_scope.
+  const openPanel = (key: ScreenKey) => {
+    setActiveScreen(key);
+    workstationRef.current?.openPanel(key);
+  };
 
   const handleRunAction = async (action: OperatorActionDefinition) => {
     const reason = action.requiresReason
@@ -195,7 +217,6 @@ export function AppShell() {
 
   const showLeftRail = deskRole === "control";
   const showBottomRail = deskRole !== "oversight";
-  const showRightRail = true;
 
   // Boot card: shown during the initial fetch (before first daemon response).
   // Replaced by the full layout once loading=false, whether connected or not.
@@ -215,9 +236,14 @@ export function AppShell() {
   }
 
   return (
-    <div className={`app-shell desk-mode-${deskMode} desk-role-${deskRole}`}>
+    <div className={`app-shell desk-mode-${deskMode} desk-role-${deskRole} ${leftRailCollapsed ? "left-rail-collapsed" : ""}`}>
       {showLeftRail ? (
-        <LeftCommandRail activeScreen={activeScreen} onSelect={setActiveScreen} />
+        <LeftCommandRail
+          activeScreen={activeScreen}
+          onSelect={openPanel}
+          collapsed={leftRailCollapsed}
+          onToggleCollapsed={() => setLeftRailCollapsed((v) => !v)}
+        />
       ) : null}
 
       <div className="main-shell">
@@ -234,6 +260,9 @@ export function AppShell() {
               deskMode={deskMode}
               onDeskModeChange={(mode) => void handleDeskModeChange(mode)}
               onRefresh={() => void refresh()}
+              rightDrawerOpen={rightDrawerOpen}
+              onToggleRightDrawer={() => setRightDrawerOpen((v) => !v)}
+              onResetLayout={() => workstationRef.current?.resetLayout()}
             />
 
             <WorkspaceContextStrip />
@@ -242,7 +271,7 @@ export function AppShell() {
               <RoleCommandStrip
                 deskRole={deskRole}
                 activeScreen={activeScreen}
-                onSelect={setActiveScreen}
+                onSelect={openPanel}
               />
             ) : null}
 
@@ -260,26 +289,37 @@ export function AppShell() {
               <PreflightGate preflight={model.preflight} runtimeStatus={model.status.runtime_status} />
             )}
 
-            <WorkspaceFrame
-              title={screen.title}
-              description={screen.description}
-              panelKey={activeScreen}
-              authority={model.panelSources[activeScreen]}
-            >
-              <ScreenErrorBoundary key={activeScreen} screenKey={activeScreen}>
-                {screen.render({
-                  model,
-                  selectTimeline: (internalOrderId) => void selectTimeline(internalOrderId),
-                  timelineLoading,
-                  runAction: (action) => void handleRunAction(action),
-                })}
-              </ScreenErrorBoundary>
-            </WorkspaceFrame>
+            <Workstation
+              ref={workstationRef}
+              storageKey={`mqd.workstation.layout.${deskRole}`}
+              initialPanelId={activeScreen}
+              ctx={{
+                model,
+                selectTimeline: (internalOrderId) => void selectTimeline(internalOrderId),
+                timelineLoading,
+                runAction: (action) => void handleRunAction(action),
+              }}
+              onActivePanelChange={(id) => {
+                if (id) setActiveScreen(id);
+              }}
+            />
 
             {showBottomRail ? <BottomEventRail events={model.feed} /> : null}
           </main>
 
-          {showRightRail ? <RightOpsRail model={model} /> : null}
+          {rightDrawerOpen ? (
+            <>
+              <button
+                type="button"
+                className="ops-drawer-backdrop"
+                aria-label="Close operator context drawer"
+                onClick={() => setRightDrawerOpen(false)}
+              />
+              <div className="ops-drawer">
+                <RightOpsRail model={model} />
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
     </div>
