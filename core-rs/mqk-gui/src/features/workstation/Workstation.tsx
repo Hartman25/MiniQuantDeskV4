@@ -15,6 +15,7 @@ import {
   useContext,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
 } from "react";
 import {
@@ -25,10 +26,12 @@ import {
   type IDockviewPanelProps,
 } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { SCREEN_REGISTRY, type ScreenKey, type ScreenRenderContext } from "../screens/screenRegistry";
 import { WorkspaceFrame } from "../../components/layout/WorkspaceFrame";
 import { ScreenErrorBoundary } from "../../components/common/ScreenErrorBoundary";
 import { getPanelMetadata, isKnownPanelId } from "./panelRegistry";
+import { detachPanel, REATTACH_EVENT } from "./detachedWindow";
 import {
   allDockviewPanelIdsKnown,
   extractDockviewPanelIds,
@@ -44,10 +47,18 @@ interface PanelHostParams {
 
 const ScreenRenderCtx = createContext<ScreenRenderContext | null>(null);
 
+interface WorkstationActions {
+  detach: (id: ScreenKey) => void;
+}
+
+const WorkstationActionsCtx = createContext<WorkstationActions | null>(null);
+
 function PanelHost({ params }: IDockviewPanelProps<PanelHostParams>) {
   const ctx = useContext(ScreenRenderCtx);
+  const actions = useContext(WorkstationActionsCtx);
   const panelId = params.panelId;
   const screen = isKnownPanelId(panelId) ? SCREEN_REGISTRY[panelId] : null;
+  const meta = isKnownPanelId(panelId) ? getPanelMetadata(panelId) : null;
 
   if (!ctx || !screen) {
     // Fail closed: never fabricate content for a panel id whose definition
@@ -63,6 +74,7 @@ function PanelHost({ params }: IDockviewPanelProps<PanelHostParams>) {
       description={screen.description}
       panelKey={panelId}
       authority={ctx.model.panelSources[panelId]}
+      onDetach={meta?.detachable && actions ? () => actions.detach(panelId) : undefined}
     >
       <ScreenErrorBoundary key={panelId} screenKey={panelId}>
         {screen.render(ctx)}
@@ -77,6 +89,29 @@ export interface WorkstationHandle {
   /** Focuses the panel if already open; otherwise opens it. Never creates a second instance of an already-open panel (this is what keeps an operator-singleton panel from duplicating). */
   openPanel: (id: ScreenKey) => void;
   resetLayout: () => void;
+}
+
+function addOrFocusPanel(api: DockviewApi, id: ScreenKey) {
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.api.setActive();
+    return;
+  }
+  const meta = getPanelMetadata(id);
+  api.addPanel({
+    id,
+    component: "panelHost",
+    title: meta?.title ?? id,
+    params: { panelId: id } satisfies PanelHostParams,
+  });
+}
+
+function currentWindowLabelOrDefault(): string {
+  try {
+    return getCurrentWebviewWindow().label;
+  } catch {
+    return "control";
+  }
 }
 
 export interface WorkstationProps {
@@ -177,24 +212,61 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
     [],
   );
 
+  // GUI-LAYOUT-03: listens for a detached window asking to be reattached.
+  // Scoped to THIS window's own webview (getCurrentWebviewWindow().listen),
+  // never a global broadcast — only the window that owns the target
+  // panel-window's `opener` param ever receives its reattach request, so a
+  // panel can never be re-added into more than one window from a single
+  // reattach action. No-ops outside Tauri (browser-only preview).
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const stop = await getCurrentWebviewWindow().listen<{ panelId: string }>(REATTACH_EVENT, (event) => {
+          const id = event.payload?.panelId;
+          const api = apiRef.current;
+          if (api && id && isKnownPanelId(id)) addOrFocusPanel(api, id);
+        });
+        if (cancelled) stop();
+        else unlisten = stop;
+      } catch {
+        // Not in a Tauri context — no cross-window reattach is possible, nothing to listen for.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const actions = useMemo<WorkstationActions>(
+    () => ({
+      detach: (id: ScreenKey) => {
+        const api = apiRef.current;
+        if (!api) return;
+        const panel = api.getPanel(id);
+        if (panel) api.removePanel(panel);
+        const openerLabel = currentWindowLabelOrDefault();
+        void detachPanel(id, openerLabel).then((result) => {
+          // Detach genuinely failed (e.g. browser-only preview, no monitors)
+          // — restore the panel locally rather than silently lose it.
+          if (!result.ok) {
+            const liveApi = apiRef.current;
+            if (liveApi) addOrFocusPanel(liveApi, id);
+          }
+        });
+      },
+    }),
+    [],
+  );
+
   useImperativeHandle(
     ref,
     () => ({
       openPanel: (id: ScreenKey) => {
         const api = apiRef.current;
-        if (!api) return;
-        const existing = api.getPanel(id);
-        if (existing) {
-          existing.api.setActive();
-          return;
-        }
-        const meta = getPanelMetadata(id);
-        api.addPanel({
-          id,
-          component: "panelHost",
-          title: meta?.title ?? id,
-          params: { panelId: id } satisfies PanelHostParams,
-        });
+        if (api) addOrFocusPanel(api, id);
       },
       resetLayout: () => {
         const api = apiRef.current;
@@ -213,12 +285,14 @@ export const Workstation = forwardRef<WorkstationHandle, WorkstationProps>(funct
   return (
     <div className="workstation-root">
       <ScreenRenderCtx.Provider value={ctx}>
-        <DockviewReact
-          className="dockview-theme-abyss workstation-dockview"
-          theme={themeAbyss}
-          components={DOCKVIEW_COMPONENTS}
-          onReady={handleReady}
-        />
+        <WorkstationActionsCtx.Provider value={actions}>
+          <DockviewReact
+            className="dockview-theme-abyss workstation-dockview"
+            theme={themeAbyss}
+            components={DOCKVIEW_COMPONENTS}
+            onReady={handleReady}
+          />
+        </WorkstationActionsCtx.Provider>
       </ScreenRenderCtx.Provider>
     </div>
   );

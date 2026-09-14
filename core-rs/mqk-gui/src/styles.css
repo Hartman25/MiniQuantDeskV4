@@ -399,6 +399,25 @@ ul {
   min-height: 0;
 }
 
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.panel-detach-button {
+  font-size: 0.72rem;
+  padding: 4px 10px;
+}
+
 .workspace-body,
 .screen-grid {
   display: flex;
@@ -1454,7 +1473,8 @@ ul {
 }
 
 .app-shell.desk-role-execution,
-.app-shell.desk-role-oversight {
+.app-shell.desk-role-oversight,
+.app-shell.detached-panel-window {
   grid-template-columns: 1fr;
 }
 

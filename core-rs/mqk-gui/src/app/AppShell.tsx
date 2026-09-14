@@ -17,7 +17,10 @@ import { GlobalStatusBar } from "../components/status/GlobalStatusBar";
 import { ROLE_SCREENS, SCREEN_REGISTRY, type ScreenKey } from "../features/screens/screenRegistry";
 import { useOperatorModel } from "../features/system/useOperatorModel";
 import type { OperatorActionDefinition } from "../features/system/types";
+import { confirmAndRunOperatorAction } from "../features/system/runOperatorAction";
 import { Workstation, type WorkstationHandle } from "../features/workstation/Workstation";
+import { readDetachedPanelBootstrap } from "../features/workstation/detachedWindow";
+import { DetachedPanelWindow } from "./DetachedPanelWindow";
 import { formatDateTime } from "../lib/format";
 import type { DeskMode, DeskRole } from "./shellTypes";
 
@@ -132,6 +135,19 @@ async function applyDeskMode(mode: DeskMode) {
 }
 
 export function AppShell() {
+  // GUI-LAYOUT-03: a window opened by detaching a single panel renders a
+  // minimal single-panel shell instead of the full desk-role workstation.
+  // Computed once from the immutable window.location.search this window was
+  // created with — fails closed to the normal path on any malformed value.
+  const detachedBootstrap = useMemo(() => readDetachedPanelBootstrap(window.location.search), []);
+  if (detachedBootstrap) {
+    return <DetachedPanelWindow bootstrap={detachedBootstrap} />;
+  }
+
+  return <ControlWorkstationShell />;
+}
+
+function ControlWorkstationShell() {
   const deskRole = useMemo(() => detectDeskRole(), []);
   const [deskMode, setDeskMode] = useState<DeskMode>("single");
   const [activeScreen, setActiveScreen] = useState<ScreenKey>(defaultScreenForRole(deskRole));
@@ -195,25 +211,8 @@ export function AppShell() {
     workstationRef.current?.openPanel(key);
   };
 
-  const handleRunAction = async (action: OperatorActionDefinition) => {
-    const reason = action.requiresReason
-      ? window.prompt(`Reason required for ${action.label}:`, "Operator review") ?? ""
-      : "";
-    if (action.requiresReason && !reason.trim()) return;
-
-    const accepted = window.confirm(
-      `${action.confirmText}\\n\\nEnvironment: ${model.status.environment}\\nLive routing: ${
-        model.status.live_routing_enabled ? "enabled" : "disabled"
-      }`,
-    );
-    if (!accepted) return;
-
-    await runAction(action, {
-      reason: reason.trim() || undefined,
-      target_scope: activeScreen,
-    });
-    await refresh();
-  };
+  const handleRunAction = (action: OperatorActionDefinition) =>
+    confirmAndRunOperatorAction(action, { status: model.status, runAction, refresh, targetScope: activeScreen });
 
   const showLeftRail = deskRole === "control";
   const showBottomRail = deskRole !== "oversight";
