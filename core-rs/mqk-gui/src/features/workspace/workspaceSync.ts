@@ -104,3 +104,99 @@ export function isNewerRevision(incoming: WorkspaceSyncRevision, current: Worksp
 export function nextLocalRevision(observedMaxCounter: number, origin: string): WorkspaceSyncRevision {
   return { counter: observedMaxCounter + 1, origin };
 }
+
+// ---------------------------------------------------------------------------
+// R1 — GUI-WORKSPACE-LATE-JOIN-SYNC-01: mount-time handshake so a window that
+// joins AFTER the current workspace identity was already established
+// converges without requiring another operator context change. UI IDENTITY
+// ONLY, same as the rest of this module — see the file header.
+// ---------------------------------------------------------------------------
+
+export const WORKSPACE_SYNC_REQUEST_EVENT = "mqd:workspace:sync-request";
+
+/** Closed request schema: exactly {requester}, a non-empty string identifying the asking window. Carries no identity/authority — a request never smuggles the answer it's asking for. */
+export interface WorkspaceSyncRequest {
+  requester: string;
+}
+
+const SYNC_REQUEST_FIELDS = ["requester"] as const;
+
+/**
+ * Validates an untrusted cross-window sync-request payload against the
+ * CLOSED {requester} schema. Same discipline as parseWorkspaceSyncMessage:
+ * wrong shape, wrong type, empty string, or any extra key (including an
+ * authority-shaped one) voids the whole payload rather than partially
+ * accepting it.
+ */
+export function parseWorkspaceSyncRequest(raw: unknown): WorkspaceSyncRequest | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== SYNC_REQUEST_FIELDS.length) return null;
+  for (const key of keys) {
+    if (!(SYNC_REQUEST_FIELDS as readonly string[]).includes(key)) return null;
+  }
+  const { requester } = record;
+  if (typeof requester !== "string" || requester.length === 0) return null;
+  return { requester };
+}
+
+/** Transport-agnostic view of the cross-window event bus, so the handshake below can be exercised by tests with a fake in-memory bus instead of the real Tauri event API. */
+export interface WorkspaceSyncTransport {
+  listen: (event: string, handler: (payload: unknown) => void) => Promise<() => void>;
+  emit: (event: string, payload: unknown) => Promise<void>;
+}
+
+/** The caller's (WorkspaceContext.tsx's) current state, read fresh each time the handshake needs it — never captured once, since a local write can happen between handshake install and a request/response round trip. */
+export interface WorkspaceSyncHandshakeState {
+  getRevision: () => WorkspaceSyncRevision;
+  getIdentity: () => WorkspaceIdentity;
+  /** Called when a remote WORKSPACE_SYNC_EVENT (an ordinary broadcast, or a late-join response) beats the current revision. Must apply both revision and identity atomically from the caller's side. */
+  onRemoteState: (revision: WorkspaceSyncRevision, identity: WorkspaceIdentity) => void;
+}
+
+/**
+ * Installs the full R1 mount-time handshake on `transport` and returns a
+ * cleanup function. Required lifecycle, enforced by sequential awaits (not
+ * by effect-declaration order, which the real Tauri event API gives no
+ * ordering guarantee across):
+ *
+ *   1. install the ordinary workspace-state listener (existing behavior —
+ *      future broadcasts still apply via isNewerRevision);
+ *   2. install the sync-request listener;
+ *   3. only once both listeners are ready, emit ONE sync-request.
+ *
+ * A window receiving another origin's request responds with its OWN current
+ * {revision, identity} on the existing WORKSPACE_SYNC_EVENT — never a new
+ * Lamport-stamped write (no nextLocalRevision call, no mutation of the
+ * responder's own state), so a requester that made a newer local write
+ * before the response arrives keeps winning via the ordinary
+ * isNewerRevision comparison (R1-LJ-03). A window never responds to its own
+ * request (matched by `origin`), and a request only ever yields state
+ * responses, never another request — so no request/response loop is
+ * possible structurally.
+ */
+export async function installWorkspaceSyncHandshake(
+  transport: WorkspaceSyncTransport,
+  origin: string,
+  state: WorkspaceSyncHandshakeState,
+): Promise<() => void> {
+  const unlistenState = await transport.listen(WORKSPACE_SYNC_EVENT, (payload) => {
+    const msg = parseWorkspaceSyncMessage(payload);
+    if (!msg || !isNewerRevision(msg.revision, state.getRevision())) return;
+    state.onRemoteState(msg.revision, msg.identity);
+  });
+
+  const unlistenRequest = await transport.listen(WORKSPACE_SYNC_REQUEST_EVENT, (payload) => {
+    const req = parseWorkspaceSyncRequest(payload);
+    if (!req || req.requester === origin) return;
+    void transport.emit(WORKSPACE_SYNC_EVENT, { revision: state.getRevision(), identity: state.getIdentity() });
+  });
+
+  await transport.emit(WORKSPACE_SYNC_REQUEST_EVENT, { requester: origin });
+
+  return () => {
+    unlistenState();
+    unlistenRequest();
+  };
+}

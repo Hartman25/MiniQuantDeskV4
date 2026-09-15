@@ -23,10 +23,10 @@ import { EMPTY_WORKSPACE_IDENTITY, mergeWorkspaceIdentity, type WorkspaceIdentit
 import {
   INITIAL_SYNC_REVISION,
   WORKSPACE_SYNC_EVENT,
-  isNewerRevision,
+  installWorkspaceSyncHandshake,
   nextLocalRevision,
-  parseWorkspaceSyncMessage,
   type WorkspaceSyncRevision,
+  type WorkspaceSyncTransport,
 } from "./workspaceSync.ts";
 
 /**
@@ -65,6 +65,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // is always the max counter this window has observed, accepted or not,
   // with no separate clock variable needed.
   const revisionRef = useRef<WorkspaceSyncRevision>(INITIAL_SYNC_REVISION);
+  // Mirrors `linked` synchronously for the R1 handshake's request-response
+  // path (see the mount effect below): a listener installed once via a
+  // mount-only effect cannot read a fresh `linked` from React state without
+  // this ref, and a late-arriving request must answer with whatever this
+  // window's identity ACTUALLY is at that moment, not a stale closure over
+  // the value at mount time.
+  const identityRef = useRef<WorkspaceIdentity>(EMPTY_WORKSPACE_IDENTITY);
 
   const broadcast = useCallback((identity: WorkspaceIdentity) => {
     const revision = nextLocalRevision(revisionRef.current.counter, currentWindowOrigin());
@@ -84,6 +91,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     (patch: Partial<WorkspaceIdentity>) => {
       setLinkedState((prev) => {
         const next = mergeWorkspaceIdentity(prev, patch);
+        identityRef.current = next;
         broadcast(next);
         return next;
       });
@@ -92,39 +100,49 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const resetLinked = useCallback(() => {
+    identityRef.current = EMPTY_WORKSPACE_IDENTITY;
     setLinkedState(EMPTY_WORKSPACE_IDENTITY);
     broadcast(EMPTY_WORKSPACE_IDENTITY);
   }, [broadcast]);
 
-  // Receives identity changes broadcast by OTHER windows (including this
-  // window's own echo of its last broadcast — isNewerRevision correctly
-  // rejects that as a tie on both counter and origin). A message that is
-  // malformed, carries an unrecognized field, or loses the (counter, origin)
-  // comparison against revisionRef.current is dropped outright — never
-  // partially applied. Whether accepted or rejected, revisionRef.current
-  // already reflects the max counter observed (see the ref's own comment
-  // above), so no separate Lamport-clock-advance step is needed here.
+  // R1 — GUI-WORKSPACE-LATE-JOIN-SYNC-01: installs both the ordinary
+  // workspace-state listener AND the mount-time late-join handshake (see
+  // installWorkspaceSyncHandshake in workspaceSync.ts for the full
+  // lifecycle/ordering contract). A message that is malformed, carries an
+  // unrecognized field, or loses the (counter, origin) comparison against
+  // revisionRef.current is dropped outright — never partially applied.
+  // Whether accepted or rejected, revisionRef.current already reflects the
+  // max counter observed (see the ref's own comment above), so no separate
+  // Lamport-clock-advance step is needed here.
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
+    let cleanup: (() => void) | null = null;
     let cancelled = false;
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const stop = await listen<unknown>(WORKSPACE_SYNC_EVENT, (event) => {
-          const msg = parseWorkspaceSyncMessage(event.payload);
-          if (!msg || !isNewerRevision(msg.revision, revisionRef.current)) return;
-          revisionRef.current = msg.revision;
-          setLinkedState(msg.identity);
+        const { listen, emit } = await import("@tauri-apps/api/event");
+        const transport: WorkspaceSyncTransport = {
+          listen: (event, handler) => listen<unknown>(event, (e) => handler(e.payload)),
+          emit: (event, payload) => emit(event, payload),
+        };
+        const stop = await installWorkspaceSyncHandshake(transport, currentWindowOrigin(), {
+          getRevision: () => revisionRef.current,
+          getIdentity: () => identityRef.current,
+          onRemoteState: (revision, identity) => {
+            revisionRef.current = revision;
+            identityRef.current = identity;
+            setLinkedState(identity);
+          },
         });
         if (cancelled) stop();
-        else unlisten = stop;
+        else cleanup = stop;
       } catch {
-        // Not in a Tauri context — single-window, nothing to listen for.
+        // Not in a Tauri context — single-window, nothing to listen for or
+        // request, and no false synchronization authority is manufactured.
       }
     })();
     return () => {
       cancelled = true;
-      unlisten?.();
+      cleanup?.();
     };
   }, []);
 
