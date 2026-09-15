@@ -278,6 +278,15 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: [],
   },
+  // Evidence (Unified MQD Evidence Chart): execution/flow is a real,
+  // durable DB-backed join (oms_outbox + oms_order_lifecycle_events +
+  // fill_quality_telemetry) — see executionEvidenceModel.ts.
+  evidence: {
+    db: ["/execution/flow"],
+    runtime: [],
+    broker: [],
+    placeholder: [],
+  },
 };
 
 function hasEndpoint(realEndpoints: string[], hints: string[]) {

@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import { AutonomousDailyOperationsScreen } from "../autonomousDailyOperations/AutonomousDailyOperationsScreen";
 import { AuditScreen } from "../audit/AuditScreen";
 import { BacktestResultsScreen } from "../backtests/BacktestResultsScreen";
+import { EvidenceForensicsScreen } from "../../components/evidence/EvidenceForensicsScreen";
 import { StrategyScannerScreen } from "../strategyScanner/StrategyScannerScreen";
 import { ControlStationScreen } from "../controlStation/ControlStationScreen";
 import { DashboardScreen } from "../dashboard/DashboardScreen";
@@ -51,7 +52,8 @@ export type ScreenKey =
   | "operatorTimeline"
   | "backtests"
   | "strategyScanner"
-  | "dailyOperations";
+  | "dailyOperations"
+  | "evidence";
 
 /**
  * Which monitor this screen is designed to occupy.
@@ -249,6 +251,12 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
     description: "View performance artifacts from completed CLI backtest runs.",
     monitorGroup: "diagnostics",
     render: () => <BacktestResultsScreen />,
+  },
+  evidence: {
+    title: "Evidence",
+    description: "Unified, read-only lifecycle evidence chart linked to the current workspace run — market/strategy/execution/research layers, each explicit about what it can and cannot prove.",
+    monitorGroup: "diagnostics",
+    render: () => <EvidenceForensicsScreen />,
   },
   strategyScanner: {
     title: "Strategy Scanner",

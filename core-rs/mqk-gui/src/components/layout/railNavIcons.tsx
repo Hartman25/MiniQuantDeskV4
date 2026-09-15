@@ -9,6 +9,7 @@ import {
   Clock,
   Cpu,
   DatabaseZap,
+  FileSearch,
   FlaskConical,
   Gauge,
   History,
@@ -60,4 +61,5 @@ export const RAIL_NAV_ICONS: Record<ScreenKey, LucideIcon> = {
   backtests: FlaskConical,
   strategyScanner: Radar,
   settings: SlidersHorizontal,
+  evidence: FileSearch,
 };

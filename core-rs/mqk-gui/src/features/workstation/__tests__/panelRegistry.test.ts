@@ -123,9 +123,9 @@ test("Tier-0 status fields include the full required fixed safety surface", () =
   }
 });
 
-test("contextAware is only set for panels with current WorkspaceContext evidence (marketData, backtests)", () => {
+test("contextAware is only set for panels with current WorkspaceContext evidence (marketData, backtests, evidence)", () => {
   const contextAwareIds = PANEL_IDS.filter((id) => PANEL_REGISTRY[id].contextAware).sort();
-  assert.deepEqual(contextAwareIds, ["backtests", "marketData"]);
+  assert.deepEqual(contextAwareIds, ["backtests", "evidence", "marketData"]);
 });
 
 test("every panel declares a positive minimum footprint", () => {
@@ -156,9 +156,18 @@ test("panelRendererFor requests 'always' for exactly the contextAware panels, an
   // Anchors the exact expected set so this test would fail if contextAware
   // classification ever silently drifted (see the contextAware test above).
   const alwaysRenderedIds = PANEL_IDS.filter((id) => panelRendererFor(id) === "always").sort();
-  assert.deepEqual(alwaysRenderedIds, ["backtests", "marketData"]);
+  assert.deepEqual(alwaysRenderedIds, ["backtests", "evidence", "marketData"]);
 });
 
 test("panelRendererFor fails closed (default renderer, not 'always') for an unknown panel id", () => {
   assert.equal(panelRendererFor("not-a-real-panel"), undefined);
+});
+
+// R2-EV-09: the Unified Evidence panel exposes no operator/trading authority — read-only, and detachable like any other read-only panel.
+test("R2-EV-09: the evidence panel is read-only, duplicable, and detachable — never operator-singleton authority", () => {
+  const meta = PANEL_REGISTRY.evidence;
+  assert.equal(meta.authority, "read-only");
+  assert.equal(meta.duplicable, true);
+  assert.equal(meta.detachable, true);
+  assert.equal(meta.contextAware, true);
 });

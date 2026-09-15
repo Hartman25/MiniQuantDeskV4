@@ -20,6 +20,7 @@ export const LEFT_RAIL_SECONDARY: readonly ScreenKey[] = [
   "audit",
   "artifacts",
   "backtests",
+  "evidence",
   "strategyScanner",
   "settings",
 ];

@@ -63,8 +63,8 @@ export interface PanelMetadata {
 // Evidence-based, not invented: `ops` is the sole screen whose render() is
 // given `runAction` (see screenRegistry.tsx) — it is the only current
 // operator-authority action surface. `contextAware: true` is set only for
-// backtests and marketData, the only two screens that currently call
-// useWorkspaceContext().
+// backtests, marketData, and evidence — the only three screens that
+// currently call useWorkspaceContext().
 //
 // WAVE-02-FINAL-REPAIR-01 R2: `ops` is non-detachable. Detaching it would
 // remove it from the control window's local Dockview instance while leaving
@@ -99,6 +99,7 @@ const PANEL_CONTRACTS: Record<ScreenKey, RawPanelContract> = {
   backtests:        { tier: "tier2", authority: "read-only",         detachable: true, contextAware: true,  minWidth: 480, minHeight: 360 },
   strategyScanner:  { tier: "tier2", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },
   dailyOperations:  { tier: "tier1", authority: "read-only",         detachable: true, contextAware: false, minWidth: 360, minHeight: 280 },
+  evidence:         { tier: "tier2", authority: "read-only",         detachable: true, contextAware: true,  minWidth: 480, minHeight: 360 },
 };
 
 function buildPanelMetadata(id: ScreenKey, contract: RawPanelContract): PanelMetadata {
