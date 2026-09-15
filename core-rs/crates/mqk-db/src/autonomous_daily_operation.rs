@@ -2663,26 +2663,32 @@ pub async fn count_autonomous_daily_bar_dispatch_claims(
 // contradiction detection needs), validated in Rust only.
 // ---------------------------------------------------------------------------
 
-/// One raw `(transition_seq, run_id)` row from a `to_state='running'`
-/// transition with a non-null `run_id`, in ascending `transition_seq` order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One raw `(transition_seq, run_id, from_state)` row from a
+/// `to_state='running'` transition with a non-null `run_id`, in ascending
+/// `transition_seq` order. `from_state` lets
+/// [`validate_autonomous_daily_operation_run_lineage`] distinguish a genuine
+/// runtime-generation binding transition from a `controller_degraded ->
+/// running` same-live-run recovery, which restores an already-established
+/// `run_id` rather than minting a new lineage member.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutonomousDailyOperationRunningTransitionRow {
     pub transition_seq: i64,
     pub run_id: Uuid,
+    pub from_state: String,
 }
 
-/// Read every raw `(transition_seq, run_id)` row for `operation_id` where
-/// `to_state = 'running'` and `run_id is not null`, ordered by
-/// `transition_seq asc`. No `DISTINCT`, no `LIMIT` -- every row is returned
-/// exactly as stored, including a duplicate `run_id` if one somehow exists,
-/// so [`validate_autonomous_daily_operation_run_lineage`] can detect it.
-/// Read-only.
+/// Read every raw `(transition_seq, run_id, from_state)` row for
+/// `operation_id` where `to_state = 'running'` and `run_id is not null`,
+/// ordered by `transition_seq asc`. No `DISTINCT`, no `LIMIT` -- every row is
+/// returned exactly as stored, including a duplicate `run_id` if one somehow
+/// exists, so [`validate_autonomous_daily_operation_run_lineage`] can detect
+/// it. Read-only.
 pub async fn fetch_autonomous_daily_operation_running_transitions_raw(
     pool: &PgPool,
     operation_id: Uuid,
 ) -> Result<Vec<AutonomousDailyOperationRunningTransitionRow>> {
     let rows = sqlx::query(
-        "select transition_seq, run_id \
+        "select transition_seq, run_id, from_state \
          from sys_autonomous_daily_operation_events \
          where operation_id = $1 and to_state = $2 and run_id is not null \
          order by transition_seq asc",
@@ -2698,6 +2704,7 @@ pub async fn fetch_autonomous_daily_operation_running_transitions_raw(
             Ok(AutonomousDailyOperationRunningTransitionRow {
                 transition_seq: r.try_get("transition_seq")?,
                 run_id: r.try_get("run_id")?,
+                from_state: r.try_get("from_state")?,
             })
         })
         .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
@@ -2708,20 +2715,34 @@ pub async fn fetch_autonomous_daily_operation_running_transitions_raw(
 /// ordered, contradiction-free lineage (§6b, §7 `unknown_run_lineage_unavailable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunLineageValidationError {
-    /// A `run_id` appeared more than once across the raw rows.
+    /// A `run_id` appeared more than once across genuine runtime-generation
+    /// binding transitions (i.e. excluding `controller_degraded -> running`
+    /// same-live-run recovery rows).
     DuplicateRunId(Uuid),
     /// `transition_seq` did not strictly increase across the returned rows.
     NonMonotonicSequence,
     /// The operation's current `run_id` column is non-`NULL` but does not
     /// equal the lineage's final entry (or the lineage is empty).
     CurrentRunMismatch,
+    /// A `controller_degraded -> running` row's `run_id` did not match the
+    /// run_id already at the head of the lineage -- either no runtime
+    /// generation was established yet, or it names a different run than the
+    /// one it claims to be recovering.
+    RecoveryRunMismatch(Uuid),
 }
 
 /// Validate a raw run-lineage row set (§6b) entirely in Rust -- never in
 /// SQL. Returns the full lineage (run IDs in bind order) on success.
 ///
 /// - `transition_seq` must strictly increase.
-/// - Each `run_id` must appear exactly once.
+/// - A `controller_degraded -> running` row is a lifecycle-state recovery of
+///   the same still-live runtime, never a new runtime generation (M1-
+///   LINEAGE-SAME-RUN-RECOVERY-01): it must restore exactly the `run_id`
+///   already at the head of the lineage, and it does not add a new lineage
+///   entry or participate in duplicate detection.
+/// - Every other `to_state='running'` row (i.e. from `start_retrying`,
+///   `recovery_retrying`, or `evidence_degraded`) establishes a new lineage
+///   member; each such `run_id` must appear exactly once.
 /// - `current_run_id` (the operation's own mutable `run_id` column) must
 ///   equal the final lineage entry whenever it is `Some`; an empty lineage
 ///   is legal only when `current_run_id` is `None`.
@@ -2731,7 +2752,7 @@ pub fn validate_autonomous_daily_operation_run_lineage(
 ) -> std::result::Result<Vec<Uuid>, RunLineageValidationError> {
     let mut seen = std::collections::HashSet::with_capacity(rows.len());
     let mut last_seq: Option<i64> = None;
-    let mut lineage = Vec::with_capacity(rows.len());
+    let mut lineage: Vec<Uuid> = Vec::with_capacity(rows.len());
 
     for row in rows {
         if let Some(prev) = last_seq {
@@ -2740,6 +2761,13 @@ pub fn validate_autonomous_daily_operation_run_lineage(
             }
         }
         last_seq = Some(row.transition_seq);
+
+        if row.from_state == STATE_CONTROLLER_DEGRADED {
+            if lineage.last() != Some(&row.run_id) {
+                return Err(RunLineageValidationError::RecoveryRunMismatch(row.run_id));
+            }
+            continue;
+        }
 
         if !seen.insert(row.run_id) {
             return Err(RunLineageValidationError::DuplicateRunId(row.run_id));

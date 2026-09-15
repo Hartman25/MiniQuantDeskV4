@@ -707,10 +707,24 @@ use mqk_db::{
     RunLineageValidationError,
 };
 
+/// `from_state` defaults to `start_retrying` -- an ordinary genuine
+/// runtime-generation binding transition. Use [`recovery_row`] for a
+/// `controller_degraded -> running` same-live-run recovery row.
 fn row(seq: i64, run_id: Uuid) -> AutonomousDailyOperationRunningTransitionRow {
     AutonomousDailyOperationRunningTransitionRow {
         transition_seq: seq,
         run_id,
+        from_state: mqk_db::STATE_START_RETRYING.to_string(),
+    }
+}
+
+/// A `controller_degraded -> running` row: a lifecycle-state recovery of an
+/// already-established run, never a new lineage generation.
+fn recovery_row(seq: i64, run_id: Uuid) -> AutonomousDailyOperationRunningTransitionRow {
+    AutonomousDailyOperationRunningTransitionRow {
+        transition_seq: seq,
+        run_id,
+        from_state: mqk_db::STATE_CONTROLLER_DEGRADED.to_string(),
     }
 }
 
@@ -795,6 +809,100 @@ fn c08_validator_never_deduplicates_or_resorts_and_never_needs_a_row_cap() {
     let current = *ids.last().unwrap();
     let lineage = validate_autonomous_daily_operation_run_lineage(&rows, Some(current)).unwrap();
     assert_eq!(lineage, ids);
+}
+
+// ---------------------------------------------------------------------------
+// Group C (M1-LINEAGE-SAME-RUN-RECOVERY-01) -- controller_degraded
+// same-live-run recovery must not manufacture a second lineage generation.
+// Mirrors the 5 required negative controls from the production incident
+// (operation_id 91626a1d-7c85-50ac-b749-66f33c124d25, 2026-09-15): seq 46
+// start_retrying->running(A), seq 47 running->controller_degraded, seq 48
+// controller_degraded->running(A) ("live local owner unchanged; recovering
+// to running with the same run_id") -- finalization must not observe this
+// as unknown_run_lineage_unavailable.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c09_same_run_controller_degraded_recovery_is_not_a_second_lineage_generation() {
+    // Negative control 1: initial + same-run control recovery.
+    let run_a = Uuid::new_v4();
+    let rows = vec![row(46, run_a), recovery_row(48, run_a)];
+    let lineage = validate_autonomous_daily_operation_run_lineage(&rows, Some(run_a)).unwrap();
+    assert_eq!(
+        lineage,
+        vec![run_a],
+        "controller_degraded->running(A) recovery must not append a second A"
+    );
+}
+
+#[test]
+fn c10_real_multi_run_lineage_with_interleaved_recovery() {
+    // Negative control 2: a genuine second runtime generation (B, via
+    // recovery_retrying) after a same-run controller_degraded recovery of A
+    // still produces the true two-member lineage [A, B].
+    let run_a = Uuid::new_v4();
+    let run_b = Uuid::new_v4();
+    let rows = vec![
+        row(1, run_a),
+        recovery_row(2, run_a),
+        row(3, run_b), // recovery_retrying -> running(B), a new generation
+    ];
+    let lineage = validate_autonomous_daily_operation_run_lineage(&rows, Some(run_b)).unwrap();
+    assert_eq!(lineage, vec![run_a, run_b]);
+}
+
+#[test]
+fn c11_true_duplicate_run_id_across_genuine_generations_remains_red() {
+    // Negative control 3: two genuine runtime-generation transitions (never
+    // controller_degraded) both establishing A must still fail closed --
+    // the recovery carve-out must not weaken real duplicate detection.
+    let run_a = Uuid::new_v4();
+    let rows = vec![row(1, run_a), row(2, run_a)];
+    assert_eq!(
+        validate_autonomous_daily_operation_run_lineage(&rows, Some(run_a)),
+        Err(RunLineageValidationError::DuplicateRunId(run_a))
+    );
+}
+
+#[test]
+fn c12_current_run_mismatch_after_recovery_remains_red() {
+    // Negative control 4: lineage's final genuine member is B, but the
+    // operation's current_run_id column is A -- must still fail closed even
+    // when a controller_degraded recovery row is present earlier.
+    let run_a = Uuid::new_v4();
+    let run_b = Uuid::new_v4();
+    let rows = vec![row(1, run_a), recovery_row(2, run_a), row(3, run_b)];
+    assert_eq!(
+        validate_autonomous_daily_operation_run_lineage(&rows, Some(run_a)),
+        Err(RunLineageValidationError::CurrentRunMismatch)
+    );
+}
+
+#[test]
+fn c13_recovery_row_naming_an_unestablished_run_fails_closed() {
+    // A controller_degraded->running row cannot be the very first row (no
+    // runtime generation was ever established to recover) -- fail closed
+    // rather than silently accepting it as a fresh generation.
+    let run_a = Uuid::new_v4();
+    let rows = vec![recovery_row(1, run_a)];
+    assert_eq!(
+        validate_autonomous_daily_operation_run_lineage(&rows, Some(run_a)),
+        Err(RunLineageValidationError::RecoveryRunMismatch(run_a))
+    );
+}
+
+#[test]
+fn c14_recovery_row_naming_a_different_run_than_the_lineage_head_fails_closed() {
+    // A controller_degraded->running row naming a run_id other than the one
+    // already at the head of the lineage is a contradiction, not a valid
+    // recovery -- fail closed.
+    let run_a = Uuid::new_v4();
+    let run_other = Uuid::new_v4();
+    let rows = vec![row(1, run_a), recovery_row(2, run_other)];
+    assert_eq!(
+        validate_autonomous_daily_operation_run_lineage(&rows, Some(run_a)),
+        Err(RunLineageValidationError::RecoveryRunMismatch(run_other))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2146,6 +2254,116 @@ async fn h02_duplicate_and_mismatched_run_id_fail_closed_against_real_rows() {
             .await
             .expect("read ok");
     assert_eq!(result, Err(RunLineageValidationError::CurrentRunMismatch));
+}
+
+/// Production regression (M1-LINEAGE-SAME-RUN-RECOVERY-01, negative control
+/// 5): a `controller_degraded -> running` recovery that restores the SAME
+/// still-live run must not be misclassified as
+/// `unknown_run_lineage_unavailable` at finalization. Exercises the real
+/// production write path -- `transition_autonomous_daily_operation_to_running`
+/// (`start_retrying -> running(A)`), `transition_autonomous_daily_operation`
+/// (`running -> controller_degraded`), and
+/// `recover_controller_degraded_operation_with_run_authority`
+/// (`controller_degraded -> running(A)`, same `run_id`) -- exactly the seq
+/// 46/47/48 production sequence from `operation_id`
+/// `91626a1d-7c85-50ac-b749-66f33c124d25` (2026-09-15).
+#[tokio::test]
+async fn h03_controller_degraded_same_run_recovery_does_not_duplicate_lineage() {
+    let _shared_fixture_guard = SHARED_FIXTURE_LOCK.lock().await;
+    let Some(pool) = maybe_db("h03").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zze2a-h03-{}", unique_suffix());
+    let symbol = "ZZE2AH03";
+    let now = monday_at(14, 0, 0);
+
+    std::env::set_var(STRATEGY_SYMBOL_ENV, symbol);
+    std::env::set_var(STRATEGY_IDS_ENV, "swing_momentum");
+    std::env::set_var(STRATEGY_TIMEFRAME_ENV, "5m");
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
+
+    let run_a = Uuid::new_v4();
+    let after_a = create_test_operation_running(&pool, &st, &adapter_id, symbol, now, run_a).await;
+
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id: run_a,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: now,
+            git_hash: "TEST".to_string(),
+            config_hash: "TEST".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-host".to_string(),
+        },
+    )
+    .await
+    .expect("insert_run ok");
+    mqk_db::arm_run(&pool, run_a).await.expect("arm_run ok");
+    mqk_db::begin_run(&pool, run_a).await.expect("begin_run ok");
+
+    let degraded = match mqk_db::transition_autonomous_daily_operation(
+        &pool,
+        &mqk_db::TransitionAutonomousDailyOperationArgs {
+            operation_id: after_a.operation_id,
+            expected_state: after_a.state.clone(),
+            expected_state_version: after_a.state_version,
+            new_state: mqk_db::STATE_CONTROLLER_DEGRADED.to_string(),
+            reason_code: Some("interior_gap".to_string()),
+            blocker_signature: None,
+            occurred_at_utc: now,
+            run_id: Some(run_a),
+            bounded_detail: "test: running -> controller_degraded (interior_gap)".to_string(),
+        },
+    )
+    .await
+    .expect("transition ok")
+    {
+        mqk_db::AutonomousDailyTransitionOutcome::Applied(record) => record,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+
+    let recovered = match mqk_db::recover_controller_degraded_operation_with_run_authority(
+        &pool,
+        &mqk_db::RecoverControllerDegradedArgs {
+            operation_id: degraded.operation_id,
+            expected_state_version: degraded.state_version,
+            expected_run_id: run_a,
+            occurred_at_utc: now,
+            bounded_detail:
+                "test: live local owner unchanged; recovering to running with the same run_id"
+                    .to_string(),
+        },
+    )
+    .await
+    .expect("recover ok")
+    {
+        mqk_db::ControllerDegradedRecoveryOutcome::Applied(record) => record,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert_eq!(recovered.run_id, Some(run_a));
+
+    let lineage =
+        mqk_db::fetch_and_validate_autonomous_daily_operation_run_lineage(&pool, &recovered)
+            .await
+            .expect("read ok");
+    assert_eq!(
+        lineage,
+        Ok(vec![run_a]),
+        "same-live-run controller_degraded recovery must not be classified as \
+         unknown_run_lineage_unavailable and must not duplicate the lineage"
+    );
+
+    let _ = sqlx::query("delete from runs where run_id = $1")
+        .bind(run_a)
+        .execute(&pool)
+        .await;
 }
 
 // ---------------------------------------------------------------------------
