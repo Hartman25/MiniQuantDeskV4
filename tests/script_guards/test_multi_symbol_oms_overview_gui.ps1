@@ -219,23 +219,22 @@ if ($DesignContent -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*CLOSED' -and
 }
 
 # -----------------------------------------------------------------------
-# G14: Patch-10 ledger-scope invariant.
+# G14: current-patch ledger-scope invariant.
 #
-# Two different facts are intentionally kept separate:
+# The working/index diff must never touch the current canonical master patch
+# ledger (MiniQuantDesk_Master_Patch_Ledger_v2.md, per CLAUDE.md's canonical
+# status ledger reference). This is always locally enforceable, including in
+# shallow CI checkouts, and it is what actually protects the ledger from this
+# GUI-only patch scope.
 #
-# G14a -- CURRENT PATCH INTEGRITY
-# The working/index diff must never touch the historical master patch ledger.
-# This is always locally enforceable, including in shallow CI checkouts.
-#
-# G14b -- FIXED HISTORICAL EVIDENCE
-# When Patch 10's immutable commit object is available locally, re-prove that
-# its committed path set did not touch the ledger. A depth-limited checkout
-# may legitimately omit that old commit object; in that specific case only,
-# absence of the object is reported as unavailable historical re-proof rather
-# than fabricated evidence of a Patch-10 violation. A missing commit in a
-# non-shallow repository remains a fail-closed error.
+# G14 previously also re-verified, via a hardcoded commit SHA, that a specific
+# historical commit (Patch 10) did not touch the ledger. That re-proof checked
+# repository chronology, not a live invariant: the commit is immutable, its
+# path set can never change, and the check offered no protection beyond what
+# this present-state assertion already provides. It has been retired; no
+# production safety condition is lost, since the current-diff check below is
+# the actual guard against a patch touching the ledger.
 # -----------------------------------------------------------------------
-$Patch10Commit = 'e4fc73cac56bc2a21eac60af46a28ee62e2dd8e4'
 $MasterLedgerTouched = @(
     $DiffNames |
         Where-Object {
@@ -244,57 +243,9 @@ $MasterLedgerTouched = @(
 )
 
 if ($MasterLedgerTouched.Count -eq 0) {
-    Assert-Pass "G14a: current working/index diff does not touch the historical master patch ledger"
+    Assert-Pass "G14: current working/index diff does not touch the canonical master patch ledger"
 } else {
-    Assert-Fail "G14a: current working/index diff touches the historical master patch ledger: $($MasterLedgerTouched -join ', ')"
-}
-
-Push-Location $RepoRoot
-
-$ShallowText = @(
-    git rev-parse --is-shallow-repository 2>$null
-)
-
-$RepoIsShallow = (
-    $LASTEXITCODE -eq 0 -and
-    $ShallowText.Count -eq 1 -and
-    $ShallowText[0].Trim() -eq 'true'
-)
-
-git cat-file -e ($Patch10Commit + '^{commit}') 2>$null
-$Patch10CommitExists = ($LASTEXITCODE -eq 0)
-
-$Patch10DiffNames = if ($Patch10CommitExists) {
-    @(
-        git diff-tree `
-            --no-commit-id `
-            --name-only `
-            -r `
-            $Patch10Commit 2>$null
-    ) | Where-Object { $_ }
-} else {
-    @()
-}
-
-Pop-Location
-
-$Patch10TouchedLedger = @(
-    $Patch10DiffNames |
-        Where-Object {
-            $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$'
-        }
-)
-
-if ($Patch10CommitExists) {
-    if ($Patch10TouchedLedger.Count -eq 0) {
-        Assert-Pass "G14b: Patch 10 ($Patch10Commit) historical path set is available locally and does not touch the master patch ledger"
-    } else {
-        Assert-Fail "G14b: Patch 10 historical commit touched the master patch ledger: $($Patch10TouchedLedger -join ', ')"
-    }
-} elseif ($RepoIsShallow) {
-    Assert-Pass "G14b: Patch 10 historical commit is unavailable in this shallow checkout; historical scope is not re-proven here, while G14a still enforces the current patch boundary"
-} else {
-    Assert-Fail "G14b: Patch 10 historical commit is missing from a non-shallow repository"
+    Assert-Fail "G14: current working/index diff touches the canonical master patch ledger: $($MasterLedgerTouched -join ', ')"
 }
 
 Write-Host ''
