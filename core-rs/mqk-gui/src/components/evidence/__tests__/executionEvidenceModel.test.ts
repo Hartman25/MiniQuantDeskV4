@@ -204,6 +204,79 @@ function minimalBacktestBundle(): ArtifactBundle {
   };
 }
 
+// ---------------------------------------------------------------------------
+// R3 GUI-EVIDENCE-ROW-RUN-PROVENANCE-01: a surface's own run_id is
+// authoritative for the whole evidence set, and every row must agree with it
+// — a single disagreeing row must withhold the entire surface, never a
+// partial render of the matching rows only.
+// ---------------------------------------------------------------------------
+
+test("R3-EV-01: an active surface with no run_id fails closed with zero markers and null identity", () => {
+  const surface = activeSurface([flowRow()], { run_id: null });
+  const model = buildExecutionEvidenceChartModel(surface, null);
+  assert.equal(model.executionLifecycleMarkers.status, "unavailable");
+  assert.deepEqual(model.executionLifecycleMarkers.markers, []);
+  assert.equal(model.identity.runId, null);
+});
+
+test("R3-EV-02: a row run_id mismatch against a matching workspace link withholds the entire surface", () => {
+  const surface = activeSurface(
+    [flowRow({ row_id: "a", run_id: "run-exec-1" }), flowRow({ row_id: "b", run_id: "run-exec-2" })],
+    { run_id: "run-exec-1" },
+  );
+  const model = buildExecutionEvidenceChartModel(surface, "run-exec-1");
+  assert.equal(model.executionLifecycleMarkers.status, "unavailable");
+  assert.deepEqual(model.executionLifecycleMarkers.markers, []);
+  assert.match(model.executionLifecycleMarkers.reason ?? "", /does not match the surface's own run_id/);
+  assert.equal(model.identity.runId, null);
+});
+
+test("R3-EV-03: a row run_id mismatch fails closed even without a linked workspace run", () => {
+  const surface = activeSurface(
+    [flowRow({ row_id: "a", run_id: "run-exec-1" }), flowRow({ row_id: "b", run_id: "run-exec-2" })],
+    { run_id: "run-exec-1" },
+  );
+  const model = buildExecutionEvidenceChartModel(surface, null);
+  assert.equal(model.executionLifecycleMarkers.status, "unavailable");
+  assert.deepEqual(model.executionLifecycleMarkers.markers, []);
+  assert.equal(model.identity.runId, null);
+});
+
+test("R3-EV-04: workspace, surface, and every row all agreeing on run_id renders normally", () => {
+  const surface = activeSurface(
+    [flowRow({ row_id: "a", run_id: "run-exec-1" }), flowRow({ row_id: "b", run_id: "run-exec-1" })],
+    { run_id: "run-exec-1" },
+  );
+  const model = buildExecutionEvidenceChartModel(surface, "run-exec-1");
+  assert.equal(model.executionLifecycleMarkers.status, "artifact_present");
+  assert.equal(model.executionLifecycleMarkers.markers.length, 2);
+  assert.equal(model.identity.runId, "run-exec-1");
+});
+
+test("R3-EV-05: no_db/no_active_run unavailable behavior is unchanged by row-level provenance validation", () => {
+  const noRun = buildExecutionEvidenceChartModel(
+    { canonical_route: "/api/v1/execution/flow", truth_state: "no_active_run", backend: "unavailable", run_id: null, rows: [] },
+    null,
+  );
+  assert.equal(noRun.executionLifecycleMarkers.status, "unavailable");
+  assert.match(noRun.executionLifecycleMarkers.reason ?? "", /No active execution run/);
+
+  const noDb = buildExecutionEvidenceChartModel(
+    { canonical_route: "/api/v1/execution/flow", truth_state: "no_db", backend: "unavailable", run_id: null, rows: [] },
+    null,
+  );
+  assert.equal(noDb.executionLifecycleMarkers.status, "unavailable");
+  assert.match(noDb.executionLifecycleMarkers.reason ?? "", /No database configured/);
+});
+
+test("R3: an unexpected canonical_route fails the surface closed regardless of truth_state", () => {
+  const surface = activeSurface([flowRow()], { canonical_route: "/api/v1/execution/flow/legacy" });
+  const model = buildExecutionEvidenceChartModel(surface, null);
+  assert.equal(model.executionLifecycleMarkers.status, "unavailable");
+  assert.deepEqual(model.executionLifecycleMarkers.markers, []);
+  assert.match(model.executionLifecycleMarkers.reason ?? "", /unexpected canonical_route/);
+});
+
 test("R2-EV-13: a backtest-artifact model and an execution-flow model both satisfy EvidenceChartModel and keep distinct, honest provenance", () => {
   const backtestModel = buildEvidenceChartModel(minimalBacktestBundle());
   const executionModel = buildExecutionEvidenceChartModel(activeSurface([flowRow()]), null);

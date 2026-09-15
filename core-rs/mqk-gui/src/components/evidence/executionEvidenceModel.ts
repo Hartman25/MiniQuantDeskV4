@@ -25,6 +25,14 @@
 // currently-linked WorkspaceIdentity's runId. If the surface's own run_id
 // disagrees, every lane fails closed rather than rendering one run's
 // evidence while the workspace is linked to a different run.
+//
+// ROW-LEVEL RUN PROVENANCE (R3 GUI-EVIDENCE-ROW-RUN-PROVENANCE-01): the
+// endpoint contract says active rows belong to the queried run, but the
+// contract is not proof — a malformed/inconsistent surface must not
+// silently cross-contaminate runs. For truth_state "active", surface.run_id
+// must be a non-empty string and every row.run_id must exactly equal it, or
+// the entire surface fails closed (never a partial render of only the
+// matching rows).
 
 import type { ExecutionFlowRow, ExecutionFlowSurface } from "../../features/system/types/execution.ts";
 import {
@@ -135,6 +143,15 @@ function buildLifecycleLane(rows: ExecutionFlowRow[], status: LaneStatus, runId:
   return { status, markers, malformedRowCount: 0, reason: null };
 }
 
+function failClosedEvidence(reason: string): EvidenceChartModel {
+  return {
+    identity: EMPTY_IDENTITY,
+    timeRange: UNAVAILABLE_TIME_RANGE,
+    ...notWiredLanes(),
+    executionLifecycleMarkers: { status: "unavailable", markers: [], malformedRowCount: 0, reason },
+  };
+}
+
 /**
  * Builds an EvidenceChartModel from a real execution-flow surface fetched via
  * fetchExecutionFlow(). `workspaceRunId` is the caller's currently-linked
@@ -144,18 +161,37 @@ export function buildExecutionEvidenceChartModel(
   surface: ExecutionFlowSurface,
   workspaceRunId: string | null,
 ): EvidenceChartModel {
-  // Fail closed rather than silently render a different run's evidence
-  // inside the currently-linked workspace.
-  if (workspaceRunId != null && surface.run_id != null && surface.run_id !== workspaceRunId) {
-    const mismatchReason =
-      `Execution flow reported run_id '${surface.run_id}', which does not match the linked workspace run ` +
-      `'${workspaceRunId}' — evidence withheld rather than shown against the wrong run.`;
-    return {
-      identity: EMPTY_IDENTITY,
-      timeRange: UNAVAILABLE_TIME_RANGE,
-      ...notWiredLanes(),
-      executionLifecycleMarkers: { status: "unavailable", markers: [], malformedRowCount: 0, reason: mismatchReason },
-    };
+  if (surface.canonical_route !== "/api/v1/execution/flow") {
+    return failClosedEvidence(
+      `Execution flow surface reported an unexpected canonical_route '${surface.canonical_route}' — evidence withheld.`,
+    );
+  }
+
+  if (surface.truth_state === "active") {
+    if (!surface.run_id) {
+      return failClosedEvidence(
+        "Execution flow reported truth_state 'active' with no run_id — evidence withheld rather than shown " +
+          "without a verified run identity.",
+      );
+    }
+    // Fail closed rather than silently render a different run's evidence
+    // inside the currently-linked workspace.
+    if (workspaceRunId != null && surface.run_id !== workspaceRunId) {
+      return failClosedEvidence(
+        `Execution flow reported run_id '${surface.run_id}', which does not match the linked workspace run ` +
+          `'${workspaceRunId}' — evidence withheld rather than shown against the wrong run.`,
+      );
+    }
+    // Every row must agree with the surface's own run_id — a single
+    // disagreeing row invalidates the entire surface, not just that row.
+    const mismatchedRow = surface.rows.find((r) => r.run_id !== surface.run_id);
+    if (mismatchedRow != null) {
+      return failClosedEvidence(
+        `Execution flow row '${mismatchedRow.row_id}' carries run_id '${mismatchedRow.run_id}', which does not ` +
+          `match the surface's own run_id '${surface.run_id}' — evidence withheld for the entire execution ` +
+          `evidence surface rather than partially rendered.`,
+      );
+    }
   }
 
   let status: LaneStatus;
