@@ -1286,13 +1286,30 @@ function Start-OrVerifyRequiredUniverseScheduler {
             }
         }
         if ($ruReport.overall_state -eq 'not_applicable') {
-            # A legitimate non-trading day / empty required-symbol set makes
-            # zero provider calls and settles the scheduler stopped -- that
-            # is a valid no-work result, never a failure.
+            # M1-REQUIRED-UNIVERSE-SMOKE-NOT-APPLICABLE-FAILCLOSED-01: mirrors
+            # Start-MiniQuantDesk.ps1's Test-RequiredUniverseReportAcceptable
+            # closed-set interpretation exactly (PAPER-OPS-AUTOFRESH-
+            # LAUNCHER-INTEGRATION-01-REPAIR-01) -- a legitimate non-trading
+            # day (is_trading_day=false) makes zero provider calls and
+            # settles the scheduler stopped, a valid no-work result, never a
+            # failure. But overall_state=not_applicable on a trading day
+            # means the required universe resolved empty -- a configuration
+            # defect, not a legitimate no-work day -- and must fail closed.
+            # The exact-equality check against `$false` (not a truthiness
+            # check) also fails closed when is_trading_day is missing/null/
+            # any other value, never just "not explicitly true".
+            if ($ruReport.is_trading_day -eq $false) {
+                return [pscustomobject]@{
+                    Established = $true
+                    Reason      = 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE'
+                    Detail      = "is_trading_day=$($ruReport.is_trading_day)"
+                    Report      = $ruReport
+                }
+            }
             return [pscustomobject]@{
-                Established = $true
-                Reason      = 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE'
-                Detail      = "is_trading_day=$($ruReport.is_trading_day)"
+                Established = $false
+                Reason      = 'REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY'
+                Detail      = 'required-universe scheduler reported overall_state=not_applicable on a trading day (is_trading_day=true) -- no authoritative required market-data universe exists for today; refusing to proceed'
                 Report      = $ruReport
             }
         }

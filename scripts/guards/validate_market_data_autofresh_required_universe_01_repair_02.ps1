@@ -456,25 +456,10 @@ $script:MockGetResult = [pscustomobject]@{
 $p8 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
 Assert-Case "P8" $p8 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
 
-# P9 is NOT proven against this launcher: source inspection for this patch
-# found that Start-PaperTradingSmoke.ps1's Start-OrVerifyRequiredUniverseScheduler
-# accepts overall_state=not_applicable UNCONDITIONALLY (never checks
-# is_trading_day), unlike Start-MiniQuantDesk.ps1's
-# Test-RequiredUniverseReportAcceptable (PAPER-OPS-AUTOFRESH-LAUNCHER-
-# INTEGRATION-01-REPAIR-01), which fails closed for
-# not_applicable+is_trading_day=true. That is a pre-existing gap between the
-# two launcher seams, unrelated to the terminal_no_future_work/
-# explicitly_stopped lifecycle invariant this patch adds -- fixing it here
-# would be a second, unrelated invariant in the same commit. Reported as a
-# known limitation in this patch's final report rather than silently
-# repaired or silently asserted as correct. P9 IS proven against
-# Start-MiniQuantDesk.ps1 (test_official_dual_mode_launcher.ps1's P9,
-# re-affirming its existing L13 coverage).
-
-# P10 (re-affirms CASE E): non-trading-day not_applicable -> preserve the
-# existing ACCEPT/no-work behavior, unchanged by this patch. Recomputed
-# fresh (not reusing `$r`, which section [8] above has since reassigned to
-# an unrelated fixture) against the identical CASE E inputs.
+# P10 (re-affirms CASE E / S1 below): non-trading-day not_applicable ->
+# preserve the existing ACCEPT/no-work behavior, unchanged by this patch.
+# Recomputed fresh (not reusing `$r`, which section [8] above has since
+# reassigned to an unrelated fixture) against the identical CASE E inputs.
 Reset-Mocks
 $script:MockPostResult = [pscustomobject]@{
     StatusCode = 200
@@ -486,6 +471,77 @@ Assert-Case "P10 (re-affirms CASE E)" $p10 $true 'REQUIRED_UNIVERSE_NO_WORK_NOT_
 # P11 (re-affirms CASE D / P1): ordinary active scheduler reuse remains
 # accepted exactly as before this patch.
 Assert-Case "P11 (re-affirms P1)" $p1 $true 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE'
+
+# ---------------------------------------------------------------------------
+# [11] M1-REQUIRED-UNIVERSE-SMOKE-NOT-APPLICABLE-FAILCLOSED-01: S1-S8 --
+# Start-PaperTradingSmoke.ps1's Start-OrVerifyRequiredUniverseScheduler now
+# uses the SAME closed-set not_applicable interpretation as
+# Start-MiniQuantDesk.ps1's Test-RequiredUniverseReportAcceptable
+# (PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01-REPAIR-01). Prior to this
+# correction, P9 could not be proven here because the unmodified launcher
+# accepted overall_state=not_applicable unconditionally -- see the prior
+# session's manifest for that discovery. S2/S3 below are the genuinely new
+# assertions this correction adds; S1/S4-S8 re-affirm coverage already
+# proven above (P10/P1/P2/P3/CASE B/P6) under their mission-required S-ids
+# so this guard's own output is directly auditable against the mission's
+# S1-S8 list without cross-referencing P-numbers.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [11] S1-S8: not_applicable closed-set fail-closed contract ---"
+
+# S1 (re-affirms P10/CASE E): overall_state=not_applicable, is_trading_day=false -> ACCEPT.
+Assert-Case "S1" $p10 $true 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE'
+
+# S2 (the mission's exact correction target): overall_state=not_applicable,
+# is_trading_day=true -> REFUSE with a bounded fail-closed reason. This is
+# the case that was previously accepted unconditionally (the confirmed
+# contradiction) and is what the negative-control mutation below re-breaks.
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'not_applicable' -IsTradingDay $true) }
+}
+$s2 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "S2" $s2 $false 'REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY'
+
+# S3: overall_state=not_applicable, is_trading_day missing/null -> REFUSE
+# (exact-equality check against `$false`, never a truthiness check, so an
+# absent/null/non-boolean is_trading_day never slips through as no-work).
+Reset-Mocks
+$noTradingDayFieldReport = [pscustomobject]@{
+    market_date   = '2026-08-12'
+    overall_state = 'not_applicable'
+    requirements  = @()
+    groups        = @()
+}
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = $noTradingDayFieldReport }
+}
+$s3 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "S3" $s3 $false 'REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY'
+
+# S4 (re-affirms P1/CASE D): ordinary ready + running=true -> ACCEPT.
+Assert-Case "S4" $p1 $true 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE'
+
+# S5 (re-affirms P2): ready + running=false + lifecycle_state=terminal_no_future_work -> ACCEPT.
+Assert-Case "S5" $p2 $true 'REQUIRED_UNIVERSE_SCHEDULER_TERMINAL_NO_FUTURE_WORK'
+
+# S6 (re-affirms P3, explicit-stop negative control): ready + running=false
+# + lifecycle_state=explicitly_stopped -> REFUSE.
+Assert-Case "S6" $p3 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+
+# S7 (fresh blocked-on-POST-response fixture, re-affirms CASE B): blocked -> REFUSE.
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'blocked' -Requirements @($blockedRequirement)) }
+}
+$s7 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "S7" $s7 $false 'REQUIRED_UNIVERSE_SCHEDULER_BLOCKED'
+
+# S8 (re-affirms P6): dry-run terminal-state authority remains REFUSE.
+Assert-Case "S8" $p6 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
 
 Write-Host ""
 Write-Host "============================================================"
