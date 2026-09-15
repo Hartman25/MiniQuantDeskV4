@@ -73,6 +73,7 @@ pub(crate) async fn required_universe_status(State(st): State<Arc<AppState>>) ->
         "truth_state": truth_state,
         "limitation": "process_local_only_not_persisted",
         "running": scheduler.running,
+        "lifecycle_state": scheduler.lifecycle_state,
         "dry_run": scheduler.dry_run,
         "cycle_count": scheduler.cycle_count,
         "provider_api_calls_made_total": scheduler.provider_api_calls_made,

@@ -314,6 +314,179 @@ if ($step8dMatch.Success -and $step8dMatch.Value -match [regex]::Escape('(non-fa
     Show-Green "  OK -- STEP 8D no longer treats scheduler-establishment failure as non-fatal"
 }
 
+# ---------------------------------------------------------------------------
+# [10] M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01: P1-P11 -- typed
+# lifecycle_state acceptance/refusal contract for a stopped scheduler, proven
+# against this same real (extracted) Start-PaperTradingSmoke.ps1 function
+# body so both launcher seams (this guard's target and
+# test_official_dual_mode_launcher.ps1's Start-MiniQuantDesk.ps1 P1-P11
+# tests) agree.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [10] P1-P11: lifecycle_state contract for a stopped scheduler ---"
+
+# P1: running=true + dry_run=false + ready -> ACCEPT (unchanged; re-affirms
+# CASE D above).
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 409
+    Body       = [pscustomobject]@{ error = 'required-universe scheduler is already running' }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running = $true
+    dry_run = $false
+    report  = (New-FakeReport -OverallState 'ready')
+}
+$p1 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P1" $p1 $true 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE'
+
+# P2: running=false + lifecycle_state=terminal_no_future_work + dry_run=false
+# + ready -> ACCEPT (the exact repair invariant).
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'ready') }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running         = $false
+    dry_run         = $false
+    lifecycle_state = 'terminal_no_future_work'
+    report          = (New-FakeReport -OverallState 'ready')
+}
+$p2 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P2" $p2 $true 'REQUIRED_UNIVERSE_SCHEDULER_TERMINAL_NO_FUTURE_WORK'
+
+# P3 (explicit-stop negative control, load-bearing): running=false +
+# lifecycle_state=explicitly_stopped + a STALE ready report -> REFUSE.
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'ready') }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running         = $false
+    dry_run         = $false
+    lifecycle_state = 'explicitly_stopped'
+    report          = (New-FakeReport -OverallState 'ready')
+}
+$p3 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P3 (explicit-stop negative control)" $p3 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+
+# P4: running=false + lifecycle_state=not_started + report=null -> REFUSE.
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'ready') }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running         = $false
+    dry_run         = $false
+    lifecycle_state = 'not_started'
+    report          = $null
+}
+$p4 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P4" $p4 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+
+# P5: running=false + lifecycle_state=terminal_no_future_work + a BLOCKED
+# report -> REFUSE (terminal-safe acceptance requires overall_state=ready).
+# The /start POST response itself reports ready (so the earlier
+# overall_state=blocked-on-POST-response check, CASE B, does not short-
+# circuit this) but the /status re-check finds the requirement has since
+# drifted to blocked -- this exercises the new running=false branch inside
+# Confirm-RequiredUniverseSchedulerOwnership itself.
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'ready') }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running         = $false
+    dry_run         = $false
+    lifecycle_state = 'terminal_no_future_work'
+    report          = (New-FakeReport -OverallState 'blocked' -Requirements @($blockedRequirement))
+}
+$p5 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P5" $p5 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+
+# P6: running=false + lifecycle_state=terminal_no_future_work + dry_run=true
+# -> REFUSE (dry-run terminal state is never authority).
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'ready') }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running         = $false
+    dry_run         = $true
+    lifecycle_state = 'terminal_no_future_work'
+    report          = (New-FakeReport -OverallState 'ready')
+}
+$p6 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P6" $p6 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+
+# P7: running=false + missing lifecycle_state + ready -> REFUSE (never
+# PowerShell reconstructs terminal authority from a report alone).
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'ready') }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running = $false
+    dry_run = $false
+    report  = (New-FakeReport -OverallState 'ready')
+}
+$p7 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P7" $p7 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+
+# P8: running=false + unrecognized lifecycle_state + ready -> REFUSE
+# (closed-set: only terminal_no_future_work may authorize a stopped
+# scheduler).
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'ready') }
+}
+$script:MockGetResult = [pscustomobject]@{
+    running         = $false
+    dry_run         = $false
+    lifecycle_state = 'some_future_unrecognized_state'
+    report          = (New-FakeReport -OverallState 'ready')
+}
+$p8 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P8" $p8 $false 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+
+# P9 is NOT proven against this launcher: source inspection for this patch
+# found that Start-PaperTradingSmoke.ps1's Start-OrVerifyRequiredUniverseScheduler
+# accepts overall_state=not_applicable UNCONDITIONALLY (never checks
+# is_trading_day), unlike Start-MiniQuantDesk.ps1's
+# Test-RequiredUniverseReportAcceptable (PAPER-OPS-AUTOFRESH-LAUNCHER-
+# INTEGRATION-01-REPAIR-01), which fails closed for
+# not_applicable+is_trading_day=true. That is a pre-existing gap between the
+# two launcher seams, unrelated to the terminal_no_future_work/
+# explicitly_stopped lifecycle invariant this patch adds -- fixing it here
+# would be a second, unrelated invariant in the same commit. Reported as a
+# known limitation in this patch's final report rather than silently
+# repaired or silently asserted as correct. P9 IS proven against
+# Start-MiniQuantDesk.ps1 (test_official_dual_mode_launcher.ps1's P9,
+# re-affirming its existing L13 coverage).
+
+# P10 (re-affirms CASE E): non-trading-day not_applicable -> preserve the
+# existing ACCEPT/no-work behavior, unchanged by this patch. Recomputed
+# fresh (not reusing `$r`, which section [8] above has since reassigned to
+# an unrelated fixture) against the identical CASE E inputs.
+Reset-Mocks
+$script:MockPostResult = [pscustomobject]@{
+    StatusCode = 200
+    Body       = [pscustomobject]@{ report = (New-FakeReport -OverallState 'not_applicable' -IsTradingDay $false) }
+}
+$p10 = Start-OrVerifyRequiredUniverseScheduler -DryRun $false
+Assert-Case "P10 (re-affirms CASE E)" $p10 $true 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE'
+
+# P11 (re-affirms CASE D / P1): ordinary active scheduler reuse remains
+# accepted exactly as before this patch.
+Assert-Case "P11 (re-affirms P1)" $p1 $true 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE'
+
 Write-Host ""
 Write-Host "============================================================"
 Write-Host " Summary"

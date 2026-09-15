@@ -14,15 +14,19 @@ use std::sync::{
     Arc, Mutex,
 };
 
+use axum::body::to_bytes;
+use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
+use mqk_daemon::routes::build_router;
 use mqk_daemon::state::market_calendar::{
     MarketCalendarProvider, MarketSessionState, MarketSessionTruth,
 };
 use mqk_daemon::state::required_market_data_autofresh::{
     run_required_universe_cycle, start_required_universe_scheduler,
-    stop_required_universe_scheduler,
+    stop_required_universe_scheduler, RequiredUniverseSchedulerLifecycleState,
 };
 use tempfile::NamedTempFile;
+use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1841,6 +1845,14 @@ async fn concurrent_scheduler_start_admits_exactly_one_starter() {
             .as_ref()
             .map(|r| !r.groups.is_empty())
             .unwrap_or(false);
+        // R2: a normal start whose immediate cycle finds future work (a
+        // non-empty group, so `next_poll_utc` is `Some`) must record
+        // `lifecycle_state=running`, not merely `running=true`.
+        assert_eq!(
+            scheduler.lifecycle_state,
+            RequiredUniverseSchedulerLifecycleState::Running,
+            "a scheduler with real ongoing work must be lifecycle_state=running"
+        );
         drop(scheduler);
         mqk_daemon::state::required_market_data_autofresh::stop_required_universe_scheduler(
             &st, now,
@@ -1892,9 +1904,133 @@ async fn no_work_scheduler_settles_stopped_after_start() {
         !scheduler.running,
         "a no-work immediate cycle must settle the scheduler as stopped"
     );
+    // R3 (M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01): the immediate
+    // cycle's own truthful self-settle (`next_poll_utc == None`) must be
+    // typed `terminal_no_future_work`, never left ambiguous with an
+    // operator-initiated stop. This exercises the exact same settle branch
+    // (`report.next_poll_utc.is_none()` inside
+    // `start_required_universe_scheduler`) the mission's real-world repro
+    // (a genuinely `ready` requirement past session-close+grace) hits --
+    // `overall_state` differs (`not_applicable` here vs `ready` there) but
+    // the settle code path and its typed-lifecycle assignment are identical
+    // and unconditional on `overall_state`.
+    assert_eq!(
+        scheduler.lifecycle_state,
+        RequiredUniverseSchedulerLifecycleState::TerminalNoFutureWork,
+        "a no-work immediate cycle must settle lifecycle_state=terminal_no_future_work, not an \
+         untyped/ambiguous stop"
+    );
     assert!(scheduler.next_cycle_utc.is_none());
     assert!(scheduler.task.is_none());
     assert_eq!(scheduler.cycle_count, 1);
+}
+
+/// M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01 R5 (explicit-stop
+/// negative control): an operator-initiated stop while the scheduler is
+/// actively running must be typed `explicitly_stopped`, never
+/// `terminal_no_future_work` -- this is the exact distinction the Paper
+/// startup launcher relies on to refuse a stale ready report after an
+/// explicit stop (P3 in the launcher contract).
+#[tokio::test]
+async fn explicit_stop_sets_lifecycle_state_explicitly_stopped() {
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRSTOP");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+
+    let instruments = instrument_registry_file(&[("ZZAUTOFRSTOP", "alpaca", "5m")]);
+    let providers = provider_registry_file(&["alpaca"]);
+
+    let mut st = mqk_daemon::state::AppState::new();
+    st.instrument_registry_path = instruments.path().to_str().unwrap().to_string();
+    st.provider_registry_path = providers.path().to_str().unwrap().to_string();
+    st.db = None;
+    let st = Arc::new(st);
+    let now = now_fixture();
+
+    let start_report = start_required_universe_scheduler(&st, true, now)
+        .await
+        .expect("start must succeed");
+
+    {
+        let scheduler = st.required_universe_scheduler.lock().await;
+        assert!(
+            !start_report.groups.is_empty(),
+            "test setup must produce at least one pollable group so the scheduler stays running \
+             (never settling terminal on its own) until the explicit stop below"
+        );
+        assert!(
+            scheduler.running,
+            "scheduler must be running before the explicit stop"
+        );
+        assert_eq!(
+            scheduler.lifecycle_state,
+            RequiredUniverseSchedulerLifecycleState::Running
+        );
+    }
+
+    let stopped = stop_required_universe_scheduler(&st, now).await;
+    assert!(
+        stopped,
+        "stop must observe the scheduler as running and stop it"
+    );
+
+    let scheduler = st.required_universe_scheduler.lock().await;
+    assert!(!scheduler.running);
+    assert_eq!(
+        scheduler.lifecycle_state,
+        RequiredUniverseSchedulerLifecycleState::ExplicitlyStopped,
+        "an operator-initiated stop must be typed explicitly_stopped, never \
+         terminal_no_future_work"
+    );
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+}
+
+/// R8: `GET /api/v1/market-data/required-universe/status` must expose
+/// `lifecycle_state` accurately and read-only -- the route handler only
+/// reads the locked scheduler state, so the value observed before and after
+/// the GET must be byte-identical (no scheduler mutation from a read).
+#[tokio::test]
+async fn status_route_exposes_lifecycle_state_and_is_read_only() {
+    let st = Arc::new(mqk_daemon::state::AppState::new());
+
+    // Force a known lifecycle_state directly (process-local truth), mirroring
+    // how the other route-status test files in this crate
+    // (`scenario_completed_bar_task_status_01.rs`) prove route reflection
+    // without needing a full scheduler start/DB round trip.
+    {
+        let mut scheduler = st.required_universe_scheduler.lock().await;
+        scheduler.running = false;
+        scheduler.lifecycle_state = RequiredUniverseSchedulerLifecycleState::TerminalNoFutureWork;
+        scheduler.dry_run = false;
+        scheduler.cycle_count = 3;
+    }
+    let before_cycle_count = st.required_universe_scheduler.lock().await.cycle_count;
+
+    let router = build_router(st.clone());
+    let req = Request::builder()
+        .uri("/api/v1/market-data/required-universe/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(body["running"], false);
+    assert_eq!(body["lifecycle_state"], "terminal_no_future_work");
+
+    let scheduler = st.required_universe_scheduler.lock().await;
+    assert_eq!(
+        scheduler.cycle_count, before_cycle_count,
+        "a read-only status GET must never mutate scheduler state"
+    );
+    assert_eq!(
+        scheduler.lifecycle_state,
+        RequiredUniverseSchedulerLifecycleState::TerminalNoFutureWork,
+        "a read-only status GET must never mutate lifecycle_state"
+    );
 }
 
 /// MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-02 §15: the real
@@ -2062,6 +2198,17 @@ async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
     assert!(
         scheduler.running,
         "B's scheduler must still be running -- A's superseded stop-settle path must not touch it"
+    );
+    // R6/R7: B's legitimate new generation must be lifecycle_state=running,
+    // and A's late-completing (superseded) cycle -- which resumes and
+    // returns `Ok` *after* B already owns the slot -- must never downgrade
+    // or overwrite that typed state, exactly as it must never overwrite
+    // `last_report`/`cycle_count` (proven above).
+    assert_eq!(
+        scheduler.lifecycle_state,
+        RequiredUniverseSchedulerLifecycleState::Running,
+        "B's generation must be lifecycle_state=running; A's superseded generation must never \
+         overwrite it"
     );
     assert!(
         scheduler.task.is_some(),

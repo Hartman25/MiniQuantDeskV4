@@ -652,6 +652,107 @@ Assert-True 'L16: report present with overall_state=null/missing -> Established=
 Assert-True 'L6 (re-affirmed post-REPAIR-01): overall_state=not_applicable / is_trading_day=false / empty universe still -> Established=true, REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE' `
     ($l6.Established -and $l6.Reason -eq 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE')
 
+# ---------------------------------------------------------------------------
+# M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01: P1-P11 -- typed
+# lifecycle_state acceptance/refusal contract for a stopped scheduler. P1/
+# P9/P10/P11 re-affirm existing L5/L13/L6 behavior is byte-for-byte unchanged
+# by this patch; P2-P8 are new terminal-lifecycle proofs.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01: P1-P11 lifecycle_state contract ==='
+
+# --- P1 (re-affirms L5): running=true + dry_run=false + ready -> ACCEPT ----
+Assert-True 'P1 (re-affirms L5): running=true + dry_run=false + ready -> Established=true, REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE' `
+    ($l5.Established -and $l5.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE')
+
+# --- P2: running=false + lifecycle_state=terminal_no_future_work + dry_run=false
+# + ready -> ACCEPT (the exact repair invariant) -----------------------------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $false; dry_run = $false; lifecycle_state = 'terminal_no_future_work'; report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$p2 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'P2: running=false + lifecycle_state=terminal_no_future_work + dry_run=false + ready -> Established=true, REQUIRED_UNIVERSE_SCHEDULER_TERMINAL_NO_FUTURE_WORK' `
+    ($p2.Established -and $p2.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_TERMINAL_NO_FUTURE_WORK')
+
+# --- P3 (explicit-stop negative control, load-bearing): running=false +
+# lifecycle_state=explicitly_stopped + a STALE ready report -> REFUSE. A
+# prior ready report must never authorize startup after an operator
+# explicitly stopped the scheduler. ------------------------------------------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $false; dry_run = $false; lifecycle_state = 'explicitly_stopped'; report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$p3 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'P3 (explicit-stop negative control): running=false + lifecycle_state=explicitly_stopped + stale ready report -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING' `
+    (-not $p3.Established -and $p3.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING')
+
+# --- P4: running=false + lifecycle_state=not_started + report=null -> REFUSE
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $false; dry_run = $false; lifecycle_state = 'not_started'; report = $null } }
+$p4 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'P4: running=false + lifecycle_state=not_started + report=null -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING' `
+    (-not $p4.Established -and $p4.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING')
+
+# --- P5: running=false + lifecycle_state=terminal_no_future_work + a BLOCKED
+# report -> REFUSE (terminal-safe acceptance requires overall_state=ready,
+# never blocked). The /start POST response itself reports ready (so the
+# early Test-RequiredUniverseReportAcceptable check on that response passes
+# and the call proceeds to re-verify via /status, exactly like L5) but the
+# /status re-check finds the requirement has since drifted to blocked --
+# this exercises the new running=false branch inside
+# Confirm-RequiredUniverseSchedulerOwnership itself, not the earlier
+# blocked-on-POST-response check L3 already covers. ---------------------------
+Reset-RequiredUniverseMocks
+$blockedReqP5 = [pscustomobject]@{ symbol = 'AAPL'; timeframe = '5m'; provider_id = 'alpaca'; freshness_state = 'market_data_missing'; blockers = @('missing bar') }
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $false; dry_run = $false; lifecycle_state = 'terminal_no_future_work'; report = (New-FakeRequiredUniverseReport -OverallState 'blocked' -Requirements @($blockedReqP5)) } }
+$p5 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'P5: running=false + lifecycle_state=terminal_no_future_work + blocked report -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING' `
+    (-not $p5.Established -and $p5.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING')
+
+# --- P6: running=false + lifecycle_state=terminal_no_future_work + dry_run=true
+# -> REFUSE (dry-run makes zero provider calls/DB writes; it is never
+# authority regardless of lifecycle_state) -----------------------------------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $false; dry_run = $true; lifecycle_state = 'terminal_no_future_work'; report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$p6 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'P6: running=false + lifecycle_state=terminal_no_future_work + dry_run=true -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING' `
+    (-not $p6.Established -and $p6.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING')
+
+# --- P7: running=false + missing lifecycle_state + ready -> REFUSE (never
+# PowerShell reconstructs terminal authority from a report alone) -----------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $false; dry_run = $false; report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$p7 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'P7: running=false + missing lifecycle_state + ready report -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING' `
+    (-not $p7.Established -and $p7.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING')
+
+# --- P8: running=false + unrecognized lifecycle_state + ready -> REFUSE
+# (closed-set: only terminal_no_future_work may authorize a stopped
+# scheduler) ------------------------------------------------------------------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $false; dry_run = $false; lifecycle_state = 'some_future_unrecognized_state'; report = (New-FakeRequiredUniverseReport -OverallState 'ready') } }
+$p8 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'P8: running=false + unrecognized lifecycle_state + ready report -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING' `
+    (-not $p8.Established -and $p8.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING')
+
+# --- P9 (re-affirms L13): trading-day overall_state=not_applicable -> REFUSE
+Assert-True 'P9 (re-affirms L13): trading-day overall_state=not_applicable -> Established=false, REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY' `
+    (-not $l13.Established -and $l13.Reason -eq 'REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY')
+
+# --- P10 (re-affirms L6): non-trading-day overall_state=not_applicable ->
+# preserve the existing ACCEPT/no-work behavior, unchanged by this patch ----
+Assert-True 'P10 (re-affirms L6): non-trading-day overall_state=not_applicable -> Established=true, REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE' `
+    ($l6.Established -and $l6.Reason -eq 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE')
+
+# --- P11 (re-affirms L5/P1): ordinary active (running=true) scheduler reuse
+# remains accepted exactly as before this patch -------------------------------
+Assert-True 'P11 (re-affirms L5): ordinary active scheduler reuse remains accepted exactly as before this patch' `
+    ($l5.Established -and $l5.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE')
+
 # --- Real repo: -Mode Paper -CheckOnly (Section 2's r4) created no active
 # required-universe scheduler side effect (defense in depth -- CheckOnly
 # only ever performed a read-only GET against a local daemon that may not

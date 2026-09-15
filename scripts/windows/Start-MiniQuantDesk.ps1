@@ -1086,10 +1086,35 @@ function Confirm-RequiredUniverseSchedulerOwnership {
         }
     }
     if (-not $status.Json.running) {
+        # M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01: a stopped
+        # scheduler may be accepted ONLY when the daemon's own typed
+        # lifecycle truth says the scheduler truthfully self-settled because
+        # no future maintenance work remains for this market session
+        # (lifecycle_state=terminal_no_future_work) -- never inferred from
+        # timestamps, never merely because a prior report says ready, and
+        # never when dry_run=true (zero provider calls/DB writes, so it
+        # cannot be trusted as data-maintenance authority regardless of
+        # lifecycle_state). Every other stopped state -- not_started,
+        # explicitly_stopped, missing/unknown lifecycle_state -- falls
+        # through to the REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING refusal
+        # below unchanged.
+        $lifecycleState = if ($null -ne $status.Json.PSObject.Properties['lifecycle_state']) { $status.Json.lifecycle_state } else { $null }
+        $ruReportForTerminalCheck = $status.Json.report
+        if ($lifecycleState -eq 'terminal_no_future_work' -and
+            -not $status.Json.dry_run -and
+            $null -ne $ruReportForTerminalCheck -and
+            $ruReportForTerminalCheck.overall_state -eq 'ready') {
+            return [pscustomobject]@{
+                Established = $true
+                Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_TERMINAL_NO_FUTURE_WORK'
+                Detail      = 'required-universe scheduler reached lifecycle_state=terminal_no_future_work with an accepted ready report -- the daemon has authoritatively determined no future maintenance work remains for this market session'
+                Report      = $ruReportForTerminalCheck
+            }
+        }
         return [pscustomobject]@{
             Established = $false
             Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
-            Detail      = 'required-universe/status reported running=false after start/reuse'
+            Detail      = "required-universe/status reported running=false after start/reuse (lifecycle_state=$lifecycleState)"
             Report      = $status.Json.report
         }
     }

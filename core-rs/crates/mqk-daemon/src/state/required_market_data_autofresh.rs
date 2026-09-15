@@ -1529,6 +1529,41 @@ fn next_poll_time_for_groups(
 // Scheduler runtime state (§14, §27, §28)
 // ---------------------------------------------------------------------------
 
+/// M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01: bounded typed lifecycle
+/// truth for the required-universe scheduler, additive to (never a
+/// replacement for) `running`. Exists because `running=false` alone is
+/// ambiguous to a caller deciding whether stopped means "never started",
+/// "operator explicitly stopped it", or "truthfully settled because no
+/// future maintenance work remains for this market session" — only the last
+/// of those may ever authorize a Paper startup launcher to accept a stopped
+/// scheduler as proof of data-maintenance authority (see
+/// `Confirm-RequiredUniverseSchedulerOwnership` in
+/// `scripts/windows/Start-MiniQuantDesk.ps1` /
+/// `scripts/windows/Start-PaperTradingSmoke.ps1`). The daemon is the sole
+/// authority for this distinction — it must never be reconstructed from
+/// timestamps by a caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredUniverseSchedulerLifecycleState {
+    /// Default state for a fresh process: the scheduler has never been
+    /// started in this process lifetime.
+    NotStarted,
+    /// A start claimed ownership and either an immediate cycle found future
+    /// work or the background loop is actively polling toward it.
+    Running,
+    /// The scheduler truthfully self-settled to stopped because no future
+    /// maintenance work remains for the serviced market session/date — the
+    /// immediate cycle or the background loop observed `next_poll_utc ==
+    /// None`. This is the ONLY stopped state a launcher may treat as
+    /// equivalent to an active scheduler's data-maintenance authority.
+    TerminalNoFutureWork,
+    /// An operator (or automated caller) explicitly called
+    /// `stop_required_universe_scheduler` while the scheduler was running.
+    /// A prior ready report must never be treated as still-authoritative
+    /// once this state is observed.
+    ExplicitlyStopped,
+}
+
 /// Process-local required-universe scheduler runtime state. Disabled at
 /// boot, becomes active only after the operator (or the Paper startup
 /// wrapper) calls the start route. Not durable across restart — the
@@ -1537,6 +1572,7 @@ fn next_poll_time_for_groups(
 /// §28 restart proof).
 pub struct RequiredUniverseSchedulerRuntimeState {
     pub running: bool,
+    pub lifecycle_state: RequiredUniverseSchedulerLifecycleState,
     pub dry_run: bool,
     pub last_report: Option<RequiredUniverseStatusReport>,
     pub last_cycle_utc: Option<i64>,
@@ -1566,6 +1602,7 @@ impl Default for RequiredUniverseSchedulerRuntimeState {
     fn default() -> Self {
         Self {
             running: false,
+            lifecycle_state: RequiredUniverseSchedulerLifecycleState::NotStarted,
             dry_run: true,
             last_report: None,
             last_cycle_utc: None,
@@ -1683,6 +1720,7 @@ pub async fn start_required_universe_scheduler(
         // `.await`s while holding it.
         *scheduler = RequiredUniverseSchedulerRuntimeState {
             running: true,
+            lifecycle_state: RequiredUniverseSchedulerLifecycleState::Running,
             dry_run,
             started_at_ts: Some(now_utc.timestamp()),
             generation: new_generation,
@@ -1710,6 +1748,8 @@ pub async fn start_required_universe_scheduler(
             false
         } else if report.next_poll_utc.is_none() {
             scheduler.running = false;
+            scheduler.lifecycle_state =
+                RequiredUniverseSchedulerLifecycleState::TerminalNoFutureWork;
             scheduler.stopped_at_ts = Some(now_utc.timestamp());
             scheduler.stop_tx = None;
             scheduler.next_cycle_utc = None;
@@ -1749,6 +1789,7 @@ pub async fn stop_required_universe_scheduler(st: &Arc<AppState>, now_utc: DateT
         return false;
     }
     scheduler.running = false;
+    scheduler.lifecycle_state = RequiredUniverseSchedulerLifecycleState::ExplicitlyStopped;
     scheduler.stopped_at_ts = Some(now_utc.timestamp());
     if let Some(tx) = scheduler.stop_tx.take() {
         let _ = tx.send(true);
@@ -1819,6 +1860,8 @@ async fn required_universe_scheduler_loop(
             let mut scheduler = st.required_universe_scheduler.lock().await;
             if scheduler.running && scheduler.generation == generation {
                 scheduler.running = false;
+                scheduler.lifecycle_state =
+                    RequiredUniverseSchedulerLifecycleState::TerminalNoFutureWork;
                 scheduler.stopped_at_ts = Some(now_utc.timestamp());
                 scheduler.stop_tx = None;
             }
@@ -1909,5 +1952,89 @@ mod refreshable_reason_typed_authority_tests {
                 "{garbage:?} must not be treated as refreshable"
             );
         }
+    }
+}
+
+/// M1-REQUIRED-UNIVERSE-TERMINAL-AUTHORITY-REPAIR-01: typed
+/// [`RequiredUniverseSchedulerLifecycleState`] transition proofs that need
+/// direct (private-item) access to this module -- `required_universe_
+/// scheduler_loop` is not `pub`, so R4 below cannot be exercised from the
+/// external `tests/scenario_market_data_autofresh_required_universe_01.rs`
+/// suite (which covers R2/R3/R5/R6/R7/R8 against the public start/stop/
+/// status surface instead).
+#[cfg(test)]
+mod lifecycle_state_transition_tests {
+    use super::*;
+
+    /// R1: a fresh process's scheduler state defaults to `not_started`,
+    /// never a bare `running=false` with no typed distinction from an
+    /// explicit stop or a terminal settle.
+    #[test]
+    fn default_lifecycle_state_is_not_started() {
+        let scheduler = RequiredUniverseSchedulerRuntimeState::default();
+        assert!(!scheduler.running);
+        assert_eq!(
+            scheduler.lifecycle_state,
+            RequiredUniverseSchedulerLifecycleState::NotStarted
+        );
+    }
+
+    /// R4: the background loop's OWN natural settle (distinct code site from
+    /// the immediate-cycle settle in `start_required_universe_scheduler`,
+    /// covered by R3 in the external scenario suite) must also record
+    /// `terminal_no_future_work` when its own next real cycle finds no
+    /// future work -- never left as a stale `running`/prior lifecycle value.
+    ///
+    /// Drives the real, unmodified `required_universe_scheduler_loop`
+    /// directly rather than the real wall-clock-timed background spawn path
+    /// (`start_required_universe_scheduler`'s spawned task): that path's
+    /// `next_cycle_utc` is a real future session-anchored instant computed
+    /// against `Utc::now()` inside the loop itself, which cannot be driven
+    /// past a session-close horizon deterministically in a fast test without
+    /// either a multi-hour real wait or an injectable clock this patch does
+    /// not add (out of scope -- see mission scope). Setting `next_cycle_utc`
+    /// to an already-overdue instant makes the loop's first wait resolve
+    /// immediately (`wait_secs = 0`), so its very next real cycle runs with
+    /// zero required symbols configured (mirrors R3's own no-work fixture)
+    /// -- `next_poll_utc` is `None` unconditionally on `overall_state` in
+    /// production (`next_poll_time_for_groups` never consults readiness),
+    /// so this exercises the loop's real settle branch deterministically.
+    #[tokio::test]
+    async fn background_loop_settles_terminal_no_future_work_on_its_own_natural_cycle() {
+        std::env::remove_var("MQK_STRATEGY_SYMBOL");
+        std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+        std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+
+        let st = Arc::new(AppState::new());
+        {
+            let mut scheduler = st.required_universe_scheduler.lock().await;
+            scheduler.running = true;
+            scheduler.lifecycle_state = RequiredUniverseSchedulerLifecycleState::Running;
+            scheduler.generation = 1;
+            // Already overdue: the loop's own wait resolves with no delay.
+            scheduler.next_cycle_utc = Some(0);
+        }
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            required_universe_scheduler_loop(st.clone(), stop_rx, false, 1),
+        )
+        .await
+        .expect("the loop's natural no-work settle must complete promptly, not hang");
+
+        let scheduler = st.required_universe_scheduler.lock().await;
+        assert!(
+            !scheduler.running,
+            "the loop must settle the scheduler stopped when its own natural cycle finds no \
+             future work"
+        );
+        assert_eq!(
+            scheduler.lifecycle_state,
+            RequiredUniverseSchedulerLifecycleState::TerminalNoFutureWork,
+            "the background loop's own natural no-future-work settle must be typed \
+             terminal_no_future_work, not left at its prior lifecycle_state"
+        );
+        assert_eq!(scheduler.cycle_count, 1);
     }
 }
