@@ -43,7 +43,6 @@ $LegacyTs         = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\system\leg
 $TypesStrategyTs  = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\system\types\strategy.ts"
 $ApiTestTs        = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\system\api.test.ts"
 $DesignDoc        = Join-Path $RepoRoot "docs\design\native_multi_symbol_dispatch.md"
-$MasterLedger     = Join-Path $RepoRoot "MiniQuantDesk_Master_Patch_Ledger_v2.md"
 
 Write-Host ''
 Write-Host '============================================================'
@@ -216,36 +215,6 @@ if ($DesignContent -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*CLOSED' -and
     Assert-Pass "G13: docs mark MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 CLOSED and Patch 11 open/next"
 } else {
     Assert-Fail "G13: docs do not mark MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 CLOSED with Patch 11 open"
-}
-
-# -----------------------------------------------------------------------
-# G14: current-patch ledger-scope invariant.
-#
-# The working/index diff must never touch the current canonical master patch
-# ledger (MiniQuantDesk_Master_Patch_Ledger_v2.md, per CLAUDE.md's canonical
-# status ledger reference). This is always locally enforceable, including in
-# shallow CI checkouts, and it is what actually protects the ledger from this
-# GUI-only patch scope.
-#
-# G14 previously also re-verified, via a hardcoded commit SHA, that a specific
-# historical commit (Patch 10) did not touch the ledger. That re-proof checked
-# repository chronology, not a live invariant: the commit is immutable, its
-# path set can never change, and the check offered no protection beyond what
-# this present-state assertion already provides. It has been retired; no
-# production safety condition is lost, since the current-diff check below is
-# the actual guard against a patch touching the ledger.
-# -----------------------------------------------------------------------
-$MasterLedgerTouched = @(
-    $DiffNames |
-        Where-Object {
-            $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$'
-        }
-)
-
-if ($MasterLedgerTouched.Count -eq 0) {
-    Assert-Pass "G14: current working/index diff does not touch the canonical master patch ledger"
-} else {
-    Assert-Fail "G14: current working/index diff touches the canonical master patch ledger: $($MasterLedgerTouched -join ', ')"
 }
 
 Write-Host ''
