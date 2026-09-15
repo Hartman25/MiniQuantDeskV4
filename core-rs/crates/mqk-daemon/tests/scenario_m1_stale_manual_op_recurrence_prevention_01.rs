@@ -271,6 +271,33 @@ async fn seed_stopped_run(
     Ok(())
 }
 
+/// Bound run halted but never operator-cleared: `runs.status` stays HALTED,
+/// distinct from [`seed_stopped_run`]'s HALTED -> STOPPED clear.
+async fn seed_halted_run(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    mqk_db::insert_run(
+        pool,
+        &NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: now,
+            git_hash: "test".to_string(),
+            config_hash: "test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-node".to_string(),
+        },
+    )
+    .await?;
+    mqk_db::arm_run(pool, run_id).await?;
+    mqk_db::begin_run(pool, run_id).await?;
+    mqk_db::halt_run(pool, run_id, now).await?;
+    Ok(())
+}
+
 async fn seed_clean_reconcile(pool: &sqlx::PgPool, now: DateTime<Utc>) -> anyhow::Result<()> {
     mqk_db::persist_reconcile_status_state(
         pool,
@@ -470,6 +497,62 @@ async fn negative_control_active_run_is_not_auto_closed() -> anyhow::Result<()> 
     let row = fetch_row(&pool, operation_id).await;
     assert_eq!(row.state, STATE_MANUAL_INTERVENTION_REQUIRED);
     assert!(row.stopped_at_utc.is_none());
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Negative control: a bound HALTED run must NOT be auto-closed even with
+// zero outbox/inbox and a clean reconcile -- HALTED is not STOPPED, and
+// `reconcile_durable_run_without_local_owner`'s ARMED/RUNNING-only
+// `run_is_active` check would otherwise let it fall through as terminal.
+// M1-FAST-UNBLOCK-AND-PERMANENT-CLOSE-2026-09-15 Patch B.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn negative_control_halted_run_is_not_auto_closed() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter_id = format!("m1-rec-neg3-{}", unique_suffix());
+    let market_date = fixed_past_day();
+    let plan = fixed_plan(market_date);
+    let run_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let now = plan.effective_operation_open_utc + chrono::Duration::minutes(30);
+
+    let manual = seed_orphaned_manual_intervention_operation(
+        &pool,
+        &plan,
+        operation_id,
+        &adapter_id,
+        run_id,
+        now,
+    )
+    .await?;
+    seed_halted_run(&pool, run_id, now + chrono::Duration::hours(1)).await?;
+    seed_clean_reconcile(&pool, now + chrono::Duration::hours(1)).await?;
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    let tick_now = now + chrono::Duration::hours(2);
+
+    let outcome = dispatch_by_state(&st, &pool, manual, &plan, tick_now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired { .. }
+        ),
+        "negative control: a HALTED run must never be auto-closed even with clean evidence; \
+         got {outcome:?}"
+    );
+
+    let row = fetch_row(&pool, operation_id).await;
+    assert_eq!(row.state, STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert!(
+        row.stopped_at_utc.is_none(),
+        "negative control: stopped_at_utc must never be recorded for a HALTED run"
+    );
 
     cleanup_operation(&pool, operation_id).await;
     cleanup_run(&pool, run_id).await;

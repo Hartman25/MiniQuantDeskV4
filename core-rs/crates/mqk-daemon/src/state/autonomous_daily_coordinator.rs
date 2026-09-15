@@ -2168,13 +2168,39 @@ pub async fn dispatch_by_state(
                         },
                     ),
                     None => {
-                        reconcile_durable_run_without_local_owner(
-                            pool,
-                            &operation,
-                            expected_run_id,
-                            now_utc,
-                        )
-                        .await
+                        // M1-FAST-UNBLOCK-AND-PERMANENT-CLOSE-2026-09-15:
+                        // `reconcile_durable_run_without_local_owner` only
+                        // treats ARMED/RUNNING as "still active" -- a HALTED
+                        // run is neither, so without this guard it falls
+                        // straight through the helper's outbox/inbox/
+                        // reconcile checks and, if those happen to be clean,
+                        // gets durably presented as safely stopped even
+                        // though nothing ever proved the run itself reached
+                        // STOPPED. Halt is a distinct, sticky safety state
+                        // that must never be silently reinterpreted as a
+                        // stop. Require the bound run to be independently
+                        // re-proven STOPPED before ever reaching that
+                        // helper; any other status -- including a missing
+                        // row or a read failure -- fails closed to the
+                        // unchanged sticky projection below (no mutation, no
+                        // stopped_at_utc).
+                        match mqk_db::fetch_run(pool, expected_run_id).await {
+                            Ok(run_row) if matches!(run_row.status, mqk_db::RunStatus::Stopped) => {
+                                reconcile_durable_run_without_local_owner(
+                                    pool,
+                                    &operation,
+                                    expected_run_id,
+                                    now_utc,
+                                )
+                                .await
+                            }
+                            _ => Ok(
+                                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                                    reason_code: bounded_static_reason(reason_code),
+                                    newly_applied: false,
+                                },
+                            ),
+                        }
                     }
                 }
             } else {
