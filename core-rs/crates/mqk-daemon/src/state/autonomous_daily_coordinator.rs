@@ -2130,6 +2130,53 @@ pub async fn dispatch_by_state(
 
             if recovered {
                 Ok(AutonomousDailyCoordinatorTickOutcome::PreparingData)
+            } else if let Some(expected_run_id) = operation.run_id {
+                // M1-STALE-MANUAL-OP-RECURRENCE-PREVENTION-01: a
+                // manual_intervention_required row that durably bound a run
+                // has no other automatic healing path once its reason is not
+                // data-repairable (e.g. `durable_active_run_without_local_
+                // owner`, the exact shape the 2026-09-11 production incident
+                // left stuck) -- it previously stayed sticky forever even
+                // after the linked run was later independently proven
+                // terminal (e.g. via the `clear-halted-run` operator action,
+                // which durably stops the `runs` row but never touches
+                // `sys_autonomous_daily_operations`). Mirrors
+                // `STATE_CONTROLLER_DEGRADED`'s own unconditional run-
+                // ownership check below verbatim: a local runtime that still
+                // genuinely owns this exact run_id (or a mismatched one) has
+                // nothing new to reconcile from durable truth alone and
+                // keeps the unchanged sticky projection; only the "no local
+                // owner at all" case reaches `reconcile_durable_run_without_
+                // local_owner`, which independently re-proves run STOPPED +
+                // zero unacked outbox + zero unapplied inbox + clean global
+                // reconcile before ever recording `stopped_at_utc` -- the
+                // exact same fail-closed evidence standard already accepted
+                // here for `controller_degraded`. No new legal transition
+                // edge: `manual_intervention_required -> stopping` is
+                // already legal in `mqk_db::is_legal_operation_transition`.
+                match state.locally_owned_run_id().await {
+                    Some(local_run_id) if local_run_id == expected_run_id => Ok(
+                        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                            reason_code: bounded_static_reason(reason_code),
+                            newly_applied: false,
+                        },
+                    ),
+                    Some(_mismatched_local_run_id) => Ok(
+                        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                            reason_code: bounded_static_reason(reason_code),
+                            newly_applied: false,
+                        },
+                    ),
+                    None => {
+                        reconcile_durable_run_without_local_owner(
+                            pool,
+                            &operation,
+                            expected_run_id,
+                            now_utc,
+                        )
+                        .await
+                    }
+                }
             } else {
                 Ok(
                     AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
