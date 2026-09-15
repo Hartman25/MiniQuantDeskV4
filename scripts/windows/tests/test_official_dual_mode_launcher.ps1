@@ -244,6 +244,94 @@ try {
         -StdoutLogPath (Join-Path $ProbeDir 'b4.out.log') -StderrLogPath (Join-Path $ProbeDir 'b4.err.log') -TimeoutSeconds 30
     Assert-True 'Functional: -NonInteractive (always added by Invoke-BoundedChildScript) converts a would-be Read-Host hang into a fast nonzero exit, never reaching the internal timeout' `
         (-not $b4.TimedOut -and $b4.ExitCode -eq 1)
+
+    # -------------------------------------------------------------------
+    # GUI-BOOTSTRAP-LOG-CAPTURE-01 (D1-D6): reproduce and prove fixed the
+    # observed defect where a correct child ExitCode coexisted with empty
+    # bootstrap_.stdout.log / bootstrap_.stderr.log files. Root cause:
+    # WaitForExit(ms) proves the child process has terminated, not that the
+    # async OutputDataReceived/ErrorDataReceived events have finished
+    # draining already-buffered pipe data into the StringBuilders. Each
+    # probe below writes a high volume of output immediately before exiting
+    # to stress that race window, then asserts the log FILE CONTENTS (not
+    # just ExitCode/TimedOut, which the pre-existing b1-b4 probes already
+    # covered but which cannot detect a silent drain-race data loss).
+    # -------------------------------------------------------------------
+    $stdoutTokenProbe = Join-Path $ProbeDir 'stdout_token.ps1'
+    Set-Content -Path $stdoutTokenProbe -Value @'
+for ($i = 0; $i -lt 200; $i++) { [Console]::Out.WriteLine("STDOUT_FILLER_LINE_$i") }
+[Console]::Out.WriteLine("STDOUT_TOKEN_END_MARKER_D1")
+exit 0
+'@
+
+    $stderrTokenProbe = Join-Path $ProbeDir 'stderr_token.ps1'
+    Set-Content -Path $stderrTokenProbe -Value @'
+for ($i = 0; $i -lt 200; $i++) { [Console]::Error.WriteLine("STDERR_FILLER_LINE_$i") }
+[Console]::Error.WriteLine("STDERR_TOKEN_END_MARKER_D2")
+exit 1
+'@
+
+    $bothTokenProbe = Join-Path $ProbeDir 'both_token.ps1'
+    Set-Content -Path $bothTokenProbe -Value @'
+for ($i = 0; $i -lt 200; $i++) {
+    [Console]::Out.WriteLine("STDOUT_FILLER_LINE_$i")
+    [Console]::Error.WriteLine("STDERR_FILLER_LINE_$i")
+}
+[Console]::Out.WriteLine("STDOUT_TOKEN_END_MARKER_D3")
+[Console]::Error.WriteLine("STDERR_TOKEN_END_MARKER_D3")
+exit 3
+'@
+
+    # D1: known stdout token survives a normal exit-0 termination.
+    $d1 = Invoke-BoundedChildScript -ScriptPath $stdoutTokenProbe -ScriptArgs @() -WorkingDirectory $ProbeDir `
+        -StdoutLogPath (Join-Path $ProbeDir 'd1.out.log') -StderrLogPath (Join-Path $ProbeDir 'd1.err.log') -TimeoutSeconds 30
+    $d1Stdout = Get-Content -Path $d1.StdoutLogPath -Raw -ErrorAction SilentlyContinue
+    Assert-True 'D1: ExitCode=0, TimedOut=false for the stdout-token probe' `
+        (-not $d1.TimedOut -and $d1.ExitCode -eq 0)
+    Assert-True 'D1: stdout log file contains the known token written immediately before exit (proves async drain completed, not just process exit)' `
+        ($null -ne $d1Stdout -and $d1Stdout -match 'STDOUT_TOKEN_END_MARKER_D1')
+
+    # D2: known stderr token survives an exit-1 termination.
+    $d2 = Invoke-BoundedChildScript -ScriptPath $stderrTokenProbe -ScriptArgs @() -WorkingDirectory $ProbeDir `
+        -StdoutLogPath (Join-Path $ProbeDir 'd2.out.log') -StderrLogPath (Join-Path $ProbeDir 'd2.err.log') -TimeoutSeconds 30
+    $d2Stderr = Get-Content -Path $d2.StderrLogPath -Raw -ErrorAction SilentlyContinue
+    Assert-True 'D2: ExitCode=1, TimedOut=false for the stderr-token probe' `
+        (-not $d2.TimedOut -and $d2.ExitCode -eq 1)
+    Assert-True 'D2: stderr log file contains the known token written immediately before exit' `
+        ($null -ne $d2Stderr -and $d2Stderr -match 'STDERR_TOKEN_END_MARKER_D2')
+
+    # D3: both stdout and stderr tokens survive together.
+    $d3 = Invoke-BoundedChildScript -ScriptPath $bothTokenProbe -ScriptArgs @() -WorkingDirectory $ProbeDir `
+        -StdoutLogPath (Join-Path $ProbeDir 'd3.out.log') -StderrLogPath (Join-Path $ProbeDir 'd3.err.log') -TimeoutSeconds 30
+    $d3Stdout = Get-Content -Path $d3.StdoutLogPath -Raw -ErrorAction SilentlyContinue
+    $d3Stderr = Get-Content -Path $d3.StderrLogPath -Raw -ErrorAction SilentlyContinue
+    Assert-True 'D3: ExitCode=3, TimedOut=false for the combined stdout+stderr probe' `
+        (-not $d3.TimedOut -and $d3.ExitCode -eq 3)
+    Assert-True 'D3: both stdout and stderr tokens survive together in their respective logs' `
+        ($null -ne $d3Stdout -and $d3Stdout -match 'STDOUT_TOKEN_END_MARKER_D3' -and
+         $null -ne $d3Stderr -and $d3Stderr -match 'STDERR_TOKEN_END_MARKER_D3')
+
+    # D4: timeout path remains bounded (re-affirms b3 under the D-series naming).
+    Assert-True 'D4: a hung child remains bounded by the internal timeout (re-check of b3): TimedOut=true, deterministic exit code' `
+        ($b3.TimedOut -and $b3.ExitCode -eq 1 -and $b3Elapsed -lt 60)
+
+    # D5: the timeout path kills only the wrapper child by direct process
+    # handle/PID, never anything else -- re-affirms b3's PID-scoped kill
+    # proof and the Section 1 static guard that Kill() targets $process only.
+    Assert-True 'D5: timeout path kills only the wrapper child by PID (re-check of b3), no broader process-tree/name-based kill in source' `
+        ($null -eq (Get-Process -Id $b3.ProcessId -ErrorAction SilentlyContinue) -and
+         ($LauncherText -match [regex]::Escape('$process.Kill()')) -and
+         (-not ($LauncherText -match 'Stop-Process\s+-Name')))
+
+    # D6: no secret values are printed or introduced by this hermetic proof.
+    # The probes above never reference MQK_*, .env.local, or any credential;
+    # this assertion is a cheap structural backstop confirming none leaked.
+    $d1d2d3Logs = @($d1.StdoutLogPath, $d1.StderrLogPath, $d2.StdoutLogPath, $d2.StderrLogPath, $d3.StdoutLogPath, $d3.StderrLogPath)
+    $secretLeak = @($d1d2d3Logs | Where-Object {
+        (Test-Path $_) -and ((Get-Content -Path $_ -Raw -ErrorAction SilentlyContinue) -match 'MQK_|\.env\.local|OPERATOR_TOKEN')
+    })
+    Assert-True 'D6: no secret-shaped values (MQK_*, .env.local, OPERATOR_TOKEN) appear in any D1-D3 captured log' `
+        ($secretLeak.Count -eq 0)
 } finally {
     Remove-Item -Recurse -Force $ProbeDir -ErrorAction SilentlyContinue
 }

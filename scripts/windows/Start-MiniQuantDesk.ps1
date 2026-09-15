@@ -239,10 +239,56 @@ function Invoke-BoundedChildScript {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
 
-    $stdoutBuilder = New-Object System.Text.StringBuilder
-    $stderrBuilder = New-Object System.Text.StringBuilder
-    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stdoutBuilder | Out-Null
-    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stderrBuilder | Out-Null
+    # GUI-BOOTSTRAP-LOG-CAPTURE-01 root cause: Register-ObjectEvent -Action
+    # scriptblocks do not run synchronously with the underlying .NET
+    # OutputDataReceived/ErrorDataReceived event. They are queued into
+    # PowerShell's own event queue and are only INVOKED when this runspace's
+    # engine gets a chance to pump that queue (e.g. during Wait-Event or
+    # Start-Sleep) -- a pure .NET blocking call like Process.WaitForExit()
+    # never pumps it. Empirically, calling WaitForExit() a second time after
+    # WaitForExit(ms) returns true does NOT drain queued-but-unfired output
+    # events; a fast child with a handful of Write-Host lines can terminate
+    # with a correct nonzero ExitCode while $stdoutBuilder/$stderrBuilder
+    # remain completely empty, reproducing the observed zero-byte evidence
+    # files. The actual fix must pump the PowerShell event queue itself.
+    #
+    # Each event handler here appends normal (non-null) data to its own
+    # Builder and marks a synchronized Done=$true when it receives the
+    # single null-Data sentinel event that .NET guarantees fires exactly
+    # once per stream when the pipe has been fully read to end. That
+    # sentinel is the deterministic completion signal driving the bounded
+    # drain loop below -- not an arbitrary sleep.
+    $outState = [hashtable]::Synchronized(@{ Builder = (New-Object System.Text.StringBuilder); Done = $false })
+    $errState = [hashtable]::Synchronized(@{ Builder = (New-Object System.Text.StringBuilder); Done = $false })
+
+    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
+        if ($null -eq $EventArgs.Data) { $Event.MessageData.Done = $true }
+        else { [void]$Event.MessageData.Builder.AppendLine($EventArgs.Data) }
+    } -MessageData $outState | Out-Null
+    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
+        if ($null -eq $EventArgs.Data) { $Event.MessageData.Done = $true }
+        else { [void]$Event.MessageData.Builder.AppendLine($EventArgs.Data) }
+    } -MessageData $errState | Out-Null
+
+    # Bounded drain: pumps the PowerShell event queue in short ticks until
+    # both streams report their completion sentinel, or DrainTimeoutSeconds
+    # elapses -- whichever comes first. This can never hang: the process is
+    # already confirmed exited (or killed) before this is called, and the
+    # deadline guarantees a return even if a sentinel is somehow never
+    # delivered, in which case whatever was captured so far is still used
+    # (fail-soft partial evidence, not a hang).
+    function Wait-DrainProcessOutputEvents {
+        param(
+            [Parameter(Mandatory = $true)]$OutState,
+            [Parameter(Mandatory = $true)]$ErrState,
+            [int]$DrainTimeoutSeconds = 10
+        )
+        $deadline = (Get-Date).AddSeconds($DrainTimeoutSeconds)
+        while ((-not $OutState.Done -or -not $ErrState.Done) -and (Get-Date) -lt $deadline) {
+            Wait-Event -Timeout 0.2 | Out-Null
+            Get-Event -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+        }
+    }
 
     try {
         [void]$process.Start()
@@ -261,17 +307,26 @@ function Invoke-BoundedChildScript {
                 # wrapper in between, so the parameterless Kill() is
                 # sufficient.
                 $process.Kill()
-                $process.WaitForExit(5000) | Out-Null
+                $killConfirmed = $process.WaitForExit(5000)
+                if ($killConfirmed) {
+                    # Drain whatever output/error the child emitted before
+                    # termination, bounded independently of the timeout above.
+                    Wait-DrainProcessOutputEvents -OutState $outState -ErrState $errState
+                }
             } catch {
                 Write-Warn "Could not stop timed-out child PID $($process.Id): $($_.Exception.Message)"
             }
-            Set-Content -Path $StdoutLogPath -Value $stdoutBuilder.ToString() -NoNewline
-            Set-Content -Path $StderrLogPath -Value $stderrBuilder.ToString() -NoNewline
+            Set-Content -Path $StdoutLogPath -Value $outState.Builder.ToString() -NoNewline
+            Set-Content -Path $StderrLogPath -Value $errState.Builder.ToString() -NoNewline
             return [pscustomobject]@{ ExitCode = 1; TimedOut = $true; ProcessId = $process.Id; StdoutLogPath = $StdoutLogPath; StderrLogPath = $StderrLogPath }
         }
 
-        Set-Content -Path $StdoutLogPath -Value $stdoutBuilder.ToString() -NoNewline
-        Set-Content -Path $StderrLogPath -Value $stderrBuilder.ToString() -NoNewline
+        # The child has exited normally. Drain queued-but-unfired output
+        # events before serializing -- see root-cause comment above.
+        Wait-DrainProcessOutputEvents -OutState $outState -ErrState $errState
+
+        Set-Content -Path $StdoutLogPath -Value $outState.Builder.ToString() -NoNewline
+        Set-Content -Path $StderrLogPath -Value $errState.Builder.ToString() -NoNewline
         return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; ProcessId = $process.Id; StdoutLogPath = $StdoutLogPath; StderrLogPath = $StderrLogPath }
     }
     finally {
