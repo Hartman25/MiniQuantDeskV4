@@ -23,7 +23,7 @@
 //!
 //! | Test   | What it proves                                                              |
 //! |--------|-----------------------------------------------------------------------------|
-//! | OC-20  | catalog has exactly 9 entries (updated: 8→9 for flatten-paper-positions)    |
+//! | OC-20  | catalog contains exactly the 10 current daemon action identities           |
 //! | OC-21  | catalog contains request-mode-change with required fields                   |
 //! | OC-22  | catalog contains cancel-mode-transition with required fields                |
 //! | OC-23  | request-mode-change is enabled when not halted (no-DB state)                |
@@ -359,15 +359,46 @@ async fn oc_09_change_system_mode_legacy_still_returns_409() {
 // OPS-CONTROL-02 catalog tests (pure in-process)
 // ---------------------------------------------------------------------------
 
-/// OC-20: catalog has exactly 10 entries after flatten and recovery-action expansion.
+/// OC-20: catalog contains exactly the 10 current daemon action identities.
+///
+/// A bare `len() == 10` check is a magic-cardinality assertion: it would still
+/// pass if a real action were silently swapped for a fantasy one, as long as
+/// the count stayed the same. This asserts the explicit current action-key
+/// set instead, so a renamed or dropped action fails this test even when the
+/// count is unchanged.
 #[tokio::test]
 async fn oc_20_catalog_has_exactly_10_entries() {
     let j = get_catalog(no_db_router()).await;
     let actions = j["actions"].as_array().expect("actions must be an array");
+    let keys: std::collections::BTreeSet<&str> = actions
+        .iter()
+        .filter_map(|a| a["action_key"].as_str())
+        .collect();
+
+    let expected: std::collections::BTreeSet<&str> = [
+        "arm-execution",
+        "disarm-execution",
+        "start-system",
+        "stop-system",
+        "kill-switch",
+        "request-mode-change",
+        "cancel-mode-transition",
+        "clear-halted-run",
+        "recover-orphaned-run",
+        "flatten-paper-positions",
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(
+        keys, expected,
+        "OC-20: catalog action-key identity must equal the current daemon-authoritative \
+         set exactly; got: {keys:?}"
+    );
     assert_eq!(
         actions.len(),
         10,
-        "OC-20: catalog must have exactly 10 entries; got: {:?}",
+        "OC-20: catalog must have exactly 10 entries (no duplicate action_key values); got: {:?}",
         actions
             .iter()
             .filter_map(|a| a["action_key"].as_str())
