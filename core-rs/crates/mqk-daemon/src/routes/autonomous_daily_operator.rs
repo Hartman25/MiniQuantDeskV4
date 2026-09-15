@@ -1026,6 +1026,459 @@ fn finalize_stale_refusal_response(
     resp
 }
 
+// ---------------------------------------------------------------------------
+// POST /api/v1/autonomous/daily-operation/finalize-stale-manual
+// ---------------------------------------------------------------------------
+//
+// M1-STALE-MANUAL-OP-FINALIZATION-01: a narrow, explicit operator action to
+// terminalize a PRIOR-DAY operation stuck in `manual_intervention_required`
+// whose durably bound run has since been independently proven safely
+// terminal (run `STOPPED`, zero unacked outbox, zero unapplied inbox, clean
+// global reconcile). This closes the exact same reachability gap
+// `finalize_stale` closes for `evidence_degraded`:
+// `fetch_relevant_open_autonomous_daily_operation` treats a
+// `manual_intervention_required` row with `run_id is not null and
+// stopped_at_utc is null` as relevant forever (REPAIR 2's durable-stop-
+// evidence contract, `mqk_db::autonomous_daily_operation`'s own doc comment)
+// regardless of the run's actual current status, so it makes every later
+// day's ordinary coordinator tick fail closed with an ambiguity error before
+// any per-operation handler -- including this operation's own
+// `manual_intervention_required` handler, which never calls the run-
+// terminality reconciliation this route uses -- ever runs. A human must
+// explicitly point at the exact stale operation_id to break that deadlock.
+//
+// This route invents no new finalization semantics and no new legal
+// transition edge (`manual_intervention_required -> stopping` is already
+// legal in `mqk_db::is_legal_operation_transition`). It calls
+// `reconcile_durable_run_without_local_owner` -- the exact same run-
+// terminality proof + `stopping` transition + `stopped_at_utc` recording
+// `controller_degraded`'s own ordinary tick already trusts -- on the exact
+// operation record identified by `operation_id`, then (once that call
+// durably records `stopped_at_utc`) the exact same `handle_outcome_
+// finalization` ordinary coordinator ticks call to let the existing strict
+// outcome classifier decide `completed_no_trade` vs `completed_with_activity`
+// from durable evidence. Not a second classifier, not a direct SQL write.
+//
+// Safety (defense in depth -- every check independently sufficient to
+// refuse with zero mutation):
+//   - PAPER only.
+//   - adapter identity must match this daemon's configured adapter.
+//   - `state` must be exactly `manual_intervention_required`.
+//   - `run_id` must be bound -- a manual-intervention row with no run ever
+//     attached (e.g. a pre-start data-readiness blocker) has nothing for
+//     this route to reconcile; the operator retry route is the correct seam
+//     for that class instead.
+//   - the operation's own `market_date` must be strictly before `now_utc`'s
+//     UTC calendar date -- this route can never be pointed at any
+//     same-calendar-day operation, regardless of what other checks might
+//     (incorrectly) pass.
+//   - `now_utc` must be at or past the operation's own
+//     `effective_operation_close_utc` (mirrors `finalize_stale`'s identical
+//     structural guard).
+//   - this daemon process must not currently locally own `run_id` -- this
+//     route is for the cold, no-local-runtime-at-all case only, mirroring
+//     `clear-halted-run`'s own local-quiescence gate.
+//   - the linked run must exist and its durable `status` must be exactly
+//     `STOPPED` -- not `ARMED`/`RUNNING` (still active) and not `HALTED`
+//     (a halt is a safety-relevant event that must stay visible; never
+//     silently released by this route). This is a strictly narrower,
+//     independent pre-check than `reconcile_durable_run_without_local_owner`
+//     performs on its own (which only excludes `ARMED`/`RUNNING`), added
+//     here so this route's own attack surface can never rely on that
+//     function's broader tolerance for a caller reaching it with a `HALTED`
+//     run.
+//   - `reconcile_durable_run_without_local_owner` itself then independently
+//     re-proves zero unacked outbox, zero unapplied inbox, and a clean
+//     global reconcile status before ever recording `stopped_at_utc` --
+//     refusing (unchanged, zero mutation) on any of those exactly as it
+//     already does for `controller_degraded`.
+//   - never touches arm/halt/reconcile/kill-switch state; never starts a
+//     runtime; never submits, cancels, or replaces an order --
+//     `reconcile_durable_run_without_local_owner` and `handle_outcome_
+//     finalization` have no such capability, and this route adds none.
+const CANONICAL_ROUTE_FINALIZE_STALE_MANUAL: &str =
+    "/api/v1/autonomous/daily-operation/finalize-stale-manual";
+
+fn finalize_stale_manual_base_response(
+    operation_id: Uuid,
+    truth_state: &str,
+) -> AutonomousDailyOperationRetryResponse {
+    AutonomousDailyOperationRetryResponse {
+        canonical_route: CANONICAL_ROUTE_FINALIZE_STALE_MANUAL.to_string(),
+        truth_state: truth_state.to_string(),
+        operation_id: operation_id.to_string(),
+        previous_state: None,
+        new_state: None,
+        previous_reason_code: None,
+        runtime_started: false,
+        arm_modified: false,
+        halt_changed: false,
+        reconcile_changed: false,
+        orders_submitted: 0,
+        message: None,
+    }
+}
+
+fn finalize_stale_manual_refusal_response(
+    operation: &AutonomousDailyOperationRecord,
+    truth_state: &str,
+    message: impl Into<String>,
+) -> AutonomousDailyOperationRetryResponse {
+    let mut resp = finalize_stale_manual_base_response(operation.operation_id, truth_state);
+    resp.previous_state = Some(operation.state.clone());
+    resp.previous_reason_code = operation.state_reason_code.clone();
+    resp.message = Some(message.into());
+    resp
+}
+
+pub(crate) async fn autonomous_daily_operation_finalize_stale_manual(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AutonomousDailyOperationRetryRequest>,
+) -> Response {
+    let now_utc = st.daily_data_readiness_now().await;
+
+    let Some(pool) = st.db.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(finalize_stale_manual_base_response(
+                body.operation_id,
+                "backend_unavailable",
+            )),
+        )
+            .into_response();
+    };
+
+    let operation =
+        match mqk_db::fetch_autonomous_daily_operation_by_id(&pool, body.operation_id).await {
+            Ok(Some(op)) => op,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(finalize_stale_manual_base_response(
+                        body.operation_id,
+                        "not_found",
+                    )),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                tracing::error!(
+                    "autonomous_daily_operation_finalize_stale_manual: fetch failed: {err}"
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(finalize_stale_manual_base_response(
+                        body.operation_id,
+                        "backend_unavailable",
+                    )),
+                )
+                    .into_response();
+            }
+        };
+
+    if let Some(expected_market_date) = &body.expected_market_date {
+        if operation.market_date.format("%Y-%m-%d").to_string() != *expected_market_date {
+            return (
+                StatusCode::CONFLICT,
+                Json(finalize_stale_manual_refusal_response(
+                    &operation,
+                    "identity_mismatch",
+                    "expected_market_date does not match the target operation's market_date",
+                )),
+            )
+                .into_response();
+        }
+    }
+
+    if !operation.deployment_mode.eq_ignore_ascii_case("PAPER") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(finalize_stale_manual_refusal_response(
+                &operation,
+                "not_authorized",
+                "stale-manual finalization is refused for a non-paper deployment_mode",
+            )),
+        )
+            .into_response();
+    }
+
+    if !operation.adapter_id.eq_ignore_ascii_case(st.adapter_id()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(finalize_stale_manual_refusal_response(
+                &operation,
+                "wrong_adapter",
+                "operation's adapter_id does not match this daemon's configured adapter",
+            )),
+        )
+            .into_response();
+    }
+
+    if operation.state != STATE_MANUAL_INTERVENTION_REQUIRED {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_manual_refusal_response(
+                &operation,
+                "not_manual_intervention_required",
+                "operation is not currently in manual_intervention_required",
+            )),
+        )
+            .into_response();
+    }
+
+    let Some(expected_run_id) = operation.run_id else {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_manual_refusal_response(
+                &operation,
+                "no_run_id",
+                "operation has no bound run_id; nothing for this route to reconcile -- use \
+                 the retry route for a pre-start blocker instead",
+            )),
+        )
+            .into_response();
+    };
+
+    // Structural guard: this route may only ever act on a strictly prior
+    // calendar-day operation, regardless of what any other check might
+    // (incorrectly) pass.
+    if operation.market_date >= now_utc.date_naive() {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_manual_refusal_response(
+                &operation,
+                "not_prior_day",
+                "operation's market_date is not strictly before the current UTC calendar date; \
+                 refused",
+            )),
+        )
+            .into_response();
+    }
+
+    // Structural guard: mirrors `finalize_stale`'s identical session-window
+    // check -- this route can never be pointed at the current trading day's
+    // live operation, regardless of what other checks might (incorrectly)
+    // pass.
+    if now_utc < operation.effective_operation_close_utc {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_manual_refusal_response(
+                &operation,
+                "session_not_closed",
+                "operation's session window has not yet closed; refused",
+            )),
+        )
+            .into_response();
+    }
+
+    if st.locally_owned_run_id().await == Some(expected_run_id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(finalize_stale_manual_refusal_response(
+                &operation,
+                "local_execution_loop_active",
+                "this daemon process still locally owns the linked run; refused -- wait for it \
+                 to release ownership (normal shutdown) or for a crashed process's ownership to \
+                 be reaped, then retry",
+            )),
+        )
+            .into_response();
+    }
+
+    // Independent, narrower pre-check than `reconcile_durable_run_without_
+    // local_owner` performs on its own: the linked run's durable status must
+    // be exactly STOPPED, never HALTED (a halt stays visible; never silently
+    // released here) and never ARMED/RUNNING.
+    match mqk_db::fetch_run(&pool, expected_run_id).await {
+        Ok(run_row) => {
+            if !matches!(run_row.status, mqk_db::RunStatus::Stopped) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(finalize_stale_manual_refusal_response(
+                        &operation,
+                        "run_not_stopped",
+                        format!(
+                            "linked run {expected_run_id} has status '{}', not 'STOPPED'; \
+                             refused",
+                            run_row.status.as_str()
+                        ),
+                    )),
+                )
+                    .into_response();
+            }
+        }
+        Err(err) => {
+            tracing::error!(
+                "autonomous_daily_operation_finalize_stale_manual: fetch_run failed: {err}"
+            );
+            return (
+                StatusCode::CONFLICT,
+                Json(finalize_stale_manual_refusal_response(
+                    &operation,
+                    "run_missing",
+                    format!("linked run {expected_run_id} could not be read: {err}"),
+                )),
+            )
+                .into_response();
+        }
+    }
+
+    let previous_state = operation.state.clone();
+    let previous_reason_code = operation.state_reason_code.clone();
+    let operation_id = operation.operation_id;
+
+    let reconciled =
+        match crate::state::autonomous_daily_coordinator::reconcile_durable_run_without_local_owner(
+            &pool,
+            &operation,
+            expected_run_id,
+            now_utc,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                tracing::error!(
+                "autonomous_daily_operation_finalize_stale_manual: reconciliation failed: {err}"
+            );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(finalize_stale_manual_base_response(
+                        operation_id,
+                        "backend_unavailable",
+                    )),
+                )
+                    .into_response();
+            }
+        };
+
+    match reconciled {
+        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+            reason_code, ..
+        } => {
+            // Zero mutation beyond, at most, a same-state blocker-signature
+            // refresh (`apply_manual_if_changed`) -- the operation is still
+            // not safely terminal per its own independent economic-evidence
+            // proof (unacked outbox / unapplied inbox / dirty reconcile).
+            (
+                StatusCode::CONFLICT,
+                Json(finalize_stale_manual_refusal_response(
+                    &operation,
+                    reason_code,
+                    format!(
+                        "reconciliation refused to present this operation as safely stopped: \
+                         {reason_code}"
+                    ),
+                )),
+            )
+                .into_response()
+        }
+        AutonomousDailyCoordinatorTickOutcome::RuntimeStopped => {
+            // Durable stop truth established (`stopping` + `stopped_at_utc`
+            // recorded). Re-fetch and hand off to the exact same
+            // finalization codepath ordinary coordinator ticks use, so this
+            // route reaches a genuine terminal outcome instead of leaving
+            // the operation sitting in `stopping` forever, unreachable by
+            // any later tick once it has left the relevant set.
+            let updated =
+                match mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id).await {
+                    Ok(Some(op)) => op,
+                    Ok(None) | Err(_) => {
+                        return (
+                            StatusCode::OK,
+                            Json({
+                                let mut resp =
+                                    finalize_stale_manual_base_response(operation_id, "stopped");
+                                resp.previous_state = Some(previous_state);
+                                resp.new_state = Some(mqk_db::STATE_STOPPING.to_string());
+                                resp.previous_reason_code = previous_reason_code;
+                                resp.message = Some(
+                                "durable stop truth recorded; re-fetch for finalization failed, \
+                                 a later coordinator tick will complete finalization"
+                                    .to_string(),
+                            );
+                                resp
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+
+            match handle_outcome_finalization(&st, &pool, updated, now_utc).await {
+                Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeFinalized {
+                    operation_id,
+                    outcome_reason_code,
+                    ..
+                }) => {
+                    let mut resp = finalize_stale_manual_base_response(operation_id, "finalized");
+                    resp.previous_state = Some(previous_state);
+                    resp.new_state =
+                        Some("completed_no_trade_or_completed_with_activity".to_string());
+                    resp.previous_reason_code = previous_reason_code;
+                    resp.message = Some(format!(
+                        "stale manual-intervention operation terminalized after independent \
+                         terminal-run proof, then finalized via the ordinary coordinator \
+                         finalization path; outcome_reason_code={outcome_reason_code}"
+                    ));
+                    (StatusCode::OK, Json(resp)).into_response()
+                }
+                Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeAlreadyFinalized {
+                    state,
+                    outcome_reason_code,
+                }) => {
+                    let mut resp =
+                        finalize_stale_manual_base_response(operation_id, "already_finalized");
+                    resp.previous_state = Some(previous_state);
+                    resp.new_state = Some(state);
+                    resp.previous_reason_code = previous_reason_code;
+                    resp.message = Some(outcome_reason_code.unwrap_or_default());
+                    (StatusCode::OK, Json(resp)).into_response()
+                }
+                Ok(other) => {
+                    let mut resp =
+                        finalize_stale_manual_base_response(operation_id, "stopped_not_finalized");
+                    resp.previous_state = Some(previous_state);
+                    resp.new_state = Some(mqk_db::STATE_STOPPING.to_string());
+                    resp.previous_reason_code = previous_reason_code;
+                    resp.message = Some(format!(
+                        "durable stop truth recorded; finalization was not reached this call: \
+                         {other:?}"
+                    ));
+                    (StatusCode::OK, Json(resp)).into_response()
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "autonomous_daily_operation_finalize_stale_manual: finalization failed: \
+                         {err}"
+                    );
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(finalize_stale_manual_base_response(
+                            operation_id,
+                            "backend_unavailable",
+                        )),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        other => {
+            tracing::error!(
+                "autonomous_daily_operation_finalize_stale_manual: unexpected reconciliation \
+                 outcome: {other:?}"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(finalize_stale_manual_base_response(
+                    operation_id,
+                    "backend_unavailable",
+                )),
+            )
+                .into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod manual_retry_eligibility_tests {
     use super::*;

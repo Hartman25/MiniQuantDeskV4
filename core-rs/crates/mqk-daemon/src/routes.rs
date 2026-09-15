@@ -268,7 +268,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use autonomous_daily_operations::{autonomous_daily_operation, autonomous_daily_operations};
     use autonomous_daily_operator::{
-        autonomous_daily_operation_finalize_stale, autonomous_daily_operation_retry,
+        autonomous_daily_operation_finalize_stale,
+        autonomous_daily_operation_finalize_stale_manual, autonomous_daily_operation_retry,
     };
     use autonomous_paper_status::autonomous_paper_status;
     use backtests::{
@@ -937,6 +938,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/autonomous/daily-operation/finalize-stale",
             post(autonomous_daily_operation_finalize_stale),
+        )
+        // M1-STALE-MANUAL-OP-FINALIZATION-01: narrow, explicit operator
+        // terminalization of a PRIOR-DAY operation stuck in
+        // `manual_intervention_required` whose durably bound run has since
+        // been independently proven safely terminal (run STOPPED, zero
+        // unacked outbox, zero unapplied inbox, clean global reconcile).
+        // Never starts the runtime, never arms, never clears halt/kill-
+        // switch/reconcile authority, never submits orders, and is
+        // structurally refused unless the target operation's own market_date
+        // is strictly before today's UTC calendar date and its session
+        // window has already closed (never today's live operation).
+        .route(
+            "/api/v1/autonomous/daily-operation/finalize-stale-manual",
+            post(autonomous_daily_operation_finalize_stale_manual),
         )
         .merge(control::router())
         .layer(axum::middleware::from_fn_with_state(

@@ -3784,7 +3784,18 @@ async fn attempt_controller_degraded_recovery(
 /// stopped without first confirming the durable run row is actually
 /// terminal — an active orphaned run (or an unreadable run row) always
 /// fails closed to a manual/controller-degraded truth instead.
-async fn reconcile_durable_run_without_local_owner(
+///
+/// `pub(crate)` (M1-STALE-MANUAL-OP-FINALIZATION-01): also called directly
+/// by `routes::autonomous_daily_operator::autonomous_daily_operation_
+/// finalize_stale_manual` for a prior-day `manual_intervention_required`
+/// operation an ordinary coordinator tick can no longer reach once it has
+/// left `fetch_relevant_open_autonomous_daily_operation`'s relevant set
+/// (exactly the same reachability gap `finalize_stale` already exists to
+/// close for `evidence_degraded`). No behavior of this function changes for
+/// that caller's sake -- same fail-closed evidence proof, same legal
+/// transition graph, same `now_utc`-at-reconciliation stop-timestamp
+/// semantics already accepted here for `controller_degraded`.
+pub(crate) async fn reconcile_durable_run_without_local_owner(
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     expected_run_id: Uuid,
