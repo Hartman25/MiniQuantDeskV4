@@ -21,7 +21,7 @@ const EQUITY_HEIGHT = 90;
 const DRAWDOWN_HEIGHT = 46;
 const EVENTS_HEIGHT = 36;
 
-type LayerKey = "equity" | "drawdown" | "orders" | "fills" | "costs";
+type LayerKey = "equity" | "drawdown" | "orders" | "fills" | "costs" | "lifecycle";
 
 const LAYER_LABELS: Record<LayerKey, string> = {
   equity: "Equity",
@@ -29,6 +29,7 @@ const LAYER_LABELS: Record<LayerKey, string> = {
   orders: "Order intents",
   fills: "Fills",
   costs: "Costs",
+  lifecycle: "Execution lifecycle",
 };
 
 function statusLabel(status: LaneStatus): string {
@@ -97,6 +98,7 @@ const MARKER_COLOR: Record<EvidenceMarker["kind"], string> = {
   order_intent: "var(--accent)",
   fill: "var(--success)",
   cost: "var(--warning)",
+  lifecycle_event: "var(--muted, #94a3b8)",
 };
 
 export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
@@ -106,6 +108,7 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
     orders: true,
     fills: true,
     costs: true,
+    lifecycle: true,
   });
   const [hoverFraction, setHoverFraction] = useState<number | null>(null);
   const [selectedMarker, setSelectedMarker] = useState<EvidenceMarker | null>(null);
@@ -126,8 +129,18 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
     if (layers.orders) out.push(...model.orderIntentMarkers.markers);
     if (layers.fills) out.push(...model.fillMarkers.markers);
     if (layers.costs) out.push(...model.costEvents.markers);
+    if (layers.lifecycle) out.push(...model.executionLifecycleMarkers.markers);
     return out;
-  }, [layers.orders, layers.fills, layers.costs, model.orderIntentMarkers.markers, model.fillMarkers.markers, model.costEvents.markers]);
+  }, [
+    layers.orders,
+    layers.fills,
+    layers.costs,
+    layers.lifecycle,
+    model.orderIntentMarkers.markers,
+    model.fillMarkers.markers,
+    model.costEvents.markers,
+    model.executionLifecycleMarkers.markers,
+  ]);
 
   const knownMarkers = allMarkers.filter((m) => m.timeStatus === "known");
   const unknownMarkers = allMarkers.filter((m) => m.timeStatus === "unknown");
@@ -174,6 +187,11 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
     { label: "Order intents", malformed: model.orderIntentMarkers.malformedRowCount, reason: model.orderIntentMarkers.reason },
     { label: "Fills", malformed: model.fillMarkers.malformedRowCount, reason: model.fillMarkers.reason },
     { label: "Costs", malformed: model.costEvents.malformedRowCount, reason: model.costEvents.reason },
+    {
+      label: "Execution lifecycle",
+      malformed: model.executionLifecycleMarkers.malformedRowCount,
+      reason: model.executionLifecycleMarkers.reason,
+    },
   ].filter((notice) => notice.malformed > 0 || notice.reason != null);
 
   return (
@@ -342,6 +360,7 @@ export function EvidenceChart({ model }: { model: EvidenceChartModel }) {
             ["Fold regions", model.foldRegions.status],
             ["OOS regions", model.oosRegions.status],
             ["Costs", model.costEvents.status],
+            ["Execution lifecycle", model.executionLifecycleMarkers.status],
           ] as [string, LaneStatus][]
         ).map(([label, status]) => (
           <span key={label} className={`legend-pill status-${statusToneClass(status)}`}>

@@ -144,9 +144,11 @@ function unavailableReason<T>(result: FileResult<T>, artifactLabel: string): str
 /**
  * Parses an RFC3339-ish timestamp to epoch ms. Returns null (never a
  * guessed/default value) for empty, missing, or unparsable input — callers
- * must treat null as "unknown timestamp", never as "place at bar 0".
+ * must treat null as "unknown timestamp", never as "place at bar 0". Exported
+ * so other EvidenceChartModel adapters (e.g. executionEvidenceModel.ts) reuse
+ * this exact parsing rule instead of a second, possibly-divergent one.
  */
-function parseTsMs(ts: string | null | undefined): number | null {
+export function parseTsMs(ts: string | null | undefined): number | null {
   if (ts == null) return null;
   const trimmed = ts.trim();
   if (trimmed === "") return null;
@@ -395,7 +397,7 @@ export type MarkerTimeStatus = "known" | "unknown";
 
 export interface EvidenceMarker {
   id: string;
-  kind: "order_intent" | "fill" | "cost";
+  kind: "order_intent" | "fill" | "cost" | "lifecycle_event";
   tsUtc: string;
   tsMs: number | null;
   timeStatus: MarkerTimeStatus;
@@ -420,6 +422,32 @@ export interface EvidenceMarkerLane {
    * (orders/fills themselves).
    */
   invalidFeeCount?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Shared "not wired" lane builders — one consistent shape for "this adapter's
+// source has no evidence for this lane", reused by every adapter
+// (buildEvidenceChartModel here, buildExecutionEvidenceChartModel in
+// executionEvidenceModel.ts, and any future adapter) so a missing lane always
+// renders identically regardless of which real source produced the model.
+// ---------------------------------------------------------------------------
+
+export function notWiredMarkerLane(reason: string): EvidenceMarkerLane {
+  return { status: "not_wired", markers: [], malformedRowCount: 0, reason };
+}
+
+export function notWiredSeriesLane(artifact: string, reason: string): EvidenceSeriesLane {
+  return {
+    status: "not_wired",
+    points: [],
+    malformedRowCount: 0,
+    provenance: { artifact, runId: null, runIdConflict: false, symbol: null, timeframe: null },
+    reason,
+  };
+}
+
+export function notWiredRegionLane(reason: string): RegionLane {
+  return { status: "not_wired", regions: [], reason };
 }
 
 function parseFiniteNumber(raw: string | undefined): number | null {
@@ -619,25 +647,17 @@ function buildFillAndCostLanes(
 
 /** Negative control C (structural half): no signal artifact exists in ArtifactBundle — takes no arguments. */
 function buildSignalMarkersLane(): EvidenceMarkerLane {
-  return {
-    status: "not_wired",
-    markers: [],
-    malformedRowCount: 0,
-    reason:
-      "No strategy-signal-evaluation artifact is included in ArtifactBundle for backtest runs " +
+  return notWiredMarkerLane(
+    "No strategy-signal-evaluation artifact is included in ArtifactBundle for backtest runs " +
       "(distinct from the live/autonomous strategy_signal_evaluations journal).",
-  };
+  );
 }
 
 function buildEntryExitMarkersLane(): EvidenceMarkerLane {
-  return {
-    status: "not_wired",
-    markers: [],
-    malformedRowCount: 0,
-    reason:
-      "No artifact classifies orders/fills as entry vs exit distinct from side (buy/sell) — " +
+  return notWiredMarkerLane(
+    "No artifact classifies orders/fills as entry vs exit distinct from side (buy/sell) — " +
       "inferring one here would manufacture identity the source data doesn't carry.",
-  };
+  );
 }
 
 export interface RegionLane {
@@ -647,23 +667,17 @@ export interface RegionLane {
 }
 
 function buildFoldRegionsLane(): RegionLane {
-  return {
-    status: "not_wired",
-    regions: [],
-    reason:
-      "No walk-forward fold-boundary artifact is included in ArtifactBundle for backtest runs " +
+  return notWiredRegionLane(
+    "No walk-forward fold-boundary artifact is included in ArtifactBundle for backtest runs " +
       "— walk-forward split artifacts are a separate CLI output not wired to this screen.",
-  };
+  );
 }
 
 function buildOosRegionsLane(): RegionLane {
-  return {
-    status: "not_wired",
-    regions: [],
-    reason:
-      "No out-of-sample boundary timestamp is exposed to BacktestResultsScreen — strategy_fit.json " +
+  return notWiredRegionLane(
+    "No out-of-sample boundary timestamp is exposed to BacktestResultsScreen — strategy_fit.json " +
       "reports out_of_sample_failed (pass/fail) only, never boundary timestamps.",
-  };
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +697,15 @@ export interface EvidenceChartModel {
   foldRegions: RegionLane;
   oosRegions: RegionLane;
   costEvents: EvidenceMarkerLane;
+  /**
+   * R2 — UNIFIED-MQD-EVIDENCE-CHART-01: the raw, undifferentiated lifecycle
+   * event stream for sources that report one (e.g. execution/flow's
+   * outbox/dispatch/ack/fill/cancel/replace stream — see
+   * executionEvidenceModel.ts). A backtest artifact bundle has no such
+   * generic stream distinct from orderIntentMarkers/fillMarkers, so this lane
+   * is always not_wired here.
+   */
+  executionLifecycleMarkers: EvidenceMarkerLane;
 }
 
 export function buildEvidenceChartModel(bundle: ArtifactBundle): EvidenceChartModel {
@@ -704,5 +727,9 @@ export function buildEvidenceChartModel(bundle: ArtifactBundle): EvidenceChartMo
     foldRegions: buildFoldRegionsLane(),
     oosRegions: buildOosRegionsLane(),
     costEvents: costLane,
+    executionLifecycleMarkers: notWiredMarkerLane(
+      "Backtest artifacts (orders.csv/fills.csv) already report order intents and fills individually " +
+        "— there is no separate generic execution-lifecycle event stream for a completed backtest run.",
+    ),
   };
 }
