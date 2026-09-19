@@ -6,6 +6,56 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -2. Governance Decision — Bulk Code Completion Resumes (Stage B / M2), M1 Operational Status Unchanged (2026-09-18, `V4-BULK-CODE-COMPLETION-STAGE-B-M2-02`)
+
+Branch: `v4-bulk-code-completion-stage-b-m2-01`. Baseline HEAD (ancestor):
+`28fff6952a65791cd489b88d3673561ab8c12a03`.
+
+The operator has explicitly changed near-term execution priority. This is a
+sequencing decision only; it does not redefine milestone acceptance.
+
+**Two status dimensions are now tracked separately and must not be
+conflated:**
+
+- **A. CODE COMPLETION** — may continue into Stage B / M2 now.
+- **B. OPERATIONAL ACCEPTANCE** — unaffected by this decision; M1 remains
+  `BLOCKED` per the M1.9 correction below.
+
+**Durable truth carried forward unchanged by this decision:**
+
+- Stage A / M1 code-completion: `INDEPENDENTLY ACCEPTED`, `PUSHED-VERIFIED`.
+  M1 code census: `CODE_MISSING=0`, `WIRING_MISSING=0`, `TEST_MISSING=0`.
+- Deployed strategy identity: `intraday_scalper` / `AAPL` / `300s`.
+- A genuine real-data promotion-evidence attempt was performed once and was
+  **REJECTED**: `review_state=rejected`, `reason_code=negative_total_return`.
+  This rejection is durable truth. It is not waived or converted to a pass.
+  `intraday_scalper` must not be promoted from that evidence, and the
+  rejected attempt must not be retried/tuned merely to obtain a passing
+  result.
+- Formal M1 operational acceptance remains **BLOCKED** (deployment authority
+  gap, see §-1 below — unchanged by this decision).
+- M1.10 formal soak remains `OPERATOR-WAIVED`. WAIVED != PASSED, WAIVED !=
+  OPEN BLOCKER.
+- Additional alpha discovery is now `OPERATOR-DEFERRED`.
+
+**What this decision authorizes:**
+
+- Stage B / M2 CODE COMPLETION work may proceed now, independent of the open
+  M1 operational-only gate, using the canonical M2 requirement set in
+  `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md`.
+- Later-milestone code may be implemented and tested without that implying
+  the corresponding milestone is operationally accepted.
+
+**What this decision does NOT authorize:**
+
+- M1 must not be called formally `CLOSED`.
+- Paper must not be promoted or forced ready.
+- Live must not be enabled.
+- No alpha discovery, no retry/tune of the rejected `intraday_scalper`
+  evidence, no Paper/Live operational ceremony under this controller.
+
+---
+
 ## -1. M1.9 Deployed-State Verification Result (2026-09-19, READ-ONLY; CORRECTED 2026-09-19)
 
 A bounded, read-only M1.9 verification was performed against the actual

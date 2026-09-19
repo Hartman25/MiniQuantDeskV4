@@ -1,9 +1,22 @@
-# MiniQuantDeskV4 — M1 Code Completion Manifest
+# MiniQuantDeskV4 — Code Completion Manifest
 
-**Mission:** Stage A M1 — Bulk Code Completion  
-**Started:** 2026-09-16T03:55:27Z  
-**Baseline HEAD:** f0e16651da74cc4a26726ae02321315618855a22  
-**Branch:** v4-bulk-code-completion-stage-a-m1-01 (to be created)  
+**Mission:** Stage A M1 — Bulk Code Completion (below); Stage B M2 — Bulk
+Code Completion (see the M2 section near the end of this file)
+**Started:** 2026-09-16T03:55:27Z
+**Baseline HEAD:** f0e16651da74cc4a26726ae02321315618855a22
+**Branch:** v4-bulk-code-completion-stage-a-m1-01 (M1; closed out, see
+`docs/CURRENT_MISSION.md` §0)
+
+---
+
+## Governance Note (2026-09-18, `V4-BULK-CODE-COMPLETION-STAGE-B-M2-02`)
+
+Stage B / M2 CODE COMPLETION is authorized to proceed now, independent of
+the still-open M1 operational-acceptance gate (deployment authority gap,
+`docs/CURRENT_MISSION.md` §-1). CODE COMPLETION and OPERATIONAL ACCEPTANCE
+are tracked as separate dimensions; M2 code work here does not imply M2 (or
+M1) operational closure. Full governance record:
+`docs/CURRENT_MISSION.md` §-2.
 
 ---
 
