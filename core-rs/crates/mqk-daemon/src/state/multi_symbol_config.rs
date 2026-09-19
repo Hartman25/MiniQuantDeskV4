@@ -574,6 +574,12 @@ pub fn build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
 /// `crate::watchlist_intake::evaluate_watchlist_intake_from_env` and the
 /// configured path / timeframe from the same env vars as
 /// [`build_multi_symbol_runtime_config_from_env`]'s watchlist-v2 sibling.
+/// Not called by the real daemon-start path (Patch C3, `state/lifecycle.rs`)
+/// -- that path already holds a frozen `StartAttemptAuthoritySnapshot` and
+/// must never re-read the environment independently. Kept public for a
+/// future direct env-based caller (CLI/test/status route), mirroring every
+/// other builder in this file having this exact `_from_env` sibling.
+#[allow(dead_code)]
 pub fn build_explicit_multi_strategy_config_from_env(
 ) -> Result<ExplicitMultiStrategyRuntimeConfig, ExplicitMultiStrategyConfigError> {
     let watchlist_outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();

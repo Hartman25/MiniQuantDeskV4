@@ -598,7 +598,7 @@ fn refused_evidence(reason: CandidateEvidenceReason) -> SelectionCandidateEviden
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::state::market_calendar::NyseWeekdaysProvider;
     use crate::state::{MultiSymbolConfigSource, OperatorAuthMode};
@@ -870,16 +870,21 @@ mod tests {
     // crate's own `#[cfg(test)]` module cannot share code without a
     // support crate).
 
-    struct ResearchEvidenceFixture {
-        trial_id: String,
-        economic_eval_id: String,
-        registry_db_path: std::path::PathBuf,
-        evidence_dir: std::path::PathBuf,
-        judge_path: std::path::PathBuf,
-        judge_artifact_sha256: String,
+    /// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C3 (`state/lifecycle.rs`'s
+    /// own test module) reuses this struct and the two heavy fixture
+    /// builders below via crate-visible test-only paths, rather than
+    /// reconstructing the real research/backtest evidence pipeline a second
+    /// time -- see `CLAUDE.md` §12 (reuse existing seams).
+    pub(crate) struct ResearchEvidenceFixture {
+        pub(crate) trial_id: String,
+        pub(crate) economic_eval_id: String,
+        pub(crate) registry_db_path: std::path::PathBuf,
+        pub(crate) evidence_dir: std::path::PathBuf,
+        pub(crate) judge_path: std::path::PathBuf,
+        pub(crate) judge_artifact_sha256: String,
     }
 
-    fn research_py_root() -> std::path::PathBuf {
+    pub(crate) fn research_py_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -924,7 +929,7 @@ mod tests {
 
     /// Runs the REAL Research production pipeline
     /// (`mqk_research.ml.real_research_promotion_e2e_cli`).
-    fn write_real_research_evidence_via_production_pipeline(
+    pub(crate) fn write_real_research_evidence_via_production_pipeline(
         root: &std::path::Path,
         seed: &str,
         strategy_id: &str,
@@ -1035,7 +1040,7 @@ mod tests {
     /// P7A/P7B economic replay stress result, and a real genuine shuffled
     /// placebo result, each via a real Python subprocess against a real
     /// disposable SQLite registry). Returns the candidate's `run_id`.
-    fn write_real_backtest_evidence(
+    pub(crate) fn write_real_backtest_evidence(
         artifact_root: &std::path::Path,
         research_trial_id: &str,
         research_economic_eval_id: &str,

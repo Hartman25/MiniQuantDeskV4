@@ -33,8 +33,8 @@ use super::{
 };
 use super::{
     AcceptedArtifactProvenance, BrokerKind, DeploymentMode, DynamicSelectionLifecycleFaultSeam,
-    DynamicSelectionRuntimeState, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot,
-    StrategyMarketDataSource,
+    DynamicSelectionRuntimeState, OperatorAuthMode, RuntimeLifecycleError,
+    RuntimeStrategyAuthorityKind, StatusSnapshot, StrategyMarketDataSource,
 };
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
@@ -421,6 +421,13 @@ struct StartAttemptAuthoritySnapshot {
     /// separate local pair before the snapshot exists.
     native_strategy_bootstrap: NativeStrategyBootstrap,
     effective_runtime_binding: mqk_runtime::native_strategy::EffectiveRuntimeBinding,
+    /// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C3: the same raw watchlist/
+    /// legacy inputs `multi_symbol_config` was built from, kept so
+    /// [`AppState::build_explicit_multi_strategy_start_snapshot`] can inspect
+    /// `watchlist_outcome` for a v3 artifact without a second,
+    /// independently-timed watchlist read (mirrors this whole struct's own
+    /// "resolve every start-attempt input exactly once" contract).
+    multi_symbol_raw_inputs: crate::state::MultiSymbolConfigRawInputs,
 }
 
 impl StartAttemptAuthoritySnapshot {
@@ -510,6 +517,7 @@ impl StartAttemptAuthoritySnapshot {
             required_freshness_symbols,
             native_strategy_bootstrap,
             effective_runtime_binding,
+            multi_symbol_raw_inputs,
         }
     }
 
@@ -567,6 +575,7 @@ impl AppState {
             return Ok((
                 DynamicSelectionRuntimeState {
                     run_id,
+                    authority_kind: RuntimeStrategyAuthorityKind::Legacy,
                     disposition: DynamicSelectionStartGateDisposition::Off,
                     configured_mode: effective.configured_mode,
                     effective_mode: effective.effective_mode,
@@ -584,6 +593,27 @@ impl AppState {
                     assignments: snapshot.legacy_assignments(),
                 },
             ));
+        }
+
+        // MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C3: a configured
+        // watchlist-v3 artifact takes this wholly separate, additive path
+        // instead of Bundle 7's ranking selector below — never silently
+        // falling through and being misread as "no watchlist configured"
+        // (frozen contract; independent review finding). Only engaged for
+        // `PaperEnforced` — the artifact's own schema hard-locks `mode:
+        // "paper"`, and the frozen contract is silent on a Shadow+v3
+        // interaction, so Shadow continues to consume only v1/v2/legacy
+        // exactly as before this patch.
+        if effective.effective_mode == DynamicSelectionMode::PaperEnforced
+            && matches!(
+                snapshot.multi_symbol_raw_inputs.watchlist_outcome,
+                crate::watchlist_intake::WatchlistIntakeOutcome::LoadedApprovedV3 { .. }
+                    | crate::watchlist_intake::WatchlistIntakeOutcome::LoadedNotApprovedV3 { .. }
+            )
+        {
+            return self
+                .build_explicit_multi_strategy_start_snapshot(run_id, snapshot, effective)
+                .await;
         }
 
         // Non-Off (Shadow or PaperEnforced) is only reachable when
@@ -604,6 +634,7 @@ impl AppState {
                     return Ok((
                         DynamicSelectionRuntimeState {
                             run_id,
+                            authority_kind: RuntimeStrategyAuthorityKind::Bundle7DynamicSelection,
                             disposition: DynamicSelectionStartGateDisposition::ShadowInvalid,
                             configured_mode: effective.configured_mode,
                             effective_mode: effective.effective_mode,
@@ -883,6 +914,7 @@ impl AppState {
         Ok((
             DynamicSelectionRuntimeState {
                 run_id,
+                authority_kind: RuntimeStrategyAuthorityKind::Bundle7DynamicSelection,
                 disposition: outcome.disposition,
                 configured_mode: effective.configured_mode,
                 effective_mode: effective.effective_mode,
@@ -895,6 +927,306 @@ impl AppState {
                 approved_for_live: false,
                 evidence_persisted,
                 evidence_validation_state,
+            },
+            dispatch_authority,
+        ))
+    }
+
+    /// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C3: the explicit per-symbol
+    /// multi-strategy authority-producing start path — the v3 analog of
+    /// [`Self::build_dynamic_selection_start_snapshot`]'s Bundle-7 path,
+    /// called only when `snapshot.multi_symbol_raw_inputs.watchlist_outcome`
+    /// is a `LoadedApprovedV3`/`LoadedNotApprovedV3` outcome and the
+    /// effective mode is `PaperEnforced` (see that function's call site).
+    ///
+    /// Required sequence (frozen contract / mission C3): canonical v3
+    /// config validation → resolve every explicit binding independently
+    /// through the real evidence gate → build the durable explicit-authority
+    /// evidence → persist it → read-validate it → construct the isolated
+    /// host pool → return the committed run-scoped runtime truth for the
+    /// caller to publish. Never fabricates a Bundle 7 `DynamicSelectionPlan`
+    /// — `plan`/`plan_id` are always `None` here.
+    async fn build_explicit_multi_strategy_start_snapshot(
+        self: &Arc<Self>,
+        run_id: uuid::Uuid,
+        snapshot: &StartAttemptAuthoritySnapshot,
+        effective: &crate::dynamic_selection_mode::EffectiveDynamicSelectionMode,
+    ) -> Result<
+        (
+            DynamicSelectionRuntimeState,
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority,
+        ),
+        RuntimeLifecycleError,
+    > {
+        use crate::watchlist_intake::WatchlistIntakeOutcome;
+
+        const DOMAIN: &str = "explicit_multi_strategy";
+        const CONTRACT: &str = "MULTI-STRATEGY-RUNTIME-DISPATCH-01";
+
+        let raw = &snapshot.multi_symbol_raw_inputs;
+        let configured_path = raw.configured_watchlist_path.clone().unwrap_or_default();
+
+        // Canonical v3 config validation (Patch C1's builder) — never
+        // reimplemented here. Refuses closed on: not approved, wrong schema
+        // (defense-in-depth), missing/unsupported shared timeframe, hard
+        // ceiling exceeded, concurrent limit exceeded, missing per-symbol
+        // assignment, or a duplicate exact binding within one symbol's list.
+        let explicit_config =
+            crate::state::build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+                &raw.watchlist_outcome,
+                &configured_path,
+                raw.legacy_timeframe.as_deref(),
+            )
+            .map_err(|e| {
+                RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_config_invalid",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: config resolution \
+                     failed for watchlist-v3 artifact at '{configured_path}': {} ({CONTRACT})",
+                        e.as_str()
+                    ),
+                )
+            })?;
+        let Some(&(_, _, timeframe_secs)) = explicit_config.bindings.first() else {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.explicit_multi_strategy_no_bindings",
+                DOMAIN,
+                format!(
+                    "explicit multi-strategy paper_enforced start refused: resolved config has \
+                     zero bindings for watchlist-v3 artifact at '{configured_path}' ({CONTRACT})"
+                ),
+            ));
+        };
+
+        let artifact = match &raw.watchlist_outcome {
+            WatchlistIntakeOutcome::LoadedApprovedV3 { artifact } => artifact,
+            WatchlistIntakeOutcome::LoadedNotApprovedV3 { .. } => {
+                // Reachable only if `explicit_config` above somehow
+                // succeeded for a not-approved outcome — it cannot
+                // (`build_explicit_multi_strategy_config_from_watchlist_artifact_v3`
+                // requires `LoadedApprovedV3`), so this is provably
+                // unreachable; kept for exhaustive fail-closed handling
+                // rather than an `.expect()`.
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_watchlist_not_approved",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: watchlist-v3 \
+                         artifact at '{configured_path}' is not approved ({CONTRACT})"
+                    ),
+                ));
+            }
+            _ => {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_internal_routing_invariant_violated",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: internal routing \
+                         invariant violated -- reached the v3 start path for a non-v3 watchlist \
+                         outcome ({CONTRACT})"
+                    ),
+                ));
+            }
+        };
+
+        let timeframe_label = raw.legacy_timeframe.clone().unwrap_or_default();
+        let readiness_context = &snapshot.readiness_context;
+        let now_utc = snapshot.now_utc;
+        let (year, month, day) = crate::state::market_calendar::resolve_market_session_schedule(
+            readiness_context.calendar_provider.as_ref(),
+            now_utc,
+        )
+        .market_date;
+        let market_date = format!("{year:04}-{month:02}-{day:02}");
+
+        let plan_ctx = crate::dynamic_selection_plan_builder::DynamicSelectionPlanBuildContext {
+            db: self.db.as_ref(),
+            st: self,
+            calendar_provider: readiness_context.calendar_provider.as_ref(),
+            provider_configs: &readiness_context.provider_configs,
+            instruments: &readiness_context.instruments,
+        };
+
+        // Resolve every explicit binding independently through the real
+        // evidence gate (registry/promotion/config-identity/readiness — real
+        // DB I/O via `evaluate_candidate`, never a hand-built green fixture).
+        let evaluations = crate::multi_strategy_runtime_dispatch::evaluate_explicit_bindings(
+            &plan_ctx,
+            artifact,
+            timeframe_secs,
+            &timeframe_label,
+            run_id,
+            &configured_path,
+            &market_date,
+            now_utc,
+        )
+        .await;
+
+        // Build + persist + read-validate the durable explicit authority
+        // BEFORE any host pool construction/activation.
+        let source_artifact_hash = crate::watchlist_intake::hash_watchlist_artifact_file(
+            std::path::Path::new(&configured_path),
+        )
+        .ok_or_else(|| {
+            RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.explicit_multi_strategy_source_hash_unavailable",
+                DOMAIN,
+                format!(
+                    "explicit multi-strategy paper_enforced start refused: could not hash \
+                     source artifact at '{configured_path}' ({CONTRACT})"
+                ),
+            )
+        })?;
+        let config_fingerprint =
+            crate::watchlist_intake::canonical_v3_artifact_fingerprint(artifact);
+
+        let new_authority =
+            crate::multi_strategy_runtime_dispatch::build_new_explicit_multi_strategy_authority(
+                &evaluations,
+                run_id,
+                &configured_path,
+                &source_artifact_hash,
+                &config_fingerprint,
+                &market_date,
+                now_utc,
+            );
+        let authority_id = new_authority.authority_id;
+
+        let Some(db) = self.db.as_ref() else {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.explicit_multi_strategy_db_unavailable",
+                DOMAIN,
+                format!(
+                    "explicit multi-strategy paper_enforced start refused: no DB pool \
+                     available to persist durable authority evidence ({CONTRACT})"
+                ),
+            ));
+        };
+
+        match mqk_db::insert_explicit_multi_strategy_authority(db, new_authority).await {
+            Ok(mqk_db::InsertExplicitMultiStrategyAuthorityOutcome::Inserted)
+            | Ok(mqk_db::InsertExplicitMultiStrategyAuthorityOutcome::AlreadyExists) => {}
+            Ok(mqk_db::InsertExplicitMultiStrategyAuthorityOutcome::PayloadCollision {
+                detail,
+            }) => {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_evidence_payload_collision",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: durable evidence \
+                         payload collision for authority_id={authority_id}: {detail} ({CONTRACT})"
+                    ),
+                ));
+            }
+            Err(e) => {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_evidence_write_failed",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: durable evidence \
+                         write failed for authority_id={authority_id}: {e} ({CONTRACT})"
+                    ),
+                ));
+            }
+        }
+
+        // Read-validate the exact durable authority before any host pool
+        // construction/activation.
+        let (validated_header, validated_bindings) =
+            match mqk_db::fetch_explicit_multi_strategy_authority(db, authority_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.explicit_multi_strategy_evidence_missing_after_insert",
+                        DOMAIN,
+                        format!(
+                            "explicit multi-strategy paper_enforced start refused: durable \
+                             authority evidence not found on read-validate for \
+                             authority_id={authority_id} ({CONTRACT})"
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.explicit_multi_strategy_evidence_read_failed",
+                        DOMAIN,
+                        format!(
+                            "explicit multi-strategy paper_enforced start refused: durable \
+                             authority evidence read-validation failed for \
+                             authority_id={authority_id}: {e} ({CONTRACT})"
+                        ),
+                    ));
+                }
+            };
+        if validated_header.authority_id != authority_id
+            || validated_bindings.len() != evaluations.len()
+            || validated_header.approved_for_live
+        {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.explicit_multi_strategy_evidence_incoherent",
+                DOMAIN,
+                format!(
+                    "explicit multi-strategy paper_enforced start refused: durable authority \
+                     evidence failed read-side coherence check for authority_id={authority_id} \
+                     ({CONTRACT})"
+                ),
+            ));
+        }
+
+        // Construct the isolated host pool / dispatch authority from only
+        // the authorized bindings — the exact same
+        // `RuntimeStrategyDispatchAuthority::DynamicPaperEnforced` variant
+        // Bundle 7 uses, reused verbatim, never a parallel reimplementation.
+        let mut authorized_bindings: Vec<crate::dynamic_selection_host_pool::HostPoolKey> =
+            evaluations
+                .iter()
+                .filter(|e| e.authorized)
+                .map(|e| (e.symbol.clone(), e.strategy_id.clone(), e.timeframe_secs))
+                .collect();
+        authorized_bindings.sort();
+
+        let dispatch_authority =
+            crate::multi_strategy_runtime_dispatch::build_explicit_multi_strategy_dispatch_authority(
+                run_id,
+                &authorized_bindings,
+            )
+            .map_err(|e| {
+                RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_dispatch_authority_invalid",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: dispatch \
+                         authority could not be built for run_id={run_id}: {e:?} (code={}) \
+                         ({CONTRACT})",
+                        e.code(),
+                    ),
+                )
+            })?;
+
+        let host_pool_present = matches!(
+            dispatch_authority,
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::DynamicPaperEnforced { .. }
+        );
+        let selected_pairs = authorized_bindings;
+
+        Ok((
+            DynamicSelectionRuntimeState {
+                run_id,
+                authority_kind: RuntimeStrategyAuthorityKind::ExplicitWatchlistV3MultiStrategy,
+                disposition:
+                    crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::PaperEnforcedAllowed,
+                configured_mode: effective.configured_mode,
+                effective_mode: effective.effective_mode,
+                live_lock_applied: effective.live_lock_applied,
+                plan: None,
+                plan_id: None,
+                selected_pairs,
+                host_pool_present,
+                reasons: Vec::new(),
+                approved_for_live: false,
+                evidence_persisted: true,
+                evidence_validation_state: Some("valid".to_string()),
             },
             dispatch_authority,
         ))
@@ -3586,6 +3918,7 @@ mod real_production_effects_matrix_tests {
     fn off_disposition_fixture(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
         DynamicSelectionRuntimeState {
             run_id,
+            authority_kind: RuntimeStrategyAuthorityKind::Legacy,
             disposition:
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
             configured_mode: mqk_portfolio::DynamicSelectionMode::Off,
@@ -3609,6 +3942,7 @@ mod real_production_effects_matrix_tests {
     fn shadow_allowed_disposition_fixture(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
         DynamicSelectionRuntimeState {
             run_id,
+            authority_kind: RuntimeStrategyAuthorityKind::Bundle7DynamicSelection,
             disposition:
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowAllowed,
             configured_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
@@ -3632,6 +3966,7 @@ mod real_production_effects_matrix_tests {
     fn shadow_invalid_disposition_fixture(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
         DynamicSelectionRuntimeState {
             run_id,
+            authority_kind: RuntimeStrategyAuthorityKind::Bundle7DynamicSelection,
             disposition:
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid,
             configured_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
@@ -5489,6 +5824,7 @@ mod real_production_effects_matrix_tests {
             crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id(plan);
         DynamicSelectionRuntimeState {
             run_id,
+            authority_kind: RuntimeStrategyAuthorityKind::Bundle7DynamicSelection,
             disposition:
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::PaperEnforcedAllowed,
             configured_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
@@ -6808,6 +7144,7 @@ mod dynamic_selection_cleanup_contract_tests {
     fn fixture_off_state(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
         DynamicSelectionRuntimeState {
             run_id,
+            authority_kind: RuntimeStrategyAuthorityKind::Legacy,
             disposition:
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
             configured_mode: mqk_portfolio::DynamicSelectionMode::Off,
@@ -7470,5 +7807,717 @@ mod frozen_strategy_fleet_tests {
              strategy_id — no watchlist is configured and the frozen fleet \
              is empty"
         );
+    }
+}
+
+// =============================================================================
+// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C3 (V4-STAGE-B-M2-REPAIR-03):
+// required load-bearing tests for the real daemon-start activation path
+// (`AppState::build_explicit_multi_strategy_start_snapshot`).
+//
+// Scope decision, stated honestly (mirrors `dynamic_selection_plan_builder.rs`'s
+// own `full_evidence_chain_passes_refused_only_on_data_readiness`, which hits
+// the identical wall): achieving a genuinely `data_ready=true` real-DB
+// candidate requires a calendar-aligned instrument/provider registry
+// pointing at a real provider whose daily-bar timestamp convention is
+// proven (`resolve_daily_bar_timestamp_convention`), plus bars seeded at the
+// exact provider-specific `end_ts` convention across real trading-day
+// boundaries -- reproducing that is `daily_data_readiness`'s own subsystem,
+// already exhaustively tested elsewhere, and out of proportion to what this
+// patch's own new logic (routing + durable persistence + host-pool
+// composition) needs proven. These tests instead prove every genuinely new
+// C3 fact through real seams:
+//
+// - `c3_01_*`: a real registry entry + a real research/backtest/promotion
+//   HTTP chain to `active_paper` (the exact same production pipeline
+//   `dynamic_selection_plan_builder.rs`'s own heaviest fixture uses, reused
+//   verbatim via crate-visible test-only paths) feeds the real
+//   `evaluate_candidate` (never a hand-built `SelectionCandidateEvidence`).
+//   The resulting durable authority row -- persisted even though the
+//   overall start is honestly refused on data readiness -- is read back
+//   directly from Postgres and shown to carry the real
+//   registry/promotion/config-identity truth. The same test then proves: an
+//   unregistered sibling on the same symbol is refused independently with
+//   its own distinct (false) evidence, without touching the promoted
+//   identity's own real evidence; a dry-run-flagged genuinely-promoted
+//   identity is still excluded; and tampering the persisted row then
+//   re-running the identical real path is refused as a payload collision,
+//   never silently overwritten (this is also the "provenance swap fails
+//   closed downstream" proof -- `derive_explicit_multi_strategy_authority_id`
+//   itself already has pure unit proof in `multi_strategy_runtime_dispatch.rs`
+//   that a changed source artifact mints a different identity).
+// - `c3_02_*`: two independently authorized same-symbol identities
+//   (`intraday_scalper`/`intraday_short_scalper`, real distinct registered
+//   engines) genuinely instantiate as two real, isolated `StrategyHost`s via
+//   the unmodified `DynamicSelectionHostPool::build` -- the same host-pool
+//   multiplicity mechanism Bundle 7 already relies on, reused verbatim.
+// - `c3_03_*`: the `Off` disposition is untouched by this patch (zero I/O,
+//   `Legacy` authority, exactly the pre-C3 shape).
+// - `c3_04_*`: a non-paper/non-Alpaca deployment demotes to `Off` before the
+//   v3 branch is ever reached, even with a v3 artifact configured --
+//   `approved_for_live` can never become true through this path.
+// =============================================================================
+#[cfg(test)]
+mod explicit_multi_strategy_start_snapshot_tests {
+    use super::*;
+    use crate::state::STRATEGY_MD_TIMEFRAME_ENV;
+    use sqlx::Row;
+
+    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+        crate::state::shared_test_locks::strategy_fleet_env_test_lock()
+    }
+
+    fn clear_v3_env() {
+        std::env::remove_var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH);
+        std::env::remove_var(STRATEGY_MD_TIMEFRAME_ENV);
+        std::env::remove_var("MQK_STRATEGY_SYMBOL");
+        std::env::remove_var("MQK_STRATEGY_IDS");
+        std::env::remove_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+        );
+        std::env::remove_var(crate::state::dry_run_strategy::DRY_RUN_STRATEGY_IDS_ENV);
+    }
+
+    fn write_watchlist_v3(tag: &str, symbol: &str, strategy_ids: &[&str]) -> std::path::PathBuf {
+        let assignments_list = strategy_ids
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let json = format!(
+            r#"{{
+  "schema_version": "watchlist-v3",
+  "mode": "paper",
+  "approved_for_autonomous_paper": true,
+  "approved_for_live": false,
+  "symbols": ["{symbol}"],
+  "strategy_assignments": {{"{symbol}": [{assignments_list}]}},
+  "max_symbols_to_trade": 1,
+  "max_concurrent_positions": 1
+}}"#
+        );
+        let path = std::env::temp_dir().join(format!(
+            "mqk_lifecycle_c3_{tag}_{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, json).expect("write watchlist v3 fixture");
+        path
+    }
+
+    fn paper_alpaca_state_with_db(pool: &PgPool) -> Arc<AppState> {
+        let mut state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca);
+        state.db = Some(pool.clone());
+        Arc::new(state)
+    }
+
+    async fn insert_fixture_run(pool: &PgPool, run_id: uuid::Uuid) {
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "test-explicit-multi-strategy-lifecycle".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc::now(),
+                git_hash: "test".to_string(),
+                config_hash: "test".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "test".to_string(),
+            },
+        )
+        .await
+        .expect("fixture run insert should succeed");
+    }
+
+    async fn cleanup_run(pool: &PgPool, run_id: uuid::Uuid) {
+        let _ = sqlx::query(
+            "delete from sys_explicit_multi_strategy_authority_bindings where authority_id in \
+             (select authority_id from sys_explicit_multi_strategy_authority where run_id = $1)",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("delete from sys_explicit_multi_strategy_authority where run_id = $1")
+            .bind(run_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("delete from runs where run_id = $1")
+            .bind(run_id)
+            .execute(pool)
+            .await;
+    }
+
+    async fn snapshot_and_result(
+        state: &Arc<AppState>,
+        run_id: uuid::Uuid,
+    ) -> Result<
+        (
+            DynamicSelectionRuntimeState,
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority,
+        ),
+        RuntimeLifecycleError,
+    > {
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(state).await;
+        state
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
+            .await
+    }
+
+    async fn transition(
+        st: Arc<AppState>,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, bytes::Bytes) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/strategy/promotions/transition")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = crate::routes::build_router(st).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, body)
+    }
+
+    /// C3-01 (mission requirements #1, #3, #4, #5, #6, #9, #10 -- see module
+    /// doc above for the scope decision): real registry + real
+    /// research/backtest/promotion chain to `active_paper`, real
+    /// `evaluate_candidate`, durable persistence before/despite refusal, an
+    /// independently-refused unregistered sibling, dry-run exclusion of a
+    /// genuinely-promoted identity, and payload-collision fail-closed on a
+    /// tampered re-run.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; spawns a real python research subprocess"]
+    async fn c3_01_real_registry_promotion_and_evaluate_candidate_drive_durable_authority() {
+        let _env_guard = env_lock().lock().await;
+        if std::env::var("MQK_DATABASE_URL").is_err() {
+            eprintln!("C3-01: MQK_DATABASE_URL not set; skipped");
+            return;
+        }
+        clear_v3_env();
+
+        let root = std::env::temp_dir().join(format!("mqk_lifecycle_c3_01_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
+
+        let strategy_id = "swing_momentum".to_string();
+        let unregistered_sibling = "mean_reversion".to_string();
+        // Deliberately NOT a real instrument-registry entry -- data
+        // readiness genuinely, honestly fails here (see module doc's scope
+        // decision), never fabricated.
+        let symbol = "ZZC3LIFECYCLE".to_string();
+
+        // The exact seed string `dynamic_selection_plan_builder.rs`'s own
+        // established fixture uses -- proven (empirically, by that module's
+        // own passing test) to draw a real judge/robustness-gauntlet result
+        // that clears the genuine-shuffled-placebo check; an arbitrary
+        // different seed can legitimately draw a real judge failure here
+        // (the underlying signal genuinely indistinguishable from its own
+        // shuffled placebo for that seed) without indicating any defect in
+        // this patch's own code.
+        let research_trials =
+            crate::dynamic_selection_plan_builder::tests::write_real_research_evidence_via_production_pipeline(
+                &root,
+                "dyn_sel_plan_builder_fixture_repair",
+                &strategy_id,
+                &[0.45, 0.55],
+            );
+        let research = &research_trials[0];
+        let backtest_run_id =
+            crate::dynamic_selection_plan_builder::tests::write_real_backtest_evidence(
+                &root,
+                &research.trial_id,
+                &research.economic_eval_id,
+                &research.registry_db_path,
+                &research.judge_artifact_sha256,
+                &symbol,
+            );
+        std::env::set_var("MQK_RESEARCH_REGISTRY_DB", &research.registry_db_path);
+        std::env::set_var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT", &root);
+        std::env::set_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO", "0.0");
+        std::env::set_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING", "1.0");
+        std::env::set_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT", &root);
+        std::env::set_var("MQK_PROMOTION_MIN_SHARPE", "0.0");
+        std::env::set_var("MQK_PROMOTION_MAX_MDD", "1.0");
+        std::env::set_var("MQK_PROMOTION_MIN_CAGR", "0.0");
+        std::env::set_var("MQK_PROMOTION_MIN_PROFIT_FACTOR", "0.0");
+        std::env::set_var("MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT", "0.0");
+
+        let decision = mqk_backtest::StrategyScanReviewDecision {
+            symbol: symbol.clone(),
+            timeframe: "1D".to_string(),
+            strategy_id: strategy_id.clone(),
+            scanner_rank: Some(1),
+            scanner_score: Some(9.0),
+            review_state: mqk_backtest::StrategyScanReviewState::PaperCandidate,
+            reason_codes: vec!["eligible_paper_candidate".to_string()],
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let review_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"c3-01-review");
+        let manifest = mqk_backtest::ReviewManifest {
+            schema_version: 1,
+            review_id: review_id.to_string(),
+            scanner_scan_id: "scan-fixture".to_string(),
+            source_artifact_dir: "fixture-source-not-on-disk".to_string(),
+            created_at_utc: "2026-07-01T00:00:00Z".to_string(),
+            git_hash: "test-git-hash".to_string(),
+            policy_min_bars_used: 252,
+            policy_min_trade_count: 5,
+            policy_min_total_return_pct: 0.0,
+            policy_min_alpha_pct: 0.0,
+            policy_max_drawdown_pct: 25.0,
+            policy_min_profit_factor: 1.05,
+            candidate_count: 1,
+            blocked_count: 0,
+            needs_review_count: 0,
+            watchlist_candidate_count: 0,
+            paper_candidate_count: 1,
+            rejected_count: 0,
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let summary = mqk_backtest::ReviewSummary {
+            scanner_scan_id: "scan-fixture".to_string(),
+            review_id: review_id.to_string(),
+            candidate_count: 1,
+            blocked_count: 0,
+            needs_review_count: 0,
+            watchlist_candidate_count: 0,
+            paper_candidate_count: 1,
+            rejected_count: 0,
+            top_paper_candidates: Vec::new(),
+            top_watchlist_candidates: Vec::new(),
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let review_dir = mqk_backtest::write_review_artifacts(
+            &root,
+            &mqk_backtest::ReviewRunOutput {
+                review_id,
+                manifest,
+                decisions: vec![decision],
+                summary,
+            },
+        )
+        .expect("write fixture review artifacts");
+
+        let strategy_id_outer = strategy_id.clone();
+        let unregistered_sibling_outer = unregistered_sibling.clone();
+        let symbol_outer = symbol.clone();
+        let research_trials_outer = research_trials;
+        let backtest_run_id_outer = backtest_run_id;
+        let review_dir_outer = review_dir.clone();
+        mqk_db::run_isolated("c3_01_explicit_multi_strategy_lifecycle", move |pool| async move {
+        let strategy_id = strategy_id_outer;
+        let unregistered_sibling = unregistered_sibling_outer;
+        let symbol = symbol_outer;
+        let research = &research_trials_outer[0];
+        let backtest_run_id = backtest_run_id_outer;
+        let review_dir = review_dir_outer;
+        let st = paper_alpaca_state_with_db(&pool);
+
+        mqk_db::upsert_strategy_registry_entry(
+            &pool,
+            &mqk_db::UpsertStrategyRegistryArgs {
+                strategy_id: strategy_id.clone(),
+                display_name: "Swing Momentum (C3 fixture)".to_string(),
+                enabled: true,
+                kind: "bar_driven".to_string(),
+                registered_at_utc: Utc::now(),
+                updated_at_utc: Utc::now(),
+                note: String::new(),
+            },
+        )
+        .await
+        .expect("upsert strategy registry entry");
+
+        let (status, resp_body) = transition(
+            Arc::clone(&st),
+            serde_json::json!({
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "timeframe_secs": 86400,
+                "target_state": "shadow_approved",
+                "review_dir": review_dir.to_str().unwrap(),
+                "research_trial_id": research.trial_id,
+                "research_evidence_dir": research.evidence_dir.to_str().unwrap(),
+                "research_judge_artifact_path": research.judge_path.to_str().unwrap(),
+                "backtest_run_id": backtest_run_id.to_string(),
+                "effective_at_utc": Utc::now().to_rfc3339(),
+                "expires_at_utc": null,
+                "initiated_by": "test-operator",
+                "reason": "C3-01 scenario test",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "shadow_approved failed: {:?}",
+            String::from_utf8_lossy(&resp_body)
+        );
+
+        let (status, _) = transition(
+            Arc::clone(&st),
+            serde_json::json!({
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "timeframe_secs": 86400,
+                "target_state": "paper_approved",
+                "review_dir": null,
+                "effective_at_utc": Utc::now().to_rfc3339(),
+                "expires_at_utc": null,
+                "initiated_by": "test-operator",
+                "reason": "C3-01 scenario test",
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "paper_approved failed");
+
+        let (status, _) = transition(
+            Arc::clone(&st),
+            serde_json::json!({
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "timeframe_secs": 86400,
+                "target_state": "active_paper",
+                "review_dir": null,
+                "effective_at_utc": Utc::now().to_rfc3339(),
+                "expires_at_utc": null,
+                "initiated_by": "test-operator",
+                "reason": "C3-01 scenario test",
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "active_paper failed");
+
+        let watchlist_path =
+            write_watchlist_v3("c3_01", &symbol, &[strategy_id.as_str(), unregistered_sibling.as_str()]);
+        std::env::set_var(
+            crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
+            &watchlist_path,
+        );
+        std::env::set_var(STRATEGY_MD_TIMEFRAME_ENV, "1D");
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+
+        let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"c3-01-run");
+        cleanup_run(&pool, run_id).await;
+        insert_fixture_run(&pool, run_id).await;
+
+        // Phase 1: the real v3 lifecycle path is reached and honestly
+        // refuses on data readiness (symbol is not a real instrument-
+        // registry entry) -- proves req #1 (v3 reaches the real lifecycle
+        // path, not Bundle 7) and req #6 (a real failure fails start closed).
+        let result = snapshot_and_result(&st, run_id).await;
+        let err = result.expect_err(
+            "must refuse: no real instrument-registry entry exists for this symbol, so data \
+             readiness cannot genuinely pass",
+        );
+        assert!(
+            err.fault_class().starts_with("runtime.start_refused.explicit_multi_strategy"),
+            "must be refused via the new v3 path, never silently handled by Bundle 7: {}",
+            err.fault_class()
+        );
+
+        // Phase 2: inspect the REAL persisted durable evidence directly --
+        // proves req #4 (real DB-backed evaluate_candidate, never a
+        // hand-built green SelectionCandidateEvidence) and req #5 (durable
+        // authority persisted before/despite the overall refusal) and req #3
+        // (the unregistered sibling is refused independently, with its own
+        // distinct, real evidence, never affecting the promoted identity's).
+        let promoted_row = sqlx::query(
+            "select b.registry_enabled, b.promotion_query_ok, b.promotion_effective, \
+                    b.config_identity_verified, b.data_ready, b.authorized, b.reason_code \
+               from sys_explicit_multi_strategy_authority_bindings b \
+               join sys_explicit_multi_strategy_authority a on a.authority_id = b.authority_id \
+              where a.run_id = $1 and b.strategy_id = $2",
+        )
+        .bind(run_id)
+        .bind(&strategy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("promoted identity's durable evidence row must exist despite overall refusal");
+        assert!(
+            promoted_row.get::<bool, _>("registry_enabled"),
+            "real registry lookup must show enabled=true"
+        );
+        assert!(
+            promoted_row.get::<bool, _>("promotion_query_ok"),
+            "real promotion query must have succeeded"
+        );
+        assert!(
+            promoted_row.get::<bool, _>("promotion_effective"),
+            "the real active_paper promotion must be effective"
+        );
+        assert!(
+            promoted_row.get::<bool, _>("config_identity_verified"),
+            "real config-identity verification must pass"
+        );
+        assert!(
+            !promoted_row.get::<bool, _>("data_ready"),
+            "data readiness genuinely fails for an unregistered instrument -- honest, not fabricated"
+        );
+        assert!(!promoted_row.get::<bool, _>("authorized"));
+
+        let sibling_row = sqlx::query(
+            "select b.registry_enabled, b.promotion_state is null as no_promotion_state, \
+                    b.authorized \
+               from sys_explicit_multi_strategy_authority_bindings b \
+               join sys_explicit_multi_strategy_authority a on a.authority_id = b.authority_id \
+              where a.run_id = $1 and b.strategy_id = $2",
+        )
+        .bind(run_id)
+        .bind(&unregistered_sibling)
+        .fetch_one(&pool)
+        .await
+        .expect("unregistered sibling's own durable evidence row must exist independently");
+        assert!(
+            !sibling_row.get::<bool, _>("registry_enabled"),
+            "the sibling was never registered -- its own real evidence must show that honestly"
+        );
+        // `promotion_effective` is not the discriminating field here: the
+        // real pure gate (`evaluate_evidence_gate`) refuses on
+        // `promotion_state.is_none()` before ever inspecting
+        // `promotion_effective` for this reason
+        // (`CandidateEvidenceReason::NoPromotionRecord`), so
+        // `refused_evidence` deliberately leaves it at its placeholder
+        // `true` -- asserting on `promotion_state` (the field the reason
+        // actually flips) is the honest, non-false-positive check (CLAUDE.md
+        // §14).
+        assert!(
+            sibling_row.get::<bool, _>("no_promotion_state"),
+            "no promotion record exists for the sibling -- promotion_state must be null"
+        );
+        assert!(!sibling_row.get::<bool, _>("authorized"));
+        // The sibling's real refusal never altered the promoted identity's
+        // own independently-evaluated evidence (re-checked from the same
+        // durable row set, not re-derived).
+        assert!(promoted_row.get::<bool, _>("promotion_effective"));
+
+        // Phase 3 (req #9): the SAME genuinely-promoted identity is excluded
+        // when dry-run-flagged, despite its real, verified promotion.
+        std::env::set_var(
+            crate::state::dry_run_strategy::DRY_RUN_STRATEGY_IDS_ENV,
+            &strategy_id,
+        );
+        let dry_run_result = snapshot_and_result(&st, run_id).await;
+        std::env::remove_var(crate::state::dry_run_strategy::DRY_RUN_STRATEGY_IDS_ENV);
+        assert!(
+            dry_run_result.is_err(),
+            "still refused overall (data readiness), but via a genuinely different evaluation"
+        );
+        let dry_run_promoted_row = sqlx::query(
+            "select b.authorized, b.reason_code, b.promotion_query_ok \
+               from sys_explicit_multi_strategy_authority_bindings b \
+               join sys_explicit_multi_strategy_authority a on a.authority_id = b.authority_id \
+              where a.run_id = $1 and b.strategy_id = $2 \
+              order by a.created_at_utc desc limit 1",
+        )
+        .bind(run_id)
+        .bind(&strategy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("dry-run authority row must also be persisted");
+        assert!(!dry_run_promoted_row.get::<bool, _>("authorized"));
+        assert_eq!(
+            dry_run_promoted_row.get::<String, _>("reason_code"),
+            "explicit_multi_strategy_dry_run_excluded",
+            "a genuinely promoted identity must still be excluded for the dry-run reason, not \
+             re-evaluated as if never promoted"
+        );
+        assert!(
+            !dry_run_promoted_row.get::<bool, _>("promotion_query_ok"),
+            "dry-run exclusion happens before any promotion/readiness I/O -- evidence stays \
+             unresolved, never a stale copy of the real promoted evidence"
+        );
+
+        // Phase 4 (req #6/#10): tamper the ORIGINAL (non-dry-run) persisted
+        // row directly, then re-run the identical real path -- the
+        // recomputed authority_id collides with the tampered row's id, and
+        // the divergence must refuse the start closed, never silently
+        // overwrite the tampered row.
+        sqlx::query(
+            "update sys_explicit_multi_strategy_authority_bindings set data_ready = true \
+             where authority_id = (select authority_id from sys_explicit_multi_strategy_authority \
+             where run_id = $1 order by created_at_utc asc limit 1) and strategy_id = $2",
+        )
+        .bind(run_id)
+        .bind(&strategy_id)
+        .execute(&pool)
+        .await
+        .expect("tamper update must succeed");
+
+        let collision_result = snapshot_and_result(&st, run_id).await;
+        let collision_err = collision_result.expect_err("tampered replay must still refuse");
+        assert_eq!(
+            collision_err.fault_class(),
+            "runtime.start_refused.explicit_multi_strategy_evidence_payload_collision",
+            "a divergent persisted row under the same recomputed authority_id must be reported \
+             as a payload collision, never silently accepted or overwritten"
+        );
+        let _ = std::fs::remove_file(&watchlist_path);
+        }).await;
+
+        clear_v3_env();
+        std::env::remove_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT");
+        std::env::remove_var("MQK_RESEARCH_REGISTRY_DB");
+        std::env::remove_var("MQK_RESEARCH_EVIDENCE_ARTIFACT_ROOT");
+        std::env::remove_var("MQK_RESEARCH_MIN_DEFLATED_SHARPE_RATIO");
+        std::env::remove_var("MQK_RESEARCH_MAX_PROBABILITY_BACKTEST_OVERFITTING");
+        std::env::remove_var("MQK_BACKTEST_EVIDENCE_ARTIFACT_ROOT");
+        std::env::remove_var("MQK_PROMOTION_MIN_SHARPE");
+        std::env::remove_var("MQK_PROMOTION_MIN_CAGR");
+        std::env::remove_var("MQK_PROMOTION_MAX_MDD");
+        std::env::remove_var("MQK_PROMOTION_MIN_PROFIT_FACTOR");
+        std::env::remove_var("MQK_PROMOTION_MIN_PROFITABLE_MONTHS_PCT");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C3-02 (mission requirement #2): two independently authorized
+    /// same-symbol identities -- real, distinct, registered engines
+    /// (`intraday_scalper`/`intraday_short_scalper`) -- genuinely
+    /// instantiate as two isolated real `StrategyHost`s via the unmodified
+    /// `DynamicSelectionHostPool::build`, reused verbatim from Bundle 7 (see
+    /// this module's own doc comment for why this is proven separately from
+    /// C3-01's real-evidence-gate proof rather than composed into one
+    /// fixture).
+    #[test]
+    fn c3_02_two_same_symbol_independently_authorized_strategies_produce_two_real_hosts() {
+        let bindings: Vec<crate::dynamic_selection_host_pool::HostPoolKey> = vec![
+            ("AAPL".to_string(), "intraday_scalper".to_string(), 300),
+            (
+                "AAPL".to_string(),
+                "intraday_short_scalper".to_string(),
+                300,
+            ),
+        ];
+        let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"c3-02-two-hosts");
+        let authority =
+            crate::multi_strategy_runtime_dispatch::build_explicit_multi_strategy_dispatch_authority(
+                run_id, &bindings,
+            )
+            .expect(
+                "two real, distinct, same-symbol strategy identities must build a coherent \
+                 two-host dispatch authority",
+            );
+        match authority {
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+                host_pool,
+                bindings: b,
+                ..
+            } => {
+                assert_eq!(
+                    host_pool.len(),
+                    2,
+                    "two independently authorized same-symbol strategies must produce two real \
+                     hosts, never merged into one"
+                );
+                assert!(host_pool.contains_key("AAPL", "intraday_scalper", 300));
+                assert!(host_pool.contains_key("AAPL", "intraday_short_scalper", 300));
+                assert_eq!(b.len(), 2);
+            }
+            other => panic!("expected DynamicPaperEnforced, got {other:?}"),
+        }
+    }
+
+    /// C3-03 (mission requirement #7): `Off` is completely untouched by this
+    /// patch -- zero I/O, `Legacy` authority, identical shape to before C3.
+    #[tokio::test]
+    async fn c3_03_off_disposition_is_unaffected_by_the_v3_branch() {
+        let _env_guard = env_lock().lock().await;
+        clear_v3_env();
+        // A v3 artifact IS configured, but effective_mode stays Off (no
+        // MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE set) -- the v3 branch
+        // must never be reached.
+        let watchlist_path = write_watchlist_v3("c3_03", "ZZC3OFF", &["intraday_scalper"]);
+        std::env::set_var(
+            crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
+            &watchlist_path,
+        );
+        std::env::set_var(STRATEGY_MD_TIMEFRAME_ENV, "5m");
+
+        let state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca);
+        let state = Arc::new(state);
+        let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"c3-03-off");
+
+        let (dyn_state, authority) = snapshot_and_result(&state, run_id)
+            .await
+            .expect("Off must never fail");
+
+        let _ = std::fs::remove_file(&watchlist_path);
+        clear_v3_env();
+
+        assert_eq!(
+            dyn_state.authority_kind,
+            RuntimeStrategyAuthorityKind::Legacy
+        );
+        assert_eq!(
+            dyn_state.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
+        );
+        assert!(dyn_state.plan.is_none());
+        assert!(!dyn_state.host_pool_present);
+        assert!(matches!(
+            authority,
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::Legacy { .. }
+        ));
+    }
+
+    /// C3-04 (mission requirement #8): a non-paper/non-Alpaca deployment
+    /// demotes to `Off` via the existing live-lock before the v3 branch is
+    /// ever reached, even with a v3 artifact and `paper_enforced` both
+    /// configured -- `approved_for_live` can never become true through this
+    /// path.
+    #[tokio::test]
+    async fn c3_04_non_paper_alpaca_deployment_never_reaches_the_v3_branch() {
+        let _env_guard = env_lock().lock().await;
+        clear_v3_env();
+        let watchlist_path = write_watchlist_v3("c3_04", "ZZC3LIVELOCK", &["intraday_scalper"]);
+        std::env::set_var(
+            crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
+            &watchlist_path,
+        );
+        std::env::set_var(STRATEGY_MD_TIMEFRAME_ENV, "5m");
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+
+        // Paper deployment mode but a non-Alpaca broker -- the live-lock
+        // predicate (`deployment_mode==Paper && broker_kind==Alpaca`) is
+        // false, so effective_mode must demote to Off regardless of the
+        // configured mode or the v3 artifact.
+        let state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Paper);
+        let state = Arc::new(state);
+        let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"c3-04-live-lock");
+
+        let (dyn_state, _authority) = snapshot_and_result(&state, run_id)
+            .await
+            .expect("live-locked Off must never fail");
+
+        let _ = std::fs::remove_file(&watchlist_path);
+        clear_v3_env();
+
+        assert_eq!(
+            dyn_state.effective_mode,
+            mqk_portfolio::DynamicSelectionMode::Off,
+            "the live-lock must demote to Off even with a v3 artifact and paper_enforced \
+             configured"
+        );
+        assert!(dyn_state.live_lock_applied);
+        assert_eq!(
+            dyn_state.authority_kind,
+            RuntimeStrategyAuthorityKind::Legacy
+        );
+        assert!(!dyn_state.approved_for_live);
     }
 }

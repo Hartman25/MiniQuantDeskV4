@@ -145,6 +145,13 @@ pub(crate) use closed_trade_attribution::{
     resolve_authoritative_closed_trade_view, ClosureAttribution, ClosureFragment,
 };
 pub(crate) use multi_symbol_config::read_multi_symbol_config_raw_inputs_from_env_and_fleet;
+// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C3: `StartAttemptAuthoritySnapshot`
+// (state/lifecycle.rs) keeps the raw-inputs struct itself (not just its
+// derived `MultiSymbolRuntimeConfig`) so the real daemon-start path can
+// inspect `watchlist_outcome` for a v3 artifact.
+pub(crate) use multi_symbol_config::{
+    build_explicit_multi_strategy_config_from_watchlist_artifact_v3, MultiSymbolConfigRawInputs,
+};
 pub use per_symbol_bar_window::{
     classify_bar_staleness, load_recent_completed_bars_for_symbol_window,
     per_symbol_loaded_bars_from_rows, EmptySymbolError, PerSymbolBarInput, PerSymbolBarWindow,
@@ -171,7 +178,7 @@ pub use types::{
     AutonomousSessionTruth, BrokerKind, BrokerSnapshotTruthSource, BuildInfo, BusMsg,
     DeploymentMode, DynamicSelectionLifecycleFaultSeam, DynamicSelectionRuntimeState,
     OperatorAuthMode, ReconcileStatusSnapshot, RestartTruthSnapshot, RuntimeLifecycleError,
-    StatusSnapshot, StrategyMarketDataSource,
+    RuntimeStrategyAuthorityKind, StatusSnapshot, StrategyMarketDataSource,
 };
 pub(crate) use types::{
     BoundedLifecycleDegradation, ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle,
@@ -8612,6 +8619,7 @@ mod ownership_state_machine_tests {
         // metadata) so `clear_local_runtime_for_run` actually matches.
         let dyn_state = DynamicSelectionRuntimeState {
             run_id,
+            authority_kind: RuntimeStrategyAuthorityKind::Legacy,
             disposition:
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
             configured_mode: mqk_portfolio::DynamicSelectionMode::Off,

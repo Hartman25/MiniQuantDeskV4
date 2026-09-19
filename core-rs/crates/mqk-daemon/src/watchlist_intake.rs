@@ -1058,6 +1058,60 @@ pub fn evaluate_watchlist_intake_v3_from_env() -> WatchlistIntakeOutcomeV3 {
 }
 
 // ---------------------------------------------------------------------------
+// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C2/C3: durable-authority identity
+// inputs -- the exact source-artifact hash and the v3 artifact's own
+// semantic fingerprint, kept deliberately distinct (frozen contract's
+// durable-evidence requirements list both as separate facts): a byte-for-
+// byte formatting change to the file changes the former but not the latter;
+// a meaning-changing edit (a different symbol/strategy list) changes both.
+// ---------------------------------------------------------------------------
+
+/// SHA-256 hex digest of the exact raw bytes of the file at `path` -- the
+/// durable authority's `source_artifact_hash`. `None` if the file cannot be
+/// read; callers must fail closed on `None`, never substitute a placeholder
+/// hash.
+pub fn hash_watchlist_artifact_file(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    Some(hex::encode(Sha256::digest(&bytes)))
+}
+
+/// Canonical semantic fingerprint of a validated `watchlist-v3` artifact's
+/// meaningful content -- the durable authority's `config_fingerprint`.
+/// Changes only when the artifact's authorized meaning changes (schema
+/// version, admitted symbols in order, each symbol's own strategy list in
+/// order, the shared caps, approval flag) -- never on an incidental raw-byte
+/// formatting difference (whitespace, key order) that
+/// [`hash_watchlist_artifact_file`]'s raw-byte hash would independently
+/// catch.
+pub fn canonical_v3_artifact_fingerprint(artifact: &LoadedWatchlistArtifactV3) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn push_len_prefixed(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    let mut buf = Vec::new();
+    push_len_prefixed(&mut buf, &artifact.schema_version);
+    buf.extend_from_slice(&(artifact.symbols.len() as u32).to_be_bytes());
+    let empty: Vec<String> = Vec::new();
+    for symbol in &artifact.symbols {
+        push_len_prefixed(&mut buf, symbol);
+        let strategies = artifact.strategy_assignments.get(symbol).unwrap_or(&empty);
+        buf.extend_from_slice(&(strategies.len() as u32).to_be_bytes());
+        for s in strategies {
+            push_len_prefixed(&mut buf, s);
+        }
+    }
+    buf.extend_from_slice(&artifact.max_symbols_to_trade.to_le_bytes());
+    buf.extend_from_slice(&artifact.max_concurrent_positions.to_le_bytes());
+    buf.push(u8::from(artifact.approved_for_autonomous_paper));
+
+    hex::encode(Sha256::digest(&buf))
+}
+
+// ---------------------------------------------------------------------------
 // Dry signal-admission contract (PAPER-HANDOFF-ENFORCE-01 seam)
 // ---------------------------------------------------------------------------
 

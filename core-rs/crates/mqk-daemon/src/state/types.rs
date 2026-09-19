@@ -871,9 +871,46 @@ pub enum AutonomousSessionTruth {
 /// `RuntimeStrategyDispatchAuthority`, `state/loop_runner.rs`). `host_pool_
 /// present`/`plan_id` are the immutable, cheaply-cloned status witnesses of
 /// that fact, not the object itself.
+/// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C3 (V4-STAGE-B-M2-REPAIR-03):
+/// which mechanism actually produced this start attempt's dispatch
+/// authority. Orthogonal to `disposition`, which stays in Bundle 7's own
+/// vocabulary (`Off`/`ShadowAllowed`/.../`PaperEnforcedAllowed`) for every
+/// mechanism, since both mechanisms' outcomes are conceptually "this mode,
+/// allowed or refused to dispatch" -- this field is what actually lets an
+/// operator/read-only surface distinguish which mechanism produced that
+/// outcome, without inferring it from `plan`'s presence (which the explicit
+/// v3 mechanism deliberately never populates -- see the frozen contract:
+/// `docs/specs/multi_strategy_runtime_dispatch_01a_frozen_contract.md`. This
+/// mechanism never fabricates a Bundle 7 `DynamicSelectionPlan`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStrategyAuthorityKind {
+    /// `Off`/`Shadow`, or any disposition that falls back to the legacy
+    /// single-symbol assignment path.
+    Legacy,
+    /// Bundle 7's dynamic ranking selector (`mqk_portfolio::dynamic_selection`).
+    Bundle7DynamicSelection,
+    /// The explicit per-symbol multi-strategy authorization mechanism
+    /// (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`), built from a `watchlist-v3`
+    /// artifact.
+    ExplicitWatchlistV3MultiStrategy,
+}
+
+impl RuntimeStrategyAuthorityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Bundle7DynamicSelection => "bundle7_dynamic_selection",
+            Self::ExplicitWatchlistV3MultiStrategy => "explicit_watchlist_v3_multi_strategy",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DynamicSelectionRuntimeState {
     pub run_id: Uuid,
+    /// Which mechanism actually produced this start attempt's authority —
+    /// see [`RuntimeStrategyAuthorityKind`].
+    pub authority_kind: RuntimeStrategyAuthorityKind,
     pub disposition: crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition,
     pub configured_mode: mqk_portfolio::DynamicSelectionMode,
     pub effective_mode: mqk_portfolio::DynamicSelectionMode,
@@ -939,6 +976,7 @@ impl fmt::Debug for DynamicSelectionRuntimeState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DynamicSelectionRuntimeState")
             .field("run_id", &self.run_id)
+            .field("authority_kind", &self.authority_kind)
             .field("disposition", &self.disposition)
             .field("configured_mode", &self.configured_mode)
             .field("effective_mode", &self.effective_mode)

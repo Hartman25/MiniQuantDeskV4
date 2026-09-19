@@ -3386,6 +3386,7 @@ mod tests {
     fn fixture_shadow_committed(run_id: uuid::Uuid) -> crate::state::DynamicSelectionRuntimeState {
         crate::state::DynamicSelectionRuntimeState {
             run_id,
+            authority_kind: crate::state::RuntimeStrategyAuthorityKind::Bundle7DynamicSelection,
             disposition:
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowAllowed,
             configured_mode: mqk_portfolio::DynamicSelectionMode::Shadow,

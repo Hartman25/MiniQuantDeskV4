@@ -315,9 +315,14 @@ pub(crate) async fn evaluate_explicit_bindings(
 /// [`evaluate_explicit_bindings`], filtered and re-sorted to only the
 /// authorized subset's `(symbol, strategy_id, timeframe_secs)` identity —
 /// the shape [`crate::dynamic_selection_host_pool::DynamicSelectionHostPool::build`]
-/// consumes. Kept as the existing, narrower entry point for dispatch/host-
-/// pool construction; [`evaluate_explicit_bindings`] is the fuller entry
-/// point for durable-evidence construction (Patch C2).
+/// consumes. Kept as a narrower entry point for a future caller that needs
+/// only the authorized set without full per-binding evidence; the real
+/// Patch C3 activation path (`state/lifecycle.rs`) calls
+/// [`evaluate_explicit_bindings`] directly instead and derives both the
+/// authorized subset and the durable evidence from that one evaluation
+/// pass, so it is not itself a production caller of this function
+/// (avoiding a second, redundant evidence-gathering DB round trip).
+#[allow(dead_code)]
 pub(crate) async fn resolve_authorized_explicit_bindings(
     ctx: &DynamicSelectionPlanBuildContext<'_>,
     artifact: &LoadedWatchlistArtifactV3,
