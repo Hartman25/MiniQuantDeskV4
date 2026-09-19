@@ -119,6 +119,17 @@ fn source_kind_and_identity(source: &MultiSymbolConfigSource) -> (String, String
         MultiSymbolConfigSource::WatchlistArtifactV2 { path } => {
             ("watchlist_v2".to_string(), path.clone())
         }
+        // Provably unreachable: `MultiSymbolRuntimeConfig` (whose `source`
+        // this function inspects) is never constructed with
+        // `WatchlistArtifactV3` -- that variant is only ever carried on the
+        // wholly separate `ExplicitMultiStrategyRuntimeConfig::source`,
+        // which never flows into Bundle 7's start-gate path (frozen
+        // contract; `MULTI-STRATEGY-RUNTIME-DISPATCH-01`). Fail-closed
+        // labeling rather than a silent misattribution if that invariant is
+        // ever violated.
+        MultiSymbolConfigSource::WatchlistArtifactV3 { path } => {
+            ("watchlist_v3_unexpected_in_bundle7".to_string(), path.clone())
+        }
     }
 }
 

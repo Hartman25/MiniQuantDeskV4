@@ -116,19 +116,15 @@ pub enum MultiSymbolConfigSource {
     /// An approved `watchlist-v2` artifact loaded from `path`
     /// (`MQK_PAPER_WATCHLIST_PATH`).
     WatchlistArtifactV2 { path: String },
-}
-
-/// Where an [`ExplicitMultiStrategyRuntimeConfig`] was built from. A
-/// dedicated, separate enum from [`MultiSymbolConfigSource`] — not an added
-/// variant on it — so every existing exhaustive match over
-/// `MultiSymbolConfigSource` (all of which only ever see a
-/// [`MultiSymbolRuntimeConfig`]'s source, never an explicit-v3 one) keeps
-/// compiling without gaining a dead, provably-unreachable arm.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MultiStrategyConfigSourceV3 {
     /// An approved `watchlist-v3` artifact loaded from `path`
     /// (`MQK_PAPER_WATCHLIST_PATH`) — explicit per-symbol multi-strategy
-    /// authorization (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`).
+    /// authorization (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`, frozen contract
+    /// §9). Frozen-contract-mandated variant on this same enum, not a
+    /// separate source vocabulary — carried on
+    /// [`ExplicitMultiStrategyRuntimeConfig::source`] only; never
+    /// constructed by [`MultiSymbolRuntimeConfig`]'s own builders (whose
+    /// `symbols: Vec<SymbolStrategyAssignment>` shape cannot represent a v3
+    /// artifact's multiple strategies per symbol).
     WatchlistArtifactV3 { path: String },
 }
 
@@ -188,6 +184,19 @@ pub enum MultiSymbolConfigError {
     /// Watchlist source: `artifact.max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING`.
     /// Defense-in-depth — already rejected by `evaluate_watchlist_intake`.
     HardCeilingExceeded { configured: usize, ceiling: usize },
+    /// Watchlist source: `outcome` is `LoadedApprovedV3` — a genuine,
+    /// approved multi-strategy authorization that this single-assignment-
+    /// per-symbol builder cannot represent. Frozen contract §9 / independent
+    /// review: an approved v3 artifact must never be silently reinterpreted
+    /// as "not configured" and fall through to the legacy single-symbol
+    /// path (which would silently discard the real authorization and could
+    /// resolve to a stale/unrelated legacy single-symbol config instead).
+    /// Callers that need the v3 binding set must call
+    /// [`build_explicit_multi_strategy_config_from_watchlist_artifact_v3`]
+    /// directly. `LoadedNotApprovedV3` is unaffected — it continues to fall
+    /// through to the legacy path, mirroring v2's own not-approved
+    /// behavior (there is no authorization to lose).
+    WatchlistIsV3,
 }
 
 impl MultiSymbolConfigError {
@@ -202,6 +211,7 @@ impl MultiSymbolConfigError {
             Self::MissingAssignment { .. } => "multi_symbol_config_missing_assignment",
             Self::ConcurrentLimitExceeded { .. } => "multi_symbol_config_concurrent_limit_exceeded",
             Self::HardCeilingExceeded { .. } => "multi_symbol_config_hard_ceiling_exceeded",
+            Self::WatchlistIsV3 => "multi_symbol_config_watchlist_is_v3",
         }
     }
 }
@@ -463,7 +473,10 @@ pub struct ExplicitMultiStrategyRuntimeConfig {
     /// never `HashMap` iteration order.
     pub bindings: Vec<(String, String, i64)>,
     pub max_symbols_to_trade: usize,
-    pub source: MultiStrategyConfigSourceV3,
+    /// Always [`MultiSymbolConfigSource::WatchlistArtifactV3`] — the frozen
+    /// contract's own canonical source vocabulary (§9), not a parallel
+    /// source enum.
+    pub source: MultiSymbolConfigSource,
 }
 
 /// Build an [`ExplicitMultiStrategyRuntimeConfig`] from a watchlist intake
@@ -496,7 +509,7 @@ pub struct ExplicitMultiStrategyRuntimeConfig {
 /// own rationale.
 ///
 /// On success, `max_symbols_to_trade = artifact.max_symbols_to_trade` and
-/// `source = MultiStrategyConfigSourceV3::WatchlistArtifactV3 { path:
+/// `source = MultiSymbolConfigSource::WatchlistArtifactV3 { path:
 /// configured_path.to_string() }`.
 pub fn build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
     outcome: &WatchlistIntakeOutcome,
@@ -563,7 +576,7 @@ pub fn build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
         schema_version: WATCHLIST_SCHEMA_VERSION_V3.to_string(),
         bindings,
         max_symbols_to_trade,
-        source: MultiStrategyConfigSourceV3::WatchlistArtifactV3 {
+        source: MultiSymbolConfigSource::WatchlistArtifactV3 {
             path: configured_path.to_string(),
         },
     })
@@ -601,17 +614,27 @@ pub fn build_explicit_multi_strategy_config_from_env(
 /// fallback (design doc §4.1).
 ///
 /// # Selection order
+/// 0. If `watchlist_outcome` is `WatchlistIntakeOutcome::LoadedApprovedV3` —
+///    a genuine, approved multi-strategy authorization — fail closed with
+///    [`MultiSymbolConfigError::WatchlistIsV3`] rather than silently
+///    reinterpreting it as "not configured" and falling through to the
+///    legacy path (frozen contract §9 / independent review). Callers that
+///    need the v3 binding set must call
+///    [`build_explicit_multi_strategy_config_from_watchlist_artifact_v3`]
+///    directly, not this function. `LoadedNotApprovedV3` is unaffected by
+///    this step (see step 2).
 /// 1. If `watchlist_outcome` is `WatchlistIntakeOutcome::LoadedApproved` with
 ///    `schema_version == "watchlist-v2"`, try
 ///    [`build_multi_symbol_config_from_watchlist_artifact`]. If it succeeds,
 ///    return it (`source = WatchlistArtifactV2`).
 /// 2. Otherwise — including when step 1 was skipped (not configured, not
-///    approved, v1, `Invalid`) *or* the watchlist-v2 builder returned `Err`
-///    for any reason — fall back to
+///    approved, v1, `Invalid`, `LoadedNotApprovedV3`) *or* the watchlist-v2
+///    builder returned `Err` for any reason — fall back to
 ///    [`build_legacy_single_symbol_config`] (`source =
 ///    EnvSingleSymbolFallback`). Per the design doc: "Invalid watchlist-v2
 ///    artifact -> falls back to EnvSingleSymbolFallback (back-compat),
-///    logged, not an error."
+///    logged, not an error." `LoadedNotApprovedV3` mirrors v2's own
+///    not-approved behavior here — there is no authorization to lose.
 /// 3. If the legacy fallback also fails, its [`MultiSymbolConfigError`] is
 ///    returned — fail-closed: no config is ever fabricated.
 pub fn build_multi_symbol_runtime_config_from_env_and_watchlist(
@@ -621,16 +644,13 @@ pub fn build_multi_symbol_runtime_config_from_env_and_watchlist(
     legacy_strategy_id: Option<&str>,
     legacy_timeframe: Option<&str>,
 ) -> Result<MultiSymbolRuntimeConfig, MultiSymbolConfigError> {
-    // A `LoadedApprovedV3`/`LoadedNotApprovedV3` outcome deliberately does
-    // NOT match the `if let` below and falls through to the legacy
-    // single-symbol builder — explicitly, not silently: this function
-    // returns `MultiSymbolRuntimeConfig`, whose one-assignment-per-symbol
-    // shape cannot represent a v3 artifact's multiple strategies per symbol
-    // (frozen contract §9). A v3 artifact's own config source is
-    // `ExplicitMultiStrategyRuntimeConfig`, built by
-    // `build_explicit_multi_strategy_config_from_watchlist_artifact_v3`
-    // above — a wholly separate seam, never this one. Callers that need the
-    // v3 binding set must call that function directly, not this one.
+    if matches!(
+        watchlist_outcome,
+        WatchlistIntakeOutcome::LoadedApprovedV3 { .. }
+    ) {
+        return Err(MultiSymbolConfigError::WatchlistIsV3);
+    }
+
     if let WatchlistIntakeOutcome::LoadedApproved { artifact } = watchlist_outcome {
         if artifact.schema_version == WATCHLIST_SCHEMA_VERSION_V2 {
             let path = configured_watchlist_path.unwrap_or("");
@@ -938,7 +958,7 @@ mod explicit_multi_strategy_v3_config_tests {
         );
         assert_eq!(
             cfg.source,
-            MultiStrategyConfigSourceV3::WatchlistArtifactV3 {
+            MultiSymbolConfigSource::WatchlistArtifactV3 {
                 path: "test-path".to_string()
             }
         );
@@ -1142,5 +1162,62 @@ mod explicit_multi_strategy_v3_config_tests {
                 ("AAPL".to_string(), "intraday_scalper".to_string(), 300),
             ]
         );
+    }
+
+    /// D1 (V4-STAGE-B-M2-C1-C3-REPAIR-04): an approved v3 outcome fed to the
+    /// v1/v2/legacy selector must fail closed with `WatchlistIsV3` — never
+    /// silently reinterpreted as "not configured" and resolved to whatever
+    /// legacy single-symbol env vars happen to be set. This is the negative
+    /// control: legacy env inputs are deliberately supplied *valid* here, so
+    /// a pre-repair build would have silently returned an
+    /// `EnvSingleSymbolFallback` config, discarding the real multi-strategy
+    /// authorization — proving this is a fail-closed refusal, not merely an
+    /// absence of a positive path.
+    #[test]
+    fn d1_approved_v3_outcome_never_silently_falls_through_to_legacy() {
+        let artifact = v3_artifact(
+            &["AAPL"],
+            &[("AAPL", &["intraday_scalper", "intraday_short_scalper"])],
+            1,
+        );
+        let outcome = WatchlistIntakeOutcome::LoadedApprovedV3 { artifact };
+
+        let err = build_multi_symbol_runtime_config_from_env_and_watchlist(
+            &outcome,
+            Some("watchlist-v3.json"),
+            Some("AAPL"),
+            Some("legacy-strategy-should-never-be-used"),
+            Some("5m"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            MultiSymbolConfigError::WatchlistIsV3,
+            "an approved v3 outcome must refuse closed, never silently resolve to a \
+             legacy single-symbol config even when legacy env inputs are individually valid"
+        );
+    }
+
+    /// A not-approved v3 outcome carries no authorization to lose, so it
+    /// continues to fall through to the legacy path — mirroring v2's own
+    /// not-approved behavior. Confirms step 0's refusal is scoped to
+    /// `LoadedApprovedV3` only.
+    #[test]
+    fn d1_not_approved_v3_outcome_still_falls_through_to_legacy() {
+        let artifact = v3_artifact(&["AAPL"], &[("AAPL", &["intraday_scalper"])], 1);
+        let outcome = WatchlistIntakeOutcome::LoadedNotApprovedV3 { artifact };
+
+        let cfg = build_multi_symbol_runtime_config_from_env_and_watchlist(
+            &outcome,
+            Some("watchlist-v3.json"),
+            Some("AAPL"),
+            Some("legacy-strategy"),
+            Some("5m"),
+        )
+        .expect("not-approved v3 has no authorization to lose; legacy fallback proceeds");
+
+        assert_eq!(cfg.source, MultiSymbolConfigSource::EnvSingleSymbolFallback);
+        assert_eq!(cfg.symbols[0].strategy_id, "legacy-strategy");
     }
 }

@@ -43,6 +43,11 @@ fn assignment_source_str(source: &MultiSymbolConfigSource) -> &'static str {
     match source {
         MultiSymbolConfigSource::EnvSingleSymbolFallback => "env_single_symbol_fallback",
         MultiSymbolConfigSource::WatchlistArtifactV2 { .. } => "watchlist_v2",
+        // Provably unreachable: `MultiSymbolRuntimeConfig` is never
+        // constructed with `WatchlistArtifactV3` (see
+        // `dynamic_selection_start_gate::source_kind_and_identity`'s own
+        // comment on the same invariant).
+        MultiSymbolConfigSource::WatchlistArtifactV3 { .. } => "watchlist_v3_unexpected",
     }
 }
 

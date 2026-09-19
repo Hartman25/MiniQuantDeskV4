@@ -511,6 +511,14 @@ pub fn derive_assignment_identity(config: &MultiSymbolRuntimeConfig) -> String {
         MultiSymbolConfigSource::WatchlistArtifactV2 { path } => {
             format!("watchlist_v2:{}", path.trim())
         }
+        // Provably unreachable: `MultiSymbolRuntimeConfig` is never
+        // constructed with `WatchlistArtifactV3` (see
+        // `dynamic_selection_start_gate::source_kind_and_identity`'s own
+        // comment on the same invariant). Fail-closed labeling, never a
+        // silent misattribution.
+        MultiSymbolConfigSource::WatchlistArtifactV3 { path } => {
+            format!("watchlist_v3_unexpected:{}", path.trim())
+        }
     };
     let assignments: Vec<String> = config
         .symbols

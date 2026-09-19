@@ -1760,11 +1760,37 @@ impl AppState {
         // deployments (e.g. LiveShadow running in monitor-only mode); this
         // block is scoped to Paper+Alpaca only, matching the pre-extraction
         // gate exactly.
+        //
+        // MULTI-STRATEGY-RUNTIME-DISPATCH-01 (D1, V4-STAGE-B-M2-C1-C3-
+        // REPAIR-04): a native `MQK_STRATEGY_IDS` bootstrap is not the only
+        // way this start attempt can guarantee a real strategy engine will
+        // generate decisions — an approved `watchlist-v3` artifact, engaged
+        // only when `effective_mode` actually resolves to `PaperEnforced`
+        // (the only mode `build_explicit_multi_strategy_start_snapshot`
+        // consumes it in), is an independent, equally authoritative
+        // guarantee: that path builds one isolated `StrategyHost` per
+        // authorized binding and fails the whole start closed
+        // (`ExplicitMultiStrategyBuildError::NoAuthorizedBindings`) if zero
+        // bindings independently pass their evidence gate. The invariant
+        // this gate protects — "no strategy engine will generate decisions"
+        // — is therefore never weakened by this bypass; only the two
+        // *sources* that can satisfy it are widened, per operator decision
+        // (frozen contract; operators must not be required to duplicate a
+        // v3 artifact's strategy list into `MQK_STRATEGY_IDS` merely to
+        // pass this gate). `LoadedNotApprovedV3` and any non-v3 outcome do
+        // not qualify — the ordinary Dormant refusal below still applies.
+        let explicit_v3_authority_pending = start_attempt_snapshot.effective_mode.effective_mode
+            == mqk_portfolio::DynamicSelectionMode::PaperEnforced
+            && matches!(
+                start_attempt_snapshot.multi_symbol_raw_inputs.watchlist_outcome,
+                crate::watchlist_intake::WatchlistIntakeOutcome::LoadedApprovedV3 { .. }
+            );
         if start_attempt_snapshot
             .native_strategy_bootstrap
             .is_dormant()
             && self.deployment_mode() == DeploymentMode::Paper
             && self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
+            && !explicit_v3_authority_pending
         {
             return Err(RuntimeLifecycleError::forbidden(
                 "runtime.start_refused.strategy_bootstrap_dormant",
@@ -1774,7 +1800,8 @@ impl AppState {
                  decisions; set MQK_STRATEGY_IDS to a registered strategy name \
                  (e.g. 'swing_momentum') and ensure it is enabled in \
                  sys_strategy_registry before starting the autonomous paper path \
-                 (STRATEGY-DORMANCY-01)",
+                 (STRATEGY-DORMANCY-01), or configure an approved watchlist-v3 \
+                 artifact (MULTI-STRATEGY-RUNTIME-DISPATCH-01)",
             ));
         }
 
@@ -8519,5 +8546,83 @@ mod explicit_multi_strategy_start_snapshot_tests {
             RuntimeStrategyAuthorityKind::Legacy
         );
         assert!(!dyn_state.approved_for_live);
+    }
+
+    /// D1 (V4-STAGE-B-M2-C1-C3-REPAIR-04): full-wrapper proof, through the
+    /// actual `start_execution_runtime` entry point (not only
+    /// `build_dynamic_selection_start_snapshot`) -- no DB required, since
+    /// the STRATEGY-DORMANCY-01 gate this proves is evaluated before any DB
+    /// resource is acquired.
+    ///
+    /// 1. With nothing configured at all (no fleet, no watchlist), the
+    ///    Paper+Alpaca Dormant gate must still refuse exactly as before this
+    ///    patch -- this patch never weakens the ordinary case.
+    /// 2. With an approved watchlist-v3 artifact and `paper_enforced`
+    ///    configured but `MQK_STRATEGY_IDS` deliberately absent, the start
+    ///    attempt must proceed PAST the Dormant gate -- it must fail (this
+    ///    test has no DB pool, so it cannot succeed end-to-end), but never
+    ///    with `strategy_bootstrap_dormant`. Operators must not be required
+    ///    to duplicate a v3 artifact's strategy list into `MQK_STRATEGY_IDS`
+    ///    merely to pass this gate (frozen contract; operator clarification).
+    #[tokio::test]
+    async fn d1_full_wrapper_dormant_gate_bypassed_only_for_approved_v3_paper_enforced() {
+        let _env_guard = env_lock().lock().await;
+        clear_v3_env();
+
+        let state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca);
+        let state = Arc::new(state);
+        {
+            let mut integrity = state.integrity.write().await;
+            integrity.disarmed = false;
+            integrity.halted = false;
+        }
+        state
+            .update_ws_continuity(crate::state::AlpacaWsContinuityState::Live {
+                last_message_id: "d1-full-wrapper-test".to_string(),
+                last_event_at: "2026-09-19T00:00:00Z".to_string(),
+            })
+            .await;
+
+        // 1. Ordinary case: nothing configured -- Dormant gate fires exactly
+        // as before this patch.
+        let err = state
+            .start_execution_runtime()
+            .await
+            .expect_err("paper+alpaca with no fleet and no v3 artifact must refuse closed");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.strategy_bootstrap_dormant",
+            "the ordinary Dormant refusal must be unaffected by this patch"
+        );
+
+        // 2. Approved v3 artifact + paper_enforced, no MQK_STRATEGY_IDS.
+        let watchlist_path = write_watchlist_v3("d1_full_wrapper", "ZZD1WRAPPER", &["intraday_scalper"]);
+        std::env::set_var(
+            crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
+            &watchlist_path,
+        );
+        std::env::set_var(STRATEGY_MD_TIMEFRAME_ENV, "5m");
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+        std::env::remove_var("MQK_STRATEGY_IDS");
+        std::env::remove_var("MQK_STRATEGY_SYMBOL");
+
+        let err = state
+            .start_execution_runtime()
+            .await
+            .expect_err("no DB pool means this cannot succeed end-to-end in this test");
+
+        let _ = std::fs::remove_file(&watchlist_path);
+        clear_v3_env();
+
+        assert_ne!(
+            err.fault_class(),
+            "runtime.start_refused.strategy_bootstrap_dormant",
+            "an approved watchlist-v3 artifact under paper_enforced must not require \
+             MQK_STRATEGY_IDS to pass the native-bootstrap Dormant gate: {err:?}"
+        );
     }
 }

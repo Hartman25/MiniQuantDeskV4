@@ -707,7 +707,8 @@ pub fn top_level_blocker_for_config_error(err: &MultiSymbolConfigError) -> &'sta
         | MultiSymbolConfigError::WatchlistNotApproved
         | MultiSymbolConfigError::MissingAssignment { .. }
         | MultiSymbolConfigError::ConcurrentLimitExceeded { .. }
-        | MultiSymbolConfigError::HardCeilingExceeded { .. } => REASON_ASSIGNMENT_RESOLUTION_FAILED,
+        | MultiSymbolConfigError::HardCeilingExceeded { .. }
+        | MultiSymbolConfigError::WatchlistIsV3 => REASON_ASSIGNMENT_RESOLUTION_FAILED,
     }
 }
 
