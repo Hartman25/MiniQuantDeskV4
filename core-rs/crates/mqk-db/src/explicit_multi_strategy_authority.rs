@@ -30,6 +30,15 @@ use uuid::Uuid;
 /// at the DB level too (migration 0072).
 pub const EXPLICIT_MULTI_STRATEGY_SOURCE_KIND: &str = "explicit_watchlist_v3";
 
+/// Every `mqk_portfolio::SelectionCandidateEvidence` field that can change a
+/// candidate's authorization, provenance validity, semantic identity, or
+/// evidence interpretation (D2, V4-STAGE-B-M2-C1-C3-REPAIR-04) is carried on
+/// this DTO -- never a fragile partial mirror. `promotion_state`/
+/// `durable_config_fingerprint`/`current_config_fingerprint`/
+/// `registry_enabled`/`data_ready`/`promotion_transition_id`/
+/// `evidence_transition_id`/`promotion_query_ok`/`promotion_effective`/
+/// `config_identity_verified` were already present (Patch C2); every other
+/// field below closes the independent-review gap.
 #[derive(Debug, Clone)]
 pub struct NewExplicitMultiStrategyAuthorityBinding {
     pub symbol: String,
@@ -40,13 +49,36 @@ pub struct NewExplicitMultiStrategyAuthorityBinding {
     pub promotion_query_ok: bool,
     pub promotion_state: Option<String>,
     pub promotion_effective: bool,
+    pub promotion_expired: bool,
+    pub evidence_resolved: bool,
+    pub review_state_is_paper_candidate: bool,
+    pub evidence_review_state: Option<String>,
+    pub durable_legacy_fingerprint: Option<String>,
+    pub recomputed_legacy_fingerprint: Option<String>,
+    pub legacy_fingerprint_matches: bool,
+    pub durable_exact_fingerprint_v2: Option<String>,
+    pub recomputed_exact_fingerprint_v2: Option<String>,
+    pub exact_fingerprint_v2_matches: bool,
     pub config_identity_verified: bool,
     pub durable_config_fingerprint: Option<String>,
     pub current_config_fingerprint: Option<String>,
     pub registry_enabled: bool,
+    pub plugin_instantiable: bool,
+    pub timeframe_matches: bool,
     pub data_ready: bool,
+    pub canonical_score_decimal: Option<String>,
+    pub canonical_score_micros: Option<i64>,
+    pub scanner_rank: Option<i32>,
+    pub watchlist_assigned: bool,
+    pub evidence_review_id: Option<String>,
+    pub evidence_scanner_scan_id: Option<String>,
+    pub evidence_artifact_path: Option<String>,
+    pub evidence_git_hash: Option<String>,
     pub promotion_transition_id: Option<String>,
+    pub promotion_effective_at: Option<String>,
+    pub promotion_expires_at: Option<String>,
     pub evidence_transition_id: Option<String>,
+    pub exact_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,13 +134,36 @@ pub struct ExplicitMultiStrategyAuthorityBindingRecord {
     pub promotion_query_ok: bool,
     pub promotion_state: Option<String>,
     pub promotion_effective: bool,
+    pub promotion_expired: bool,
+    pub evidence_resolved: bool,
+    pub review_state_is_paper_candidate: bool,
+    pub evidence_review_state: Option<String>,
+    pub durable_legacy_fingerprint: Option<String>,
+    pub recomputed_legacy_fingerprint: Option<String>,
+    pub legacy_fingerprint_matches: bool,
+    pub durable_exact_fingerprint_v2: Option<String>,
+    pub recomputed_exact_fingerprint_v2: Option<String>,
+    pub exact_fingerprint_v2_matches: bool,
     pub config_identity_verified: bool,
     pub durable_config_fingerprint: Option<String>,
     pub current_config_fingerprint: Option<String>,
     pub registry_enabled: bool,
+    pub plugin_instantiable: bool,
+    pub timeframe_matches: bool,
     pub data_ready: bool,
+    pub canonical_score_decimal: Option<String>,
+    pub canonical_score_micros: Option<i64>,
+    pub scanner_rank: Option<i32>,
+    pub watchlist_assigned: bool,
+    pub evidence_review_id: Option<String>,
+    pub evidence_scanner_scan_id: Option<String>,
+    pub evidence_artifact_path: Option<String>,
+    pub evidence_git_hash: Option<String>,
     pub promotion_transition_id: Option<String>,
+    pub promotion_effective_at: Option<String>,
+    pub promotion_expires_at: Option<String>,
     pub evidence_transition_id: Option<String>,
+    pub exact_reason: Option<String>,
 }
 
 /// Every way a [`NewExplicitMultiStrategyAuthority`] fails validation
@@ -212,13 +267,36 @@ struct BindingSnapshot {
     promotion_query_ok: bool,
     promotion_state: Option<String>,
     promotion_effective: bool,
+    promotion_expired: bool,
+    evidence_resolved: bool,
+    review_state_is_paper_candidate: bool,
+    evidence_review_state: Option<String>,
+    durable_legacy_fingerprint: Option<String>,
+    recomputed_legacy_fingerprint: Option<String>,
+    legacy_fingerprint_matches: bool,
+    durable_exact_fingerprint_v2: Option<String>,
+    recomputed_exact_fingerprint_v2: Option<String>,
+    exact_fingerprint_v2_matches: bool,
     config_identity_verified: bool,
     durable_config_fingerprint: Option<String>,
     current_config_fingerprint: Option<String>,
     registry_enabled: bool,
+    plugin_instantiable: bool,
+    timeframe_matches: bool,
     data_ready: bool,
+    canonical_score_decimal: Option<String>,
+    canonical_score_micros: Option<i64>,
+    scanner_rank: Option<i32>,
+    watchlist_assigned: bool,
+    evidence_review_id: Option<String>,
+    evidence_scanner_scan_id: Option<String>,
+    evidence_artifact_path: Option<String>,
+    evidence_git_hash: Option<String>,
     promotion_transition_id: Option<String>,
+    promotion_effective_at: Option<String>,
+    promotion_expires_at: Option<String>,
     evidence_transition_id: Option<String>,
+    exact_reason: Option<String>,
 }
 
 fn new_header_snapshot(new: &NewExplicitMultiStrategyAuthority) -> HeaderSnapshot {
@@ -265,13 +343,36 @@ fn new_binding_snapshots(
             promotion_query_ok: b.promotion_query_ok,
             promotion_state: b.promotion_state.clone(),
             promotion_effective: b.promotion_effective,
+            promotion_expired: b.promotion_expired,
+            evidence_resolved: b.evidence_resolved,
+            review_state_is_paper_candidate: b.review_state_is_paper_candidate,
+            evidence_review_state: b.evidence_review_state.clone(),
+            durable_legacy_fingerprint: b.durable_legacy_fingerprint.clone(),
+            recomputed_legacy_fingerprint: b.recomputed_legacy_fingerprint.clone(),
+            legacy_fingerprint_matches: b.legacy_fingerprint_matches,
+            durable_exact_fingerprint_v2: b.durable_exact_fingerprint_v2.clone(),
+            recomputed_exact_fingerprint_v2: b.recomputed_exact_fingerprint_v2.clone(),
+            exact_fingerprint_v2_matches: b.exact_fingerprint_v2_matches,
             config_identity_verified: b.config_identity_verified,
             durable_config_fingerprint: b.durable_config_fingerprint.clone(),
             current_config_fingerprint: b.current_config_fingerprint.clone(),
             registry_enabled: b.registry_enabled,
+            plugin_instantiable: b.plugin_instantiable,
+            timeframe_matches: b.timeframe_matches,
             data_ready: b.data_ready,
+            canonical_score_decimal: b.canonical_score_decimal.clone(),
+            canonical_score_micros: b.canonical_score_micros,
+            scanner_rank: b.scanner_rank,
+            watchlist_assigned: b.watchlist_assigned,
+            evidence_review_id: b.evidence_review_id.clone(),
+            evidence_scanner_scan_id: b.evidence_scanner_scan_id.clone(),
+            evidence_artifact_path: b.evidence_artifact_path.clone(),
+            evidence_git_hash: b.evidence_git_hash.clone(),
             promotion_transition_id: b.promotion_transition_id.clone(),
+            promotion_effective_at: b.promotion_effective_at.clone(),
+            promotion_expires_at: b.promotion_expires_at.clone(),
             evidence_transition_id: b.evidence_transition_id.clone(),
+            exact_reason: b.exact_reason.clone(),
         })
         .collect();
     v.sort();
@@ -292,13 +393,36 @@ fn stored_binding_snapshots(
             promotion_query_ok: b.promotion_query_ok,
             promotion_state: b.promotion_state.clone(),
             promotion_effective: b.promotion_effective,
+            promotion_expired: b.promotion_expired,
+            evidence_resolved: b.evidence_resolved,
+            review_state_is_paper_candidate: b.review_state_is_paper_candidate,
+            evidence_review_state: b.evidence_review_state.clone(),
+            durable_legacy_fingerprint: b.durable_legacy_fingerprint.clone(),
+            recomputed_legacy_fingerprint: b.recomputed_legacy_fingerprint.clone(),
+            legacy_fingerprint_matches: b.legacy_fingerprint_matches,
+            durable_exact_fingerprint_v2: b.durable_exact_fingerprint_v2.clone(),
+            recomputed_exact_fingerprint_v2: b.recomputed_exact_fingerprint_v2.clone(),
+            exact_fingerprint_v2_matches: b.exact_fingerprint_v2_matches,
             config_identity_verified: b.config_identity_verified,
             durable_config_fingerprint: b.durable_config_fingerprint.clone(),
             current_config_fingerprint: b.current_config_fingerprint.clone(),
             registry_enabled: b.registry_enabled,
+            plugin_instantiable: b.plugin_instantiable,
+            timeframe_matches: b.timeframe_matches,
             data_ready: b.data_ready,
+            canonical_score_decimal: b.canonical_score_decimal.clone(),
+            canonical_score_micros: b.canonical_score_micros,
+            scanner_rank: b.scanner_rank,
+            watchlist_assigned: b.watchlist_assigned,
+            evidence_review_id: b.evidence_review_id.clone(),
+            evidence_scanner_scan_id: b.evidence_scanner_scan_id.clone(),
+            evidence_artifact_path: b.evidence_artifact_path.clone(),
+            evidence_git_hash: b.evidence_git_hash.clone(),
             promotion_transition_id: b.promotion_transition_id.clone(),
+            promotion_effective_at: b.promotion_effective_at.clone(),
+            promotion_expires_at: b.promotion_expires_at.clone(),
             evidence_transition_id: b.evidence_transition_id.clone(),
+            exact_reason: b.exact_reason.clone(),
         })
         .collect();
     v.sort();
@@ -307,8 +431,15 @@ fn stored_binding_snapshots(
 
 const BINDING_COLUMNS: &str = "authority_id, ordinal, symbol, strategy_id, timeframe_secs, \
      authorized, reason_code, promotion_query_ok, promotion_state, promotion_effective, \
-     config_identity_verified, durable_config_fingerprint, current_config_fingerprint, \
-     registry_enabled, data_ready, promotion_transition_id, evidence_transition_id";
+     promotion_expired, evidence_resolved, review_state_is_paper_candidate, \
+     evidence_review_state, durable_legacy_fingerprint, recomputed_legacy_fingerprint, \
+     legacy_fingerprint_matches, durable_exact_fingerprint_v2, recomputed_exact_fingerprint_v2, \
+     exact_fingerprint_v2_matches, config_identity_verified, durable_config_fingerprint, \
+     current_config_fingerprint, registry_enabled, plugin_instantiable, timeframe_matches, \
+     data_ready, canonical_score_decimal, canonical_score_micros, scanner_rank, \
+     watchlist_assigned, evidence_review_id, evidence_scanner_scan_id, evidence_artifact_path, \
+     evidence_git_hash, promotion_transition_id, promotion_effective_at, promotion_expires_at, \
+     evidence_transition_id, exact_reason";
 
 fn binding_select_sql(clause: &str) -> String {
     format!("select {BINDING_COLUMNS} from sys_explicit_multi_strategy_authority_bindings {clause}")
@@ -347,13 +478,36 @@ fn binding_row_to_record(
         promotion_query_ok: row.get("promotion_query_ok"),
         promotion_state: row.get("promotion_state"),
         promotion_effective: row.get("promotion_effective"),
+        promotion_expired: row.get("promotion_expired"),
+        evidence_resolved: row.get("evidence_resolved"),
+        review_state_is_paper_candidate: row.get("review_state_is_paper_candidate"),
+        evidence_review_state: row.get("evidence_review_state"),
+        durable_legacy_fingerprint: row.get("durable_legacy_fingerprint"),
+        recomputed_legacy_fingerprint: row.get("recomputed_legacy_fingerprint"),
+        legacy_fingerprint_matches: row.get("legacy_fingerprint_matches"),
+        durable_exact_fingerprint_v2: row.get("durable_exact_fingerprint_v2"),
+        recomputed_exact_fingerprint_v2: row.get("recomputed_exact_fingerprint_v2"),
+        exact_fingerprint_v2_matches: row.get("exact_fingerprint_v2_matches"),
         config_identity_verified: row.get("config_identity_verified"),
         durable_config_fingerprint: row.get("durable_config_fingerprint"),
         current_config_fingerprint: row.get("current_config_fingerprint"),
         registry_enabled: row.get("registry_enabled"),
+        plugin_instantiable: row.get("plugin_instantiable"),
+        timeframe_matches: row.get("timeframe_matches"),
         data_ready: row.get("data_ready"),
+        canonical_score_decimal: row.get("canonical_score_decimal"),
+        canonical_score_micros: row.get("canonical_score_micros"),
+        scanner_rank: row.get("scanner_rank"),
+        watchlist_assigned: row.get("watchlist_assigned"),
+        evidence_review_id: row.get("evidence_review_id"),
+        evidence_scanner_scan_id: row.get("evidence_scanner_scan_id"),
+        evidence_artifact_path: row.get("evidence_artifact_path"),
+        evidence_git_hash: row.get("evidence_git_hash"),
         promotion_transition_id: row.get("promotion_transition_id"),
+        promotion_effective_at: row.get("promotion_effective_at"),
+        promotion_expires_at: row.get("promotion_expires_at"),
         evidence_transition_id: row.get("evidence_transition_id"),
+        exact_reason: row.get("exact_reason"),
     }
 }
 
@@ -460,10 +614,20 @@ pub async fn insert_explicit_multi_strategy_authority(
             insert into sys_explicit_multi_strategy_authority_bindings
                 (authority_id, ordinal, symbol, strategy_id, timeframe_secs, authorized,
                  reason_code, promotion_query_ok, promotion_state, promotion_effective,
-                 config_identity_verified, durable_config_fingerprint,
-                 current_config_fingerprint, registry_enabled, data_ready,
-                 promotion_transition_id, evidence_transition_id)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                 promotion_expired, evidence_resolved, review_state_is_paper_candidate,
+                 evidence_review_state, durable_legacy_fingerprint,
+                 recomputed_legacy_fingerprint, legacy_fingerprint_matches,
+                 durable_exact_fingerprint_v2, recomputed_exact_fingerprint_v2,
+                 exact_fingerprint_v2_matches, config_identity_verified,
+                 durable_config_fingerprint, current_config_fingerprint, registry_enabled,
+                 plugin_instantiable, timeframe_matches, data_ready, canonical_score_decimal,
+                 canonical_score_micros, scanner_rank, watchlist_assigned, evidence_review_id,
+                 evidence_scanner_scan_id, evidence_artifact_path, evidence_git_hash,
+                 promotion_transition_id, promotion_effective_at, promotion_expires_at,
+                 evidence_transition_id, exact_reason)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                    $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32,
+                    $33, $34, $35, $36, $37, $38, $39, $40)
             "#,
         )
         .bind(new.authority_id)
@@ -476,13 +640,36 @@ pub async fn insert_explicit_multi_strategy_authority(
         .bind(b.promotion_query_ok)
         .bind(&b.promotion_state)
         .bind(b.promotion_effective)
+        .bind(b.promotion_expired)
+        .bind(b.evidence_resolved)
+        .bind(b.review_state_is_paper_candidate)
+        .bind(&b.evidence_review_state)
+        .bind(&b.durable_legacy_fingerprint)
+        .bind(&b.recomputed_legacy_fingerprint)
+        .bind(b.legacy_fingerprint_matches)
+        .bind(&b.durable_exact_fingerprint_v2)
+        .bind(&b.recomputed_exact_fingerprint_v2)
+        .bind(b.exact_fingerprint_v2_matches)
         .bind(b.config_identity_verified)
         .bind(&b.durable_config_fingerprint)
         .bind(&b.current_config_fingerprint)
         .bind(b.registry_enabled)
+        .bind(b.plugin_instantiable)
+        .bind(b.timeframe_matches)
         .bind(b.data_ready)
+        .bind(&b.canonical_score_decimal)
+        .bind(b.canonical_score_micros)
+        .bind(b.scanner_rank)
+        .bind(b.watchlist_assigned)
+        .bind(&b.evidence_review_id)
+        .bind(&b.evidence_scanner_scan_id)
+        .bind(&b.evidence_artifact_path)
+        .bind(&b.evidence_git_hash)
         .bind(&b.promotion_transition_id)
+        .bind(&b.promotion_effective_at)
+        .bind(&b.promotion_expires_at)
         .bind(&b.evidence_transition_id)
+        .bind(&b.exact_reason)
         .execute(&mut *tx)
         .await
         .context("insert_explicit_multi_strategy_authority: insert binding row failed")?;
@@ -550,13 +737,36 @@ mod pure_tests {
             promotion_query_ok: true,
             promotion_state: Some("active_paper".to_string()),
             promotion_effective: true,
+            promotion_expired: false,
+            evidence_resolved: true,
+            review_state_is_paper_candidate: true,
+            evidence_review_state: Some("paper_candidate".to_string()),
+            durable_legacy_fingerprint: Some("legacy-a".to_string()),
+            recomputed_legacy_fingerprint: Some("legacy-a".to_string()),
+            legacy_fingerprint_matches: true,
+            durable_exact_fingerprint_v2: Some("v2-a".to_string()),
+            recomputed_exact_fingerprint_v2: Some("v2-a".to_string()),
+            exact_fingerprint_v2_matches: true,
             config_identity_verified: true,
             durable_config_fingerprint: Some("abc".to_string()),
             current_config_fingerprint: Some("abc".to_string()),
             registry_enabled: true,
+            plugin_instantiable: true,
+            timeframe_matches: true,
             data_ready: true,
+            canonical_score_decimal: Some("1".to_string()),
+            canonical_score_micros: Some(1_000_000),
+            scanner_rank: Some(1),
+            watchlist_assigned: true,
+            evidence_review_id: None,
+            evidence_scanner_scan_id: None,
+            evidence_artifact_path: None,
+            evidence_git_hash: None,
             promotion_transition_id: None,
+            promotion_effective_at: None,
+            promotion_expires_at: None,
             evidence_transition_id: None,
+            exact_reason: None,
         }
     }
 

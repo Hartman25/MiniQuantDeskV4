@@ -435,6 +435,26 @@ fn push_bool(buf: &mut Vec<u8>, b: bool) {
     buf.push(u8::from(b));
 }
 
+fn push_opt_i64(buf: &mut Vec<u8>, v: &Option<i64>) {
+    match v {
+        Some(n) => {
+            buf.push(1);
+            buf.extend_from_slice(&n.to_le_bytes());
+        }
+        None => buf.push(0),
+    }
+}
+
+fn push_opt_u32(buf: &mut Vec<u8>, v: &Option<u32>) {
+    match v {
+        Some(n) => {
+            buf.push(1);
+            buf.extend_from_slice(&n.to_le_bytes());
+        }
+        None => buf.push(0),
+    }
+}
+
 /// Mint the one deterministic durable authority identity, from every
 /// result-affecting input: `run_id`, the source artifact's own identity/hash,
 /// the config fingerprint, `market_date`, and every binding's full
@@ -473,16 +493,50 @@ pub(crate) fn derive_explicit_multi_strategy_authority_id(
         buf.extend_from_slice(&e.timeframe_secs.to_le_bytes());
         push_bool(&mut buf, e.authorized);
         push_len_prefixed(&mut buf, &e.reason_code);
+        // Every `SelectionCandidateEvidence` field capable of changing this
+        // binding's authorization, provenance validity, semantic identity,
+        // or evidence interpretation (D2, V4-STAGE-B-M2-C1-C3-REPAIR-04) --
+        // never a fragile partial mirror. Field order here is fixed and
+        // matches `unresolved_evidence`'s field order for readability; it is
+        // not itself semantically meaningful (each field is length/type
+        // prefixed), but changing it would change every existing
+        // authority_id, so it must not be reordered casually.
         push_bool(&mut buf, e.evidence.promotion_query_ok);
         push_opt_str(&mut buf, &e.evidence.promotion_state);
         push_bool(&mut buf, e.evidence.promotion_effective);
+        push_bool(&mut buf, e.evidence.promotion_expired);
+        push_bool(&mut buf, e.evidence.evidence_resolved);
+        push_bool(&mut buf, e.evidence.review_state_is_paper_candidate);
+        push_opt_str(&mut buf, &e.evidence.evidence_review_state);
+        push_opt_str(&mut buf, &e.evidence.durable_legacy_fingerprint);
+        push_opt_str(&mut buf, &e.evidence.recomputed_legacy_fingerprint);
+        push_bool(&mut buf, e.evidence.legacy_fingerprint_matches);
+        push_opt_str(&mut buf, &e.evidence.durable_exact_fingerprint_v2);
+        push_opt_str(&mut buf, &e.evidence.recomputed_exact_fingerprint_v2);
+        push_bool(&mut buf, e.evidence.exact_fingerprint_v2_matches);
         push_bool(&mut buf, e.evidence.config_identity_verified);
         push_opt_str(&mut buf, &e.evidence.durable_config_fingerprint);
         push_opt_str(&mut buf, &e.evidence.current_config_fingerprint);
         push_bool(&mut buf, e.evidence.registry_enabled);
+        push_bool(&mut buf, e.evidence.plugin_instantiable);
+        push_bool(&mut buf, e.evidence.timeframe_matches);
         push_bool(&mut buf, e.evidence.data_ready);
+        push_opt_str(&mut buf, &e.evidence.canonical_score_decimal);
+        push_opt_i64(&mut buf, &e.evidence.canonical_score_micros);
+        push_opt_u32(&mut buf, &e.evidence.scanner_rank);
+        push_bool(&mut buf, e.evidence.watchlist_assigned);
+        push_opt_str(&mut buf, &e.evidence.evidence_review_id);
+        push_opt_str(&mut buf, &e.evidence.evidence_scanner_scan_id);
+        push_opt_str(&mut buf, &e.evidence.evidence_artifact_path);
+        push_opt_str(&mut buf, &e.evidence.evidence_git_hash);
         push_opt_str(&mut buf, &e.evidence.promotion_transition_id);
+        push_opt_str(&mut buf, &e.evidence.promotion_effective_at);
+        push_opt_str(&mut buf, &e.evidence.promotion_expires_at);
         push_opt_str(&mut buf, &e.evidence.evidence_transition_id);
+        push_opt_str(
+            &mut buf,
+            &e.evidence.exact_reason.as_ref().map(|r| r.code()),
+        );
     }
 
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, &buf)
@@ -529,13 +583,36 @@ pub(crate) fn build_new_explicit_multi_strategy_authority(
             promotion_query_ok: e.evidence.promotion_query_ok,
             promotion_state: e.evidence.promotion_state.clone(),
             promotion_effective: e.evidence.promotion_effective,
+            promotion_expired: e.evidence.promotion_expired,
+            evidence_resolved: e.evidence.evidence_resolved,
+            review_state_is_paper_candidate: e.evidence.review_state_is_paper_candidate,
+            evidence_review_state: e.evidence.evidence_review_state.clone(),
+            durable_legacy_fingerprint: e.evidence.durable_legacy_fingerprint.clone(),
+            recomputed_legacy_fingerprint: e.evidence.recomputed_legacy_fingerprint.clone(),
+            legacy_fingerprint_matches: e.evidence.legacy_fingerprint_matches,
+            durable_exact_fingerprint_v2: e.evidence.durable_exact_fingerprint_v2.clone(),
+            recomputed_exact_fingerprint_v2: e.evidence.recomputed_exact_fingerprint_v2.clone(),
+            exact_fingerprint_v2_matches: e.evidence.exact_fingerprint_v2_matches,
             config_identity_verified: e.evidence.config_identity_verified,
             durable_config_fingerprint: e.evidence.durable_config_fingerprint.clone(),
             current_config_fingerprint: e.evidence.current_config_fingerprint.clone(),
             registry_enabled: e.evidence.registry_enabled,
+            plugin_instantiable: e.evidence.plugin_instantiable,
+            timeframe_matches: e.evidence.timeframe_matches,
             data_ready: e.evidence.data_ready,
+            canonical_score_decimal: e.evidence.canonical_score_decimal.clone(),
+            canonical_score_micros: e.evidence.canonical_score_micros,
+            scanner_rank: e.evidence.scanner_rank.map(|r| r as i32),
+            watchlist_assigned: e.evidence.watchlist_assigned,
+            evidence_review_id: e.evidence.evidence_review_id.clone(),
+            evidence_scanner_scan_id: e.evidence.evidence_scanner_scan_id.clone(),
+            evidence_artifact_path: e.evidence.evidence_artifact_path.clone(),
+            evidence_git_hash: e.evidence.evidence_git_hash.clone(),
             promotion_transition_id: e.evidence.promotion_transition_id.clone(),
+            promotion_effective_at: e.evidence.promotion_effective_at.clone(),
+            promotion_expires_at: e.evidence.promotion_expires_at.clone(),
             evidence_transition_id: e.evidence.evidence_transition_id.clone(),
+            exact_reason: e.evidence.exact_reason.as_ref().map(|r| r.code()),
         })
         .collect();
 
@@ -1026,5 +1103,116 @@ mod tests {
             evaluation.reason_code,
             REASON_EXPLICIT_MULTI_STRATEGY_DRY_RUN_EXCLUDED
         );
+    }
+
+    /// D2 (V4-STAGE-B-M2-C1-C3-REPAIR-04): mutation proof that every
+    /// previously-omitted `SelectionCandidateEvidence` field is actually
+    /// bound into `authority_id` -- not merely carried through to the
+    /// durable DTO. Each mutator flips exactly one field away from
+    /// `green_evidence()`'s baseline; every one must change the derived id,
+    /// proving a promoted-then-later-demoted/expired/refingerprinted binding
+    /// (or any other previously-invisible evidence change) can never reuse a
+    /// stale authority_id.
+    #[test]
+    fn d2_every_previously_omitted_evidence_field_changes_authority_id() {
+        let base_eval = authorized_evaluation("AAPL", "intraday_scalper");
+        let baseline_id = base_id(&[base_eval.clone()]);
+
+        type Mutator = Box<dyn Fn(&mut mqk_portfolio::SelectionCandidateEvidence)>;
+        let mutators: Vec<(&str, Mutator)> = vec![
+            ("promotion_expired", Box::new(|e| e.promotion_expired = true)),
+            ("evidence_resolved", Box::new(|e| e.evidence_resolved = false)),
+            (
+                "review_state_is_paper_candidate",
+                Box::new(|e| e.review_state_is_paper_candidate = false),
+            ),
+            (
+                "evidence_review_state",
+                Box::new(|e| e.evidence_review_state = Some("rejected".to_string())),
+            ),
+            (
+                "durable_legacy_fingerprint",
+                Box::new(|e| e.durable_legacy_fingerprint = Some("different".to_string())),
+            ),
+            (
+                "recomputed_legacy_fingerprint",
+                Box::new(|e| e.recomputed_legacy_fingerprint = Some("different".to_string())),
+            ),
+            (
+                "legacy_fingerprint_matches",
+                Box::new(|e| e.legacy_fingerprint_matches = false),
+            ),
+            (
+                "durable_exact_fingerprint_v2",
+                Box::new(|e| e.durable_exact_fingerprint_v2 = Some("different".to_string())),
+            ),
+            (
+                "recomputed_exact_fingerprint_v2",
+                Box::new(|e| e.recomputed_exact_fingerprint_v2 = Some("different".to_string())),
+            ),
+            (
+                "exact_fingerprint_v2_matches",
+                Box::new(|e| e.exact_fingerprint_v2_matches = false),
+            ),
+            (
+                "plugin_instantiable",
+                Box::new(|e| e.plugin_instantiable = false),
+            ),
+            ("timeframe_matches", Box::new(|e| e.timeframe_matches = false)),
+            (
+                "canonical_score_decimal",
+                Box::new(|e| e.canonical_score_decimal = Some("2".to_string())),
+            ),
+            (
+                "canonical_score_micros",
+                Box::new(|e| e.canonical_score_micros = Some(2_000_000)),
+            ),
+            ("scanner_rank", Box::new(|e| e.scanner_rank = Some(2))),
+            (
+                "watchlist_assigned",
+                Box::new(|e| e.watchlist_assigned = false),
+            ),
+            (
+                "evidence_review_id",
+                Box::new(|e| e.evidence_review_id = Some("review-1".to_string())),
+            ),
+            (
+                "evidence_scanner_scan_id",
+                Box::new(|e| e.evidence_scanner_scan_id = Some("scan-1".to_string())),
+            ),
+            (
+                "evidence_artifact_path",
+                Box::new(|e| e.evidence_artifact_path = Some("path".to_string())),
+            ),
+            (
+                "evidence_git_hash",
+                Box::new(|e| e.evidence_git_hash = Some("deadbeef".to_string())),
+            ),
+            (
+                "promotion_effective_at",
+                Box::new(|e| e.promotion_effective_at = Some("2026-09-18T00:00:00Z".to_string())),
+            ),
+            (
+                "promotion_expires_at",
+                Box::new(|e| e.promotion_expires_at = Some("2026-10-18T00:00:00Z".to_string())),
+            ),
+            (
+                "exact_reason",
+                Box::new(|e| {
+                    e.exact_reason = Some(mqk_portfolio::ExactSelectionReason::PromotionExpired)
+                }),
+            ),
+        ];
+
+        for (field_name, mutate) in mutators {
+            let mut mutated_eval = base_eval.clone();
+            mutate(&mut mutated_eval.evidence);
+            let mutated_id = base_id(&[mutated_eval]);
+            assert_ne!(
+                baseline_id, mutated_id,
+                "mutating `{field_name}` alone must change authority_id -- it is not bound \
+                 into identity"
+            );
+        }
     }
 }
