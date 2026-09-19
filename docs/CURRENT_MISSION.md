@@ -54,6 +54,25 @@ conflated:**
 - No alpha discovery, no retry/tune of the rejected `intraday_scalper`
   evidence, no Paper/Live operational ceremony under this controller.
 
+### Stage B / M2 result (2026-09-18)
+
+Bounded census against canonical M2 (`MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md`
+§ Milestone 2) found **all 9 required capabilities already CODE_CLOSED**
+through prior committed patches (Bundles 5/6/7, `MULTI-SYMBOL-DISPATCH-LOOP-01`,
+`MULTI-SYMBOL-CAPITAL-CAPS-01`, `A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
+`MULTI-STRATEGY-RUNTIME-DRY-RUN-01`). 137 targeted tests (10 modules, 2
+real-DB-backed) run this session, all green; no production/test code was
+changed. Full detail and citations: `docs/V4_CODE_COMPLETION_MANIFEST.md`
+§ "M2 Code Completion Manifest".
+
+```text
+M2 CODE COMPLETION:       CODE_CLOSED (9/9, no gaps)
+M2 OPERATIONAL ACCEPTANCE: NOT CLAIMED — MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE
+                            is unset in the deployed Paper environment;
+                            deployed runtime remains single_strategy
+                            (intraday_scalper/AAPL/300).
+```
+
 ---
 
 ## -1. M1.9 Deployed-State Verification Result (2026-09-19, READ-ONLY; CORRECTED 2026-09-19)

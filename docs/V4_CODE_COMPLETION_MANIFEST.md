@@ -422,3 +422,160 @@ None of these corrections changed any classification: no CODE_MISSING,
 WIRING_MISSING, or TEST_MISSING gap was found in the items sampled.
 Items not independently re-verified in that bounded pass should still be
 treated as citation-unverified until independently checked.
+
+---
+
+## M2 Code Completion Manifest — Stage B (`V4-BULK-CODE-COMPLETION-STAGE-B-M2-02`)
+
+**Mission:** Stage B M2 — Bulk Code Completion
+**Started:** 2026-09-18
+**Baseline HEAD:** 28fff6952a65791cd489b88d3673561ab8c12a03
+**Branch:** v4-bulk-code-completion-stage-b-m2-01
+
+### M2 Scope (Canonical Authority)
+
+From `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` § Milestone 2
+("Concurrent Multi-Strategy / Multi-Symbol Engine"), required capabilities:
+
+1. multiple strategy instances and symbols operate simultaneously
+2. per-strategy/per-symbol state cannot contaminate another
+3. same-symbol competing strategy intentions resolve through explicit
+   portfolio/execution authority
+4. strategies propose targets/opportunities rather than owning the account
+5. portfolio-level capital allocation and risk aggregation span strategies
+6. retries/restarts cannot create duplicate dispatches/orders
+7. concurrent completed bars cannot be lost or double-consumed
+8. conflict resolution/order is deterministic where economics depend on it
+9. failures/panics are isolated according to explicit policy
+
+### Census Result
+
+**CONCLUSION:** Bounded, requirement-driven inspection found that every
+M2-required capability is **already CODE_CLOSED** through prior, already-
+committed patches (`MULTI-SYMBOL-DISPATCH-LOOP-01`,
+`MULTI-SYMBOL-CAPITAL-CAPS-01`, `DYNAMIC-STRATEGY-SYMBOL-SELECTION-01`
+Phases 2-7B / `PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE`,
+`MULTI-STRATEGY-CONFLICT-POLICY-01` (Bundle 6),
+`RUNTIME-OPPORTUNITY-ALLOCATION-01` (Bundle 5),
+`MULTI-STRATEGY-RUNTIME-DRY-RUN-01`,
+`A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
+`STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02`). No `CODE_MISSING`,
+`WIRING_MISSING`, or `TEST_MISSING` gap was found against the canonical M2
+requirement list above. **No new production/test code was implemented by
+this controller** — per the controller's own instruction ("If M2 code is
+already complete: prove it with load-bearing references/tests and do not
+invent changes"), none was needed.
+
+`CODE_CLOSED: 9/9`. `CODE_MISSING: 0`. `WIRING_MISSING: 0`.
+`TEST_MISSING: 0`. `SPEC_DECISION_REQUIRED: 0`. `BLOCKED_DEPENDENCY: 0`.
+
+This is a bounded requirement-driven census (mirrors the Stage A M1
+methodology), not an exhaustive audit of every file in the concurrency
+seam. Items not independently re-verified here should be treated as
+citation-unverified until independently checked, per the Stage A
+historical-correction precedent above.
+
+### Requirement-by-Requirement Evidence
+
+#### M2.1 — Multiple strategy instances and symbols operate simultaneously
+
+**Status:** CODE_CLOSED
+
+**Production seam:** `DynamicSelectionHostPool` (`core-rs/crates/mqk-daemon/src/dynamic_selection_host_pool.rs:121-140`) — `BTreeMap<HostPoolKey, StrategyHost>`, one isolated `StrategyHost` instance per selected `(symbol, strategy_id, timeframe_secs)` binding. Built by `RuntimeStrategyDispatchAuthority::DynamicPaperEnforced` before the Phase 7A start barrier releases and moved into the execution loop (`state/loop_runner.rs`).
+
+**Wiring:** `state/lifecycle.rs:668` calls `dynamic_selection_start_gate::evaluate_dynamic_selection_start_gate` from the real start path (`start_execution_runtime`); the resulting authority/host pool is dispatched every tick in `state/loop_runner.rs:1169-1250` (`tick_strategy_dispatch_selected_hosts_with_bar_facts`), branching per-binding, not per-run. The legacy `Legacy { assignments }` variant already dispatches multiple `(symbol, strategy_id)` pairs per tick via `tick_strategy_dispatch_multi_symbol_with_bar_facts` (`state.rs:4287-4299`, `MULTI-SYMBOL-DISPATCH-LOOP-01`).
+
+**Test proof (this session, green):** `dynamic_selection_host_pool::tests::two_symbols_get_independent_isolated_hosts`, `same_strategy_independently_instantiated_for_two_symbols`, `same_symbol_strategy_different_timeframe_is_not_treated_as_duplicate_key` — 10/10 passed.
+
+#### M2.2 — Per-strategy/per-symbol state cannot contaminate another
+
+**Status:** CODE_CLOSED
+
+**Production seam:** Each `HostPoolKey` gets its own `StrategyHost` (no shared mutable strategy state across bindings). Cross-binding provenance is independently re-validated in `state/loop_runner.rs` (`dynamic_selection_envelope_ok`) before submission, keyed by exact `(run_id, plan_id, symbol, strategy_id, timeframe_secs)`.
+
+**Test proof (this session, green, real negative controls):** `state::loop_runner::phase7b_provenance_tests::swapped_provenance_between_two_decisions_fails_closed` (swaps two real bindings' provenance and proves both are rejected), `provenance_naming_a_binding_that_does_not_exist_fails_closed`, `mutated_symbol_fails_closed`, `mutated_strategy_id_fails_closed`, `mutated_timeframe_secs_fails_closed`, `mutated_plan_id_fails_closed` — 13/13 passed.
+
+#### M2.3 — Same-symbol competing strategy intentions resolve through explicit portfolio/execution authority
+
+**Status:** CODE_CLOSED
+
+**Production seam:** `runtime_strategy_conflict.rs` (`MULTI-STRATEGY-CONFLICT-POLICY-01` Bundle 6) — `apply_conflict_policy`/`gather_and_resolve`, wired into `state/loop_runner.rs` immediately before Bundle 5 (opportunity allocation). Closed-vocabulary, fail-closed mode resolution (`off`/`shadow`/`paper_enforced`) mirroring `dynamic_selection_mode.rs`'s pattern.
+
+**Test proof (this session, green):** `runtime_strategy_conflict::tests::paper_enforced_emits_at_most_one_decision_per_symbol`, `unbound_sell_is_refused_and_never_reaches_downstream`, `paper_enforced_never_resurrects_a_refused_increase`, `unrelated_symbol_unaffected_by_a_refused_conflict`, `shadow_mode_returns_exact_original_vector_in_exact_original_order` — 25/25 passed.
+
+#### M2.4 — Strategies propose targets/opportunities rather than owning the account
+
+**Status:** CODE_CLOSED
+
+**Production seam:** Native `on_bar` output (`TargetPosition`) is a proposal only: it passes through symbol-match guard (`AppState::retain_targets_matching_symbol`), per-symbol position caps (`MULTI-SYMBOL-CAPITAL-CAPS-01`), Bundle 6 conflict policy, and Bundle 5 opportunity allocation (`runtime_opportunity_allocation::gather_and_apply`, which delegates to the pure `mqk_portfolio::compute_allocation_cycle` allocator — a real production caller, not a dormant library) before any decision reaches `submit_internal_strategy_decision`.
+
+**Test proof (this session, green):** `runtime_opportunity_allocation::tests::symbol_not_in_opportunity_set_is_refused_not_fabricated`, `paper_enforced_drops_decision_when_no_capital_available` — 35/35 passed in module.
+
+#### M2.5 — Portfolio-level capital allocation and risk aggregation span strategies
+
+**Status:** CODE_CLOSED
+
+**Production seam:** `mqk_portfolio::compute_allocation_cycle` (`AllocationCycleContext`/`AllocationCandidateInput`/`AllocationCycleResult`), called from `runtime_opportunity_allocation.rs:82-85,721` (`gather_and_apply`), itself called once per tick across every symbol dispatched that cycle (decisions collected across all symbols before any submission — `state/loop_runner.rs:1302-1317`).
+
+**Test proof (this session, green):** `runtime_opportunity_allocation::tests` — 35/35 passed, including `same_economic_cycle_replayed_on_a_later_tick_yields_the_same_cycle_id`.
+
+#### M2.6 — Retries/restarts cannot create duplicate dispatches/orders
+
+**Status:** CODE_CLOSED
+
+**Production seam:** Reuses the M1-accepted outbox claim/idempotency seam (`outbox_claim_batch`, single atomic operation, DB rules unchanged) plus `STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02` decision-id derivation, which is per-symbol/per-strategy salted (not a shared wall-clock value — see `state/loop_runner.rs:1251-1267` comment on `now_micros` being excluded from Bundle 5/6 identity). No new seam invented; existing M1 durable-write invariants (`db_rules.md`) apply unchanged per-symbol.
+
+#### M2.7 — Concurrent completed bars cannot be lost or double-consumed
+
+**Status:** CODE_CLOSED
+
+**Production seam:** `pending_strategy_bar_input.lock().await.take()` (`state.rs:4248,4295`) — a single-consumer `Option::take()` per completed-bar trigger, shared once per tick across every dispatched symbol/binding; each symbol's actual OHLC window is then independently loaded from `md_bars` per `(symbol, timeframe)` inside `dispatch_native_strategy_for_symbol_with_bar[_and_facts]`, so the shared trigger cannot be double-consumed across ticks while per-symbol data stays independent.
+
+#### M2.8 — Conflict resolution/order is deterministic where economics depend on it
+
+**Status:** CODE_CLOSED
+
+**Production seam:** `dynamic_selection_host_pool.rs` uses `BTreeMap` (deterministic key ordering, not hash-map iteration order); `runtime_strategy_conflict.rs`'s `compute_conflict_cycle_id` binds cycle identity to every result-affecting fact (mode, timeframe, bar provenance, order semantics) so two structurally-different evaluations never collide, and two identical replays always agree.
+
+**Test proof (this session, green):** `dynamic_selection_host_pool::tests::input_order_does_not_change_the_resulting_pool_keys`, `runtime_strategy_conflict::tests::different_symbol_set_changes_cycle_id`, `different_bar_changes_cycle_id`, `different_strategy_changes_cycle_id`, `different_current_position_changes_cycle_id`, `shadow_versus_paper_enforced_changes_plan_id` — all passed (counted in the 10/10 and 25/25 above).
+
+#### M2.9 — Failures/panics are isolated according to explicit policy
+
+**Status:** CODE_CLOSED
+
+**Production seam:** `A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01` — a panic inside the real `Strategy::on_bar` callback is caught narrowly at the one seam that invokes it (`invoke_native_strategy_host_on_bar`), never around infrastructure (DB load, journal writes, which still unwind normally on a genuine infra panic). The explicit, documented policy is to quarantine the affected shared host (`Failed`) for the rest of the run rather than permit sibling continuation against possibly-corrupted state — a deliberate fail-closed choice, not silent contamination. The `DynamicPaperEnforced` selected-host path applies the same narrow containment per selected host.
+
+**Test proof (this session, green, real DB — `postgres://postgres:postgres@127.0.0.1:5434/mqk_test`):** `state::phase7b_selected_host_dispatch_tests::a1_t7_selected_host_panic_is_contained_and_halts_whole_tick`, `a1_r7_real_on_bar_panic_persists_durable_fault_evidence_via_legacy_path` — both inject a real panic (`A1_TEST_INJECTED_PANIC`, `A1_REAL_ON_BAR_PANIC_LEGACY_DB_TEST`), both pass.
+
+### Additional invariants inspected (not separate M2 numbered requirements, but explicitly required by the controller mission)
+
+- **Dry-run strategies remain incapable of economic submission:** `state/dry_run_strategy.rs` — structurally impossible to submit (no `PgPool`/`AppState`/broker handle in any function signature in the module; `DryRunStrategyDiagnostic.submitted` is always `false`). Also proves same-tick multi-strategy evaluation (`drs07_multiple_ids_evaluated_independently_same_window`). Test proof: 7/7 passed.
+- **No silent loss of assignments over the configured cap:** `MultiSymbolConfigError::ConcurrentLimitExceeded` / `HardCeilingExceeded` fail closed rather than truncating (`state/multi_symbol_config.rs:171-176,298-310`). Test proof: `multi_symbol_config::frozen_fleet_raw_inputs_tests` — 3/3 passed.
+- **Unknown strategy/symbol/timeframe fail closed:** `dynamic_selection_host_pool::tests::unknown_strategy_id_is_refused`, `wrong_timeframe_for_a_real_strategy_is_refused`, `duplicate_key_is_refused` — all passed (counted above).
+- **Promotion refusal remains enforced per strategy identity (no dynamic-selection bypass of M1's promotion gate):** `dynamic_selection_plan_builder.rs:329,344` calls `promotion_evidence_validation::validate_active_paper_candidate` — every dynamic-selection candidate is still gated on `active_paper` promotion identity before it can be selected; no separate authorization path exists.
+- **Mode default and live-lock:** `MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE` defaults to `Off` (unset/unrecognized never fabricates a mode) and is hard-locked to `Off` outside `deployment_mode=paper && adapter=alpaca` (`dynamic_selection_mode.rs`). Test proof: `dynamic_selection_mode::tests` — 14/14 passed, plus `dynamic_selection_start_gate::tests` — 28/28 passed.
+
+### Test Summary (this session, all green, no code changed)
+
+```text
+dynamic_selection_host_pool::           10 passed
+runtime_strategy_conflict::             25 passed
+state::dry_run_strategy::                7 passed
+state::loop_runner::phase7b_provenance_tests::  13 passed
+state::multi_symbol_config::             3 passed
+runtime_opportunity_allocation::        35 passed
+dynamic_selection_start_gate::          28 passed
+dynamic_selection_mode::                14 passed
+state::phase7b_selected_host_dispatch_tests::a1_t7_...   1 passed (real DB)
+state::phase7b_selected_host_dispatch_tests::a1_r7_...   1 passed (real DB)
+---------------------------------------------------------------
+TOTAL                                  137 passed, 0 failed
+```
+
+Run against `postgres://postgres:postgres@127.0.0.1:5434/mqk_test` (`mqk-test-postgres`) where DB-backed; no migration-checksum drift encountered this session (the drift noted in `docs/CURRENT_MISSION.md` §6 as of the prior checkpoint did not reproduce here). Full workspace/GUI/research-py suites were not run (no crate outside `mqk-daemon` was touched; per the controller's efficiency contract).
+
+### M2 Status
+
+**M2 CODE COMPLETION: CODE_CLOSED** (9/9 canonical requirements, bounded census, no gaps found, no new code needed).
+
+**M2 OPERATIONAL ACCEPTANCE: NOT CLAIMED BY THIS CONTROLLER.** `MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE` is unset in the current deployed Paper environment (deployed identity remains `intraday_scalper`/AAPL/300, `runtime_execution_mode=single_strategy`, per `docs/CURRENT_MISSION.md` §-1) — the concurrent multi-strategy/multi-symbol path exists, is wired, and is tested, but is not the currently-active deployed configuration. Turning it on for Paper, and any operational validation of it under real market conditions, is a separate operational decision this controller does not make.
