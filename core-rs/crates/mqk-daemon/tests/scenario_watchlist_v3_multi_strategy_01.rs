@@ -24,8 +24,11 @@
 //! | V13 | Strategy list order is preserved exactly (not re-sorted) |
 //! | V14 | symbols.len() > max_symbols_to_trade → truncates, surfaces dropped tail |
 //! | V15 | max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING → Invalid |
-//! | V16 | v1 evaluator (existing `evaluate_watchlist_intake`) on a v3 file → Invalid, unchanged behavior |
+//! | V16 | canonical evaluator (`evaluate_watchlist_intake`) on a v3 file → `LoadedApprovedV3`, not `Invalid` (C1 repair: v3 is wired into the canonical intake contract, not treated as an unsupported schema) |
 //! | V17 | Singleton strategy list (1 entry) is a valid, ordinary v3 assignment |
+//! | V18 | canonical evaluator on a v1 file is byte-for-byte unchanged by the v3 routing branch |
+//! | V19 | canonical evaluator on a v2 file is byte-for-byte unchanged by the v3 routing branch |
+//! | V20 | canonical evaluator on a not-approved v3 file → `LoadedNotApprovedV3` |
 
 use mqk_daemon::watchlist_intake::{
     evaluate_watchlist_intake, evaluate_watchlist_intake_v3, LoadedWatchlistArtifactV3,
@@ -203,7 +206,10 @@ fn v06_valid_v3_two_symbols_aapl_two_strategies_is_loaded_approved() {
     assert_eq!(artifact.symbols, vec!["AAPL", "MSFT"]);
     assert_eq!(
         artifact.strategy_assignments.get("AAPL").unwrap(),
-        &vec!["intraday_scalper".to_string(), "intraday_short_scalper".to_string()]
+        &vec![
+            "intraday_scalper".to_string(),
+            "intraday_short_scalper".to_string()
+        ]
     );
     assert_eq!(
         artifact.strategy_assignments.get("MSFT").unwrap(),
@@ -283,7 +289,10 @@ fn v10_symbol_with_no_assignment_entry_is_invalid() {
 
 #[test]
 fn v11_symbol_over_max_strategies_per_symbol_is_invalid() {
-    assert_eq!(MAX_STRATEGIES_PER_SYMBOL, 3, "test assumes the frozen bound of 3");
+    assert_eq!(
+        MAX_STRATEGIES_PER_SYMBOL, 3,
+        "test assumes the frozen bound of 3"
+    );
     let json = valid_watchlist_v3(
         true,
         false,
@@ -413,22 +422,30 @@ fn v15_max_symbols_over_hard_ceiling_is_invalid() {
 }
 
 // ---------------------------------------------------------------------------
-// V16: existing v1/v2-only evaluator is completely unaffected by v3's
-// existence — a v3 file remains "unsupported schema_version" to it, exactly
-// as it was before this patch.
+// V16 (C1 repair): the canonical evaluator (`evaluate_watchlist_intake`) now
+// recognizes watchlist-v3 explicitly — R1A's frozen contract requires v3 be
+// wired into the canonical intake contract, not treated as an unsupported
+// legacy schema (V16 previously asserted the opposite; this replacement is
+// evidence of the fix, per V4-STAGE-B-M2-REPAIR-03's independent review).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn v16_existing_v1v2_evaluator_treats_v3_file_as_unsupported_schema_unchanged() {
+fn v16_canonical_evaluator_recognizes_v3_as_loaded_approved_v3() {
     let path = write_watchlist("v16", &approved_v3_two_symbols());
     let outcome = evaluate_watchlist_intake(Some(&path));
     cleanup(&path);
-    let WatchlistIntakeOutcome::Invalid { failure_reasons } = outcome else {
-        panic!("expected Invalid, got {outcome:?}");
+    let WatchlistIntakeOutcome::LoadedApprovedV3 { artifact } = outcome else {
+        panic!("expected LoadedApprovedV3, got {outcome:?}");
     };
-    assert!(failure_reasons
-        .iter()
-        .any(|r| r.contains("watchlist_schema_invalid")));
+    assert_eq!(artifact.schema_version, "watchlist-v3");
+    assert_eq!(artifact.symbols, vec!["AAPL", "MSFT"]);
+    assert_eq!(
+        artifact.strategy_assignments.get("AAPL").unwrap(),
+        &vec![
+            "intraday_scalper".to_string(),
+            "intraday_short_scalper".to_string()
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -454,4 +471,60 @@ fn v17_singleton_strategy_list_is_ordinary_valid_assignment() {
     };
     let expected: LoadedWatchlistArtifactV3 = artifact.clone();
     assert_eq!(expected.strategy_assignments.get("AAPL").unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// V18-V19 (C1 repair): v1/v2 canonical parsing is byte-for-byte unchanged by
+// the new v3 routing branch — the branch is only ever taken when
+// schema_version is exactly "watchlist-v3".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v18_canonical_evaluator_on_v1_file_is_unchanged_by_v3_routing() {
+    let path = write_watchlist("v18", &v1_watchlist());
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+    let WatchlistIntakeOutcome::LoadedApproved { artifact } = outcome else {
+        panic!("expected LoadedApproved, got {outcome:?}");
+    };
+    assert_eq!(artifact.schema_version, "watchlist-v1");
+    assert_eq!(artifact.symbols, vec!["AAPL"]);
+}
+
+#[test]
+fn v19_canonical_evaluator_on_v2_file_is_unchanged_by_v3_routing() {
+    let path = write_watchlist("v19", &v2_watchlist());
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+    let WatchlistIntakeOutcome::LoadedApproved { artifact } = outcome else {
+        panic!("expected LoadedApproved, got {outcome:?}");
+    };
+    assert_eq!(artifact.schema_version, "watchlist-v2");
+    assert_eq!(artifact.symbols, vec!["AAPL", "MSFT"]);
+}
+
+// ---------------------------------------------------------------------------
+// V20 (C1 repair): canonical evaluator surfaces the not-approved v3 case
+// through its own dedicated variant, never conflated with the v1/v2
+// LoadedNotApproved variant or with Invalid.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v20_canonical_evaluator_on_not_approved_v3_file_is_loaded_not_approved_v3() {
+    let json = valid_watchlist_v3(
+        false,
+        false,
+        "paper",
+        &["AAPL"],
+        &[("AAPL", &["intraday_scalper"])],
+        1,
+        1,
+    );
+    let path = write_watchlist("v20", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+    assert!(matches!(
+        outcome,
+        WatchlistIntakeOutcome::LoadedNotApprovedV3 { .. }
+    ));
 }

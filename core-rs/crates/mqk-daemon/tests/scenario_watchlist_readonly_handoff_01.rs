@@ -287,14 +287,18 @@ fn w03_malformed_json_returns_invalid() {
 
 // ---------------------------------------------------------------------------
 // W04 — Wrong schema_version → Invalid
+//
+// (V4-STAGE-B-M2-REPAIR-03 / C1: "watchlist-v3" is now a real, canonically
+// recognized schema — MULTI-STRATEGY-RUNTIME-DISPATCH-01's frozen contract
+// requires it be wired into this same canonical intake contract, not treated
+// as an unsupported legacy schema. This fixture now uses a genuinely
+// unrecognized version string; W04B below proves v3 is recognized.)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn w04_wrong_schema_version_returns_invalid() {
-    // "watchlist-v3" is intentionally unsupported — v1 and v2 are the only
-    // accepted schema versions (WATCHLIST-V2-SCHEMA-01).
     let json = r#"{
-  "schema_version": "watchlist-v3",
+  "schema_version": "watchlist-v99-does-not-exist",
   "mode": "paper",
   "approved_for_autonomous_paper": false,
   "approved_for_live": false,
@@ -312,6 +316,31 @@ fn w04_wrong_schema_version_returns_invalid() {
     assert!(
         reasons.iter().any(|r| r.contains("schema_version")),
         "expected schema_version reason, got: {reasons:?}"
+    );
+}
+
+#[test]
+fn w04b_v3_schema_version_is_now_canonically_recognized_not_invalid() {
+    let json = r#"{
+  "schema_version": "watchlist-v3",
+  "mode": "paper",
+  "approved_for_autonomous_paper": false,
+  "approved_for_live": false,
+  "symbols": [],
+  "strategy_assignments": {},
+  "max_symbols_to_trade": 1,
+  "max_concurrent_positions": 1
+}"#;
+    let path = write_watchlist("w04b", json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(
+        outcome.status_label(),
+        "loaded_not_approved_v3",
+        "a well-formed, unapproved watchlist-v3 artifact must be recognized \
+         via the canonical intake contract, never treated as an unsupported \
+         legacy schema"
     );
 }
 

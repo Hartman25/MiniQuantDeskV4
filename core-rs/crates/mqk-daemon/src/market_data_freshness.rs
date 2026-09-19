@@ -702,6 +702,14 @@ mod opening_bar_tests {
 /// symbols (WATCHLIST-INGEST-PLAN-01).
 pub const SYMBOL_SOURCE_WATCHLIST_V2: &str = "watchlist_v2";
 
+/// Source label: an approved `watchlist-v3` artifact supplied the required
+/// symbols (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`). Every symbol a v3
+/// artifact authorizes — regardless of how many strategies it assigns to
+/// that symbol — still needs exactly one `(symbol, timeframe)` readiness
+/// check (frozen contract §4 item 5): readiness is per-symbol, not
+/// per-binding.
+pub const SYMBOL_SOURCE_WATCHLIST_V3: &str = "watchlist_v3";
+
 /// Source label: the legacy single `MQK_STRATEGY_SYMBOL` env var supplied
 /// the required symbol (WATCHLIST-INGEST-PLAN-01).
 pub const SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL: &str = "env_strategy_symbol";
@@ -719,7 +727,8 @@ pub struct RequiredSymbolsResolution {
     /// [`normalize_required_symbols`]).
     pub required: Vec<RequiredSymbolTimeframe>,
     /// Which source produced `required`: [`SYMBOL_SOURCE_WATCHLIST_V2`],
-    /// [`SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL`], or [`SYMBOL_SOURCE_NONE`].
+    /// [`SYMBOL_SOURCE_WATCHLIST_V3`], [`SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL`],
+    /// or [`SYMBOL_SOURCE_NONE`].
     pub source: &'static str,
     /// The watchlist intake outcome evaluated during resolution, regardless
     /// of whether it ended up being the active source. Lets callers explain
@@ -798,6 +807,28 @@ pub(crate) fn required_symbols_with_source(
             return RequiredSymbolsResolution {
                 required,
                 source: SYMBOL_SOURCE_WATCHLIST_V2,
+                watchlist_outcome: watchlist_outcome.clone(),
+            };
+        }
+    }
+
+    // A LoadedApprovedV3 outcome must never silently fall through to the
+    // legacy/none source below as if no watchlist were configured — every
+    // symbol a v3 artifact authorizes still needs its own readiness check,
+    // exactly like v2's symbols (frozen contract §4 item 5).
+    if let WatchlistIntakeOutcome::LoadedApprovedV3 { artifact } = watchlist_outcome {
+        if !artifact.symbols.is_empty() {
+            let required = artifact
+                .symbols
+                .iter()
+                .map(|symbol| RequiredSymbolTimeframe {
+                    symbol: symbol.clone(),
+                    timeframe: timeframe.clone(),
+                })
+                .collect();
+            return RequiredSymbolsResolution {
+                required,
+                source: SYMBOL_SOURCE_WATCHLIST_V3,
                 watchlist_outcome: watchlist_outcome.clone(),
             };
         }

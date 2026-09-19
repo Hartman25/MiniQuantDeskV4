@@ -1,9 +1,10 @@
 //! PAPER-HANDOFF-READONLY-01 / WATCHLIST-V2-SCHEMA-01: Read-only daemon-side
 //! watchlist artifact loader.
 //!
-//! Loads a `watchlist-v1` or `watchlist-v2` JSON artifact produced by the
-//! Python scanner promotion pipeline (WATCHLIST-PROMO-01 /
-//! WATCHLIST-PREMKT-RISK-BUNDLE-01) and returns one of five honest outcomes:
+//! Loads a `watchlist-v1`, `watchlist-v2`, or `watchlist-v3` JSON artifact
+//! produced by the Python scanner promotion pipeline (WATCHLIST-PROMO-01 /
+//! WATCHLIST-PREMKT-RISK-BUNDLE-01) or hand-authored (v3) and returns one of
+//! seven honest outcomes:
 //!
 //! - **`NotConfigured`** — `MQK_PAPER_WATCHLIST_PATH` env var is absent or empty.
 //!   No watchlist is in scope.
@@ -12,10 +13,15 @@
 //! - **`Invalid`** — file found but structurally invalid (malformed JSON,
 //!   unsupported schema_version, mode != paper, approved_for_live=true,
 //!   missing required fields, constraint violations).  Fail-closed.
-//! - **`LoadedNotApproved`** — file valid but `approved_for_autonomous_paper=false`.
+//! - **`LoadedNotApproved`** — v1/v2 file valid but `approved_for_autonomous_paper=false`.
 //!   Operator must re-run promotion before the watchlist is usable.
-//! - **`LoadedApproved`** — file valid and `approved_for_autonomous_paper=true`.
+//! - **`LoadedApproved`** — v1/v2 file valid and `approved_for_autonomous_paper=true`.
 //!   Top symbol and strategy assignment are surfaced for status visibility only.
+//! - **`LoadedNotApprovedV3`** / **`LoadedApprovedV3`** — the v3 (explicit
+//!   per-symbol multi-strategy) analogs, carrying a separate
+//!   [`LoadedWatchlistArtifactV3`] artifact type (never a v1/v2
+//!   [`LoadedWatchlistArtifact`] and never unified with it — see §2.3 of the
+//!   frozen contract referenced below).
 //!
 //! # Schema versions
 //! - **`watchlist-v1`** — single-symbol.  `max_symbols_to_trade` and
@@ -201,6 +207,18 @@ pub enum WatchlistIntakeOutcome {
         /// Validated artifact content.
         artifact: LoadedWatchlistArtifact,
     },
+
+    /// File is structurally valid `watchlist-v3`
+    /// (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`, frozen contract §2.3) but
+    /// `approved_for_autonomous_paper=false`.  A separate variant from
+    /// [`Self::LoadedNotApproved`] — never a v1/v2 `LoadedWatchlistArtifact`
+    /// masquerading as v3, or vice versa.
+    LoadedNotApprovedV3 { artifact: LoadedWatchlistArtifactV3 },
+
+    /// File is structurally valid `watchlist-v3` and
+    /// `approved_for_autonomous_paper=true`.  Does NOT by itself authorize
+    /// trading — every binding still independently passes frozen contract §4.
+    LoadedApprovedV3 { artifact: LoadedWatchlistArtifactV3 },
 }
 
 impl WatchlistIntakeOutcome {
@@ -212,14 +230,20 @@ impl WatchlistIntakeOutcome {
             Self::Invalid { .. } => "invalid",
             Self::LoadedNotApproved { .. } => "loaded_not_approved",
             Self::LoadedApproved { .. } => "loaded_approved",
+            Self::LoadedNotApprovedV3 { .. } => "loaded_not_approved_v3",
+            Self::LoadedApprovedV3 { .. } => "loaded_approved_v3",
         }
     }
 
     /// Whether `approved_for_autonomous_paper` is true.
     ///
-    /// Only `LoadedApproved` returns true.  All other variants return false.
+    /// Only `LoadedApproved`/`LoadedApprovedV3` return true.  All other
+    /// variants return false.
     pub fn approved_for_autonomous_paper(&self) -> bool {
-        matches!(self, Self::LoadedApproved { .. })
+        matches!(
+            self,
+            Self::LoadedApproved { .. } | Self::LoadedApprovedV3 { .. }
+        )
     }
 
     /// `approved_for_live` is always false — hard invariant.
@@ -227,10 +251,25 @@ impl WatchlistIntakeOutcome {
         false
     }
 
-    /// Return the validated artifact if present (LoadedNotApproved or LoadedApproved).
+    /// Return the validated v1/v2 artifact if present (`LoadedNotApproved` or
+    /// `LoadedApproved`). Returns `None` for a v3 outcome — see
+    /// [`Self::artifact_v3`] — never a silent type-punned fallback.
     pub fn artifact(&self) -> Option<&LoadedWatchlistArtifact> {
         match self {
             Self::LoadedNotApproved { artifact } | Self::LoadedApproved { artifact } => {
+                Some(artifact)
+            }
+            _ => None,
+        }
+    }
+
+    /// Return the validated v3 artifact if present (`LoadedNotApprovedV3` or
+    /// `LoadedApprovedV3`). A separate accessor from [`Self::artifact`] — the
+    /// two artifact types are deliberately not unified (frozen contract
+    /// §2.3).
+    pub fn artifact_v3(&self) -> Option<&LoadedWatchlistArtifactV3> {
+        match self {
+            Self::LoadedNotApprovedV3 { artifact } | Self::LoadedApprovedV3 { artifact } => {
                 Some(artifact)
             }
             _ => None,
@@ -334,6 +373,44 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
             }
         }
     };
+
+    // Route watchlist-v3 through the dedicated v3 evaluator before any
+    // v1/v2-specific parsing below — v3 is a new validation branch of this
+    // same canonical entry point (frozen contract §9), not a v1/v2
+    // reinterpretation. v1/v2 parsing (steps below) is reached only when
+    // schema_version is absent, unrecognized, or exactly v1/v2 — unchanged
+    // byte-for-byte from before this branch existed.
+    if j.get("schema_version").and_then(|v| v.as_str()) == Some(WATCHLIST_SCHEMA_VERSION_V3) {
+        return match evaluate_watchlist_intake_v3(Some(path)) {
+            WatchlistIntakeOutcomeV3::Missing { configured_path } => {
+                WatchlistIntakeOutcome::Missing { configured_path }
+            }
+            WatchlistIntakeOutcomeV3::Invalid { failure_reasons } => {
+                WatchlistIntakeOutcome::Invalid { failure_reasons }
+            }
+            WatchlistIntakeOutcomeV3::LoadedNotApproved { artifact } => {
+                WatchlistIntakeOutcome::LoadedNotApprovedV3 { artifact }
+            }
+            WatchlistIntakeOutcomeV3::LoadedApproved { artifact } => {
+                WatchlistIntakeOutcome::LoadedApprovedV3 { artifact }
+            }
+            // Provably unreachable here: `path` is `Some` (this function
+            // already returned `NotConfigured` earlier otherwise) and
+            // schema_version is confirmed == v3 above, so
+            // evaluate_watchlist_intake_v3 cannot return NotConfigured or
+            // NotV3 for this same path/contents. Fail closed rather than
+            // panic in this canonical read path.
+            WatchlistIntakeOutcomeV3::NotConfigured | WatchlistIntakeOutcomeV3::NotV3 => {
+                WatchlistIntakeOutcome::Invalid {
+                    failure_reasons: vec![
+                        "watchlist_schema_invalid: internal routing invariant violated \
+                         evaluating a watchlist-v3 artifact"
+                            .to_string(),
+                    ],
+                }
+            }
+        };
+    }
 
     // Accumulate all validation failures rather than stopping at first error.
     let mut reasons: Vec<String> = Vec::new();
@@ -615,8 +692,13 @@ pub fn evaluate_watchlist_intake_from_env() -> WatchlistIntakeOutcome {
 
 // ---------------------------------------------------------------------------
 // MULTI-STRATEGY-RUNTIME-DISPATCH-01: watchlist-v3 (explicit per-symbol
-// multi-strategy authorization) — wholly separate, additive evaluation path.
-// See docs/specs/multi_strategy_runtime_dispatch_01a_frozen_contract.md.
+// multi-strategy authorization). [`evaluate_watchlist_intake`] (the
+// canonical entry point) now recognizes v3 and delegates to
+// [`evaluate_watchlist_intake_v3`] below, mapping its outcome into
+// [`WatchlistIntakeOutcome::LoadedApprovedV3`]/[`WatchlistIntakeOutcome::LoadedNotApprovedV3`].
+// v1/v2 validation logic is untouched by this branch. The v3-specific
+// validator/types below remain additive and separate from the v1/v2 ones —
+// see docs/specs/multi_strategy_runtime_dispatch_01a_frozen_contract.md §2.3.
 // ---------------------------------------------------------------------------
 
 /// Validated content extracted from a `watchlist-v3` artifact. A separate
@@ -1052,6 +1134,27 @@ pub fn evaluate_watchlist_signal_admission(
         }
         WatchlistIntakeOutcome::LoadedNotApproved { .. } => {
             return deny(WatchlistAdmissionReason::WatchlistNotApproved)
+        }
+        WatchlistIntakeOutcome::LoadedNotApprovedV3 { .. } => {
+            return deny(WatchlistAdmissionReason::WatchlistNotApproved)
+        }
+        WatchlistIntakeOutcome::LoadedApprovedV3 { artifact } => {
+            // v3's strategy_assignments is symbol -> Vec<String> (one or
+            // more strategy identities per symbol) — membership check, never
+            // v1/v2's single-string equality (frozen contract §2.3: the two
+            // shapes are never unified).
+            if !artifact.symbols.contains(&symbol.to_string()) {
+                return deny(WatchlistAdmissionReason::SymbolNotApproved);
+            }
+            return match artifact.strategy_assignments.get(symbol) {
+                Some(assigned) if assigned.iter().any(|s| s == strategy_id) => {
+                    WatchlistSignalAdmission {
+                        allowed: true,
+                        reason: WatchlistAdmissionReason::Allowed,
+                    }
+                }
+                _ => deny(WatchlistAdmissionReason::StrategyNotAssigned),
+            };
         }
         WatchlistIntakeOutcome::LoadedApproved { artifact } => artifact,
     };

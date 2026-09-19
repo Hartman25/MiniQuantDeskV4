@@ -80,8 +80,8 @@
 //!   an artifact with `approved_for_live=true` (hard live lock, unchanged).
 
 use crate::watchlist_intake::{
-    LoadedWatchlistArtifact, WatchlistIntakeOutcome, MULTI_SYMBOL_HARD_CEILING,
-    WATCHLIST_SCHEMA_VERSION_V2,
+    LoadedWatchlistArtifact, LoadedWatchlistArtifactV3, WatchlistIntakeOutcome,
+    MULTI_SYMBOL_HARD_CEILING, WATCHLIST_SCHEMA_VERSION_V2, WATCHLIST_SCHEMA_VERSION_V3,
 };
 
 /// Schema version for [`MultiSymbolRuntimeConfig`] (design doc §4.1).
@@ -116,6 +116,20 @@ pub enum MultiSymbolConfigSource {
     /// An approved `watchlist-v2` artifact loaded from `path`
     /// (`MQK_PAPER_WATCHLIST_PATH`).
     WatchlistArtifactV2 { path: String },
+}
+
+/// Where an [`ExplicitMultiStrategyRuntimeConfig`] was built from. A
+/// dedicated, separate enum from [`MultiSymbolConfigSource`] — not an added
+/// variant on it — so every existing exhaustive match over
+/// `MultiSymbolConfigSource` (all of which only ever see a
+/// [`MultiSymbolRuntimeConfig`]'s source, never an explicit-v3 one) keeps
+/// compiling without gaining a dead, provably-unreachable arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultiStrategyConfigSourceV3 {
+    /// An approved `watchlist-v3` artifact loaded from `path`
+    /// (`MQK_PAPER_WATCHLIST_PATH`) — explicit per-symbol multi-strategy
+    /// authorization (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`).
+    WatchlistArtifactV3 { path: String },
 }
 
 /// The central multi-symbol runtime configuration object (design doc §4.1).
@@ -188,6 +202,78 @@ impl MultiSymbolConfigError {
             Self::MissingAssignment { .. } => "multi_symbol_config_missing_assignment",
             Self::ConcurrentLimitExceeded { .. } => "multi_symbol_config_concurrent_limit_exceeded",
             Self::HardCeilingExceeded { .. } => "multi_symbol_config_hard_ceiling_exceeded",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit v3 (watchlist-v3) config-source error set
+// ---------------------------------------------------------------------------
+
+/// Every way [`ExplicitMultiStrategyRuntimeConfig`] construction can fail. A
+/// dedicated, separate enum from [`MultiSymbolConfigError`] — not added
+/// variants on it — so every existing exhaustive match over
+/// `MultiSymbolConfigError` (all of which only ever see an error from the
+/// v1/v2/legacy builders, never the explicit-v3 one) keeps compiling without
+/// gaining a dead, provably-unreachable arm. All variants are fail-closed:
+/// none of them produce a partial or default config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExplicitMultiStrategyConfigError {
+    /// `outcome` is not `WatchlistIntakeOutcome::LoadedApprovedV3` (covers
+    /// `NotConfigured`, `Missing`, `Invalid`, `LoadedNotApprovedV3`, and any
+    /// v1/v2 outcome).
+    WatchlistNotApproved,
+    /// `artifact.schema_version` is not `"watchlist-v3"`. Defense-in-depth —
+    /// unreachable via `evaluate_watchlist_intake`, kept for
+    /// hand-constructed fixtures.
+    WatchlistNotV3,
+    /// The artifact's shared `default_timeframe` input is absent or empty
+    /// after trim.
+    MissingTimeframe,
+    /// The artifact's shared `default_timeframe` string does not parse to a
+    /// known `timeframe_secs` value (`market_data_freshness::timeframe_secs`).
+    UnsupportedTimeframeLabel { timeframe: String },
+    /// `artifact.max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING`.
+    /// Defense-in-depth — already rejected by `evaluate_watchlist_intake_v3`.
+    HardCeilingExceeded { configured: usize, ceiling: usize },
+    /// `artifact.symbols.len() > artifact.max_symbols_to_trade`.
+    /// Defense-in-depth — already rejected by `evaluate_watchlist_intake_v3`.
+    ConcurrentLimitExceeded { configured: usize, limit: usize },
+    /// A symbol in `artifact.symbols` has no corresponding entry in
+    /// `artifact.strategy_assignments`. Defense-in-depth — already rejected
+    /// by `evaluate_watchlist_intake_v3` for v3 artifacts loaded from disk.
+    MissingAssignment { symbol: String },
+    /// The exact same `(symbol, strategy_id, timeframe_secs)` binding
+    /// appeared more than once while flattening the artifact's
+    /// `strategy_assignments` lists — never silently deduplicated into one
+    /// authority. `evaluate_watchlist_intake_v3` bounds each symbol's list
+    /// length but does not itself reject a repeated strategy id within one
+    /// symbol's list; this builder is the fail-closed seam that does.
+    DuplicateBinding {
+        symbol: String,
+        strategy_id: String,
+        timeframe_secs: i64,
+    },
+}
+
+impl ExplicitMultiStrategyConfigError {
+    /// Stable reason string suitable for logging / future API surfaces.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WatchlistNotApproved => "explicit_multi_strategy_config_watchlist_not_approved",
+            Self::WatchlistNotV3 => "explicit_multi_strategy_config_watchlist_not_v3",
+            Self::MissingTimeframe => "explicit_multi_strategy_config_missing_timeframe",
+            Self::UnsupportedTimeframeLabel { .. } => {
+                "explicit_multi_strategy_config_unsupported_timeframe_label"
+            }
+            Self::HardCeilingExceeded { .. } => {
+                "explicit_multi_strategy_config_hard_ceiling_exceeded"
+            }
+            Self::ConcurrentLimitExceeded { .. } => {
+                "explicit_multi_strategy_config_concurrent_limit_exceeded"
+            }
+            Self::MissingAssignment { .. } => "explicit_multi_strategy_config_missing_assignment",
+            Self::DuplicateBinding { .. } => "explicit_multi_strategy_config_duplicate_binding",
         }
     }
 }
@@ -348,6 +434,160 @@ fn symbol_assignments_from_artifact(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4b — watchlist-v3 explicit multi-strategy artifact builder
+// (MULTI-STRATEGY-RUNTIME-DISPATCH-01, frozen contract §9)
+// ---------------------------------------------------------------------------
+
+/// The v3-aware analog of [`MultiSymbolRuntimeConfig`], for the explicit
+/// per-symbol multi-strategy authorization path.
+///
+/// Deliberately **not** a [`MultiSymbolRuntimeConfig`]: that type's
+/// `symbols: Vec<SymbolStrategyAssignment>` field has an established
+/// one-assignment-per-symbol meaning relied on by its existing Tier
+/// A/watchlist-v2 callers (`daily_data_readiness.rs`,
+/// `autonomous_completed_bar_task.rs`, `autonomous_daily_coordinator.rs`,
+/// `routes/market_data_readiness.rs`) — reusing it for v3 would either
+/// silently narrow a multi-strategy symbol back to one strategy or silently
+/// redefine what every existing caller of that field means. This is a wholly
+/// separate, additive result type instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitMultiStrategyRuntimeConfig {
+    /// Always [`WATCHLIST_SCHEMA_VERSION_V3`].
+    pub schema_version: String,
+    /// Flattened `(symbol, strategy_id, timeframe_secs)` binding set —
+    /// [`crate::dynamic_selection_host_pool::HostPoolKey`]'s own shape, so a
+    /// caller can feed this directly into
+    /// [`crate::dynamic_selection_host_pool::DynamicSelectionHostPool::build`]
+    /// with no translation. Ordered by artifact symbol order, then by each
+    /// symbol's own artifact strategy-list order (frozen contract §5) —
+    /// never `HashMap` iteration order.
+    pub bindings: Vec<(String, String, i64)>,
+    pub max_symbols_to_trade: usize,
+    pub source: MultiStrategyConfigSourceV3,
+}
+
+/// Build an [`ExplicitMultiStrategyRuntimeConfig`] from a watchlist intake
+/// outcome.
+///
+/// # Validation (in order; first failure wins — fail-closed)
+/// 1. `outcome` must be `WatchlistIntakeOutcome::LoadedApprovedV3` — anything
+///    else => [`ExplicitMultiStrategyConfigError::WatchlistNotApproved`].
+/// 2. `artifact.schema_version` must equal `"watchlist-v3"` => otherwise
+///    [`ExplicitMultiStrategyConfigError::WatchlistNotV3`].
+/// 3. `default_timeframe` must be non-empty after trim and must parse to a
+///    known `timeframe_secs` value (`market_data_freshness::timeframe_secs`)
+///    => otherwise [`ExplicitMultiStrategyConfigError::MissingTimeframe`] /
+///    [`ExplicitMultiStrategyConfigError::UnsupportedTimeframeLabel`].
+///    Timeframe is currently global per artifact (frozen contract §3).
+/// 4. `artifact.max_symbols_to_trade <= MULTI_SYMBOL_HARD_CEILING` =>
+///    otherwise [`ExplicitMultiStrategyConfigError::HardCeilingExceeded`].
+/// 5. `artifact.symbols.len() <= artifact.max_symbols_to_trade` =>
+///    otherwise [`ExplicitMultiStrategyConfigError::ConcurrentLimitExceeded`].
+/// 6. Flattening `artifact.symbols` x `artifact.strategy_assignments[symbol]`
+///    (in artifact order both ways) must never repeat the exact same
+///    `(symbol, strategy_id, timeframe_secs)` triple => otherwise
+///    [`ExplicitMultiStrategyConfigError::DuplicateBinding`].
+///
+/// Steps 4-6 are defense-in-depth: `evaluate_watchlist_intake`/
+/// `evaluate_watchlist_intake_v3` already enforce most of this for artifacts
+/// loaded from disk, but this builder re-checks independently of that
+/// validator (e.g. for hand-constructed `LoadedWatchlistArtifactV3` values in
+/// tests), mirroring [`build_multi_symbol_config_from_watchlist_artifact`]'s
+/// own rationale.
+///
+/// On success, `max_symbols_to_trade = artifact.max_symbols_to_trade` and
+/// `source = MultiStrategyConfigSourceV3::WatchlistArtifactV3 { path:
+/// configured_path.to_string() }`.
+pub fn build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+    outcome: &WatchlistIntakeOutcome,
+    configured_path: &str,
+    default_timeframe: Option<&str>,
+) -> Result<ExplicitMultiStrategyRuntimeConfig, ExplicitMultiStrategyConfigError> {
+    let artifact: &LoadedWatchlistArtifactV3 = match outcome {
+        WatchlistIntakeOutcome::LoadedApprovedV3 { artifact } => artifact,
+        _ => return Err(ExplicitMultiStrategyConfigError::WatchlistNotApproved),
+    };
+
+    if artifact.schema_version != WATCHLIST_SCHEMA_VERSION_V3 {
+        return Err(ExplicitMultiStrategyConfigError::WatchlistNotV3);
+    }
+
+    let timeframe_label = non_empty_trimmed(default_timeframe)
+        .ok_or(ExplicitMultiStrategyConfigError::MissingTimeframe)?;
+    let timeframe_secs =
+        crate::market_data_freshness::timeframe_secs(timeframe_label).ok_or_else(|| {
+            ExplicitMultiStrategyConfigError::UnsupportedTimeframeLabel {
+                timeframe: timeframe_label.to_string(),
+            }
+        })?;
+
+    let max_symbols_to_trade = artifact.max_symbols_to_trade as usize;
+    if max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING as usize {
+        return Err(ExplicitMultiStrategyConfigError::HardCeilingExceeded {
+            configured: max_symbols_to_trade,
+            ceiling: MULTI_SYMBOL_HARD_CEILING as usize,
+        });
+    }
+
+    if artifact.symbols.len() > max_symbols_to_trade {
+        return Err(ExplicitMultiStrategyConfigError::ConcurrentLimitExceeded {
+            configured: artifact.symbols.len(),
+            limit: max_symbols_to_trade,
+        });
+    }
+
+    let mut bindings: Vec<(String, String, i64)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String, i64)> =
+        std::collections::HashSet::new();
+    for symbol in &artifact.symbols {
+        let Some(strategy_ids) = artifact.strategy_assignments.get(symbol) else {
+            return Err(ExplicitMultiStrategyConfigError::MissingAssignment {
+                symbol: symbol.clone(),
+            });
+        };
+        for strategy_id in strategy_ids {
+            let key = (symbol.clone(), strategy_id.clone(), timeframe_secs);
+            if !seen.insert(key.clone()) {
+                let (symbol, strategy_id, timeframe_secs) = key;
+                return Err(ExplicitMultiStrategyConfigError::DuplicateBinding {
+                    symbol,
+                    strategy_id,
+                    timeframe_secs,
+                });
+            }
+            bindings.push((symbol.clone(), strategy_id.clone(), timeframe_secs));
+        }
+    }
+
+    Ok(ExplicitMultiStrategyRuntimeConfig {
+        schema_version: WATCHLIST_SCHEMA_VERSION_V3.to_string(),
+        bindings,
+        max_symbols_to_trade,
+        source: MultiStrategyConfigSourceV3::WatchlistArtifactV3 {
+            path: configured_path.to_string(),
+        },
+    })
+}
+
+/// [`build_explicit_multi_strategy_config_from_watchlist_artifact_v3`],
+/// reading `watchlist_outcome` via
+/// `crate::watchlist_intake::evaluate_watchlist_intake_from_env` and the
+/// configured path / timeframe from the same env vars as
+/// [`build_multi_symbol_runtime_config_from_env`]'s watchlist-v2 sibling.
+pub fn build_explicit_multi_strategy_config_from_env(
+) -> Result<ExplicitMultiStrategyRuntimeConfig, ExplicitMultiStrategyConfigError> {
+    let watchlist_outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();
+    let configured_path =
+        std::env::var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH).unwrap_or_default();
+    let legacy_timeframe = std::env::var(super::STRATEGY_MD_TIMEFRAME_ENV).ok();
+    build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+        &watchlist_outcome,
+        &configured_path,
+        legacy_timeframe.as_deref(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Phase 5 — selection helper
 // ---------------------------------------------------------------------------
 
@@ -375,6 +615,16 @@ pub fn build_multi_symbol_runtime_config_from_env_and_watchlist(
     legacy_strategy_id: Option<&str>,
     legacy_timeframe: Option<&str>,
 ) -> Result<MultiSymbolRuntimeConfig, MultiSymbolConfigError> {
+    // A `LoadedApprovedV3`/`LoadedNotApprovedV3` outcome deliberately does
+    // NOT match the `if let` below and falls through to the legacy
+    // single-symbol builder — explicitly, not silently: this function
+    // returns `MultiSymbolRuntimeConfig`, whose one-assignment-per-symbol
+    // shape cannot represent a v3 artifact's multiple strategies per symbol
+    // (frozen contract §9). A v3 artifact's own config source is
+    // `ExplicitMultiStrategyRuntimeConfig`, built by
+    // `build_explicit_multi_strategy_config_from_watchlist_artifact_v3`
+    // above — a wholly separate seam, never this one. Callers that need the
+    // v3 binding set must call that function directly, not this one.
     if let WatchlistIntakeOutcome::LoadedApproved { artifact } = watchlist_outcome {
         if artifact.schema_version == WATCHLIST_SCHEMA_VERSION_V2 {
             let path = configured_watchlist_path.unwrap_or("");
@@ -620,5 +870,271 @@ mod frozen_fleet_raw_inputs_tests {
                      fleet admission is a separate, downstream (DB-backed) concern",
                 );
         assert_eq!(cfg.symbols[0].strategy_id, "strategy-not-in-any-fleet");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// V4-STAGE-B-M2-REPAIR-03 / Patch C1 tests — explicit v3 config source
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod explicit_multi_strategy_v3_config_tests {
+    use super::*;
+
+    fn v3_artifact(
+        symbols: &[&str],
+        assignments: &[(&str, &[&str])],
+        max_symbols_to_trade: u64,
+    ) -> LoadedWatchlistArtifactV3 {
+        let strategy_assignments = assignments
+            .iter()
+            .map(|(sym, ids)| (sym.to_string(), ids.iter().map(|s| s.to_string()).collect()))
+            .collect();
+        LoadedWatchlistArtifactV3 {
+            schema_version: WATCHLIST_SCHEMA_VERSION_V3.to_string(),
+            symbols: symbols.iter().map(|s| s.to_string()).collect(),
+            top_symbol: symbols.first().map(|s| s.to_string()),
+            strategy_assignments,
+            max_symbols_to_trade,
+            max_concurrent_positions: max_symbols_to_trade,
+            approved_for_autonomous_paper: true,
+            dropped_symbols: vec![],
+        }
+    }
+
+    #[test]
+    fn c1_happy_path_flattens_in_symbol_then_strategy_list_order() {
+        let artifact = v3_artifact(
+            &["AAPL", "MSFT"],
+            &[
+                ("AAPL", &["intraday_scalper", "intraday_short_scalper"]),
+                ("MSFT", &["swing_momentum"]),
+            ],
+            2,
+        );
+        let outcome = WatchlistIntakeOutcome::LoadedApprovedV3 { artifact };
+        let cfg = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            Some("5m"),
+        )
+        .expect("valid v3 artifact must build");
+        assert_eq!(
+            cfg.bindings,
+            vec![
+                ("AAPL".to_string(), "intraday_scalper".to_string(), 300),
+                (
+                    "AAPL".to_string(),
+                    "intraday_short_scalper".to_string(),
+                    300
+                ),
+                ("MSFT".to_string(), "swing_momentum".to_string(), 300),
+            ]
+        );
+        assert_eq!(
+            cfg.source,
+            MultiStrategyConfigSourceV3::WatchlistArtifactV3 {
+                path: "test-path".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn c1_not_approved_outcome_fails_closed() {
+        let outcome = WatchlistIntakeOutcome::NotConfigured;
+        let err = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            Some("5m"),
+        )
+        .unwrap_err();
+        assert_eq!(err, ExplicitMultiStrategyConfigError::WatchlistNotApproved);
+    }
+
+    #[test]
+    fn c1_v2_approved_outcome_is_not_approved_for_this_v3_only_builder() {
+        let artifact = LoadedWatchlistArtifact {
+            schema_version: WATCHLIST_SCHEMA_VERSION_V2.to_string(),
+            symbols: vec!["AAPL".to_string()],
+            top_symbol: Some("AAPL".to_string()),
+            strategy_assignments: std::collections::HashMap::from([(
+                "AAPL".to_string(),
+                "intraday_scalper".to_string(),
+            )]),
+            max_symbols_to_trade: 1,
+            max_concurrent_positions: 1,
+            approved_for_autonomous_paper: true,
+            dropped_symbols: vec![],
+        };
+        let outcome = WatchlistIntakeOutcome::LoadedApproved { artifact };
+        let err = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            Some("5m"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ExplicitMultiStrategyConfigError::WatchlistNotApproved,
+            "a v1/v2 LoadedApproved outcome must never be silently accepted by the v3-only builder"
+        );
+    }
+
+    #[test]
+    fn c1_missing_timeframe_fails_closed() {
+        let artifact = v3_artifact(&["AAPL"], &[("AAPL", &["intraday_scalper"])], 1);
+        let outcome = WatchlistIntakeOutcome::LoadedApprovedV3 { artifact };
+        let err = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, ExplicitMultiStrategyConfigError::MissingTimeframe);
+    }
+
+    #[test]
+    fn c1_unsupported_timeframe_label_fails_closed() {
+        let artifact = v3_artifact(&["AAPL"], &[("AAPL", &["intraday_scalper"])], 1);
+        let outcome = WatchlistIntakeOutcome::LoadedApprovedV3 { artifact };
+        let err = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            Some("not-a-real-timeframe"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ExplicitMultiStrategyConfigError::UnsupportedTimeframeLabel {
+                timeframe: "not-a-real-timeframe".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn c1_hard_ceiling_exceeded_fails_closed() {
+        let artifact = v3_artifact(
+            &["AAPL"],
+            &[("AAPL", &["intraday_scalper"])],
+            MULTI_SYMBOL_HARD_CEILING + 1,
+        );
+        let outcome = WatchlistIntakeOutcome::LoadedApprovedV3 { artifact };
+        let err = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            Some("5m"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ExplicitMultiStrategyConfigError::HardCeilingExceeded {
+                configured: (MULTI_SYMBOL_HARD_CEILING + 1) as usize,
+                ceiling: MULTI_SYMBOL_HARD_CEILING as usize,
+            }
+        );
+    }
+
+    #[test]
+    fn c1_missing_assignment_fails_closed_defense_in_depth() {
+        // Hand-constructed fixture bypassing evaluate_watchlist_intake_v3's
+        // own guarantee — proves this builder re-checks independently.
+        // max_symbols_to_trade=2 keeps the (earlier) concurrent-limit check
+        // from firing first, so this specifically exercises the
+        // missing-assignment check.
+        let mut artifact = v3_artifact(&["AAPL"], &[("AAPL", &["intraday_scalper"])], 2);
+        artifact.symbols.push("MSFT".to_string());
+        let outcome = WatchlistIntakeOutcome::LoadedApprovedV3 { artifact };
+        let err = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            Some("5m"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ExplicitMultiStrategyConfigError::MissingAssignment {
+                symbol: "MSFT".to_string()
+            }
+        );
+    }
+
+    /// Duplicate exact binding (same strategy id repeated in one symbol's
+    /// list) must never silently collapse into one authority nor silently
+    /// double up — it must fail closed. `evaluate_watchlist_intake_v3` only
+    /// bounds list length, so a hand-constructed fixture is needed to reach
+    /// this defense-in-depth check (mirrors
+    /// `c1_missing_assignment_fails_closed_defense_in_depth`'s rationale).
+    #[test]
+    fn c1_duplicate_binding_within_one_symbol_fails_closed() {
+        let artifact = v3_artifact(
+            &["AAPL"],
+            &[("AAPL", &["intraday_scalper", "intraday_scalper"])],
+            1,
+        );
+        let outcome = WatchlistIntakeOutcome::LoadedApprovedV3 { artifact };
+        let err = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &outcome,
+            "test-path",
+            Some("5m"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ExplicitMultiStrategyConfigError::DuplicateBinding {
+                symbol: "AAPL".to_string(),
+                strategy_id: "intraday_scalper".to_string(),
+                timeframe_secs: 300,
+            }
+        );
+    }
+
+    #[test]
+    fn c1_reversed_symbol_order_input_produces_reversed_but_stable_binding_order() {
+        // The builder preserves artifact order (frozen contract §5) rather
+        // than re-sorting — proving the flattening is order-preserving, not
+        // that two differently-ordered artifacts converge (that convergence
+        // is HostPoolKey/DynamicSelectionHostPool's own BTreeMap-key
+        // responsibility downstream, not this config layer's).
+        let forward = v3_artifact(
+            &["AAPL", "MSFT"],
+            &[
+                ("AAPL", &["intraday_scalper"]),
+                ("MSFT", &["swing_momentum"]),
+            ],
+            2,
+        );
+        let reversed = v3_artifact(
+            &["MSFT", "AAPL"],
+            &[
+                ("AAPL", &["intraday_scalper"]),
+                ("MSFT", &["swing_momentum"]),
+            ],
+            2,
+        );
+        let forward_cfg = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &WatchlistIntakeOutcome::LoadedApprovedV3 { artifact: forward },
+            "test-path",
+            Some("5m"),
+        )
+        .unwrap();
+        let reversed_cfg = build_explicit_multi_strategy_config_from_watchlist_artifact_v3(
+            &WatchlistIntakeOutcome::LoadedApprovedV3 { artifact: reversed },
+            "test-path",
+            Some("5m"),
+        )
+        .unwrap();
+        assert_eq!(
+            forward_cfg.bindings,
+            vec![
+                ("AAPL".to_string(), "intraday_scalper".to_string(), 300),
+                ("MSFT".to_string(), "swing_momentum".to_string(), 300),
+            ]
+        );
+        assert_eq!(
+            reversed_cfg.bindings,
+            vec![
+                ("MSFT".to_string(), "swing_momentum".to_string(), 300),
+                ("AAPL".to_string(), "intraday_scalper".to_string(), 300),
+            ]
+        );
     }
 }
