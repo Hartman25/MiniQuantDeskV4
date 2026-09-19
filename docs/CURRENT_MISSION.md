@@ -6,6 +6,61 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -1. M1.9 Deployed-State Verification Result (2026-09-19, READ-ONLY)
+
+A bounded, read-only M1.9 verification was performed against the actual
+deployed Paper system (daemon PID 16680, `mqk-paper-postgres` /
+`miniquantdesk_paper` on port 5440, live status API on 127.0.0.1:8899).
+Full evidence: `C:\Users\Zacha\Downloads\MQD_M1_9_DEPLOYED_STATE_REVIEW\`.
+
+**Result: M1.9 PARTIAL.** Seven of eight sub-items are truthfully verified
+and internally consistent: correct Paper DB, correct deployment
+mode/adapter (`paper`/`alpaca`), `live_routing_enabled=false`, provider
+data freshness (AAPL 5m latest completed bar `2026-09-17T16:20:00Z`,
+stale only because the runtime has been disarmed/halted since then —
+not a separate provider defect), scheduler registration (task `Ready`,
+correct action/arguments), and risk/arm/reconcile truth
+(`sys_arm_state.state=DISARMED` reason `DeadmanSupervisorFailure` since
+`2026-09-17T16:33:50Z`, `reconcile_status=ok`, 0 mismatches, no active
+risk block). A halted/disarmed state is treated as truthful, not as an
+M1.9 failure, per the mission's own acceptance rule.
+
+The **deployed-universe/promotion-authorization** sub-item is
+**UNKNOWN_NEEDS_PROOF**: `sys_strategy_registry` has 41 rows, 40 of
+which read as leftover test fixtures, and exactly one
+(`intraday_scalper`, kind=`native`, enabled=true) reads as the genuine
+production strategy — but `sys_strategy_promotion_transitions` has zero
+rows for it, so no promotion-transition record could be found to
+confirm its authorization through the table this verification checked.
+This may mean native/built-in strategies are authorized through a
+different path, but that was not confirmed this turn.
+
+Also observed (informational, not diagnosed further — out of read-only
+scope): today's (`2026-09-18`) autonomous daily operation
+(`352ea5d7...`) never started a run (`start_attempt_count=0`) and was
+closed to `evidence_degraded` at end-of-day rollover, consistent with
+the runtime remaining disarmed for the entire session window rather
+than a separate scheduling defect.
+
+**M1.9 does not close on this evidence.** It remains
+**OPERATIONAL_ONLY / PARTIAL** pending either a promotion-record source
+outside `sys_strategy_promotion_transitions` for `intraday_scalper`, or
+an explicit operator decision on how that strategy's authorization is
+tracked.
+
+**Formal M1 closure status: still OPEN.** M1.9 is not fully verified,
+so — independent of the Stage A code-completion acceptance recorded in
+§0 below — the canonical M1→M2 sequencing gate
+(`MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §H item 8) is
+**not yet satisfied**. M2 remains not authorized by this document.
+
+No Paper/Live/runtime state was modified during this verification: no
+re-arm, no halt clear, no daemon restart, no scheduled-task mutation, no
+Discord test, no order submission, no `.env.local` edit, no
+`smoke_logs/` access.
+
+---
+
 ## 0. Stage A M1 Code-Completion Census — Current Status (2026-09-18)
 
 Branch:
