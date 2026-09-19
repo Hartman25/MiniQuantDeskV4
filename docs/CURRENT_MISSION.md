@@ -6,6 +6,67 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -3. Stage B M2 Repair Outcome — R1/R2 stopped as SPEC_DECISION_REQUIRED (2026-09-18, `V4-STAGE-B-M2-REPAIR-01`)
+
+Independent review rejected the original Stage B 9/9 CODE_CLOSED conclusion
+(see §-2 below). This controller investigated both confirmed gaps in full
+and, for each, found a genuine unresolved operator decision — not merely
+missing code — blocking further implementation. **No production/test code
+was changed by this controller.** Full evidence and cited line numbers:
+`docs/V4_CODE_COMPLETION_MANIFEST.md` § "Stage B M2 Repair Findings".
+
+**R1 (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`, blocks M2.1/M2.3) — `SPEC_DECISION_REQUIRED`.**
+Both Bundle 6's and Bundle 7's own committed design docs explicitly defer
+"how multiple strategies become simultaneously economically active on the
+same symbol" to this not-yet-designed follow-up patch; no committed
+contract answers it. Operator must choose one of:
+- (a) multi-entry `MQK_STRATEGY_IDS` = fleet-wide multi-strategy;
+- (b) watchlist-v2 `strategy_assignments` becomes `symbol -> Vec<strategy_id>` (per-symbol explicit);
+- (c) relax `dynamic_selection.rs`'s frozen one-per-symbol contract to ranked top-N under a new mode;
+- (d) something else.
+
+Each has different capital-caps/promotion-authority consequences that this
+controller will not invent unilaterally (`CLAUDE.md` §19).
+
+**R2 (multi-symbol completed-bar driver, blocks M2.7) — `SPEC_DECISION_REQUIRED`.**
+Concrete, code-proven conflict found: `select_driver_mode_for_state`
+(`state/autonomous_completed_bar_task.rs:154-164`) returns `None` (halts
+**all** automated driver invocation, for every configured symbol) for
+`controller_degraded`/`evidence_degraded` — so today's single-binding
+"any critical fault degrades the operation" behavior, naively extended to
+N bindings, would let *one* symbol's non-remediable blocker silently stop
+dispatch for *every* symbol. This directly violates R2's own requirements
+("a claimed bar for symbol A cannot suppress symbol B"; "one symbol lacking
+a new bar must not cause another symbol's real new bar to be lost").
+Operator must choose:
+- (a) keep coarse operation-wide degrade (simplest, but knowingly violates
+  the isolation requirement the moment >1 symbol is configured);
+- (b) add genuine per-binding fault state and change the state-machine
+  gating so operation-level degrade reflects "no binding can progress," not
+  "any binding failed" (correct, but a real schema + state-machine change to
+  an already-audited subsystem);
+- (c) a hybrid (only certain fault classes — e.g. evidence/claim-integrity —
+  degrade globally; per-symbol readiness/config faults isolate).
+
+**R3 (retry/restart idempotency proof) — `CLOSED`.** Ran
+`scenario_strategy_decision_idempotency_01` in full against the real test
+Postgres: 16/16 passed (4 DB-backed, including restart/replay and
+multi-symbol cross-contamination negative controls). No code changed — M2.6
+now has direct load-bearing proof from this session, not just a cited seam.
+
+**R4 (integrated M2 finish-line scenario) — `BLOCKED`** on R1/R2; cannot be
+honestly built without reimplementing the missing production logic inside
+the test, which would prove nothing real.
+
+**Corrected M2 totals:** `CODE_CLOSED 6/9` (M2.2, M2.4, M2.5, M2.6, M2.8,
+M2.9), `WIRING_MISSING 2/9` (M2.3, M2.7 — both blocked on the above),
+`PARTIAL/WIRING_MISSING 1/9` (M2.1). **M2 code completion is NOT closed.**
+Two operator decisions (R1, R2) are required before remaining M2 code can
+proceed. M1 operational blocker, `intraday_scalper` rejection, and alpha
+discovery deferral are unchanged.
+
+---
+
 ## -2. Governance Decision — Bulk Code Completion Resumes (Stage B / M2), M1 Operational Status Unchanged (2026-09-18, `V4-BULK-CODE-COMPLETION-STAGE-B-M2-02`)
 
 Branch: `v4-bulk-code-completion-stage-b-m2-01`. Baseline HEAD (ancestor):

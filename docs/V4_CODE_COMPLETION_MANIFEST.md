@@ -691,3 +691,194 @@ Corrected status: `CODE_CLOSED 6/9` (M2.2, M2.4, M2.5, M2.6, M2.8, M2.9),
 `WIRING_MISSING 2/9` (M2.3, M2.7), `PARTIAL/WIRING_MISSING 1/9` (M2.1). See
 `docs/CURRENT_MISSION.md` §-2 for the current authoritative M2 status and
 remaining-work tracking (R1-R4).
+
+---
+
+## Stage B M2 Repair Findings (`V4-STAGE-B-M2-REPAIR-01`, 2026-09-18)
+
+Baseline: `27a1733c` (after PATCH R0). Working through R1-R4 in mission order.
+
+### R1 — `MULTI-STRATEGY-RUNTIME-DISPATCH-01`: STOPPED — `SPEC_DECISION_REQUIRED`
+
+**Investigation performed (no code changed):**
+
+- `mqk-portfolio/src/dynamic_selection.rs:29` — the Bundle 7 pure selection
+  model is explicitly frozen: "Exactly one selected candidate per symbol, or
+  none — never more." This is the actual production seam that would need to
+  hand Bundle 6 two same-symbol candidates; it structurally cannot.
+- `docs/specs/multi_strategy_conflict_policy_01a_current_truth_and_contract.md`
+  Q4 (Bundle 6's own committed design doc) states directly: "Building real
+  multi-strategy competition requires per-`(symbol, strategy_id)` host
+  instantiation — that is Bundle 7's dynamic strategy-symbol selection work,
+  explicitly deferred... Bundle 6 must be provably correct against the
+  *possibility* of multiple same-symbol candidates without requiring the
+  runtime to actually produce them today." Bundle 6 was deliberately scoped
+  to prove conflict-resolution *correctness*, not to be fed genuine
+  same-symbol candidates — that production step was explicitly punted
+  forward, undated, unnamed beyond the `MULTI-STRATEGY-RUNTIME-DISPATCH-01`
+  forward reference.
+- `docs/specs/dynamic_strategy_symbol_selection_01f_closure.md` (Bundle 7's
+  own closure doc) confirms the same deferral and does not name any
+  follow-up design for multi-strategy-per-symbol economic authority.
+- No file anywhere in the repo matching `*MULTI-STRATEGY-RUNTIME-DISPATCH*`
+  exists as a design doc — the forward reference in
+  `mqk-strategy/src/engines/mod.rs:75` and
+  `scenario_parallel_long_short_strategy_01.rs:15` is aspirational, not a
+  committed design.
+
+**The exact unresolved choice:** how should the set of strategies
+simultaneously economically-active on the *same* symbol be configured and
+authorized? None of the following is answered by any committed contract:
+
+- (a) Extend `MQK_STRATEGY_IDS` (today: only its first entry is used,
+  `state/multi_symbol_config.rs:92-95,509-518`) so every entry becomes an
+  independently economically-active strategy applied to every configured
+  symbol?
+- (b) Extend the watchlist-v2 artifact's `strategy_assignments` from
+  `symbol -> one strategy_id` to `symbol -> Vec<strategy_id>`, so multi-
+  strategy authorization is per-symbol explicit, not fleet-wide?
+- (c) Relax `dynamic_selection.rs`'s frozen "exactly one selected candidate
+  per symbol" invariant to a ranked top-N under a new explicit mode, still
+  gated by `active_paper` promotion per candidate?
+- (d) Something else the operator has in mind that isn't derivable from
+  existing code/docs.
+
+Each choice has different economic, promotion-authority, and capital-caps
+consequences (`MULTI-SYMBOL-CAPITAL-CAPS-01`'s `per_symbol_max_position_qty`
+is currently scoped per-symbol, not per-`(symbol,strategy)` — a second
+economically-active strategy on the same symbol would need its own capital
+budget carved out of the same per-symbol cap, which is itself a policy
+choice). Per `CLAUDE.md` §19 ("do not invent trading economics") and this
+mission's own explicit instruction ("If the existing configuration contract
+cannot unambiguously define which strategies are economically active...
+STOP this patch as `SPEC_DECISION_REQUIRED` with the exact unresolved
+choice"), this patch stops here. **No code was written for R1.**
+
+### R2 — Multi-symbol completed-bar driver: STOPPED — `SPEC_DECISION_REQUIRED`
+
+**Investigation performed (no code changed):**
+
+- `state/autonomous_completed_bar_driver.rs:334-381`
+  (`resolve_single_effective_binding`) confirmed as the authoritative
+  driver: requires `assignment_config.symbols.len() == 1`, fails closed
+  (`MultiSymbolAssignmentNotExactlyBound`) otherwise — never silently
+  narrows to "the first assignment." The durable claim-identity foundation
+  (`sys_autonomous_daily_bar_dispatches`, keyed by `(operation_id,
+  local_symbol, timeframe, bar_end_ts)`, migration
+  `0050_autonomous_daily_bar_dispatches.sql`) exists and should be reused
+  unchanged — this part of R2 is genuinely a mechanical extension.
+- However, `tick_autonomous_completed_bar_driver`'s single
+  `AutonomousCompletedBarDriverOutcome` return value flows into
+  `state/autonomous_daily_coordinator.rs::apply_completed_bar_driver_outcome`,
+  which classifies it into `NoDurableEffect` or `Critical{...}` and, for
+  `Critical`, durably transitions the **one** `AutonomousDailyOperationRecord.state`
+  column (e.g. `running -> controller_degraded`) — an operation-level, not
+  symbol-level, state machine (`ALL_OPERATION_STATES`,
+  `mqk-db/src/autonomous_daily_operation.rs:45-62`).
+- **Concrete, code-proven conflict with R2's own requirements #3/#7:**
+  `state/autonomous_completed_bar_task.rs::select_driver_mode_for_state`
+  (lines 154-164) returns `Some(...)` (permits automated driver invocation
+  at all) **only** for `STATE_RUNNING` and the five pre-runtime states —
+  every other state, explicitly including `controller_degraded` and
+  `evidence_degraded`, returns `None`: "no automated driver invocation is
+  legal for this state (recovery/stopping/manual/degraded/terminal/unknown)."
+  Concretely: if binding MSFT hits a genuine non-remediable blocker (e.g.
+  `unsupported_timeframe`) and the existing, unmodified
+  `apply_completed_bar_driver_outcome` degrades the operation to
+  `controller_degraded` (today's behavior, correct for the single-binding
+  case), then on the *very next tick* the entire completed-bar task stops
+  being invoked for **every** binding, including a healthy AAPL binding
+  that was dispatching correctly. This is not a hypothetical risk — it is
+  the literal, current, tested behavior of `select_driver_mode_for_state`,
+  and it directly violates R2's own requirement #3 ("a claimed bar for
+  symbol A cannot suppress symbol B") and #7 ("one symbol lacking a new bar
+  must not cause another symbol's real new bar to be lost").
+
+**The exact unresolved choice:** how does per-operation durable state
+(`running`/`controller_degraded`/`evidence_degraded`/`manual_intervention_required`)
+aggregate across N simultaneously-configured symbol/timeframe bindings when
+they can independently succeed, transiently wait, or hit a non-remediable
+blocker in the same tick? Candidate resolutions, none currently authorized
+by any committed contract:
+
+- (a) Keep operation-level state coarse (today's shape, unchanged): any one
+  binding's `Critical` outcome degrades the *whole* operation for *all*
+  bindings — simplest, zero new schema, but knowingly violates R2 #3/#7 as
+  demonstrated above the moment more than one symbol is configured.
+- (b) Introduce genuine per-binding fault state (e.g. a status column on
+  `sys_autonomous_daily_bar_dispatches` or a new durable table), and change
+  `select_driver_mode_for_state`/the coordinator so operation-level
+  `controller_degraded` reflects "no configured binding can make progress"
+  rather than "at least one binding failed" — satisfies #3/#7 but is a real
+  schema + state-machine design change to an already-audited, heavily
+  fail-closed-tested subsystem (Phase D/D3, `REPAIR 4` durable-degrade,
+  critical-notification paths), not a mechanical extension.
+- (c) Some other operator-directed policy (e.g. only certain fault classes
+  are per-binding-isolable; evidence/dispatch-claim-integrity faults still
+  degrade globally since they indicate possible corruption, while
+  readiness/binding-config faults are per-binding-isolable).
+
+This is a genuine operational-safety design decision for a live-money-
+adjacent autonomous system (it determines when the whole autonomous
+operation halts vs. continues degraded-for-one-symbol), not a matter of
+code effort. Writing an unwired "resolve multiple bindings" helper without
+resolving this would not move any M2.7 sub-requirement to `CODE_CLOSED` — it
+would just be more `WIRING_MISSING` surface, repeating exactly the mistake
+this repair mission exists to fix. **No code was written for R2.**
+
+### R3 — Retry/restart load-bearing proof: `CLOSED`
+
+Ran the existing focused scenario in full against the real test Postgres
+(`postgres://postgres:postgres@127.0.0.1:5434/mqk_test`):
+
+```text
+cargo test -p mqk-daemon --test scenario_strategy_decision_idempotency_01
+running 16 tests ... test result: ok. 16 passed; 0 failed
+```
+
+Includes the DB-backed restart/replay proofs
+(`d05_same_bar_reevaluated_twice_submits_exactly_one_outbox_row`,
+`d06_restart_recomputes_identical_decision_id_and_resubmit_is_a_noop`,
+`c2_partial_fill_reevaluation_creates_zero_additional_order`,
+`c4_restart_replay_with_partial_fill_creates_zero_additional_order`) and the
+multi-symbol identity negative control
+(`c10_multi_symbol_one_symbols_current_never_affects_another`). No code
+changed — all 16 already passed. **M2.6 now has direct load-bearing proof
+run this session**, upgrading it from "cited seam" to "directly verified,"
+still `CODE_CLOSED`.
+
+### R4 — Integrated M2 finish-line scenario: `BLOCKED`
+
+Cannot be honestly built. The canonical finish-line combination this
+scenario must prove ("same-symbol conflicting strategy signals" and
+"multiple strategies × multiple symbols" operating through the *real*
+production seam) does not yet exist as a production path — R1 and R2 are
+both `SPEC_DECISION_REQUIRED`, not implemented. A test that reimplemented
+the missing production logic itself would violate this patch's own
+instruction ("must not reimplement the production logic inside the test")
+and would prove nothing about the real system. R4 is blocked on R1 and R2.
+
+### Corrected M2 Status (after R0-R4)
+
+```text
+M2.1  PARTIAL / WIRING_MISSING   (blocked on R1's SPEC_DECISION_REQUIRED)
+M2.2  CODE_CLOSED                (unaffected by this repair)
+M2.3  WIRING_MISSING             (blocked on R1's SPEC_DECISION_REQUIRED)
+M2.4  CODE_CLOSED                (unaffected by this repair)
+M2.5  CODE_CLOSED                (unaffected by this repair)
+M2.6  CODE_CLOSED                (upgraded: direct 16/16 DB-backed proof run this session, R3)
+M2.7  WIRING_MISSING             (blocked on R2's SPEC_DECISION_REQUIRED)
+M2.8  CODE_CLOSED                (unaffected by this repair)
+M2.9  CODE_CLOSED                (unaffected by this repair)
+
+CODE_CLOSED: 6/9   WIRING_MISSING: 2/9   PARTIAL/WIRING_MISSING: 1/9
+SPEC_DECISION_REQUIRED: 2 (R1, R2 — both block further M2 code progress
+                            on M2.1/M2.3/M2.7 until resolved)
+```
+
+**M2 CODE COMPLETION: NOT CLOSED.** Two genuine operator decisions are
+required before the remaining M2 code can be safely implemented — see R1
+and R2 above for the exact unresolved choices and their options. **M2
+operational acceptance remains unclaimed** (unaffected either way). M1
+operational blocker, `intraday_scalper` rejection, and alpha-discovery
+deferral are unchanged by this repair.
