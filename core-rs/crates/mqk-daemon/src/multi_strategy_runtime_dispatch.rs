@@ -1105,6 +1105,65 @@ mod tests {
         );
     }
 
+    /// V4-STAGE-B-M2-C1-C3-FINAL-01 (C2 adversarial audit): exhaustive
+    /// field-by-field matrix proof. Every one of `SelectionCandidateEvidence`'s
+    /// 33 fields is decided PERSISTED + IDENTITY-BOUND (never PROVEN
+    /// NON-AUTHORITATIVE by omission) -- this list plus `d2`'s own list plus
+    /// `c2_changed_binding_evidence_changes_authority_id`'s `promotion_effective`
+    /// mutator together cover the complete struct. Fields deliberately
+    /// covered elsewhere: `promotion_effective` (that test above). Every
+    /// other field mutated here.
+    #[test]
+    fn c2_remaining_evidence_fields_change_authority_id() {
+        let base_eval = authorized_evaluation("AAPL", "intraday_scalper");
+        let baseline_id = base_id(&[base_eval.clone()]);
+
+        type Mutator = Box<dyn Fn(&mut mqk_portfolio::SelectionCandidateEvidence)>;
+        let mutators: Vec<(&str, Mutator)> = vec![
+            (
+                "promotion_query_ok",
+                Box::new(|e| e.promotion_query_ok = false),
+            ),
+            (
+                "promotion_state",
+                Box::new(|e| e.promotion_state = Some("expired".to_string())),
+            ),
+            (
+                "config_identity_verified",
+                Box::new(|e| e.config_identity_verified = false),
+            ),
+            (
+                "durable_config_fingerprint",
+                Box::new(|e| e.durable_config_fingerprint = Some("different-cfg".to_string())),
+            ),
+            (
+                "current_config_fingerprint",
+                Box::new(|e| e.current_config_fingerprint = Some("different-cfg".to_string())),
+            ),
+            ("registry_enabled", Box::new(|e| e.registry_enabled = false)),
+            ("data_ready", Box::new(|e| e.data_ready = false)),
+            (
+                "promotion_transition_id",
+                Box::new(|e| e.promotion_transition_id = Some("transition-1".to_string())),
+            ),
+            (
+                "evidence_transition_id",
+                Box::new(|e| e.evidence_transition_id = Some("transition-2".to_string())),
+            ),
+        ];
+
+        for (field_name, mutate) in mutators {
+            let mut mutated_eval = base_eval.clone();
+            mutate(&mut mutated_eval.evidence);
+            let mutated_id = base_id(&[mutated_eval]);
+            assert_ne!(
+                baseline_id, mutated_id,
+                "mutating `{field_name}` alone must change authority_id -- it is not bound \
+                 into identity"
+            );
+        }
+    }
+
     /// D2 (V4-STAGE-B-M2-C1-C3-REPAIR-04): mutation proof that every
     /// previously-omitted `SelectionCandidateEvidence` field is actually
     /// bound into `authority_id` -- not merely carried through to the
