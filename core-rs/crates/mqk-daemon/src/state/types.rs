@@ -952,6 +952,14 @@ pub struct DynamicSelectionRuntimeState {
     /// Shadow* and refused starts persist evidence but do not gate
     /// activation on read-validation.
     pub evidence_validation_state: Option<String>,
+    /// Read-only operator visibility (D3, V4-STAGE-B-M2-C1-C3-REPAIR-04):
+    /// the durable `sys_explicit_multi_strategy_authority.authority_id` this
+    /// start attempt committed — `Some` only for
+    /// `RuntimeStrategyAuthorityKind::ExplicitWatchlistV3MultiStrategy`,
+    /// `None` for every other authority kind. Never a Bundle 7 `plan_id`
+    /// masquerading as this identity, and never fabricated when this
+    /// mechanism did not actually run.
+    pub explicit_authority_id: Option<Uuid>,
 }
 
 impl DynamicSelectionRuntimeState {

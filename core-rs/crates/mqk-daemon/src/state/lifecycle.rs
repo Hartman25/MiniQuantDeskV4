@@ -588,6 +588,7 @@ impl AppState {
                     approved_for_live: false,
                     evidence_persisted: false,
                     evidence_validation_state: None,
+                    explicit_authority_id: None,
                 },
                 RuntimeStrategyDispatchAuthority::Legacy {
                     assignments: snapshot.legacy_assignments(),
@@ -654,6 +655,7 @@ impl AppState {
                             approved_for_live: false,
                             evidence_persisted: false,
                             evidence_validation_state: None,
+                            explicit_authority_id: None,
                         },
                         RuntimeStrategyDispatchAuthority::Legacy {
                             assignments: snapshot.legacy_assignments(),
@@ -927,6 +929,7 @@ impl AppState {
                 approved_for_live: false,
                 evidence_persisted,
                 evidence_validation_state,
+                explicit_authority_id: None,
             },
             dispatch_authority,
         ))
@@ -1159,17 +1162,35 @@ impl AppState {
                     ));
                 }
             };
-        if validated_header.authority_id != authority_id
-            || validated_bindings.len() != evaluations.len()
-            || validated_header.approved_for_live
-        {
+        // D3 (V4-STAGE-B-M2-C1-C3-REPAIR-04): true read-side validation --
+        // every header identity fact, the exact binding set (no
+        // missing/extra/duplicate child), and `authority_id` recomputed
+        // from the durable stored facts themselves, never merely
+        // `authority_id` + a binding-length check.
+        let expected = crate::explicit_multi_strategy_evidence_validator::ExpectedExplicitMultiStrategyAuthority {
+            authority_id,
+            run_id,
+            source_kind: mqk_db::EXPLICIT_MULTI_STRATEGY_SOURCE_KIND,
+            source_identity: &configured_path,
+            source_artifact_hash: &source_artifact_hash,
+            config_fingerprint: &config_fingerprint,
+            market_date: &market_date,
+            writer_version: crate::multi_strategy_runtime_dispatch::EXPLICIT_MULTI_STRATEGY_AUTHORITY_WRITER_VERSION,
+            evaluations: &evaluations,
+        };
+        if let Err(e) = crate::explicit_multi_strategy_evidence_validator::validate_explicit_multi_strategy_authority(
+            &expected,
+            &validated_header,
+            &validated_bindings,
+        ) {
             return Err(RuntimeLifecycleError::forbidden(
                 "runtime.start_refused.explicit_multi_strategy_evidence_incoherent",
                 DOMAIN,
                 format!(
                     "explicit multi-strategy paper_enforced start refused: durable authority \
-                     evidence failed read-side coherence check for authority_id={authority_id} \
-                     ({CONTRACT})"
+                     evidence failed read-side coherence check for authority_id={authority_id}: \
+                     {} ({CONTRACT})",
+                    e.code(),
                 ),
             ));
         }
@@ -1227,6 +1248,7 @@ impl AppState {
                 approved_for_live: false,
                 evidence_persisted: true,
                 evidence_validation_state: Some("valid".to_string()),
+                explicit_authority_id: Some(authority_id),
             },
             dispatch_authority,
         ))
@@ -3959,6 +3981,7 @@ mod real_production_effects_matrix_tests {
             approved_for_live: false,
             evidence_persisted: false,
             evidence_validation_state: None,
+            explicit_authority_id: None,
         }
     }
 
@@ -3983,6 +4006,7 @@ mod real_production_effects_matrix_tests {
             approved_for_live: false,
             evidence_persisted: false,
             evidence_validation_state: None,
+            explicit_authority_id: None,
         }
     }
 
@@ -4011,6 +4035,7 @@ mod real_production_effects_matrix_tests {
             approved_for_live: false,
             evidence_persisted: false,
             evidence_validation_state: None,
+            explicit_authority_id: None,
         }
     }
 
@@ -5865,6 +5890,7 @@ mod real_production_effects_matrix_tests {
             approved_for_live: false,
             evidence_persisted: false,
             evidence_validation_state: None,
+            explicit_authority_id: None,
         }
     }
 
@@ -7185,6 +7211,7 @@ mod dynamic_selection_cleanup_contract_tests {
             approved_for_live: false,
             evidence_persisted: false,
             evidence_validation_state: None,
+            explicit_authority_id: None,
         }
     }
 

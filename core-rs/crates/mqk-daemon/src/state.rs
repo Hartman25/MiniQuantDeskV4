@@ -8633,6 +8633,7 @@ mod ownership_state_machine_tests {
             approved_for_live: false,
             evidence_persisted: false,
             evidence_validation_state: None,
+            explicit_authority_id: None,
         };
         *state.runtime_ownership.lock().await = LocalRuntimeOwnership::Active {
             run_id,

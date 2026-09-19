@@ -23,6 +23,7 @@ pub mod dynamic_selection_plan_builder;
 pub mod dynamic_selection_start_gate;
 pub mod earnings_calendar;
 pub mod event_risk_blackout;
+pub mod explicit_multi_strategy_evidence_validator;
 pub mod ingest_jobs;
 pub mod market_data_freshness;
 pub mod mode_transition;

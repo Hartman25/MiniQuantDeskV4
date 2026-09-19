@@ -3400,6 +3400,7 @@ mod tests {
             approved_for_live: false,
             evidence_persisted: false,
             evidence_validation_state: None,
+            explicit_authority_id: None,
         }
     }
 

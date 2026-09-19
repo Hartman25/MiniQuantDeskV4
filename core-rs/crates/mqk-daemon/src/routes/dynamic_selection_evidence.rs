@@ -149,6 +149,17 @@ pub(crate) struct DynamicSelectionStatusResponse {
 
     // Committed truth (from `dynamic_selection_runtime_snapshot`) — every
     // field below is `None`/`false`/empty when no commitment exists yet.
+    /// D3 (V4-STAGE-B-M2-C1-C3-REPAIR-04) read-only operator visibility:
+    /// which mechanism actually produced the committed authority --
+    /// `"legacy"` | `"bundle7_dynamic_selection"` |
+    /// `"explicit_watchlist_v3_multi_strategy"`. `None` when no commitment
+    /// exists yet.
+    pub committed_authority_kind: Option<String>,
+    /// The durable `sys_explicit_multi_strategy_authority.authority_id` this
+    /// run committed -- `Some` only when `committed_authority_kind ==
+    /// "explicit_watchlist_v3_multi_strategy"`. Never a Bundle 7 `plan_id`
+    /// masquerading as this identity.
+    pub committed_explicit_authority_id: Option<Uuid>,
     pub committed_configured_mode: Option<String>,
     pub committed_effective_mode: Option<String>,
     pub committed_live_lock_applied: bool,
@@ -197,6 +208,8 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
     let mut response = DynamicSelectionStatusResponse {
         lifecycle,
         active_run_id,
+        committed_authority_kind: None,
+        committed_explicit_authority_id: None,
         committed_configured_mode: None,
         committed_effective_mode: None,
         committed_live_lock_applied: false,
@@ -224,6 +237,7 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
         return (StatusCode::OK, Json(response)).into_response();
     };
 
+    response.committed_authority_kind = Some(snapshot.authority_kind.as_str().to_string());
     response.committed_configured_mode = Some(snapshot.configured_mode.as_str().to_string());
     response.committed_effective_mode = Some(snapshot.effective_mode.as_str().to_string());
     response.committed_live_lock_applied = snapshot.live_lock_applied;
@@ -231,6 +245,27 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
     response.host_pool_present = snapshot.host_pool_present;
     response.host_pool_count = snapshot.selected_pair_count() as u64;
     response.evidence_persisted = snapshot.evidence_persisted;
+
+    // D3: the explicit watchlist-v3 multi-strategy mechanism never builds a
+    // Bundle 7 `DynamicSelectionPlan` (frozen contract) -- its own durable
+    // identity is `explicit_authority_id`, surfaced here truthfully instead
+    // of falling into the `plan_id`-only early return below (which would
+    // otherwise silently omit this mechanism's committed identity entirely,
+    // as though nothing were committed). `evidence_validation_state` here
+    // reflects the real D3 read-side validation this run's start attempt
+    // already performed against the durable authority before activating --
+    // never a fresh, unbounded re-validation attempt on a GET.
+    if matches!(
+        snapshot.authority_kind,
+        crate::state::RuntimeStrategyAuthorityKind::ExplicitWatchlistV3MultiStrategy
+    ) {
+        response.committed_explicit_authority_id = snapshot.explicit_authority_id;
+        response.evidence_validation_state = snapshot
+            .evidence_validation_state
+            .as_deref()
+            .and_then(|s| if s == "valid" { Some("valid") } else { None });
+        return (StatusCode::OK, Json(response)).into_response();
+    }
 
     let Some(plan_id) = snapshot.plan_id else {
         return (StatusCode::OK, Json(response)).into_response();
@@ -623,6 +658,66 @@ mod tests {
         assert_eq!(body["host_pool_count"], 0);
         assert_eq!(body["preview_configured_mode"], "off");
         assert_eq!(body["preview_effective_mode"], "off");
+    }
+
+    /// D3 (V4-STAGE-B-M2-C1-C3-REPAIR-04): a committed explicit
+    /// watchlist-v3 multi-strategy authority must surface
+    /// `committed_authority_kind` and `committed_explicit_authority_id`
+    /// truthfully -- never fall into the Bundle-7-only `plan_id` early
+    /// return and report as though nothing were committed, and never
+    /// fabricate a Bundle 7 `committed_plan_id`/`committed_source_kind` for
+    /// a mechanism that never builds a `DynamicSelectionPlan`.
+    #[tokio::test]
+    async fn status_surfaces_explicit_v3_authority_kind_and_id_not_a_fabricated_plan() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"test.routes.dynamic_selection_evidence.explicit_v3_status",
+        );
+        let authority_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"test.routes.dynamic_selection_evidence.explicit_v3_status.authority",
+        );
+        state
+            .commit_dynamic_selection_runtime_state_for_test(crate::state::DynamicSelectionRuntimeState {
+                run_id,
+                authority_kind: crate::state::RuntimeStrategyAuthorityKind::ExplicitWatchlistV3MultiStrategy,
+                disposition:
+                    crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::PaperEnforcedAllowed,
+                configured_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
+                effective_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
+                live_lock_applied: false,
+                plan: None,
+                plan_id: None,
+                selected_pairs: vec![("AAPL".to_string(), "intraday_scalper".to_string(), 300)],
+                host_pool_present: true,
+                reasons: Vec::new(),
+                approved_for_live: false,
+                evidence_persisted: true,
+                evidence_validation_state: Some("valid".to_string()),
+                explicit_authority_id: Some(authority_id),
+            })
+            .await;
+
+        let resp = dynamic_selection_status(State(Arc::clone(&state)))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+
+        assert_eq!(body["committed_authority_kind"], "explicit_watchlist_v3_multi_strategy");
+        assert_eq!(body["committed_explicit_authority_id"], authority_id.to_string());
+        assert_eq!(body["evidence_validation_state"], "valid");
+        assert!(
+            body["committed_plan_id"].is_null(),
+            "the explicit v3 mechanism never builds a Bundle 7 plan; committed_plan_id must \
+             never be fabricated for it"
+        );
+        assert!(body["committed_source_kind"].is_null());
+        assert_eq!(body["host_pool_present"], true);
     }
 
     /// The `limit` query parameter must clamp into `[1, 100]` -- never an
