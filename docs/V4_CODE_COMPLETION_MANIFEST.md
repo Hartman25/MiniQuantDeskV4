@@ -882,3 +882,170 @@ and R2 above for the exact unresolved choices and their options. **M2
 operational acceptance remains unclaimed** (unaffected either way). M1
 operational blocker, `intraday_scalper` rejection, and alpha-discovery
 deferral are unchanged by this repair.
+
+---
+
+## Stage B M2 Completion After Operator Decisions (`V4-STAGE-B-M2-REPAIR-02`, 2026-09-18)
+
+Baseline: `0ba64172` (end of `V4-STAGE-B-M2-REPAIR-01`). The operator resolved
+both `SPEC_DECISION_REQUIRED` items with frozen decisions; this controller
+implemented against them.
+
+### R1A — FROZEN: `docs/specs/multi_strategy_runtime_dispatch_01a_frozen_contract.md`
+
+Documents the operator's R1 decision (explicit per-symbol multi-strategy
+authorization via a new, additive `watchlist-v3` schema) in full: JSON
+shape, validation contract, `MAX_STRATEGIES_PER_SYMBOL` bound, identity
+tuple, independent per-binding promotion/readiness requirements,
+deterministic ordering, reuse of the existing host-pool/Bundle-6/Bundle-5
+pipeline, account/symbol (not per-strategy) capital authority, and no
+dry-run/Live authority change. Commit `7f78cc0d`.
+
+### R1B — `MULTI-STRATEGY-RUNTIME-DISPATCH-01`: CODE_CLOSED (dispatch/conflict/config pipeline); WIRING_MISSING (live daemon activation)
+
+Implemented and tested (commit `a00f9238`, 69 tests green: 9 new R1B proofs
++ 43 unchanged v1/v2 regression + 17 new v3 schema tests):
+
+- `watchlist_intake.rs`: `WATCHLIST_SCHEMA_VERSION_V3`, `LoadedWatchlistArtifactV3`,
+  `evaluate_watchlist_intake_v3` — a wholly separate, additive evaluation
+  path. v1/v2 parsing is unchanged byte-for-byte (regression-proven).
+- `multi_strategy_runtime_dispatch.rs` (new): resolves every `(symbol,
+  strategy_id)` pair a v3 artifact authorizes **independently** through the
+  real Bundle 7 evidence gate (`evaluate_candidate` +
+  `compute_dynamic_selection_plan`, called once per binding so ranking
+  never applies — a promoted sibling structurally cannot authorize an
+  unpromoted one), excludes dry-run identities before any I/O, and builds
+  the real `DynamicSelectionHostPool` + `RuntimeStrategyDispatchAuthority::
+  DynamicPaperEnforced` — the exact same per-tick dispatch/conflict/
+  allocation pipeline Bundle 7 already uses, reused verbatim, not
+  reimplemented.
+- All 10 of R1B's mission-required focused proofs pass, each calling a real
+  production function: two real strategies on one symbol both genuinely
+  `on_bar`-dispatch with distinct identity
+  (`r1b_two_strategies_same_symbol_both_dispatch_with_distinct_identity`,
+  real DB-backed); both original same-symbol proposals reach Bundle 6 and
+  resolve to the deterministic risk-reducing survivor regardless of input
+  order (`r1b_both_real_strategy_proposals_reach_bundle6_and_resolve_
+  deterministically`, `r1b_reversed_real_strategy_input_order_yields_
+  same_result`); a promoted sibling never authorizes an unpromoted one
+  (`r1b_06_promoted_sibling_never_authorizes_an_unpromoted_one`); same-symbol
+  sibling provenance swap fails closed
+  (`r1b_same_symbol_sibling_provenance_swap_fails_closed`); dry-run identity
+  never appears in the authorized set
+  (`r1b_08_dry_run_strategy_id_never_appears_in_authorized_bindings`); no
+  cross-symbol/cross-strategy contamination
+  (`r1b_10_multi_symbol_multi_strategy_no_cross_contamination`); existing
+  single-strategy configuration is provably unaffected (43/43 unmodified
+  v1/v2 tests still pass).
+
+**What remains WIRING_MISSING:** activation in the live daemon start
+sequence. `state/lifecycle.rs::build_dynamic_selection_start_snapshot` (the
+one call site that constructs the run's `RuntimeStrategyDispatchAuthority`)
+returns `DynamicSelectionRuntimeState`, a type whose fields
+(`disposition: DynamicSelectionStartGateDisposition`, `plan:
+Option<DynamicSelectionPlan>`, etc.) are Bundle-7-plan-shaped and feed a
+durable evidence-persistence path (`dynamic_selection_evidence_writer`,
+`sys_dynamic_selection_plans`) built specifically for Bundle 7's ranking
+plan. Splicing v3 in at this exact call site would require either
+fabricating a synthetic Bundle-7-shaped plan/evidence for a mechanism that
+isn't Bundle 7 (semantically dishonest evidence), or extending that
+durable evidence/status surface to understand a second plan kind — a new
+observability surface R1A's own frozen contract §9 explicitly placed out of
+scope for R1B ("Not in scope for R1B: GUI surfaces, new API routes"). This
+is a genuine, narrowly-scoped follow-up integration patch, not a design
+question — the dispatch mechanism itself is proven correct; only its
+activation switch and observable evidence shape remain to be built.
+
+### R2A — durable per-binding driver state: CODE_CLOSED
+
+Implemented and tested (commit `9fd7df12`, 8/8 DB-backed tests green,
+migration 0071). See `docs/V4_CODE_COMPLETION_MANIFEST.md`'s R2A commit
+message and the migration's own header for full detail: additive
+`sys_autonomous_daily_binding_state` table, closed active/locally_blocked
+vocabulary with a closed binding-local reason-code set mirroring the R2
+operator decision's own enumerated categories, `mark_autonomous_daily_
+binding_active`/`_locally_blocked` (idempotent upserts) and `fetch_
+autonomous_daily_binding_states`. Proven: schema/constraint enforcement,
+restart persistence (fresh-pool read), cross-binding isolation (blocking
+one binding never mutates a sibling, including two strategies on the same
+symbol).
+
+### R2B/R2C — multi-binding completed-bar driver + aggregate operation state: NOT IMPLEMENTED — WIRING_MISSING
+
+Investigated in full; not implemented this session. `resolve_single_
+effective_binding` (`state/autonomous_completed_bar_driver.rs:334-381`),
+`tick_autonomous_completed_bar_driver` (897-994), its production task
+adapter (`autonomous_completed_bar_task.rs`, ~900 lines, including
+`select_driver_mode_for_state`), and the coordinator's outcome-to-state
+aggregation (`autonomous_daily_coordinator.rs::apply_completed_bar_driver_
+outcome`/`classify_completed_bar_driver_outcome`) together form roughly
+2,600 lines of already-deeply-audited, safety-critical autonomous-operation
+machinery — the actual live trading heartbeat for the deployed system. A
+correct rewrite requires: (1) resolving every configured binding instead of
+exactly one; (2) reusing `sys_autonomous_daily_bar_dispatches`'s existing
+per-bar claim identity unchanged per binding; (3) writing R2A's new
+per-binding state on every binding-local outcome; (4) reclassifying
+`apply_completed_bar_driver_outcome` so a binding-local fault (per R2's
+frozen enumeration) updates only that binding's row and leaves
+`sys_autonomous_daily_operations.state` untouched, while a global-critical
+fault (evidence-lineage corruption, dispatch-claim ambiguity, runtime-
+ownership/leadership failure, etc.) still degrades the whole operation
+exactly as today; and (5) proving, with real DB-backed negative controls,
+that a binding-local block on one symbol never suppresses another symbol's
+genuine progress on the same or a later tick. Given the safety-critical
+nature of this exact code path (CLAUDE.md's correctness-first priority, and
+this repair mission's own origin — a prior session's rushed, insufficiently-
+verified claim of closure on this same subsystem class), attempting this
+rewrite in the time remaining in this session risked exactly the kind of
+under-verified change this mission exists to prevent. R2A's durable
+foundation is real and ready for R2B/R2C to build on in a focused follow-up
+patch with its own dedicated verification budget.
+
+### R3 — retry/restart idempotency: reconfirmed, still CODE_CLOSED
+
+Rerun after R1B/R2A (neither touched this scenario's dependencies): `cargo
+test -p mqk-daemon --test scenario_strategy_decision_idempotency_01` — 16/16
+passed, unchanged, no code modified.
+
+### R4 — integrated M2 finish-line scenario: still BLOCKED
+
+Blocked on R1B's live-activation wiring and R2B/R2C, neither of which exist
+yet as production paths. Building it anyway would require reimplementing
+the missing production logic inside the test itself, which the mission's
+own instructions forbid and which would prove nothing about the real
+system (see the original `08_integrated_m2_proof.txt` reasoning, unchanged).
+
+### Corrected M2 Status (final, this session)
+
+```text
+M2.1  WIRING_MISSING   dispatch/conflict pipeline CODE_CLOSED (R1B); live activation not wired
+M2.2  CODE_CLOSED      unaffected; reinforced by R1B's same-symbol provenance-swap proof
+M2.3  WIRING_MISSING   dispatch/conflict pipeline CODE_CLOSED (R1B); live activation not wired
+M2.4  CODE_CLOSED      unaffected
+M2.5  CODE_CLOSED      unaffected
+M2.6  CODE_CLOSED      unaffected; direct proof reconfirmed this session (R3)
+M2.7  WIRING_MISSING   durable per-binding schema CODE_CLOSED (R2A); driver/aggregation not wired (R2B/R2C)
+M2.8  CODE_CLOSED      unaffected
+M2.9  CODE_CLOSED      unaffected
+
+CODE_CLOSED: 6/9   WIRING_MISSING: 3/9 (M2.1, M2.3, M2.7 — each has a real,
+                    tested underlying capability; each is missing only its
+                    final production-activation splice)
+SPEC_DECISION_REQUIRED: 0 (both R1 and R2 resolved by the operator this session)
+```
+
+**M2 CODE COMPLETION: NOT CLOSED**, per this controller's own instruction
+("Only claim M2 CODE_CLOSED if the real production integrated proof
+passes" — R4 did not run). Real, meaningful progress was made this
+session: both `SPEC_DECISION_REQUIRED` blockers are resolved with frozen,
+documented decisions; the same-symbol multi-strategy dispatch pipeline is
+implemented and proven correct at the production-function level (R1B); the
+durable per-binding state foundation for multi-symbol completed-bar
+dispatch is implemented and proven (R2A). What remains for full M2 closure
+is narrowly scoped and precisely identified: R1B's live-daemon-start-
+sequence splice (needs its own evidence/status design, explicitly deferred
+by R1A), and R2B/R2C's driver/coordinator rewrite (needs its own dedicated
+verification budget given its safety-critical nature). **M2 operational
+acceptance remains unclaimed.** M1 operational blocker (deployment
+authority gap), the `intraday_scalper` promotion rejection, and alpha-
+discovery deferral are all unchanged.

@@ -6,6 +6,77 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -4. Stage B M2 Completion After Operator Decisions (2026-09-18, `V4-STAGE-B-M2-REPAIR-02`)
+
+The operator resolved both `SPEC_DECISION_REQUIRED` items from §-3 below
+with frozen decisions. This controller implemented against both. Full
+evidence: `docs/V4_CODE_COMPLETION_MANIFEST.md` § "Stage B M2 Completion
+After Operator Decisions".
+
+**R1 frozen decision:** explicit per-symbol multi-strategy authorization via
+a new, additive `watchlist-v3` schema (`symbol -> Vec<strategy_id>`), not
+implicit fleet-wide activation and not a relaxation of Bundle 7's frozen
+selector. Design frozen in
+`docs/specs/multi_strategy_runtime_dispatch_01a_frozen_contract.md`
+(commit `7f78cc0d`).
+
+**R1B result — CODE_CLOSED (pipeline) / WIRING_MISSING (live activation).**
+The same-symbol multi-strategy dispatch/conflict/config pipeline is
+implemented and proven with 10 real production-function-level proofs (69
+tests green: commit `a00f9238`). Two real strategies on one symbol
+genuinely dispatch with distinct identity; both reach Bundle 6 and resolve
+deterministically regardless of input order; a promoted sibling never
+authorizes an unpromoted one; same-symbol provenance swap fails closed;
+dry-run identity is excluded; no cross-contamination; existing v1/v2
+config is unaffected (43/43 regression). **Not yet spliced into the live
+daemon start sequence** — that requires extending Bundle 7's
+plan/evidence-persistence type shape, a new observability surface R1A's
+own contract explicitly deferred out of R1B's scope. This is a narrow,
+well-understood follow-up integration patch, not an open design question.
+
+**R2 frozen decision:** hybrid per-binding fault isolation. A binding-local
+failure (symbol-specific no-new-bar, missing/stale data, readiness
+failure, unsupported symbol/timeframe, isolated provider failure)
+quarantines only that binding. A global-critical failure (evidence-lineage
+corruption, dispatch-claim ambiguity, runtime-ownership/leadership
+failure, etc.) remains operation-wide fail-closed via the existing state
+machine, unchanged.
+
+**R2A result — CODE_CLOSED.** New additive table
+`sys_autonomous_daily_binding_state` (migration 0071, commit `9fd7df12`)
+durably tracks each binding's `active`/`locally_blocked` health with a
+closed reason-code vocabulary. 8/8 DB-backed tests: schema/constraint
+enforcement, restart persistence, cross-binding isolation.
+
+**R2B/R2C result — NOT IMPLEMENTED, WIRING_MISSING.** The multi-binding
+completed-bar driver rewrite and operation-state aggregation
+(~2,600 lines across `autonomous_completed_bar_driver.rs`,
+`autonomous_completed_bar_task.rs`, `autonomous_daily_coordinator.rs` —
+the actual live autonomous-trading heartbeat) were investigated in full
+but not attempted this session: the safety-critical nature of this exact
+code path, and the fact that this whole repair mission exists because a
+prior session rushed a closure claim on this same subsystem class, made a
+rushed rewrite in remaining session time the wrong tradeoff. R2A's durable
+foundation is ready for a focused follow-up patch with its own dedicated
+verification budget.
+
+**R3:** reconfirmed unchanged, 16/16 still passing, no code modified.
+
+**R4:** still `BLOCKED` — needs R1B's live-activation splice and R2B/R2C,
+neither of which exist as production paths yet.
+
+**Corrected M2 totals:** `CODE_CLOSED 6/9` (M2.2, M2.4, M2.5, M2.6, M2.8,
+M2.9), `WIRING_MISSING 3/9` (M2.1, M2.3, M2.7 — each has a real, tested
+underlying capability; each is missing only its final production-
+activation splice). `SPEC_DECISION_REQUIRED: 0` (both resolved this
+session). **M2 code completion is NOT closed** (per this controller's own
+rule: only claim closed if the real integrated proof, R4, passes — it does
+not yet). M2 operational acceptance remains unclaimed. M1 operational
+blocker, the `intraday_scalper` rejection, and alpha-discovery deferral
+are unchanged.
+
+---
+
 ## -3. Stage B M2 Repair Outcome — R1/R2 stopped as SPEC_DECISION_REQUIRED (2026-09-18, `V4-STAGE-B-M2-REPAIR-01`)
 
 Independent review rejected the original Stage B 9/9 CODE_CLOSED conclusion
