@@ -432,6 +432,76 @@ treated as citation-unverified until independently checked.
 **Baseline HEAD:** 28fff6952a65791cd489b88d3673561ab8c12a03
 **Branch:** v4-bulk-code-completion-stage-b-m2-01
 
+### CORRECTION (`V4-STAGE-B-M2-REPAIR-01`, 2026-09-18) — the 9/9 CODE_CLOSED conclusion below was REJECTED by independent review
+
+The census below (original commit `2b520aa0`) is preserved verbatim as audit
+history. It contained a real defect: it verified that Bundle 6
+(`runtime_strategy_conflict.rs`) is production-wired and correctly resolves
+conflicting same-symbol decisions **when given synthetic/hand-constructed
+same-symbol inputs**, but never checked whether the actual upstream
+production producer can ever hand Bundle 6 two genuine, independently
+dispatched, economically-active strategy decisions for the *same* symbol in
+one cycle. It cannot, today:
+
+- `mqk-portfolio/src/dynamic_selection.rs:29` — the dynamic-selection plan
+  model is explicitly documented and enforced: "Exactly one selected
+  candidate per symbol, or none — never more."
+- `mqk-strategy/src/host.rs` (`StrategyHostError::MultiStrategyNotAllowed`)
+  — a `StrategyHost` instance refuses a second strategy registration.
+  `mqk-strategy/tests/scenario_parallel_long_short_strategy_01.rs::p11_strategy_host_enforces_single_strategy`
+  is a committed, passing test that exists specifically to document and
+  prove this limit, asserting `MultiStrategyNotAllowed` and stating in its
+  own doc comment: "True concurrent long+short dispatch on the same symbol
+  requires a separate patch: `MULTI-STRATEGY-RUNTIME-DISPATCH-01`."
+- `mqk-strategy/src/engines/mod.rs:71-75` — the short-side strategy variant
+  is registered in the plugin catalog but documented as selectable only
+  one-at-a-time via `MQK_STRATEGY_IDS`, with the same
+  `MULTI-STRATEGY-RUNTIME-DISPATCH-01` forward reference.
+- `state/autonomous_completed_bar_driver.rs:329-333`
+  (`resolve_single_effective_binding`) — the actual authoritative
+  autonomous completed-bar production driver requires "exactly one
+  configured assignment that matches the resolved binding's symbol/strategy
+  exactly — ... a same-strategy/different-symbol or any other multi-symbol
+  assignment is unsupported, never silently narrowed to 'the first
+  assignment'" (fails closed, but confirms multi-symbol autonomous
+  completed-bar dispatch does not exist in the authoritative driver). The
+  original census's citation of `pending_strategy_bar_input.lock().await.take()`
+  in the ordinary execution-loop tick was real code, but not the
+  authoritative autonomous completed-bar driver this requirement needs.
+
+**Corrected classifications** (see the "Requirement-by-Requirement
+Evidence" sections below, which are corrected in place rather than
+duplicated):
+
+- **M2.1** (multiple strategy instances and symbols operate simultaneously):
+  `CODE_CLOSED` → **`PARTIAL / WIRING_MISSING`**. Multiple *symbols* with
+  distinct single strategies operate simultaneously (host-pool evidence
+  from the original census stands for that sub-case). Multiple
+  *economically-active strategies on the same symbol* do not — that
+  sub-case is blocked by the same-symbol producer gap below.
+- **M2.3** (same-symbol competing strategy intentions resolve through
+  explicit portfolio/execution authority): `CODE_CLOSED` → **`WIRING_MISSING`**.
+  Bundle 6 (the resolver) is real and correctly tested against synthetic
+  same-symbol inputs; the producer wiring that could ever hand it two
+  genuine same-symbol candidates does not exist yet.
+- **M2.7** (concurrent completed bars cannot be lost or double-consumed):
+  `CODE_CLOSED` → **`WIRING_MISSING`**. The durable per-assignment claim
+  identity foundation (`sys_autonomous_daily_bar_dispatches`, keyed by
+  `(operation_id, local_symbol, timeframe, bar_end_ts)`, migration
+  `0050_autonomous_daily_bar_dispatches.sql`) exists, but the authoritative
+  driver (`resolve_single_effective_binding`) only ever resolves exactly
+  one binding, not one per configured multi-symbol assignment.
+
+All other requirements (M2.2, M2.4, M2.5, M2.6, M2.8, M2.9, and the five
+additional invariants) are **not** rejected by this review and retain their
+original `CODE_CLOSED` classification and evidence below — none of that
+evidence depended on the same-symbol-producer or multi-symbol-autonomous-bar
+gaps.
+
+**M2 CODE COMPLETION is NOT CLOSED.** `docs/CURRENT_MISSION.md` §-2 records
+the corrected overall status. See the repair patches (R1/R2/R3/R4) tracked
+under `V4-STAGE-B-M2-REPAIR-01` for the remaining work.
+
 ### M2 Scope (Canonical Authority)
 
 From `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` § Milestone 2
@@ -479,7 +549,15 @@ historical-correction precedent above.
 
 #### M2.1 — Multiple strategy instances and symbols operate simultaneously
 
-**Status:** CODE_CLOSED
+**Status:** PARTIAL / WIRING_MISSING (corrected by `V4-STAGE-B-M2-REPAIR-01`; was CODE_CLOSED)
+
+**Correction:** the evidence below is real and stands for the "multiple
+*symbols*, each with a distinct single strategy" sub-case. It does **not**
+prove "multiple economically-active *strategies* on the same symbol" —
+`StrategyHostError::MultiStrategyNotAllowed` and `dynamic_selection.rs`'s
+"exactly one selected candidate per symbol, or none" both block that
+sub-case today. See the manifest-level correction note above and R1 in
+`docs/CURRENT_MISSION.md` for the remaining work.
 
 **Production seam:** `DynamicSelectionHostPool` (`core-rs/crates/mqk-daemon/src/dynamic_selection_host_pool.rs:121-140`) — `BTreeMap<HostPoolKey, StrategyHost>`, one isolated `StrategyHost` instance per selected `(symbol, strategy_id, timeframe_secs)` binding. Built by `RuntimeStrategyDispatchAuthority::DynamicPaperEnforced` before the Phase 7A start barrier releases and moved into the execution loop (`state/loop_runner.rs`).
 
@@ -497,7 +575,18 @@ historical-correction precedent above.
 
 #### M2.3 — Same-symbol competing strategy intentions resolve through explicit portfolio/execution authority
 
-**Status:** CODE_CLOSED
+**Status:** WIRING_MISSING (corrected by `V4-STAGE-B-M2-REPAIR-01`; was CODE_CLOSED)
+
+**Correction:** Bundle 6 below is real, production-wired, and correctly
+resolves conflicting same-symbol inputs — but only inputs it is actually
+given. No current production producer can hand it two genuine,
+independently-dispatched, economically-active same-symbol strategy
+decisions in one cycle: `dynamic_selection.rs` selects at most one
+candidate per symbol, and `StrategyHost` refuses a second concurrent
+strategy registration
+(`scenario_parallel_long_short_strategy_01.rs::p11_strategy_host_enforces_single_strategy`,
+asserting `MultiStrategyNotAllowed`). Remaining work:
+`MULTI-STRATEGY-RUNTIME-DISPATCH-01` (tracked as R1).
 
 **Production seam:** `runtime_strategy_conflict.rs` (`MULTI-STRATEGY-CONFLICT-POLICY-01` Bundle 6) — `apply_conflict_policy`/`gather_and_resolve`, wired into `state/loop_runner.rs` immediately before Bundle 5 (opportunity allocation). Closed-vocabulary, fail-closed mode resolution (`off`/`shadow`/`paper_enforced`) mirroring `dynamic_selection_mode.rs`'s pattern.
 
@@ -527,9 +616,26 @@ historical-correction precedent above.
 
 #### M2.7 — Concurrent completed bars cannot be lost or double-consumed
 
-**Status:** CODE_CLOSED
+**Status:** WIRING_MISSING (corrected by `V4-STAGE-B-M2-REPAIR-01`; was CODE_CLOSED)
 
-**Production seam:** `pending_strategy_bar_input.lock().await.take()` (`state.rs:4248,4295`) — a single-consumer `Option::take()` per completed-bar trigger, shared once per tick across every dispatched symbol/binding; each symbol's actual OHLC window is then independently loaded from `md_bars` per `(symbol, timeframe)` inside `dispatch_native_strategy_for_symbol_with_bar[_and_facts]`, so the shared trigger cannot be double-consumed across ticks while per-symbol data stays independent.
+**Correction:** the `pending_strategy_bar_input.lock().await.take()` seam
+cited below is real, but it is the ordinary execution-loop tick's shared
+trigger, not the authoritative autonomous completed-bar production driver.
+That driver, `resolve_single_effective_binding`
+(`state/autonomous_completed_bar_driver.rs:329-333`), requires "exactly one
+configured assignment" and explicitly documents that "a
+same-strategy/different-symbol or any other multi-symbol assignment is
+unsupported" (fails closed, not silently narrowed — a correctly fail-closed
+gap, not a correctness defect, but still a gap against M2.7's multi-symbol
+requirement). The durable claim-identity foundation this needs already
+exists (`sys_autonomous_daily_bar_dispatches`, keyed by `(operation_id,
+local_symbol, timeframe, bar_end_ts)`, migration
+`0050_autonomous_daily_bar_dispatches.sql`) and must be reused, not
+replaced. Remaining work: extend the driver to resolve one binding per
+configured multi-symbol assignment (tracked as R2).
+
+**Production seam (real, but not sufficient alone — see correction above):**
+`pending_strategy_bar_input.lock().await.take()` (`state.rs:4248,4295`) — a single-consumer `Option::take()` per completed-bar trigger, shared once per tick across every dispatched symbol/binding; each symbol's actual OHLC window is then independently loaded from `md_bars` per `(symbol, timeframe)` inside `dispatch_native_strategy_for_symbol_with_bar[_and_facts]`, so the shared trigger cannot be double-consumed across ticks while per-symbol data stays independent. This covers the ordinary execution-loop path only, not the autonomous daily-operation completed-bar driver.
 
 #### M2.8 — Conflict resolution/order is deterministic where economics depend on it
 
@@ -574,8 +680,14 @@ TOTAL                                  137 passed, 0 failed
 
 Run against `postgres://postgres:postgres@127.0.0.1:5434/mqk_test` (`mqk-test-postgres`) where DB-backed; no migration-checksum drift encountered this session (the drift noted in `docs/CURRENT_MISSION.md` §6 as of the prior checkpoint did not reproduce here). Full workspace/GUI/research-py suites were not run (no crate outside `mqk-daemon` was touched; per the controller's efficiency contract).
 
-### M2 Status
+### M2 Status (ORIGINAL — SUPERSEDED, see correction note above)
 
-**M2 CODE COMPLETION: CODE_CLOSED** (9/9 canonical requirements, bounded census, no gaps found, no new code needed).
+~~**M2 CODE COMPLETION: CODE_CLOSED** (9/9 canonical requirements, bounded census, no gaps found, no new code needed).~~
 
-**M2 OPERATIONAL ACCEPTANCE: NOT CLAIMED BY THIS CONTROLLER.** `MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE` is unset in the current deployed Paper environment (deployed identity remains `intraday_scalper`/AAPL/300, `runtime_execution_mode=single_strategy`, per `docs/CURRENT_MISSION.md` §-1) — the concurrent multi-strategy/multi-symbol path exists, is wired, and is tested, but is not the currently-active deployed configuration. Turning it on for Paper, and any operational validation of it under real market conditions, is a separate operational decision this controller does not make.
+~~**M2 OPERATIONAL ACCEPTANCE: NOT CLAIMED BY THIS CONTROLLER.**~~
+
+**This conclusion was REJECTED by independent review (`V4-STAGE-B-M2-REPAIR-01`).**
+Corrected status: `CODE_CLOSED 6/9` (M2.2, M2.4, M2.5, M2.6, M2.8, M2.9),
+`WIRING_MISSING 2/9` (M2.3, M2.7), `PARTIAL/WIRING_MISSING 1/9` (M2.1). See
+`docs/CURRENT_MISSION.md` §-2 for the current authoritative M2 status and
+remaining-work tracking (R1-R4).

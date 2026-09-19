@@ -54,24 +54,66 @@ conflated:**
 - No alpha discovery, no retry/tune of the rejected `intraday_scalper`
   evidence, no Paper/Live operational ceremony under this controller.
 
-### Stage B / M2 result (2026-09-18)
+### Stage B / M2 result (2026-09-18, CORRECTED 2026-09-18, `V4-STAGE-B-M2-REPAIR-01`)
 
-Bounded census against canonical M2 (`MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md`
-§ Milestone 2) found **all 9 required capabilities already CODE_CLOSED**
-through prior committed patches (Bundles 5/6/7, `MULTI-SYMBOL-DISPATCH-LOOP-01`,
-`MULTI-SYMBOL-CAPITAL-CAPS-01`, `A1-MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`,
-`MULTI-STRATEGY-RUNTIME-DRY-RUN-01`). 137 targeted tests (10 modules, 2
-real-DB-backed) run this session, all green; no production/test code was
-changed. Full detail and citations: `docs/V4_CODE_COMPLETION_MANIFEST.md`
-§ "M2 Code Completion Manifest".
+**The original 9/9 CODE_CLOSED conclusion below was REJECTED by
+independent review and is superseded.** It is preserved as audit history
+in `docs/V4_CODE_COMPLETION_MANIFEST.md` (struck through in place, not
+deleted).
+
+~~Bounded census against canonical M2 found all 9 required capabilities
+already CODE_CLOSED... 137 targeted tests... no production/test code was
+changed.~~
+
+**Confirmed gaps (independent review, 2026-09-18):**
+
+1. **M2.3 = WIRING_MISSING.** Bundle 6 (`runtime_strategy_conflict.rs`) is
+   real and correctly resolves conflicting same-symbol inputs, but no
+   production producer can ever hand it two genuine same-symbol
+   economically-active strategy decisions in one cycle:
+   `mqk-portfolio/src/dynamic_selection.rs:29` selects "exactly one
+   candidate per symbol, or none — never more"; `StrategyHost` refuses a
+   second concurrent strategy registration
+   (`StrategyHostError::MultiStrategyNotAllowed`,
+   `scenario_parallel_long_short_strategy_01.rs::p11_strategy_host_enforces_single_strategy`).
+   Remaining work: `MULTI-STRATEGY-RUNTIME-DISPATCH-01`.
+2. **M2.7 = WIRING_MISSING.** The authoritative autonomous completed-bar
+   production driver, `resolve_single_effective_binding`
+   (`state/autonomous_completed_bar_driver.rs:329-333`), only ever resolves
+   exactly one binding and explicitly documents multi-symbol assignment as
+   unsupported (fails closed). The durable per-assignment claim identity
+   foundation already exists (`sys_autonomous_daily_bar_dispatches`, keyed
+   by `(operation_id, local_symbol, timeframe, bar_end_ts)`) and must be
+   reused, not replaced.
+3. **M2.1 = PARTIAL / WIRING_MISSING** (downstream of #1 — multiple
+   *symbols* with distinct single strategies works; multiple
+   economically-active *strategies on the same symbol* does not).
+
+All other requirements (M2.2, M2.4, M2.5, M2.6, M2.8, M2.9, and the five
+additional invariants) are unaffected by this correction and retain
+`CODE_CLOSED`.
 
 ```text
-M2 CODE COMPLETION:       CODE_CLOSED (9/9, no gaps)
-M2 OPERATIONAL ACCEPTANCE: NOT CLAIMED — MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE
-                            is unset in the deployed Paper environment;
-                            deployed runtime remains single_strategy
-                            (intraday_scalper/AAPL/300).
+M2 CODE COMPLETION:        CODE_CLOSED 6/9, WIRING_MISSING 2/9 (M2.3, M2.7),
+                            PARTIAL/WIRING_MISSING 1/9 (M2.1)
+M2 OPERATIONAL ACCEPTANCE:  NOT CLAIMED (unchanged)
 ```
+
+Remaining work tracked under `V4-STAGE-B-M2-REPAIR-01`:
+- **R1** — `MULTI-STRATEGY-RUNTIME-DISPATCH-01`: wire genuine same-symbol
+  multi-strategy dispatch into the existing Bundle 6 conflict authority.
+- **R2** — extend the autonomous completed-bar driver to support multiple
+  configured symbol/timeframe assignments, reusing
+  `sys_autonomous_daily_bar_dispatches` identity.
+- **R3** — run the existing `scenario_strategy_decision_idempotency_01`
+  restart/replay proof (M2.6 load-bearing check not run in the original
+  census).
+- **R4** — one integrated M2 finish-line scenario combining R1+R2 with
+  retry/restart and cross-contamination negative controls.
+
+Full detail and citations: `docs/V4_CODE_COMPLETION_MANIFEST.md`
+§ "M2 Code Completion Manifest" (original census + correction note +
+per-requirement corrections).
 
 ---
 
