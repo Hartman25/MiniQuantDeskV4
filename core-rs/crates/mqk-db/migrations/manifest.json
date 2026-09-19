@@ -434,6 +434,12 @@
       "path": "0070_runtime_leader_lease_strict_quiescence_forward.sql",
       "status": "applied",
       "intent": "RUNTIME-LEASE-STRICT-QUIESCENCE-FORWARD-01: forward-only repair for the deployed immutable 0069 migration. If a run_id-IS-NULL runtime_leader_lease row exists, refuse while that lease is unexpired or while any run reports ARMED or RUNNING status regardless of heartbeat freshness; LOCK TABLE runs IN SHARE MODE fences concurrent run-status mutation across the check/delete. Delete the ambiguous legacy row only when the system is quiescent. No FK/schema change is repeated here; 0069 already established ON DELETE RESTRICT."
+    },
+    {
+      "id": "0071",
+      "path": "0071_autonomous_daily_binding_state.sql",
+      "status": "applied",
+      "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 / autonomous completed-bar driver multi-binding repair (R2A, V4-STAGE-B-M2-REPAIR-02): new additive table sys_autonomous_daily_binding_state, keyed per-binding (operation_id, symbol, strategy_id, timeframe) -- distinct from migration 0050's per-bar sys_autonomous_daily_bar_dispatches. Durably records whether each configured binding is 'active' (progress-capable) or 'locally_blocked' (a binding-local fault quarantines only that binding, per the frozen hybrid per-binding fault-isolation operator decision), with a closed reason-code vocabulary. No existing table/column altered."
     }
   ]
 }

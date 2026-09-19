@@ -3402,3 +3402,212 @@ pub async fn finalize_autonomous_daily_operation(
 
     Ok(outcome)
 }
+
+// ---------------------------------------------------------------------------
+// MULTI-STRATEGY-RUNTIME-DISPATCH-01 / autonomous completed-bar driver
+// multi-binding repair (R2A, V4-STAGE-B-M2-REPAIR-02): durable per-binding
+// health state (migration 0071). See that migration's header for the exact
+// distinction from `sys_autonomous_daily_bar_dispatches` (per-bar claim,
+// migration 0050) -- this table is per-BINDING
+// (operation_id, symbol, strategy_id, timeframe), answering "is this
+// configured binding currently progress-capable, or locally quarantined and
+// why," under the frozen hybrid per-binding fault-isolation policy.
+// ---------------------------------------------------------------------------
+
+pub const BINDING_STATE_ACTIVE: &str = "active";
+pub const BINDING_STATE_LOCALLY_BLOCKED: &str = "locally_blocked";
+
+/// Closed, bounded reason-code vocabulary for a `locally_blocked` binding —
+/// mirrors migration 0071's own `check` constraint exactly. A
+/// global-critical condition (evidence-lineage corruption, dispatch-claim
+/// ambiguity, runtime-ownership/leadership failure, etc.) must never be
+/// recorded through this type — those remain
+/// `sys_autonomous_daily_operations`' own state/blocker authority,
+/// unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingLocalBlockReason {
+    NoNewBarWaiting,
+    MarketDataMissingOrStale,
+    ReadinessBlocked,
+    UnsupportedOrInvalidSymbolTimeframe,
+    ProviderFailureIsolated,
+}
+
+impl BindingLocalBlockReason {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::NoNewBarWaiting => "binding_no_new_bar_waiting",
+            Self::MarketDataMissingOrStale => "binding_market_data_missing_or_stale",
+            Self::ReadinessBlocked => "binding_readiness_blocked",
+            Self::UnsupportedOrInvalidSymbolTimeframe => {
+                "binding_unsupported_or_invalid_symbol_timeframe"
+            }
+            Self::ProviderFailureIsolated => "binding_provider_failure_isolated",
+        }
+    }
+
+    /// Parse a persisted reason code back into a closed variant. `None` for
+    /// anything outside the closed set — an unrecognized code must fail
+    /// closed, never silently resolve to a guessed variant.
+    pub fn parse(code: &str) -> Option<Self> {
+        Some(match code {
+            "binding_no_new_bar_waiting" => Self::NoNewBarWaiting,
+            "binding_market_data_missing_or_stale" => Self::MarketDataMissingOrStale,
+            "binding_readiness_blocked" => Self::ReadinessBlocked,
+            "binding_unsupported_or_invalid_symbol_timeframe" => {
+                Self::UnsupportedOrInvalidSymbolTimeframe
+            }
+            "binding_provider_failure_isolated" => Self::ProviderFailureIsolated,
+            _ => return None,
+        })
+    }
+}
+
+/// One row from `sys_autonomous_daily_binding_state`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutonomousDailyBindingStateRecord {
+    pub operation_id: Uuid,
+    pub symbol: String,
+    pub strategy_id: String,
+    pub timeframe: String,
+    pub status: String,
+    pub reason_code: Option<String>,
+    pub last_error: Option<String>,
+    pub updated_at_utc: DateTime<Utc>,
+}
+
+const BINDING_STATE_COLUMNS: &str = r#"
+    operation_id, symbol, strategy_id, timeframe, status,
+    reason_code, last_error, updated_at_utc
+"#;
+
+fn row_to_binding_state_record(
+    r: sqlx::postgres::PgRow,
+) -> Result<AutonomousDailyBindingStateRecord, sqlx::Error> {
+    Ok(AutonomousDailyBindingStateRecord {
+        operation_id: r.try_get("operation_id")?,
+        symbol: r.try_get("symbol")?,
+        strategy_id: r.try_get("strategy_id")?,
+        timeframe: r.try_get("timeframe")?,
+        status: r.try_get("status")?,
+        reason_code: r.try_get("reason_code")?,
+        last_error: r.try_get("last_error")?,
+        updated_at_utc: r.try_get("updated_at_utc")?,
+    })
+}
+
+fn validate_binding_identity(symbol: &str, strategy_id: &str, timeframe: &str) -> Result<()> {
+    if symbol.trim().is_empty() {
+        anyhow::bail!("symbol must not be empty");
+    }
+    if strategy_id.trim().is_empty() {
+        anyhow::bail!("strategy_id must not be empty");
+    }
+    if timeframe.trim().is_empty() {
+        anyhow::bail!("timeframe must not be empty");
+    }
+    Ok(())
+}
+
+/// Durably mark one binding `active` (progress-capable). Idempotent
+/// upsert — safe to call every tick a binding successfully progresses,
+/// including to clear a prior `locally_blocked` state once the binding
+/// recovers (e.g. its market data becomes fresh again).
+pub async fn mark_autonomous_daily_binding_active(
+    pool: &PgPool,
+    operation_id: Uuid,
+    symbol: &str,
+    strategy_id: &str,
+    timeframe: &str,
+    updated_at_utc: DateTime<Utc>,
+) -> Result<()> {
+    validate_binding_identity(symbol, strategy_id, timeframe)?;
+    sqlx::query(&format!(
+        r#"
+        insert into sys_autonomous_daily_binding_state ({BINDING_STATE_COLUMNS})
+        values ($1,$2,$3,$4,$5,$6,$7,$8)
+        on conflict (operation_id, symbol, strategy_id, timeframe)
+        do update set status = excluded.status,
+                      reason_code = excluded.reason_code,
+                      last_error = excluded.last_error,
+                      updated_at_utc = excluded.updated_at_utc
+        "#
+    ))
+    .bind(operation_id)
+    .bind(symbol)
+    .bind(strategy_id)
+    .bind(timeframe)
+    .bind(BINDING_STATE_ACTIVE)
+    .bind(None::<String>)
+    .bind(None::<String>)
+    .bind(updated_at_utc)
+    .execute(pool)
+    .await
+    .context("mark_autonomous_daily_binding_active: upsert failed")?;
+    Ok(())
+}
+
+/// Durably mark one binding `locally_blocked` for a closed-vocabulary
+/// binding-local reason. Never call this for a global-critical condition —
+/// those must use `sys_autonomous_daily_operations`' own state/blocker
+/// path, which affects the whole operation, not one binding. Idempotent
+/// upsert — a repeated block for the same or a different binding-local
+/// reason simply refreshes this one binding's row; no other binding's row
+/// is touched.
+pub async fn mark_autonomous_daily_binding_locally_blocked(
+    pool: &PgPool,
+    operation_id: Uuid,
+    symbol: &str,
+    strategy_id: &str,
+    timeframe: &str,
+    reason: BindingLocalBlockReason,
+    last_error: Option<&str>,
+    updated_at_utc: DateTime<Utc>,
+) -> Result<()> {
+    validate_binding_identity(symbol, strategy_id, timeframe)?;
+    sqlx::query(&format!(
+        r#"
+        insert into sys_autonomous_daily_binding_state ({BINDING_STATE_COLUMNS})
+        values ($1,$2,$3,$4,$5,$6,$7,$8)
+        on conflict (operation_id, symbol, strategy_id, timeframe)
+        do update set status = excluded.status,
+                      reason_code = excluded.reason_code,
+                      last_error = excluded.last_error,
+                      updated_at_utc = excluded.updated_at_utc
+        "#
+    ))
+    .bind(operation_id)
+    .bind(symbol)
+    .bind(strategy_id)
+    .bind(timeframe)
+    .bind(BINDING_STATE_LOCALLY_BLOCKED)
+    .bind(Some(reason.as_db_str()))
+    .bind(last_error)
+    .bind(updated_at_utc)
+    .execute(pool)
+    .await
+    .context("mark_autonomous_daily_binding_locally_blocked: upsert failed")?;
+    Ok(())
+}
+
+/// Every durable binding-state row for one operation, in deterministic
+/// `(symbol, strategy_id, timeframe)` order — never DB row-insertion order.
+/// The read R2C's aggregation step needs every tick to decide whether at
+/// least one binding remains progress-capable.
+pub async fn fetch_autonomous_daily_binding_states(
+    pool: &PgPool,
+    operation_id: Uuid,
+) -> Result<Vec<AutonomousDailyBindingStateRecord>> {
+    let rows = sqlx::query(&format!(
+        "select {BINDING_STATE_COLUMNS} from sys_autonomous_daily_binding_state \
+         where operation_id = $1 \
+         order by symbol asc, strategy_id asc, timeframe asc"
+    ))
+    .bind(operation_id)
+    .fetch_all(pool)
+    .await
+    .context("fetch_autonomous_daily_binding_states: query failed")?;
+    rows.into_iter()
+        .map(|r| row_to_binding_state_record(r).context("row decode failed"))
+        .collect()
+}
