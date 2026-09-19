@@ -75,6 +75,7 @@ pub mod audit;
 pub mod autonomous_daily_operation;
 pub mod broker_baseline;
 pub mod dynamic_selection_evidence;
+pub mod explicit_multi_strategy_authority;
 pub mod fill_quality;
 pub mod flow;
 pub mod inbox;
@@ -101,6 +102,11 @@ pub use broker_baseline::*;
 // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 7C Part 1: durable
 // dynamic-selection plan evidence store (never portfolio/P&L/order truth).
 pub use dynamic_selection_evidence::*;
+// MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C2: durable evidence store for
+// the explicit watchlist-v3 per-symbol multi-strategy authorization
+// mechanism -- wholly separate from dynamic_selection_evidence's Bundle 7
+// ranking-plan schema (never portfolio/P&L/order truth).
+pub use explicit_multi_strategy_authority::*;
 pub use fill_quality::*;
 pub use flow::{fetch_execution_flow, ExecutionFlowRow, FlowQuery};
 pub use inbox::*;

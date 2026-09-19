@@ -440,6 +440,12 @@
       "path": "0071_autonomous_daily_binding_state.sql",
       "status": "applied",
       "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 / autonomous completed-bar driver multi-binding repair (R2A, V4-STAGE-B-M2-REPAIR-02): new additive table sys_autonomous_daily_binding_state, keyed per-binding (operation_id, symbol, strategy_id, timeframe) -- distinct from migration 0050's per-bar sys_autonomous_daily_bar_dispatches. Durably records whether each configured binding is 'active' (progress-capable) or 'locally_blocked' (a binding-local fault quarantines only that binding, per the frozen hybrid per-binding fault-isolation operator decision), with a closed reason-code vocabulary. No existing table/column altered."
+    },
+    {
+      "id": "0072",
+      "path": "0072_explicit_multi_strategy_authority.sql",
+      "status": "applied",
+      "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C2 (V4-STAGE-B-M2-REPAIR-03): two new additive tables, sys_explicit_multi_strategy_authority and sys_explicit_multi_strategy_authority_bindings, for the explicit watchlist-v3 per-symbol multi-strategy authorization mechanism's durable evidence -- deliberately separate from sys_dynamic_selection_plans/* (0059/0060), which represents one Bundle 7 ranking plan, never this mechanism. authority_id is a caller-minted deterministic UUIDv5 binding every result-affecting input (run_id, source artifact identity/hash, config fingerprint, market_date, per-binding evidence); approved_for_live is constrained false at the DB level; a UNIQUE(authority_id, symbol, strategy_id, timeframe_secs) constraint on the bindings table enforces that the exact same binding can never appear twice under one authority. No existing table/column altered."
     }
   ]
 }

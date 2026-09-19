@@ -126,10 +126,86 @@ fn derive_explicit_multi_strategy_plan_id(run_id: Uuid, bindings: &[HostPoolKey]
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, &seed)
 }
 
+/// Reason code for a binding refused because its identity appears in
+/// `MQK_DRY_RUN_STRATEGY_IDS` (frozen contract §8) — checked before any
+/// promotion/readiness I/O, so a dry-run identity's evidence fields are
+/// never populated (they stay at pure-default/unresolved values).
+pub(crate) const REASON_EXPLICIT_MULTI_STRATEGY_DRY_RUN_EXCLUDED: &str =
+    "explicit_multi_strategy_dry_run_excluded";
+
+/// Reason code for a binding that was independently evaluated through the
+/// real evidence gate and refused on its own merits (unpromoted, config
+/// mismatch, not data-ready, etc.) — the gate's own `exact_reason`/
+/// `reason_code` is not re-derived here; this is the outer, closed-vocabulary
+/// disposition this module itself assigns.
+pub(crate) const REASON_EXPLICIT_MULTI_STRATEGY_EVIDENCE_GATE_REFUSED: &str =
+    "explicit_multi_strategy_evidence_gate_refused";
+
+/// The "never independently evaluated" evidence value for a binding refused
+/// before any promotion/readiness I/O was attempted (dry-run exclusion) --
+/// every field fail-closed (`false`/`None`), never a fabricated pass.
+/// [`mqk_portfolio::SelectionCandidateEvidence`] has no `Default` impl (each
+/// field is independently meaningful evidence, not a type with a sensible
+/// zero value in general), so this is production code's own explicit
+/// "unresolved" constant, not a derive.
+fn unresolved_evidence() -> mqk_portfolio::SelectionCandidateEvidence {
+    mqk_portfolio::SelectionCandidateEvidence {
+        promotion_query_ok: false,
+        promotion_state: None,
+        promotion_effective: false,
+        promotion_expired: false,
+        evidence_resolved: false,
+        review_state_is_paper_candidate: false,
+        evidence_review_state: None,
+        durable_legacy_fingerprint: None,
+        recomputed_legacy_fingerprint: None,
+        legacy_fingerprint_matches: false,
+        durable_exact_fingerprint_v2: None,
+        recomputed_exact_fingerprint_v2: None,
+        exact_fingerprint_v2_matches: false,
+        config_identity_verified: false,
+        durable_config_fingerprint: None,
+        current_config_fingerprint: None,
+        registry_enabled: false,
+        plugin_instantiable: false,
+        timeframe_matches: false,
+        data_ready: false,
+        canonical_score_decimal: None,
+        canonical_score_micros: None,
+        scanner_rank: None,
+        watchlist_assigned: true,
+        evidence_review_id: None,
+        evidence_scanner_scan_id: None,
+        evidence_artifact_path: None,
+        evidence_git_hash: None,
+        promotion_transition_id: None,
+        promotion_effective_at: None,
+        promotion_expires_at: None,
+        evidence_transition_id: None,
+        exact_reason: None,
+    }
+}
+
+/// One binding's full, independent evaluation result — every result-
+/// affecting evidence field Patch C2's durable authority store needs,
+/// whether or not the binding was ultimately authorized. A refused binding
+/// still gets one of these (never an absent entry), so its evidence is never
+/// lost.
+#[derive(Debug, Clone)]
+pub(crate) struct ExplicitBindingEvaluation {
+    pub(crate) symbol: String,
+    pub(crate) strategy_id: String,
+    pub(crate) timeframe_secs: i64,
+    pub(crate) authorized: bool,
+    pub(crate) reason_code: String,
+    pub(crate) evidence: mqk_portfolio::SelectionCandidateEvidence,
+}
+
 /// Evaluate every `(symbol, strategy_id)` pair a `watchlist-v3` artifact
 /// explicitly authorizes, independently, through the exact same gate Bundle
-/// 7 candidates pass through — and return only those that independently
-/// passed, in deterministic `(symbol, strategy_id, timeframe_secs)` order.
+/// 7 candidates pass through — returning one [`ExplicitBindingEvaluation`]
+/// per pair, authorized or not, in artifact order (symbol order, then each
+/// symbol's own artifact strategy-list order — frozen contract §5).
 ///
 /// `timeframe_secs`/`timeframe_label` are the artifact's one shared
 /// timeframe (frozen contract §3 — v3 does not support per-binding
@@ -137,8 +213,8 @@ fn derive_explicit_multi_strategy_plan_id(run_id: Uuid, bindings: &[HostPoolKey]
 /// caller-supplied, caller-minted facts (this function reads no clock and
 /// no env var), carried through into each per-binding gate call's
 /// [`DynamicSelectionContext`] for durable-evidence-shape parity with
-/// Bundle 7, even though this mechanism does not itself persist evidence.
-pub(crate) async fn resolve_authorized_explicit_bindings(
+/// Bundle 7.
+pub(crate) async fn evaluate_explicit_bindings(
     ctx: &DynamicSelectionPlanBuildContext<'_>,
     artifact: &LoadedWatchlistArtifactV3,
     timeframe_secs: i64,
@@ -147,8 +223,8 @@ pub(crate) async fn resolve_authorized_explicit_bindings(
     source_identity: &str,
     market_date: &str,
     now_utc: DateTime<Utc>,
-) -> Vec<HostPoolKey> {
-    let mut authorized: Vec<HostPoolKey> = Vec::new();
+) -> Vec<ExplicitBindingEvaluation> {
+    let mut evaluations: Vec<ExplicitBindingEvaluation> = Vec::new();
 
     // Frozen contract §8: dry-run identities never gain economic authority
     // through this path, regardless of whether they appear in a v3
@@ -170,6 +246,14 @@ pub(crate) async fn resolve_authorized_explicit_bindings(
         };
         for strategy_id in strategy_ids {
             if dry_run_ids.contains(strategy_id) {
+                evaluations.push(ExplicitBindingEvaluation {
+                    symbol: symbol.clone(),
+                    strategy_id: strategy_id.clone(),
+                    timeframe_secs,
+                    authorized: false,
+                    reason_code: REASON_EXPLICIT_MULTI_STRATEGY_DRY_RUN_EXCLUDED.to_string(),
+                    evidence: unresolved_evidence(),
+                });
                 continue;
             }
             let pending = PendingCandidate {
@@ -184,7 +268,7 @@ pub(crate) async fn resolve_authorized_explicit_bindings(
                 symbol: symbol.clone(),
                 strategy_id: strategy_id.clone(),
                 timeframe_secs,
-                evidence,
+                evidence: evidence.clone(),
             };
 
             let context = DynamicSelectionContext {
@@ -202,8 +286,7 @@ pub(crate) async fn resolve_authorized_explicit_bindings(
             // pure gate's outcome is exactly this binding's own
             // pass/refuse — Bundle 7's ranking contract is never invoked
             // with more than one candidate here.
-            let plan =
-                compute_dynamic_selection_plan(context, &[symbol.clone()], &[candidate.clone()]);
+            let plan = compute_dynamic_selection_plan(context, &[symbol.clone()], &[candidate]);
             let passed = plan
                 .symbol_results
                 .first()
@@ -211,11 +294,55 @@ pub(crate) async fn resolve_authorized_explicit_bindings(
                 .map(|c| c.disposition == SelectionCandidateDisposition::Selected)
                 .unwrap_or(false);
 
-            if passed {
-                authorized.push((symbol.clone(), strategy_id.clone(), timeframe_secs));
-            }
+            evaluations.push(ExplicitBindingEvaluation {
+                symbol: symbol.clone(),
+                strategy_id: strategy_id.clone(),
+                timeframe_secs,
+                authorized: passed,
+                reason_code: if passed {
+                    REASON_EXPLICIT_MULTI_STRATEGY_AUTHORIZED.to_string()
+                } else {
+                    REASON_EXPLICIT_MULTI_STRATEGY_EVIDENCE_GATE_REFUSED.to_string()
+                },
+                evidence,
+            });
         }
     }
+
+    evaluations
+}
+
+/// [`evaluate_explicit_bindings`], filtered and re-sorted to only the
+/// authorized subset's `(symbol, strategy_id, timeframe_secs)` identity —
+/// the shape [`crate::dynamic_selection_host_pool::DynamicSelectionHostPool::build`]
+/// consumes. Kept as the existing, narrower entry point for dispatch/host-
+/// pool construction; [`evaluate_explicit_bindings`] is the fuller entry
+/// point for durable-evidence construction (Patch C2).
+pub(crate) async fn resolve_authorized_explicit_bindings(
+    ctx: &DynamicSelectionPlanBuildContext<'_>,
+    artifact: &LoadedWatchlistArtifactV3,
+    timeframe_secs: i64,
+    timeframe_label: &str,
+    run_id: Uuid,
+    source_identity: &str,
+    market_date: &str,
+    now_utc: DateTime<Utc>,
+) -> Vec<HostPoolKey> {
+    let mut authorized: Vec<HostPoolKey> = evaluate_explicit_bindings(
+        ctx,
+        artifact,
+        timeframe_secs,
+        timeframe_label,
+        run_id,
+        source_identity,
+        market_date,
+        now_utc,
+    )
+    .await
+    .into_iter()
+    .filter(|e| e.authorized)
+    .map(|e| (e.symbol, e.strategy_id, e.timeframe_secs))
+    .collect();
 
     authorized.sort();
     authorized
@@ -265,6 +392,163 @@ pub(crate) fn build_explicit_multi_strategy_dispatch_authority(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Patch C2 (V4-STAGE-B-M2-REPAIR-03): durable explicit authority evidence
+// -- authority_id derivation and the mapping into `mqk_db::
+// NewExplicitMultiStrategyAuthority`. Distinct from `derive_explicit_
+// multi_strategy_plan_id` above: that id identifies the host-pool/dispatch
+// authority (run_id + authorized binding identities only); this id
+// additionally binds the source artifact and config-fingerprint facts, and
+// every binding's own result-affecting evidence -- so a changed source
+// artifact, or a changed promotion/config/readiness fact for any binding,
+// can never reuse a stale durable authority_id (mission requirement: a
+// promoted-then-later-demoted binding, or a swapped artifact, must mint a
+// new identity, never silently overwrite or reuse the old one).
+// ---------------------------------------------------------------------------
+
+/// Versioned namespace seed for the durable authority identity -- distinct
+/// from [`EXPLICIT_PLAN_ID_NAMESPACE_SEED`] so the two id spaces can never
+/// collide.
+const EXPLICIT_AUTHORITY_ID_NAMESPACE_SEED: &str = "mqk.explicit-multi-strategy-authority-id.v1";
+
+fn push_len_prefixed(buf: &mut Vec<u8>, s: &str) {
+    buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+    buf.extend_from_slice(s.as_bytes());
+}
+
+fn push_opt_str(buf: &mut Vec<u8>, s: &Option<String>) {
+    match s {
+        Some(v) => {
+            buf.push(1);
+            push_len_prefixed(buf, v);
+        }
+        None => buf.push(0),
+    }
+}
+
+fn push_bool(buf: &mut Vec<u8>, b: bool) {
+    buf.push(u8::from(b));
+}
+
+/// Mint the one deterministic durable authority identity, from every
+/// result-affecting input: `run_id`, the source artifact's own identity/hash,
+/// the config fingerprint, `market_date`, and every binding's full
+/// evaluation (sorted by `(symbol, strategy_id, timeframe_secs)` so input
+/// order never changes the identity) -- never from wall clock or any other
+/// non-reproducible fact.
+pub(crate) fn derive_explicit_multi_strategy_authority_id(
+    run_id: Uuid,
+    source_identity: &str,
+    source_artifact_hash: &str,
+    config_fingerprint: &str,
+    market_date: &str,
+    evaluations: &[ExplicitBindingEvaluation],
+) -> Uuid {
+    let mut sorted: Vec<&ExplicitBindingEvaluation> = evaluations.iter().collect();
+    sorted.sort_by(|a, b| {
+        (a.symbol.as_str(), a.strategy_id.as_str(), a.timeframe_secs).cmp(&(
+            b.symbol.as_str(),
+            b.strategy_id.as_str(),
+            b.timeframe_secs,
+        ))
+    });
+
+    let mut buf = Vec::new();
+    push_len_prefixed(&mut buf, EXPLICIT_AUTHORITY_ID_NAMESPACE_SEED);
+    buf.extend_from_slice(run_id.as_bytes());
+    push_len_prefixed(&mut buf, source_identity);
+    push_len_prefixed(&mut buf, source_artifact_hash);
+    push_len_prefixed(&mut buf, config_fingerprint);
+    push_len_prefixed(&mut buf, market_date);
+
+    buf.extend_from_slice(&(sorted.len() as u32).to_be_bytes());
+    for e in sorted {
+        push_len_prefixed(&mut buf, &e.symbol);
+        push_len_prefixed(&mut buf, &e.strategy_id);
+        buf.extend_from_slice(&e.timeframe_secs.to_le_bytes());
+        push_bool(&mut buf, e.authorized);
+        push_len_prefixed(&mut buf, &e.reason_code);
+        push_bool(&mut buf, e.evidence.promotion_query_ok);
+        push_opt_str(&mut buf, &e.evidence.promotion_state);
+        push_bool(&mut buf, e.evidence.promotion_effective);
+        push_bool(&mut buf, e.evidence.config_identity_verified);
+        push_opt_str(&mut buf, &e.evidence.durable_config_fingerprint);
+        push_opt_str(&mut buf, &e.evidence.current_config_fingerprint);
+        push_bool(&mut buf, e.evidence.registry_enabled);
+        push_bool(&mut buf, e.evidence.data_ready);
+        push_opt_str(&mut buf, &e.evidence.promotion_transition_id);
+        push_opt_str(&mut buf, &e.evidence.evidence_transition_id);
+    }
+
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, &buf)
+}
+
+/// Single, shared writer-version identity string recorded on every durable
+/// authority header row.
+pub(crate) const EXPLICIT_MULTI_STRATEGY_AUTHORITY_WRITER_VERSION: &str =
+    "mqk-daemon.explicit-multi-strategy-authority-writer.v1";
+
+/// Build the durable evidence DTO for one resolved explicit authority,
+/// binding-count/authorized-count derived from `evaluations` itself (never a
+/// separately caller-supplied count that could drift). `authority_id` is
+/// [`derive_explicit_multi_strategy_authority_id`]'s output for these exact
+/// inputs. Bindings are carried in `evaluations`' own (artifact) order --
+/// ordinal, not a re-sort — mirroring `dynamic_selection_evidence_writer`'s
+/// own convention.
+pub(crate) fn build_new_explicit_multi_strategy_authority(
+    evaluations: &[ExplicitBindingEvaluation],
+    run_id: Uuid,
+    source_identity: &str,
+    source_artifact_hash: &str,
+    config_fingerprint: &str,
+    market_date: &str,
+    created_at_utc: DateTime<Utc>,
+) -> mqk_db::NewExplicitMultiStrategyAuthority {
+    let authority_id = derive_explicit_multi_strategy_authority_id(
+        run_id,
+        source_identity,
+        source_artifact_hash,
+        config_fingerprint,
+        market_date,
+        evaluations,
+    );
+
+    let bindings = evaluations
+        .iter()
+        .map(|e| mqk_db::NewExplicitMultiStrategyAuthorityBinding {
+            symbol: e.symbol.clone(),
+            strategy_id: e.strategy_id.clone(),
+            timeframe_secs: e.timeframe_secs,
+            authorized: e.authorized,
+            reason_code: e.reason_code.clone(),
+            promotion_query_ok: e.evidence.promotion_query_ok,
+            promotion_state: e.evidence.promotion_state.clone(),
+            promotion_effective: e.evidence.promotion_effective,
+            config_identity_verified: e.evidence.config_identity_verified,
+            durable_config_fingerprint: e.evidence.durable_config_fingerprint.clone(),
+            current_config_fingerprint: e.evidence.current_config_fingerprint.clone(),
+            registry_enabled: e.evidence.registry_enabled,
+            data_ready: e.evidence.data_ready,
+            promotion_transition_id: e.evidence.promotion_transition_id.clone(),
+            evidence_transition_id: e.evidence.evidence_transition_id.clone(),
+        })
+        .collect();
+
+    mqk_db::NewExplicitMultiStrategyAuthority {
+        authority_id,
+        run_id,
+        source_kind: mqk_db::EXPLICIT_MULTI_STRATEGY_SOURCE_KIND.to_string(),
+        source_identity: source_identity.to_string(),
+        source_artifact_hash: source_artifact_hash.to_string(),
+        config_fingerprint: config_fingerprint.to_string(),
+        market_date: market_date.to_string(),
+        approved_for_live: false,
+        writer_version: EXPLICIT_MULTI_STRATEGY_AUTHORITY_WRITER_VERSION.to_string(),
+        created_at_utc,
+        bindings,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,12 +576,7 @@ mod tests {
             .collect();
         let strategy_assignments = strategy_assignments
             .iter()
-            .map(|(s, ids)| {
-                (
-                    s.to_string(),
-                    ids.iter().map(|id| id.to_string()).collect(),
-                )
-            })
+            .map(|(s, ids)| (s.to_string(), ids.iter().map(|id| id.to_string()).collect()))
             .collect();
         LoadedWatchlistArtifactV3 {
             schema_version: crate::watchlist_intake::WATCHLIST_SCHEMA_VERSION_V3.to_string(),
@@ -495,7 +774,11 @@ mod tests {
     /// `resolve_authorized_explicit_bindings` does internally: one symbol,
     /// one candidate, per call — returning whether that one candidate was
     /// independently `Selected`.
-    fn gate_passes(symbol: &str, strategy_id: &str, evidence: mqk_portfolio::SelectionCandidateEvidence) -> bool {
+    fn gate_passes(
+        symbol: &str,
+        strategy_id: &str,
+        evidence: mqk_portfolio::SelectionCandidateEvidence,
+    ) -> bool {
         let context = DynamicSelectionContext {
             run_id: "r1b-test".to_string(),
             schema_version: crate::watchlist_intake::WATCHLIST_SCHEMA_VERSION_V3.to_string(),
@@ -547,7 +830,10 @@ mod tests {
         let aapl_short = gate_passes("AAPL", "intraday_short_scalper", green_evidence());
         let msft_unpromoted = gate_passes("MSFT", "volatility_breakout", unpromoted_evidence());
 
-        assert!(aapl_scalper, "AAPL/intraday_scalper must pass independently");
+        assert!(
+            aapl_scalper,
+            "AAPL/intraday_scalper must pass independently"
+        );
         assert!(
             aapl_short,
             "AAPL/intraday_short_scalper must pass independently, alongside its sibling"
@@ -555,6 +841,185 @@ mod tests {
         assert!(
             !msft_unpromoted,
             "MSFT/volatility_breakout's refusal must not depend on or affect AAPL's results"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Patch C2 (V4-STAGE-B-M2-REPAIR-03): durable authority identity
+    // derivation and builder proofs.
+    // -----------------------------------------------------------------
+
+    fn authorized_evaluation(symbol: &str, strategy_id: &str) -> ExplicitBindingEvaluation {
+        ExplicitBindingEvaluation {
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            timeframe_secs: 300,
+            authorized: true,
+            reason_code: REASON_EXPLICIT_MULTI_STRATEGY_AUTHORIZED.to_string(),
+            evidence: green_evidence(),
+        }
+    }
+
+    fn base_id(evaluations: &[ExplicitBindingEvaluation]) -> Uuid {
+        derive_explicit_multi_strategy_authority_id(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"c2-run"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            evaluations,
+        )
+    }
+
+    #[test]
+    fn c2_changed_source_artifact_hash_changes_authority_id() {
+        let evaluations = vec![authorized_evaluation("AAPL", "intraday_scalper")];
+        let a = base_id(&evaluations);
+        let b = derive_explicit_multi_strategy_authority_id(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"c2-run"),
+            "watchlist-v3.json",
+            "hash-b",
+            "cfg-a",
+            "2026-09-18",
+            &evaluations,
+        );
+        assert_ne!(
+            a, b,
+            "a changed source artifact hash must mint a different authority_id"
+        );
+    }
+
+    #[test]
+    fn c2_changed_config_fingerprint_changes_authority_id() {
+        let evaluations = vec![authorized_evaluation("AAPL", "intraday_scalper")];
+        let a = base_id(&evaluations);
+        let b = derive_explicit_multi_strategy_authority_id(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"c2-run"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-b",
+            "2026-09-18",
+            &evaluations,
+        );
+        assert_ne!(
+            a, b,
+            "a changed config fingerprint must mint a different authority_id -- \
+             a semantic/config change can never reuse a stale authority"
+        );
+    }
+
+    /// A binding's own evidence changing (e.g. promotion later expires, or
+    /// config identity stops verifying) must mint a different authority_id
+    /// -- proving the identity is not merely `run_id + binding names`.
+    #[test]
+    fn c2_changed_binding_evidence_changes_authority_id() {
+        let a_eval = authorized_evaluation("AAPL", "intraday_scalper");
+        let mut b_eval = a_eval.clone();
+        b_eval.evidence.promotion_effective = false;
+        b_eval.authorized = false;
+        b_eval.reason_code = REASON_EXPLICIT_MULTI_STRATEGY_EVIDENCE_GATE_REFUSED.to_string();
+
+        let a = base_id(&[a_eval]);
+        let b = base_id(&[b_eval]);
+        assert_ne!(
+            a, b,
+            "a binding's own evidence/authorization result changing must mint a \
+             different authority_id, never silently reuse the prior identity"
+        );
+    }
+
+    #[test]
+    fn c2_authority_id_is_input_order_independent() {
+        let forward = vec![
+            authorized_evaluation("AAPL", "intraday_scalper"),
+            authorized_evaluation("MSFT", "swing_momentum"),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+
+        assert_eq!(
+            base_id(&forward),
+            base_id(&reversed),
+            "authority_id must not depend on evaluation input order"
+        );
+    }
+
+    #[test]
+    fn c2_same_run_different_run_id_changes_authority_id() {
+        let evaluations = vec![authorized_evaluation("AAPL", "intraday_scalper")];
+        let a = derive_explicit_multi_strategy_authority_id(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"c2-run-a"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            &evaluations,
+        );
+        let b = derive_explicit_multi_strategy_authority_id(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"c2-run-b"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            &evaluations,
+        );
+        assert_ne!(
+            a, b,
+            "a different run_id must mint a different authority_id"
+        );
+    }
+
+    #[test]
+    fn c2_build_new_explicit_multi_strategy_authority_maps_fields_and_counts() {
+        let mut refused = authorized_evaluation("MSFT", "swing_momentum");
+        refused.authorized = false;
+        refused.reason_code = REASON_EXPLICIT_MULTI_STRATEGY_EVIDENCE_GATE_REFUSED.to_string();
+        refused.evidence = unpromoted_evidence();
+
+        let evaluations = vec![authorized_evaluation("AAPL", "intraday_scalper"), refused];
+        let created_at_utc = Utc::now();
+        let new_authority = build_new_explicit_multi_strategy_authority(
+            &evaluations,
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"c2-run"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            created_at_utc,
+        );
+
+        assert!(!new_authority.approved_for_live);
+        assert_eq!(
+            new_authority.source_kind,
+            mqk_db::EXPLICIT_MULTI_STRATEGY_SOURCE_KIND
+        );
+        assert_eq!(new_authority.bindings.len(), 2);
+        assert_eq!(new_authority.bindings[0].symbol, "AAPL");
+        assert!(new_authority.bindings[0].authorized);
+        assert_eq!(new_authority.bindings[1].symbol, "MSFT");
+        assert!(!new_authority.bindings[1].authorized);
+
+        // Validation-layer proof: a mqk_db-level validator must accept this
+        // DTO (correct binding_count/authorized_count derivation, no
+        // duplicate binding) before any DB I/O is attempted.
+        assert_eq!(mqk_db::validate_new_authority(&new_authority), Ok(()));
+    }
+
+    #[test]
+    fn c2_dry_run_binding_evaluation_carries_unresolved_evidence_and_refusal_reason() {
+        let evaluation = ExplicitBindingEvaluation {
+            symbol: "AAPL".to_string(),
+            strategy_id: "intraday_short_scalper".to_string(),
+            timeframe_secs: 300,
+            authorized: false,
+            reason_code: REASON_EXPLICIT_MULTI_STRATEGY_DRY_RUN_EXCLUDED.to_string(),
+            evidence: unresolved_evidence(),
+        };
+        assert!(!evaluation.evidence.promotion_query_ok);
+        assert!(!evaluation.evidence.registry_enabled);
+        assert_eq!(
+            evaluation.reason_code,
+            REASON_EXPLICIT_MULTI_STRATEGY_DRY_RUN_EXCLUDED
         );
     }
 }
