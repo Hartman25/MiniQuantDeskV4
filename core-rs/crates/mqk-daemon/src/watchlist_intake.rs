@@ -84,11 +84,25 @@ pub const WATCHLIST_SCHEMA_VERSION_V2: &str = "watchlist-v2";
 /// Back-compat alias for the original (v1) schema version constant.
 pub const WATCHLIST_SCHEMA_VERSION: &str = WATCHLIST_SCHEMA_VERSION_V1;
 
+/// Explicit per-symbol multi-strategy schema version
+/// (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`, frozen contract:
+/// `docs/specs/multi_strategy_runtime_dispatch_01a_frozen_contract.md`).
+/// `strategy_assignments` is `symbol -> Vec<String>` (one or more strategy
+/// identities) instead of v1/v2's `symbol -> String`. A wholly separate,
+/// additive evaluation path ([`evaluate_watchlist_intake_v3`]) — v1/v2
+/// parsing via [`evaluate_watchlist_intake`] is unchanged byte-for-byte.
+pub const WATCHLIST_SCHEMA_VERSION_V3: &str = "watchlist-v3";
+
 /// Hard ceiling on `max_symbols_to_trade` (and therefore on `symbols.len()`)
-/// for `watchlist-v2` artifacts (native multi-symbol dispatch design, cap
-/// #12).  v1 artifacts remain capped at [`REQUIRED_MAX_SYMBOLS`] regardless
-/// of this value.
+/// for `watchlist-v2`/`watchlist-v3` artifacts (native multi-symbol dispatch
+/// design, cap #12).  v1 artifacts remain capped at [`REQUIRED_MAX_SYMBOLS`]
+/// regardless of this value.
 pub const MULTI_SYMBOL_HARD_CEILING: u64 = 5;
+
+/// Hard ceiling on `strategy_assignments[symbol].len()` for `watchlist-v3`
+/// artifacts — defense-in-depth bound on total isolated `StrategyHost`
+/// construction/dispatch cost per tick (frozen contract §2.1).
+pub const MAX_STRATEGIES_PER_SYMBOL: u64 = 3;
 
 /// Hard constraint: v1 only allows one symbol to trade.
 const REQUIRED_MAX_SYMBOLS: u64 = 1;
@@ -597,6 +611,368 @@ pub fn evaluate_watchlist_intake_from_env() -> WatchlistIntakeOutcome {
         Some(std::path::PathBuf::from(raw.trim()))
     };
     evaluate_watchlist_intake(path.as_deref())
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-STRATEGY-RUNTIME-DISPATCH-01: watchlist-v3 (explicit per-symbol
+// multi-strategy authorization) — wholly separate, additive evaluation path.
+// See docs/specs/multi_strategy_runtime_dispatch_01a_frozen_contract.md.
+// ---------------------------------------------------------------------------
+
+/// Validated content extracted from a `watchlist-v3` artifact. A separate
+/// type from [`LoadedWatchlistArtifact`] — deliberately not a widened v1/v2
+/// type, so a v1/v2-only caller can never be handed a `Vec`-valued
+/// `strategy_assignments` it does not expect (frozen contract §2.3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedWatchlistArtifactV3 {
+    /// Always [`WATCHLIST_SCHEMA_VERSION_V3`].
+    pub schema_version: String,
+    /// Admitted symbols, already truncated to `max_symbols_to_trade` where
+    /// applicable (see [`Self::dropped_symbols`]).
+    pub symbols: Vec<String>,
+    pub top_symbol: Option<String>,
+    /// symbol -> ordered, non-empty list of authorized strategy identities
+    /// (artifact JSON array order preserved — never re-sorted).
+    pub strategy_assignments: std::collections::HashMap<String, Vec<String>>,
+    pub max_symbols_to_trade: u64,
+    pub max_concurrent_positions: u64,
+    pub approved_for_autonomous_paper: bool,
+    pub dropped_symbols: Vec<String>,
+}
+
+/// Result of evaluating a path for `watchlist-v3` intake. Mirrors
+/// [`WatchlistIntakeOutcome`]'s five-outcome shape, plus one v3-specific
+/// case: [`Self::NotV3`], reached when the file at `path` is well-formed but
+/// its `schema_version` is not `"watchlist-v3"` (a v1/v2 artifact, or an
+/// artifact this evaluator otherwise cannot recognize as v3). `NotV3` exists
+/// only for routing (a caller that wants "v3 if configured, else fall back
+/// to legacy/v2" — mirrors the existing precedent in
+/// `build_multi_symbol_runtime_config_from_env_and_watchlist`); it is never
+/// a v3 validation failure and must never be displayed as one.
+///
+/// `approved_for_live` is ALWAYS false for every variant — identical
+/// hard-lock to v1/v2.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WatchlistIntakeOutcomeV3 {
+    /// `MQK_PAPER_WATCHLIST_PATH` is absent or empty.
+    NotConfigured,
+    /// Path is configured but the file does not exist.
+    Missing { configured_path: String },
+    /// File found, parses as JSON, and its `schema_version` field is
+    /// exactly `"watchlist-v3"`, but is otherwise structurally invalid.
+    Invalid { failure_reasons: Vec<String> },
+    /// File found and parses as JSON, but `schema_version` is not
+    /// `"watchlist-v3"` — routing signal only, see the enum's own docs.
+    NotV3,
+    /// Structurally valid v3 artifact, `approved_for_autonomous_paper=false`.
+    LoadedNotApproved { artifact: LoadedWatchlistArtifactV3 },
+    /// Structurally valid v3 artifact, `approved_for_autonomous_paper=true`.
+    LoadedApproved { artifact: LoadedWatchlistArtifactV3 },
+}
+
+impl WatchlistIntakeOutcomeV3 {
+    pub fn status_label(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::Missing { .. } => "missing",
+            Self::Invalid { .. } => "invalid",
+            Self::NotV3 => "not_v3",
+            Self::LoadedNotApproved { .. } => "loaded_not_approved",
+            Self::LoadedApproved { .. } => "loaded_approved",
+        }
+    }
+
+    pub fn approved_for_autonomous_paper(&self) -> bool {
+        matches!(self, Self::LoadedApproved { .. })
+    }
+
+    pub fn artifact(&self) -> Option<&LoadedWatchlistArtifactV3> {
+        match self {
+            Self::LoadedNotApproved { artifact } | Self::LoadedApproved { artifact } => {
+                Some(artifact)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Evaluate a `watchlist-v3` artifact at `path`. Pure: no env-var reads, no
+/// network, no DB — mirrors [`evaluate_watchlist_intake`]'s shape exactly,
+/// with `strategy_assignments` parsed as `symbol -> Vec<String>` and one
+/// additional per-symbol bound ([`MAX_STRATEGIES_PER_SYMBOL`]).
+///
+/// A file whose `schema_version` is not `"watchlist-v3"` returns
+/// [`WatchlistIntakeOutcomeV3::NotV3`] — not `Invalid` — since it is not a
+/// broken v3 artifact, merely not a v3 artifact at all (see the enum's own
+/// docs on `NotV3`'s routing-only purpose).
+pub fn evaluate_watchlist_intake_v3(path: Option<&Path>) -> WatchlistIntakeOutcomeV3 {
+    let path = match path {
+        None => return WatchlistIntakeOutcomeV3::NotConfigured,
+        Some(p) if p.as_os_str().is_empty() => return WatchlistIntakeOutcomeV3::NotConfigured,
+        Some(p) => p,
+    };
+
+    let contents = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => {
+            return WatchlistIntakeOutcomeV3::Missing {
+                configured_path: path.display().to_string(),
+            }
+        }
+    };
+
+    let j: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            return WatchlistIntakeOutcomeV3::Invalid {
+                failure_reasons: vec![format!("invalid JSON in '{}': {e}", path.display())],
+            }
+        }
+    };
+
+    match j.get("schema_version").and_then(|v| v.as_str()) {
+        Some(sv) if sv == WATCHLIST_SCHEMA_VERSION_V3 => {}
+        _ => return WatchlistIntakeOutcomeV3::NotV3,
+    }
+
+    let mut reasons: Vec<String> = Vec::new();
+
+    match j.get("mode").and_then(|v| v.as_str()) {
+        Some("paper") => {}
+        Some(other) => reasons.push(format!(
+            "watchlist_mode_not_paper: mode '{other}' is not allowed; only 'paper' is accepted"
+        )),
+        None => reasons.push("watchlist_mode_not_paper: missing 'mode' field".to_string()),
+    }
+
+    match j.get("approved_for_live") {
+        Some(v) if v.as_bool() == Some(true) => {
+            reasons.push(
+                "watchlist_live_approval_forbidden: approved_for_live=true in artifact; \
+                 hard live lock — artifact is invalid"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    let approved_for_paper = match j.get("approved_for_autonomous_paper") {
+        Some(v) => match v.as_bool() {
+            Some(b) => b,
+            None => {
+                reasons.push(
+                    "watchlist_approved_for_autonomous_paper_invalid: field \
+                     'approved_for_autonomous_paper' is not a boolean"
+                        .to_string(),
+                );
+                false
+            }
+        },
+        None => {
+            reasons.push(
+                "watchlist_approved_for_autonomous_paper_invalid: missing required field \
+                 'approved_for_autonomous_paper'"
+                    .to_string(),
+            );
+            false
+        }
+    };
+
+    let mut symbols: Vec<String> = match j.get("symbols") {
+        Some(v) => match v.as_array() {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                .collect(),
+            None => {
+                reasons
+                    .push("watchlist_symbols_invalid: field 'symbols' is not an array".to_string());
+                vec![]
+            }
+        },
+        None => {
+            reasons.push("watchlist_symbols_invalid: missing required field 'symbols'".to_string());
+            vec![]
+        }
+    };
+
+    // strategy_assignments: symbol -> Vec<String> (v3's one structural
+    // difference from v1/v2). Non-string / non-array entries are dropped
+    // (mirrors v1/v2's filter_map convention) rather than causing a parse
+    // panic; a resulting empty list still fails closed via the per-symbol
+    // bound check below (§2.1: 0 is `watchlist_strategy_assignment_missing`).
+    let strategy_assignments: std::collections::HashMap<String, Vec<String>> =
+        match j.get("strategy_assignments") {
+            Some(v) => match v.as_object() {
+                Some(obj) => obj
+                    .iter()
+                    .map(|(k, val)| {
+                        let list: Vec<String> = val
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (k.clone(), list)
+                    })
+                    .collect(),
+                None => {
+                    reasons.push(
+                        "watchlist_strategy_assignments_invalid: field 'strategy_assignments' \
+                         is not an object"
+                            .to_string(),
+                    );
+                    std::collections::HashMap::new()
+                }
+            },
+            None => {
+                reasons.push(
+                    "watchlist_strategy_assignments_invalid: missing required field \
+                     'strategy_assignments'"
+                        .to_string(),
+                );
+                std::collections::HashMap::new()
+            }
+        };
+
+    let max_symbols_to_trade: u64 = match j.get("max_symbols_to_trade").and_then(|v| v.as_u64()) {
+        Some(n) => {
+            if n < 1 {
+                reasons.push(format!(
+                    "watchlist_max_symbols_invalid: max_symbols_to_trade={n}; must be >= 1 in v3"
+                ));
+            } else if n > MULTI_SYMBOL_HARD_CEILING {
+                reasons.push(format!(
+                    "watchlist_multi_symbol_ceiling_exceeded: max_symbols_to_trade={n} \
+                     exceeds MULTI_SYMBOL_HARD_CEILING={MULTI_SYMBOL_HARD_CEILING}"
+                ));
+            }
+            n
+        }
+        None => {
+            reasons.push(format!(
+                "watchlist_max_symbols_invalid: missing or non-integer 'max_symbols_to_trade'; \
+                 must be 1..={MULTI_SYMBOL_HARD_CEILING} in v3"
+            ));
+            0
+        }
+    };
+
+    let max_concurrent_positions: u64 =
+        match j.get("max_concurrent_positions").and_then(|v| v.as_u64()) {
+            Some(n) => {
+                if n < 1 || n > max_symbols_to_trade {
+                    reasons.push(format!(
+                        "watchlist_max_concurrent_positions_invalid: \
+                         max_concurrent_positions={n}; must be between 1 and \
+                         max_symbols_to_trade={max_symbols_to_trade} in v3"
+                    ));
+                }
+                n
+            }
+            None => {
+                reasons.push(
+                    "watchlist_max_concurrent_positions_invalid: missing or non-integer \
+                     'max_concurrent_positions'; must be 1..=max_symbols_to_trade in v3"
+                        .to_string(),
+                );
+                0
+            }
+        };
+
+    let max_symbols_to_trade_is_valid =
+        (1..=MULTI_SYMBOL_HARD_CEILING).contains(&max_symbols_to_trade);
+    let exceeds_cap = symbols.len() as u64 > max_symbols_to_trade;
+    let eligible_for_truncation = exceeds_cap && max_symbols_to_trade_is_valid;
+    if exceeds_cap && !eligible_for_truncation {
+        reasons.push(format!(
+            "watchlist_max_symbols_invalid: symbols.len()={} exceeds \
+             max_symbols_to_trade={}",
+            symbols.len(),
+            max_symbols_to_trade
+        ));
+    }
+
+    // §2.1: every ORIGINALLY REQUESTED symbol (pre-truncation) must have a
+    // non-empty strategy_assignments list, bounded by
+    // MAX_STRATEGIES_PER_SYMBOL. Checked against the full requested list —
+    // not the post-truncation admitted list — mirroring v2's identical
+    // "malformed dropped-tail symbol must still fail the whole artifact"
+    // rule.
+    for s in &symbols {
+        match strategy_assignments.get(s) {
+            None => reasons.push(format!(
+                "watchlist_strategy_assignment_missing: symbol '{s}' has no \
+                 strategy_assignments entry"
+            )),
+            Some(list) if list.is_empty() => reasons.push(format!(
+                "watchlist_strategy_assignment_missing: symbol '{s}' has an empty \
+                 strategy_assignments list"
+            )),
+            Some(list) if list.len() as u64 > MAX_STRATEGIES_PER_SYMBOL => {
+                reasons.push(format!(
+                    "watchlist_strategy_per_symbol_ceiling_exceeded: symbol '{s}' has \
+                     {} strategy_assignments entries; exceeds MAX_STRATEGIES_PER_SYMBOL={}",
+                    list.len(),
+                    MAX_STRATEGIES_PER_SYMBOL
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let mut dropped_symbols: Vec<String> = Vec::new();
+    if eligible_for_truncation {
+        dropped_symbols = symbols.split_off(max_symbols_to_trade as usize);
+    }
+
+    if approved_for_paper && symbols.is_empty() && reasons.is_empty() {
+        reasons.push(
+            "watchlist_symbols_invalid: approved_for_autonomous_paper=true but symbols list \
+             is empty; internal consistency violation"
+                .to_string(),
+        );
+    }
+
+    if !reasons.is_empty() {
+        return WatchlistIntakeOutcomeV3::Invalid {
+            failure_reasons: reasons,
+        };
+    }
+
+    let top_symbol = symbols.first().cloned();
+    let artifact = LoadedWatchlistArtifactV3 {
+        schema_version: WATCHLIST_SCHEMA_VERSION_V3.to_string(),
+        symbols,
+        top_symbol,
+        strategy_assignments,
+        max_symbols_to_trade,
+        max_concurrent_positions,
+        approved_for_autonomous_paper: approved_for_paper,
+        dropped_symbols,
+    };
+
+    if approved_for_paper {
+        WatchlistIntakeOutcomeV3::LoadedApproved { artifact }
+    } else {
+        WatchlistIntakeOutcomeV3::LoadedNotApproved { artifact }
+    }
+}
+
+/// [`evaluate_watchlist_intake_v3`], reading [`ENV_PAPER_WATCHLIST_PATH`]
+/// from the environment. Same env var as the v1/v2 path — a v3 artifact and
+/// a v1/v2 artifact are never simultaneously configured (one file, one
+/// `schema_version`).
+pub fn evaluate_watchlist_intake_v3_from_env() -> WatchlistIntakeOutcomeV3 {
+    let raw = std::env::var(ENV_PAPER_WATCHLIST_PATH).unwrap_or_default();
+    let path = if raw.trim().is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(raw.trim()))
+    };
+    evaluate_watchlist_intake_v3(path.as_deref())
 }
 
 // ---------------------------------------------------------------------------

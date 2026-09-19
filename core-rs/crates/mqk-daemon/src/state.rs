@@ -17,7 +17,7 @@ pub mod autonomous_runtime_context;
 mod broker;
 pub(crate) mod closed_trade_attribution;
 mod deadman;
-mod dry_run_strategy;
+pub(crate) mod dry_run_strategy;
 mod env;
 #[cfg(test)]
 mod hermetic_positive_proofs;
@@ -32,7 +32,7 @@ mod paper_portfolio_accounting;
 mod per_symbol_bar_window;
 pub mod required_market_data_autofresh;
 pub mod runtime_session_source;
-mod session_controller;
+pub(crate) mod session_controller;
 pub(crate) mod signal_intake;
 mod snapshot;
 mod types;
@@ -9854,5 +9854,89 @@ mod phase7b_selected_host_dispatch_tests {
                 }],
             };
         assert!(!legacy.is_dynamic_paper_enforced());
+    }
+
+    // -----------------------------------------------------------------
+    // MULTI-STRATEGY-RUNTIME-DISPATCH-01 (R1B), proofs #1/#2/#9: two
+    // isolated strategies on the SAME symbol, dispatched through the exact
+    // same real production selected-host dispatch function this module's
+    // other tests already use for different symbols. Proves both hosts are
+    // genuinely, independently invoked in one cycle, with distinct,
+    // correctly-attributed identity — and that the pre-existing
+    // single-symbol/single-strategy tests above (unmodified) remain green,
+    // i.e. existing configuration behavior is unaffected by this addition.
+    // -----------------------------------------------------------------
+
+    /// R1B #1/#2: `AAPL/intraday_scalper` and `AAPL/intraday_short_scalper`
+    /// — two isolated hosts for the same symbol — both genuinely execute
+    /// `on_bar` in one dispatch cycle, each producing its own correctly
+    /// attributed `StrategyBarResult` (distinct `spec.name`, matched to its
+    /// own binding, never swapped or merged).
+    #[tokio::test]
+    async fn r1b_two_strategies_same_symbol_both_dispatch_with_distinct_identity() {
+        let Some(pool) = db_pool_or_skip("R1B-DISPATCH-01").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "R1BDISPAAPL", "5m", ts, 100_000_000).await;
+
+        let keys = vec![
+            (
+                "R1BDISPAAPL".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+            (
+                "R1BDISPAAPL".to_string(),
+                "intraday_short_scalper".to_string(),
+                300,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![
+            binding("R1BDISPAAPL", "intraday_scalper", 300, "5m"),
+            binding("R1BDISPAAPL", "intraday_short_scalper", 300, "5m"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
+            .await
+            .expect("two isolated same-symbol hosts must dispatch without fault");
+
+        cleanup_bars(&pool, "R1BDISPAAPL").await;
+
+        assert_eq!(
+            results.len(),
+            2,
+            "both same-symbol strategies must genuinely dispatch this cycle"
+        );
+        let long = results
+            .iter()
+            .find(|(a, r, _)| a.symbol == "R1BDISPAAPL" && r.spec.name == "intraday_scalper")
+            .expect("long variant result present with correct identity");
+        let short = results
+            .iter()
+            .find(|(a, r, _)| a.symbol == "R1BDISPAAPL" && r.spec.name == "intraday_short_scalper")
+            .expect("short variant result present with correct identity");
+        assert_ne!(
+            long.1.spec.name, short.1.spec.name,
+            "identities must remain distinct, never collapsed to one"
+        );
+        assert_eq!(long.1.spec.timeframe_secs, 300);
+        assert_eq!(short.1.spec.timeframe_secs, 300);
     }
 }

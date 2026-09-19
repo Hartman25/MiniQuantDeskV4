@@ -1191,4 +1191,80 @@ mod tests {
             "mixed-timeframe reordering with different source ordinals must never change cycle id"
         );
     }
+
+    // -----------------------------------------------------------------
+    // MULTI-STRATEGY-RUNTIME-DISPATCH-01 (R1B), proofs #3/#4/#5: genuine
+    // same-symbol competing proposals from the two real intraday_scalper
+    // variants reach this exact resolver and are resolved deterministically,
+    // regardless of input order. Uses real strategy identities specifically
+    // (rather than the synthetic "s1"/"s2" the tests above already use for
+    // the same underlying mechanism) to tie this coverage explicitly to the
+    // R1B same-symbol multi-strategy feature.
+    // -----------------------------------------------------------------
+
+    /// R1B #3/#4: both `intraday_scalper` and `intraday_short_scalper`
+    /// original proposals for AAPL reach Bundle 6 as real candidates; the
+    /// deterministic, authorized survivor is the risk-reducing sell.
+    #[test]
+    fn r1b_both_real_strategy_proposals_reach_bundle6_and_resolve_deterministically() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 10i64);
+        let decisions = vec![
+            bound_buy("AAPL", "intraday_scalper", 5, 1_000),
+            bound_sell("AAPL", "intraday_short_scalper", 3, 2_000),
+        ];
+        let out =
+            apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
+        assert_eq!(
+            out.decisions.len(),
+            1,
+            "exactly one authorized survivor for AAPL"
+        );
+        assert_eq!(out.decisions[0].decision.side, "sell");
+        assert_eq!(out.decisions[0].decision.strategy_id, "intraday_short_scalper");
+        assert!(
+            out.plan.is_some(),
+            "paper_enforced must produce durable conflict-resolution evidence"
+        );
+    }
+
+    /// R1B #5: reversing the two real strategies' input order produces the
+    /// identical authorized economic result.
+    #[test]
+    fn r1b_reversed_real_strategy_input_order_yields_same_result() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 10i64);
+        let forward = vec![
+            bound_buy("AAPL", "intraday_scalper", 5, 1_000),
+            bound_sell("AAPL", "intraday_short_scalper", 3, 2_000),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+
+        let out_forward = apply_conflict_policy(
+            &ctx(ConflictPolicyMode::PaperEnforced),
+            forward,
+            &current,
+        );
+        let out_reversed = apply_conflict_policy(
+            &ctx(ConflictPolicyMode::PaperEnforced),
+            reversed,
+            &current,
+        );
+
+        assert_eq!(out_forward.decisions.len(), out_reversed.decisions.len());
+        assert_eq!(
+            out_forward.decisions[0].decision.strategy_id,
+            out_reversed.decisions[0].decision.strategy_id,
+            "input order must never change which strategy's decision survives"
+        );
+        assert_eq!(
+            out_forward.decisions[0].decision.side,
+            out_reversed.decisions[0].decision.side
+        );
+        assert_eq!(
+            out_forward.decisions[0].decision.qty,
+            out_reversed.decisions[0].decision.qty
+        );
+    }
 }

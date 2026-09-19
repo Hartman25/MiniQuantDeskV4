@@ -26,6 +26,7 @@ pub mod event_risk_blackout;
 pub mod ingest_jobs;
 pub mod market_data_freshness;
 pub mod mode_transition;
+pub mod multi_strategy_runtime_dispatch;
 pub mod notify;
 pub mod parity_evidence;
 pub mod pre_event_flatten;

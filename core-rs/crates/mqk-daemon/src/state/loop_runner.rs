@@ -2676,6 +2676,81 @@ mod phase7b_provenance_tests {
         assert!(dynamic_selection_envelopes_ok(&legacy_authority(), &[]));
         assert!(dynamic_selection_envelopes_ok(&dynamic_authority(), &[]));
     }
+
+    // -----------------------------------------------------------------
+    // MULTI-STRATEGY-RUNTIME-DISPATCH-01 (R1B), proof #7: swapping
+    // provenance between two SAME-symbol sibling bindings (not just
+    // different-symbol siblings, as `swapped_provenance_between_two_
+    // decisions_fails_closed` above already proves) is refused just as
+    // strictly — the exact `(symbol, strategy_id, timeframe_secs, plan_id)`
+    // match has no special case for same-symbol siblings.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn r1b_same_symbol_sibling_provenance_swap_fails_closed() {
+        let authority = RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            bindings: vec![
+                binding("AAPL", "intraday_scalper", 300),
+                binding("AAPL", "intraday_short_scalper", 300),
+            ],
+            host_pool: DynamicSelectionHostPool::build(&[]).expect("empty pool builds"),
+        };
+        let long_provenance = DynamicSelectionDispatchProvenance {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            symbol: "AAPL".to_string(),
+            strategy_id: "intraday_scalper".to_string(),
+            timeframe_secs: 300,
+        };
+        let short_provenance = DynamicSelectionDispatchProvenance {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            symbol: "AAPL".to_string(),
+            strategy_id: "intraday_short_scalper".to_string(),
+            timeframe_secs: 300,
+        };
+
+        // Correct pairing: both pass.
+        assert!(dynamic_selection_envelope_ok(
+            &authority,
+            &PendingDecisionWithBarFacts {
+                decision: decision("AAPL", "intraday_scalper", 300),
+                bar_facts: None,
+                dynamic_selection_provenance: Some(long_provenance.clone()),
+            }
+        ));
+        assert!(dynamic_selection_envelope_ok(
+            &authority,
+            &PendingDecisionWithBarFacts {
+                decision: decision("AAPL", "intraday_short_scalper", 300),
+                bar_facts: None,
+                dynamic_selection_provenance: Some(short_provenance.clone()),
+            }
+        ));
+
+        // Swapped: the long variant's decision claiming the short variant's
+        // provenance (and vice versa) must both be refused, even though
+        // both provenance values are individually valid for *some*
+        // decision this tick and both name the same symbol.
+        assert!(!dynamic_selection_envelope_ok(
+            &authority,
+            &PendingDecisionWithBarFacts {
+                decision: decision("AAPL", "intraday_scalper", 300),
+                bar_facts: None,
+                dynamic_selection_provenance: Some(short_provenance),
+            }
+        ));
+        assert!(!dynamic_selection_envelope_ok(
+            &authority,
+            &PendingDecisionWithBarFacts {
+                decision: decision("AAPL", "intraday_short_scalper", 300),
+                bar_facts: None,
+                dynamic_selection_provenance: Some(long_provenance),
+            }
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------

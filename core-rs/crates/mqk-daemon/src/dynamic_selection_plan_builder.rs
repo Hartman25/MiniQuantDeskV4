@@ -101,12 +101,18 @@ pub struct DynamicSelectionPlanBuildContext<'a> {
 
 /// One `(symbol, strategy_id)` pair pending independent-check evaluation —
 /// cheap, zero-I/O identity data only.
-struct PendingCandidate {
-    symbol: String,
-    strategy_id: String,
-    timeframe_secs: i64,
-    timeframe_label: String,
-    watchlist_assigned: bool,
+///
+/// `pub(crate)`: reused as-is by
+/// `multi_strategy_runtime_dispatch.rs` (`MULTI-STRATEGY-RUNTIME-DISPATCH-01`,
+/// R1B) to evaluate explicit watchlist-v3 per-symbol multi-strategy
+/// authorizations through this exact same independent-check pipeline,
+/// rather than duplicating it.
+pub(crate) struct PendingCandidate {
+    pub(crate) symbol: String,
+    pub(crate) strategy_id: String,
+    pub(crate) timeframe_secs: i64,
+    pub(crate) timeframe_label: String,
+    pub(crate) watchlist_assigned: bool,
 }
 
 /// Build one [`DynamicSelectionPlan`]. See module docs for the full
@@ -222,7 +228,9 @@ pub async fn build_dynamic_selection_plan(
 /// instantiation + timeframe match, daily data readiness, and promotion/
 /// evidence validation (Phase 3) -- see module docs for why each check is
 /// safe to run standalone per-candidate.
-async fn evaluate_candidate(
+/// `pub(crate)`: reused by `multi_strategy_runtime_dispatch.rs` (R1B) — see
+/// [`PendingCandidate`]'s doc comment.
+pub(crate) async fn evaluate_candidate(
     ctx: &DynamicSelectionPlanBuildContext<'_>,
     p: &PendingCandidate,
     now_utc: DateTime<Utc>,
