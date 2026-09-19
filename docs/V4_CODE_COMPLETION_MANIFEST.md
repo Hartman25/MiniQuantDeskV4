@@ -1049,3 +1049,59 @@ verification budget given its safety-critical nature). **M2 operational
 acceptance remains unclaimed.** M1 operational blocker (deployment
 authority gap), the `intraday_scalper` promotion rejection, and alpha-
 discovery deferral are all unchanged.
+
+### R5 — `V4-STAGE-B-M2-C1-C3-FINAL-01`: C1/C2/C3 live-activation splice closed
+
+Superseded status above (R1B/R2A era): M2.1/M2.3's "live activation not
+wired" gap was closed by a follow-on controller
+(`V4-STAGE-B-M2-C1-C3-REPAIR-04`, commits `97a9af5c`/`b0e957b5`/`ac7b400d`)
+and this session (`0af79883`/`420c0690`) — see
+`docs/CURRENT_MISSION.md` §-6 for the full record. Summary:
+
+- `state/lifecycle.rs`'s real `start_execution_runtime` routes a configured,
+  approved `watchlist-v3` artifact under `PaperEnforced` to
+  `build_explicit_multi_strategy_start_snapshot`: canonical v3 config
+  resolution -> real per-binding `evaluate_candidate` DB evidence gate ->
+  durable authority build+persist (`sys_explicit_multi_strategy_authority`
+  + `_bindings`, migrations 0072/0073) -> true read-side validation
+  (`explicit_multi_strategy_evidence_validator.rs`, recomputes `authority_id`
+  from durable stored facts, never trusts the stored column) -> isolated
+  `StrategyHost` pool construction, strictly in that order (host pool is
+  never built before validation passes).
+- The STRATEGY-DORMANCY-01 gate (native `MQK_STRATEGY_IDS` bootstrap
+  required for Paper+Alpaca autonomous operation) is bypassed only for an
+  approved v3 artifact under `paper_enforced` — this session closed the one
+  remaining caller (`autonomous_runtime_context::resolve_autonomous_runtime_context_from_fleet`,
+  used by the daily coordinator/completed-bar-task/operator-retry paths)
+  that still carried the pre-bypass interpretation.
+- Read-only status (`routes/dynamic_selection_evidence.rs`) truthfully
+  distinguishes `explicit_watchlist_v3_multi_strategy` from
+  `bundle7_dynamic_selection`/`legacy` and never fabricates a Bundle-7
+  `committed_plan_id` for the explicit-v3 mechanism.
+- Known, deliberately unchanged: `autonomous_completed_bar_driver.rs`'s
+  single-effective-binding restriction (R2B/R2C) is not on this path (it
+  drives a separate, legacy single-binding autonomous dispatch mechanism);
+  still requires its own dedicated verification budget as a future patch.
+
+```text
+M2.1  CODE_CLOSED      dispatch/conflict pipeline + live activation both closed
+M2.2  CODE_CLOSED      unaffected
+M2.3  CODE_CLOSED      dispatch/conflict pipeline + live activation both closed
+M2.4  CODE_CLOSED      unaffected
+M2.5  CODE_CLOSED      unaffected
+M2.6  CODE_CLOSED      unaffected
+M2.7  WIRING_MISSING   durable per-binding schema CODE_CLOSED (R2A); driver/aggregation still not wired (R2B/R2C)
+M2.8  CODE_CLOSED      unaffected
+M2.9  CODE_CLOSED      unaffected
+
+CODE_CLOSED: 8/9   WIRING_MISSING: 1/9 (M2.7 — R2B/R2C, out of scope for this controller)
+```
+
+**M2 CODE COMPLETION: still NOT CLOSED** (M2.7's driver/aggregation rewrite
+remains). C1/C2/C3 (the watchlist-v3 canonical authority / durable
+authority identity / real daemon-start activation chain this controller was
+scoped to) are each independently `CODE_CLOSED` pending independent review.
+M2 overall (C4/C5/C6, i.e. R2B/R2C and the integrated M2 finish-line proof)
+remains open. M1 operational status, `intraday_scalper` promotion
+rejection, and alpha-discovery deferral are unchanged. No Paper/Live/
+runtime state modified; no push; no M3.

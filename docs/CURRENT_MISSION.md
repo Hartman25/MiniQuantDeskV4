@@ -6,6 +6,186 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -6. Stage B M2 — C1/C2/C3 Final Completion (2026-09-19, `V4-STAGE-B-M2-C1-C3-FINAL-01`)
+
+Reconciles §-5 below, whose draft text (written mid-`V4-STAGE-B-M2-REPAIR-03`)
+was never updated to reflect three further commits that landed later the same
+day under a follow-on controller (`V4-STAGE-B-M2-C1-C3-REPAIR-04`, visible in
+those commits' own code comments): `97a9af5c` (config: align watchlist-v3
+with frozen runtime authority), `b0e957b5` (authority: bind complete explicit
+strategy evidence identity — Patch D2, migration 0073's full-evidence
+columns), and `ac7b400d` (runtime: true read-side validation — Patch D3,
+`explicit_multi_strategy_evidence_validator.rs`, plus lifecycle.rs's own
+`explicit_v3_authority_pending` STRATEGY-DORMANCY-01 bypass). §-5's "R2B/R2C
+Still Open" framing undersold what REPAIR-04 had already closed; this section
+is the accurate final record.
+
+**This controller's own two commits**, starting from HEAD `ac7b400d`:
+
+- `0af79883` (C1): `resolve_autonomous_runtime_context_from_fleet`
+  (`state/autonomous_runtime_context.rs`) — the one seam every autonomous
+  daily-coordinator/completed-bar-task/operator-retry caller uses — still
+  carried the pre-REPAIR-04 STRATEGY-DORMANCY-01 interpretation verbatim:
+  Paper+Alpaca with no `MQK_STRATEGY_IDS` refused unconditionally even with
+  an approved watchlist-v3 fleet configured, even though `lifecycle.rs`'s own
+  `start_execution_runtime` gate had already been repaired to bypass this.
+  Extracted the bypass predicate into one shared, pure
+  `dynamic_selection_mode::explicit_watchlist_v3_authority_pending` helper
+  consumed by both call sites, closing the one remaining parallel
+  interpretation the frozen-contract review had flagged. Proof: three new
+  focused tests (`a11`/`a12`/`a13` in
+  `scenario_autonomous_daily_coordinator_policy_01.rs`) prove the bypass
+  fires only for an approved v3 artifact under `paper_enforced`, never for
+  `LoadedNotApprovedV3` or outside that mode.
+- `420c0690` (C2): adversarial field-by-field audit of
+  `derive_explicit_multi_strategy_authority_id` found all 33
+  `SelectionCandidateEvidence` fields structurally bound into `authority_id`,
+  but 9 of them had no mutation-test proof the binding actually holds
+  (`promotion_query_ok`, `promotion_state`, `config_identity_verified`,
+  `durable_config_fingerprint`, `current_config_fingerprint`,
+  `registry_enabled`, `data_ready`, `promotion_transition_id`,
+  `evidence_transition_id`). Added the missing mutators. Also replaced the
+  DB round-trip test's handful of spot-checks with an exhaustive per-field
+  comparison of all 40 persisted columns against the value written, run for
+  real against `postgres://postgres:postgres@127.0.0.1:5434/mqk_test`.
+
+**C3**: adversarially reviewed `explicit_multi_strategy_evidence_validator.rs`
+(D3) and `build_explicit_multi_strategy_start_snapshot`'s call ordering
+directly — the validator recomputes `authority_id` from durable stored facts
+(never trusts the stored column), checks every header identity field, the
+exact binding set (missing/extra/duplicate), and is called strictly before
+host-pool construction (`validate_...` at `lifecycle.rs:1181`, host pool
+`build_explicit_multi_strategy_dispatch_authority` at `lifecycle.rs:1210`+).
+The status route (`routes/dynamic_selection_evidence.rs`) truthfully
+distinguishes `explicit_watchlist_v3_multi_strategy` and never fabricates a
+Bundle-7 `committed_plan_id`/`committed_source_kind` for it (already covered
+by its own dedicated test). No defect found; no additional patch needed.
+Ran the integrated DB-backed proof
+(`c3_01_real_registry_promotion_and_evaluate_candidate_drive_durable_authority`,
+real registry + real research/backtest/promotion-to-`active_paper` chain)
+against the real test DB this session — passes.
+
+**Known, deliberately out-of-scope finding (not part of C1/C2/C3, not
+touched)**: `autonomous_completed_bar_driver.rs`'s `prove_running_dispatch_eligibility`
+treats a `Dormant` native-strategy bootstrap as unconditionally
+"not ready" for per-bar dispatch — a second dormancy interpretation on paper,
+but this driver only supports the single-effective-binding (legacy
+`MQK_STRATEGY_IDS`) dispatch path; it is not on the explicit-v3 runtime path
+at all (that path dispatches through `state/loop_runner.rs`'s host pool, per
+the frozen contract §9). This is the already-identified, already-deferred
+R2B/R2C multi-binding completed-bar driver gap (§-5 below), requiring its
+own dedicated verification budget per that prior session's explicit decision
+— confirmed still accurate, not re-attempted here (mission scope: C1/C2/C3
+only, no C4/C5/C6).
+
+**Acceptance**: `cargo test -p mqk-daemon --lib` 997 passed / 0 failed / 22
+ignored; `cargo test -p mqk-db --lib` 79 passed / 0 failed / 24 ignored;
+plus the DB-backed integration suites for both crates' explicit-multi-
+strategy-authority mechanisms run directly against `mqk_test`, all passing.
+
+**Final status: C1 = CODE_CLOSED. C2 = CODE_CLOSED. C3 = CODE_CLOSED.**
+Independent review of the diff is still required before any of the three is
+treated as accepted contract. **M2 overall remains NOT CLOSED** — C4/C5/C6
+(the R2B/R2C multi-binding completed-bar driver/aggregation rewrite among
+them) are the remaining Stage B work, out of scope for this controller. M1
+operational status is unchanged; alpha discovery remains deferred; no
+Paper/Live/runtime state was modified; no push; no M3.
+
+---
+
+## -5. Stage B M2 — R1B Live Activation Closed; R2B/R2C Still Open (2026-09-19, `V4-STAGE-B-M2-REPAIR-03`)
+
+Independent review found R1A/R1B were not fully coherent (§-4 below): the
+frozen contract required watchlist-v3 wired into the *canonical* intake
+contract (`WatchlistIntakeOutcome` itself), but R1B instead built a wholly
+separate `WatchlistIntakeOutcomeV3` type the canonical evaluator never
+recognized. This controller repaired that mismatch and closed R1B's
+previously-`WIRING_MISSING` live-activation gap.
+
+**Patch C1 (commit `7db0a18b`) — canonical intake repair.**
+`WatchlistIntakeOutcome` now has `LoadedApprovedV3`/`LoadedNotApprovedV3`
+variants; `evaluate_watchlist_intake` recognizes `watchlist-v3` directly
+(v1/v2 parsing byte-for-byte unchanged); `state/multi_symbol_config.rs`
+gained the frozen contract's v3-aware config source. The V16 test that
+previously asserted the *mismatch* as correct behavior is replaced with
+proof of the fix.
+
+**Patch C2 (commit `9fc2f912`) — durable explicit-authority evidence.**
+New additive tables (migration 0072) `sys_explicit_multi_strategy_authority`
++ `_bindings`, deliberately separate from `sys_dynamic_selection_plans`
+(Bundle 7's own ranking-plan schema — never conflated). `authority_id` is a
+deterministic identity binding every result-affecting input (run_id, source
+artifact hash, config fingerprint, market_date, every binding's own
+evidence) so a changed artifact or a changed promotion/config/readiness
+fact can never reuse a stale authority. Idempotent-insert-or-payload-
+collision, mirroring `insert_dynamic_selection_plan`'s established pattern.
+
+**Patch C3 (commit `644cfde7`) — real daemon-start activation. R1B's
+WIRING_MISSING gap is now CODE_CLOSED.** `state/lifecycle.rs`'s real
+`build_dynamic_selection_start_snapshot` now routes a configured
+`watchlist-v3` artifact under `PaperEnforced` to a new
+`build_explicit_multi_strategy_start_snapshot`, which runs the full real
+sequence (canonical v3 validation -> real `evaluate_candidate` DB I/O ->
+build+persist+read-validate the durable authority -> construct the isolated
+host pool -> return committed runtime truth) and fails start closed on any
+step. A new `RuntimeStrategyAuthorityKind` (`Legacy` /
+`Bundle7DynamicSelection` / `ExplicitWatchlistV3MultiStrategy`) lets a
+status surface distinguish which mechanism produced a given start's
+authority without inferring it from `plan`'s presence; this mechanism never
+fabricates a Bundle-7 plan. Proven with real registry + real
+research/backtest/promotion-to-`active_paper` evidence (not hand-built
+`SelectionCandidateEvidence`): the durable evidence persists even when the
+overall start is honestly refused (data readiness genuinely fails for a
+symbol with no real instrument-registry entry — the same wall R1B's own
+heaviest existing fixture, `full_evidence_chain_passes_refused_only_on_data_readiness`,
+also stops at); an unregistered sibling refuses independently; a genuinely-
+promoted identity is still excluded when dry-run-flagged; tampering the
+persisted row then re-running fails closed as a payload collision; two
+independently-authorized same-symbol identities build two real hosts; `Off`
+and the live-lock are untouched. Full regression: 983 mqk-daemon lib tests
+green.
+
+**R2B/R2C (multi-binding completed-bar driver + hybrid aggregation) — still
+NOT IMPLEMENTED.** Investigated: `resolve_single_effective_binding`
+(`state/autonomous_completed_bar_driver.rs`) is the exact-one-binding
+restriction R2 must replace, embedded through ~2,600 lines of already-
+audited, safety-critical claim/dispatch machinery across
+`autonomous_completed_bar_driver.rs`, `autonomous_completed_bar_task.rs`,
+and `autonomous_daily_coordinator.rs` — the live autonomous-trading
+heartbeat. Not attempted this session: a correct rewrite requires its own
+dedicated verification budget (idempotency/restart-safety proofs, per-
+binding negative controls) that this session's remaining time could not
+responsibly provide without risking exactly the kind of under-verified
+change this repair mission exists to prevent (CLAUDE.md's correctness-first
+priority). C6 (integrated M2 finish-line proof) is consequently also not
+attempted — it is blocked on C4/C5 existing as real production paths.
+
+**Doc truth corrections (this section):** the R1B section below (§-4)
+claimed "All 10 of R1B's mission-required focused proofs... each calling a
+real production function" for the *whole* proof set; several of those
+proofs (the Bundle-6-conflict-resolution ones) call
+`compute_dynamic_selection_plan` directly with hand-built
+`SelectionCandidateEvidence` — genuine, valid proofs of the pure
+selector/conflict-resolution logic, but not DB evidence-gate proofs. Only
+the promotion/registry/dry-run-facing proofs (`r1b_06`, `r1b_08`) exercise
+real DB-backed evidence. This session's own C3 tests are the first to
+exercise the real `evaluate_candidate` DB path end to end for this
+mechanism. A separately-referenced "V3 report" commit-count typo could not
+be located anywhere in this repository or in `Downloads/`; it may refer to
+an external/prior-session artifact not present on this machine and was not
+corrected.
+
+**Corrected M2 totals (this session):** `CODE_CLOSED 7/9` (M2.2, M2.4,
+M2.5, M2.6, M2.8, M2.9, plus **M2.1 and M2.3 upgraded from
+WIRING_MISSING to CODE_CLOSED** by C1-C3), `WIRING_MISSING 1/9` (M2.7 —
+durable per-binding schema CODE_CLOSED via R2A, driver/aggregation still
+not wired, R2B/R2C). **M2 CODE COMPLETION remains NOT CLOSED** (one
+requirement, M2.7, still open) and **M2 operational acceptance remains
+NOT CLAIMED** regardless. No Paper/Live/runtime state modified; no push;
+no M3; no alpha discovery.
+
+---
+
 ## -4. Stage B M2 Completion After Operator Decisions (2026-09-18, `V4-STAGE-B-M2-REPAIR-02`)
 
 The operator resolved both `SPEC_DECISION_REQUIRED` items from §-3 below
