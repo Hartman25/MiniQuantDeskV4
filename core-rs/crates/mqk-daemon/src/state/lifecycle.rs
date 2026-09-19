@@ -1801,11 +1801,10 @@ impl AppState {
         // v3 artifact's strategy list into `MQK_STRATEGY_IDS` merely to
         // pass this gate). `LoadedNotApprovedV3` and any non-v3 outcome do
         // not qualify — the ordinary Dormant refusal below still applies.
-        let explicit_v3_authority_pending = start_attempt_snapshot.effective_mode.effective_mode
-            == mqk_portfolio::DynamicSelectionMode::PaperEnforced
-            && matches!(
-                start_attempt_snapshot.multi_symbol_raw_inputs.watchlist_outcome,
-                crate::watchlist_intake::WatchlistIntakeOutcome::LoadedApprovedV3 { .. }
+        let explicit_v3_authority_pending =
+            crate::dynamic_selection_mode::explicit_watchlist_v3_authority_pending(
+                start_attempt_snapshot.effective_mode.effective_mode,
+                &start_attempt_snapshot.multi_symbol_raw_inputs.watchlist_outcome,
             );
         if start_attempt_snapshot
             .native_strategy_bootstrap

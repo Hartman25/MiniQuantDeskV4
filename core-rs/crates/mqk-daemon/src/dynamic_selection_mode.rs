@@ -125,6 +125,32 @@ pub fn effective_mode(
     }
 }
 
+/// MULTI-STRATEGY-RUNTIME-DISPATCH-01: the one canonical predicate for
+/// "an approved `watchlist-v3` artifact is this daemon instance's current
+/// explicit multi-strategy authority." STRATEGY-DORMANCY-01's "a strategy
+/// engine will generate decisions" invariant can be satisfied either by a
+/// native `MQK_STRATEGY_IDS` bootstrap or by this — never by re-deriving
+/// the same `matches!` independently at each dormancy-gate call site
+/// (frozen contract §9 / independent review finding: a second, drifting
+/// interpretation of the same artifact is exactly what this contract
+/// forbids). `LoadedNotApprovedV3` and every non-v3 outcome return `false`
+/// — only a genuinely approved v3 artifact, and only under the mode this
+/// authority is actually consumed in (`PaperEnforced` —
+/// `build_explicit_multi_strategy_start_snapshot`'s own scope), qualifies.
+/// Pure; takes already-resolved inputs, never reads env/state itself, so
+/// every caller controls its own read timing (no TOCTOU is introduced by
+/// this helper).
+pub fn explicit_watchlist_v3_authority_pending(
+    effective_mode: DynamicSelectionMode,
+    watchlist_outcome: &crate::watchlist_intake::WatchlistIntakeOutcome,
+) -> bool {
+    effective_mode == DynamicSelectionMode::PaperEnforced
+        && matches!(
+            watchlist_outcome,
+            crate::watchlist_intake::WatchlistIntakeOutcome::LoadedApprovedV3 { .. }
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

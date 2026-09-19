@@ -124,9 +124,38 @@ pub async fn resolve_autonomous_runtime_context_from_fleet(
     // strategy bootstrap. Dormant is allowed for non-paper deployments (e.g.
     // LiveShadow running in monitor-only mode); this block is scoped to
     // Paper+Alpaca only, matching the pre-extraction gate exactly.
+    //
+    // MULTI-STRATEGY-RUNTIME-DISPATCH-01 (V4-STAGE-B-M2-C1-C3-FINAL-01): this
+    // resolver is the daily coordinator / completed-bar-task / operator-retry
+    // callers' only dormancy gate — unlike `lifecycle.rs`'s own start
+    // attempt, none of them hold a frozen `StartAttemptAuthoritySnapshot`, so
+    // this is each one's first (not a second, drifting) read of the
+    // dynamic-selection mode/watchlist outcome for its own tick. Reuses
+    // `dynamic_selection_mode::explicit_watchlist_v3_authority_pending` —
+    // the exact same predicate `lifecycle.rs`'s real start-attempt gate
+    // consumes — so an approved `watchlist-v3` fleet is never required to
+    // duplicate itself into `MQK_STRATEGY_IDS` merely to pass this parallel
+    // gate (previously it was: this was the one caller path R2's frozen
+    // contract review found still carrying the pre-C1 STRATEGY-DORMANCY-01
+    // interpretation verbatim).
+    let watchlist_outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();
+    let dynamic_selection_mode_resolution =
+        crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
+    let effective_dynamic_selection_mode = crate::dynamic_selection_mode::effective_mode(
+        &dynamic_selection_mode_resolution,
+        state.deployment_mode(),
+        state.runtime_selection().broker_kind,
+    );
+    let explicit_v3_authority_pending =
+        crate::dynamic_selection_mode::explicit_watchlist_v3_authority_pending(
+            effective_dynamic_selection_mode.effective_mode,
+            &watchlist_outcome,
+        );
+
     if native_strategy_bootstrap.is_dormant()
         && state.deployment_mode() == DeploymentMode::Paper
         && state.runtime_selection().broker_kind == Some(BrokerKind::Alpaca)
+        && !explicit_v3_authority_pending
     {
         return Err(RuntimeLifecycleError::forbidden(
             "runtime.start_refused.strategy_bootstrap_dormant",
@@ -136,7 +165,8 @@ pub async fn resolve_autonomous_runtime_context_from_fleet(
              decisions; set MQK_STRATEGY_IDS to a registered strategy name \
              (e.g. 'swing_momentum') and ensure it is enabled in \
              sys_strategy_registry before starting the autonomous paper path \
-             (STRATEGY-DORMANCY-01)",
+             (STRATEGY-DORMANCY-01), or configure an approved watchlist-v3 \
+             artifact (MULTI-STRATEGY-RUNTIME-DISPATCH-01)",
         ));
     }
 

@@ -74,7 +74,41 @@ fn clear_env() {
     unsafe {
         std::env::remove_var("MQK_STRATEGY_SYMBOL");
         std::env::remove_var("MQK_STRATEGY_IDS");
+        std::env::remove_var(mqk_daemon::watchlist_intake::ENV_PAPER_WATCHLIST_PATH);
+        std::env::remove_var(
+            mqk_daemon::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+        );
     }
+}
+
+/// Writes a minimal approved (or not-approved) `watchlist-v3` fixture file
+/// and returns its path. Mirrors `lifecycle.rs`'s own
+/// `explicit_multi_strategy_start_snapshot_tests::write_watchlist_v3` helper
+/// so both proof sites build the identical artifact shape.
+fn write_watchlist_v3(tag: &str, symbol: &str, strategy_ids: &[&str], approved: bool) -> std::path::PathBuf {
+    let assignments_list = strategy_ids
+        .iter()
+        .map(|s| format!("{s:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let json = format!(
+        r#"{{
+  "schema_version": "watchlist-v3",
+  "mode": "paper",
+  "approved_for_autonomous_paper": {approved},
+  "approved_for_live": false,
+  "symbols": ["{symbol}"],
+  "strategy_assignments": {{"{symbol}": [{assignments_list}]}},
+  "max_symbols_to_trade": 1,
+  "max_concurrent_positions": 1
+}}"#
+    );
+    let path = std::env::temp_dir().join(format!(
+        "mqk_coordinator_policy_v3_{tag}_{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, json).expect("write watchlist v3 fixture");
+    path
 }
 
 // ===========================================================================
@@ -323,6 +357,113 @@ async fn a10_repeated_identical_resolution_produces_identical_binding_identity()
         second.effective_runtime_binding
     );
     clear_env();
+}
+
+/// V4-STAGE-B-M2-C1-C3-FINAL-01 (C1): this resolver is the daily
+/// coordinator / completed-bar-task / operator-retry callers' only
+/// dormancy gate, and unlike `lifecycle.rs`'s own `start_execution_runtime`
+/// it previously carried a second, unrepaired STRATEGY-DORMANCY-01
+/// interpretation that ignored an approved `watchlist-v3` fleet entirely.
+/// Paper+Alpaca, no fleet, no `MQK_STRATEGY_IDS`, but an approved v3
+/// artifact configured under `paper_enforced` must now resolve `Ok` (the
+/// bootstrap remains genuinely `Dormant` -- only the refusal is bypassed).
+#[tokio::test]
+async fn a11_approved_v3_fleet_bypasses_dormancy_gate_without_mqk_strategy_ids() {
+    let _g = env_lock().lock().await;
+    clear_env();
+    let watchlist_path = write_watchlist_v3("a11", "ZZA11", &["intraday_scalper"], true);
+    unsafe {
+        std::env::set_var(
+            mqk_daemon::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
+            &watchlist_path,
+        );
+        std::env::set_var(
+            mqk_daemon::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+    }
+    let state =
+        AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca);
+    state.set_strategy_fleet_for_test(None).await;
+
+    let resolved = resolve_autonomous_runtime_context(&state).await;
+    let _ = std::fs::remove_file(&watchlist_path);
+    clear_env();
+
+    let resolved =
+        resolved.expect("an approved watchlist-v3 fleet must bypass the dormancy refusal");
+    assert!(
+        resolved.native_strategy_bootstrap.is_dormant(),
+        "the native bootstrap itself is still genuinely dormant -- only the refusal is bypassed"
+    );
+}
+
+/// A `LoadedNotApprovedV3` artifact must not bypass dormancy -- only a
+/// genuinely approved v3 artifact qualifies (frozen contract §9; C1 must
+/// never let an unapproved artifact grant authority).
+#[tokio::test]
+async fn a12_not_approved_v3_fleet_does_not_bypass_dormancy_gate() {
+    let _g = env_lock().lock().await;
+    clear_env();
+    let watchlist_path = write_watchlist_v3("a12", "ZZA12", &["intraday_scalper"], false);
+    unsafe {
+        std::env::set_var(
+            mqk_daemon::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
+            &watchlist_path,
+        );
+        std::env::set_var(
+            mqk_daemon::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+    }
+    let state =
+        AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca);
+    state.set_strategy_fleet_for_test(None).await;
+
+    let err = resolve_autonomous_runtime_context(&state).await;
+    let _ = std::fs::remove_file(&watchlist_path);
+    clear_env();
+
+    let err = err.expect_err("an unapproved v3 artifact must not bypass the dormancy refusal");
+    assert_eq!(
+        err.fault_class(),
+        "runtime.start_refused.strategy_bootstrap_dormant"
+    );
+}
+
+/// An approved v3 artifact configured while the dynamic-selection mode is
+/// NOT `paper_enforced` (absent/`off`) must not bypass dormancy -- the
+/// bypass is scoped exactly to the one mode
+/// `build_explicit_multi_strategy_start_snapshot` actually consumes the
+/// artifact in, never a blanket "a v3 file exists somewhere" check.
+#[tokio::test]
+async fn a13_approved_v3_fleet_without_paper_enforced_mode_does_not_bypass_dormancy_gate() {
+    let _g = env_lock().lock().await;
+    clear_env();
+    let watchlist_path = write_watchlist_v3("a13", "ZZA13", &["intraday_scalper"], true);
+    unsafe {
+        std::env::set_var(
+            mqk_daemon::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
+            &watchlist_path,
+        );
+        // Deliberately no DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV set --
+        // effective_mode resolves to Off.
+    }
+    let state =
+        AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca);
+    state.set_strategy_fleet_for_test(None).await;
+
+    let err = resolve_autonomous_runtime_context(&state).await;
+    let _ = std::fs::remove_file(&watchlist_path);
+    clear_env();
+
+    let err = err.expect_err(
+        "an approved v3 artifact must not bypass dormancy outside paper_enforced mode",
+    );
+    assert_eq!(
+        err.fault_class(),
+        "runtime.start_refused.strategy_bootstrap_dormant"
+    );
 }
 
 // ===========================================================================
