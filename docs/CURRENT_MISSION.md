@@ -6,34 +6,99 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
-## -1. M1.9 Deployed-State Verification Result (2026-09-19, READ-ONLY)
+## -1. M1.9 Deployed-State Verification Result (2026-09-19, READ-ONLY; CORRECTED 2026-09-19)
 
 A bounded, read-only M1.9 verification was performed against the actual
 deployed Paper system (daemon PID 16680, `mqk-paper-postgres` /
 `miniquantdesk_paper` on port 5440, live status API on 127.0.0.1:8899).
 Full evidence: `C:\Users\Zacha\Downloads\MQD_M1_9_DEPLOYED_STATE_REVIEW\`.
 
-**Result: M1.9 PARTIAL.** Seven of eight sub-items are truthfully verified
-and internally consistent: correct Paper DB, correct deployment
-mode/adapter (`paper`/`alpaca`), `live_routing_enabled=false`, provider
-data freshness (AAPL 5m latest completed bar `2026-09-17T16:20:00Z`,
-stale only because the runtime has been disarmed/halted since then —
-not a separate provider defect), scheduler registration (task `Ready`,
-correct action/arguments), and risk/arm/reconcile truth
+Seven of eight sub-items are truthfully verified and internally
+consistent: correct Paper DB, correct deployment mode/adapter
+(`paper`/`alpaca`), `live_routing_enabled=false`, provider data freshness
+(AAPL 5m latest completed bar `2026-09-17T16:20:00Z`, stale only because
+the runtime has been disarmed/halted since then — not a separate
+provider defect), scheduler registration (task `Ready`, correct
+action/arguments), and risk/arm/reconcile truth
 (`sys_arm_state.state=DISARMED` reason `DeadmanSupervisorFailure` since
 `2026-09-17T16:33:50Z`, `reconcile_status=ok`, 0 mismatches, no active
 risk block). A halted/disarmed state is treated as truthful, not as an
 M1.9 failure, per the mission's own acceptance rule.
 
-The **deployed-universe/promotion-authorization** sub-item is
-**UNKNOWN_NEEDS_PROOF**: `sys_strategy_registry` has 41 rows, 40 of
-which read as leftover test fixtures, and exactly one
-(`intraday_scalper`, kind=`native`, enabled=true) reads as the genuine
-production strategy — but `sys_strategy_promotion_transitions` has zero
-rows for it, so no promotion-transition record could be found to
-confirm its authorization through the table this verification checked.
-This may mean native/built-in strategies are authorized through a
-different path, but that was not confirmed this turn.
+### CORRECTION (M1-DEPLOYED-PROMOTION-AUTHORITY-01, 2026-09-19)
+
+The **deployed-universe/promotion-authorization** sub-item was
+previously recorded as `UNKNOWN_NEEDS_PROOF` on the theory that
+native/built-in strategies might be authorized through a path other
+than `sys_strategy_promotion_transitions`. An independent review found
+this classification error: current production code makes the outcome
+deterministic, and that theory is contradicted by the code itself.
+
+Full evidence: `C:\Users\Zacha\Downloads\MQD_M1_9_PROMOTION_AUTHORITY_REVIEW\`.
+
+Five invariants were inspected and cited against current HEAD (`05_code_authority.txt`), all CONFIRMED:
+1. `submit_internal_strategy_decision` Gate 3b unconditionally invokes
+   `evaluate_paper_promotion_gate` for every strategy_id
+   (`mqk-daemon/src/decision.rs:801-828`).
+2. `registered + enabled` in `sys_strategy_registry` is explicitly
+   documented and enforced as insufficient
+   (`mqk-daemon/src/promotion_gate.rs:11-16`; Gate 3 and Gate 3b are
+   separate, sequential gates).
+3. Only an exact `(strategy_id, symbol, timeframe_secs)` match with
+   current state `active_paper` (not expired, already effective)
+   authorizes trading (`mqk-db/src/strategy_promotion.rs:989-1019`).
+4. Absence of a promotion record returns `paper_tradable=false`,
+   `reason_code=promotion_missing`
+   (`mqk-db/src/strategy_promotion.rs:993-995`) — confirmed live.
+5. There is **no** special native/built-in bypass for `intraday_scalper`
+   or any `kind=native` strategy; the registry's `kind` field is never
+   read by the promotion gate.
+
+The exact deployed identity was resolved read-only:
+`strategy_id=intraday_scalper`, `symbol=AAPL`, `timeframe_secs=300`
+(`01_runtime_identity.txt`; `configured_fleet_size=1`,
+`runtime_execution_mode=single_strategy` — this is the ONLY runtime
+fleet member).
+
+The read-only truth surface `GET /api/v1/strategy/promotions/check` was
+queried for that exact identity (no POST transition route called):
+`tradable_paper=false`, `reason_code=promotion_missing`,
+`current_state=null` (`02_promotion_check.txt`). `GET
+/api/v1/strategy/promotions` additionally confirms **zero** promotion
+rows exist for any identity system-wide.
+
+Promotion-evidence availability was checked against the configured
+review-artifact root (`exports/strategy_reviews/`, default path): the
+only artifact present is for a different strategy (`swing_momentum`),
+scored 0 `paper_candidate` results out of 88, and has no entry for
+`intraday_scalper`/`AAPL` at all (`03_existing_promotion_evidence.txt`).
+Classification: **NO_VALID_PROMOTION_EVIDENCE**.
+
+The 40 non-`intraday_scalper` `sys_strategy_registry` rows were
+bounded-classified: all 40 trace to exact test-fixture call sites
+(`unique_id(...)` in `scenario_internal_strategy_decision.rs`,
+`scenario_suppress_strategy.rs`, and
+`scenario_sector_risk_gate_etf_risk_closure_01.rs`), carry zero
+promotion/signal-eval references, and are not runtime fleet members.
+Classification: **CONFIRMED_TEST_RESIDUE** for all 40
+(`04_registry_residue_classification.txt`).
+
+**Corrected result:**
+- **CODE DEFECT:** none established by this finding — the promotion
+  gate enforces its documented invariant correctly and identically on
+  both the write path (Gate 3b) and the read-only observability path.
+- **DEPLOYMENT AUTHORITY GAP:** **CONFIRMED**. The deployed
+  `intraday_scalper`/`AAPL`/300 identity cannot create a new Paper
+  outbox order through the canonical internal decision path without an
+  `active_paper` promotion, no such promotion exists, and no valid
+  promotion evidence exists to create one through the normal transition
+  path. `intraday_scalper` was seeded directly into the enabled runtime
+  fleet ("Seeded for autonomous paper trading startup") without ever
+  being run through the promotion pipeline the code requires before it
+  may actually trade.
+- **M1.9:** corrected from `UNKNOWN_NEEDS_PROOF` to verified-sufficient
+  to establish the deployed mismatch — not a residual unknown, a
+  confirmed gap.
 
 Also observed (informational, not diagnosed further — out of read-only
 scope): today's (`2026-09-18`) autonomous daily operation
@@ -42,22 +107,24 @@ closed to `evidence_degraded` at end-of-day rollover, consistent with
 the runtime remaining disarmed for the entire session window rather
 than a separate scheduling defect.
 
-**M1.9 does not close on this evidence.** It remains
-**OPERATIONAL_ONLY / PARTIAL** pending either a promotion-record source
-outside `sys_strategy_promotion_transitions` for `intraday_scalper`, or
-an explicit operator decision on how that strategy's authorization is
-tracked.
+**Formal M1 closure status: BLOCKED.** Independent of the Stage A
+code-completion acceptance recorded in §0 below, formal M1 is blocked
+until the deployed Paper strategy has truthful promotion authority (an
+`active_paper` promotion for `intraday_scalper`/`AAPL`/300, created
+through a validated evidence bundle via
+`POST /api/v1/strategy/promotions/transition`) or is removed from the
+deployed trading universe by an explicit, valid operator decision. M2
+remains **NOT AUTHORIZED** by this document.
 
-**Formal M1 closure status: still OPEN.** M1.9 is not fully verified,
-so — independent of the Stage A code-completion acceptance recorded in
-§0 below — the canonical M1→M2 sequencing gate
-(`MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §H item 8) is
-**not yet satisfied**. M2 remains not authorized by this document.
+M1.10 remains `OPERATOR-WAIVED`. WAIVED != PASSED. WAIVED != OPEN
+BLOCKER. This is unrelated to and unaffected by the M1.9 correction
+above.
 
-No Paper/Live/runtime state was modified during this verification: no
-re-arm, no halt clear, no daemon restart, no scheduled-task mutation, no
-Discord test, no order submission, no `.env.local` edit, no
-`smoke_logs/` access.
+No Paper/Live/runtime state was modified during this verification or
+this correction: no re-arm, no halt clear, no daemon restart, no
+scheduled-task mutation, no Discord test, no order submission, no
+`.env.local` edit, no `smoke_logs/` access, no promotion-transition
+endpoint call.
 
 ---
 
