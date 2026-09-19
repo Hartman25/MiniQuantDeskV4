@@ -26,13 +26,29 @@ f0e16651da74cc4a26726ae02321315618855a22
 CODE_MISSING:      0
 WIRING_MISSING:    0
 TEST_MISSING:      0
-OPERATIONAL_ONLY:  3
-  - Genuine Paper trade lifecycle observed end to end
-  - Genuine no-trade lifecycle observed end to end
+OPERATIONAL_ONLY:  1
   - Actual deployed Paper DB/config/provider/universe/scheduler/risk-state verified
 ```
 
-Full detail: `docs/V4_CODE_COMPLETION_MANIFEST.md`, including a bounded adversarial-verification addendum (V4-STAGE-A-M1-CLOSEOUT-02) that spot-checked the original census's citations. That pass found the underlying CODE_CLOSED capabilities real and Paper-wired in every case sampled, but found several of the original citations (table names, file names, line numbers) did not match the repo and have been corrected. No classification changed as a result.
+Genuine Paper trade lifecycle and genuine no-trade lifecycle were both
+originally listed here as still-unproven OPERATIONAL_ONLY items. They are
+not: both have already been observed end to end against a real Alpaca
+Paper broker during live market hours and are recorded as CLOSED_LOCAL in
+committed closure decisions (`docs/specs/paper_trade_lifecycle_proof_02_fast_market_hours_retry.md`,
+`docs/specs/paper_daily_pnl_capture_01e_closure_decision.md`,
+`docs/specs/paper_order_lifecycle_visibility_01e_closure_decision.md`,
+`docs/specs/auton_no_trade_02c_market_hours_closure_decision.md`,
+`docs/specs/market_hours_proof_sweep_01e_closure_decision.md`). See
+`docs/V4_CODE_COMPLETION_MANIFEST.md` M1.7/M1.8 for the full evidence
+chain. They are not re-demanded here absent a new deterministic
+contradiction.
+
+Full detail: `docs/V4_CODE_COMPLETION_MANIFEST.md`. Its citations were
+independently spot-checked (`V4-STAGE-A-M1-CLOSEOUT-02`) against several
+of the original census's table names, file names, and line numbers that
+did not match the repo; the manifest body has since been rewritten to
+cite the verified current locations directly (`V4-STAGE-A-M1-DOC-TRUTH-REPAIR-01`).
+No classification changed as a result of that citation repair.
 
 Formal M1 soak requirement:
 
@@ -40,9 +56,17 @@ Formal M1 soak requirement:
 OPERATOR-WAIVED
 ```
 
+WAIVED does not mean PASSED (no claim of 10/10 or 5/5 sessions is made),
+and it does not mean OPEN BLOCKER either (no further multi-day soak is
+required before advancing).
+
 **This status explicitly is NOT:**
 - independent acceptance of Stage A;
-- formal M1 closure (M1 is not formally closed merely because code-completion gaps are zero — the 3 OPERATIONAL_ONLY items and the waived soak remain open against full M1 closure);
+- formal M1 closure (M1 is not formally closed merely because
+  code-completion gaps are zero — the one remaining OPERATIONAL_ONLY item,
+  actual deployed Paper state verification, is open against full M1
+  closure; the operator-waived soak is neither passed nor an open
+  blocker);
 - authorization to push to origin (push requires independent review);
 - authorization to begin M2 (M2 is not authorized by this controller).
 
@@ -94,47 +118,86 @@ INDEPENDENT ACCEPTANCE: PENDING
 
 ## 2. Current Machine / Runtime State
 
-The operator intentionally shut MiniQuantDeskV4 down after Claude usage was exhausted.
+**HISTORICAL (superseded) — shutdown snapshot as previously recorded, no longer current:**
 
-Confirmed shutdown:
+```text
+MiniQuantDesk-Paper-Preopen-Startup:  STOPPED + DISABLED
+mqk-daemon:                           STOPPED
+mqk-cli/cargo/rustc:                  NONE RUNNING
+MQD GUI/node helpers:                 STOPPED
+MQD Docker containers:                mqk-test-postgres / mqk-live-postgres / mqk-paper-postgres STOPPED
+HEAD (at time of that snapshot):      f0e16651 (main)
+```
+
+**Fresh read-only capture, 2026-09-19T00:36:35Z** (this repair turn;
+read-only inspection only — no daemon start/stop/restart, no re-arm, no
+halt clear, no scheduled-task modification, no Discord test, no
+Paper/Live state mutation):
 
 ```text
 MiniQuantDesk-Paper-Preopen-Startup:
-STOPPED + DISABLED
+  PRESENT, State=Ready (Get-ScheduledTask) — this is the enabled/idle
+  state, not Disabled. This contradicts the historical snapshot above.
+  Get-ScheduledTaskInfo (last-run/next-run detail) errored on this box
+  and could not be read this turn — treat last/next run time as
+  UNAVAILABLE, not absent.
 
 mqk-daemon:
-STOPPED
+  PRESENT / RUNNING — PID 16680, image
+  C:\Users\Zacha\Desktop\MiniQuantDeskV4\core-rs\target\release\mqk-daemon.exe,
+  StartTime 2026-09-15T11:42:29 (local), listening on 127.0.0.1:8899
+  (TCP connect succeeds). This contradicts the historical "STOPPED" entry
+  above.
+
+mqk-daemon read-only API (GET /api/v1/system/status on :8899):
+  UNAVAILABLE — TCP connects but the HTTP request did not return within
+  15s (timed out). Runtime/halt/kill-switch/reconcile/session-window
+  truth could not be read this turn; do not assume any value for it.
 
 mqk-cli/cargo/rustc:
-NONE RUNNING
+  NONE RUNNING (checked by name; consistent with historical snapshot).
 
 MQD GUI/node helpers:
-STOPPED
+  PRESENT — 14 `node` processes running (oldest since 2026-09-15, newest
+  since 2026-09-18T14:30). This contradicts the historical "STOPPED"
+  entry above. Not identified further this turn (which dev server/task
+  owns each PID is UNAVAILABLE without additional read-only inspection).
 
 MQD Docker containers:
-mqk-test-postgres STOPPED
-mqk-live-postgres STOPPED
-mqk-paper-postgres STOPPED
+  UNAVAILABLE — Docker Desktop application processes are present
+  (`Docker Desktop`, `com.docker.backend`) but `docker ps` itself fails
+  ("Docker Desktop is unable to start"). Container status for
+  mqk-test-postgres / mqk-live-postgres / mqk-paper-postgres could not be
+  read this turn; do not assume STOPPED or RUNNING for any of them.
 
 Git index lock:
-NONE
+  NONE (Test-Path on .git/index.lock = False).
 
-Git worktree:
-CLEAN
+Git worktree (this branch, this turn):
+  Two intentional modifications from this doc-repair patch
+  (docs/CURRENT_MISSION.md, docs/V4_CODE_COMPLETION_MANIFEST.md); no
+  other changes.
 
 HEAD:
-f0e16651 (main)
+  c2ed45cb (v4-bulk-code-completion-stage-a-m1-01) — unchanged by this
+  read-only capture.
 ```
 
-The shutdown did **not**:
+This turn's inspection did **not**:
 - touch `smoke_logs/`;
-- run `git clean`;
-- run `git reset`;
-- run `git stash`;
-- delete evidence/artifacts;
-- delete Docker containers.
+- run `git clean`, `git reset`, or `git stash`;
+- delete evidence/artifacts or Docker containers;
+- start, stop, or restart the daemon;
+- re-arm, clear a halt, or modify any scheduled task;
+- send a Discord test;
+- mutate any Paper/Live state.
 
-Paper automatic startup remains disabled until explicitly re-enabled.
+Operator: the daemon-process and scheduled-task findings above
+contradict the previously recorded shutdown state. Do not assume Paper
+auto-start is currently disabled based on the historical block — verify
+directly (e.g. via a working `docker ps` and a responsive daemon status
+route) before relying on either the historical or this turn's partial
+capture for an operational decision.
 
 ---
 
