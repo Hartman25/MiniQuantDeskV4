@@ -6,6 +6,149 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -8. V4 Bulk Code Completion Wave B — M5-M8 Multi-Asset: Frozen Matrix + Bounded Census + First Code (2026-09-19, `V4-BULK-CODE-COMPLETION-STAGE-B-M2-01`)
+
+### Frozen V4 asset matrix (operator-approved, recorded here as durable truth)
+
+CRYPTO: canonical integration market BTC/USD; market data Kraken; execution
+broker Alpaca; 24/7 spot semantics; fractional quantity required.
+FUTURES: canonical integration contract MES; execution broker IBKR;
+executable-contract identity must stay distinct from research continuous-
+series identity. FX: canonical integration pair EUR/USD; execution broker
+IBKR; base/quote, pip/tick, leverage/margin, financing/rollover semantics
+required. OPTIONS: canonical underlying SPY; execution broker Alpaca.
+
+Frozen options permission set — ALLOWED: long call, long put, covered call,
+cash-secured put, defined-risk call vertical spread, defined-risk put
+vertical spread. NOT ALLOWED: naked short calls, naked short puts,
+unlimited-risk structures, arbitrary complex/multi-leg strategies outside
+defined-risk verticals.
+
+### Bounded M5-M8 census (evidence-grounded, not exhaustive)
+
+This repository already has a deliberate, multi-month-old architectural
+pattern for exactly this problem: build asset-neutral **model-only, zero-
+production-caller** contracts first (`ASSET-CORE-01` through `04`), prove
+them with focused tests, and defer the live production cutover until a
+concrete consumer requires it (`instrument_registry_v2.rs` module docs:
+"a model + loader seam, not a production cutover... nothing in this module
+is wired into any consumer"). This census inventories that existing layer
+against the frozen M6-M8 assets rather than assuming it doesn't exist.
+
+**Already real (model layer, zero production callers unless noted):**
+- `mqk_schemas::{AssetClass, ContractSpec, Instrument, QtyMicros, OrderSpec}`
+  (`core-rs/crates/mqk-schemas/src/lib.rs:119-230`) — `QtyMicros` is an
+  explicit fixed-point fractional-quantity type ("future assets (crypto...)
+  require fractional quantities"); `ContractSpec` already models
+  `Option`/`Future`/`Crypto`. `AssetClass` here is canonical: it is the type
+  actually checked by the live broker-submit gate.
+- `mqk_md::instrument_registry_v2` (2,661 lines) — additive instrument
+  schema modeling equity/option/future/crypto/forex/rate identity,
+  contract shape, and (`InstrumentEconomicsMetadataV2`) multiplier/margin
+  metadata. No production JSON file exists for this schema yet; nothing
+  reads it in any daemon/CLI/ingest/backtest/GUI path.
+- `mqk_execution::types::{OrderIntentV2, IntentV2Contract, BracketLegs}` —
+  asset-neutral order intent with fractional `QtyMicros` qty, per-asset
+  contract validation (currency pair, future multiplier/tick, option
+  strike/multiplier), and a TP/SL bracket model. Explicitly documented as
+  not wired into `BrokerGateway`/OMS/broker adapters (`lib.rs`: "RESEARCH-
+  NON-EQ-01... NOT wired into canonical MAIN execution path").
+- `mqk_execution::asset_risk_policy` (ASSET-CORE-03) — static per-asset
+  policy table with two hard global kill switches,
+  `ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED = false` and
+  `ASSET_RISK_NON_EQUITY_ROUTING_ENABLED = false`. Its own `crypto_policy`/
+  `future_policy`/`option_policy`/`forex_policy` functions self-document
+  the exact remaining gap per asset class (quoted verbatim below).
+- `mqk_portfolio::{instrument_economics, portfolio_economics}`
+  (ASSET-CORE-04A-F) — multiplier/currency-aware single-position valuation,
+  integer-checked (`i128`), zero production callers; explicitly notes the
+  still-missing bridge from `instrument_registry_v2`'s raw `multiplier: i64`
+  to this crate's micros-scaled `contract_multiplier_micros` (`ASSET-CORE-
+  04B... deferred`).
+- `mqk_md::providers::kraken` (1,708 lines) + its `provider_registry`
+  factory entry — a real, non-stub Kraken market-data provider.
+- **New this session** (commit `2b9387e4`):
+  `mqk_execution::option_strategy_permission` — the M8 frozen options-
+  permission-set structural classifier (long call/put, covered call,
+  cash-secured put, defined-risk call/put vertical spread; every other
+  shape, especially a naked short, refused by name). 17 focused tests.
+  Same model-only precedent as the rest of this layer.
+
+**Confirmed CODE_MISSING / WIRING_MISSING (concrete, cited):**
+
+- **M5 — fractional quantity does not reach the live execution boundary.**
+  `mqk_execution::order_router::BrokerSubmitRequest.quantity: i64` and
+  `mqk_execution::types::{TargetPosition,OrderIntent,ExecutionIntent}.qty:
+  i64` are the types the real orchestrator/OMS/broker-adapter path actually
+  uses; none of them is `QtyMicros`. `QtyMicros` exists only in the V2
+  model scaffold. Threading fractional quantity through the live execution
+  boundary is real, deterministically scoped work, but touches an already-
+  audited, safety-critical path (OMS state machine, outbox/inbox,
+  portfolio accounting, every existing equity call site) with no dedicated
+  verification budget available this session — not attempted here; recorded
+  as the single largest concrete M5/M6 blocker.
+- **M5 — `MULTI-ASSET-ROUTING-GUARD-01` remains a hard equity-only gate.**
+  `mqk_execution::gateway::BrokerGateway::submit_with_context`
+  (`gateway.rs:388`) refuses every `AssetClass != Equity` before any broker
+  adapter is invoked. Correct and intentional today; loosening it to a
+  real per-`(asset_class, broker)` capability check is required before any
+  of M6-M8 can submit a live/paper order, and was deliberately not
+  attempted this session for the same reason as above (safety-critical,
+  no dedicated verification budget).
+- **M6 — crypto cannot flow through the production data-freshness
+  controller.** `mqk-daemon/src/state/required_market_data_autofresh.rs`
+  (the daemon's real, scheduled required-universe controller) fail-closed
+  rejects any `instrument.asset_class != "equity"` (line 316) and any
+  provider not declaring `supports_asset_class("equity")` (line 364); its
+  top-level trading-day gate (`schedule.is_trading_day`, line ~1075) is a
+  single NYSE-calendar check with no per-asset 24/7 override. Kraken's own
+  scheduler has a read-only status route (`CRYPTO-DATA-03C`, per repo
+  memory) but no task registration — Kraken ingestion is CLI-invoked only,
+  never automatic. This exactly matches the mission's own description of
+  the M6 data gap.
+- **M7 — no IBKR integration exists at any level.** Verified directly:
+  `grep -i ibkr` across the repo's non-test source returns zero real
+  references; the only "interactive-brokers" string anywhere is a
+  deliberate negative-control test fixture
+  (`mqk-daemon/src/state.rs::unknown_broker_adapter_string_is_fail_closed`)
+  proving an *unrecognized* adapter string fails closed — there is no
+  `BrokerKind::InteractiveBrokers` variant, no adapter crate, no account/
+  order/position/fill interface. `asset_risk_policy::future_policy()`/
+  `forex_policy()` already name the remaining gap precisely: futures need
+  "margin model, contract multiplier, expiry handling, and futures session
+  calendar"; FX needs "pair registry, pip/lot sizing, leverage, currency
+  conversion, and 24x5 session model." No roll/expiry logic exists.
+- **M8 — no options chain/lifecycle/Alpaca-options capability.**
+  `option_policy()` already self-documents: "options require chain
+  metadata, contract multiplier, Greeks, assignment, and margin risk model
+  before routing." `mqk-broker-alpaca` has no options-specific code path
+  (grep for `option` in that crate returns only unrelated `Option<T>`
+  Rust-syntax matches and one pricing-tick-size doc comment). Contract
+  discovery, liquidity/spread data, expiry/exercise/assignment lifecycle,
+  and Alpaca options order/position/fill handling are all absent.
+
+**Why a full live production cutover was not attempted this session:**
+every one of the four gaps above requires modifying either (a) the exact
+safety-critical, already-audited execution/OMS/risk choke point this
+repository's own `CLAUDE.md` and `execution_rules.md` single out for
+extreme care (`BrokerGateway`, `OMS` state machine, outbox/inbox, the
+`i64` quantity type threaded through dozens of already-tested call sites),
+or (b) a brand-new broker wire-protocol integration (IBKR) with zero
+existing scaffolding, real account/session/order lifecycle semantics, and
+no committed design doc. Rushing either without a dedicated verification
+budget is exactly the failure mode this repository's own prior sessions
+have repeatedly identified and declined to rush (see the R2B/R2C
+completed-bar-driver deferral and the M5 registry v1->v2 cutover
+deferral, both above in this file). This session instead: (1) froze the
+asset matrix as durable repo truth, (2) performed this grounded citation-
+backed census, and (3) implemented the one concrete, safely-scoped,
+zero-blast-radius M8 gap the census identified (the options-permission
+classifier). **M5-M8 CODE_MISSING/WIRING_MISSING are NOT zero** — the wave
+exit gate is not met. No Paper/Live/runtime state modified; no broker
+network call made; no push.
+
+---
+
 ## -7. V4 Bulk Code Completion Wave A — M2 C4/C5/C6 Closure + M3 Bounded Census (2026-09-19, `V4-BULK-CODE-COMPLETION-STAGE-B-M2-01`)
 
 Continuation of §-6a's C1-C3 baseline. Scope: close the remaining M2 gap
