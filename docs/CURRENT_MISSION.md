@@ -15,27 +15,52 @@ under an explicit CODE-COMPLETION-FIRST mandate (exhaustive
 regression/acceptance/operational proof deferred to a later verification
 wave). Commit `f93b3660`.
 
-**IR-3 status check (mission's own stated first task):** re-verified against
-repo truth before touching anything — already `CODE_CLOSED` per §-6a
-(disposition: ALREADY SAFE + PROVEN, test already committed at
-`7e06b03b`). No action needed; the mission's premise here was stale relative
-to this branch's own HEAD.
+**IR-3 — CORRECTED (2026-09-19, same-day follow-up).** The disposition
+recorded immediately below ("ALREADY SAFE + PROVEN") and §-6a's original
+record of it were both **incomplete, not merely stale**: they relied solely
+on the read-side validator rejecting an already-wrapped negative
+`scanner_rank` — real, but not a substitute for refusing the write itself.
+The write path (`build_new_explicit_multi_strategy_authority`) still
+performed an unchecked `r as i32` and would deliberately persist a
+bit-reinterpreted value for any `scanner_rank` above `i32::MAX`. Fixed
+(commit `9515b6f5`): the builder now returns
+`Result<_, ScannerRankOverflow>` via `i32::try_from`; the one production
+caller (`state/lifecycle.rs`'s explicit-v3 start path) propagates the
+refusal through its existing `RuntimeLifecycleError::forbidden(...)`
+fail-closed construction path — the durable authority is never built, and
+the DB insert is never reached, for an overflowing value. Read-side
+rejection is unchanged and still applies as a second, independent backstop.
+Four focused tests (normal value, `i32::MAX`, `i32::MAX+1`, `u32::MAX`).
+**IR-3 is CODE_CLOSED with a checked write, not merely a read-side catch.**
 
-**C4 (multi-binding resolution).** `resolve_effective_bindings`
-(`autonomous_completed_bar_driver.rs`) generalizes
-`resolve_single_effective_binding` to every configured assignment
-independently, instead of requiring exactly one. Scope decision, recorded
-honestly rather than silently narrowed: this process has exactly one active
-native-strategy engine (Tier A single-strategy policy —
-`mqk_runtime::native_strategy` module docs: "Multi-strategy fleet execution
-is deferred to a later patch," a frozen boundary this patch does not touch).
-An assignment whose `strategy_id` does not match that one engine resolves as
-a per-binding rejection (`StrategyEngineMismatch`), never a whole-config
-rejection — genuine multi-*symbol*, single-shared-strategy autonomous
-progression is now real; genuine multi-*strategy* concurrent dispatch
-through this specific autonomous path is not, and remains achievable only
+**C4 (multi-binding resolution) — CORRECTED (2026-09-19, same-day
+follow-up).** The claim below that "genuine multi-*strategy* concurrent
+dispatch through this specific autonomous path... remains achievable only
 through the separate `DynamicSelectionHostPool` the interactive execution
-loop already uses.
+loop already uses" was wrong against the authoritative M2 contract, which
+requires same-symbol competing strategies (e.g. `AAPL/strategy_A` +
+`AAPL/strategy_B`) to progress independently through production code, not
+merely through one specific runtime path. Fixed (commit `e37d10c6`):
+`resolve_effective_bindings` now checks a configured assignment against
+both the legacy engine *and* the current run's real host-pool selection
+(`AppState::dynamic_selection_runtime_snapshot`) before ever rejecting it.
+A binding matching the host pool's own selected pairs resolves
+`BindingDispatchRoute::HostPool` and dispatches through the existing
+`pending_strategy_bar_input` mailbox hand-off (never reaching into the
+execution loop's exclusively-owned host-pool object), confirmed via the
+durable `strategy_signal_evaluations` row the loop's own dispatch writes.
+Migration 0075 adds a strategy_id-scoped claim table
+(`sys_autonomous_daily_binding_bar_dispatches`) since two strategies can
+share one `(symbol, timeframe)` and migration 0050's identity cannot
+distinguish them. The Tier-A single-engine policy remains frozen and
+unchanged for the *legacy* bootstrap itself — it was never actually a
+ceiling on what this driver may resolve or dispatch, and is no longer
+treated as one. Proof:
+`same_symbol_multi_strategy_resolves_via_host_pool_never_narrowed_or_refused`
+resolves all three of AAPL/strategy_A, AAPL/strategy_B, MSFT/strategy_C via
+the host pool, none narrowed or refused. **C4 now supports genuine
+same-symbol multi-strategy production dispatch, not only multi-symbol
+single-shared-strategy.**
 
 **C5 (fault isolation).** `tick_autonomous_completed_bar_driver_multi`
 classifies every binding's tick outcome via the frozen hybrid isolation
@@ -51,17 +76,22 @@ resolving its own `provider_id` from the instrument registry); an
 exactly-one-symbol config keeps the original single-binding call
 byte-for-byte unchanged.
 
-**Proof:** full existing `scenario_autonomous_completed_bar_driver_01`
-(57/57, one new) and `scenario_autonomous_completed_bar_task_01` (47/47, 2
-DB-only ignored) suites pass unchanged; `cargo check -p mqk-db -p mqk-daemon
---lib --tests` clean; `check_migration_governance.sh` all 3 checks pass.
-DB-backed `sys_autonomous_daily_binding_state` scenario suite and full
-daemon/db regression deferred to the verification wave per this mission's
-explicit mandate.
+**Proof:** `scenario_autonomous_completed_bar_driver_01` (58/58, including
+the same-symbol multi-strategy proof) and `scenario_autonomous_completed_bar_task_01`
+(47/47, 2 DB-only ignored) pass; `cargo check -p mqk-db -p mqk-daemon --lib
+--tests` clean; `check_migration_governance.sh` all 3 checks pass. DB-backed
+`sys_autonomous_daily_binding_state`/`sys_autonomous_daily_binding_bar_dispatches`
+scenario suites, an end-to-end dispatch-through-a-real-host-pool integration
+test, and full daemon/db regression remain deferred to the verification wave
+per this mission's explicit mandate — this wave's proof is at the resolution
+layer (routing is correct, never narrowed/refused) plus reuse of
+already-tested claim/completion primitives, not a live host-pool dispatch
+run.
 
-**M2 status: CODE_MISSING = 0, WIRING_MISSING = 0** against the M2.1-M2.9
-requirement list (§-5/§-6a's census). M2 operational acceptance is still not
-claimed.
+**M2 status: CODE_MISSING = 0, WIRING_MISSING = 0**, against the M2.1-M2.9
+requirement list (§-5/§-6a's census) *and* including same-symbol
+multi-strategy production dispatch (commits `f93b3660`, `9515b6f5`,
+`e37d10c6`). M2 operational acceptance is still not claimed.
 
 **M3 bounded census (Concurrent Paper + Live Execution Domains) — audit
 before build, per this mission's own instruction.** Read
@@ -190,9 +220,16 @@ governance gap that would have failed CI, and adds proof for a risk finding.
   SQLx checksum identity) but omitted 0073. Guard 3 of the same script was
   failing (`eol: unspecified` for 0073, confirmed pre-fix). Added the missing
   `.gitattributes` line; guard now passes for all three checks.
-- **IR-3 (scanner_rank narrowing-cast risk).** The write path persists
+- **IR-3 (scanner_rank narrowing-cast risk).** **CORRECTED 2026-09-19, see
+  §-7 above — this disposition was incomplete: it never fixed the write
+  itself, only the read-side backstop. The write is now a checked
+  conversion (commit `9515b6f5`); the "ALREADY SAFE + PROVEN, not fixed"
+  text immediately below is superseded and kept only as the historical
+  record of what this session actually found and concluded at the time.**
+  The write path persists
   `SelectionCandidateEvidence.scanner_rank` (`Option<u32>`) as `Option<i32>`
-  via `.map(|r| r as i32)`. Disposition: **ALREADY SAFE + PROVEN**, not fixed.
+  via `.map(|r| r as i32)`. Disposition (superseded): **ALREADY SAFE +
+  PROVEN**, not fixed.
   `u32 as i32` is a same-width bit-reinterpreting cast: every value above
   `i32::MAX` has its top bit set and therefore always becomes negative — a
   two's-complement identity, not a coincidence of typical rank values — and
