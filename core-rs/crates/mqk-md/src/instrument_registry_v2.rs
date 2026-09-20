@@ -91,6 +91,17 @@ pub struct InstrumentDefinitionV2 {
     /// Provider name -> provider-specific symbol, e.g. `{"twelvedata": "AAPL"}`.
     #[serde(default)]
     pub provider_symbols: BTreeMap<String, String>,
+    /// M6-REGISTRY-V2-PRODUCTION-CONTRACT-01: broker name -> broker-specific
+    /// wire symbol, e.g. `{"alpaca": "BTC/USD"}`. Mirrors `provider_symbols`'
+    /// shape and defaulting exactly, but for the execution/broker identity
+    /// axis rather than the market-data-provider axis — the two can
+    /// legitimately differ (e.g. a market-data provider and an execution
+    /// broker for the same instrument may use different symbol formats).
+    /// Empty for an instrument with no broker mapping configured (not yet
+    /// tradeable through any broker) — this is never inferred from
+    /// `provider_symbols` or from `symbol` itself.
+    #[serde(default)]
+    pub broker_symbols: BTreeMap<String, String>,
     /// Whether this instrument is tracked at all (ingestion/backtest/GUI scope).
     pub enabled: bool,
     /// Whether this instrument may be paper-traded. Independent of `enabled`.
@@ -130,17 +141,29 @@ pub struct InstrumentDefinitionV2 {
     pub economics: Option<InstrumentEconomicsMetadataV2>,
 }
 
-/// Backtest-economics metadata for a registry-v2 instrument: contract
-/// multiplier + optional margin scaffold.
+/// Backtest-economics + order-validation metadata for a registry-v2
+/// instrument: contract multiplier, optional margin scaffold, and (M6-
+/// REGISTRY-V2-PRODUCTION-CONTRACT-01) the order-time economics a broker
+/// submission must be validated against — quantity increment, minimum trade
+/// quantity, price tick, and session profile.
 ///
-/// Mirrors `mqk_backtest::BacktestInstrumentEconomics`'s shape without
-/// introducing a dependency on `mqk-backtest` from `mqk-md` (consistent with
-/// this module's existing no-new-Cargo-dependency precedent). Metadata only:
-/// nothing in this module enforces margin or reads this to gate, block, or
-/// route any order. `contract_multiplier` is `Option` (rather than the
-/// always-positive `i64` on the backtest-side type) so an instrument can
-/// omit it entirely rather than a caller fabricating a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `contract_multiplier`/`initial_margin_micros`/`maintenance_margin_micros`
+/// remain descriptive-only exactly as before: nothing in this module enforces
+/// margin or reads them to gate, block, or route any order.
+/// `quantity_increment_micros`/`min_trade_qty_micros`/`price_tick_micros`/
+/// `session_profile` are different — they are the fields
+/// `mqk_portfolio::instrument_economics::validate_order_against_economics`
+/// checks before a fractional-capable (Crypto) order is allowed to reach a
+/// broker, once that asset class's own trading-enablement gates
+/// (`paper_trading_enabled`/`live_trading_enabled` here,
+/// `mqk_execution::asset_risk_policy`'s per-asset-class `Disabled`/`Enabled`
+/// state, and `BrokerAdapter::supports_asset_class`) are independently
+/// satisfied. This metadata never enables or implies enablement of any asset
+/// class by itself — [`validate_registry_v2`] requires it to be complete for
+/// any crypto instrument that IS paper- or live-trading-enabled (see that
+/// function), precisely so an operator cannot flip trading on for an
+/// instrument this schema cannot yet describe completely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstrumentEconomicsMetadataV2 {
     #[serde(default)]
     pub contract_multiplier: Option<i64>,
@@ -148,7 +171,34 @@ pub struct InstrumentEconomicsMetadataV2 {
     pub initial_margin_micros: Option<i64>,
     #[serde(default)]
     pub maintenance_margin_micros: Option<i64>,
+    /// Finest tradeable quantity increment, in raw `QtyMicros` units (1.0
+    /// unit = 1_000_000). E.g. Alpaca's BTC/USD `min_trade_increment`
+    /// `"0.0001"` is `100`.
+    #[serde(default)]
+    pub quantity_increment_micros: Option<i64>,
+    /// Minimum order quantity, in raw `QtyMicros` units. E.g. Alpaca's
+    /// BTC/USD `min_order_size` `"0.0001"` is `100`.
+    #[serde(default)]
+    pub min_trade_qty_micros: Option<i64>,
+    /// Finest tradeable price increment, in price-micros (1e-6 USD). E.g.
+    /// Alpaca's BTC/USD `price_increment` `"1"` (one whole dollar) is
+    /// `1_000_000`.
+    #[serde(default)]
+    pub price_tick_micros: Option<i64>,
+    /// Closed vocabulary: `"equity_nyse"` | `"crypto_24_7"`. See
+    /// [`SESSION_PROFILE_EQUITY_NYSE`] / [`SESSION_PROFILE_CRYPTO_24_7`].
+    /// [`validate_registry_v2`] rejects any other value.
+    #[serde(default)]
+    pub session_profile: Option<String>,
 }
+
+/// Closed-vocabulary `session_profile` value for the existing NYSE-calendar
+/// equity session.
+pub const SESSION_PROFILE_EQUITY_NYSE: &str = "equity_nyse";
+/// Closed-vocabulary `session_profile` value for the 24/7 crypto session —
+/// matches `mqk_daemon::state::market_calendar::Crypto24x7Provider`'s
+/// `"crypto_24_7"` source label.
+pub const SESSION_PROFILE_CRYPTO_24_7: &str = "crypto_24_7";
 
 /// Contract details for non-spot / derivative instruments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +374,7 @@ pub fn validate_registry_v2(registry: &InstrumentRegistryV2) -> Result<()> {
         )?;
 
         validate_economics_v2(&inst.economics, &inst.symbol)?;
+        validate_crypto_trading_economics_complete_v2(inst)?;
 
         if inst.enabled
             && inst.asset_class != "equity"
@@ -536,6 +587,88 @@ fn validate_economics_v2(
             );
         }
     }
+    if let Some(v) = econ.quantity_increment_micros {
+        if v <= 0 {
+            anyhow::bail!(
+                "instrument_registry_v2: economics.quantity_increment_micros must be positive for symbol={symbol}, got {v}"
+            );
+        }
+    }
+    if let Some(v) = econ.min_trade_qty_micros {
+        if v <= 0 {
+            anyhow::bail!(
+                "instrument_registry_v2: economics.min_trade_qty_micros must be positive for symbol={symbol}, got {v}"
+            );
+        }
+    }
+    if let Some(v) = econ.price_tick_micros {
+        if v <= 0 {
+            anyhow::bail!(
+                "instrument_registry_v2: economics.price_tick_micros must be positive for symbol={symbol}, got {v}"
+            );
+        }
+    }
+    if let Some(profile) = &econ.session_profile {
+        if profile != SESSION_PROFILE_EQUITY_NYSE && profile != SESSION_PROFILE_CRYPTO_24_7 {
+            anyhow::bail!(
+                "instrument_registry_v2: economics.session_profile={profile:?} for symbol={symbol} is not in the closed vocabulary [{SESSION_PROFILE_EQUITY_NYSE:?}, {SESSION_PROFILE_CRYPTO_24_7:?}]"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// M6-REGISTRY-V2-PRODUCTION-CONTRACT-01: a crypto instrument that is
+/// paper- or live-trading-enabled must carry COMPLETE order-validation
+/// economics — partial metadata (e.g. a multiplier but no quantity
+/// increment) would let `validate_order_against_economics` silently treat
+/// the missing fields as "no constraint" rather than "unknown," which is
+/// the exact optimistic-default failure mode CLAUDE.md's fail-closed
+/// invariant forbids. `enabled` (ingestion/backtest/GUI scope) is
+/// deliberately NOT checked here — an instrument can be tracked without
+/// being trading-enabled, and this rule is about trading readiness, not
+/// data-tracking readiness.
+fn validate_crypto_trading_economics_complete_v2(inst: &InstrumentDefinitionV2) -> Result<()> {
+    if inst.asset_class != "crypto" {
+        return Ok(());
+    }
+    if !inst.paper_trading_enabled && !inst.live_trading_enabled {
+        return Ok(());
+    }
+    let econ = inst.economics.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "instrument_registry_v2: crypto symbol={} is paper/live trading-enabled but carries \
+             no economics metadata at all — quantity_increment_micros, min_trade_qty_micros, \
+             price_tick_micros, and session_profile are all required",
+            inst.symbol
+        )
+    })?;
+    let mut missing = Vec::new();
+    if econ.quantity_increment_micros.is_none() {
+        missing.push("quantity_increment_micros");
+    }
+    if econ.min_trade_qty_micros.is_none() {
+        missing.push("min_trade_qty_micros");
+    }
+    if econ.price_tick_micros.is_none() {
+        missing.push("price_tick_micros");
+    }
+    match econ.session_profile.as_deref() {
+        Some(SESSION_PROFILE_CRYPTO_24_7) => {}
+        Some(other) => anyhow::bail!(
+            "instrument_registry_v2: crypto symbol={} is paper/live trading-enabled but \
+             economics.session_profile={other:?} must be {SESSION_PROFILE_CRYPTO_24_7:?}",
+            inst.symbol
+        ),
+        None => missing.push("session_profile"),
+    }
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "instrument_registry_v2: crypto symbol={} is paper/live trading-enabled but economics \
+             is missing required field(s): {missing:?}",
+            inst.symbol
+        );
+    }
     Ok(())
 }
 
@@ -729,6 +862,7 @@ pub fn convert_tracked_instrument_to_v2(input: &TrackedInstrument) -> Instrument
         currency: input.currency.clone(),
         quote_currency: None,
         provider_symbols,
+        broker_symbols: BTreeMap::new(),
         enabled: input.enabled,
         paper_trading_enabled: false,
         live_trading_enabled: false,
@@ -1106,6 +1240,7 @@ mod tests {
             currency: "USD".to_string(),
             quote_currency: None,
             provider_symbols: BTreeMap::from([("twelvedata".to_string(), symbol.to_string())]),
+            broker_symbols: BTreeMap::new(),
             enabled: true,
             paper_trading_enabled: false,
             live_trading_enabled: false,
@@ -1142,6 +1277,7 @@ mod tests {
             currency: "USD".to_string(),
             quote_currency: None,
             provider_symbols: BTreeMap::new(),
+            broker_symbols: BTreeMap::new(),
             enabled: false,
             paper_trading_enabled: false,
             live_trading_enabled: false,
@@ -1169,6 +1305,7 @@ mod tests {
             currency: "USD".to_string(),
             quote_currency: None,
             provider_symbols: BTreeMap::new(),
+            broker_symbols: BTreeMap::new(),
             enabled: false,
             paper_trading_enabled: false,
             live_trading_enabled: false,
@@ -1197,6 +1334,7 @@ mod tests {
             currency: "USD".to_string(),
             quote_currency: Some("USD".to_string()),
             provider_symbols: BTreeMap::new(),
+            broker_symbols: BTreeMap::new(),
             enabled: false,
             paper_trading_enabled: false,
             live_trading_enabled: false,
@@ -1222,6 +1360,7 @@ mod tests {
             currency: "USD".to_string(),
             quote_currency: Some("USD".to_string()),
             provider_symbols: BTreeMap::new(),
+            broker_symbols: BTreeMap::new(),
             enabled: false,
             paper_trading_enabled: false,
             live_trading_enabled: false,
@@ -1247,6 +1386,7 @@ mod tests {
             currency: "USD".to_string(),
             quote_currency: None,
             provider_symbols: BTreeMap::new(),
+            broker_symbols: BTreeMap::new(),
             enabled: false,
             paper_trading_enabled: false,
             live_trading_enabled: false,
@@ -1849,6 +1989,10 @@ mod tests {
                 contract_multiplier: Some(1),
                 initial_margin_micros: None,
                 maintenance_margin_micros: None,
+                quantity_increment_micros: None,
+                min_trade_qty_micros: None,
+                price_tick_micros: None,
+                session_profile: None,
             },
         );
         validate_registry_v2(&registry_of(vec![inst]))
@@ -1865,6 +2009,10 @@ mod tests {
                     contract_multiplier: Some(bad),
                     initial_margin_micros: None,
                     maintenance_margin_micros: None,
+                    quantity_increment_micros: None,
+                    min_trade_qty_micros: None,
+                    price_tick_micros: None,
+                    session_profile: None,
                 },
             );
             let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
@@ -1885,6 +2033,10 @@ mod tests {
                 contract_multiplier: Some(1),
                 initial_margin_micros: Some(-1),
                 maintenance_margin_micros: None,
+                quantity_increment_micros: None,
+                min_trade_qty_micros: None,
+                price_tick_micros: None,
+                session_profile: None,
             },
         );
         let err = validate_registry_v2(&registry_of(vec![with_initial])).unwrap_err();
@@ -1900,6 +2052,10 @@ mod tests {
                 contract_multiplier: Some(1),
                 initial_margin_micros: None,
                 maintenance_margin_micros: Some(-1),
+                quantity_increment_micros: None,
+                min_trade_qty_micros: None,
+                price_tick_micros: None,
+                session_profile: None,
             },
         );
         let err = validate_registry_v2(&registry_of(vec![with_maintenance])).unwrap_err();
@@ -1917,6 +2073,10 @@ mod tests {
                 contract_multiplier: Some(1),
                 initial_margin_micros: Some(0),
                 maintenance_margin_micros: Some(0),
+                quantity_increment_micros: None,
+                min_trade_qty_micros: None,
+                price_tick_micros: None,
+                session_profile: None,
             },
         );
         validate_registry_v2(&registry_of(vec![inst])).expect("zero margins must validate");
@@ -1939,6 +2099,123 @@ mod tests {
             .expect("absent economics must validate");
     }
 
+    // ── M6-REGISTRY-V2-PRODUCTION-CONTRACT-01: crypto trading-economics
+    //    completeness (the concrete BTC/USD registry-v2 entry) ──────────────
+
+    /// The concrete BTC/USD instrument the approved V4 asset matrix
+    /// authorizes for M6, with the exact order-validation economics Alpaca's
+    /// real BTC/USD asset object publishes (`min_order_size="0.0001"`,
+    /// `min_trade_increment="0.0001"`, `price_increment="1"` — see
+    /// docs.alpaca.markets/us/docs/crypto-trading-1) and a broker symbol
+    /// mapping (identity for Alpaca — its crypto wire format already IS
+    /// canonical `"BTC/USD"`, no translation needed).
+    fn concrete_btc_usd_v2() -> InstrumentDefinitionV2 {
+        let mut inst = base_crypto("BTC/USD");
+        inst.broker_symbols
+            .insert("alpaca".to_string(), "BTC/USD".to_string());
+        inst.provider_symbols
+            .insert("kraken".to_string(), "XBTUSD".to_string());
+        inst.paper_trading_enabled = true;
+        inst.notes = Some(
+            "M6-REGISTRY-V2-PRODUCTION-CONTRACT-01: the approved V4 asset matrix's concrete \
+             BTC/USD entry."
+                .to_string(),
+        );
+        inst.economics = Some(InstrumentEconomicsMetadataV2 {
+            contract_multiplier: None,
+            initial_margin_micros: None,
+            maintenance_margin_micros: None,
+            quantity_increment_micros: Some(100),  // 0.0001 BTC
+            min_trade_qty_micros: Some(100),        // 0.0001 BTC
+            price_tick_micros: Some(1_000_000),     // $1.00
+            session_profile: Some(SESSION_PROFILE_CRYPTO_24_7.to_string()),
+        });
+        inst
+    }
+
+    /// RC01: the concrete, complete, paper-trading-enabled BTC/USD entry
+    /// validates cleanly.
+    #[test]
+    fn rc01_concrete_btc_usd_with_complete_economics_validates() {
+        validate_registry_v2(&registry_of(vec![concrete_btc_usd_v2()]))
+            .expect("complete BTC/USD economics must validate");
+    }
+
+    /// RC02: a crypto instrument that is NOT trading-enabled (the default
+    /// `base_crypto` fixture, `paper_trading_enabled: false`) still validates
+    /// with no economics at all — this rule is about trading readiness, not
+    /// data-tracking readiness (mirrors ECON05's absent-economics claim).
+    #[test]
+    fn rc02_non_trading_enabled_crypto_needs_no_economics() {
+        let inst = base_crypto("BTC/USD");
+        assert!(!inst.paper_trading_enabled && !inst.live_trading_enabled);
+        validate_registry_v2(&registry_of(vec![inst]))
+            .expect("non-trading-enabled crypto needs no economics");
+    }
+
+    /// RC03: each individually-omitted required field, on an otherwise
+    /// complete and trading-enabled BTC/USD entry, fails closed with a
+    /// message naming that field — never silently treated as "no
+    /// constraint."
+    #[test]
+    fn rc03_trading_enabled_crypto_missing_any_required_field_fails_closed() {
+        for missing in [
+            "quantity_increment_micros",
+            "min_trade_qty_micros",
+            "price_tick_micros",
+            "session_profile",
+        ] {
+            let mut inst = concrete_btc_usd_v2();
+            let mut econ = inst.economics.take().unwrap();
+            match missing {
+                "quantity_increment_micros" => econ.quantity_increment_micros = None,
+                "min_trade_qty_micros" => econ.min_trade_qty_micros = None,
+                "price_tick_micros" => econ.price_tick_micros = None,
+                "session_profile" => econ.session_profile = None,
+                _ => unreachable!(),
+            }
+            inst.economics = Some(econ);
+            let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
+            assert!(
+                err.to_string().contains(missing),
+                "expected error naming '{missing}', got: {err}"
+            );
+        }
+    }
+
+    /// RC04: a trading-enabled crypto instrument with NO economics block at
+    /// all (not just a partial one) fails closed.
+    #[test]
+    fn rc04_trading_enabled_crypto_with_no_economics_at_all_fails_closed() {
+        let mut inst = concrete_btc_usd_v2();
+        inst.economics = None;
+        let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
+        assert!(err.to_string().contains("BTC/USD"));
+    }
+
+    /// RC05: `session_profile` outside the closed vocabulary fails closed,
+    /// even when every other field is present.
+    #[test]
+    fn rc05_wrong_session_profile_fails_closed() {
+        let mut inst = concrete_btc_usd_v2();
+        inst.economics.as_mut().unwrap().session_profile =
+            Some("equity_nyse".to_string());
+        let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
+        assert!(err.to_string().contains("session_profile"));
+    }
+
+    /// RC06: live-trading-enabled (not just paper) triggers the same
+    /// completeness requirement.
+    #[test]
+    fn rc06_live_trading_enabled_also_requires_complete_economics() {
+        let mut inst = concrete_btc_usd_v2();
+        inst.paper_trading_enabled = false;
+        inst.live_trading_enabled = true;
+        inst.economics = None;
+        let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
+        assert!(err.to_string().contains("BTC/USD"));
+    }
+
     // ── BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: suggestion helper ──────────
 
     // SUG-01: explicit registry-v2 economics on a non-equity fixture wins
@@ -1953,6 +2230,10 @@ mod tests {
                 contract_multiplier: Some(50),
                 initial_margin_micros: Some(500_000_000),
                 maintenance_margin_micros: Some(400_000_000),
+                quantity_increment_micros: None,
+                min_trade_qty_micros: None,
+                price_tick_micros: None,
+                session_profile: None,
             },
         );
         let suggestion = backtest_economics_suggestion_for_instrument(&inst);
@@ -1973,6 +2254,10 @@ mod tests {
                 contract_multiplier: Some(5),
                 initial_margin_micros: None,
                 maintenance_margin_micros: None,
+                quantity_increment_micros: None,
+                min_trade_qty_micros: None,
+                price_tick_micros: None,
+                session_profile: None,
             },
         );
         let suggestion = backtest_economics_suggestion_for_instrument(&inst);
@@ -2069,6 +2354,7 @@ mod tests {
             );
             assert!(
                 inst.economics
+                    .as_ref()
                     .is_some_and(|e| e.contract_multiplier.is_some()),
                 "example fixture symbol={} should demonstrate an explicit contract_multiplier",
                 inst.symbol
@@ -2195,6 +2481,10 @@ mod tests {
                 contract_multiplier: Some(50),
                 initial_margin_micros: None,
                 maintenance_margin_micros: None,
+                quantity_increment_micros: None,
+                min_trade_qty_micros: None,
+                price_tick_micros: None,
+                session_profile: None,
             },
         );
         let registry = registry_of(vec![base_equity("AAPL"), with_econ]);

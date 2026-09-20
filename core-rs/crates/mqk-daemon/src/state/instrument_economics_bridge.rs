@@ -152,7 +152,8 @@ pub fn instrument_v2_to_economics(
         }
     }
 
-    let explicit_multiplier_override = instrument.economics.and_then(|e| e.contract_multiplier);
+    let explicit_multiplier_override =
+        instrument.economics.as_ref().and_then(|e| e.contract_multiplier);
     if let Some(m) = explicit_multiplier_override {
         if m <= 0 {
             return bridge_failure(
