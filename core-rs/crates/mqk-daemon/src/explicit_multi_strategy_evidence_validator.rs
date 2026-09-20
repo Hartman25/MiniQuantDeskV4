@@ -667,4 +667,50 @@ mod tests {
             ExplicitMultiStrategyEvidenceValidationError::ExpectedAuthorityIdMismatch
         );
     }
+
+    /// IR-3 (independent review): the write path persists `scanner_rank`
+    /// (`SelectionCandidateEvidence::scanner_rank: Option<u32>`) as
+    /// `Option<i32>` via `.map(|r| r as i32)`
+    /// (`multi_strategy_runtime_dispatch::build_new_explicit_multi_strategy_authority`).
+    /// `u32 as i32` is a same-width bit-reinterpreting cast: every value in
+    /// `0..=i32::MAX` round-trips exactly, and every value in
+    /// `i32::MAX+1..=u32::MAX` has its top bit set, so it ALWAYS becomes
+    /// negative under that cast -- a two's-complement identity, not a
+    /// coincidence of the specific values tested here. This proves the
+    /// write-side cast can never silently produce a wrong-but-plausible
+    /// positive rank: any value it cannot represent is deterministically
+    /// caught by this module's `r >= 0` read-side check and fails closed as
+    /// `NegativeScannerRank`, never accepted as valid evidence.
+    #[test]
+    fn scanner_rank_overflow_is_always_caught_never_silently_accepted() {
+        for overflowing in [1u32 << 31, (i32::MAX as u32) + 1, 3_000_000_000u32, u32::MAX] {
+            let stored_i32 = overflowing as i32;
+            assert!(
+                stored_i32 < 0,
+                "u32 value {overflowing} did not become negative under the production cast; \
+                 the write-side conversion could silently corrupt evidence"
+            );
+
+            let f = build_fixture();
+            let mut binding = f.bindings[0].clone();
+            binding.scanner_rank = Some(stored_i32);
+            let err = stored_binding_to_evaluation(&binding).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ExplicitMultiStrategyEvidenceValidationError::NegativeScannerRank { .. }
+                ),
+                "expected NegativeScannerRank for overflowed value {overflowing}, got {err:?}"
+            );
+        }
+
+        // The boundary itself: i32::MAX is the largest u32 value that round-
+        // trips exactly through the production cast and must NOT be rejected.
+        let f = build_fixture();
+        let mut binding = f.bindings[0].clone();
+        binding.scanner_rank = Some(i32::MAX);
+        let evaluation =
+            stored_binding_to_evaluation(&binding).expect("i32::MAX must round-trip");
+        assert_eq!(evaluation.evidence.scanner_rank, Some(i32::MAX as u32));
+    }
 }
