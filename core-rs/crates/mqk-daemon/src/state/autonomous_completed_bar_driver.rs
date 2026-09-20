@@ -339,9 +339,13 @@ pub enum BindingDispatchRoute {
     /// (`crate::dynamic_selection_host_pool::DynamicSelectionHostPool`),
     /// which is owned exclusively by the execution loop's own task for
     /// `run_id` for the run's lifetime — this driver can never call into it
-    /// directly. Dispatch instead hands off through the existing
-    /// `AppState::pending_strategy_bar_input` mailbox (the same seam the
-    /// operator signal route already uses) and confirms completion by
+    /// directly. Dispatch instead hands off through
+    /// `AppState::deposit_binding_strategy_bar_input` — a per-binding keyed
+    /// slot, deliberately never the shared account-wide destructive
+    /// `AppState::pending_strategy_bar_input` `Option` (that single slot
+    /// cannot represent two independently-pending same-symbol bindings, e.g.
+    /// `AAPL/strategy_A` and `AAPL/strategy_B`, without one overwriting or
+    /// being consumed instead of the other) — and confirms completion by
     /// reading the durable `strategy_signal_evaluations` row the loop's own
     /// dispatch writes, deterministically identified via
     /// `AppState::derive_strategy_signal_evaluation_id`. Only
@@ -2199,12 +2203,17 @@ const HOST_POOL_CONFIRM_ATTEMPT_DELAY_MS: u64 = 250;
 /// binding-bar identity durably (migration 0075 — deliberately a separate
 /// table from [`claim_and_dispatch_observed_bar`]'s, since two different
 /// strategies may share one `(symbol, timeframe)` under an approved
-/// watchlist-v3 fleet); then hand the bar off through the existing
-/// `AppState::pending_strategy_bar_input` mailbox — the same seam the
-/// operator signal route already uses — and confirm completion by reading
-/// the durable `strategy_signal_evaluations` row the loop's own
-/// `tick_strategy_dispatch_selected_hosts_with_bar_facts` writes for this
-/// exact binding, deterministically identified via
+/// watchlist-v3 fleet); then hand the bar off through
+/// `AppState::deposit_binding_strategy_bar_input` — a per-binding keyed
+/// slot the loop's own `tick_strategy_dispatch_selected_hosts_with_bar_facts`
+/// checks for this exact binding before falling back to the shared
+/// account-wide slot. Deliberately never the shared
+/// `AppState::pending_strategy_bar_input` `Option` directly: a second,
+/// independently-pending sibling binding for the same symbol (e.g.
+/// `AAPL/strategy_B` while `AAPL/strategy_A` is also pending) must never
+/// overwrite or be consumed instead of this one. Completion is confirmed by
+/// reading the durable `strategy_signal_evaluations` row the loop's own
+/// dispatch writes for this exact binding, deterministically identified via
 /// `AppState::derive_strategy_signal_evaluation_id`.
 ///
 /// `now_tick` is derived from `bar_end_ts` itself (not a shared mutable
@@ -2215,7 +2224,12 @@ const HOST_POOL_CONFIRM_ATTEMPT_DELAY_MS: u64 = 250;
 /// redundant redeposit after the row already exists writes nothing new
 /// (`record_signal_evaluation`'s own `ON CONFLICT DO NOTHING`) and
 /// confirmation simply succeeds on this or a later attempt — safe to retry,
-/// never a duplicate evaluation.
+/// never a duplicate evaluation. This intentionally diverges from
+/// `claim_and_dispatch_observed_bar`'s small monotonic
+/// `operation.bars_observed`-derived `now_tick`; verified safe because
+/// nothing in `mqk_strategy` reads `StrategyContext::now_tick` for decision
+/// logic — every current strategy engine treats it as identity/logging
+/// only, never a sequential tick count a strategy's own logic depends on.
 ///
 /// Uses [`crate::dynamic_selection_dispatch_authority::timeframe_secs_to_db_label`]
 /// for the identity's timeframe component, never
@@ -2288,14 +2302,26 @@ async fn claim_and_dispatch_observed_bar_via_host_pool(
             .await;
         }
 
+        // Ownership fix (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01, correcting
+        // e37d10c6): a per-binding keyed deposit, never the shared
+        // account-wide destructive `Option` — AAPL/strategy_A and
+        // AAPL/strategy_B each have their own key and cannot overwrite or
+        // consume each other's pending work, and the loop's own dispatch
+        // (`AppState::tick_strategy_dispatch_selected_hosts_with_bar_facts`)
+        // only ever drains THIS exact binding's entry for this call.
         input
             .state
-            .deposit_strategy_bar_input(StrategyBarInput {
-                now_tick,
-                end_ts: bar_end_ts,
-                limit_price: None,
-                qty: 1,
-            })
+            .deposit_binding_strategy_bar_input(
+                &binding.symbol,
+                &binding.strategy_id,
+                db_timeframe_label,
+                StrategyBarInput {
+                    now_tick,
+                    end_ts: bar_end_ts,
+                    limit_price: None,
+                    qty: 1,
+                },
+            )
             .await;
 
         let evaluation_row =
@@ -2365,6 +2391,19 @@ async fn claim_and_dispatch_observed_bar_via_host_pool(
         "host-pool dispatch confirmation not observed within the bounded retry window",
     )
     .await?;
+    // Review finding (mqd-review-patch, pre-commit): the claim is now
+    // durably `failed`, but this binding's own last deposit may still be
+    // sitting unconsumed in `pending_binding_strategy_bar_inputs` (e.g. the
+    // run was not actually ticking during the bounded window above). Left
+    // in place, some much later, unrelated tick could drain it and dispatch
+    // against a now-stale trigger identity, producing a spurious journal
+    // entry disconnected from any real completed-bar boundary at the time
+    // it fires. Drain it here — the value itself is discarded, never used
+    // to retroactively un-fail this claim.
+    let _ = input
+        .state
+        .take_binding_strategy_bar_input(&binding.symbol, &binding.strategy_id, db_timeframe_label)
+        .await;
     Ok(AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
         status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
     })

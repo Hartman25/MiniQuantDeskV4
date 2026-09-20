@@ -593,6 +593,25 @@ pub struct AppState {
     /// unconsumed prior bar).  Consumed atomically (set to `None`) by
     /// `tick_strategy_dispatch`.
     pending_strategy_bar_input: Arc<Mutex<Option<StrategyBarInput>>>,
+    /// Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-
+    /// M2-01, correcting the prior HostPool patch e37d10c6): a per-binding
+    /// keyed hand-off, deliberately separate from
+    /// [`Self::pending_strategy_bar_input`]'s single destructive account-
+    /// wide slot. Keyed by `(symbol, strategy_id, db_timeframe_label)` —
+    /// exactly the identity a `DynamicSelectionHostPool` binding is keyed
+    /// on — so `AAPL/strategy_A` and `AAPL/strategy_B` can have
+    /// independent pending work at the same time without one overwriting
+    /// or being consumed by the other. Consumed per-binding (removed from
+    /// the map) by
+    /// [`AppState::tick_strategy_dispatch_selected_hosts_with_bar_facts`],
+    /// which checks this map first and falls back to the shared account-
+    /// wide slot unchanged (preserving the operator-signal route's existing
+    /// behavior of waking every selected binding at once). Written only by
+    /// the autonomous completed-bar driver's host-pool dispatch route
+    /// (`autonomous_completed_bar_driver::claim_and_dispatch_observed_bar_via_host_pool`),
+    /// never by the legacy single-engine path.
+    pending_binding_strategy_bar_inputs:
+        Arc<Mutex<HashMap<(String, String, String), StrategyBarInput>>>,
     /// D4.4: test-only rendezvous hook for the completed-bar driver's
     /// post-claim/pre-dispatch concurrency proof (see
     /// [`autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook`]).
@@ -1996,6 +2015,7 @@ impl AppState {
             panic_on_symbol_for_test: Arc::new(Mutex::new(None)),
             dispatch_call_count_for_test: Arc::new(AtomicU32::new(0)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
+            pending_binding_strategy_bar_inputs: Arc::new(Mutex::new(HashMap::new())),
             completed_bar_post_claim_test_hook: Arc::new(Mutex::new(None)),
             coverage_authority_pre_bind_test_hook: Arc::new(Mutex::new(None)),
             completed_bar_completion_fault_test_hook: Arc::new(AtomicBool::new(false)),
@@ -3015,6 +3035,66 @@ operator_reconcile_or_repair_required"
     pub async fn deposit_strategy_bar_input(&self, input: StrategyBarInput) {
         self.last_bar_input_ts.store(input.end_ts, Ordering::SeqCst);
         *self.pending_strategy_bar_input.lock().await = Some(input);
+    }
+
+    /// Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-
+    /// M2-01): deposit a bar input for exactly one `(symbol, strategy_id,
+    /// db_timeframe_label)` host-pool binding — never the shared
+    /// account-wide slot [`Self::deposit_strategy_bar_input`] writes to, and
+    /// never consumable by any other binding's key. `symbol`/`strategy_id`/
+    /// `timeframe` are trimmed before keying, matching
+    /// `DynamicSelectionHostPool`'s own key normalization. Overwrite policy
+    /// mirrors the shared slot's: a new deposit for the same exact key
+    /// supersedes any prior unconsumed one for that key only — every other
+    /// key's pending entry is untouched.
+    pub async fn deposit_binding_strategy_bar_input(
+        &self,
+        symbol: &str,
+        strategy_id: &str,
+        timeframe: &str,
+        input: StrategyBarInput,
+    ) {
+        let key = (
+            symbol.trim().to_string(),
+            strategy_id.trim().to_string(),
+            timeframe.trim().to_string(),
+        );
+        self.pending_binding_strategy_bar_inputs
+            .lock()
+            .await
+            .insert(key, input);
+    }
+
+    /// Same-symbol multi-strategy repair: atomically take (remove) the
+    /// pending bar input for exactly one binding key, if any. `pub(crate)` —
+    /// the only production consumer is
+    /// [`Self::tick_strategy_dispatch_selected_hosts_with_bar_facts`]; test
+    /// code may call it directly to assert ownership (a consumer never
+    /// observes another binding's entry).
+    pub(crate) async fn take_binding_strategy_bar_input(
+        &self,
+        symbol: &str,
+        strategy_id: &str,
+        timeframe: &str,
+    ) -> Option<StrategyBarInput> {
+        let key = (
+            symbol.trim().to_string(),
+            strategy_id.trim().to_string(),
+            timeframe.trim().to_string(),
+        );
+        self.pending_binding_strategy_bar_inputs
+            .lock()
+            .await
+            .remove(&key)
+    }
+
+    /// Same-symbol multi-strategy repair: test-only visibility into how many
+    /// distinct bindings currently have pending work deposited — used to
+    /// prove multiple bindings coexist without one overwriting another
+    /// before any draining occurs. Named `_for_test` to signal intent; never
+    /// called in production code.
+    pub async fn pending_binding_strategy_bar_input_count_for_test(&self) -> usize {
+        self.pending_binding_strategy_bar_inputs.lock().await.len()
     }
 
     /// B3: Returns the Unix-seconds timestamp of the last bar input deposit.
@@ -4321,9 +4401,7 @@ operator_reconcile_or_repair_required"
     /// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 4: the
     /// `DynamicPaperEnforced` dispatch backend — the frozen selected-host
     /// authority is the ONLY strategy-evaluation authority when this is
-    /// called; the legacy native bootstrap is never touched. Same single
-    /// `.take()` of the pending bar input as
-    /// [`Self::tick_strategy_dispatch_multi_symbol_with_bar_facts`], same
+    /// called; the legacy native bootstrap is never touched. Same
     /// per-binding sequential order (`bindings` is already in the frozen
     /// plan's deterministic symbol-ascending order — never re-sorted here),
     /// same one-DB-bar-window-load-per-selected-symbol/timeframe shape,
@@ -4332,6 +4410,18 @@ operator_reconcile_or_repair_required"
     /// backend uses. Returns `Err` (never invented decisions) the instant a
     /// selected-host result fails Part 5 coherence — the caller must submit
     /// zero decisions for the whole tick and halt.
+    ///
+    /// Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-
+    /// M2-01): each binding independently sources its trigger `bar` —
+    /// preferring its own per-binding keyed deposit
+    /// ([`Self::take_binding_strategy_bar_input`], never observable by or
+    /// consumable by another binding's key) and falling back to a clone of
+    /// the shared account-wide slot only when it has none of its own. A
+    /// binding with neither is skipped this tick (`continue`), not treated
+    /// as "nothing pending at all" for every other binding — this is what
+    /// lets `AAPL/strategy_A` and `AAPL/strategy_B` have independent
+    /// pending work at the same time without one starving or being
+    /// evaluated against the other's trigger identity.
     pub(crate) async fn tick_strategy_dispatch_selected_hosts_with_bar_facts(
         &self,
         // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 2: the active
@@ -4350,11 +4440,33 @@ operator_reconcile_or_repair_required"
         )>,
         SelectedHostDispatchFault,
     > {
-        let Some(bar) = self.pending_strategy_bar_input.lock().await.take() else {
-            return Ok(Vec::new());
-        };
+        // Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-
+        // B-M2-01): the shared account-wide slot is still taken once here,
+        // unchanged, preserving the operator-signal route's existing
+        // behavior of waking every selected binding at once. It is no
+        // longer the only trigger, and no longer taken unconditionally
+        // before checking whether ANY binding has work — each binding below
+        // independently prefers its own per-binding keyed deposit (never
+        // observable by, or consumable by, any other binding's key) and
+        // falls back to a clone of this shared bar only when it has none of
+        // its own.
+        let shared_bar = self.pending_strategy_bar_input.lock().await.take();
         let mut results = Vec::new();
         for binding in bindings {
+            let bar = match self
+                .take_binding_strategy_bar_input(
+                    &binding.symbol,
+                    &binding.strategy_id,
+                    &binding.db_timeframe_label,
+                )
+                .await
+            {
+                Some(b) => b,
+                None => match &shared_bar {
+                    Some(b) => b.clone(),
+                    None => continue,
+                },
+            };
             let selected_authority = SignalEvaluationAuthority::Explicit {
                 run_id,
                 strategy_id: &binding.strategy_id,
@@ -9947,5 +10059,195 @@ mod phase7b_selected_host_dispatch_tests {
         );
         assert_eq!(long.1.spec.timeframe_secs, 300);
         assert_eq!(short.1.spec.timeframe_secs, 300);
+    }
+
+    /// Ownership fix (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01, correcting
+    /// e37d10c6): the exact three-binding scenario the correction demanded
+    /// — `AAPL/strategy_A`, `AAPL/strategy_B`, `MSFT/strategy_C` — proven
+    /// pending simultaneously, via the per-binding keyed slots
+    /// (`deposit_binding_strategy_bar_input`/`take_binding_strategy_bar_input`),
+    /// never the shared account-wide `Option`. Proves requirement #1 (all
+    /// three coexist before any draining) and requirement #4 (one binding's
+    /// key can never observe or consume another's, including the two
+    /// same-symbol siblings) directly against `AppState`, with no DB and no
+    /// host pool involved — the narrowest possible proof of the ownership
+    /// invariant itself.
+    #[tokio::test]
+    async fn ownership_three_bindings_coexist_without_overwrite_or_cross_consumption() {
+        let state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Paper);
+
+        state
+            .deposit_binding_strategy_bar_input(
+                "AAPL",
+                "strategy_A",
+                "5m",
+                StrategyBarInput {
+                    now_tick: 100,
+                    end_ts: 100,
+                    limit_price: None,
+                    qty: 1,
+                },
+            )
+            .await;
+        state
+            .deposit_binding_strategy_bar_input(
+                "AAPL",
+                "strategy_B",
+                "5m",
+                StrategyBarInput {
+                    now_tick: 200,
+                    end_ts: 200,
+                    limit_price: None,
+                    qty: 1,
+                },
+            )
+            .await;
+        state
+            .deposit_binding_strategy_bar_input(
+                "MSFT",
+                "strategy_C",
+                "5m",
+                StrategyBarInput {
+                    now_tick: 300,
+                    end_ts: 300,
+                    limit_price: None,
+                    qty: 1,
+                },
+            )
+            .await;
+
+        // Requirement #1: all three remain independently addressable before
+        // any draining — never collapsed into one shared slot.
+        assert_eq!(
+            state
+                .pending_binding_strategy_bar_input_count_for_test()
+                .await,
+            3,
+            "three distinct bindings must coexist without one overwriting another"
+        );
+
+        // Requirement #4: strategy_A must never observe or consume
+        // strategy_B's same-symbol entry, and vice versa — each `take`
+        // returns only its own exact key's value.
+        let a = state
+            .take_binding_strategy_bar_input("AAPL", "strategy_A", "5m")
+            .await
+            .expect("AAPL/strategy_A's own entry must be present");
+        assert_eq!(
+            a.end_ts, 100,
+            "strategy_A must get its own bar, not strategy_B's"
+        );
+
+        let b = state
+            .take_binding_strategy_bar_input("AAPL", "strategy_B", "5m")
+            .await
+            .expect("AAPL/strategy_B's own entry must still be present after A's take");
+        assert_eq!(
+            b.end_ts, 200,
+            "strategy_B must get its own bar, not strategy_A's"
+        );
+
+        // Requirement #2: each binding consumed exactly once — a second take
+        // on an already-drained key returns nothing, never a stale replay.
+        assert!(
+            state
+                .take_binding_strategy_bar_input("AAPL", "strategy_A", "5m")
+                .await
+                .is_none(),
+            "a consumed binding must not be consumable a second time"
+        );
+
+        // MSFT/strategy_C was never touched by A's or B's takes.
+        let c = state
+            .take_binding_strategy_bar_input("MSFT", "strategy_C", "5m")
+            .await
+            .expect("MSFT/strategy_C must be untouched by AAPL's own takes");
+        assert_eq!(c.end_ts, 300);
+
+        assert_eq!(
+            state
+                .pending_binding_strategy_bar_input_count_for_test()
+                .await,
+            0,
+            "all three must now be drained, independently, with nothing left over"
+        );
+    }
+
+    /// Ownership fix: the loop's real dispatch entrypoint
+    /// (`tick_strategy_dispatch_selected_hosts_with_bar_facts`) must prefer
+    /// each binding's own per-binding keyed deposit over the shared
+    /// account-wide slot, and a binding with no deposit of its own (neither
+    /// per-binding nor shared) must simply produce no result this tick —
+    /// never dispatch using an unrelated binding's trigger identity.
+    #[tokio::test]
+    async fn ownership_per_binding_deposit_takes_priority_over_shared_slot_in_real_dispatch() {
+        let Some(pool) = db_pool_or_skip("OWNERSHIP-01").await else {
+            return;
+        };
+        let ts_a = recent_bar_ts();
+        let ts_b = ts_a - 300;
+        seed_bar(&pool, "OWNAAPL", "5m", ts_a, 100_000_000).await;
+        seed_bar(&pool, "OWNAAPL", "5m", ts_b, 100_000_000).await;
+
+        let keys = vec![
+            ("OWNAAPL".to_string(), "intraday_scalper".to_string(), 300),
+            (
+                "OWNAAPL".to_string(),
+                "intraday_short_scalper".to_string(),
+                300,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![
+            binding("OWNAAPL", "intraday_scalper", 300, "5m"),
+            binding("OWNAAPL", "intraday_short_scalper", 300, "5m"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        // intraday_scalper gets its own per-binding deposit with a distinct
+        // now_tick; intraday_short_scalper gets none of its own — it must
+        // fall back to the shared slot (left empty here) and therefore
+        // produce no result, never silently reusing its sibling's own
+        // trigger identity.
+        state
+            .deposit_binding_strategy_bar_input(
+                "OWNAAPL",
+                "intraday_scalper",
+                "5m",
+                StrategyBarInput {
+                    now_tick: 42,
+                    end_ts: ts_a,
+                    limit_price: Some(100_000_000),
+                    qty: 0,
+                },
+            )
+            .await;
+
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
+            .await
+            .expect("dispatch must not fault");
+
+        cleanup_bars(&pool, "OWNAAPL").await;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "only the binding with its own pending deposit dispatches this tick"
+        );
+        let (assignment, _, _) = &results[0];
+        assert_eq!(assignment.strategy_id, "intraday_scalper");
+        assert!(
+            state
+                .take_binding_strategy_bar_input("OWNAAPL", "intraday_scalper", "5m")
+                .await
+                .is_none(),
+            "intraday_scalper's own deposit must be fully consumed by the tick that used it"
+        );
     }
 }
