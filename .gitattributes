@@ -17,3 +17,4 @@ core-rs/crates/mqk-db/migrations/0069_runtime_leader_lease_legacy_unbound_migrat
 core-rs/crates/mqk-db/migrations/0070_runtime_leader_lease_strict_quiescence_forward.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0071_autonomous_daily_binding_state.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0072_explicit_multi_strategy_authority.sql text eol=lf
+core-rs/crates/mqk-db/migrations/0073_explicit_multi_strategy_authority_full_evidence.sql text eol=lf

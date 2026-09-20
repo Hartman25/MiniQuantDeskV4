@@ -446,6 +446,12 @@
       "path": "0072_explicit_multi_strategy_authority.sql",
       "status": "applied",
       "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 Patch C2 (V4-STAGE-B-M2-REPAIR-03): two new additive tables, sys_explicit_multi_strategy_authority and sys_explicit_multi_strategy_authority_bindings, for the explicit watchlist-v3 per-symbol multi-strategy authorization mechanism's durable evidence -- deliberately separate from sys_dynamic_selection_plans/* (0059/0060), which represents one Bundle 7 ranking plan, never this mechanism. authority_id is a caller-minted deterministic UUIDv5 binding every result-affecting input (run_id, source artifact identity/hash, config fingerprint, market_date, per-binding evidence); approved_for_live is constrained false at the DB level; a UNIQUE(authority_id, symbol, strategy_id, timeframe_secs) constraint on the bindings table enforces that the exact same binding can never appear twice under one authority. No existing table/column altered."
+    },
+    {
+      "id": "0073",
+      "path": "0073_explicit_multi_strategy_authority_full_evidence.sql",
+      "status": "applied",
+      "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 (V4-STAGE-B-M2-C1-C3-REPAIR-04 Patch D2): add every previously-omitted mqk_portfolio::SelectionCandidateEvidence field to sys_explicit_multi_strategy_authority_bindings (promotion_expired, evidence_resolved, review_state_is_paper_candidate, evidence_review_state, durable/recomputed legacy and v2 fingerprints plus their match flags, plugin_instantiable, timeframe_matches, canonical_score_decimal/micros, scanner_rank, watchlist_assigned, evidence_review_id/scanner_scan_id/artifact_path/git_hash, promotion_effective_at/expires_at, exact_reason) so every result-affecting field can be durably persisted and bound into authority_id. Additive only -- 0072 is not modified; every new column is nullable-or-defaulted."
     }
   ]
 }
