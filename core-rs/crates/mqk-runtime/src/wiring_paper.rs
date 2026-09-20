@@ -313,7 +313,7 @@ mod tests {
             order_id: "paper-risk".to_string(),
             symbol: "SPY".to_string(),
             side: Side::Buy,
-            quantity: 10,
+            quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
             order_type: "market".to_string(),
             limit_price: None,
             time_in_force: "day".to_string(),

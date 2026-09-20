@@ -263,7 +263,7 @@ fn a1_paper_broker_cursor_filters_events() {
         order_id: id.to_string(),
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "limit".to_string(),
         limit_price: Some(price),
         time_in_force: "day".to_string(),

@@ -67,8 +67,9 @@ pub use id_map::BrokerOrderMap;
 pub use order_router::{
     AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerEventIdentity,
     BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse,
+    BrokerSubmitResponse, QtyMicros,
 };
+pub use mqk_schemas::QTY_MICROS_SCALE;
 
 pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,

@@ -35,7 +35,7 @@ use crate::broker_error::BrokerError;
 use crate::id_map::BrokerOrderMap;
 use crate::order_router::{
     AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
-    BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
+    BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter, QtyMicros,
 };
 use crate::risk_decision::{RiskDecision, RiskDenial};
 use serde::{Deserialize, Serialize};
@@ -491,7 +491,7 @@ where
         &self,
         internal_id: &str,
         order_map: &BrokerOrderMap,
-        quantity: i64,
+        quantity: QtyMicros,
         limit_price: Option<i64>,
         time_in_force: String,
     ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error + Send + Sync>> {
@@ -623,7 +623,7 @@ mod tests {
             order_id: "ord-1".to_string(),
             symbol: "AAPL".to_string(),
             side: crate::types::Side::Buy,
-            quantity: 10,
+            quantity: QtyMicros::from_whole_units(10).unwrap(),
             order_type: "market".to_string(),
             limit_price: None,
             time_in_force: "day".to_string(),
@@ -989,7 +989,7 @@ mod tests {
         let mut map = crate::id_map::BrokerOrderMap::new();
         map.register("ord-1", "b-ord-1");
         let res =
-            make_gateway(true, true, true).replace("ord-1", &map, 20, None, "day".to_string());
+            make_gateway(true, true, true).replace("ord-1", &map, QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string());
         assert!(res.is_ok());
     }
 }

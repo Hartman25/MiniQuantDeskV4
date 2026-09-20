@@ -135,7 +135,7 @@ fn submit_req() -> BrokerSubmitRequest {
         order_id: "ord-e2".to_string(),
         symbol: "SPY".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 5,
+        quantity: mqk_execution::QtyMicros::from_whole_units(5).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
@@ -262,7 +262,7 @@ fn stale_feed_disarms_gateway_blocks_replace() {
         .replace(
             "b-ord-e2",
             &BrokerOrderMap::new(),
-            20,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
             None,
             "day".to_string(),
         )

@@ -147,7 +147,7 @@ fn submit_req() -> BrokerSubmitRequest {
         order_id: "ord-ep01".to_string(),
         symbol: "SPY".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
@@ -202,7 +202,7 @@ fn ep_unsafe_02_all_gates_failing_blocks_replace_with_integrity_first() {
         .replace(
             "ord-ep01",
             &BrokerOrderMap::new(),
-            20,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
             None,
             "day".to_string(),
         )
@@ -288,7 +288,7 @@ fn ep_entry_02_no_reconcile_ever_blocks_replace_at_boot() {
         .replace(
             "ord-ep01",
             &BrokerOrderMap::new(),
-            20,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
             None,
             "day".to_string(),
         )
@@ -433,7 +433,7 @@ fn ep_stale_02_stale_reconcile_blocks_replace() {
         .replace(
             "ord-ep01",
             &BrokerOrderMap::new(),
-            20,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
             None,
             "day".to_string(),
         )
@@ -484,7 +484,7 @@ fn ep_stale_04_dirty_reconcile_blocks_replace_immediately() {
         .replace(
             "ord-ep01",
             &BrokerOrderMap::new(),
-            20,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
             None,
             "day".to_string(),
         )

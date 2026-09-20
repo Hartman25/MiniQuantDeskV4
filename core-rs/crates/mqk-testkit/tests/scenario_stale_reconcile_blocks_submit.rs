@@ -101,7 +101,7 @@ fn submit_req() -> BrokerSubmitRequest {
         order_id: "ord-test".to_string(),
         symbol: "AAPL".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),

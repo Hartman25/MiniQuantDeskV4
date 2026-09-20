@@ -163,7 +163,7 @@ fn submit_req() -> BrokerSubmitRequest {
         order_id: "ord-g-risk".to_string(),
         symbol: "SPY".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
@@ -455,7 +455,7 @@ fn risk_denial_blocks_replace() {
         .replace(
             "ord-g-risk",
             &BrokerOrderMap::new(),
-            20,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
             None,
             "day".to_string(),
         )

@@ -74,7 +74,7 @@ pub use inbound::{
 use mqk_execution::{
     micros_to_price, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent,
     BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, Side,
+    BrokerSubmitResponse, QtyMicros, Side,
 };
 use mqk_schemas::BrokerSnapshot;
 pub use snapshot::{build_snapshot, normalize_account, normalize_open_order, normalize_position};
@@ -636,7 +636,7 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             filled_qty,
             req.limit_price,
             &req.time_in_force,
-        );
+        )?;
         // Step 3: send PATCH.
         let resp: AlpacaReplaceResponse =
             self.patch(&format!("/v2/orders/{}", req.broker_order_id), &body)?;
@@ -922,19 +922,32 @@ pub fn build_submit_body(req: &BrokerSubmitRequest) -> AlpacaSubmitBody {
 ///
 /// Alpaca PATCH interprets `qty` as the **new total** (filled + open leaves).
 /// The canonical `BrokerReplaceRequest.quantity` carries the new open-leaves
-/// count.  This function computes `new_total = filled_qty + new_leaves_qty`.
+/// count, fractional-capable (QTY-MICROS-PRODUCTION-CUTOVER-01) for Crypto.
+/// `filled_qty` is whole-unit `i64` (`parse_alpaca_whole_share_qty` fails
+/// closed on any fractional broker-reported filled_qty, so a fractional
+/// Crypto order that already has a fractional fill cannot reach this
+/// function at all yet -- see `mqk-broker-alpaca::normalize`'s doc comment).
+/// This function computes `new_total = filled_qty + new_leaves_qty`, failing
+/// closed on overflow rather than wrapping.
 pub fn build_replace_body(
-    new_leaves_qty: i64,
+    new_leaves_qty: QtyMicros,
     filled_qty: i64,
     limit_price: Option<i64>,
     time_in_force: &str,
-) -> AlpacaReplaceBody {
-    let new_total_qty = filled_qty + new_leaves_qty;
-    AlpacaReplaceBody {
+) -> Result<AlpacaReplaceBody, BrokerError> {
+    let new_total_qty = QtyMicros::from_whole_units(filled_qty)
+        .and_then(|f| f.checked_add(new_leaves_qty))
+        .ok_or_else(|| BrokerError::Reject {
+            code: "replace_quantity_overflow".to_string(),
+            detail: format!(
+                "replace: filled_qty={filled_qty} + new_leaves_qty={new_leaves_qty} overflows"
+            ),
+        })?;
+    Ok(AlpacaReplaceBody {
         qty: format_alpaca_qty(new_total_qty),
         limit_price: limit_price.map(format_alpaca_price),
         time_in_force: time_in_force.to_string(),
-    }
+    })
 }
 /// Convert Alpaca's `PATCH /v2/orders/{id}` response into a `BrokerReplaceResponse`.
 ///
@@ -1095,11 +1108,14 @@ fn side_to_str(side: &Side) -> &'static str {
 /// `BrokerSubmitRequest.quantity: i64` and are not claimed supported here.
 ///
 /// # TODO BRK-PRICE-01: multi-asset extension point
-/// When `BrokerSubmitRequest` gains `instrument: Instrument`, select
-/// precision by `AssetClass`:
-/// - `Equity`: whole shares → integer string (current behavior)
-/// - Fractional equity / `Crypto`: decimal string at asset-specific scale
-pub fn format_alpaca_qty(qty: i64) -> String {
+/// QTY-MICROS-PRODUCTION-CUTOVER-01: renders via `QtyMicros`'s canonical
+/// decimal `Display` -- an exact whole-unit value (equity shares) renders
+/// as a bare integer string ("10"), unchanged from the prior behavior;
+/// a fractional value (Crypto, e.g. 0.5 BTC) renders as a trimmed decimal
+/// string ("0.5"), which is Alpaca's documented wire format for fractional
+/// quantity. Adapter-specific increment/minimum enforcement (e.g. Alpaca's
+/// BTC/USD minimum increment) happens upstream of this formatter, not here.
+pub fn format_alpaca_qty(qty: QtyMicros) -> String {
     qty.to_string()
 }
 

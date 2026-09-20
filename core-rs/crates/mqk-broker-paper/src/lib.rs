@@ -165,7 +165,22 @@ impl BrokerAdapter for LockedPaperBroker {
         // P1-02:
         // Submit-side direction is explicit on the request; quantity is always positive.
         let side = req.side;
-        let abs_qty: i64 = req.quantity.saturating_abs();
+        // LockedPaperBroker declares Equity-only capability (the trait
+        // default `supports_asset_class`, never overridden here), so
+        // `BrokerGateway::submit_with_context` never routes a fractional
+        // Crypto quantity to this adapter in production. This is a
+        // defensive fail-closed check, not the primary gate.
+        let abs_qty: i64 = req
+            .quantity
+            .checked_abs()
+            .and_then(mqk_execution::QtyMicros::to_whole_units_checked)
+            .ok_or_else(|| BrokerError::Reject {
+                code: "unsupported_fractional_quantity".to_string(),
+                detail: format!(
+                    "LockedPaperBroker is Equity-only and cannot represent fractional quantity {}",
+                    req.quantity
+                ),
+            })?;
 
         let state = PaperOrderState::new(req.order_id.clone(), req.symbol.clone(), side, abs_qty);
 
@@ -257,7 +272,17 @@ impl BrokerAdapter for LockedPaperBroker {
         }
 
         if let Some(o) = inner.open.get_mut(&oid) {
-            let new_abs: i64 = req.quantity.saturating_abs();
+            let new_abs: i64 = req
+                .quantity
+                .checked_abs()
+                .and_then(mqk_execution::QtyMicros::to_whole_units_checked)
+                .ok_or_else(|| BrokerError::Reject {
+                    code: "unsupported_fractional_quantity".to_string(),
+                    detail: format!(
+                        "LockedPaperBroker is Equity-only and cannot represent fractional quantity {}",
+                        req.quantity
+                    ),
+                })?;
 
             // P1-03: Reject replace with zero open leaves (invalid quantity).
             if new_abs == 0 {
@@ -349,7 +374,7 @@ mod tests {
                     order_id: "ord-sell".to_string(),
                     symbol: "SPY".to_string(),
                     side: ExecSide::Sell,
-                    quantity: 100,
+                    quantity: mqk_execution::QtyMicros::from_whole_units(100).unwrap(),
                     order_type: "market".to_string(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
@@ -377,7 +402,7 @@ mod tests {
                     order_id: "ord-1".to_string(),
                     symbol: "SPY".to_string(),
                     side: ExecSide::Sell,
-                    quantity: 100,
+                    quantity: mqk_execution::QtyMicros::from_whole_units(100).unwrap(),
                     order_type: "market".to_string(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
@@ -391,7 +416,7 @@ mod tests {
             .replace_order(
                 BrokerReplaceRequest {
                     broker_order_id: "ord-1".to_string(),
-                    quantity: 75,
+                    quantity: mqk_execution::QtyMicros::from_whole_units(75).unwrap(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
                 },
@@ -429,7 +454,7 @@ mod tests {
             .replace_order(
                 BrokerReplaceRequest {
                     broker_order_id: "ord-pf".to_string(),
-                    quantity: 25,
+                    quantity: mqk_execution::QtyMicros::from_whole_units(25).unwrap(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
                 },
@@ -484,7 +509,7 @@ mod tests {
             .replace_order(
                 BrokerReplaceRequest {
                     broker_order_id: "ord-cxl".to_string(),
-                    quantity: 25,
+                    quantity: mqk_execution::QtyMicros::from_whole_units(25).unwrap(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
                 },
@@ -524,7 +549,7 @@ mod tests {
             .replace_order(
                 BrokerReplaceRequest {
                     broker_order_id: "ord-filled".to_string(),
-                    quantity: 10,
+                    quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
                 },

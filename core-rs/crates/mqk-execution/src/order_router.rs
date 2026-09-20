@@ -9,6 +9,7 @@
 
 use crate::broker_error::BrokerError;
 pub use mqk_schemas::AssetClass;
+pub use mqk_schemas::QtyMicros;
 
 /// Convenience alias used throughout this module.
 type Result<T> = std::result::Result<T, BrokerError>;
@@ -323,7 +324,10 @@ pub struct BrokerSubmitRequest {
     pub symbol: String,
     /// Direction of the order. Quantity is always positive; side carries direction.
     pub side: crate::types::Side,
-    pub quantity: i64,
+    /// Fractional-capable (QTY-MICROS-PRODUCTION-CUTOVER-01): 1 unit = 1_000_000
+    /// micros. Equity orders remain whole-unit by construction (validated
+    /// upstream); Crypto orders may carry a fractional remainder.
+    pub quantity: QtyMicros,
     pub order_type: String,
     /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
     pub limit_price: Option<i64>,
@@ -359,7 +363,7 @@ pub struct BrokerCancelResponse {
 #[derive(Debug, Clone)]
 pub struct BrokerReplaceRequest {
     pub broker_order_id: String,
-    pub quantity: i64,
+    pub quantity: QtyMicros,
     /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
     pub limit_price: Option<i64>,
     pub time_in_force: String,
@@ -597,7 +601,7 @@ mod tests {
             order_id: "ord-1".to_string(),
             symbol: "AAPL".to_string(),
             side: crate::types::Side::Buy,
-            quantity: 100,
+            quantity: QtyMicros::from_whole_units(100).unwrap(),
             order_type: "limit".to_string(),
             limit_price: Some(150_000_000), // $150.00 in micros
             time_in_force: "day".to_string(),
@@ -620,7 +624,7 @@ mod tests {
         let router = OrderRouter::new(MockBroker::default());
         let req = BrokerReplaceRequest {
             broker_order_id: "broker-ord-1".to_string(),
-            quantity: 200,
+            quantity: QtyMicros::from_whole_units(200).unwrap(),
             limit_price: Some(151_000_000), // $151.00 in micros
             time_in_force: "gtc".to_string(),
         };

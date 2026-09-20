@@ -240,7 +240,8 @@ async fn invariant_submit_path_explicit_side_keeps_direction_with_positive_qty_a
 
     assert!(matches!(req.side, Side::Buy));
     assert_eq!(
-        req.quantity, 7,
+        req.quantity,
+        mqk_execution::QtyMicros::from_whole_units(7).unwrap(),
         "quantity must be positive in broker request"
     );
     assert_eq!(req.order_type, "market", "legacy default must be preserved");
@@ -262,7 +263,11 @@ async fn invariant_submit_path_legacy_signed_quantity_without_side_maps_to_sell(
     };
 
     assert!(matches!(req.side, Side::Sell));
-    assert_eq!(req.quantity, 9, "quantity must be absolute on submit");
+    assert_eq!(
+        req.quantity,
+        mqk_execution::QtyMicros::from_whole_units(9).unwrap(),
+        "quantity must be absolute on submit"
+    );
     assert_eq!(req.order_type, "market");
     assert_eq!(req.time_in_force, "day");
     assert_eq!(req.symbol, "QQQ");

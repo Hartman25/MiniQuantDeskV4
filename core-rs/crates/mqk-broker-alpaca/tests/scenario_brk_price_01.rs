@@ -5,7 +5,9 @@
 //! FP01  equity market buy: qty routed through format_alpaca_qty, not inline to_string().
 //! FP02  equity limit sell: price routed through format_alpaca_price in build_submit_body.
 //! FP03  format_alpaca_qty: no scientific notation for large whole-share quantities.
-//! FP04  format_alpaca_qty: fractional qty is structurally impossible via i64 (documented).
+//! FP04  format_alpaca_qty: fractional QtyMicros formats as a trimmed decimal
+//!       string (QTY-MICROS-PRODUCTION-CUTOVER-01 — supersedes the prior
+//!       "structurally impossible via i64" documentation test).
 //! FP05  format_alpaca_price: sub-cent rounding is explicit and deterministic ("150.51").
 //! FP06  format_alpaca_price: zero price formats as "0.00".
 //! FP07  format_alpaca_price: whole-dollar price formats as "X.00" not "X".
@@ -23,13 +25,13 @@ use mqk_broker_alpaca::{
     build_replace_body, build_submit_body, format_alpaca_price, format_alpaca_qty,
     micros_to_price_str,
 };
-use mqk_execution::{AssetClass, BrokerSubmitRequest, Side};
+use mqk_execution::{AssetClass, BrokerSubmitRequest, QtyMicros, Side};
 
 fn submit_req(
     order_id: &str,
     symbol: &str,
     side: Side,
-    quantity: i64,
+    quantity_whole_units: i64,
     order_type: &str,
     limit_price: Option<i64>,
 ) -> BrokerSubmitRequest {
@@ -37,7 +39,7 @@ fn submit_req(
         order_id: order_id.to_string(),
         symbol: symbol.to_string(),
         side,
-        quantity,
+        quantity: QtyMicros::from_whole_units(quantity_whole_units).unwrap(),
         order_type: order_type.to_string(),
         limit_price,
         time_in_force: "day".to_string(),
@@ -54,7 +56,7 @@ fn fp01_market_buy_qty_uses_format_alpaca_qty() {
     let req = submit_req("fp01", "AAPL", Side::Buy, 100, "market", None);
     let body = build_submit_body(&req);
     // format_alpaca_qty(100) must equal the body qty field.
-    assert_eq!(body.qty, format_alpaca_qty(100));
+    assert_eq!(body.qty, format_alpaca_qty(QtyMicros::from_whole_units(100).unwrap()));
     assert_eq!(body.qty, "100");
 }
 
@@ -94,14 +96,14 @@ fn fp03_large_qty_no_scientific_notation() {
         999_999_999,
     ];
     for &qty in cases {
-        let s = format_alpaca_qty(qty);
+        let s = format_alpaca_qty(QtyMicros::from_whole_units(qty).unwrap());
         assert!(
             !s.contains('e') && !s.contains('E'),
             "qty={qty}: format_alpaca_qty must not produce scientific notation, got {s:?}"
         );
         assert!(
             !s.contains('.'),
-            "qty={qty}: format_alpaca_qty must produce integer string (no decimal point), got {s:?}"
+            "qty={qty}: whole-unit format_alpaca_qty must produce integer string (no decimal point), got {s:?}"
         );
         // Must round-trip as i64.
         let parsed: i64 = s
@@ -112,22 +114,31 @@ fn fp03_large_qty_no_scientific_notation() {
 }
 
 // ---------------------------------------------------------------------------
-// FP04 — fractional qty: structurally impossible via BrokerSubmitRequest.quantity: i64
+// FP04 — fractional QtyMicros formats as a trimmed decimal string
+// (QTY-MICROS-PRODUCTION-CUTOVER-01)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn fp04_fractional_qty_is_structurally_impossible_via_i64() {
-    // BrokerSubmitRequest.quantity is i64 — there is no way to express
-    // 0.5 shares or 1.75 shares through the current submit path.
-    // This test documents the boundary: fractional share support is not
-    // claimed. When the model is extended to QtyMicros / Instrument,
-    // format_alpaca_qty must be updated to select precision by asset class.
-    //
-    // Proof: format_alpaca_qty only accepts i64; whole units only.
-    let s = format_alpaca_qty(1);
+fn fp04_fractional_qty_formats_as_trimmed_decimal_via_build_submit_body() {
+    // BrokerSubmitRequest.quantity is QtyMicros — 0.5 BTC is now
+    // representable and flows through build_submit_body unchanged, exactly
+    // like an equity whole-share order.
+    let req = BrokerSubmitRequest {
+        order_id: "fp04".to_string(),
+        symbol: "BTCUSD".to_string(),
+        side: Side::Buy,
+        quantity: QtyMicros::new(500_000), // 0.5 BTC
+        order_type: "market".to_string(),
+        limit_price: None,
+        time_in_force: "gtc".to_string(),
+        asset_class: AssetClass::Crypto,
+    };
+    let body = build_submit_body(&req);
+    assert_eq!(body.qty, "0.5", "0.5 BTC must format as trimmed decimal '0.5'");
+
+    // A whole-unit value still formats without a decimal point.
+    let s = format_alpaca_qty(QtyMicros::from_whole_units(1).unwrap());
     assert_eq!(s, "1", "whole-unit qty=1 must format as '1'");
-    // The type system enforces that sub-unit quantities cannot reach this
-    // function through the current BrokerSubmitRequest path.
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +209,9 @@ fn fp07_whole_dollar_price_formats_with_two_decimal_places() {
 #[test]
 fn fp08_replace_body_qty_uses_format_alpaca_qty() {
     // new_leaves=80, filled=20 → total=100
-    let body = build_replace_body(80, 20, None, "day");
-    assert_eq!(body.qty, format_alpaca_qty(100));
+    let body = build_replace_body(QtyMicros::from_whole_units(80).unwrap(), 20, None, "day")
+        .expect("replace body must build");
+    assert_eq!(body.qty, format_alpaca_qty(QtyMicros::from_whole_units(100).unwrap()));
     assert_eq!(body.qty, "100");
 }
 
@@ -210,7 +222,8 @@ fn fp08_replace_body_qty_uses_format_alpaca_qty() {
 #[test]
 fn fp09_replace_body_price_uses_format_alpaca_price() {
     // $150.75 = 150_750_000 micros.
-    let body = build_replace_body(50, 0, Some(150_750_000), "gtc");
+    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), 0, Some(150_750_000), "gtc")
+        .expect("replace body must build");
     let price_str = body
         .limit_price
         .as_deref()
@@ -226,6 +239,7 @@ fn fp09_replace_body_price_uses_format_alpaca_price() {
 #[test]
 fn fp10_format_alpaca_qty_is_deterministic() {
     for qty in [1_i64, 100, 10_000, 999_999_999] {
+        let qty = QtyMicros::from_whole_units(qty).unwrap();
         let s1 = format_alpaca_qty(qty);
         let s2 = format_alpaca_qty(qty);
         assert_eq!(s1, s2, "format_alpaca_qty({qty}) must be deterministic");

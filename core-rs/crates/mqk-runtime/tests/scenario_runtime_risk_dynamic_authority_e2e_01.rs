@@ -223,7 +223,7 @@ fn submit_req(order_id: &str) -> BrokerSubmitRequest {
         order_id: order_id.to_string(),
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),

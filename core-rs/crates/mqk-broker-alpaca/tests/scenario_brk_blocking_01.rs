@@ -24,7 +24,8 @@ use mqk_broker_alpaca::{
     encode_fetch_cursor, types::AlpacaFetchCursor, AlpacaBrokerAdapter, AlpacaConfig,
 };
 use mqk_execution::{
-    AssetClass, BrokerAdapter, BrokerError, BrokerInvokeToken, BrokerSubmitRequest, Side,
+    AssetClass, BrokerAdapter, BrokerError, BrokerInvokeToken, BrokerSubmitRequest, QtyMicros,
+    Side,
 };
 
 fn unreachable_adapter() -> AlpacaBrokerAdapter {
@@ -56,7 +57,7 @@ async fn bk01_submit_order_from_async_multi_thread_returns_transport_not_panic()
         order_id: "bk01-order".to_string(),
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        quantity: 1,
+        quantity: QtyMicros::from_whole_units(1).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),

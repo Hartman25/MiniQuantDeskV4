@@ -108,7 +108,7 @@ fn replace_must_use_broker_id_from_map_not_internal_id() {
     // Build the replace request with the broker ID (not the internal ID).
     let req = BrokerReplaceRequest {
         broker_order_id: target.to_string(),
-        quantity: 200,
+        quantity: mqk_execution::QtyMicros::from_whole_units(200).unwrap(),
         limit_price: Some(151_000_000), // $151.00 in micros — no f64
         time_in_force: "day".to_string(),
     };
@@ -212,7 +212,7 @@ fn restart_rehydrated_map_preserves_cancel_replace_targeting() {
         .expect("rehydrated map must resolve replace target after restart");
     let req = BrokerReplaceRequest {
         broker_order_id: replace_target.to_string(),
-        quantity: 125,
+        quantity: mqk_execution::QtyMicros::from_whole_units(125).unwrap(),
         limit_price: Some(152_250_000), // $152.25
         time_in_force: "day".to_string(),
     };
@@ -237,7 +237,7 @@ fn broker_submit_request_limit_price_is_integer_micros() {
         order_id: "ord-limit".to_string(),
         symbol: "AAPL".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 100,
+        quantity: mqk_execution::QtyMicros::from_whole_units(100).unwrap(),
         order_type: "limit".to_string(),
         limit_price: Some(150_000_000), // $150.00 in micros
         time_in_force: "day".to_string(),
@@ -255,7 +255,7 @@ fn broker_submit_request_market_order_has_no_limit_price() {
         order_id: "ord-market".to_string(),
         symbol: "SPY".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
@@ -272,7 +272,7 @@ fn broker_submit_request_market_order_has_no_limit_price() {
 fn broker_replace_request_limit_price_is_integer_micros() {
     let req = BrokerReplaceRequest {
         broker_order_id: "b-ord-1".to_string(),
-        quantity: 50,
+        quantity: mqk_execution::QtyMicros::from_whole_units(50).unwrap(),
         limit_price: Some(200_500_000), // $200.50 in micros
         time_in_force: "gtc".to_string(),
     };

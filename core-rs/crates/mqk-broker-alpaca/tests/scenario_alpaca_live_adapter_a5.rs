@@ -37,7 +37,7 @@ use mqk_broker_alpaca::{
 };
 use mqk_execution::{
     AssetClass, BrokerAdapter, BrokerError, BrokerEvent, BrokerInvokeToken, BrokerReplaceRequest,
-    BrokerSubmitRequest, Side,
+    BrokerSubmitRequest, QtyMicros, Side,
 };
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,7 +57,7 @@ fn make_submit_req(
     order_id: &str,
     symbol: &str,
     side: Side,
-    quantity: i64,
+    quantity_whole_units: i64,
     order_type: &str,
     limit_price: Option<i64>,
 ) -> BrokerSubmitRequest {
@@ -65,7 +65,7 @@ fn make_submit_req(
         order_id: order_id.to_string(),
         symbol: symbol.to_string(),
         side,
-        quantity,
+        quantity: QtyMicros::from_whole_units(quantity_whole_units).unwrap(),
         order_type: order_type.to_string(),
         limit_price,
         time_in_force: "day".to_string(),
@@ -201,7 +201,8 @@ fn l4_parse_submit_response_created_at_is_optional() {
 #[test]
 fn l5_build_replace_body_total_qty_semantics() {
     // Alpaca filled 20 shares; operator wants 80 more open leaves → total = 100.
-    let body = build_replace_body(80, 20, None, "day");
+    let body = build_replace_body(QtyMicros::from_whole_units(80).unwrap(), 20, None, "day")
+        .expect("replace body must build");
     assert_eq!(
         body.qty, "100",
         "replace qty must be total (filled + new leaves), got {}",
@@ -211,13 +212,15 @@ fn l5_build_replace_body_total_qty_semantics() {
 #[test]
 fn l5_build_replace_body_zero_filled() {
     // No fills yet; new open leaves = 50 → total = 50.
-    let body = build_replace_body(50, 0, None, "day");
+    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), 0, None, "day")
+        .expect("replace body must build");
     assert_eq!(body.qty, "50");
 }
 #[test]
 fn l5_build_replace_body_large_fill() {
     // Heavily-filled order: 900 filled, want 100 more → total = 1000.
-    let body = build_replace_body(100, 900, None, "gtc");
+    let body = build_replace_body(QtyMicros::from_whole_units(100).unwrap(), 900, None, "gtc")
+        .expect("replace body must build");
     assert_eq!(body.qty, "1000");
 }
 // ---------------------------------------------------------------------------
@@ -226,7 +229,8 @@ fn l5_build_replace_body_large_fill() {
 #[test]
 fn l6_build_replace_body_limit_price_at_wire_boundary() {
     // $150.75 = 150_750_000 micros
-    let body = build_replace_body(50, 0, Some(150_750_000), "gtc");
+    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), 0, Some(150_750_000), "gtc")
+        .expect("replace body must build");
     let price_str = body
         .limit_price
         .as_deref()
@@ -235,7 +239,8 @@ fn l6_build_replace_body_limit_price_at_wire_boundary() {
 }
 #[test]
 fn l6_build_replace_body_no_limit_price_for_market() {
-    let body = build_replace_body(100, 0, None, "day");
+    let body = build_replace_body(QtyMicros::from_whole_units(100).unwrap(), 0, None, "day")
+        .expect("replace body must build");
     assert!(body.limit_price.is_none());
 }
 // ---------------------------------------------------------------------------
@@ -663,7 +668,7 @@ fn l13_adapter_replace_order_fails_on_unreachable_url() {
     let token = BrokerInvokeToken::for_test();
     let req = BrokerReplaceRequest {
         broker_order_id: "alpaca-broker-uuid-l13".to_string(),
-        quantity: 100,
+        quantity: QtyMicros::from_whole_units(100).unwrap(),
         limit_price: Some(150_000_000),
         time_in_force: "day".to_string(),
     };

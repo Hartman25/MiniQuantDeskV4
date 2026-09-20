@@ -38,8 +38,33 @@ where
         let claim_owner = claimed_row.row.claimed_by.clone();
         let claim = claimed_row.token;
         let symbol = req.symbol.clone();
-        let qty = req.quantity;
         let side = req.side;
+
+        // QTY-MICROS-PRODUCTION-CUTOVER-01: `BrokerSubmitRequest.quantity` is
+        // fractional-capable (QtyMicros) so Crypto orders can be built and
+        // submitted correctly. `OmsOrder`/`OmsEvent`/`BrokerEvent::delta_qty`
+        // remain whole-unit `i64` for this patch: their fill deltas are
+        // persisted verbatim to `oms_inbox` via `#[derive(Serialize)]`, and
+        // reinterpreting that already-persisted i64 as micro-units on the
+        // next OMS-recovery replay would silently misread every historical
+        // row by 1e6x. Widening that persisted envelope safely requires a
+        // schema-version-gated reader (see `mqk_db::inbox::MESSAGE_JSON_SCHEMA_VERSION`
+        // / `mqk_db::orders::ORDER_JSON_SCHEMA_VERSION`), which is out of
+        // scope here. Until that lands, this dispatcher fails closed on a
+        // fractional quantity rather than truncating it or risking a
+        // corrupted OMS/portfolio replay.
+        let Some(qty) = req.quantity.to_whole_units_checked() else {
+            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+            return Err(anyhow!(
+                "FRACTIONAL_QTY_DISPATCH_UNSUPPORTED: outbox row {} (order_id={}, qty={}) carries \
+                 a fractional quantity; OMS lifecycle tracking (OmsOrder/OmsEvent/BrokerEvent) is \
+                 whole-unit only pending oms_inbox schema-version-gated widening -- refusing \
+                 dispatch fail-closed rather than truncating or corrupting replay",
+                outbox_id,
+                order_id,
+                req.quantity
+            ));
+        };
 
         // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
         //

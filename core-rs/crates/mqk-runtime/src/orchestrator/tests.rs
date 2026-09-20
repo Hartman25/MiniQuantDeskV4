@@ -179,7 +179,7 @@ fn explicit_side_overrides_legacy_sign_in_submit_request_building() {
     };
     let req = build_submit_request(&row).expect("submit request must build");
     assert!(matches!(req.side, mqk_execution::Side::Buy));
-    assert_eq!(req.quantity, 100);
+    assert_eq!(req.quantity, mqk_execution::QtyMicros::from_whole_units(100).unwrap());
 }
 #[test]
 fn broker_event_to_fill_rejects_zero_qty() {
@@ -1991,7 +1991,7 @@ fn legacy_payload_without_side_uses_signed_quantity_compatibility_rule() {
         .expect("legacy signed-quantity payload must build");
 
     assert!(matches!(req.side, mqk_execution::Side::Sell));
-    assert_eq!(req.quantity, 25);
+    assert_eq!(req.quantity, mqk_execution::QtyMicros::from_whole_units(25).unwrap());
     assert_eq!(req.order_type, "market");
     assert_eq!(req.time_in_force, "day");
 }
@@ -2003,7 +2003,7 @@ fn legacy_payload_without_order_type_or_tif_uses_repo_backed_defaults() {
             .expect("legacy minimal payload must build with repo-backed defaults");
 
     assert!(matches!(req.side, mqk_execution::Side::Buy));
-    assert_eq!(req.quantity, 10);
+    assert_eq!(req.quantity, mqk_execution::QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(req.order_type, "market");
     assert_eq!(req.time_in_force, "day");
     assert_eq!(req.limit_price, None);

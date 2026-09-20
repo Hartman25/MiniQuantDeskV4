@@ -13,7 +13,7 @@
 //! - `summarize_ambiguous_outbox` — human-readable summary for quarantine errors.
 
 use anyhow::anyhow;
-use mqk_execution::{AssetClass, BrokerSubmitRequest};
+use mqk_execution::{AssetClass, BrokerSubmitRequest, QtyMicros};
 
 // ---------------------------------------------------------------------------
 // ClaimedOutboxRequest
@@ -72,12 +72,23 @@ pub(super) fn build_validated_submit_request(
     mqk_db::validate_order_json_schema_version(order_json)?;
     let symbol = validated_order_symbol(order_json)?;
     let quantity = validated_order_quantity(order_json)?;
-    let side = validated_order_side(order_json, quantity.signed_qty)?;
+    let side = validated_order_side(order_json, quantity.signed_qty, quantity.quantity)?;
     let order_type = validated_order_type(order_json)?;
     let time_in_force = validated_order_time_in_force(order_json)?;
     let limit_price = validated_limit_price_for_order_type(order_json, &order_type)?;
 
     let asset_class = validated_asset_class(order_json)?;
+
+    // Equity whole-share invariant (QTY-MICROS-PRODUCTION-CUTOVER-01):
+    // fractional quantity is only meaningful for asset classes that support
+    // it. Preserved explicitly here rather than left implicit, since the
+    // parser above no longer rejects a fractional decimal string outright.
+    if asset_class == AssetClass::Equity && !quantity.quantity.is_whole() {
+        return Err(anyhow!(
+            "invalid submit payload: Equity quantity {} must be a whole share count",
+            quantity.quantity
+        ));
+    }
 
     Ok(BrokerSubmitRequest {
         order_id: order_id.to_string(),
@@ -115,18 +126,34 @@ fn validated_order_symbol(order_json: &serde_json::Value) -> anyhow::Result<Stri
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ValidatedOrderQuantity {
+    /// Signed whole-unit share count, used only to derive side when the
+    /// payload omits an explicit `side` field. Equity-only legacy shape:
+    /// a fractional/crypto payload MUST carry an explicit `side` (enforced
+    /// in `validated_order_side`), so `signed_qty` is never consulted for it.
     pub(super) signed_qty: i64,
-    pub(super) quantity: i64,
+    /// Fractional-capable (QTY-MICROS-PRODUCTION-CUTOVER-01): always positive.
+    pub(super) quantity: QtyMicros,
 }
 
 fn validated_order_side(
     order_json: &serde_json::Value,
     signed_qty: i64,
+    effective_qty: QtyMicros,
 ) -> anyhow::Result<mqk_execution::Side> {
     // Compatibility rule restored from pre-EXE-01R submit building:
     // explicit side is authoritative; if absent, derive direction from the
     // legacy signed-quantity encoding already evidenced by local code/tests.
+    // QTY-MICROS-PRODUCTION-CUTOVER-01: that legacy inference only ever
+    // covered whole-unit (equity) payloads -- a fractional quantity has no
+    // whole-unit sign to report (`signed_qty` is always 0 for one) and must
+    // therefore carry an explicit `side`, fail-closed rather than silently
+    // defaulting to Sell.
     let Some(side_value) = order_json.get("side") else {
+        if !effective_qty.is_whole() {
+            return Err(anyhow!(
+                "invalid submit payload: side is required when quantity is fractional"
+            ));
+        }
         return if signed_qty > 0 {
             Ok(mqk_execution::Side::Buy)
         } else {
@@ -153,10 +180,10 @@ fn validated_order_side(
 fn validated_order_quantity(
     order_json: &serde_json::Value,
 ) -> anyhow::Result<ValidatedOrderQuantity> {
-    let signed_qty = match (order_json.get("qty"), order_json.get("quantity")) {
+    let signed = match (order_json.get("qty"), order_json.get("quantity")) {
         (Some(qty), Some(quantity)) => {
-            let qty = parse_signed_i64_field("qty", qty)?;
-            let quantity = parse_signed_i64_field("quantity", quantity)?;
+            let qty = parse_signed_qty_micros_field("qty", qty)?;
+            let quantity = parse_signed_qty_micros_field("quantity", quantity)?;
             if qty != quantity {
                 return Err(anyhow!(
                     "invalid submit payload: qty and quantity disagree (qty={}, quantity={})",
@@ -166,20 +193,27 @@ fn validated_order_quantity(
             }
             qty
         }
-        (Some(qty), None) => parse_signed_i64_field("qty", qty)?,
-        (None, Some(quantity)) => parse_signed_i64_field("quantity", quantity)?,
+        (Some(qty), None) => parse_signed_qty_micros_field("qty", qty)?,
+        (None, Some(quantity)) => parse_signed_qty_micros_field("quantity", quantity)?,
         (None, None) => return Err(anyhow!("invalid submit payload: quantity missing")),
     };
 
-    let effective_qty = signed_qty.checked_abs().ok_or_else(|| {
+    // Legacy whole-unit sign, preserved only to let `validated_order_side`
+    // infer direction when the payload omits an explicit `side` field
+    // (equity backward-compat shape). A fractional value has no whole-unit
+    // sign to report here -- 0 -- which forces `validated_order_side` to
+    // require an explicit `side` field instead of silently guessing.
+    let signed_qty = signed.to_whole_units_checked().unwrap_or(0);
+
+    let effective_qty = signed.checked_abs().ok_or_else(|| {
         anyhow!("invalid submit payload: quantity out of range for broker request")
     })?;
-    if effective_qty > i32::MAX as i64 {
+    if effective_qty.raw() > (i32::MAX as i64) * mqk_execution::QTY_MICROS_SCALE {
         return Err(anyhow!(
             "invalid submit payload: quantity out of range for broker request"
         ));
     }
-    if effective_qty == 0 {
+    if effective_qty.is_zero() {
         return Err(anyhow!(
             "invalid submit payload: effective quantity must be positive"
         ));
@@ -272,29 +306,47 @@ fn validated_limit_price_for_order_type(
 // Numeric field parsers
 // ---------------------------------------------------------------------------
 
-fn parse_signed_i64_field(name: &str, value: &serde_json::Value) -> anyhow::Result<i64> {
-    let parsed = match value {
-        serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
-            anyhow!(
-                "invalid submit payload: {} must be an integer without lossy conversion",
-                name
-            )
-        })?,
-        serde_json::Value::String(raw) => raw.trim().parse::<i64>().map_err(|_| {
-            anyhow!(
-                "invalid submit payload: {} must be an integer without lossy conversion",
-                name
-            )
-        })?,
-        _ => {
-            return Err(anyhow!(
-                "invalid submit payload: {} missing or not an integer-compatible value",
-                name
-            ))
+/// Fractional-capable quantity parser (QTY-MICROS-PRODUCTION-CUTOVER-01).
+///
+/// A JSON integer is treated as whole units (equity backward-compat: `10`
+/// means 10 shares). A JSON string is parsed as a canonical decimal via
+/// `QtyMicros::from_str`, accepting up to 6 fraction digits (e.g. `"0.5"`
+/// for half a BTC). A bare JSON float (has a fractional component but is
+/// still `serde_json::Value::Number`) is rejected outright rather than
+/// converted -- f64 cannot represent an arbitrary decimal exactly, and
+/// silently rounding a quantity would violate the no-unchecked-narrowing
+/// invariant for money-moving fields.
+fn parse_signed_qty_micros_field(name: &str, value: &serde_json::Value) -> anyhow::Result<QtyMicros> {
+    match value {
+        serde_json::Value::Number(number) => {
+            let whole = number.as_i64().ok_or_else(|| {
+                anyhow!(
+                    "invalid submit payload: {} must be a whole-unit integer, or a decimal \
+                     string for a fractional quantity -- a floating-point JSON number is \
+                     rejected to avoid silent precision loss",
+                    name
+                )
+            })?;
+            QtyMicros::from_whole_units(whole).ok_or_else(|| {
+                anyhow!(
+                    "invalid submit payload: {} out of range for broker request",
+                    name
+                )
+            })
         }
-    };
-
-    Ok(parsed)
+        serde_json::Value::String(raw) => {
+            raw.trim().parse::<QtyMicros>().map_err(|_| {
+                anyhow!(
+                    "invalid submit payload: {} must be an integer or a valid decimal-string quantity",
+                    name
+                )
+            })
+        }
+        _ => Err(anyhow!(
+            "invalid submit payload: {} missing or not an integer/decimal-string value",
+            name
+        )),
+    }
 }
 
 fn parse_positive_i64_field(name: &str, value: &serde_json::Value) -> anyhow::Result<i64> {
@@ -341,9 +393,22 @@ fn validated_asset_class(order_json: &serde_json::Value) -> anyhow::Result<Asset
 
     match cls.as_str() {
         "equity" => Ok(AssetClass::Equity),
+        // M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01 / M6: Crypto is accepted at
+        // the JSON-shape layer, but this does NOT grant execution capability
+        // by itself -- `BrokerGateway::submit_with_context` still consults
+        // `BrokerAdapter::supports_asset_class` before any gate or adapter
+        // call and refuses fail-closed (`GateRefusal::AssetClassDisabled`)
+        // for any configured broker that has not explicitly opted in
+        // (the Paper broker has not; `DaemonBroker::Alpaca` has). Other
+        // non-equity classes remain hard-disabled here: no adapter in this
+        // repository declares support for them yet, so surfacing that
+        // refusal earlier (at parse time, not gateway time) avoids
+        // needlessly claiming, dispatching, and marking outbox rows for
+        // asset classes that cannot possibly execute.
+        "crypto" => Ok(AssetClass::Crypto),
         // Non-equity asset classes are disabled. Explicit payload values must not
         // be silently converted to equity — reject so the caller quarantines the row.
-        "crypto" | "future" | "futures" | "option" | "options" | "forex" => Err(anyhow!(
+        "future" | "futures" | "option" | "options" | "forex" => Err(anyhow!(
             "invalid submit payload: asset_class '{}' is not enabled for execution",
             cls
         )),
@@ -378,7 +443,9 @@ pub(super) fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) ->
 //
 // O01  absent asset_class field → defaults to Equity (backward compat)
 // O02  explicit "equity" → Equity
-// O03  explicit "crypto" → parser Err, not panic
+// O03  explicit "crypto" → Crypto (M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01:
+//      JSON-shape acceptance only; BrokerGateway still gates execution
+//      capability per configured broker adapter)
 // O04  explicit "future" → parser Err
 // O05  explicit "futures" (alias) → parser Err
 // O06  explicit "option" → parser Err
@@ -386,7 +453,7 @@ pub(super) fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) ->
 // O08  explicit "forex" → parser Err
 // O09  unknown string → parser Err
 // O10  asset_class present but not a string → parser Err
-// O11  case-insensitive: "CRYPTO" → parser Err (same gate)
+// O11  case-insensitive: "CRYPTO" → Crypto (same gate as O03)
 // O12  production path: absent asset_class in a well-formed equity payload
 //      produces a valid BrokerSubmitRequest with asset_class=Equity
 #[cfg(test)]
@@ -424,11 +491,12 @@ mod disabled_asset_gate_tests {
         assert!(matches!(result, Ok(AssetClass::Equity)));
     }
 
-    // O03 — "crypto" rejects
+    // O03 — "crypto" is accepted at the JSON-shape layer
+    // (M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01 / M6).
     #[test]
-    fn o03_crypto_rejects() {
-        let err = validated_asset_class(&with_asset_class(json!("crypto"))).unwrap_err();
-        assert!(err.to_string().contains("not enabled"), "{err}");
+    fn o03_crypto_accepted() {
+        let result = validated_asset_class(&with_asset_class(json!("crypto")));
+        assert!(matches!(result, Ok(AssetClass::Crypto)), "{result:?}");
     }
 
     // O04 — "future" rejects
@@ -480,11 +548,11 @@ mod disabled_asset_gate_tests {
         assert!(err.to_string().contains("not a string"), "{err}");
     }
 
-    // O11 — case-insensitive: "CRYPTO" is caught by the same gate
+    // O11 — case-insensitive: "CRYPTO" is caught by the same gate as O03
     #[test]
-    fn o11_uppercase_crypto_rejects() {
-        let err = validated_asset_class(&with_asset_class(json!("CRYPTO"))).unwrap_err();
-        assert!(err.to_string().contains("not enabled"), "{err}");
+    fn o11_uppercase_crypto_accepted() {
+        let result = validated_asset_class(&with_asset_class(json!("CRYPTO")));
+        assert!(matches!(result, Ok(AssetClass::Crypto)), "{result:?}");
     }
 
     // O12 — full build_validated_submit_request: absent asset_class → Equity
@@ -494,6 +562,42 @@ mod disabled_asset_gate_tests {
             .expect("valid equity payload must parse successfully");
         assert_eq!(req.asset_class, AssetClass::Equity);
         assert_eq!(req.symbol, "AAPL");
-        assert_eq!(req.quantity, 10);
+        assert_eq!(req.quantity, QtyMicros::from_whole_units(10).unwrap());
+    }
+
+    // O13 — fractional decimal-string qty parses for Crypto and rejects
+    // implicit side inference (fail-closed: fractional payloads must carry
+    // an explicit side).
+    #[test]
+    fn o13_fractional_qty_requires_explicit_side() {
+        let mut payload = with_asset_class(json!("crypto"));
+        payload["qty"] = json!("0.5");
+        payload.as_object_mut().unwrap().remove("side");
+        let err = build_validated_submit_request("test-order-id", &payload).unwrap_err();
+        assert!(err.to_string().contains("side is required"), "{err}");
+    }
+
+    // O14 — fractional decimal-string qty with explicit side parses to the
+    // exact QtyMicros value (no precision loss).
+    #[test]
+    fn o14_fractional_qty_with_explicit_side_parses_exactly() {
+        let mut payload = with_asset_class(json!("crypto"));
+        payload["symbol"] = json!("BTCUSD");
+        payload["qty"] = json!("0.5");
+        let req = build_validated_submit_request("test-order-id", &payload)
+            .expect("valid fractional crypto payload must parse successfully");
+        assert_eq!(req.quantity, QtyMicros::new(500_000));
+        assert_eq!(req.asset_class, AssetClass::Crypto);
+    }
+
+    // O15 — a bare JSON float is rejected outright (precision-loss guard),
+    // even though it would otherwise represent the same value as O14.
+    #[test]
+    fn o15_float_json_number_qty_rejected() {
+        let mut payload = with_asset_class(json!("crypto"));
+        payload["symbol"] = json!("BTCUSD");
+        payload["qty"] = json!(0.5);
+        let err = build_validated_submit_request("test-order-id", &payload).unwrap_err();
+        assert!(err.to_string().contains("floating-point"), "{err}");
     }
 }

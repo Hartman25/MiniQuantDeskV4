@@ -142,7 +142,7 @@ fn submit_req() -> BrokerSubmitRequest {
         order_id: "ord-1".to_string(),
         symbol: "AAPL".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
@@ -275,7 +275,7 @@ fn all_gates_pass_replace_succeeds() {
     let res = make_gateway(true, true, true).replace(
         "ord-1",
         &registered_map(),
-        20,
+        mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
         None,
         "day".to_string(),
     );
@@ -285,7 +285,7 @@ fn all_gates_pass_replace_succeeds() {
 #[test]
 fn integrity_gate_blocks_replace() {
     let err = make_gateway(false, true, true)
-        .replace("ord-1", &empty_map(), 20, None, "day".to_string())
+        .replace("ord-1", &empty_map(), mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
         .unwrap_err();
     let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
     assert_eq!(*refusal, GateRefusal::IntegrityDisarmed);
@@ -294,7 +294,7 @@ fn integrity_gate_blocks_replace() {
 #[test]
 fn risk_gate_blocks_replace() {
     let err = make_gateway(true, false, true)
-        .replace("ord-1", &empty_map(), 20, None, "day".to_string())
+        .replace("ord-1", &empty_map(), mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
         .unwrap_err();
     let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
     assert!(matches!(*refusal, GateRefusal::RiskBlocked(_)));
@@ -303,7 +303,7 @@ fn risk_gate_blocks_replace() {
 #[test]
 fn reconcile_gate_blocks_replace() {
     let err = make_gateway(true, true, false)
-        .replace("ord-1", &empty_map(), 20, None, "day".to_string())
+        .replace("ord-1", &empty_map(), mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
         .unwrap_err();
     let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
     assert_eq!(*refusal, GateRefusal::ReconcileNotClean);

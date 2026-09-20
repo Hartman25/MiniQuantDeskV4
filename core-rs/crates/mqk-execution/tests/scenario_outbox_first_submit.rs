@@ -112,7 +112,7 @@ fn submit_uses_claim_idempotency_key_not_req_order_id() {
         order_id: "caller-key".to_string(), // must be overridden
         symbol: "AAPL".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 10,
+        quantity: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
@@ -137,7 +137,7 @@ fn submit_when_req_order_id_matches_claim_key_succeeds_unchanged() {
         order_id: "order-abc".to_string(),
         symbol: "MSFT".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 5,
+        quantity: mqk_execution::QtyMicros::from_whole_units(5).unwrap(),
         order_type: "limit".to_string(),
         limit_price: Some(300_000_000),
         time_in_force: "gtc".to_string(),
@@ -156,7 +156,7 @@ fn submit_other_fields_from_req_are_preserved() {
         order_id: "wrong".to_string(),
         symbol: "TSLA".to_string(),
         side: mqk_execution::Side::Buy,
-        quantity: 25,
+        quantity: mqk_execution::QtyMicros::from_whole_units(25).unwrap(),
         order_type: "limit".to_string(),
         limit_price: Some(200_000_000), // $200 in micros
         time_in_force: "ioc".to_string(),
@@ -184,6 +184,6 @@ fn cancel_still_uses_broker_order_map_after_eb3() {
 fn replace_still_uses_broker_order_map_after_eb3() {
     let map = registered_map("ord-1", "b-ord-1");
     assert!(all_clear()
-        .replace("ord-1", &map, 20, None, "day".to_string())
+        .replace("ord-1", &map, mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
         .is_ok());
 }

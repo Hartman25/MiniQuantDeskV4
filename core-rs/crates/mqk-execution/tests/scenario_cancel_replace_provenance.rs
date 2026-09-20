@@ -154,7 +154,7 @@ fn replace_registered_order_succeeds() {
     let mut map = BrokerOrderMap::new();
     map.register("ord-1", "b-ord-1");
     assert!(all_clear()
-        .replace("ord-1", &map, 20, None, "day".to_string())
+        .replace("ord-1", &map, mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
         .is_ok());
 }
 
@@ -162,7 +162,7 @@ fn replace_registered_order_succeeds() {
 fn replace_unknown_order_refused() {
     let map = BrokerOrderMap::new();
     let err = all_clear()
-        .replace("unknown-ord", &map, 20, None, "day".to_string())
+        .replace("unknown-ord", &map, mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
         .unwrap_err();
     let refused = err.downcast::<UnknownOrder>().expect("UnknownOrder");
     assert_eq!(refused.internal_id, "unknown-ord");
@@ -174,7 +174,7 @@ fn replace_deregistered_order_refused() {
     map.register("ord-2", "b-ord-2");
     map.deregister("ord-2");
     let err = all_clear()
-        .replace("ord-2", &map, 10, Some(100_000_000), "gtc".to_string())
+        .replace("ord-2", &map, mqk_execution::QtyMicros::from_whole_units(10).unwrap(), Some(100_000_000), "gtc".to_string())
         .unwrap_err();
     err.downcast::<UnknownOrder>()
         .expect("UnknownOrder — deregistered order must be refused");
@@ -198,7 +198,7 @@ fn gate_failure_before_map_lookup_on_cancel() {
 fn gate_failure_before_map_lookup_on_replace() {
     let map = BrokerOrderMap::new();
     let err = integrity_down()
-        .replace("ord-1", &map, 20, None, "day".to_string())
+        .replace("ord-1", &map, mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
         .unwrap_err();
     let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
     assert_eq!(*refusal, GateRefusal::IntegrityDisarmed);
