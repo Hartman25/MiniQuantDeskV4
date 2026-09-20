@@ -503,16 +503,22 @@ impl AlpacaBrokerAdapter {
 // ---------------------------------------------------------------------------
 impl BrokerAdapter for AlpacaBrokerAdapter {
     /// M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01 / M6: Alpaca is a real,
-    /// wired execution venue for both US equities and BTC/USD-class spot
-    /// crypto this wave. Every other asset class (`Option`, `Future`,
-    /// `Forex`) remains refused fail-closed via the trait default — this
-    /// adapter has no options/futures/forex order-construction, status, or
-    /// fill-normalization support, and must not silently accept them.
+    /// wired execution venue for US equities.
+    ///
+    /// IR-B1-03: Crypto capability is deliberately NOT advertised yet.
+    /// `BrokerAdapter::supports_asset_class` is the sole gating authority
+    /// for order submission (see `mqk_execution::gateway` /
+    /// `OrderRouter::broker_supports_asset_class`) — advertising Crypto
+    /// support here before this adapter has canonical BTC/USD symbol
+    /// mapping, min-quantity/increment validation, and fill/reconciliation
+    /// identity wired would let a real crypto order reach `submit_order`
+    /// through a broker-symbol/status/fill path never built or tested for
+    /// it. Every asset class other than `Equity` remains refused fail-closed
+    /// via the trait default. Flip Crypto to `true` here only in the
+    /// coherent Alpaca-crypto completion commit, once those production
+    /// seams exist and are proven by focused tests.
     fn supports_asset_class(&self, asset_class: mqk_execution::AssetClass) -> bool {
-        matches!(
-            asset_class,
-            mqk_execution::AssetClass::Equity | mqk_execution::AssetClass::Crypto
-        )
+        matches!(asset_class, mqk_execution::AssetClass::Equity)
     }
 
     /// Submit a new order to Alpaca.
@@ -880,10 +886,20 @@ mod supports_asset_class_tests {
     }
 
     #[test]
-    fn m5_equity_and_crypto_are_supported() {
+    fn m5_equity_is_supported() {
         let a = adapter();
         assert!(a.supports_asset_class(AssetClass::Equity));
-        assert!(a.supports_asset_class(AssetClass::Crypto));
+    }
+
+    /// IR-B1-03: Crypto must remain fail-closed/unsupported until the
+    /// coherent Alpaca-crypto completion commit wires canonical BTC/USD
+    /// symbol mapping, min-qty/increment validation, and fill/reconciliation
+    /// identity — advertising capability ahead of that implementation would
+    /// let a real order reach `submit_order` through an untested path.
+    #[test]
+    fn ir_b1_03_crypto_remains_unsupported_pending_alpaca_crypto_completion() {
+        let a = adapter();
+        assert!(!a.supports_asset_class(AssetClass::Crypto));
     }
 
     #[test]

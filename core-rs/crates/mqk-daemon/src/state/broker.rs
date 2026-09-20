@@ -46,7 +46,8 @@ impl BrokerAdapter for DaemonBroker {
     /// adapter's declared capability. This override is load-bearing, not
     /// cosmetic — without it, `DaemonBroker`'s own trait impl would fall
     /// back to `BrokerAdapter`'s Equity-only default and silently negate
-    /// `AlpacaBrokerAdapter::supports_asset_class`'s Crypto capability,
+    /// whatever capability the inner adapter declares (today: Alpaca is
+    /// Equity-only pending IR-B1-03 / the Alpaca-crypto completion commit),
     /// since `DaemonBroker` (not the inner adapter) is the concrete type
     /// `BrokerGateway<B, ..>` is instantiated with in the real daemon.
     fn supports_asset_class(&self, asset_class: mqk_execution::AssetClass) -> bool {
@@ -108,24 +109,29 @@ mod daemon_broker_capability_tests {
 
     /// M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01: proves `DaemonBroker`'s
     /// `supports_asset_class` override genuinely forwards to the wrapped
-    /// adapter rather than silently falling back to the trait's Equity-only
-    /// default — the specific defect this override exists to prevent.
+    /// adapter's declared capability set (today Equity-only for Alpaca,
+    /// pending IR-B1-03) rather than silently falling back to the trait's
+    /// Equity-only default for an unrelated reason — the specific defect
+    /// this override exists to prevent is masking the forwarding bug behind
+    /// a coincidentally-identical capability set, so this also proves the
+    /// non-Equity refusals forward correctly.
     #[test]
-    fn alpaca_variant_forwards_crypto_capability() {
+    fn alpaca_variant_forwards_declared_capability() {
         let broker = DaemonBroker::Alpaca(AlpacaBrokerAdapter::paper(
             "test-key".to_string(),
             "test-secret".to_string(),
         ));
         assert!(broker.supports_asset_class(AssetClass::Equity));
-        assert!(broker.supports_asset_class(AssetClass::Crypto));
+        // IR-B1-03: Alpaca does not yet advertise Crypto — see
+        // AlpacaBrokerAdapter::supports_asset_class.
+        assert!(!broker.supports_asset_class(AssetClass::Crypto));
         assert!(!broker.supports_asset_class(AssetClass::Future));
         assert!(!broker.supports_asset_class(AssetClass::Option));
         assert!(!broker.supports_asset_class(AssetClass::Forex));
     }
 
     /// LockedPaperBroker does not override the trait default; the Paper
-    /// variant must forward to that unchanged Equity-only behavior, not
-    /// grant it Alpaca's crypto capability.
+    /// variant must forward to that unchanged Equity-only behavior.
     #[test]
     fn paper_variant_stays_equity_only() {
         let broker = DaemonBroker::Paper(LockedPaperBroker::new());
