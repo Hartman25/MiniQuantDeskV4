@@ -6,6 +6,169 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -7. V4 Bulk Code Completion Wave A — M2 C4/C5/C6 Closure + M3 Bounded Census (2026-09-19, `V4-BULK-CODE-COMPLETION-STAGE-B-M2-01`)
+
+Continuation of §-6a's C1-C3 baseline. Scope: close the remaining M2 gap
+(C4/C5/C6, the R2B/R2C multi-binding completed-bar driver work §-5 explicitly
+deferred), then begin M3/M4/M5 CODE_MISSING/WIRING_MISSING implementation
+under an explicit CODE-COMPLETION-FIRST mandate (exhaustive
+regression/acceptance/operational proof deferred to a later verification
+wave). Commit `f93b3660`.
+
+**IR-3 status check (mission's own stated first task):** re-verified against
+repo truth before touching anything — already `CODE_CLOSED` per §-6a
+(disposition: ALREADY SAFE + PROVEN, test already committed at
+`7e06b03b`). No action needed; the mission's premise here was stale relative
+to this branch's own HEAD.
+
+**C4 (multi-binding resolution).** `resolve_effective_bindings`
+(`autonomous_completed_bar_driver.rs`) generalizes
+`resolve_single_effective_binding` to every configured assignment
+independently, instead of requiring exactly one. Scope decision, recorded
+honestly rather than silently narrowed: this process has exactly one active
+native-strategy engine (Tier A single-strategy policy —
+`mqk_runtime::native_strategy` module docs: "Multi-strategy fleet execution
+is deferred to a later patch," a frozen boundary this patch does not touch).
+An assignment whose `strategy_id` does not match that one engine resolves as
+a per-binding rejection (`StrategyEngineMismatch`), never a whole-config
+rejection — genuine multi-*symbol*, single-shared-strategy autonomous
+progression is now real; genuine multi-*strategy* concurrent dispatch
+through this specific autonomous path is not, and remains achievable only
+through the separate `DynamicSelectionHostPool` the interactive execution
+loop already uses.
+
+**C5 (fault isolation).** `tick_autonomous_completed_bar_driver_multi`
+classifies every binding's tick outcome via the frozen hybrid isolation
+policy (migration 0071) into healthy/local-fault/global-critical
+(`classify_binding_outcome_for_isolation`, exhaustive match, no wildcard),
+writing `sys_autonomous_daily_binding_state` per binding. Migration 0074
+adds one new closed reason (`binding_strategy_engine_not_active`) that
+0071's original five did not honestly cover.
+
+**C6 (wiring).** `autonomous_completed_bar_task.rs` routes a >1-symbol
+assignment config through the new multi-binding entrypoint (each binding
+resolving its own `provider_id` from the instrument registry); an
+exactly-one-symbol config keeps the original single-binding call
+byte-for-byte unchanged.
+
+**Proof:** full existing `scenario_autonomous_completed_bar_driver_01`
+(57/57, one new) and `scenario_autonomous_completed_bar_task_01` (47/47, 2
+DB-only ignored) suites pass unchanged; `cargo check -p mqk-db -p mqk-daemon
+--lib --tests` clean; `check_migration_governance.sh` all 3 checks pass.
+DB-backed `sys_autonomous_daily_binding_state` scenario suite and full
+daemon/db regression deferred to the verification wave per this mission's
+explicit mandate.
+
+**M2 status: CODE_MISSING = 0, WIRING_MISSING = 0** against the M2.1-M2.9
+requirement list (§-5/§-6a's census). M2 operational acceptance is still not
+claimed.
+
+**M3 bounded census (Concurrent Paper + Live Execution Domains) — audit
+before build, per this mission's own instruction.** Read
+`mode_transition.rs` (canonical, restart-only mode-transition state machine;
+hot switching is architecturally unsupported — every `DeploymentMode` is
+fixed for a daemon process's whole lifetime), `state/env.rs`
+(`deployment_mode_readiness`, per-mode/per-broker readiness, including an
+explicit `(LiveCapital, Paper-broker)` block), `state/lifecycle.rs`'s
+`LiveCapital` trust-chain gate (`TV-03`, fail-closed until parity proof
+completes — confirmed still fail-closed at this HEAD), and confirmed
+`deployment_mode` is already durable identity on
+`sys_autonomous_daily_operations` and `sys_paper_portfolio_snapshots` with
+explicit mismatch rejection (`paper_portfolio.rs`: "expected 'paper'").
+Combined with Paper and Live using physically separate databases
+(operationally enforced — Paper 5440 / Live 5432, per this mission's own
+protected-resource list) and separate broker base URLs per mode
+(`alpaca_base_url_for_mode`), the negative controls M3's contract requires
+("Paper cannot submit to Live," "Live cannot submit to Paper," "duplicate/
+replayed deployment identity cannot cross domains") are structurally
+satisfied by already-existing, already-committed architecture — not a
+dormant or partial seam requiring new code. No `CODE_MISSING`/
+`WIRING_MISSING` gap was found against the M3 finish-line contract's stated
+requirements. **No new production code was written for M3 in this session**
+— per the same principle §-5's M2 census applied ("if code is already
+complete, prove it; do not invent changes").
+
+**M3 status: CODE_MISSING = 0, WIRING_MISSING = 0** (bounded census, not an
+exhaustive audit — see caveat below). **TEST_MISSING:** a dedicated
+integrated negative-control proof (two daemon processes, Paper-mode and
+Live-shadow-mode, running concurrently against their real separate
+databases, with an explicit attempt to cross-submit/replay identity between
+them and observe the fail-closed refusal) has never been run and is not
+attempted here — this mission explicitly forbids enabling Live or any
+broker mutation this session, and exhaustive acceptance testing is deferred
+to the verification wave by mandate. This census is bounded (mirrors the
+Stage A/M2 historical-correction precedent: items not independently
+re-verified end-to-end should be treated as citation-unverified until that
+proof exists). M3 operational acceptance is not claimed.
+
+**M4 bounded census (US Equity/ETF Live Production).** Read
+`parity_evidence.rs` (parses/validates an external `parity_evidence.json`
+TV-03 artifact; `live_trust_complete` is surfaced honestly, never
+fabricated — every current build's artifact hardcodes it `false` because no
+real shadow-execution cycle has ever completed), `state/lifecycle.rs`'s
+LiveCapital-transition gate (fail-closed on `!live_trust_complete`,
+confirmed unchanged at this HEAD), `state/broker.rs::build_daemon_broker`
+(refuses `BrokerKind::Paper`/`LockedPaperBroker` outright as "not the
+canonical paper-trading execution path" — fail-closed against a broker that
+would accept orders with no real fills; `BrokerKind::Alpaca` selects
+`ALPACA_API_KEY_PAPER`/`ALPACA_API_SECRET_PAPER` for `Paper` vs
+`ALPACA_API_KEY_LIVE`/`ALPACA_API_SECRET_LIVE` for
+`LiveShadow`/`LiveCapital` — separate credential identity per domain, not a
+shared secret gated only by a flag), and `alpaca_base_url_for_mode`
+(`paper-api.alpaca.markets` vs `api.alpaca.markets`, refuses `Backtest`
+outright). The reconciliation/outbox/inbox/OMS-state-machine/restart-safety
+machinery this gate sits in front of is deployment-mode-agnostic by
+construction (the same Alpaca adapter code already runs continuously
+against the Paper endpoint) — M4's required proof surface (order/fill
+lifecycle, reconciliation, cancel, restart/recovery, disconnect/reconnect)
+is therefore already exercised in production against Alpaca Paper today;
+what remains before it can be *claimed* for Live is exclusively the
+economic/operational chain the finish line itself names as sequential and
+human-gated (accumulate real shadow-execution evidence -> `live_trust_complete=true`
+-> explicit operator Live authorization -> tiny-capital Live validation),
+never a missing code seam.
+
+**M4 status: CODE_MISSING = 0, WIRING_MISSING = 0** against everything this
+census actually read (bounded, not exhaustive). **OPERATIONAL_ONLY /
+BLOCKED (correctly, not fabricated):** `live_trust_complete=true` itself —
+requires a completed real shadow-execution cycle this session cannot and
+must not produce — and every step downstream of it (operator Live
+authorization, tiny-capital order, real Live fill/reconciliation proof).
+No code was written or changed for M4 in this session; no Live credential,
+broker, or capital action was taken or simulated.
+
+**M5 bounded census (Asset-Neutral Production Contracts).** `git log
+--grep=asset-core -i` shows the most recent asset-core/registry-v2 work
+(portfolio economics v2, multi-asset NAV aggregation, registry v2 status
+surfacing) predates this bulk-completion wave by roughly three months, with
+no work in between. Per this repository's own memory record, that lineage
+already closed CODE_LOCAL but left an explicit, *recorded operator
+decision* rather than an oversight: registry v1 remains the sole trading
+identity source of truth; registry v2 (and the portfolio-economics/NAV
+seams built on it) has zero production callers by design, pending a
+deliberate v1->v2 cutover this repository's own prior sessions declined to
+attempt without a dedicated verification budget of its own — the same
+category of risk this wave's own C4/C5/C6 investigation (§ above)
+independently rediscovered for a different subsystem. M5's own finish line
+explicitly warns against exactly the alternative: "the contract is proven
+sufficient by concrete later-asset requirements rather than speculative
+abstraction" — and no M6 (crypto) work has started, so no concrete
+non-equity requirement yet exists to prove any further generalization
+against. Building more asset-neutral surface now, with no live M6 consumer
+and no committed decision to cut equities over to it, would be exactly the
+speculative framework the frozen contract forbids.
+
+**M5 status: PARTIAL, unchanged from repo truth. Not a new
+`CODE_MISSING` finding** — the registry v1->v2 cutover is a known,
+previously-recorded `BLOCKED_OPERATOR_DECISION` (deferred pending its own
+dedicated session, not an omission of this wave), and no other concrete
+M5 gap was identified against the finish-line contract without inventing
+speculative scope. No code was written or changed for M5 in this session.
+
+No Paper/Live/runtime state modified; no push; `smoke_logs/` untouched.
+
+---
+
 ## -6a. Stage B M2 — C1/C2/C3 Consolidated Surgical Correction (2026-09-19, `V4-STAGE-B-M2-C1-C3-CORRECTION-02`)
 
 Independent review of §-6's C1/C2/C3 completion bundle found two deterministic,
