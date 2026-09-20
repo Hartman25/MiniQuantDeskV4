@@ -7,6 +7,7 @@ pub mod broker_error;
 mod engine;
 pub mod gateway;
 mod id_map;
+pub mod option_strategy_permission;
 mod order_router;
 mod prices;
 mod reconcile_guard;
@@ -35,6 +36,14 @@ pub use types::{
 pub use types::{
     equity_instrument, BracketLegs, ExecutionIntentV2, IntentV2Contract, IntentV2Routability,
     IntentV2Validation, OrderIntentV2,
+};
+
+// M8 (V4 frozen asset matrix): frozen options-permission-set structural
+// classifier. Model-only, like the V2 scaffold above — no execution, OMS,
+// or broker path constructs or submits an options order from this today.
+pub use option_strategy_permission::{
+    classify_option_strategy_structure, OptionLegSide, OptionStrategyRefusal,
+    OptionStrategyStructure, ProposedOptionLeg, ProposedOptionStrategy,
 };
 
 pub use asset_risk_policy::{
