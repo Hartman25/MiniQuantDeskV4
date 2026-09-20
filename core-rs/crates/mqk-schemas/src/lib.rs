@@ -341,9 +341,16 @@ impl std::str::FromStr for QtyMicros {
         if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
             return Err(err());
         }
-        let whole: i64 = int_part.parse().map_err(|_| err())?;
+        // IR-B1-04: `whole`/`frac_micros`/`magnitude` are computed in `u64`,
+        // not `i64`. `i64::MIN`'s magnitude (9_223_372_036_854_775_808) is
+        // exactly one past `i64::MAX` and has no positive `i64`
+        // representation — an `i64` intermediate would reject it even though
+        // `QtyMicros(i64::MIN)` is a valid value whose own `Display` output
+        // must round-trip. `u64` covers the full magnitude range for every
+        // representable `QtyMicros` (`i64::MIN..=i64::MAX`).
+        let whole: u64 = int_part.parse().map_err(|_| err())?;
 
-        let frac_micros: i64 = match frac_part {
+        let frac_micros: u64 = match frac_part {
             None => 0,
             Some(f) => {
                 if f.is_empty() || f.len() > 6 || !f.bytes().all(|b| b.is_ascii_digit()) {
@@ -357,12 +364,20 @@ impl std::str::FromStr for QtyMicros {
             }
         };
 
-        let magnitude = whole
-            .checked_mul(QTY_MICROS_SCALE)
+        let magnitude: u64 = whole
+            .checked_mul(QTY_MICROS_SCALE as u64)
             .and_then(|w| w.checked_add(frac_micros))
             .ok_or_else(err)?;
 
-        Ok(QtyMicros(if neg { -magnitude } else { magnitude }))
+        if neg {
+            if magnitude == i64::MIN.unsigned_abs() {
+                Ok(QtyMicros(i64::MIN))
+            } else {
+                i64::try_from(magnitude).map(|v| QtyMicros(-v)).map_err(|_| err())
+            }
+        } else {
+            i64::try_from(magnitude).map(QtyMicros).map_err(|_| err())
+        }
     }
 }
 
@@ -497,6 +512,51 @@ mod qty_micros_tests {
             let parsed = QtyMicros::from_str(&v.to_string()).expect("parses own display output");
             assert_eq!(parsed, v, "round-trip failed for raw={raw}");
         }
+    }
+
+    /// IR-B1-04: `Display -> FromStr` must round-trip exactly at every
+    /// representable boundary, including `i64::MIN`. `i64::MIN`'s magnitude
+    /// (9_223_372_036_854_775_808) has no positive `i64` representation, so
+    /// a parser whose intermediate arithmetic stays in `i64` fails closed on
+    /// its own `Display` output — that is the exact defect this proves
+    /// fixed (see the `u64`-intermediate rewrite of `FromStr`).
+    #[test]
+    fn from_str_round_trips_i64_extremes_and_micro_boundaries() {
+        for raw in [
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MAX,
+            i64::MAX - 1,
+            0,
+            1,
+            -1,
+            999_999,
+            -999_999,
+            123_456_789_012,
+            -123_456_789_012,
+        ] {
+            let v = QtyMicros::new(raw);
+            let rendered = v.to_string();
+            let parsed = QtyMicros::from_str(&rendered)
+                .unwrap_or_else(|e| panic!("failed to parse own Display output {rendered:?} for raw={raw}: {e}"));
+            assert_eq!(
+                parsed.raw(),
+                raw,
+                "round-trip must preserve the exact raw value for raw={raw} (rendered={rendered:?})"
+            );
+        }
+    }
+
+    /// IR-B1-04: values whose magnitude exceeds what any `i64` can hold on
+    /// either sign must still fail closed, not panic and not wrap — the
+    /// `u64` intermediate widens the representable range up to (and
+    /// including) `i64::MIN`'s magnitude, never past it.
+    #[test]
+    fn from_str_still_fails_closed_one_past_i64_min_magnitude() {
+        // i64::MIN magnitude is 9_223_372_036_854_775_808; one more than
+        // that has no QtyMicros representation on either sign.
+        assert!(QtyMicros::from_str("-9223372036854.775809").is_err());
+        assert!(QtyMicros::from_str("9223372036854.775808").is_err()); // positive side: max is i64::MAX
     }
 
     #[test]

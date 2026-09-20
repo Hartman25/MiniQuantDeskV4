@@ -1098,4 +1098,57 @@ mod decode_broker_event_tests {
         assert_eq!(ev_legacy.internal_order_id(), ev_current.internal_order_id());
         assert_eq!(ev_legacy.broker_order_id(), ev_current.broker_order_id());
     }
+
+    /// IR-B1-01: proves the ACTUAL production writer seam, not a hand-built
+    /// JSON fixture. `serde_json::to_value(&BrokerEvent::Fill { .. })` is
+    /// exactly what every production writer (alpaca_inbound, orchestrator
+    /// Phase 3, repair, ws_gap_recovery — see `mqk_db::inbox_insert_deduped_with_identity`'s
+    /// single-writer contract) calls before the row reaches
+    /// `stamp_message_json_schema_version` and `oms_inbox`. `QtyMicros`
+    /// derives `Serialize` as a plain tuple struct with one field, which
+    /// serde_json renders as a bare JSON integer (newtype-transparent) — not
+    /// an object, not a string. A current-schema writer therefore always
+    /// serializes raw `QtyMicros` micro-unit semantics under `delta_qty`,
+    /// never old whole-unit semantics, and `decode_broker_event` recovers
+    /// the exact original value (including a genuinely fractional Crypto
+    /// quantity) once the schema-version stamp is applied.
+    #[test]
+    fn db09_production_serialize_path_writes_raw_qty_micros_and_round_trips() {
+        let qty = QtyMicros::from_str("0.5").unwrap(); // 0.5 BTC — genuinely fractional
+        let event = BrokerEvent::Fill {
+            broker_message_id: "m9".to_string(),
+            broker_fill_id: None,
+            internal_order_id: "ord-9".to_string(),
+            broker_order_id: Some("b-9".to_string()),
+            symbol: "BTC/USD".to_string(),
+            side: crate::types::Side::Buy,
+            delta_qty: qty,
+            price_micros: 60_000_000_000,
+            fee_micros: 0,
+        };
+        let wire = serde_json::to_value(&event).expect("production serialize must succeed");
+        assert_eq!(
+            wire.get("delta_qty").and_then(|v| v.as_i64()),
+            Some(qty.raw()),
+            "QtyMicros must serialize as a bare integer equal to its raw micro-unit value, \
+             not an object or a whole-unit-rescaled number"
+        );
+
+        // Simulate the single writer seam: stamp the current schema version
+        // exactly as `mqk_db::inbox_insert_transport_only_deduped` does
+        // before the row is durably written.
+        let mut stamped = wire.clone();
+        stamped["schema_version"] = json!(mqk_db::MESSAGE_JSON_SCHEMA_VERSION);
+
+        let decoded = decode_broker_event(&stamped).expect("current-schema decode must succeed");
+        match decoded {
+            BrokerEvent::Fill { delta_qty, .. } => {
+                assert_eq!(
+                    delta_qty, qty,
+                    "current-schema writer round-trip must preserve the exact fractional quantity"
+                );
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
+    }
 }
