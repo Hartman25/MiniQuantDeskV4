@@ -20,7 +20,7 @@ use mqk_broker_alpaca::{
     normalize::{normalize_trade_update, NormalizeError},
     types::{AlpacaOrder, AlpacaTradeUpdate},
 };
-use mqk_execution::{BrokerEvent, Side};
+use mqk_execution::{BrokerEvent, QtyMicros, Side};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -299,7 +299,7 @@ fn c5_partial_fill_fields_buy() {
             side,
             ..
         } => {
-            assert_eq!(delta_qty, 40);
+            assert_eq!(delta_qty, QtyMicros::from_whole_units(40).unwrap());
             assert_eq!(price_micros, 150_500_000);
             assert_eq!(fee_micros, 0, "Alpaca does not carry per-trade fee data");
             assert!(matches!(side, Side::Buy));
@@ -326,7 +326,7 @@ fn c5_fill_fields_sell() {
             side,
             ..
         } => {
-            assert_eq!(delta_qty, 60);
+            assert_eq!(delta_qty, QtyMicros::from_whole_units(60).unwrap());
             assert_eq!(price_micros, 200_250_000);
             assert_eq!(fee_micros, 0);
             assert!(matches!(side, Side::Sell));
@@ -347,7 +347,7 @@ fn c5_decimal_qty_string_rounds_correctly() {
     let ev = normalize_trade_update(&u).unwrap();
     match ev {
         BrokerEvent::PartialFill { delta_qty, .. } => {
-            assert_eq!(delta_qty, 40, "decimal qty string must parse to 40");
+            assert_eq!(delta_qty, QtyMicros::from_whole_units(40).unwrap(), "decimal qty string must parse to 40");
         }
         other => panic!("expected PartialFill, got {other:?}"),
     }
@@ -366,7 +366,7 @@ fn c6_replace_ack_new_total_qty_from_order_qty() {
     let ev = normalize_trade_update(&u).unwrap();
     match ev {
         BrokerEvent::ReplaceAck { new_total_qty, .. } => {
-            assert_eq!(new_total_qty, 100, "new_total_qty must come from order.qty");
+            assert_eq!(new_total_qty, QtyMicros::from_whole_units(100).unwrap(), "new_total_qty must come from order.qty");
         }
         other => panic!("expected ReplaceAck, got {other:?}"),
     }

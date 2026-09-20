@@ -250,7 +250,7 @@ async fn place_and_fill(
         broker_order_id: Some(broker_order_id.clone()),
         symbol: symbol.to_string(),
         side,
-        delta_qty: qty,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
         price_micros,
         fee_micros: 0,
     };

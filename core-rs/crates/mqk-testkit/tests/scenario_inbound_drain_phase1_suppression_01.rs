@@ -50,7 +50,7 @@ use mqk_execution::oms::state_machine::OmsOrder;
 use mqk_execution::{
     BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
     BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
+    BrokerSubmitResponse, QtyMicros, IntegrityGate, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -455,7 +455,7 @@ async fn d08_phase3_still_applies_late_fill_during_drain() -> Result<()> {
     // drain (this orchestrator is never torn down mid-drain; only Phase 1 is
     // gated).
     let mut oms_orders = BTreeMap::new();
-    let mut order = OmsOrder::new(idem, "SPY", 1);
+    let mut order = OmsOrder::new(idem, "SPY", QtyMicros::from_whole_units(1).unwrap());
     let _ = order.apply(
         &mqk_execution::oms::state_machine::OmsEvent::Ack,
         Some("ack-evt"),

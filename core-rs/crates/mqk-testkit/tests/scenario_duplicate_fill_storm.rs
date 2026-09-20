@@ -4,7 +4,7 @@
 //! Many duplicate copies of the same fill event must collapse to one durable inbox row.
 
 use chrono::Utc;
-use mqk_execution::{BrokerEvent, Side};
+use mqk_execution::{BrokerEvent, QtyMicros, Side};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -67,7 +67,7 @@ async fn duplicate_events_remain_dedupe_safe_under_new_ordering() -> anyhow::Res
         broker_order_id: Some("broker-storm".to_string()),
         symbol: "QQQ".to_string(),
         side: Side::Buy,
-        delta_qty: 5,
+        delta_qty: QtyMicros::from_whole_units(5).unwrap(),
         price_micros: 400_000_000,
         fee_micros: 0,
         cum_qty_after: None,

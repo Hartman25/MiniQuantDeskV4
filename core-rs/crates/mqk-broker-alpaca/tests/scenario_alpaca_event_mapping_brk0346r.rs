@@ -55,7 +55,7 @@ use mqk_broker_alpaca::{
     types::{AlpacaFetchCursor, AlpacaTradeUpdatesResume},
     AlpacaWsMessage,
 };
-use mqk_execution::BrokerEvent;
+use mqk_execution::{BrokerEvent, QtyMicros};
 use serde_json::json;
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -339,7 +339,7 @@ fn brk05r_p1_replaced_produces_replace_ack_with_new_total_qty() {
             assert_eq!(internal_order_id, CLIENT_ID);
             assert_eq!(broker_order_id.as_deref(), Some(BROKER_ID));
             assert_eq!(
-                *new_total_qty, 200,
+                *new_total_qty, QtyMicros::from_whole_units(200).unwrap(),
                 "P1: new_total_qty comes from order.qty"
             );
         }
@@ -374,7 +374,7 @@ fn brk05r_p3_replace_ack_new_total_qty_from_order_qty_not_filled_qty() {
     // order.qty = 200, filled_qty = 0 → new_total_qty must be 200.
     let ev = ingest("replaced", None);
     if let BrokerEvent::ReplaceAck { new_total_qty, .. } = ev {
-        assert_eq!(new_total_qty, 200);
+        assert_eq!(new_total_qty, QtyMicros::from_whole_units(200).unwrap());
     } else {
         panic!("P3: expected ReplaceAck");
     }

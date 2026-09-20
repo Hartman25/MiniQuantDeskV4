@@ -329,7 +329,8 @@ impl BrokerAdapter for LockedPaperBroker {
                     broker_message_id: format!("replace:{}", oid),
                     internal_order_id: oid.clone(),
                     broker_order_id: Some(oid.clone()),
-                    new_total_qty,
+                    new_total_qty: mqk_execution::QtyMicros::from_whole_units(new_total_qty)
+                        .expect("paper replace quantity overflows QtyMicros"),
                 },
             ));
 

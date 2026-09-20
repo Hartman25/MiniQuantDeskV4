@@ -10,7 +10,7 @@ use chrono::Utc;
 use mqk_db::{InboxRow, OutboxRow};
 use mqk_execution::{
     oms::state_machine::{OmsOrder, OrderState},
-    BrokerOrderMap,
+    BrokerOrderMap, QtyMicros,
 };
 use mqk_portfolio::{Lot, PortfolioState, PositionState};
 use mqk_runtime::observability::{
@@ -56,7 +56,7 @@ fn b4_1_empty_oms_yields_no_active_orders() {
 #[test]
 fn b4_2_order_snapshot_includes_broker_id() {
     let mut oms = BTreeMap::new();
-    oms.insert("ord-1".to_string(), OmsOrder::new("ord-1", "AAPL", 100));
+    oms.insert("ord-1".to_string(), OmsOrder::new("ord-1", "AAPL", QtyMicros::from_whole_units(100).unwrap()));
     let mut map = BrokerOrderMap::new();
     map.register("ord-1", "broker-abc");
 
@@ -66,8 +66,8 @@ fn b4_2_order_snapshot_includes_broker_id() {
     assert_eq!(s.order_id, "ord-1");
     assert_eq!(s.broker_order_id.as_deref(), Some("broker-abc"));
     assert_eq!(s.symbol, "AAPL");
-    assert_eq!(s.total_qty, 100);
-    assert_eq!(s.filled_qty, 0);
+    assert_eq!(s.total_qty, QtyMicros::from_whole_units(100).unwrap());
+    assert_eq!(s.filled_qty, QtyMicros::from_whole_units(0).unwrap());
     assert_eq!(s.status, "Open");
 }
 
@@ -78,7 +78,7 @@ fn b4_2_order_snapshot_includes_broker_id() {
 #[test]
 fn b4_3_order_snapshot_no_broker_id_when_unregistered() {
     let mut oms = BTreeMap::new();
-    oms.insert("ord-2".to_string(), OmsOrder::new("ord-2", "MSFT", 50));
+    oms.insert("ord-2".to_string(), OmsOrder::new("ord-2", "MSFT", QtyMicros::from_whole_units(50).unwrap()));
     let map = BrokerOrderMap::new(); // empty — submit not yet confirmed
 
     let snaps = build_order_snapshots(&oms, &map);

@@ -371,8 +371,8 @@ fn exec_snapshot_with_active_order(order_id: &str) -> ExecutionSnapshot {
             order_id: order_id.to_string(),
             broker_order_id: None,
             symbol: "AAPL".to_string(),
-            total_qty: 1,
-            filled_qty: 0,
+            total_qty: mqk_execution::QtyMicros::from_whole_units(1).unwrap(),
+            filled_qty: mqk_execution::QtyMicros::from_whole_units(0).unwrap(),
             status: "Open".to_string(),
         });
     snap

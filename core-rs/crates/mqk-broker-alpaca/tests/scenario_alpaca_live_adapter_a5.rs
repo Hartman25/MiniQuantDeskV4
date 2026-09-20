@@ -326,7 +326,7 @@ fn l7_fill_activity_through_normalization_pipeline() {
                 broker_fill_id.as_deref(),
                 Some("20240615093000000::activity-l7")
             );
-            assert_eq!(delta_qty, 100);
+            assert_eq!(delta_qty, QtyMicros::from_whole_units(100).unwrap());
             assert_eq!(price_micros, 150_500_000);
             assert_eq!(fee_micros, 0, "Alpaca does not carry per-trade fee data");
         }
@@ -373,7 +373,7 @@ fn l8_partial_fill_activity_through_normalization_pipeline() {
                 broker_fill_id.as_deref(),
                 Some("20240615093100000::activity-l8")
             );
-            assert_eq!(delta_qty, 40);
+            assert_eq!(delta_qty, QtyMicros::from_whole_units(40).unwrap());
             assert_eq!(price_micros, 200_250_000);
         }
         _ => unreachable!(),

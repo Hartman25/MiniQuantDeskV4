@@ -64,8 +64,8 @@ pub(crate) async fn execution_order_timeline(
         .as_ref()
         .and_then(|o| o.broker_order_id.clone());
     let symbol = order_in_snapshot.as_ref().map(|o| o.symbol.clone());
-    let requested_qty = order_in_snapshot.as_ref().map(|o| o.total_qty);
-    let filled_qty = order_in_snapshot.as_ref().map(|o| o.filled_qty);
+    let requested_qty = order_in_snapshot.as_ref().and_then(|o| o.total_qty.to_whole_units_checked());
+    let filled_qty = order_in_snapshot.as_ref().and_then(|o| o.filled_qty.to_whole_units_checked());
     let current_status = order_in_snapshot.as_ref().map(|o| o.status.clone());
     let current_stage = current_status
         .as_deref()
@@ -265,8 +265,8 @@ pub(crate) async fn execution_order_trace(
         .as_ref()
         .and_then(|o| o.broker_order_id.clone());
     let symbol = order_in_snapshot.as_ref().map(|o| o.symbol.clone());
-    let requested_qty = order_in_snapshot.as_ref().map(|o| o.total_qty);
-    let filled_qty = order_in_snapshot.as_ref().map(|o| o.filled_qty);
+    let requested_qty = order_in_snapshot.as_ref().and_then(|o| o.total_qty.to_whole_units_checked());
+    let filled_qty = order_in_snapshot.as_ref().and_then(|o| o.filled_qty.to_whole_units_checked());
     let current_status = order_in_snapshot.as_ref().map(|o| o.status.clone());
     let current_stage = current_status
         .as_deref()
@@ -485,7 +485,7 @@ pub(crate) async fn execution_order_replay(
     });
 
     let symbol = order_in_snapshot.as_ref().map(|o| o.symbol.clone());
-    let requested_qty = order_in_snapshot.as_ref().map(|o| o.total_qty);
+    let requested_qty = order_in_snapshot.as_ref().and_then(|o| o.total_qty.to_whole_units_checked());
     let current_status = order_in_snapshot.as_ref().map(|o| o.status.clone());
 
     // Outbox status from the in-memory pending outbox window (idempotency_key == order_id).

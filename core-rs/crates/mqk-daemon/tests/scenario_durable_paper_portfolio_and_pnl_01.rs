@@ -182,7 +182,7 @@ async fn insert_full_fill(
         broker_order_id: None,
         symbol: symbol.to_string(),
         side,
-        delta_qty: qty,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
         price_micros,
         fee_micros,
     };
@@ -636,7 +636,7 @@ async fn proof_f_full_chain_and_restart_reconstructable_via_paper_lifecycle() {
         broker_order_id: None,
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        delta_qty: 10,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         price_micros: 150_000_000,
         fee_micros: 0,
     };

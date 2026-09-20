@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use mqk_execution::types::Side as ExecSide;
-use mqk_execution::BrokerEvent;
+use mqk_execution::{BrokerEvent, QtyMicros};
 
 /// Fill pricing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,7 +113,15 @@ impl DeterministicFillEngine {
         // require positive delta_qty (OMS rejects delta_qty <= 0 with TransitionError,
         // which the orchestrator treats as a halt condition). Sell and short-sell
         // fills carry side=Sell; buy and buy-to-cover fills carry side=Buy.
-        let delta_qty: i64 = fill_qty_abs;
+        //
+        // CUTOVER-1B-OMS-QTY-MICROS-01: PaperOrderState remains whole-unit
+        // i64 internally (this broker is Equity-only and never receives a
+        // fractional quantity via the broker-capability gate) but the
+        // canonical BrokerEvent wire type is QtyMicros; `.expect` here is a
+        // deliberate loud failure on an overflow that is not reachable under
+        // any realistic whole-share quantity, never a silent truncation.
+        let delta_qty: QtyMicros = QtyMicros::from_whole_units(fill_qty_abs)
+            .expect("paper fill quantity overflows QtyMicros");
 
         ord.fill_seq = ord.fill_seq.saturating_add(1);
         let broker_message_id = format!("paper:fill:{}:{}", ord.internal_order_id, ord.fill_seq);
@@ -164,8 +172,8 @@ mod tests {
         else {
             panic!("expected Fill");
         };
-        assert_eq!(*delta_qty, 50, "buy fill delta_qty must equal abs fill qty");
-        assert!(*delta_qty > 0, "buy fill delta_qty must be positive");
+        assert_eq!(*delta_qty, QtyMicros::from_whole_units(50).unwrap(), "buy fill delta_qty must equal abs fill qty");
+        assert!(delta_qty.is_positive(), "buy fill delta_qty must be positive");
         assert!(matches!(side, Side::Buy), "buy fill must carry side=Buy");
     }
 
@@ -186,11 +194,11 @@ mod tests {
             panic!("expected Fill");
         };
         assert_eq!(
-            *delta_qty, 50,
+            *delta_qty, QtyMicros::from_whole_units(50).unwrap(),
             "sell fill delta_qty must equal abs fill qty"
         );
         assert!(
-            *delta_qty > 0,
+            delta_qty.is_positive(),
             "sell fill delta_qty must be positive, not signed"
         );
         assert!(matches!(side, Side::Sell), "sell fill must carry side=Sell");
@@ -219,8 +227,8 @@ mod tests {
         else {
             panic!("expected Fill");
         };
-        assert_eq!(*delta_qty, 70, "fill must equal remaining_qty");
-        assert!(*delta_qty > 0, "partial sell delta_qty must be positive");
+        assert_eq!(*delta_qty, QtyMicros::from_whole_units(70).unwrap(), "fill must equal remaining_qty");
+        assert!(delta_qty.is_positive(), "partial sell delta_qty must be positive");
         assert!(matches!(side, Side::Sell));
     }
 
@@ -241,8 +249,8 @@ mod tests {
         else {
             panic!("expected Fill");
         };
-        assert_eq!(*delta_qty, 200);
-        assert!(*delta_qty > 0, "short sell delta_qty must be positive");
+        assert_eq!(*delta_qty, QtyMicros::from_whole_units(200).unwrap());
+        assert!(delta_qty.is_positive(), "short sell delta_qty must be positive");
         assert!(
             matches!(side, Side::Sell),
             "short sell must carry side=Sell"
@@ -265,8 +273,8 @@ mod tests {
         else {
             panic!("expected Fill");
         };
-        assert_eq!(*delta_qty, 200);
-        assert!(*delta_qty > 0, "cover fill delta_qty must be positive");
+        assert_eq!(*delta_qty, QtyMicros::from_whole_units(200).unwrap());
+        assert!(delta_qty.is_positive(), "cover fill delta_qty must be positive");
         assert!(matches!(side, Side::Buy), "cover fill must carry side=Buy");
     }
 
@@ -281,7 +289,7 @@ mod tests {
             for ev in &evs {
                 if let BrokerEvent::Fill { delta_qty, .. } = ev {
                     assert!(
-                        *delta_qty > 0,
+                        delta_qty.is_positive(),
                         "fill engine must never emit non-positive delta_qty; \
                          side={:?}, got delta_qty={}",
                         side,
@@ -306,7 +314,7 @@ mod tests {
         if let BrokerEvent::Fill { delta_qty, .. } = &evs[0] {
             // OMS guard in state_machine.rs: `if *delta_qty <= 0 { return Err(...) }`
             assert!(
-                *delta_qty > 0,
+                delta_qty.is_positive(),
                 "delta_qty={} would be rejected by the OMS positive-qty guard, \
                  triggering a HALT+DISARM",
                 delta_qty
@@ -334,7 +342,7 @@ mod tests {
                 "fill side must be Sell so portfolio routes to sell_fifo"
             );
             assert!(
-                *delta_qty > 0,
+                delta_qty.is_positive(),
                 "fill delta_qty must be positive so broker_event_to_fill does not drop it"
             );
         }
@@ -349,7 +357,7 @@ mod tests {
         let evs = engine.apply_bar_to_order(&bar, &mut ord);
         assert_eq!(evs.len(), 1);
         if let BrokerEvent::Fill { delta_qty, .. } = &evs[0] {
-            assert_eq!(*delta_qty, 33);
+            assert_eq!(*delta_qty, QtyMicros::from_whole_units(33).unwrap());
             assert_eq!(
                 ord.remaining_qty, 0,
                 "remaining_qty must be 0 after full fill"

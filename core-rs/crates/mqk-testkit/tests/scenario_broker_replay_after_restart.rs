@@ -13,7 +13,7 @@
 //! Run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-testkit
 
 use chrono::Utc;
-use mqk_execution::{BrokerEvent, Side};
+use mqk_execution::{BrokerEvent, QtyMicros, Side};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -76,7 +76,7 @@ async fn restart_replay_preserves_durable_apply_order() -> anyhow::Result<()> {
         broker_order_id: Some("broker-1".to_string()),
         symbol: "SPY".to_string(),
         side: Side::Buy,
-        delta_qty: 10,
+        delta_qty: QtyMicros::from_whole_units(10).unwrap(),
         price_micros: 500_000_000,
         fee_micros: 0,
     };

@@ -478,10 +478,10 @@ mod fc3c_canonical_replay_parity_tests {
                 broker_order_id: Some("broker-order-1".to_string()),
                 symbol: "AAPL".to_string(),
                 side: Side::Buy,
-                delta_qty: 2,
+                delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
                 price_micros: 100_000_000,
                 fee_micros: 0,
-                cum_qty_after: Some(2),
+                cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(2).unwrap()),
             };
             fixture_applied_event(
                 &pool,
@@ -501,7 +501,7 @@ mod fc3c_canonical_replay_parity_tests {
                 broker_order_id: Some("broker-order-1".to_string()),
                 symbol: "AAPL".to_string(),
                 side: Side::Buy,
-                delta_qty: 2,
+                delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
                 price_micros: 102_000_000,
                 fee_micros: 0,
             };

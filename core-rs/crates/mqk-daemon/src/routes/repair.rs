@@ -968,13 +968,17 @@ pub(crate) async fn repair_halted_run_fill_apply(
 
     // Gate 11: verify the inbox row's message_json deserializes as a BrokerEvent
     // fill variant â€” proves the data is structurally complete before any mutation.
-    let event_valid =
-        match serde_json::from_value::<mqk_execution::BrokerEvent>(fill_row.message_json.clone()) {
-            Ok(mqk_execution::BrokerEvent::Fill { .. })
-            | Ok(mqk_execution::BrokerEvent::PartialFill { .. }) => true,
-            Ok(_) => false,
-            Err(_) => false,
-        };
+    //
+    // CUTOVER-1B-OMS-QTY-MICROS-01: routes through the schema-version-gated
+    // decoder rather than a raw `serde_json::from_value` -- a direct
+    // deserialize cannot tell a legacy whole-unit row from a current
+    // QtyMicros row apart and would silently misinterpret one as the other.
+    let event_valid = match mqk_execution::decode_broker_event(&fill_row.message_json) {
+        Ok(mqk_execution::BrokerEvent::Fill { .. })
+        | Ok(mqk_execution::BrokerEvent::PartialFill { .. }) => true,
+        Ok(_) => false,
+        Err(_) => false,
+    };
 
     if !event_valid {
         let evidence = format!(

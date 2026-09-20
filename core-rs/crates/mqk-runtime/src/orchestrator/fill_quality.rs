@@ -80,9 +80,17 @@ pub(super) async fn build_fill_quality_row(
     };
 
     // Skip degenerate fill events — same guard as broker_event_to_fill.
-    if fill_qty <= 0 {
+    if !fill_qty.is_positive() {
         return None;
     }
+    // CUTOVER-1B-OMS-QTY-MICROS-01: `mqk_db::NewFillQualityTelemetry.fill_qty`
+    // remains whole-unit `i64` pending CUTOVER-1C. Unlike the portfolio apply
+    // path, this function is documented best-effort/non-fatal telemetry that
+    // gates no economic decision — skipping telemetry for a fractional
+    // Crypto fill (rather than erroring the whole tick) is safe here.
+    let Some(fill_qty) = fill_qty.to_whole_units_checked() else {
+        return None;
+    };
 
     // Best-effort outbox lookup to derive ordered_qty, reference_price, submit_ts.
     let (ordered_qty, reference_price_micros, submit_ts_utc) =

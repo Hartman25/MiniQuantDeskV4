@@ -45,7 +45,7 @@ mod db_tests {
     use mqk_execution::{
         BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerGateway,
         BrokerInvokeToken, BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse,
-        BrokerSubmitRequest, BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate, Side,
+        QtyMicros, BrokerSubmitRequest, BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate, Side,
     };
     use mqk_portfolio::PortfolioState;
     use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -302,7 +302,7 @@ mod db_tests {
             broker_order_id: Some(format!("broker-{idem}")),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty: 1,
+            delta_qty: QtyMicros::from_whole_units(1).unwrap(),
             price_micros: 297_940_000, // ~$297.94
             fee_micros: 0,
         };
@@ -495,7 +495,7 @@ mod db_tests {
                     broker_order_id: Some(broker_oid.clone()),
                     symbol: "AAPL".to_string(),
                     side: Side::Buy,
-                    delta_qty: 1,
+                    delta_qty: QtyMicros::from_whole_units(1).unwrap(),
                     price_micros: 297_940_000,
                     fee_micros: 0,
                 },
@@ -508,7 +508,7 @@ mod db_tests {
                 broker_order_id: Some(broker_oid.clone()),
                 symbol: "AAPL".to_string(),
                 side: Side::Buy,
-                delta_qty: 1,
+                delta_qty: QtyMicros::from_whole_units(1).unwrap(),
                 price_micros: 297_940_000,
                 fee_micros: 0,
             }],

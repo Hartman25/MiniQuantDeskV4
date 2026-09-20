@@ -13,7 +13,7 @@
 //!   wire boundary only; no f64 crosses the decision surface.
 use crate::types::AlpacaTradeUpdate;
 use chrono;
-use mqk_execution::{price_to_micros, BrokerEvent, Side};
+use mqk_execution::{price_to_micros, BrokerEvent, QtyMicros, Side};
 // ---------------------------------------------------------------------------
 // NormalizeError
 // ---------------------------------------------------------------------------
@@ -101,13 +101,35 @@ pub fn parse_alpaca_whole_share_qty(raw: &str) -> Result<i64, String> {
     Ok(v as i64)
 }
 
-/// Parse a decimal quantity string to a non-negative whole-share i64.
+/// Parse a decimal quantity string (Alpaca's wire format for order/fill
+/// quantities, shared by every fill-class `BrokerEvent` construction path in
+/// this crate: WS trade-update normalization here, and REST activity
+/// conversion in [`crate::fill_authority`]) to `QtyMicros`.
 ///
-/// Delegates to [`parse_alpaca_whole_share_qty`] — see that function for the
-/// canonical whole-share contract. Fails closed on fractional input rather
-/// than rounding.
-fn parse_qty(raw: &str, field: &'static str) -> Result<i64, NormalizeError> {
-    parse_alpaca_whole_share_qty(raw).map_err(|_| NormalizeError::InvalidQuantity {
+/// CUTOVER-1B-OMS-QTY-MICROS-01: fractional-capable, unlike
+/// [`parse_alpaca_whole_share_qty`] (which remains the whole-share-only
+/// parser used elsewhere for Equity order-level validation). A
+/// broker-native fractional Crypto quantity (e.g. `"0.5"` BTC) is accepted
+/// here, not rejected — this is the BrokerEvent construction path, which
+/// must represent both whole-share Equity and fractional Crypto fills.
+///
+/// Uses `QtyMicros::from_str`'s exact decimal parsing (no `f64` rounding)
+/// and explicitly refuses a negative value — `FromStr` alone accepts a
+/// leading `-` (needed for other quantity contexts), but a negative
+/// order/fill quantity is never valid on this wire.
+pub fn parse_alpaca_qty_micros(raw: &str) -> Result<QtyMicros, String> {
+    let qty: QtyMicros = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("parse_alpaca_qty_micros: not a valid quantity: {raw:?}"))?;
+    if qty.is_negative() {
+        return Err(format!("parse_alpaca_qty_micros: negative: {raw:?}"));
+    }
+    Ok(qty)
+}
+
+fn parse_qty(raw: &str, field: &'static str) -> Result<QtyMicros, NormalizeError> {
+    parse_alpaca_qty_micros(raw).map_err(|_| NormalizeError::InvalidQuantity {
         field,
         raw: raw.to_string(),
     })
@@ -313,6 +335,7 @@ pub fn alpaca_event_ts_ms_from_message_id(broker_message_id: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
     use crate::types::AlpacaOrder;
     fn order(id: &str, client_id: &str, symbol: &str, side: &str, qty: &str) -> AlpacaOrder {
         AlpacaOrder {
@@ -375,9 +398,14 @@ mod tests {
         ord.filled_qty = "30".to_string();
         let u = update("partial_fill", ord, Some("150.50"), Some("10"));
         let ev = normalize_trade_update(&u).unwrap();
-        assert_eq!(ev.cum_qty_after(), Some(30));
+        assert_eq!(
+            ev.cum_qty_after(),
+            Some(QtyMicros::from_whole_units(30).unwrap())
+        );
         match ev {
-            BrokerEvent::PartialFill { delta_qty, .. } => assert_eq!(delta_qty, 10),
+            BrokerEvent::PartialFill { delta_qty, .. } => {
+                assert_eq!(delta_qty, QtyMicros::from_whole_units(10).unwrap())
+            }
             other => panic!("expected PartialFill, got {other:?}"),
         }
     }
@@ -433,17 +461,23 @@ mod tests {
     }
 
     #[test]
-    fn fc4_partial_fill_fractional_filled_qty_fails_closed() {
-        // Regression guard: a fractional order.filled_qty must fail
-        // normalization closed, never round to a plausible-looking whole
-        // share nor degrade to cum_qty_after=None.
+    fn cutover_1b_partial_fill_fractional_filled_qty_now_accepted() {
+        // CUTOVER-1B-OMS-QTY-MICROS-01: superseded PAPER-SOAK-ALPACA-FILL-
+        // ECONOMIC-AUTHORITY-CLOSURE-01's whole-share-only rejection. This
+        // wire-level parser has no asset-class context (it serves both
+        // Equity and Crypto trade updates), so a fractional cumulative is
+        // now a legitimate value here -- not silently rounded, but exactly
+        // preserved as QtyMicros. An Equity-specific "reject a fractional
+        // fill for THIS asset class" invariant belongs at a layer that knows
+        // the order's asset class, not in this generic wire parser.
         let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
         ord.filled_qty = "30.5".to_string();
         let u = update("partial_fill", ord, Some("150.50"), Some("10"));
-        let err = normalize_trade_update(&u).unwrap_err();
-        assert!(
-            matches!(err, NormalizeError::InvalidQuantity { field, .. } if field == "order.filled_qty"),
-            "fractional order.filled_qty must fail normalization closed: {err:?}"
+        let ev = normalize_trade_update(&u).unwrap();
+        assert_eq!(
+            ev.cum_qty_after(),
+            Some(QtyMicros::from_str("30.5").unwrap()),
+            "fractional order.filled_qty must be preserved exactly, not rounded or rejected"
         );
     }
 
@@ -467,7 +501,7 @@ mod tests {
         let ev = normalize_trade_update(&u).unwrap();
         assert_eq!(
             ev.cum_qty_after(),
-            Some(10),
+            Some(QtyMicros::from_whole_units(10).unwrap()),
             "no valid Alpaca PartialFill may carry cum_qty_after=None"
         );
     }

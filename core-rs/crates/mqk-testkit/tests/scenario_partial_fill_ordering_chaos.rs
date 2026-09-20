@@ -5,7 +5,7 @@
 //! non-duplicated inbox set keyed by broker_message_id.
 
 use chrono::Utc;
-use mqk_execution::{BrokerEvent, Side};
+use mqk_execution::{BrokerEvent, QtyMicros, Side};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -69,7 +69,7 @@ async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Resu
             broker_order_id: Some("broker-chaos".to_string()),
             symbol: "IWM".to_string(),
             side: Side::Buy,
-            delta_qty: 3,
+            delta_qty: QtyMicros::from_whole_units(3).unwrap(),
             price_micros: 200_000_000,
             fee_micros: 0,
             cum_qty_after: None,
@@ -81,7 +81,7 @@ async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Resu
             broker_order_id: Some("broker-chaos".to_string()),
             symbol: "IWM".to_string(),
             side: Side::Buy,
-            delta_qty: 1,
+            delta_qty: QtyMicros::from_whole_units(1).unwrap(),
             price_micros: 198_000_000,
             fee_micros: 0,
             cum_qty_after: None,
@@ -93,7 +93,7 @@ async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Resu
             broker_order_id: Some("broker-chaos".to_string()),
             symbol: "IWM".to_string(),
             side: Side::Buy,
-            delta_qty: 2,
+            delta_qty: QtyMicros::from_whole_units(2).unwrap(),
             price_micros: 199_000_000,
             fee_micros: 0,
             cum_qty_after: None,

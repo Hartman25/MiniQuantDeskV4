@@ -15,6 +15,7 @@
 //! All tests are pure in-process; no DB or network required.
 
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder, OrderState};
+use mqk_execution::QtyMicros;
 
 // ---------------------------------------------------------------------------
 // 1. Partial fills then final fill
@@ -22,26 +23,26 @@ use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder, OrderState};
 
 #[test]
 fn three_partial_fills_then_final_fill_completes_order() {
-    let mut order = OmsOrder::new("ord-1", "SPY", 100);
+    let mut order = OmsOrder::new("ord-1", "SPY", QtyMicros::from_whole_units(100).unwrap());
 
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: 30 }, Some("f1"))
+        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("f1"))
         .unwrap();
     assert_eq!(order.state, OrderState::PartiallyFilled);
-    assert_eq!(order.filled_qty, 30);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(30).unwrap());
 
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f2"))
+        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f2"))
         .unwrap();
     assert_eq!(order.state, OrderState::PartiallyFilled);
-    assert_eq!(order.filled_qty, 70);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(70).unwrap());
 
     // Final fill for the remaining 30 lots.
     order
-        .apply(&OmsEvent::Fill { delta_qty: 30 }, Some("f3"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("f3"))
         .unwrap();
     assert_eq!(order.state, OrderState::Filled);
-    assert_eq!(order.filled_qty, 100);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(100).unwrap());
     assert!(order.state.is_terminal());
 }
 
@@ -51,29 +52,29 @@ fn three_partial_fills_then_final_fill_completes_order() {
 
 #[test]
 fn late_fill_on_filled_order_does_not_double_apply() {
-    let mut order = OmsOrder::new("ord-2", "AAPL", 50);
+    let mut order = OmsOrder::new("ord-2", "AAPL", QtyMicros::from_whole_units(50).unwrap());
 
     order
-        .apply(&OmsEvent::Fill { delta_qty: 50 }, Some("fill-1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("fill-1"))
         .unwrap();
     assert_eq!(order.state, OrderState::Filled);
-    assert_eq!(order.filled_qty, 50);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(50).unwrap());
 
     // Same event_id → idempotent by event_id dedup.
     order
-        .apply(&OmsEvent::Fill { delta_qty: 50 }, Some("fill-1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("fill-1"))
         .unwrap();
     assert_eq!(
-        order.filled_qty, 50,
+        order.filled_qty, QtyMicros::from_whole_units(50).unwrap(),
         "duplicate event_id must not re-apply the fill"
     );
 
     // Different event_id but state is Filled → idempotent by state (late fill no-op).
     order
-        .apply(&OmsEvent::Fill { delta_qty: 50 }, Some("fill-late"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("fill-late"))
         .unwrap();
     assert_eq!(
-        order.filled_qty, 50,
+        order.filled_qty, QtyMicros::from_whole_units(50).unwrap(),
         "late fill on already-Filled order must be a no-op"
     );
     assert_eq!(order.state, OrderState::Filled);
@@ -85,20 +86,20 @@ fn late_fill_on_filled_order_does_not_double_apply() {
 
 #[test]
 fn idempotent_replay_does_not_double_apply_partial_fill() {
-    let mut order = OmsOrder::new("ord-3", "QQQ", 100);
+    let mut order = OmsOrder::new("ord-3", "QQQ", QtyMicros::from_whole_units(100).unwrap());
 
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("ev-1"))
+        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("ev-1"))
         .unwrap();
-    assert_eq!(order.filled_qty, 40);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(40).unwrap());
     assert_eq!(order.state, OrderState::PartiallyFilled);
 
     // Replayed event with the SAME event_id — must be a silent no-op.
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("ev-1"))
+        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("ev-1"))
         .unwrap();
     assert_eq!(
-        order.filled_qty, 40,
+        order.filled_qty, QtyMicros::from_whole_units(40).unwrap(),
         "replayed event must not re-accumulate filled_qty"
     );
     assert_eq!(order.state, OrderState::PartiallyFilled);
@@ -106,12 +107,12 @@ fn idempotent_replay_does_not_double_apply_partial_fill() {
 
 #[test]
 fn idempotent_replay_across_multiple_events() {
-    let mut order = OmsOrder::new("ord-replay", "TSLA", 200);
+    let mut order = OmsOrder::new("ord-replay", "TSLA", QtyMicros::from_whole_units(200).unwrap());
 
     let events = vec![
-        (OmsEvent::PartialFill { delta_qty: 50 }, "e1"),
-        (OmsEvent::PartialFill { delta_qty: 50 }, "e2"),
-        (OmsEvent::Fill { delta_qty: 100 }, "e3"),
+        (OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, "e1"),
+        (OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, "e2"),
+        (OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, "e3"),
     ];
 
     // Apply once.
@@ -119,7 +120,7 @@ fn idempotent_replay_across_multiple_events() {
         order.apply(ev, Some(id)).unwrap();
     }
     assert_eq!(order.state, OrderState::Filled);
-    assert_eq!(order.filled_qty, 200);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(200).unwrap());
 
     // Replay all events — state and qty must be unchanged.
     for (ev, id) in &events {
@@ -127,7 +128,7 @@ fn idempotent_replay_across_multiple_events() {
     }
     assert_eq!(order.state, OrderState::Filled);
     assert_eq!(
-        order.filled_qty, 200,
+        order.filled_qty, QtyMicros::from_whole_units(200).unwrap(),
         "full replay must produce the same final state"
     );
 }
@@ -138,7 +139,7 @@ fn idempotent_replay_across_multiple_events() {
 
 #[test]
 fn replace_request_puts_order_in_replace_pending_not_confirmed() {
-    let mut order = OmsOrder::new("ord-4", "TSLA", 10);
+    let mut order = OmsOrder::new("ord-4", "TSLA", QtyMicros::from_whole_units(10).unwrap());
 
     // Application sends a replace request.
     order.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
@@ -151,7 +152,7 @@ fn replace_request_puts_order_in_replace_pending_not_confirmed() {
     // Broker acknowledges the replace — order is live again.
     // P1-03: ReplaceAck carries new_total_qty. Order has no fills, total=10.
     order
-        .apply(&OmsEvent::ReplaceAck { new_total_qty: 10 }, Some("r2"))
+        .apply(&OmsEvent::ReplaceAck { new_total_qty: QtyMicros::from_whole_units(10).unwrap() }, Some("r2"))
         .unwrap();
     assert_eq!(
         order.state,
@@ -162,11 +163,11 @@ fn replace_request_puts_order_in_replace_pending_not_confirmed() {
 
 #[test]
 fn replace_reject_restores_prior_live_state() {
-    let mut order = OmsOrder::new("ord-5", "NVDA", 20);
+    let mut order = OmsOrder::new("ord-5", "NVDA", QtyMicros::from_whole_units(20).unwrap());
 
     // Partial fill before the replace attempt.
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: 5 }, Some("f1"))
+        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(5).unwrap() }, Some("f1"))
         .unwrap();
     assert_eq!(order.state, OrderState::PartiallyFilled);
 
@@ -182,7 +183,7 @@ fn replace_reject_restores_prior_live_state() {
         "replace reject must restore PartiallyFilled when partial fills exist"
     );
     assert_eq!(
-        order.filled_qty, 5,
+        order.filled_qty, QtyMicros::from_whole_units(5).unwrap(),
         "filled_qty must be unchanged after replace reject"
     );
 }
@@ -193,19 +194,19 @@ fn replace_reject_restores_prior_live_state() {
 
 #[test]
 fn fill_during_replace_pending_completes_order() {
-    let mut order = OmsOrder::new("ord-6", "GLD", 50);
+    let mut order = OmsOrder::new("ord-6", "GLD", QtyMicros::from_whole_units(50).unwrap());
 
     order.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
     assert_eq!(order.state, OrderState::ReplacePending);
 
     // Fill arrives before replace is processed.
     order
-        .apply(&OmsEvent::Fill { delta_qty: 50 }, Some("f1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("f1"))
         .unwrap();
     assert_eq!(
         order.state,
         OrderState::Filled,
         "order must be Filled even when replace was pending"
     );
-    assert_eq!(order.filled_qty, 50);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(50).unwrap());
 }

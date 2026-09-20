@@ -3432,8 +3432,11 @@ pub struct ExecutionOrderRow {
     pub side: Option<String>,
     /// `null` — order type is not captured at OMS snapshot level.
     pub order_type: Option<String>,
-    pub requested_qty: i64,
-    pub filled_qty: i64,
+    /// CUTOVER-1B-OMS-QTY-MICROS-01: `None` for a fractional Crypto quantity
+    /// this legacy whole-unit view cannot represent -- never a truncated or
+    /// rescaled number. Always `Some` for Equity orders.
+    pub requested_qty: Option<i64>,
+    pub filled_qty: Option<i64>,
     /// Canonical OMS state: `"Open"` | `"PartiallyFilled"` | `"Filled"` |
     /// `"CancelPending"` | `"Cancelled"` | `"ReplacePending"` | `"Rejected"`
     pub current_status: String,

@@ -68,7 +68,12 @@ pub enum BrokerEvent {
         broker_order_id: Option<String>,
         symbol: String,
         side: crate::types::Side,
-        delta_qty: i64,
+        /// CUTOVER-1B-OMS-QTY-MICROS-01: fractional-capable. Wire
+        /// representation is schema-version-gated — see
+        /// [`decode_broker_event`]. Never construct this
+        /// variant directly from a raw JSON integer without routing through
+        /// that function.
+        delta_qty: QtyMicros,
         price_micros: i64,
         fee_micros: i64,
         /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02/04: broker-authoritative
@@ -103,7 +108,7 @@ pub enum BrokerEvent {
         /// ever means "no PARTIAL_FILL activity was in play," never
         /// "identity could not be proven."
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cum_qty_after: Option<i64>,
+        cum_qty_after: Option<QtyMicros>,
     },
     Fill {
         broker_message_id: String,
@@ -114,7 +119,8 @@ pub enum BrokerEvent {
         broker_order_id: Option<String>,
         symbol: String,
         side: crate::types::Side,
-        delta_qty: i64,
+        /// CUTOVER-1B-OMS-QTY-MICROS-01: see [`PartialFill::delta_qty`] doc.
+        delta_qty: QtyMicros,
         price_micros: i64,
         fee_micros: i64,
     },
@@ -139,7 +145,8 @@ pub enum BrokerEvent {
         /// Equals filled_qty_at_replace + new_open_leaves.
         /// Used by the OMS to update `OmsOrder::total_qty` so subsequent fills
         /// validate against the amended order size rather than the original.
-        new_total_qty: i64,
+        /// CUTOVER-1B-OMS-QTY-MICROS-01: fractional-capable.
+        new_total_qty: QtyMicros,
     },
     ReplaceReject {
         broker_message_id: String,
@@ -191,7 +198,7 @@ impl BrokerEvent {
     ///
     /// Only ever `Some` for `PartialFill`. See the field doc on
     /// `PartialFill::cum_qty_after` for the full contract.
-    pub fn cum_qty_after(&self) -> Option<i64> {
+    pub fn cum_qty_after(&self) -> Option<QtyMicros> {
         match self {
             Self::PartialFill { cum_qty_after, .. } => *cum_qty_after,
             _ => None,
@@ -306,6 +313,227 @@ impl BrokerEvent {
             | Self::Reject {
                 internal_order_id, ..
             } => internal_order_id.as_str(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CUTOVER-1B-OMS-QTY-MICROS-01: schema-version-gated BrokerEvent decode
+// ---------------------------------------------------------------------------
+
+/// Legacy (pre-CUTOVER-1B) wire shape for [`BrokerEvent`], whose quantity
+/// fields (`delta_qty`, `cum_qty_after`, `new_total_qty`) were raw
+/// whole-unit `i64` integers rather than [`QtyMicros`].
+///
+/// Used ONLY by [`decode_broker_event`] to decode an `oms_inbox` row whose
+/// `schema_version` classifies as
+/// [`mqk_db::QuantityUnitEpoch::LegacyWholeUnits`] (missing, or the named
+/// legacy version) — never for new writes, and never constructed directly
+/// by production code outside this module.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LegacyBrokerEventWire {
+    Ack {
+        broker_message_id: String,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+    },
+    PartialFill {
+        broker_message_id: String,
+        #[serde(default)]
+        broker_fill_id: Option<String>,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+        symbol: String,
+        side: crate::types::Side,
+        delta_qty: i64,
+        price_micros: i64,
+        fee_micros: i64,
+        #[serde(default)]
+        cum_qty_after: Option<i64>,
+    },
+    Fill {
+        broker_message_id: String,
+        #[serde(default)]
+        broker_fill_id: Option<String>,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+        symbol: String,
+        side: crate::types::Side,
+        delta_qty: i64,
+        price_micros: i64,
+        fee_micros: i64,
+    },
+    CancelAck {
+        broker_message_id: String,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+    },
+    CancelReject {
+        broker_message_id: String,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+    },
+    ReplaceAck {
+        broker_message_id: String,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+        new_total_qty: i64,
+    },
+    ReplaceReject {
+        broker_message_id: String,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+    },
+    Reject {
+        broker_message_id: String,
+        internal_order_id: String,
+        broker_order_id: Option<String>,
+    },
+}
+
+/// Upconvert a decoded legacy whole-unit event into the canonical
+/// `QtyMicros`-based [`BrokerEvent`]. Fails closed on overflow rather than
+/// wrapping or truncating (see `QtyMicros::from_whole_units`).
+impl TryFrom<LegacyBrokerEventWire> for BrokerEvent {
+    type Error = anyhow::Error;
+
+    fn try_from(legacy: LegacyBrokerEventWire) -> std::result::Result<Self, Self::Error> {
+        use anyhow::anyhow;
+        let whole = |raw: i64| -> std::result::Result<QtyMicros, Self::Error> {
+            QtyMicros::from_whole_units(raw)
+                .ok_or_else(|| anyhow!("legacy whole-unit quantity {raw} overflows QtyMicros"))
+        };
+        Ok(match legacy {
+            LegacyBrokerEventWire::Ack {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            } => BrokerEvent::Ack {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            },
+            LegacyBrokerEventWire::PartialFill {
+                broker_message_id,
+                broker_fill_id,
+                internal_order_id,
+                broker_order_id,
+                symbol,
+                side,
+                delta_qty,
+                price_micros,
+                fee_micros,
+                cum_qty_after,
+            } => BrokerEvent::PartialFill {
+                broker_message_id,
+                broker_fill_id,
+                internal_order_id,
+                broker_order_id,
+                symbol,
+                side,
+                delta_qty: whole(delta_qty)?,
+                price_micros,
+                fee_micros,
+                cum_qty_after: cum_qty_after.map(whole).transpose()?,
+            },
+            LegacyBrokerEventWire::Fill {
+                broker_message_id,
+                broker_fill_id,
+                internal_order_id,
+                broker_order_id,
+                symbol,
+                side,
+                delta_qty,
+                price_micros,
+                fee_micros,
+            } => BrokerEvent::Fill {
+                broker_message_id,
+                broker_fill_id,
+                internal_order_id,
+                broker_order_id,
+                symbol,
+                side,
+                delta_qty: whole(delta_qty)?,
+                price_micros,
+                fee_micros,
+            },
+            LegacyBrokerEventWire::CancelAck {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            } => BrokerEvent::CancelAck {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            },
+            LegacyBrokerEventWire::CancelReject {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            } => BrokerEvent::CancelReject {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            },
+            LegacyBrokerEventWire::ReplaceAck {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+                new_total_qty,
+            } => BrokerEvent::ReplaceAck {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+                new_total_qty: whole(new_total_qty)?,
+            },
+            LegacyBrokerEventWire::ReplaceReject {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            } => BrokerEvent::ReplaceReject {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            },
+            LegacyBrokerEventWire::Reject {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            } => BrokerEvent::Reject {
+                broker_message_id,
+                internal_order_id,
+                broker_order_id,
+            },
+        })
+    }
+}
+
+/// The single production entry point for decoding a durable `oms_inbox`
+/// `message_json` envelope into a [`BrokerEvent`].
+///
+/// Routes through `mqk_db`'s schema-version epoch classification
+/// ([`mqk_db::quantity_unit_epoch`]) before touching the quantity fields:
+/// - [`mqk_db::QuantityUnitEpoch::LegacyWholeUnits`]: decoded via
+///   [`LegacyBrokerEventWire`], then upconverted to `QtyMicros` by
+///   [`TryFrom`] above.
+/// - [`mqk_db::QuantityUnitEpoch::QtyMicros`]: decoded directly — the
+///   envelope's raw quantity integers already ARE `QtyMicros`.
+///
+/// Every caller that turns a durable `message_json` value into a
+/// `BrokerEvent` (crash-recovery replay, operator repair tooling) MUST route
+/// through this function rather than calling
+/// `serde_json::from_value::<BrokerEvent>` directly — a direct call cannot
+/// distinguish the two epochs and would silently misinterpret a historical
+/// whole-unit row as raw micros (or vice versa).
+pub fn decode_broker_event(message_json: &serde_json::Value) -> anyhow::Result<BrokerEvent> {
+    match mqk_db::quantity_unit_epoch(message_json)? {
+        mqk_db::QuantityUnitEpoch::LegacyWholeUnits => {
+            let legacy: LegacyBrokerEventWire = serde_json::from_value(message_json.clone())?;
+            BrokerEvent::try_from(legacy)
+        }
+        mqk_db::QuantityUnitEpoch::QtyMicros => {
+            Ok(serde_json::from_value(message_json.clone())?)
         }
     }
 }
@@ -641,7 +869,7 @@ mod tests {
             broker_order_id: Some("brk-1".to_string()),
             symbol: "AAPL".to_string(),
             side: crate::types::Side::Buy,
-            delta_qty: 1,
+            delta_qty: QtyMicros::from_whole_units(1).unwrap(),
             price_micros: 100_000_000,
             fee_micros: 0,
         };
@@ -664,7 +892,7 @@ mod tests {
             broker_order_id: Some("brk-1".to_string()),
             symbol: "AAPL".to_string(),
             side: crate::types::Side::Buy,
-            delta_qty: 1,
+            delta_qty: QtyMicros::from_whole_units(1).unwrap(),
             price_micros: 100_000_000,
             fee_micros: 0,
             cum_qty_after: None,
@@ -673,5 +901,201 @@ mod tests {
             ev.fill_identity_strength(),
             Some(FillIdentityStrength::WeakMessageDerived)
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CUTOVER-1B-OMS-QTY-MICROS-01: decode_broker_event compatibility tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod decode_broker_event_tests {
+    use super::*;
+    use serde_json::json;
+    use std::str::FromStr;
+
+    /// A legacy whole-unit fill event (no schema_version, as every row
+    /// persisted before CUTOVER-1A looked) decodes to the SAME economic
+    /// quantity it always represented — 3 shares, expressed as
+    /// QtyMicros::from_whole_units(3).
+    #[test]
+    fn db01_legacy_whole_unit_fill_decodes_identically_to_old_behavior() {
+        let legacy = json!({
+            "type": "fill",
+            "broker_message_id": "m1",
+            "broker_fill_id": null,
+            "internal_order_id": "ord-1",
+            "broker_order_id": "b-1",
+            "symbol": "AAPL",
+            "side": "Buy",
+            "delta_qty": 3,
+            "price_micros": 150_000_000,
+            "fee_micros": 0
+        });
+        let event = decode_broker_event(&legacy).unwrap();
+        match event {
+            BrokerEvent::Fill { delta_qty, .. } => {
+                assert_eq!(delta_qty, QtyMicros::from_whole_units(3).unwrap());
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
+    }
+
+    /// Explicit legacy schema_version=1 decodes identically to the missing
+    /// case.
+    #[test]
+    fn db02_explicit_legacy_version_one_decodes_as_whole_units() {
+        let legacy = json!({
+            "type": "partial_fill",
+            "broker_message_id": "m2",
+            "internal_order_id": "ord-2",
+            "broker_order_id": "b-2",
+            "symbol": "AAPL",
+            "side": "Sell",
+            "delta_qty": 5,
+            "price_micros": 100_000_000,
+            "fee_micros": 0,
+            "schema_version": mqk_db::LEGACY_WHOLE_UNIT_SCHEMA_VERSION
+        });
+        let event = decode_broker_event(&legacy).unwrap();
+        match event {
+            BrokerEvent::PartialFill { delta_qty, .. } => {
+                assert_eq!(delta_qty, QtyMicros::from_whole_units(5).unwrap());
+            }
+            other => panic!("expected PartialFill, got {other:?}"),
+        }
+    }
+
+    /// A new (current-schema) fractional Crypto fill round-trips exactly —
+    /// the raw JSON integer already IS the QtyMicros value.
+    #[test]
+    fn db03_new_qty_micros_event_round_trips_exactly() {
+        let half_btc = QtyMicros::from_str("0.5").unwrap();
+        let current = json!({
+            "type": "fill",
+            "broker_message_id": "m3",
+            "broker_fill_id": null,
+            "internal_order_id": "ord-3",
+            "broker_order_id": "b-3",
+            "symbol": "BTC/USD",
+            "side": "Buy",
+            "delta_qty": half_btc.raw(),
+            "price_micros": 60_000_000_000i64,
+            "fee_micros": 0,
+            "schema_version": mqk_db::MESSAGE_JSON_SCHEMA_VERSION
+        });
+        let event = decode_broker_event(&current).unwrap();
+        match event {
+            BrokerEvent::Fill { delta_qty, .. } => {
+                assert_eq!(delta_qty, half_btc);
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
+    }
+
+    /// An unknown/future schema_version refuses fail-closed rather than
+    /// guessing an interpretation.
+    #[test]
+    fn db04_unknown_schema_version_refuses() {
+        let future = json!({
+            "type": "ack",
+            "broker_message_id": "m4",
+            "internal_order_id": "ord-4",
+            "broker_order_id": null,
+            "schema_version": mqk_db::MESSAGE_JSON_SCHEMA_VERSION + 1
+        });
+        assert!(decode_broker_event(&future).is_err());
+    }
+
+    /// Central replay-safety proof: decoding the identical legacy durable row
+    /// twice (simulating a crash-recovery replay happening at a later point
+    /// in time, potentially in a future build) produces byte-identical
+    /// economic quantity both times -- the interpretation is a pure function
+    /// of the envelope, not of when/how many times it is decoded.
+    #[test]
+    fn db05_replay_of_old_durable_row_cannot_change_economic_quantity() {
+        let old_row = json!({
+            "type": "fill",
+            "broker_message_id": "m5",
+            "internal_order_id": "ord-5",
+            "broker_order_id": "b-5",
+            "symbol": "AAPL",
+            "side": "Buy",
+            "delta_qty": 7,
+            "price_micros": 100_000_000,
+            "fee_micros": 0
+        });
+        let first = decode_broker_event(&old_row).unwrap();
+        let second = decode_broker_event(&old_row).unwrap();
+        let extract = |ev: &BrokerEvent| match ev {
+            BrokerEvent::Fill { delta_qty, .. } => *delta_qty,
+            _ => panic!("expected Fill"),
+        };
+        assert_eq!(extract(&first), extract(&second));
+        assert_eq!(extract(&first), QtyMicros::from_whole_units(7).unwrap());
+    }
+
+    /// cum_qty_after on a legacy PartialFill is also upconverted correctly.
+    #[test]
+    fn db06_legacy_cum_qty_after_upconverts() {
+        let legacy = json!({
+            "type": "partial_fill",
+            "broker_message_id": "m6",
+            "internal_order_id": "ord-6",
+            "broker_order_id": "b-6",
+            "symbol": "AAPL",
+            "side": "Buy",
+            "delta_qty": 2,
+            "price_micros": 100_000_000,
+            "fee_micros": 0,
+            "cum_qty_after": 5
+        });
+        let event = decode_broker_event(&legacy).unwrap();
+        assert_eq!(
+            event.cum_qty_after(),
+            Some(QtyMicros::from_whole_units(5).unwrap())
+        );
+    }
+
+    /// ReplaceAck's new_total_qty is also upconverted on the legacy path.
+    #[test]
+    fn db07_legacy_replace_ack_new_total_qty_upconverts() {
+        let legacy = json!({
+            "type": "replace_ack",
+            "broker_message_id": "m7",
+            "internal_order_id": "ord-7",
+            "broker_order_id": "b-7",
+            "new_total_qty": 65
+        });
+        let event = decode_broker_event(&legacy).unwrap();
+        match event {
+            BrokerEvent::ReplaceAck { new_total_qty, .. } => {
+                assert_eq!(new_total_qty, QtyMicros::from_whole_units(65).unwrap());
+            }
+            other => panic!("expected ReplaceAck, got {other:?}"),
+        }
+    }
+
+    /// Non-quantity-bearing events (Ack) decode identically regardless of
+    /// epoch, proving the legacy/current split does not disturb events with
+    /// no quantity fields to reinterpret.
+    #[test]
+    fn db08_non_quantity_event_decodes_the_same_in_both_epochs() {
+        let legacy = json!({
+            "type": "ack",
+            "broker_message_id": "m8",
+            "internal_order_id": "ord-8",
+            "broker_order_id": "b-8"
+        });
+        let current = json!({
+            "type": "ack",
+            "broker_message_id": "m8",
+            "internal_order_id": "ord-8",
+            "broker_order_id": "b-8",
+            "schema_version": mqk_db::MESSAGE_JSON_SCHEMA_VERSION
+        });
+        let ev_legacy = decode_broker_event(&legacy).unwrap();
+        let ev_current = decode_broker_event(&current).unwrap();
+        assert_eq!(ev_legacy.internal_order_id(), ev_current.internal_order_id());
+        assert_eq!(ev_legacy.broker_order_id(), ev_current.broker_order_id());
     }
 }

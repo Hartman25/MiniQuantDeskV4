@@ -80,6 +80,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder, OrderState};
+use mqk_execution::QtyMicros;
 use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, Side, MICROS_SCALE};
 use serde_json::json;
 use uuid::Uuid;
@@ -100,7 +101,9 @@ fn oms_apply_fill(
     broker_message_id: &str,
 ) -> bool {
     let economic_event_id = broker_fill_id.unwrap_or(broker_message_id);
-    let event = OmsEvent::Fill { delta_qty };
+    let event = OmsEvent::Fill {
+        delta_qty: QtyMicros::from_whole_units(delta_qty).unwrap(),
+    };
     let pre_qty = order.filled_qty;
     let _ = order.apply(&event, Some(economic_event_id));
     order.filled_qty != pre_qty
@@ -114,7 +117,9 @@ fn oms_apply_partial_fill(
     broker_message_id: &str,
 ) -> bool {
     let economic_event_id = broker_fill_id.unwrap_or(broker_message_id);
-    let event = OmsEvent::PartialFill { delta_qty };
+    let event = OmsEvent::PartialFill {
+        delta_qty: QtyMicros::from_whole_units(delta_qty).unwrap(),
+    };
     let pre_qty = order.filled_qty;
     let _ = order.apply(&event, Some(economic_event_id));
     order.filled_qty != pre_qty
@@ -130,7 +135,7 @@ fn oms_apply_partial_fill(
 /// After WS fill: Filled, qty=1.  After REST fill: state guard, pre_qty==filled_qty.
 #[test]
 fn fdp01_ws_fill_then_rest_fill_applies_exactly_once() {
-    let mut order = OmsOrder::new("ord-ws-rest-01", "AAPL", 1);
+    let mut order = OmsOrder::new("ord-ws-rest-01", "AAPL", QtyMicros::from_whole_units(1).unwrap());
 
     let ws_advanced = oms_apply_fill(
         &mut order,
@@ -145,7 +150,7 @@ fn fdp01_ws_fill_then_rest_fill_applies_exactly_once() {
         "FDP01: order must be Filled after WS fill"
     );
     assert_eq!(
-        order.filled_qty, 1,
+        order.filled_qty, QtyMicros::from_whole_units(1).unwrap(),
         "FDP01: filled_qty must be 1 after WS fill"
     );
 
@@ -161,7 +166,7 @@ fn fdp01_ws_fill_then_rest_fill_applies_exactly_once() {
         "FDP01: REST fill must be a no-op (OMS Filled guard)"
     );
     assert_eq!(
-        order.filled_qty, 1,
+        order.filled_qty, QtyMicros::from_whole_units(1).unwrap(),
         "FDP01: filled_qty must remain 1 after duplicate REST fill"
     );
 }
@@ -172,7 +177,7 @@ fn fdp01_ws_fill_then_rest_fill_applies_exactly_once() {
 
 #[test]
 fn fdp02_rest_fill_then_ws_fill_applies_exactly_once() {
-    let mut order = OmsOrder::new("ord-rest-ws-02", "AAPL", 1);
+    let mut order = OmsOrder::new("ord-rest-ws-02", "AAPL", QtyMicros::from_whole_units(1).unwrap());
 
     let rest_advanced = oms_apply_fill(
         &mut order,
@@ -182,7 +187,7 @@ fn fdp02_rest_fill_then_ws_fill_applies_exactly_once() {
     );
     assert!(rest_advanced, "FDP02: REST fill must advance OMS fill qty");
     assert_eq!(order.state, OrderState::Filled);
-    assert_eq!(order.filled_qty, 1);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(1).unwrap());
 
     let ws_advanced = oms_apply_fill(
         &mut order,
@@ -194,7 +199,7 @@ fn fdp02_rest_fill_then_ws_fill_applies_exactly_once() {
         !ws_advanced,
         "FDP02: WS fill must be a no-op when order already Filled"
     );
-    assert_eq!(order.filled_qty, 1, "FDP02: filled_qty must remain 1");
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(1).unwrap(), "FDP02: filled_qty must remain 1");
 }
 
 // ---------------------------------------------------------------------------
@@ -203,11 +208,11 @@ fn fdp02_rest_fill_then_ws_fill_applies_exactly_once() {
 
 #[test]
 fn fdp03_duplicate_rest_fill_same_fill_id_is_idempotent() {
-    let mut order = OmsOrder::new("ord-dup-rest-03", "AAPL", 1);
+    let mut order = OmsOrder::new("ord-dup-rest-03", "AAPL", QtyMicros::from_whole_units(1).unwrap());
 
     let first = oms_apply_fill(&mut order, 1, Some("exec-id-03"), "rest-msg-03-a");
     assert!(first, "FDP03: first REST fill must apply");
-    assert_eq!(order.filled_qty, 1);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(1).unwrap());
 
     // Same broker_fill_id → applied_event_ids check fires before do_transition.
     let second = oms_apply_fill(&mut order, 1, Some("exec-id-03"), "rest-msg-03-b");
@@ -216,7 +221,7 @@ fn fdp03_duplicate_rest_fill_same_fill_id_is_idempotent() {
         "FDP03: duplicate REST fill with same fill_id must be no-op"
     );
     assert_eq!(
-        order.filled_qty, 1,
+        order.filled_qty, QtyMicros::from_whole_units(1).unwrap(),
         "FDP03: filled_qty must not change on duplicate"
     );
 }
@@ -227,11 +232,11 @@ fn fdp03_duplicate_rest_fill_same_fill_id_is_idempotent() {
 
 #[test]
 fn fdp04_two_distinct_partial_fills_both_apply() {
-    let mut order = OmsOrder::new("ord-partial-04", "AAPL", 5);
+    let mut order = OmsOrder::new("ord-partial-04", "AAPL", QtyMicros::from_whole_units(5).unwrap());
 
     let first = oms_apply_partial_fill(&mut order, 3, Some("exec-pf-04-a"), "ws-msg-04-a");
     assert!(first, "FDP04: first partial fill must apply");
-    assert_eq!(order.filled_qty, 3);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(3).unwrap());
     assert_eq!(order.state, OrderState::PartiallyFilled);
 
     let second = oms_apply_partial_fill(&mut order, 2, Some("exec-pf-04-b"), "ws-msg-04-b");
@@ -239,7 +244,7 @@ fn fdp04_two_distinct_partial_fills_both_apply() {
         second,
         "FDP04: second distinct partial fill must also apply"
     );
-    assert_eq!(order.filled_qty, 5, "FDP04: both partials must accumulate");
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(5).unwrap(), "FDP04: both partials must accumulate");
     // PartialFill events transition to PartiallyFilled regardless of whether
     // filled_qty == total_qty; only a final Fill event transitions to Filled.
     assert_eq!(order.state, OrderState::PartiallyFilled);
@@ -251,16 +256,16 @@ fn fdp04_two_distinct_partial_fills_both_apply() {
 
 #[test]
 fn fdp05_fills_for_different_order_ids_are_independent() {
-    let mut order_a = OmsOrder::new("ord-a-05", "AAPL", 1);
-    let mut order_b = OmsOrder::new("ord-b-05", "MSFT", 1);
+    let mut order_a = OmsOrder::new("ord-a-05", "AAPL", QtyMicros::from_whole_units(1).unwrap());
+    let mut order_b = OmsOrder::new("ord-b-05", "MSFT", QtyMicros::from_whole_units(1).unwrap());
 
     let a = oms_apply_fill(&mut order_a, 1, Some("exec-a-05"), "msg-a-05");
     let b = oms_apply_fill(&mut order_b, 1, Some("exec-b-05"), "msg-b-05");
 
     assert!(a, "FDP05: order-A fill must apply");
     assert!(b, "FDP05: order-B fill must apply independently");
-    assert_eq!(order_a.filled_qty, 1);
-    assert_eq!(order_b.filled_qty, 1);
+    assert_eq!(order_a.filled_qty, QtyMicros::from_whole_units(1).unwrap());
+    assert_eq!(order_b.filled_qty, QtyMicros::from_whole_units(1).unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -529,7 +534,7 @@ fn fdp08_recovery_dedup_prevents_double_portfolio_apply() {
         },
     ];
 
-    let mut order = OmsOrder::new("fdp08-order", "AAPL", 1);
+    let mut order = OmsOrder::new("fdp08-order", "AAPL", QtyMicros::from_whole_units(1).unwrap());
     let mut portfolio = PortfolioState::new(initial_equity);
 
     // Replay using the FIXED recovery logic:
@@ -538,7 +543,7 @@ fn fdp08_recovery_dedup_prevents_double_portfolio_apply() {
     for row in &rows {
         let economic_event_id = row.broker_fill_id.unwrap_or(row.broker_message_id);
         let pre_qty = order.filled_qty;
-        let _ = order.apply(&OmsEvent::Fill { delta_qty: 1 }, Some(economic_event_id));
+        let _ = order.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(1).unwrap() }, Some(economic_event_id));
         let oms_advanced = order.filled_qty != pre_qty;
 
         if oms_advanced {
@@ -566,7 +571,7 @@ fn fdp08_recovery_dedup_prevents_double_portfolio_apply() {
         OrderState::Filled,
         "FDP08: order must be Filled"
     );
-    assert_eq!(order.filled_qty, 1, "FDP08: filled_qty must be 1, not 2");
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(1).unwrap(), "FDP08: filled_qty must be 1, not 2");
 }
 
 // ---------------------------------------------------------------------------
@@ -594,11 +599,14 @@ fn partial_fill_payload(delta_qty: i64, price_micros: i64) -> serde_json::Value 
 fn partial_fill_payload_with_watermark(
     delta_qty: i64,
     price_micros: i64,
-    cum_qty_after: Option<i64>,
+    cum_qty_after: Option<QtyMicros>,
 ) -> serde_json::Value {
     let mut payload = partial_fill_payload(delta_qty, price_micros);
     if let Some(v) = cum_qty_after {
-        payload["cum_qty_after"] = json!(v);
+        let whole = v
+            .to_whole_units_checked()
+            .expect("test fixture cum_qty_after must be a whole share count");
+        payload["cum_qty_after"] = json!(whole);
     }
     payload
 }
@@ -632,17 +640,23 @@ fn replay_rows_with_watermark(
     internal_order_id: &str,
     total_qty: i64,
 ) -> OmsOrder {
-    let mut order = OmsOrder::new(internal_order_id, "AAPL", total_qty);
+    let mut order = OmsOrder::new(
+        internal_order_id,
+        "AAPL",
+        QtyMicros::from_whole_units(total_qty).unwrap(),
+    );
     for row in rows {
         let delta_qty = row
             .message_json
             .get("delta_qty")
             .and_then(|v| v.as_i64())
+            .map(|w| QtyMicros::from_whole_units(w).unwrap())
             .expect("delta_qty present");
         let cum_qty_after = row
             .message_json
             .get("cum_qty_after")
-            .and_then(|v| v.as_i64());
+            .and_then(|v| v.as_i64())
+            .map(|w| QtyMicros::from_whole_units(w).unwrap());
         let economic_event_id = row
             .broker_fill_id
             .as_deref()
@@ -680,7 +694,7 @@ async fn fdp09_db2_ws_partial_fill_then_rest_duplicate_applies_once() -> Result<
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(6).unwrap()));
 
     let ws_inserted = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
@@ -727,7 +741,7 @@ async fn fdp09_db2_ws_partial_fill_then_rest_duplicate_applies_once() -> Result<
     let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
     let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
     assert_eq!(
-        order.filled_qty, 6,
+        order.filled_qty, QtyMicros::from_whole_units(6).unwrap(),
         "FDP09_DB2: replaying both durable rows must apply exactly once (filled_qty=6, not 12)"
     );
 
@@ -754,7 +768,7 @@ async fn fdp10_db2_rest_partial_fill_then_ws_duplicate_applies_once() -> Result<
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(6).unwrap()));
 
     let rest_inserted = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
@@ -801,7 +815,7 @@ async fn fdp10_db2_rest_partial_fill_then_ws_duplicate_applies_once() -> Result<
     let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
     let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
     assert_eq!(
-        order.filled_qty, 6,
+        order.filled_qty, QtyMicros::from_whole_units(6).unwrap(),
         "FDP10_DB2: REST-then-WS duplicate must still apply exactly once"
     );
 
@@ -830,7 +844,7 @@ async fn fdp11_db2_same_lane_retry_is_rejected() -> Result<()> {
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(6).unwrap()));
     let msg_id = "alpaca:uuid-fdp11:partial_fill:2026-05-20T14:41:52.674479Z";
 
     let first = mqk_db::inbox_insert_deduped_with_identity(
@@ -904,7 +918,7 @@ async fn fdp12_db2_two_legitimate_same_qty_price_fills_less_than_3s_apart_both_a
         internal_order_id,
         "alpaca-broker-fdp12",
         "partial_fill",
-        &partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6)),
+        &partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(6).unwrap())),
         1_748_706_112_000,
         Utc::now(),
     )
@@ -922,7 +936,7 @@ async fn fdp12_db2_two_legitimate_same_qty_price_fills_less_than_3s_apart_both_a
         internal_order_id,
         "alpaca-broker-fdp12",
         "partial_fill",
-        &partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(12)),
+        &partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(12).unwrap())),
         1_748_706_112_700,
         Utc::now(),
     )
@@ -942,7 +956,7 @@ async fn fdp12_db2_two_legitimate_same_qty_price_fills_less_than_3s_apart_both_a
     let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
     let order = replay_rows_with_watermark(&rows, internal_order_id, 20);
     assert_eq!(
-        order.filled_qty, 12,
+        order.filled_qty, QtyMicros::from_whole_units(12).unwrap(),
         "FDP12_DB2: both legitimate 6-share fills must be reflected (6+6=12), \
          not collapsed to 6"
     );
@@ -978,7 +992,7 @@ async fn fdp13_db2_distinct_qty_partial_fills_both_apply() -> Result<()> {
         internal_order_id,
         "alpaca-broker-fdp13",
         "partial_fill",
-        &partial_fill_payload_with_watermark(3, AAPL_PRICE, Some(3)),
+        &partial_fill_payload_with_watermark(3, AAPL_PRICE, Some(QtyMicros::from_whole_units(3).unwrap())),
         1_748_706_112_000,
         Utc::now(),
     )
@@ -993,7 +1007,7 @@ async fn fdp13_db2_distinct_qty_partial_fills_both_apply() -> Result<()> {
         internal_order_id,
         "alpaca-broker-fdp13",
         "partial_fill",
-        &partial_fill_payload_with_watermark(2, AAPL_PRICE, Some(5)),
+        &partial_fill_payload_with_watermark(2, AAPL_PRICE, Some(QtyMicros::from_whole_units(5).unwrap())),
         1_748_706_112_500,
         Utc::now(),
     )
@@ -1011,7 +1025,7 @@ async fn fdp13_db2_distinct_qty_partial_fills_both_apply() -> Result<()> {
 
     let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
     let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
-    assert_eq!(order.filled_qty, 5, "FDP13_DB2: 3+2=5 must both apply");
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(5).unwrap(), "FDP13_DB2: 3+2=5 must both apply");
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
@@ -1039,7 +1053,7 @@ async fn fdp14_db2_partial_dup_plus_terminal_fill_yields_correct_total() -> Resu
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let partial_payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
+    let partial_payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(6).unwrap()));
 
     // WS partial fill: 6 of 10.
     mqk_db::inbox_insert_deduped_with_identity(
@@ -1103,7 +1117,7 @@ async fn fdp14_db2_partial_dup_plus_terminal_fill_yields_correct_total() -> Resu
     let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
 
     assert_eq!(
-        order.filled_qty, 10,
+        order.filled_qty, QtyMicros::from_whole_units(10).unwrap(),
         "FDP14_DB2: cumulative filled_qty must be exactly 10 (6 + 4), not 16 (double-counted 6)"
     );
     assert_eq!(
@@ -1138,7 +1152,7 @@ async fn fdp15_db2_restart_replay_of_unapplied_duplicate_is_noop() -> Result<()>
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(6).unwrap()));
     let ws_msg_id = "alpaca:uuid-fdp15:partial_fill:2026-05-20T14:41:52.174478594Z";
 
     mqk_db::inbox_insert_deduped_with_identity(
@@ -1199,7 +1213,7 @@ async fn fdp15_db2_restart_replay_of_unapplied_duplicate_is_noop() -> Result<()>
     let order = replay_rows_with_watermark(&all_rows, internal_order_id, 10);
 
     assert_eq!(
-        order.filled_qty, 6,
+        order.filled_qty, QtyMicros::from_whole_units(6).unwrap(),
         "FDP15_DB2: restart replay of the unapplied REST duplicate must be a no-op (filled_qty=6, not 12)"
     );
 
@@ -1232,7 +1246,7 @@ async fn fdp16_db2_concurrent_ws_rest_duplicate_insert_then_apply_once() -> Resu
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(QtyMicros::from_whole_units(6).unwrap()));
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
 
     let pool_ws = pool.clone();
@@ -1294,7 +1308,7 @@ async fn fdp16_db2_concurrent_ws_rest_duplicate_insert_then_apply_once() -> Resu
     let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
     let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
     assert_eq!(
-        order.filled_qty, 6,
+        order.filled_qty, QtyMicros::from_whole_units(6).unwrap(),
         "FDP16_DB2: replaying the raced insert result must still apply exactly once"
     );
 
@@ -1315,12 +1329,12 @@ async fn fdp16_db2_concurrent_ws_rest_duplicate_insert_then_apply_once() -> Resu
 /// -01's bug and -02's fix both ultimately live or die on.
 #[test]
 fn fdp17_neg_without_watermark_the_cross_lane_duplicate_double_applies() {
-    let ws_delta = 6;
-    let rest_delta = 6; // same physical fill, so REST reports the same delta
+    let ws_delta = QtyMicros::from_whole_units(6).unwrap();
+    let rest_delta = QtyMicros::from_whole_units(6).unwrap(); // same physical fill, so REST reports the same delta
     let ws_event_id: Option<&str> = None; // WS never carries broker_fill_id
     let rest_event_id = Some("20260520104152674::fdp17-exec"); // REST does
 
-    let mut order = OmsOrder::new("fdp17-order-aapl", "AAPL", 20);
+    let mut order = OmsOrder::new("fdp17-order-aapl", "AAPL", QtyMicros::from_whole_units(20).unwrap());
 
     // WS delivery.
     let _ = order.apply(
@@ -1329,7 +1343,7 @@ fn fdp17_neg_without_watermark_the_cross_lane_duplicate_double_applies() {
         },
         ws_event_id.or(Some("alpaca:uuid-fdp17:partial_fill:ws")),
     );
-    assert_eq!(order.filled_qty, 6);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(6).unwrap());
 
     // REST redelivery of the SAME physical fill: different message_id AND
     // different economic_event_id (broker_fill_id vs broker_message_id) —
@@ -1342,7 +1356,7 @@ fn fdp17_neg_without_watermark_the_cross_lane_duplicate_double_applies() {
     );
 
     assert_eq!(
-        order.filled_qty, 12,
+        order.filled_qty, QtyMicros::from_whole_units(12).unwrap(),
         "FDP17_NEG: without the cum_qty_after watermark, the cross-lane duplicate DOES \
          double-apply (6+6=12) — this is the exact -01 bug reproduced, proving \
          apply_with_watermark (not incidental test setup) is what FDP09_DB2/FDP10_DB2 rely on"

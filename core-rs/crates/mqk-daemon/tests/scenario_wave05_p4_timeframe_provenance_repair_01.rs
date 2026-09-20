@@ -288,7 +288,7 @@ async fn submit_and_fill(
             broker_order_id: Some(bo.clone()),
             symbol: symbol.to_string(),
             side: broker_side,
-            delta_qty: qty,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
             price_micros,
             fee_micros: 0,
         };

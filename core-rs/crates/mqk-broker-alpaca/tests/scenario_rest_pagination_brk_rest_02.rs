@@ -69,7 +69,7 @@ use mqk_broker_alpaca::{
     AlpacaBrokerAdapter, AlpacaConfig, FILL_ACTIVITIES_PAGE_SIZE,
 };
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
-use mqk_execution::{BrokerAdapter, BrokerError, BrokerEvent, BrokerInvokeToken};
+use mqk_execution::{BrokerAdapter, BrokerError, BrokerEvent, BrokerInvokeToken, QtyMicros};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
@@ -689,7 +689,7 @@ fn p06_single_partial_fill_cum_qty_after_is_activitys_own_cum_qty() {
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].cum_qty_after(),
-        Some(10),
+        Some(QtyMicros::from_whole_units(10).unwrap()),
         "P06: cum_qty_after must be the activity's own broker-native cum_qty"
     );
 }
@@ -744,22 +744,28 @@ fn p07_two_partial_fills_same_order_same_page_each_keep_own_cum_qty() {
     assert_eq!(events.len(), 2);
     assert_eq!(
         events[0].cum_qty_after(),
-        Some(10),
+        Some(QtyMicros::from_whole_units(10).unwrap()),
         "P07: first activity keeps its own cum_qty (10)"
     );
     assert_eq!(
         events[1].cum_qty_after(),
-        Some(25),
+        Some(QtyMicros::from_whole_units(25).unwrap()),
         "P07: second activity keeps its own cum_qty (25)"
     );
-    let deltas: Vec<i64> = events
+    let deltas: Vec<QtyMicros> = events
         .iter()
         .map(|e| match e {
             mqk_execution::BrokerEvent::PartialFill { delta_qty, .. } => *delta_qty,
             other => panic!("expected PartialFill, got {other:?}"),
         })
         .collect();
-    assert_eq!(deltas, vec![10, 15]);
+    assert_eq!(
+        deltas,
+        vec![
+            QtyMicros::from_whole_units(10).unwrap(),
+            QtyMicros::from_whole_units(15).unwrap()
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -823,11 +829,11 @@ fn p08_mixed_partial_fill_and_terminal_fill_same_page_each_activity_stays_indepe
             cum_qty_after,
             ..
         } => {
-            assert_eq!(*delta_qty, 10);
+            assert_eq!(*delta_qty, QtyMicros::from_whole_units(10).unwrap());
             assert_eq!(*price_micros, 150_000_000);
             assert_eq!(
                 *cum_qty_after,
-                Some(10),
+                Some(QtyMicros::from_whole_units(10).unwrap()),
                 "P08: PARTIAL_FILL's cum_qty_after is its own activity's cum_qty (10), \
                  structurally independent of the adjacent terminal FILL's quantity"
             );
@@ -840,7 +846,7 @@ fn p08_mixed_partial_fill_and_terminal_fill_same_page_each_activity_stays_indepe
             price_micros,
             ..
         } => {
-            assert_eq!(*delta_qty, 10);
+            assert_eq!(*delta_qty, QtyMicros::from_whole_units(10).unwrap());
             assert_eq!(*price_micros, 102_000_000);
         }
         other => panic!("expected Fill, got {other:?}"),
@@ -900,15 +906,15 @@ fn p09_two_partials_plus_terminal_fill_same_page_all_independent() {
         .expect("P09: two partials plus terminal fill must succeed");
 
     assert_eq!(events.len(), 3);
-    assert_eq!(events[0].cum_qty_after(), Some(5));
-    assert_eq!(events[1].cum_qty_after(), Some(10));
+    assert_eq!(events[0].cum_qty_after(), Some(QtyMicros::from_whole_units(5).unwrap()));
+    assert_eq!(events[1].cum_qty_after(), Some(QtyMicros::from_whole_units(10).unwrap()));
     assert_eq!(
         events[2].cum_qty_after(),
         None,
         "P09: Fill events never carry cum_qty_after"
     );
     match &events[2] {
-        mqk_execution::BrokerEvent::Fill { delta_qty, .. } => assert_eq!(*delta_qty, 10),
+        mqk_execution::BrokerEvent::Fill { delta_qty, .. } => assert_eq!(*delta_qty, QtyMicros::from_whole_units(10).unwrap()),
         other => panic!("expected Fill, got {other:?}"),
     }
 }
@@ -1013,12 +1019,12 @@ fn p11_same_price_same_qty_partials_distinguished_by_cum_qty_both_apply() {
     assert_eq!(events.len(), 2);
     assert_eq!(
         events[0].cum_qty_after(),
-        Some(10),
+        Some(QtyMicros::from_whole_units(10).unwrap()),
         "P11: first activity's cum_qty is its own value even though price/qty match the second"
     );
     assert_eq!(
         events[1].cum_qty_after(),
-        Some(20),
+        Some(QtyMicros::from_whole_units(20).unwrap()),
         "P11: second activity's cum_qty distinguishes it from the first"
     );
     for e in &events {
@@ -1028,7 +1034,7 @@ fn p11_same_price_same_qty_partials_distinguished_by_cum_qty_both_apply() {
                 price_micros,
                 ..
             } => {
-                assert_eq!(*delta_qty, 10);
+                assert_eq!(*delta_qty, QtyMicros::from_whole_units(10).unwrap());
                 assert_eq!(*price_micros, 150_000_000);
             }
             other => panic!("P11: expected PartialFill, got {other:?}"),
@@ -1208,19 +1214,19 @@ fn a04_1_pre_bracket_race_no_longer_double_applies_same_physical_fill() {
         .expect("A04-1: fetch_events must succeed");
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].cum_qty_after(), Some(10));
+    assert_eq!(events[0].cum_qty_after(), Some(QtyMicros::from_whole_units(10).unwrap()));
 
     // Simulate the WS lane having already applied this exact physical fill
     // under a different transport event_id.
-    let mut order = OmsOrder::new("order-a04-1", "AAPL", 20);
+    let mut order = OmsOrder::new("order-a04-1", "AAPL", QtyMicros::from_whole_units(20).unwrap());
     order
         .apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: 10 },
+            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
             Some("ws-msg-a04-1"),
-            Some(10),
+            Some(QtyMicros::from_whole_units(10).unwrap()),
         )
         .unwrap();
-    assert_eq!(order.filled_qty, 10);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(10).unwrap());
 
     let (delta_qty, rest_cum_qty_after) = match &events[0] {
         BrokerEvent::PartialFill {
@@ -1239,7 +1245,7 @@ fn a04_1_pre_bracket_race_no_longer_double_applies_same_physical_fill() {
         .unwrap();
 
     assert_eq!(
-        order.filled_qty, 10,
+        order.filled_qty, QtyMicros::from_whole_units(10).unwrap(),
         "A04-1: the REST redelivery of the same physical fill must be recognized \
          as a duplicate; final economics must show exactly one 10-share application, \
          never 20"
@@ -1314,7 +1320,7 @@ fn a04_2_cross_page_contamination_no_longer_shifts_page1_identity() {
     assert_eq!(events.len(), FILL_ACTIVITIES_PAGE_SIZE + 1);
     assert_eq!(
         events[0].cum_qty_after(),
-        Some(1),
+        Some(QtyMicros::from_whole_units(1).unwrap()),
         "A04-2: page-1's first activity's cum_qty_after must be its own value (1), \
          never shifted by page 2's quantity"
     );
@@ -1324,16 +1330,16 @@ fn a04_2_cross_page_contamination_no_longer_shifts_page1_identity() {
     let mut order = OmsOrder::new(
         "order-a04-2",
         "AAPL",
-        (FILL_ACTIVITIES_PAGE_SIZE + 1) as i64,
+        QtyMicros::from_whole_units((FILL_ACTIVITIES_PAGE_SIZE + 1) as i64).unwrap(),
     );
     order
         .apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: 1 },
+            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(1).unwrap() },
             Some("ws-msg-a04-2"),
-            Some(1),
+            Some(QtyMicros::from_whole_units(1).unwrap()),
         )
         .unwrap();
-    assert_eq!(order.filled_qty, 1);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(1).unwrap());
 
     let (delta_qty, rest_cum_qty_after) = match &events[0] {
         BrokerEvent::PartialFill {
@@ -1352,7 +1358,7 @@ fn a04_2_cross_page_contamination_no_longer_shifts_page1_identity() {
         .unwrap();
 
     assert_eq!(
-        order.filled_qty, 1,
+        order.filled_qty, QtyMicros::from_whole_units(1).unwrap(),
         "A04-2: the REST redelivery of the order's first physical fill must be \
          recognized as a duplicate; final economics must show exactly one \
          1-share application, never 2"

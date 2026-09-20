@@ -223,7 +223,7 @@ async fn place_and_fill(
         broker_order_id: Some(broker_order_id.clone()),
         symbol: symbol.to_string(),
         side,
-        delta_qty: qty,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
         price_micros,
         fee_micros: 0,
     };
@@ -648,10 +648,10 @@ async fn ct04_terminal_overfill_correction_reflected_in_closure() {
             broker_order_id: Some(format!("bo:{buy_id}")),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty: 2,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
             price_micros: 100_000_000,
             fee_micros: 0,
-            cum_qty_after: Some(2),
+            cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(2).unwrap()),
         };
         fixture_applied_event(
             &pool, run_id, &format!("bm:{buy_id}:partial"), None, &buy_id,
@@ -667,7 +667,7 @@ async fn ct04_terminal_overfill_correction_reflected_in_closure() {
             broker_order_id: Some(format!("bo:{buy_id}")),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty: 2,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
             price_micros: 102_000_000,
             fee_micros: 0,
         };
@@ -757,10 +757,10 @@ async fn ct05_cross_lane_duplicate_fill_produces_one_closure_not_two() {
             broker_order_id: Some(format!("bo:{buy_id}")),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty: 10,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
             price_micros: 100_000_000,
             fee_micros: 0,
-            cum_qty_after: Some(10),
+            cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(10).unwrap()),
         };
         fixture_applied_event(
             &pool,
@@ -782,10 +782,10 @@ async fn ct05_cross_lane_duplicate_fill_produces_one_closure_not_two() {
             broker_order_id: Some(format!("bo:{buy_id}")),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty: 10,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
             price_micros: 100_000_000,
             fee_micros: 0,
-            cum_qty_after: Some(10),
+            cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(10).unwrap()),
         };
         fixture_applied_event(
             &pool,

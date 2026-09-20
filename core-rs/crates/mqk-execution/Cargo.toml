@@ -12,7 +12,9 @@ runtime-boundary = []
 testkit = []
 
 [dependencies]
+anyhow = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 mqk-db = { path = "../mqk-db" }
 mqk-schemas = { path = "../mqk-schemas" }
 

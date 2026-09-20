@@ -54,9 +54,16 @@ pub(super) fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
 
 /// Extract a portfolio `Fill` from a `BrokerEvent`, if the event carries fill data.
 ///
-/// Returns `None` for non-fill events (Ack, CancelAck, etc.).
-/// Degenerate fills with `delta_qty <= 0` are rejected.
-pub(super) fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
+/// Returns `Ok(None)` for non-fill events (Ack, CancelAck, etc.) and for a
+/// degenerate `delta_qty <= 0` — both benign no-ops.
+///
+/// CUTOVER-1B-OMS-QTY-MICROS-01: `mqk_portfolio::Fill` remains whole-unit
+/// `i64` pending CUTOVER-1C. A genuinely fractional `delta_qty` (Crypto) is
+/// therefore a hard error here, never a silent `None` — collapsing a real,
+/// non-degenerate fill into the same `None` this function returns for a
+/// harmless non-fill event would hide a real economic event from the
+/// portfolio without any trace. Callers must halt on `Err`.
+pub(super) fn broker_event_to_fill(event: &BrokerEvent) -> anyhow::Result<Option<Fill>> {
     match event {
         BrokerEvent::Fill {
             symbol,
@@ -74,22 +81,30 @@ pub(super) fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
             fee_micros,
             ..
         } => {
-            if *delta_qty <= 0 {
-                return None;
+            if !delta_qty.is_positive() {
+                return Ok(None);
             }
+            let Some(whole_qty) = delta_qty.to_whole_units_checked() else {
+                return Err(anyhow!(
+                    "FRACTIONAL_QTY_PORTFOLIO_APPLY_UNSUPPORTED: fill delta_qty={} is fractional; \
+                     mqk_portfolio::Fill is whole-unit only pending CUTOVER-1C -- refusing to \
+                     silently drop or truncate a real fill",
+                    delta_qty
+                ));
+            };
             let portfolio_side = match side {
                 mqk_execution::Side::Buy => mqk_portfolio::Side::Buy,
                 mqk_execution::Side::Sell => mqk_portfolio::Side::Sell,
             };
-            Some(Fill::new(
+            Ok(Some(Fill::new(
                 symbol.clone(),
                 portfolio_side,
-                *delta_qty,
+                whole_qty,
                 *price_micros,
                 *fee_micros,
-            ))
+            )))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -110,8 +125,11 @@ pub(super) fn build_canonical_apply_queue(
         let inbox_id = row.inbox_id;
         let msg_id = row.broker_message_id;
         let received_at = row.received_at_utc;
-        mqk_db::validate_message_json_schema_version(&row.message_json)?;
-        let event: BrokerEvent = serde_json::from_value(row.message_json)?;
+        // CUTOVER-1B-OMS-QTY-MICROS-01: `decode_broker_event` validates the
+        // schema version internally and routes legacy whole-unit envelopes
+        // through the correct upconversion -- a raw `serde_json::from_value`
+        // would silently misinterpret a historical row's quantity fields.
+        let event: BrokerEvent = mqk_execution::decode_broker_event(&row.message_json)?;
         apply_queue.push((inbox_id, msg_id, event, received_at));
     }
     apply_queue.sort_by_key(|(inbox_id, _, _, _)| *inbox_id);
@@ -234,7 +252,7 @@ pub(super) fn apply_fill_step(
             // total_qty.  Using the OMS delta prevents over-crediting the
             // portfolio (e.g. effective delta=1 vs broker-reported delta_qty=2).
             if is_fill {
-                return Ok(effective_portfolio_fill(event, pre_qty, order.filled_qty));
+                return effective_portfolio_fill(event, pre_qty, order.filled_qty);
             }
         }
         None if is_fill => {
@@ -253,7 +271,7 @@ pub(super) fn apply_fill_step(
             // No OMS transition, no portfolio effect.
         }
     }
-    Ok(broker_event_to_fill(event))
+    broker_event_to_fill(event)
 }
 
 /// Compute the portfolio-effective fill for a broker fill event, given the
@@ -278,8 +296,23 @@ pub(super) fn apply_fill_step(
 /// `mqk_runtime::orchestrator::effective_portfolio_fill`) specifically so
 /// `mqk-daemon` can call it; everything else in this module stays
 /// `pub(super)`.
-pub fn effective_portfolio_fill(event: &BrokerEvent, pre_qty: i64, post_qty: i64) -> Option<Fill> {
-    build_effective_fill(event, post_qty - pre_qty)
+///
+/// CUTOVER-1B-OMS-QTY-MICROS-01: `pre_qty`/`post_qty` are now `QtyMicros`
+/// (mirroring `OmsOrder::filled_qty`). See [`build_effective_fill`] for the
+/// fail-closed contract on a fractional effective delta.
+pub fn effective_portfolio_fill(
+    event: &BrokerEvent,
+    pre_qty: mqk_execution::QtyMicros,
+    post_qty: mqk_execution::QtyMicros,
+) -> anyhow::Result<Option<Fill>> {
+    let Some(effective_delta) = post_qty.checked_sub(pre_qty) else {
+        return Err(anyhow!(
+            "EFFECTIVE_FILL_DELTA_OVERFLOW: post_qty={} pre_qty={} overflowed on subtraction",
+            post_qty,
+            pre_qty
+        ));
+    };
+    build_effective_fill(event, effective_delta)
 }
 
 /// Build a portfolio `Fill` from a broker fill event, using `effective_delta`
@@ -287,10 +320,26 @@ pub fn effective_portfolio_fill(event: &BrokerEvent, pre_qty: i64, post_qty: i64
 ///
 /// Called by [`effective_portfolio_fill`] -- see that function for why the
 /// effective (OMS-derived) delta is used instead of the broker's raw delta.
-fn build_effective_fill(event: &BrokerEvent, effective_delta: i64) -> Option<Fill> {
-    if effective_delta <= 0 {
-        return None;
+///
+/// CUTOVER-1B-OMS-QTY-MICROS-01: `mqk_portfolio::Fill` remains whole-unit
+/// `i64` pending CUTOVER-1C. A non-degenerate but fractional effective delta
+/// (Crypto) is a hard error, not a silent `None` -- see [`broker_event_to_fill`]
+/// for why collapsing a real fill into the benign-no-op `None` case is unsafe.
+fn build_effective_fill(
+    event: &BrokerEvent,
+    effective_delta: mqk_execution::QtyMicros,
+) -> anyhow::Result<Option<Fill>> {
+    if !effective_delta.is_positive() {
+        return Ok(None);
     }
+    let Some(whole_delta) = effective_delta.to_whole_units_checked() else {
+        return Err(anyhow!(
+            "FRACTIONAL_QTY_PORTFOLIO_APPLY_UNSUPPORTED: effective fill delta={} is fractional; \
+             mqk_portfolio::Fill is whole-unit only pending CUTOVER-1C -- refusing to silently \
+             drop or truncate a real fill",
+            effective_delta
+        ));
+    };
     match event {
         BrokerEvent::Fill {
             symbol,
@@ -310,15 +359,15 @@ fn build_effective_fill(event: &BrokerEvent, effective_delta: i64) -> Option<Fil
                 mqk_execution::Side::Buy => mqk_portfolio::Side::Buy,
                 mqk_execution::Side::Sell => mqk_portfolio::Side::Sell,
             };
-            Some(Fill::new(
+            Ok(Some(Fill::new(
                 symbol.clone(),
                 portfolio_side,
-                effective_delta,
+                whole_delta,
                 *price_micros,
                 *fee_micros,
-            ))
+            )))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 

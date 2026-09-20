@@ -1458,19 +1458,32 @@ where
                 ..
             } = &event
             {
-                let signed = if matches!(side, mqk_execution::Side::Buy) {
-                    *delta_qty
-                } else {
-                    -*delta_qty
-                };
-                if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {
-                    self.recently_applied_fills.pop_front();
+                // CUTOVER-1B-OMS-QTY-MICROS-01: `RecentTerminalFill.signed_delta`
+                // remains whole-unit `i64` pending CUTOVER-1C (it is compared
+                // directly against the still-whole-unit reconcile broker/local
+                // snapshots). A fractional raw `delta_qty` here is not
+                // necessarily an error -- this specific event may have been a
+                // no-op duplicate that never reached the portfolio (see
+                // `apply_fill_step`'s early no-op return, which does not
+                // validate `delta_qty` for whole-unit-ness). Skip recording
+                // it rather than truncate: the ring buffer is a lenience
+                // heuristic for reconcile-drift explanation, so omitting an
+                // entry only makes that check MORE conservative, never less.
+                if let Some(whole_delta) = delta_qty.to_whole_units_checked() {
+                    let signed = if matches!(side, mqk_execution::Side::Buy) {
+                        whole_delta
+                    } else {
+                        -whole_delta
+                    };
+                    if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {
+                        self.recently_applied_fills.pop_front();
+                    }
+                    self.recently_applied_fills.push_back(RecentTerminalFill {
+                        symbol: symbol.clone(),
+                        signed_delta: signed,
+                        applied_at: self.time_source.now_utc(),
+                    });
                 }
-                self.recently_applied_fills.push_back(RecentTerminalFill {
-                    symbol: symbol.clone(),
-                    signed_delta: signed,
-                    applied_at: self.time_source.now_utc(),
-                });
             }
             if apply_outcome.terminal_apply_succeeded {
                 mqk_db::outbox_mark_acked(&self.pool, &internal_id).await?;

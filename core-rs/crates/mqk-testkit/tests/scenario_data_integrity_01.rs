@@ -21,6 +21,7 @@
 //! the boundary where inbox / OMS / portfolio / reconcile meet.
 
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder, OrderState};
+use mqk_execution::QtyMicros;
 use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, Side, MICROS_SCALE};
 use mqk_reconcile::{reconcile_tick, BrokerSnapshot, DriftAction, LocalSnapshot};
 use std::collections::HashSet;
@@ -65,22 +66,22 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
     let events: &[(&str, OmsEvent, Fill)] = &[
         (
             "fill-pf-1",
-            OmsEvent::PartialFill { delta_qty: 30 },
+            OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() },
             Fill::new("SPY", Side::Buy, 30, 500 * MICROS_SCALE, 0),
         ),
         (
             "fill-pf-2",
-            OmsEvent::PartialFill { delta_qty: 40 },
+            OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() },
             Fill::new("SPY", Side::Buy, 40, 501 * MICROS_SCALE, 0),
         ),
         (
             "fill-final",
-            OmsEvent::Fill { delta_qty: 30 },
+            OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() },
             Fill::new("SPY", Side::Buy, 30, 502 * MICROS_SCALE, 0),
         ),
     ];
 
-    let mut order = OmsOrder::new("ord-di01", "SPY", 100);
+    let mut order = OmsOrder::new("ord-di01", "SPY", QtyMicros::from_whole_units(100).unwrap());
     let mut portfolio = empty_portfolio();
     // Inbox dedupe state persists across restarts — mirrors durable DB rows.
     let mut seen: HashSet<String> = HashSet::new();
@@ -94,7 +95,7 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
     }
 
     assert_eq!(order.state, OrderState::Filled);
-    assert_eq!(order.filled_qty, 100);
+    assert_eq!(order.filled_qty, QtyMicros::from_whole_units(100).unwrap());
     let spy_qty = portfolio
         .positions
         .get("SPY")
@@ -124,7 +125,7 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
             "cycle {cycle}: OMS state must remain Filled"
         );
         assert_eq!(
-            order.filled_qty, 100,
+            order.filled_qty, QtyMicros::from_whole_units(100).unwrap(),
             "cycle {cycle}: filled_qty must remain 100 after restart replay"
         );
         let qty = portfolio
@@ -149,7 +150,8 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
 #[test]
 fn duplicate_and_late_event_sequences_preserve_single_truth() {
     let total_qty = 100i64;
-    let mut order = OmsOrder::new("ord-di02", "QQQ", total_qty);
+    let total_qty_micros = QtyMicros::from_whole_units(total_qty).unwrap();
+    let mut order = OmsOrder::new("ord-di02", "QQQ", total_qty_micros);
     let mut portfolio = empty_portfolio();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -157,7 +159,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
 
     if inbox_insert_sim(&mut seen, "pf-1") {
         order
-            .apply(&OmsEvent::PartialFill { delta_qty: 30 }, Some("pf-1"))
+            .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("pf-1"))
             .unwrap();
         apply_entry(
             &mut portfolio,
@@ -167,7 +169,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
 
     if inbox_insert_sim(&mut seen, "pf-2") {
         order
-            .apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("pf-2"))
+            .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("pf-2"))
             .unwrap();
         apply_entry(
             &mut portfolio,
@@ -177,7 +179,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
 
     if inbox_insert_sim(&mut seen, "fill-final") {
         order
-            .apply(&OmsEvent::Fill { delta_qty: 30 }, Some("fill-final"))
+            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("fill-final"))
             .unwrap();
         apply_entry(
             &mut portfolio,
@@ -187,7 +189,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
 
     // After normal sequence: fully filled.
     assert_eq!(order.state, OrderState::Filled);
-    assert_eq!(order.filled_qty, total_qty);
+    assert_eq!(order.filled_qty, total_qty_micros);
     let qqq_qty = portfolio
         .positions
         .get("QQQ")
@@ -222,7 +224,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
     if inbox_insert_sim(&mut seen, "fill-late") {
         // OMS is already Filled — do_transition silently ignores this (no Err).
         order
-            .apply(&OmsEvent::Fill { delta_qty: 30 }, Some("fill-late"))
+            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("fill-late"))
             .unwrap();
         // State and filled_qty must be unchanged.
         assert_eq!(
@@ -231,7 +233,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
             "late fill must not change OMS state"
         );
         assert_eq!(
-            order.filled_qty, total_qty,
+            order.filled_qty, total_qty_micros,
             "late fill must not change filled_qty"
         );
         // In the real orchestrator, the OMS no-op prevents the portfolio apply.
@@ -240,7 +242,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
 
     // After all duplicates and late events: state and portfolio are unchanged.
     assert_eq!(order.state, OrderState::Filled);
-    assert_eq!(order.filled_qty, total_qty);
+    assert_eq!(order.filled_qty, total_qty_micros);
     let qqq_qty_final = portfolio
         .positions
         .get("QQQ")

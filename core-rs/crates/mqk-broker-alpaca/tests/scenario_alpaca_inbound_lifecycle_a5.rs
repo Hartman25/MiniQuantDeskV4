@@ -48,7 +48,7 @@ use mqk_broker_alpaca::{
     normalize::{normalize_trade_update, trade_update_message_id},
     types::{AlpacaOrder, AlpacaTradeUpdate},
 };
-use mqk_execution::BrokerEvent;
+use mqk_execution::{BrokerEvent, QtyMicros};
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ fn il4_replace_ack_new_total_qty_and_id_fields_exact() {
             );
             assert_eq!(internal_order_id, CLIENT_ID);
             assert_eq!(broker_order_id, Some(BROKER_ID.to_string()));
-            assert_eq!(new_total_qty, 120, "new_total_qty must equal order.qty");
+            assert_eq!(new_total_qty, QtyMicros::from_whole_units(120).unwrap(), "new_total_qty must equal order.qty");
         }
         other => panic!("expected ReplaceAck, got {other:?}"),
     }
@@ -328,7 +328,7 @@ fn il8_fill_lifecycle_new_then_partial_fill_then_fill() {
                 broker_message_id,
                 format!("alpaca:{BROKER_ID}:partial_fill:{TS_2}")
             );
-            assert_eq!(delta_qty, 40);
+            assert_eq!(delta_qty, QtyMicros::from_whole_units(40).unwrap());
             assert_eq!(price_micros, 150_000_000);
             assert_eq!(fee_micros, 0);
         }
@@ -352,7 +352,7 @@ fn il8_fill_lifecycle_new_then_partial_fill_then_fill() {
             ..
         } => {
             assert_eq!(broker_message_id, format!("alpaca:{BROKER_ID}:fill:{TS_3}"));
-            assert_eq!(delta_qty, 60);
+            assert_eq!(delta_qty, QtyMicros::from_whole_units(60).unwrap());
             assert_eq!(price_micros, 150_000_000);
             assert_eq!(fee_micros, 0);
         }
@@ -410,7 +410,7 @@ fn il10_replace_lifecycle_new_then_replace_ack() {
             broker_message_id,
         } => {
             assert_eq!(
-                new_total_qty, 80,
+                new_total_qty, QtyMicros::from_whole_units(80).unwrap(),
                 "new_total_qty must reflect the amended order.qty"
             );
             assert_eq!(broker_order_id, Some(BROKER_ID.to_string()));

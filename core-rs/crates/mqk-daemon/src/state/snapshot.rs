@@ -36,11 +36,21 @@ pub(crate) fn outbox_json_symbol(json: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-pub(crate) fn outbox_json_qty(json: &serde_json::Value) -> Option<i64> {
+/// CUTOVER-1B-OMS-QTY-MICROS-01: fractional-capable, mirroring the live
+/// dispatch path's `order_json` quantity parsing
+/// (`mqk_runtime::orchestrator::outbox::parse_signed_qty_micros_field`) --
+/// accepts either a whole-unit JSON integer or a decimal-string quantity
+/// (crypto), never a floating-point JSON number (precision loss). Returns
+/// `None` for a missing, non-positive, or malformed value.
+pub(crate) fn outbox_json_qty(json: &serde_json::Value) -> Option<mqk_execution::QtyMicros> {
     let raw = json.get("qty").or_else(|| json.get("quantity"))?;
-    let n = raw.as_i64()?;
-    if n > 0 {
-        Some(n)
+    let qty = match raw {
+        serde_json::Value::Number(n) => mqk_execution::QtyMicros::from_whole_units(n.as_i64()?)?,
+        serde_json::Value::String(s) => s.trim().parse::<mqk_execution::QtyMicros>().ok()?,
+        _ => return None,
+    };
+    if qty.is_positive() {
+        Some(qty)
     } else {
         None
     }
@@ -131,12 +141,26 @@ pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
                 .cloned()
                 .unwrap_or(mqk_reconcile::Side::Buy);
             let status = oms_execution_status_to_reconcile(&order.status);
+            // CUTOVER-1B-OMS-QTY-MICROS-01: `mqk_reconcile::OrderSnapshot`
+            // remains whole-unit `i64` pending its own QtyMicros cutover
+            // (CUTOVER-1G: reconciliation exact fractional quantity
+            // comparison). `dispatch_submit_claimed_outbox_row` still fails
+            // closed on any fractional submit, so no fractional `OmsOrder`
+            // can exist in memory yet -- `.expect` surfaces a violated
+            // precondition loudly rather than silently corrupting a
+            // reconcile-drift comparison that gates a halt decision.
             let snap = mqk_reconcile::OrderSnapshot {
                 order_id: order.order_id.clone(),
                 symbol: order.symbol.clone(),
                 side,
-                qty: order.total_qty,
-                filled_qty: order.filled_qty,
+                qty: order
+                    .total_qty
+                    .to_whole_units_checked()
+                    .expect("fractional OmsOrder.total_qty unsupported by mqk_reconcile pending CUTOVER-1G"),
+                filled_qty: order
+                    .filled_qty
+                    .to_whole_units_checked()
+                    .expect("fractional OmsOrder.filled_qty unsupported by mqk_reconcile pending CUTOVER-1G"),
                 status,
             };
             (order.order_id.clone(), snap)
@@ -647,16 +671,22 @@ pub(crate) async fn recover_oms_and_portfolio_traced(
         // -- silently dropping it (`continue`) would omit real economic
         // evidence from authoritative truth without any record that it was
         // ever skipped.
-        let event: BrokerEvent = serde_json::from_value(row.message_json.clone()).map_err(|e| {
-            super::types::RuntimeLifecycleError::internal(
-                "recover_oms_and_portfolio.malformed_applied_event",
-                format!(
-                    "run_id={run_id} inbox_id={} broker_message_id={}: applied inbox row failed \
-                     to deserialize as BrokerEvent: {e}",
-                    row.inbox_id, row.broker_message_id,
-                ),
-            )
-        })?;
+        // CUTOVER-1B-OMS-QTY-MICROS-01: must route through the schema-
+        // version-gated decoder, not a raw `serde_json::from_value` -- a
+        // direct deserialize cannot distinguish a legacy whole-unit row from
+        // a current QtyMicros row and would silently misinterpret one as the
+        // other on replay. See `mqk_execution::decode_broker_event`.
+        let event: BrokerEvent =
+            mqk_execution::decode_broker_event(&row.message_json).map_err(|e| {
+                super::types::RuntimeLifecycleError::internal(
+                    "recover_oms_and_portfolio.malformed_applied_event",
+                    format!(
+                        "run_id={run_id} inbox_id={} broker_message_id={}: applied inbox row failed \
+                         to decode as BrokerEvent: {e}",
+                        row.inbox_id, row.broker_message_id,
+                    ),
+                )
+            })?;
         let internal_id = event.internal_order_id().to_string();
         let is_fill = matches!(
             event,
@@ -741,7 +771,17 @@ pub(crate) async fn recover_oms_and_portfolio_traced(
         // duplicate/no-op transition), `effective_portfolio_fill` returns
         // `None` and no portfolio mutation occurs.
         if is_fill {
-            if let Some(fill) = effective_portfolio_fill(&event, pre_qty, post_qty) {
+            let fill = effective_portfolio_fill(&event, pre_qty, post_qty).map_err(|e| {
+                super::types::RuntimeLifecycleError::internal(
+                    "recover_oms_and_portfolio.fractional_fill_unsupported",
+                    format!(
+                        "run_id={run_id} inbox_id={} broker_message_id={} \
+                         internal_order_id={internal_id}: {e}",
+                        row.inbox_id, row.broker_message_id,
+                    ),
+                )
+            })?;
+            if let Some(fill) = fill {
                 canonical_fills.push(CanonicalAppliedFill {
                     inbox_id: row.inbox_id,
                     internal_order_id: internal_id.clone(),
@@ -1866,10 +1906,10 @@ mod fill_economic_authority_closure_tests {
             broker_order_id: Some("broker-order-1".to_string()),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(delta_qty).unwrap(),
             price_micros,
             fee_micros: 0,
-            cum_qty_after: Some(cum),
+            cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(cum).unwrap()),
         }
     }
 
@@ -1887,10 +1927,10 @@ mod fill_economic_authority_closure_tests {
             broker_order_id: Some("broker-order-1".to_string()),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(delta_qty).unwrap(),
             price_micros,
             fee_micros: 0,
-            cum_qty_after: Some(cum),
+            cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(cum).unwrap()),
         }
     }
 
@@ -2113,7 +2153,7 @@ mod fill_economic_authority_closure_tests {
                 broker_order_id: Some("broker-order-1".to_string()),
                 symbol: "AAPL".to_string(),
                 side: Side::Buy,
-                delta_qty: 10,
+                delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
                 price_micros: 102_000_000,
                 fee_micros: 0,
             };
@@ -2186,7 +2226,7 @@ mod fill_economic_authority_closure_tests {
                 broker_order_id: Some("broker-order-1".to_string()),
                 symbol: "AAPL".to_string(),
                 side: Side::Buy,
-                delta_qty: 10,
+                delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
                 price_micros: 100_000_000,
                 fee_micros: 0,
             };
@@ -2249,7 +2289,7 @@ mod fill_economic_authority_closure_tests {
             broker_order_id: Some("broker-order-1".to_string()),
             symbol: "AAPL".to_string(),
             side: Side::Buy,
-            delta_qty,
+            delta_qty: mqk_execution::QtyMicros::from_whole_units(delta_qty).unwrap(),
             price_micros,
             fee_micros: 0,
         }
@@ -2483,35 +2523,40 @@ mod fill_economic_authority_closure_tests {
             );
 
             // ---- Side A: live apply semantics.
-            let mut live_order = OmsOrder::new(order_id, "AAPL", 3);
+            let mut live_order =
+                OmsOrder::new(order_id, "AAPL", mqk_execution::QtyMicros::from_whole_units(3).unwrap());
             let mut live_fills: Vec<(i64, i64)> = Vec::new();
 
             let pre1 = live_order.filled_qty;
             live_order
                 .apply_with_watermark(
-                    &OmsEvent::PartialFill { delta_qty: 2 },
+                    &OmsEvent::PartialFill { delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap() },
                     Some("live-partial"),
-                    Some(2),
+                    Some(mqk_execution::QtyMicros::from_whole_units(2).unwrap()),
                 )
                 .expect("live partial apply must succeed");
-            if let Some(fill) = effective_portfolio_fill(&partial, pre1, live_order.filled_qty) {
+            if let Some(fill) = effective_portfolio_fill(&partial, pre1, live_order.filled_qty)
+                .expect("live partial fill must not be fractional")
+            {
                 live_fills.push((fill.qty, fill.price_micros));
             }
 
             let pre2 = live_order.filled_qty;
             live_order
                 .apply_with_watermark(
-                    &OmsEvent::Fill { delta_qty: 2 },
+                    &OmsEvent::Fill { delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap() },
                     Some("live-terminal"),
                     None,
                 )
                 .expect("live terminal apply must succeed");
-            if let Some(fill) = effective_portfolio_fill(&terminal, pre2, live_order.filled_qty) {
+            if let Some(fill) = effective_portfolio_fill(&terminal, pre2, live_order.filled_qty)
+                .expect("live terminal fill must not be fractional")
+            {
                 live_fills.push((fill.qty, fill.price_micros));
             }
 
             assert_eq!(
-                live_order.filled_qty, 3,
+                live_order.filled_qty, mqk_execution::QtyMicros::from_whole_units(3).unwrap(),
                 "Section 8 LIVE: OMS final filled_qty must be 3"
             );
             assert_eq!(
@@ -2886,7 +2931,7 @@ mod fill_economic_authority_closure_tests {
                 broker_order_id: Some("broker-order-1".to_string()),
                 symbol: "AAPL".to_string(),
                 side: Side::Buy,
-                delta_qty: 10,
+                delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
                 price_micros: 100_000_000,
                 fee_micros: 0,
             };

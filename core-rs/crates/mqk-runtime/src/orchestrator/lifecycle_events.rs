@@ -49,7 +49,15 @@ pub(super) fn build_lifecycle_event_row(
             internal_order_id.as_str(),
             "replace_ack",
             broker_order_id.as_deref(),
-            Some(*new_total_qty),
+            // CUTOVER-1B-OMS-QTY-MICROS-01: `NewOrderLifecycleEvent.new_total_qty`
+            // (the `order_lifecycle_events` audit column) remains whole-unit
+            // `i64` pending a dedicated schema-version widening for that
+            // table (mirroring CUTOVER-1A for oms_inbox). A fractional
+            // Crypto replace is stored as `None` here rather than a
+            // misinterpreted number -- this is a diagnostic/audit
+            // convenience field, not economic authority, so an incomplete
+            // (never wrong) audit entry is the safe interim choice.
+            new_total_qty.to_whole_units_checked(),
         ),
         BrokerEvent::CancelReject {
             internal_order_id,
@@ -124,7 +132,7 @@ mod tests {
             broker_message_id: "msg-replace-1".to_string(),
             internal_order_id: "ord-2".to_string(),
             broker_order_id: None,
-            new_total_qty: 75,
+            new_total_qty: mqk_execution::QtyMicros::from_whole_units(75).unwrap(),
         };
         let row = build_lifecycle_event_row(Uuid::nil(), "msg-replace-1", &ev, fixed_ts())
             .expect("ReplaceAck must produce a row");
@@ -175,7 +183,7 @@ mod tests {
                 broker_order_id: None,
                 symbol: "SPY".to_string(),
                 side: mqk_execution::types::Side::Buy,
-                delta_qty: 10,
+                delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
                 price_micros: 100_000_000,
                 fee_micros: 0,
             },
@@ -186,7 +194,7 @@ mod tests {
                 broker_order_id: None,
                 symbol: "SPY".to_string(),
                 side: mqk_execution::types::Side::Buy,
-                delta_qty: 5,
+                delta_qty: mqk_execution::QtyMicros::from_whole_units(5).unwrap(),
                 price_micros: 100_000_000,
                 fee_micros: 0,
                 cum_qty_after: None,

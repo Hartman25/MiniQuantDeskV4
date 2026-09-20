@@ -65,9 +65,9 @@ pub use reconcile_guard::ReconcileFreshnessGuard;
 pub use id_map::BrokerOrderMap;
 
 pub use order_router::{
-    AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerEventIdentity,
-    BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, QtyMicros,
+    decode_broker_event, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerEvent,
+    BrokerEventIdentity, BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse,
+    BrokerSubmitRequest, BrokerSubmitResponse, QtyMicros,
 };
 pub use mqk_schemas::QTY_MICROS_SCALE;
 

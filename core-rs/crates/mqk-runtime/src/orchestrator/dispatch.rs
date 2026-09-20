@@ -40,26 +40,29 @@ where
         let symbol = req.symbol.clone();
         let side = req.side;
 
-        // QTY-MICROS-PRODUCTION-CUTOVER-01: `BrokerSubmitRequest.quantity` is
-        // fractional-capable (QtyMicros) so Crypto orders can be built and
-        // submitted correctly. `OmsOrder`/`OmsEvent`/`BrokerEvent::delta_qty`
-        // remain whole-unit `i64` for this patch: their fill deltas are
-        // persisted verbatim to `oms_inbox` via `#[derive(Serialize)]`, and
-        // reinterpreting that already-persisted i64 as micro-units on the
-        // next OMS-recovery replay would silently misread every historical
-        // row by 1e6x. Widening that persisted envelope safely requires a
-        // schema-version-gated reader (see `mqk_db::inbox::MESSAGE_JSON_SCHEMA_VERSION`
-        // / `mqk_db::orders::ORDER_JSON_SCHEMA_VERSION`), which is out of
-        // scope here. Until that lands, this dispatcher fails closed on a
-        // fractional quantity rather than truncating it or risking a
-        // corrupted OMS/portfolio replay.
+        // QTY-MICROS-PRODUCTION-CUTOVER-01 / CUTOVER-1A / CUTOVER-1B:
+        // `BrokerSubmitRequest.quantity` is fractional-capable (QtyMicros).
+        // As of CUTOVER-1A (oms_inbox schema-version-gated envelope) and
+        // CUTOVER-1B (BrokerEvent/OmsEvent/OmsOrder converted to QtyMicros),
+        // the OMS lifecycle layer itself is also fully fractional-capable —
+        // a durable replay can no longer misread a historical whole-unit row
+        // as micro-units or vice versa.
+        //
+        // The remaining blocker is `mqk_portfolio` (Fill/Lot/position
+        // quantity), which is still whole-unit `i64` pending CUTOVER-1C. A
+        // fractional order that reached the broker here would eventually
+        // produce a fractional fill that the portfolio apply boundary cannot
+        // yet represent — so this dispatcher still fails closed on a
+        // fractional submit, now specifically to avoid placing a live broker
+        // order this build cannot safely account for, rather than to protect
+        // OMS replay (which is already safe).
         let Some(qty) = req.quantity.to_whole_units_checked() else {
             let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
             return Err(anyhow!(
                 "FRACTIONAL_QTY_DISPATCH_UNSUPPORTED: outbox row {} (order_id={}, qty={}) carries \
-                 a fractional quantity; OMS lifecycle tracking (OmsOrder/OmsEvent/BrokerEvent) is \
-                 whole-unit only pending oms_inbox schema-version-gated widening -- refusing \
-                 dispatch fail-closed rather than truncating or corrupting replay",
+                 a fractional quantity; portfolio accounting (mqk_portfolio::Fill/Lot) is \
+                 whole-unit only pending CUTOVER-1C -- refusing dispatch fail-closed rather than \
+                 placing a broker order this build cannot account for",
                 outbox_id,
                 order_id,
                 req.quantity
@@ -272,8 +275,15 @@ where
             qty = %qty,
             "exec_submit_sent"
         );
-        self.oms_orders
-            .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));
+        self.oms_orders.insert(
+            order_id.clone(),
+            OmsOrder::new(
+                &order_id,
+                &symbol,
+                mqk_execution::QtyMicros::from_whole_units(qty)
+                    .expect("qty already proven whole-unit-representable above"),
+            ),
+        );
         // DISCORD-TRADE-LIFECYCLE-ALERTS-01: best-effort alert after durable SENT.
         self.fire_alert(crate::TradeLifecycleEvent::OrderSubmitted {
             run_id: self.run_id,

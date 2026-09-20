@@ -19,7 +19,7 @@
 //! partial fill, failing the event/page closed rather than degrading to an
 //! unproven `cum_qty_after=None`.
 use crate::classify_fill_subtype;
-use crate::normalize::parse_alpaca_whole_share_qty;
+use crate::normalize::parse_alpaca_qty_micros;
 use crate::types::AlpacaOrderActivity;
 use mqk_execution::{price_to_micros, BrokerEvent, Side};
 
@@ -104,7 +104,7 @@ pub fn activity_to_fill_broker_event(
         .filter(|s| !s.is_empty())
         .ok_or(ActivityFillConversionError::MissingQty)?;
     let delta_qty =
-        parse_alpaca_whole_share_qty(qty_str).map_err(ActivityFillConversionError::InvalidQty)?;
+        parse_alpaca_qty_micros(qty_str).map_err(ActivityFillConversionError::InvalidQty)?;
 
     let price_str = activity
         .price
@@ -126,7 +126,7 @@ pub fn activity_to_fill_broker_event(
     if subtype == "partial_fill" {
         let cum_qty_after = match activity.cum_qty.as_deref() {
             None => return Err(ActivityFillConversionError::MissingPartialCumQty),
-            Some(raw) => parse_alpaca_whole_share_qty(raw)
+            Some(raw) => parse_alpaca_qty_micros(raw)
                 .map_err(ActivityFillConversionError::InvalidPartialCumQty)?,
         };
         Ok(BrokerEvent::PartialFill {
@@ -159,6 +159,8 @@ pub fn activity_to_fill_broker_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mqk_execution::QtyMicros;
+    use std::str::FromStr;
 
     fn activity(
         activity_type: &str,
@@ -200,8 +202,8 @@ mod tests {
                 cum_qty_after,
                 ..
             } => {
-                assert_eq!(delta_qty, 5);
-                assert_eq!(cum_qty_after, Some(5));
+                assert_eq!(delta_qty, QtyMicros::from_whole_units(5).unwrap());
+                assert_eq!(cum_qty_after, Some(QtyMicros::from_whole_units(5).unwrap()));
             }
             other => panic!("expected PartialFill, got {other:?}"),
         }
@@ -238,7 +240,12 @@ mod tests {
     }
 
     #[test]
-    fn fractional_qty_fails_closed_not_rounded() {
+    fn cutover_1b_fractional_qty_now_accepted_exactly_not_rounded() {
+        // CUTOVER-1B-OMS-QTY-MICROS-01: superseded the whole-share-only
+        // rejection this test used to prove. This is the generic REST
+        // activity->BrokerEvent conversion path shared by Equity and Crypto
+        // fills, so a fractional quantity (e.g. a Crypto activity) is now a
+        // legitimate value -- preserved exactly via QtyMicros, never rounded.
         let a = activity(
             "FILL",
             Some("fill"),
@@ -247,9 +254,14 @@ mod tests {
             None,
             "buy",
         );
-        let err = activity_to_fill_broker_event(&a, "msg-1".to_string(), "int-1".to_string())
-            .unwrap_err();
-        assert!(matches!(err, ActivityFillConversionError::InvalidQty(_)));
+        let ev = activity_to_fill_broker_event(&a, "msg-1".to_string(), "int-1".to_string())
+            .expect("fractional qty must be accepted, not rejected");
+        match ev {
+            BrokerEvent::Fill { delta_qty, .. } => {
+                assert_eq!(delta_qty, QtyMicros::from_str("5.5").unwrap());
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
     }
 
     #[test]

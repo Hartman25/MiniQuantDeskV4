@@ -819,10 +819,10 @@ async fn fc3a_cross_lane_duplicate_collapses_to_one_economic_effect() {
         broker_order_id: Some("fc3a-broker-order".to_string()),
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        delta_qty: 10,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         price_micros: 100_000_000,
         fee_micros: 0,
-        cum_qty_after: Some(10),
+        cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(10).unwrap()),
     };
     seed_applied_broker_event(
         &pool,
@@ -844,10 +844,10 @@ async fn fc3a_cross_lane_duplicate_collapses_to_one_economic_effect() {
         broker_order_id: Some("fc3a-broker-order".to_string()),
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        delta_qty: 10,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         price_micros: 100_000_000,
         fee_micros: 0,
-        cum_qty_after: Some(10),
+        cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(10).unwrap()),
     };
     seed_applied_broker_event(
         &pool,
@@ -921,10 +921,10 @@ async fn fc3b_terminal_overfill_resolves_to_true_remainder_not_raw_delta() {
         broker_order_id: Some("fc3b-broker-order".to_string()),
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        delta_qty: 2,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
         price_micros: 100_000_000,
         fee_micros: 0,
-        cum_qty_after: Some(2),
+        cum_qty_after: Some(mqk_execution::QtyMicros::from_whole_units(2).unwrap()),
     };
     seed_applied_broker_event(
         &pool,
@@ -946,7 +946,7 @@ async fn fc3b_terminal_overfill_resolves_to_true_remainder_not_raw_delta() {
         broker_order_id: Some("fc3b-broker-order".to_string()),
         symbol: "AAPL".to_string(),
         side: Side::Buy,
-        delta_qty: 2,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
         price_micros: 102_000_000,
         fee_micros: 0,
     };

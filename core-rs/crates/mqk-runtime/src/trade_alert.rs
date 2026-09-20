@@ -45,7 +45,8 @@ pub enum TradeLifecycleEvent {
         order_id: String,
         symbol: String,
         side: String,
-        qty: i64,
+        /// CUTOVER-1B-OMS-QTY-MICROS-01: fractional-capable (Crypto).
+        qty: mqk_execution::QtyMicros,
         price_micros: i64,
         terminal: bool,
     },

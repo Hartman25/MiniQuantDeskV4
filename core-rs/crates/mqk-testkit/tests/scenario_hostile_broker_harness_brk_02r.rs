@@ -10,7 +10,7 @@ use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerGateway,
     BrokerInvokeToken, BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse,
-    BrokerSubmitRequest, BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate, Side,
+    BrokerSubmitRequest, BrokerSubmitResponse, QtyMicros, IntegrityGate, ReconcileGate, RiskGate, Side,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -167,7 +167,7 @@ impl BrokerAdapter for HostileBroker {
                             broker_order_id: Some("broker-a".to_string()),
                             symbol: "SPY".to_string(),
                             side: Side::Buy,
-                            delta_qty: 10,
+                            delta_qty: QtyMicros::from_whole_units(10).unwrap(),
                             price_micros: 500_000_000,
                             fee_micros: 0,
                         },
@@ -178,7 +178,7 @@ impl BrokerAdapter for HostileBroker {
                             broker_order_id: Some("broker-b".to_string()),
                             symbol: "SPY".to_string(),
                             side: Side::Buy,
-                            delta_qty: 10,
+                            delta_qty: QtyMicros::from_whole_units(10).unwrap(),
                             price_micros: 500_000_000,
                             fee_micros: 0,
                         },
@@ -202,7 +202,7 @@ impl BrokerAdapter for HostileBroker {
                             broker_order_id: Some("broker-race".to_string()),
                             symbol: "SPY".to_string(),
                             side: Side::Buy,
-                            delta_qty: 10,
+                            delta_qty: QtyMicros::from_whole_units(10).unwrap(),
                             price_micros: 500_000_000,
                             fee_micros: 0,
                         },
@@ -221,7 +221,7 @@ impl BrokerAdapter for HostileBroker {
                             broker_order_id: Some("broker-replace".to_string()),
                             symbol: "SPY".to_string(),
                             side: Side::Buy,
-                            delta_qty: 10,
+                            delta_qty: QtyMicros::from_whole_units(10).unwrap(),
                             price_micros: 500_000_000,
                             fee_micros: 0,
                         },
@@ -229,7 +229,7 @@ impl BrokerAdapter for HostileBroker {
                             broker_message_id: "02r-replace-ack-1".to_string(),
                             internal_order_id: order_id,
                             broker_order_id: Some("broker-replace".to_string()),
-                            new_total_qty: 0,
+                            new_total_qty: QtyMicros::from_whole_units(0).unwrap(),
                         },
                     ]
                 } else {
@@ -245,7 +245,7 @@ impl BrokerAdapter for HostileBroker {
                         broker_order_id: Some("broker-replay".to_string()),
                         symbol: "SPY".to_string(),
                         side: Side::Buy,
-                        delta_qty: 10,
+                        delta_qty: QtyMicros::from_whole_units(10).unwrap(),
                         price_micros: 500_000_000,
                         fee_micros: 0,
                     }]
@@ -480,7 +480,7 @@ async fn duplicate_fills_different_envelopes_do_not_double_mutate_portfolio() ->
     let mut oms = BTreeMap::new();
     oms.insert(
         "ord-dup-fill".to_string(),
-        OmsOrder::new("ord-dup-fill", "SPY", 10),
+        OmsOrder::new("ord-dup-fill", "SPY", QtyMicros::from_whole_units(10).unwrap()),
     );
 
     let broker = HostileBroker::new(
@@ -591,7 +591,7 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
     seed_running_run(&pool, run_id, ENGINE_REPLACE_FILL_RACE_ID).await?;
 
     let mut oms = BTreeMap::new();
-    let mut ord = OmsOrder::new("ord-replace-race", "SPY", 10);
+    let mut ord = OmsOrder::new("ord-replace-race", "SPY", QtyMicros::from_whole_units(10).unwrap());
     ord.apply(&OmsEvent::ReplaceRequest, Some("pre-replace-request"))
         .expect("replace request must put order into ReplacePending");
     oms.insert("ord-replace-race".to_string(), ord);
@@ -699,7 +699,7 @@ async fn replay_after_cursor_loss_is_deduped_and_state_safe() -> Result<()> {
     let mut oms = BTreeMap::new();
     oms.insert(
         "ord-replay".to_string(),
-        OmsOrder::new("ord-replay", "SPY", 10),
+        OmsOrder::new("ord-replay", "SPY", QtyMicros::from_whole_units(10).unwrap()),
     );
 
     let broker1 = HostileBroker::new(HostileScenario::ReplayAfterCursorLoss, SubmitMode::Accept);

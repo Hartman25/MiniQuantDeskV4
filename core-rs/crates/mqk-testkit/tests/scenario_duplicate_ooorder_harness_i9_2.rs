@@ -36,6 +36,7 @@
 //! Assert:     perturbed final state == canonical final state.
 
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder, OrderState};
+use mqk_execution::QtyMicros;
 use mqk_portfolio::{Fill, Ledger, Side, MICROS_SCALE};
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -70,10 +71,10 @@ fn assert_oms_state_eq(canonical: &OmsOrder, perturbed: &OmsOrder, label: &str) 
 #[test]
 fn duplicate_ack_produces_same_final_oms_state() {
     // Canonical: Ack → Fill
-    let mut canonical = OmsOrder::new("ord-1", "SPY", 100);
+    let mut canonical = OmsOrder::new("ord-1", "SPY", QtyMicros::from_whole_units(100).unwrap());
     canonical.apply(&OmsEvent::Ack, Some("e1")).unwrap();
     canonical
-        .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("e2"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("e2"))
         .unwrap();
 
     assert_eq!(
@@ -82,16 +83,16 @@ fn duplicate_ack_produces_same_final_oms_state() {
         "S1: canonical must be Filled"
     );
     assert_eq!(
-        canonical.filled_qty, 100,
+        canonical.filled_qty, QtyMicros::from_whole_units(100).unwrap(),
         "S1: canonical filled_qty must be 100"
     );
 
     // Perturbed: Ack → Ack (duplicate, same event_id) → Fill
-    let mut perturbed = OmsOrder::new("ord-2", "SPY", 100);
+    let mut perturbed = OmsOrder::new("ord-2", "SPY", QtyMicros::from_whole_units(100).unwrap());
     perturbed.apply(&OmsEvent::Ack, Some("e1")).unwrap();
     perturbed.apply(&OmsEvent::Ack, Some("e1")).unwrap(); // duplicate — idempotent skip
     perturbed
-        .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("e2"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("e2"))
         .unwrap();
 
     assert_oms_state_eq(&canonical, &perturbed, "S1: duplicate Ack");
@@ -109,18 +110,18 @@ fn duplicate_fill_produces_same_oms_and_portfolio_state() {
     // ── OMS layer ────────────────────────────────────────────────────────────
 
     // Canonical OMS: single Fill(f1)
-    let mut oms_canonical = OmsOrder::new("ord-1", "SPY", 50);
+    let mut oms_canonical = OmsOrder::new("ord-1", "SPY", QtyMicros::from_whole_units(50).unwrap());
     oms_canonical
-        .apply(&OmsEvent::Fill { delta_qty: 50 }, Some("f1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("f1"))
         .unwrap();
 
     // Perturbed OMS: Fill(f1) then Fill(f1) again — second call is a silent skip
-    let mut oms_perturbed = OmsOrder::new("ord-2", "SPY", 50);
+    let mut oms_perturbed = OmsOrder::new("ord-2", "SPY", QtyMicros::from_whole_units(50).unwrap());
     oms_perturbed
-        .apply(&OmsEvent::Fill { delta_qty: 50 }, Some("f1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("f1"))
         .unwrap();
     oms_perturbed
-        .apply(&OmsEvent::Fill { delta_qty: 50 }, Some("f1")) // duplicate event_id — skipped
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("f1")) // duplicate event_id — skipped
         .unwrap();
 
     assert_oms_state_eq(
@@ -163,16 +164,16 @@ fn duplicate_fill_produces_same_oms_and_portfolio_state() {
 #[test]
 fn fill_before_ack_produces_same_final_oms_state() {
     // Canonical: Ack → Fill
-    let mut canonical = OmsOrder::new("ord-1", "SPY", 100);
+    let mut canonical = OmsOrder::new("ord-1", "SPY", QtyMicros::from_whole_units(100).unwrap());
     canonical.apply(&OmsEvent::Ack, Some("a1")).unwrap();
     canonical
-        .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
         .unwrap();
 
     // Perturbed: Fill only (no prior Ack — accepted from Open state)
-    let mut perturbed = OmsOrder::new("ord-2", "SPY", 100);
+    let mut perturbed = OmsOrder::new("ord-2", "SPY", QtyMicros::from_whole_units(100).unwrap());
     perturbed
-        .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
         .unwrap();
 
     assert_oms_state_eq(&canonical, &perturbed, "S3: fill before ack");
@@ -187,12 +188,12 @@ fn fill_before_ack_produces_same_final_oms_state() {
 #[test]
 fn stale_cancel_ack_after_full_fill_leaves_state_unchanged() {
     // Canonical: CancelRequest → Fill → Filled (terminal)
-    let mut canonical = OmsOrder::new("ord-1", "SPY", 100);
+    let mut canonical = OmsOrder::new("ord-1", "SPY", QtyMicros::from_whole_units(100).unwrap());
     canonical
         .apply(&OmsEvent::CancelRequest, Some("c1"))
         .unwrap();
     canonical
-        .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
         .unwrap();
 
     assert_eq!(
@@ -201,17 +202,17 @@ fn stale_cancel_ack_after_full_fill_leaves_state_unchanged() {
         "S4: canonical must be Filled"
     );
     assert_eq!(
-        canonical.filled_qty, 100,
+        canonical.filled_qty, QtyMicros::from_whole_units(100).unwrap(),
         "S4: canonical filled_qty must be 100"
     );
 
     // Perturbed: same canonical sequence ...
-    let mut perturbed = OmsOrder::new("ord-2", "SPY", 100);
+    let mut perturbed = OmsOrder::new("ord-2", "SPY", QtyMicros::from_whole_units(100).unwrap());
     perturbed
         .apply(&OmsEvent::CancelRequest, Some("c1"))
         .unwrap();
     perturbed
-        .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f1"))
+        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
         .unwrap();
 
     // ... then stale CancelAck arrives — must fail, state must not change.

@@ -56,7 +56,7 @@ use mqk_db::FixedClock;
 use mqk_execution::{
     BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
     BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
+    BrokerSubmitResponse, QtyMicros, IntegrityGate, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -618,7 +618,7 @@ async fn dhd03_cancel_halt_ambiguous_halts_durably() -> Result<()> {
 
     // Build in-memory OMS state with the order already open (ACKed).
     let mut oms_orders = BTreeMap::new();
-    let mut order = mqk_execution::oms::state_machine::OmsOrder::new(order_id, "SPY", 1);
+    let mut order = mqk_execution::oms::state_machine::OmsOrder::new(order_id, "SPY", QtyMicros::from_whole_units(1).unwrap());
     // Advance to Open state (Pending → Ack).
     order
         .apply(

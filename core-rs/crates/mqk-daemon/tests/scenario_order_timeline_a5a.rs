@@ -309,8 +309,8 @@ fn exec_snapshot_with_filled_order(
             // from in-memory state on terminal fill (BRK terminal-fill cleanup).
             broker_order_id: None,
             symbol: "AAPL".to_string(),
-            total_qty: 5,
-            filled_qty: 5,
+            total_qty: mqk_execution::QtyMicros::from_whole_units(5).unwrap(),
+            filled_qty: mqk_execution::QtyMicros::from_whole_units(5).unwrap(),
             status: "Filled".to_string(),
         }],
         pending_outbox: vec![],

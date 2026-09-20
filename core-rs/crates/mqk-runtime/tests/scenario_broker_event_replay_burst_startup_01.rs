@@ -43,7 +43,7 @@
 use std::collections::BTreeMap;
 
 use mqk_execution::oms::state_machine::OmsOrder;
-use mqk_execution::{BrokerEvent, Side};
+use mqk_execution::{BrokerEvent, QtyMicros, Side};
 use mqk_runtime::orchestrator::is_historical_fill_no_run_ownership;
 
 // ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ fn make_fill(order_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         broker_order_id: None,
         symbol: "SPY".to_string(),
         side: Side::Buy,
-        delta_qty: qty,
+        delta_qty: QtyMicros::from_whole_units(qty).unwrap(),
         price_micros: 500_000_000,
         fee_micros: 0,
     }
@@ -72,7 +72,7 @@ fn make_partial_fill(order_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         broker_order_id: None,
         symbol: "SPY".to_string(),
         side: Side::Buy,
-        delta_qty: qty,
+        delta_qty: QtyMicros::from_whole_units(qty).unwrap(),
         price_micros: 500_000_000,
         fee_micros: 0,
         cum_qty_after: None,
@@ -105,7 +105,7 @@ fn make_reject(order_id: &str, msg_id: &str) -> BrokerEvent {
 
 fn oms_with_order(order_id: &str) -> BTreeMap<String, OmsOrder> {
     let mut map = BTreeMap::new();
-    map.insert(order_id.to_string(), OmsOrder::new(order_id, "SPY", 100));
+    map.insert(order_id.to_string(), OmsOrder::new(order_id, "SPY", QtyMicros::from_whole_units(100).unwrap()));
     map
 }
 
@@ -269,7 +269,7 @@ fn reb05_gate_never_fires_on_any_non_fill_variant() {
             broker_message_id: "m4".to_string(),
             internal_order_id: "ord".to_string(),
             broker_order_id: None,
-            new_total_qty: 100,
+            new_total_qty: QtyMicros::from_whole_units(100).unwrap(),
         },
         BrokerEvent::ReplaceReject {
             broker_message_id: "m5".to_string(),

@@ -128,7 +128,7 @@ async fn insert_full_fill(
         broker_order_id: None,
         symbol: symbol.to_string(),
         side,
-        delta_qty: qty,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
         price_micros,
         fee_micros,
     };
@@ -192,7 +192,7 @@ async fn insert_partial_then_final_fill(
         broker_order_id: None,
         symbol: symbol.to_string(),
         side,
-        delta_qty: partial_qty,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(partial_qty).unwrap(),
         price_micros,
         fee_micros: 0,
         cum_qty_after: None,
@@ -223,7 +223,7 @@ async fn insert_partial_then_final_fill(
         broker_order_id: None,
         symbol: symbol.to_string(),
         side,
-        delta_qty: final_qty,
+        delta_qty: mqk_execution::QtyMicros::from_whole_units(final_qty).unwrap(),
         price_micros,
         fee_micros: 0,
     };

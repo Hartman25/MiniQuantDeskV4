@@ -1920,10 +1920,12 @@ dependencies = [
 name = "mqk-execution"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "mqk-db",
  "mqk-md",
  "mqk-schemas",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

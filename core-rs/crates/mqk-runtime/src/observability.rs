@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use mqk_db::{InboxRow, OutboxRow};
 use mqk_execution::{
     oms::state_machine::{OmsOrder, OrderState},
-    BrokerOrderMap, RiskEngineHaltStatus,
+    BrokerOrderMap, QtyMicros, RiskEngineHaltStatus,
 };
 use mqk_portfolio::PortfolioState;
 use serde::{Deserialize, Serialize};
@@ -30,14 +30,22 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// Read-only snapshot of a single live OMS order.
+///
+/// CUTOVER-1B-OMS-QTY-MICROS-01: `total_qty`/`filled_qty` are `QtyMicros`
+/// (raw 1e-6-scale integer on the wire), not whole-unit `i64` shares as
+/// before this cutover — this snapshot is a live, non-persisted read model
+/// (see `ExecutionOrchestrator::snapshot`), so widening its wire shape here
+/// is a genuine visibility improvement (fractional Crypto orders are now
+/// representable) rather than a compatibility break against any durable
+/// record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderSnapshot {
     pub order_id: String,
     /// Broker-assigned order ID, if the submit has been confirmed.
     pub broker_order_id: Option<String>,
     pub symbol: String,
-    pub total_qty: i64,
-    pub filled_qty: i64,
+    pub total_qty: QtyMicros,
+    pub filled_qty: QtyMicros,
     /// One of: "Open" | "PartiallyFilled" | "Filled" | "CancelPending" |
     /// "Cancelled" | "ReplacePending" | "Rejected"
     pub status: String,
