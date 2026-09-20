@@ -328,10 +328,12 @@ pub struct BrokerSubmitRequest {
     /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
     pub limit_price: Option<i64>,
     pub time_in_force: String,
-    /// Asset class for this order. Only `Equity` is currently supported on the
-    /// canonical MAIN dispatch path. Non-equity values are rejected by
-    /// `BrokerGateway::submit` before any broker adapter is invoked
-    /// (MULTI-ASSET-ROUTING-GUARD-01).
+    /// Asset class for this order. `BrokerGateway::submit` rejects an asset
+    /// class the configured broker adapter does not declare support for
+    /// (`BrokerAdapter::supports_asset_class`) before any adapter is invoked
+    /// (M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01). The default adapter
+    /// capability is `Equity` only; an adapter must explicitly override
+    /// `supports_asset_class` to accept anything else.
     pub asset_class: AssetClass,
 }
 
@@ -421,6 +423,26 @@ impl BrokerInvokeToken {
 /// implement the trait (they can name the type) but cannot call the methods
 /// (they cannot construct the token). Only `BrokerGateway` creates the token.
 pub trait BrokerAdapter {
+    /// Declares which asset classes this concrete adapter is capable of
+    /// submitting/tracking orders for
+    /// (M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01, replacing the former
+    /// hardcoded `AssetClass::Equity`-only `MULTI-ASSET-ROUTING-GUARD-01`
+    /// check). `BrokerGateway::submit_with_context` consults this — via
+    /// `OrderRouter::broker_supports_asset_class` — before evaluating any
+    /// gate or invoking any adapter method, and refuses fail-closed with
+    /// `GateRefusal::AssetClassDisabled` when it returns `false`.
+    ///
+    /// The default implementation preserves the exact pre-existing behavior
+    /// for every adapter that does not override it: `Equity` only. An
+    /// adapter must explicitly opt in to additional asset classes by
+    /// overriding this method — there is no implicit or configuration-driven
+    /// way to widen capability, keeping the check fail-closed by
+    /// construction for any adapter/broker/asset-class combination this
+    /// repository has not deliberately implemented.
+    fn supports_asset_class(&self, asset_class: AssetClass) -> bool {
+        matches!(asset_class, AssetClass::Equity)
+    }
+
     fn submit_order(
         &self,
         req: BrokerSubmitRequest,
@@ -474,6 +496,14 @@ impl<B: BrokerAdapter> OrderRouter<B> {
     #[cfg(any(test, feature = "testkit", feature = "runtime-boundary"))]
     pub(crate) fn new(broker: B) -> Self {
         Self { broker }
+    }
+
+    /// Forwards to the wrapped adapter's `BrokerAdapter::supports_asset_class`
+    /// (M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01). Used by
+    /// `BrokerGateway::submit_with_context` to enforce the broker×asset-class
+    /// capability gate before any gate evaluation or adapter invocation.
+    pub(crate) fn broker_supports_asset_class(&self, asset_class: AssetClass) -> bool {
+        self.broker.supports_asset_class(asset_class)
     }
 
     pub(crate) fn route_submit(&self, req: BrokerSubmitRequest) -> Result<BrokerSubmitResponse> {

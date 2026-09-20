@@ -502,6 +502,19 @@ impl AlpacaBrokerAdapter {
 // BrokerAdapter implementation
 // ---------------------------------------------------------------------------
 impl BrokerAdapter for AlpacaBrokerAdapter {
+    /// M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01 / M6: Alpaca is a real,
+    /// wired execution venue for both US equities and BTC/USD-class spot
+    /// crypto this wave. Every other asset class (`Option`, `Future`,
+    /// `Forex`) remains refused fail-closed via the trait default — this
+    /// adapter has no options/futures/forex order-construction, status, or
+    /// fill-normalization support, and must not silently accept them.
+    fn supports_asset_class(&self, asset_class: mqk_execution::AssetClass) -> bool {
+        matches!(
+            asset_class,
+            mqk_execution::AssetClass::Equity | mqk_execution::AssetClass::Crypto
+        )
+    }
+
     /// Submit a new order to Alpaca.
     ///
     /// # Mapping
@@ -854,6 +867,31 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
         };
 
         Ok((all_events, new_cursor))
+    }
+}
+
+#[cfg(test)]
+mod supports_asset_class_tests {
+    use super::*;
+    use mqk_execution::AssetClass;
+
+    fn adapter() -> AlpacaBrokerAdapter {
+        AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:0".to_string())
+    }
+
+    #[test]
+    fn m5_equity_and_crypto_are_supported() {
+        let a = adapter();
+        assert!(a.supports_asset_class(AssetClass::Equity));
+        assert!(a.supports_asset_class(AssetClass::Crypto));
+    }
+
+    #[test]
+    fn m5_option_future_forex_remain_refused() {
+        let a = adapter();
+        assert!(!a.supports_asset_class(AssetClass::Option));
+        assert!(!a.supports_asset_class(AssetClass::Future));
+        assert!(!a.supports_asset_class(AssetClass::Forex));
     }
 }
 // ---------------------------------------------------------------------------

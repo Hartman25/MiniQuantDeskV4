@@ -161,11 +161,15 @@ pub enum GateRefusal {
     /// structured reason code and supporting evidence.
     RiskBlocked(RiskDenial),
     ReconcileNotClean,
-    /// The order's asset class is not enabled for broker dispatch.
+    /// The order's asset class is not supported by the configured broker
+    /// adapter (M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01, replacing the
+    /// former hardcoded equity-only `MULTI-ASSET-ROUTING-GUARD-01` check).
     ///
-    /// Only `AssetClass::Equity` is supported on the canonical MAIN path.
-    /// All other asset classes are rejected here before any broker adapter
-    /// is invoked (MULTI-ASSET-ROUTING-GUARD-01).
+    /// Refused before any gate evaluation or broker adapter invocation.
+    /// `BrokerAdapter::supports_asset_class` is the sole authority for this
+    /// decision — an unknown broker/asset-class combination fails closed by
+    /// construction (the trait's default only allows `Equity`), never by an
+    /// explicit deny-list here.
     AssetClassDisabled {
         asset_class: AssetClass,
     },
@@ -190,7 +194,7 @@ impl std::fmt::Display for GateRefusal {
             GateRefusal::AssetClassDisabled { asset_class } => {
                 write!(
                     f,
-                    "GATE_REFUSED: asset class {:?} is disabled — only Equity is supported on the canonical dispatch path",
+                    "GATE_REFUSED: asset class {:?} is disabled for the configured broker adapter (not in its declared supported-asset-class set)",
                     asset_class
                 )
             }
@@ -383,9 +387,12 @@ where
         req: BrokerSubmitRequest,
         ctx: RiskRequestContext,
     ) -> Result<BrokerSubmitResponse, SubmitError> {
-        // MULTI-ASSET-ROUTING-GUARD-01: reject disabled asset classes before
-        // any gate evaluation or broker adapter invocation.
-        if req.asset_class != AssetClass::Equity {
+        // M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01 (formerly
+        // MULTI-ASSET-ROUTING-GUARD-01's hardcoded equity-only check):
+        // reject an asset class the configured broker adapter does not
+        // declare support for, before any gate evaluation or adapter
+        // invocation.
+        if !self.router.broker_supports_asset_class(req.asset_class) {
             return Err(SubmitError::Gate(GateRefusal::AssetClassDisabled {
                 asset_class: req.asset_class,
             }));

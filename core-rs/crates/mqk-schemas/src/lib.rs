@@ -101,8 +101,10 @@ pub struct BrokerSnapshot {
 /// **Canonical status (ASSET-CORE-01A):** this is the canonical domain
 /// asset-class type — it is the type actually checked by the live broker-submit
 /// gate (`mqk_execution::gateway::BrokerGateway::submit_with_context`,
-/// `MULTI-ASSET-ROUTING-GUARD-01`), which rejects every non-`Equity` value
-/// before any broker adapter is invoked. A second, independent type,
+/// `M5-BROKER-ASSET-CAPABILITY-AUTHORITY-01`), which rejects any value the
+/// configured broker adapter does not declare support for
+/// (`mqk_execution::BrokerAdapter::supports_asset_class`) before any broker
+/// adapter is invoked. A second, independent type,
 /// `mqk_md::provider::ProviderAssetClass`, exists for an unrelated purpose
 /// (declaring what asset classes a market-data *provider* can serve) and is
 /// not unified with this enum — `mqk-md` has no dependency on `mqk-schemas`.
