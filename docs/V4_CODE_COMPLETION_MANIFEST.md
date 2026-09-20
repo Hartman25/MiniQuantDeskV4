@@ -1056,7 +1056,12 @@ Superseded status above (R1B/R2A era): M2.1/M2.3's "live activation not
 wired" gap was closed by a follow-on controller
 (`V4-STAGE-B-M2-C1-C3-REPAIR-04`, commits `97a9af5c`/`b0e957b5`/`ac7b400d`)
 and this session (`0af79883`/`420c0690`) — see
-`docs/CURRENT_MISSION.md` §-6 for the full record. Summary:
+`docs/CURRENT_MISSION.md` §-6 for the full record. A subsequent independent
+review found two deterministic manifest/gitattributes governance defects in
+this same commit range (migration 0073 omitted from `manifest.json` and
+`.gitattributes`, both CI-breaking) plus a scanner_rank narrowing-cast risk
+disposed as already-safe-and-proven; see `docs/CURRENT_MISSION.md` §-6a
+(`V4-STAGE-B-M2-C1-C3-CORRECTION-02`) for the full record. Summary:
 
 - `state/lifecycle.rs`'s real `start_execution_runtime` routes a configured,
   approved `watchlist-v3` artifact under `PaperEnforced` to

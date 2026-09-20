@@ -6,6 +6,80 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -6a. Stage B M2 — C1/C2/C3 Consolidated Surgical Correction (2026-09-19, `V4-STAGE-B-M2-C1-C3-CORRECTION-02`)
+
+Independent review of §-6's C1/C2/C3 completion bundle found two deterministic,
+CI-breaking repo-truth defects that §-6's `CODE_CLOSED` claims did not account
+for, plus one risk finding requiring disposition. All three are now closed.
+This does not retract §-6's `CODE_CLOSED` verdicts (the production behavior
+they describe was already correct); it corrects the repo-inventory/gitattributes
+governance gap that would have failed CI, and adds proof for a risk finding.
+
+- **IR-1 (migration manifest drift).** Migration `0073_explicit_multi_strategy_
+  authority_full_evidence.sql` was added on disk in `b0e957b5` but never added
+  to `migrations/manifest.json`. `scripts/guards/check_migration_governance.sh`
+  (wired into CI at `.github/workflows/ci.yml`) already enforces exact
+  manifest/filesystem parity and was failing deterministically at HEAD `6c8e1d16`
+  (`FAIL: manifest drift detected` — confirmed by running the guard before the
+  fix). Added the missing manifest entry; guard now passes.
+- **IR-2 (`.gitattributes` LF-pin omission).** The same commit range explicitly
+  pinned migrations 0068-0072 to `eol=lf` in `.gitattributes` (byte-sensitive
+  SQLx checksum identity) but omitted 0073. Guard 3 of the same script was
+  failing (`eol: unspecified` for 0073, confirmed pre-fix). Added the missing
+  `.gitattributes` line; guard now passes for all three checks.
+- **IR-3 (scanner_rank narrowing-cast risk).** The write path persists
+  `SelectionCandidateEvidence.scanner_rank` (`Option<u32>`) as `Option<i32>`
+  via `.map(|r| r as i32)`. Disposition: **ALREADY SAFE + PROVEN**, not fixed.
+  `u32 as i32` is a same-width bit-reinterpreting cast: every value above
+  `i32::MAX` has its top bit set and therefore always becomes negative — a
+  two's-complement identity, not a coincidence of typical rank values — and
+  the existing read-side validator (`explicit_multi_strategy_evidence_validator
+  ::stored_binding_to_evaluation`) already rejects any negative stored value
+  as `NegativeScannerRank`, failing closed rather than silently accepting a
+  wrapped value. Added a boundary/mutation test
+  (`scanner_rank_overflow_is_always_caught_never_silently_accepted`) proving
+  i32::MAX round-trips exactly and every overflowing u32 value is rejected;
+  verified red (weakening the `r >= 0` guard fails the test) then green
+  (restoring it passes).
+- Census of analogous narrowing casts in the same seam (`binding_count`,
+  `authorized_count`, `ordinal`, all `usize`/`.len()`-derived `as i32`)
+  found no code-backed defect: all are bounded by an in-memory parsed
+  watchlist-v3 artifact's realistic size (never remotely approaching
+  `i32::MAX`), and even in a hypothetical wrap, the validator's exact-equality
+  comparisons (never merely "is present") would still fail closed rather than
+  coincidentally match. No dedicated test added for these — no plausible
+  failure mode exists to prove against, unlike IR-3's explicit two's-complement
+  boundary.
+- C1 dormancy-gate call sites re-traced via the repo graph (`graft_find_all`
+  for `strategy_bootstrap_dormant|is_dormant()`): only two production gate
+  sites exist (`lifecycle.rs::start_execution_runtime`,
+  `autonomous_runtime_context::resolve_autonomous_runtime_context_from_fleet`),
+  both already consuming the one shared `explicit_watchlist_v3_authority_pending`
+  predicate per §-6's own `0af79883` — no residual parallel interpretation
+  found. `autonomous_completed_bar_driver.rs`'s dormancy check was re-confirmed
+  out of scope (drives the separate legacy single-binding path, never the
+  explicit-v3 host pool) — same conclusion §-6 already recorded.
+- C3 activation ordering re-verified directly in
+  `build_explicit_multi_strategy_start_snapshot`: write -> read-back -> validate
+  -> (only then) `build_explicit_multi_strategy_dispatch_authority`/host-pool
+  construction. Traced every production caller of `DynamicSelectionHostPool::
+  build`; the only caller in the explicit-v3 authority path is this function.
+  No alternate activation entry point exists.
+
+**Acceptance (corrected numbers):** `cargo test -p mqk-daemon --lib` 998
+passed / 0 failed / 22 ignored (one more than §-6's 997 — the new IR-3 proof
+test); `cargo test -p mqk-db --lib` 79 passed / 0 failed / 24 ignored;
+`cargo test -p mqk-db --test scenario_explicit_multi_strategy_authority_01 --
+--ignored` 5 passed against `mqk_test`; `scripts/guards/check_migration_
+governance.sh` passes (all 3 checks); `git diff --check` clean; `smoke_logs/`
+untouched; no Paper/Live/broker mutation.
+
+**Status: C1 = CODE_CLOSED (unchanged). C2 = CODE_CLOSED (unchanged; migration
+inventory gap repaired). C3 = CODE_CLOSED (unchanged).** No new deterministic
+C1/C2/C3 defect remains. C4/C5/C6/M3 not started, not authorized. No push.
+
+---
+
 ## -6. Stage B M2 — C1/C2/C3 Final Completion (2026-09-19, `V4-STAGE-B-M2-C1-C3-FINAL-01`)
 
 Reconciles §-5 below, whose draft text (written mid-`V4-STAGE-B-M2-REPAIR-03`)
