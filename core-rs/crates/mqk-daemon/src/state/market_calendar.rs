@@ -223,6 +223,48 @@ impl MarketCalendarProvider for NyseWeekdaysProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Crypto24x7Provider
+// ---------------------------------------------------------------------------
+
+/// M6-KRAKEN-CRYPTO-24-7-READINESS-01: 24/7 crypto session provider.
+///
+/// Crypto markets have no exchange calendar, no holidays, no DST, and no
+/// intraday close — every instant is a trading instant. This provider is
+/// therefore parameter-free and deterministic: it always returns
+/// `RegularOpen`/`is_trading_day: true` for any `now_utc`, never `Unknown`.
+///
+/// Source label: `"crypto_24_7"`. [`resolve_market_session_schedule`]
+/// recognizes this exact source string and switches its session-hours
+/// arithmetic from NYSE's 09:30-16:00 ET window to a full UTC calendar day
+/// — see that function's doc comment. This is the ONLY coupling between the
+/// two; every other consumer of [`MarketCalendarProvider`]
+/// (`daily_data_readiness::evaluate_assignment` and its helpers) is already
+/// parameterized purely through the injected provider and the
+/// `MarketSessionSchedule` it produces, so no other file needs to change to
+/// become crypto-aware.
+pub struct Crypto24x7Provider;
+
+impl MarketCalendarProvider for Crypto24x7Provider {
+    fn session_for(&self, now_utc: DateTime<Utc>) -> MarketSessionTruth {
+        // Reuses the ASSET-CORE-05A model-only classifier rather than
+        // reasserting "always open" a second time: this provider is what
+        // makes that classifier's claim real/wired for the first time.
+        debug_assert_eq!(
+            classify_crypto_continuous_session(now_utc),
+            MarketVenueSessionKind::Continuous
+        );
+        MarketSessionTruth {
+            state: MarketSessionState::RegularOpen,
+            source: "crypto_24_7",
+            exchange: "CRYPTO",
+            is_trading_day: true,
+            is_early_close: false,
+            session_close_note: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FixedWindowOverrideProvider
 // ---------------------------------------------------------------------------
 
@@ -1220,6 +1262,44 @@ pub fn resolve_market_session_schedule(
     provider: &dyn MarketCalendarProvider,
     now_utc: DateTime<Utc>,
 ) -> MarketSessionSchedule {
+    let truth = provider.session_for(now_utc);
+
+    // M6-KRAKEN-CRYPTO-24-7-READINESS-01: a `crypto_24_7`-sourced truth uses
+    // UTC calendar-day session hours (the whole day is the "session",
+    // matching this repo's existing UTC-midnight daily-bar convention for
+    // crypto — see `midnight_utc_ts_for_date`'s doc) instead of NYSE's
+    // 09:30-16:00 ET arithmetic below, and is never subject to the NYSE
+    // 2023-2028 static-heuristic-table coverage bound: a parameter-free,
+    // always-open provider has no holiday table to be honest about the
+    // bound of. `previous_trading_date` is always literally "yesterday"
+    // since [`Crypto24x7Provider`] reports every day as a trading day.
+    if truth.source == "crypto_24_7" {
+        let market_date = (now_utc.year() as i64, now_utc.month() as i64, now_utc.day() as i64);
+        let day_start_ts = midnight_utc_ts_for_date(market_date);
+        let session_open_utc =
+            DateTime::<Utc>::from_timestamp(day_start_ts, 0).unwrap_or(now_utc);
+        let session_close_utc =
+            DateTime::<Utc>::from_timestamp(day_start_ts + 86_400, 0).unwrap_or(now_utc);
+        let previous_ts = day_start_ts - 1;
+        let previous_trading_date = DateTime::<Utc>::from_timestamp(previous_ts, 0)
+            .map(|dt| (dt.year() as i64, dt.month() as i64, dt.day() as i64))
+            .unwrap_or(market_date);
+        return MarketSessionSchedule {
+            market_date,
+            session_open_utc,
+            session_close_utc,
+            previous_trading_date,
+            is_early_close: false,
+            is_trading_day: truth.is_trading_day,
+            calendar_source: truth.source,
+            coverage_state: if truth.is_trading_day {
+                CalendarCoverageState::Active
+            } else {
+                CalendarCoverageState::Unknown
+            },
+        };
+    }
+
     let et_components = utc_to_et_components(now_utc.timestamp());
     let Some((year, month, day, et_secs, _is_weekday)) = et_components else {
         return MarketSessionSchedule {
@@ -1234,7 +1314,6 @@ pub fn resolve_market_session_schedule(
         };
     };
     let market_date = (year, month, day);
-    let truth = provider.session_for(now_utc);
 
     let midnight_et_utc_ts = now_utc.timestamp() - et_secs;
     let open_secs = 9 * 3600 + 30 * 60; // 09:30 ET

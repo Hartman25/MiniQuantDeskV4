@@ -63,11 +63,11 @@ use chrono::{TimeZone, Utc};
 use mqk_daemon::state::{
     classify_crypto_continuous_session, classify_equity_us_regular_session,
     classify_forex_weekday_continuous_session, classify_futures_globex_session,
-    resolve_session_profile_for_instrument_metadata, supported_session_profiles,
-    FixedWindowOverrideProvider, FuturesSessionWindows, MarketCalendarProvider,
-    MarketSessionProfile, MarketSessionState, MarketSessionTruth, MarketVenueSessionKind,
-    NyseWeekdaysProvider, SessionAuthority, SessionProfileResolutionTruth, SessionProfileStatus,
-    SessionWindow,
+    resolve_market_session_schedule, resolve_session_profile_for_instrument_metadata,
+    supported_session_profiles, Crypto24x7Provider, FixedWindowOverrideProvider,
+    FuturesSessionWindows, MarketCalendarProvider, MarketSessionProfile, MarketSessionState,
+    MarketSessionTruth, MarketVenueSessionKind, NyseWeekdaysProvider, SessionAuthority,
+    SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow,
 };
 
 // ---------------------------------------------------------------------------
@@ -1241,4 +1241,113 @@ fn acs05b08_blank_or_whitespace_asset_class_fails_closed() {
         );
         assert_eq!(r.profile, None);
     }
+}
+
+// ---------------------------------------------------------------------------
+// M6-KRAKEN-CRYPTO-24-7-READINESS-01 — Crypto24x7Provider is real and wired
+// ---------------------------------------------------------------------------
+//
+// | Test    | Claim                                                                |
+// |---------|-----------------------------------------------------------------------|
+// | K247-01 | Crypto24x7Provider reports trading_day=true on a Saturday             |
+// | K247-02 | Crypto24x7Provider reports trading_day=true on a known NYSE holiday   |
+// | K247-03 | resolve_market_session_schedule uses a full UTC day for crypto        |
+// | K247-04 | crypto schedule's previous_trading_date is always "yesterday"         |
+// | K247-05 | crypto schedule is Active coverage even outside the NYSE 2023-2028    |
+// |         | table bound (year 2031)                                               |
+// | K247-06 | NYSE schedule (unchanged calendar_provider) is untouched by this      |
+// |         | patch — same-day equity classification is byte-identical to MCSP03    |
+
+/// K247-01: crypto is open on a Saturday, when equity (MCSP03) is closed.
+#[test]
+fn k247_01_crypto_is_trading_day_on_saturday() {
+    let saturday = ts(2026, 1, 3, 12, 0, 0); // a Saturday
+    let truth = Crypto24x7Provider.session_for(saturday);
+    assert!(truth.is_trading_day, "K247-01: crypto must trade on Saturday");
+    assert_eq!(truth.source, "crypto_24_7");
+    assert_eq!(truth.exchange, "CRYPTO");
+    assert!(!truth.is_early_close);
+}
+
+/// K247-02: crypto is open on a known full-day NYSE holiday (2026-07-03,
+/// same date MCSP04 proves NYSE is Holiday/closed for).
+#[test]
+fn k247_02_crypto_is_trading_day_on_nyse_holiday() {
+    let holiday = ts(2026, 7, 3, 15, 0, 0);
+    let truth = Crypto24x7Provider.session_for(holiday);
+    assert!(
+        truth.is_trading_day,
+        "K247-02: crypto must trade through an NYSE holiday"
+    );
+    // Cross-check: the SAME instant is genuinely closed for NYSE, proving
+    // this isn't a vacuous claim about a date nothing is ever closed on.
+    let nyse_truth = provider().session_for(holiday);
+    assert!(
+        !nyse_truth.is_trading_day,
+        "K247-02: sanity check — NYSE must actually be closed on this date"
+    );
+}
+
+/// K247-03: `resolve_market_session_schedule` gives crypto a full UTC
+/// calendar-day session (00:00Z to next 00:00Z), not NYSE's 09:30-16:00 ET
+/// window — the exact defect this patch fixes (a crypto instrument must not
+/// be treated as "session closed" outside equity market hours).
+#[test]
+fn k247_03_crypto_schedule_spans_full_utc_day() {
+    let now = ts(2026, 1, 3, 3, 0, 0); // 03:00 UTC Saturday — well outside any NYSE hours
+    let schedule = resolve_market_session_schedule(&Crypto24x7Provider, now);
+    assert!(schedule.is_trading_day, "K247-03: crypto schedule must be a trading day");
+    assert_eq!(schedule.calendar_source, "crypto_24_7");
+    assert_eq!(
+        schedule.session_open_utc,
+        ts(2026, 1, 3, 0, 0, 0),
+        "K247-03: crypto session_open_utc must be midnight UTC of the same date"
+    );
+    assert_eq!(
+        schedule.session_close_utc,
+        ts(2026, 1, 4, 0, 0, 0),
+        "K247-03: crypto session_close_utc must be midnight UTC of the NEXT date \
+         (whole-day span), not 16:00 ET"
+    );
+    assert_eq!(schedule.market_date, (2026, 1, 3));
+}
+
+/// K247-04: crypto's `previous_trading_date` is always literally yesterday —
+/// there is no weekend/holiday gap to walk over.
+#[test]
+fn k247_04_crypto_previous_trading_date_is_always_yesterday() {
+    // Sunday -> Saturday (would be a multi-day gap for NYSE's Mon-after
+    // weekend rule, but not for crypto).
+    let sunday = ts(2026, 1, 4, 12, 0, 0);
+    let schedule = resolve_market_session_schedule(&Crypto24x7Provider, sunday);
+    assert_eq!(schedule.previous_trading_date, (2026, 1, 3));
+}
+
+/// K247-05: crypto's coverage_state must be `Active` even far outside the
+/// NYSE static heuristic table's honest 2023-2028 bound — a parameter-free,
+/// always-open provider has no such table to be dishonest about.
+#[test]
+fn k247_05_crypto_coverage_active_outside_nyse_table_bound() {
+    let far_future = ts(2031, 6, 15, 12, 0, 0);
+    let schedule = resolve_market_session_schedule(&Crypto24x7Provider, far_future);
+    assert!(schedule.is_trading_day);
+    assert_eq!(
+        schedule.coverage_state,
+        mqk_daemon::state::CalendarCoverageState::Active,
+        "K247-05: crypto coverage must be Active regardless of the NYSE table bound"
+    );
+}
+
+/// K247-06: this patch must not change NYSE/equity schedule resolution at
+/// all — same claim as MCSP03 (Saturday is closed), now proved through
+/// `resolve_market_session_schedule` directly rather than the raw provider.
+#[test]
+fn k247_06_equity_schedule_unaffected_by_crypto_branch() {
+    let saturday = ts(2026, 1, 3, 12, 0, 0);
+    let schedule = resolve_market_session_schedule(&provider(), saturday);
+    assert!(
+        !schedule.is_trading_day,
+        "K247-06: NYSE schedule must remain closed on Saturday after this patch"
+    );
+    assert_eq!(schedule.calendar_source, "nyse_weekdays_heuristic");
 }
