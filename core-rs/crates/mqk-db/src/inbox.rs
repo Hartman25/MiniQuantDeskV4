@@ -21,7 +21,99 @@ use uuid::Uuid;
 /// this value under the `schema_version` key. Bump only alongside a
 /// documented, backward-compatible change to the envelope shape the readers
 /// (chiefly `serde_json::from_value::<mqk_execution::BrokerEvent>`) understand.
-pub const MESSAGE_JSON_SCHEMA_VERSION: i64 = 1;
+///
+/// CUTOVER-1A-QTY-MICROS-INBOX-ENVELOPE-01: bumped 1 -> 2 to mark the
+/// introduction of fractional `QtyMicros` (1e-6 scale) quantity semantics for
+/// the numeric quantity fields carried in this envelope (`delta_qty`,
+/// `cum_qty_after`, `new_total_qty`). See [`QuantityUnitEpoch`].
+pub const MESSAGE_JSON_SCHEMA_VERSION: i64 = 2;
+
+/// The prior `message_json` schema version, in effect before
+/// CUTOVER-1A-QTY-MICROS-INBOX-ENVELOPE-01. Every row persisted under this
+/// version (or with `schema_version` entirely absent, i.e. rows older than
+/// the DB-OUTBOX-SCHEMA-VERSION-01 patch that introduced the field at all)
+/// carries **whole-unit** integers in its quantity fields (e.g. `3` means 3
+/// shares) — never QtyMicros. This constant exists so that boundary is named
+/// and load-bearing, not an unexplained magic `1`.
+pub const LEGACY_WHOLE_UNIT_SCHEMA_VERSION: i64 = 1;
+
+/// Which quantity-unit convention a `message_json` envelope's numeric
+/// quantity fields (`delta_qty`, `cum_qty_after`, `new_total_qty`) use.
+///
+/// Determined solely from the envelope's `schema_version` field — never
+/// inferred from the numeric magnitude of the quantity values themselves
+/// (CUTOVER-1A invariant: a historical whole-unit `3` must never be
+/// reinterpreted as `0.000003` or `3_000_000` units by guessing from size).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantityUnitEpoch {
+    /// `schema_version` is missing, or equals
+    /// [`LEGACY_WHOLE_UNIT_SCHEMA_VERSION`]. Quantity fields are raw
+    /// whole-unit integers.
+    LegacyWholeUnits,
+    /// `schema_version` equals [`MESSAGE_JSON_SCHEMA_VERSION`] (current).
+    /// Quantity fields are raw `QtyMicros` integers at 1e-6 scale.
+    QtyMicros,
+}
+
+/// Scale factor separating [`QuantityUnitEpoch::LegacyWholeUnits`] from
+/// [`QuantityUnitEpoch::QtyMicros`] raw integers. Mirrors
+/// `mqk_schemas::QTY_MICROS_SCALE` exactly; duplicated here (rather than
+/// depending on `mqk-schemas`) to keep `mqk-db` free of a dependency on the
+/// execution-facing quantity type — this crate only ever produces/consumes
+/// the raw scaled integer, never the `QtyMicros` newtype itself.
+pub const LEGACY_TO_MICROS_SCALE: i64 = 1_000_000;
+
+/// Classify a `message_json` envelope's `schema_version` into the quantity
+/// unit convention its numeric quantity fields use.
+///
+/// Fail-closed: any `schema_version` other than absent,
+/// [`LEGACY_WHOLE_UNIT_SCHEMA_VERSION`], or [`MESSAGE_JSON_SCHEMA_VERSION`]
+/// is refused — including a version newer than this build supports, a
+/// version older than the legacy boundary, or a malformed value. There is no
+/// optimistic default; an unrecognized version can never fall through to
+/// either interpretation.
+pub fn quantity_unit_epoch(message_json: &Value) -> Result<QuantityUnitEpoch> {
+    match message_json.get("schema_version") {
+        None => Ok(QuantityUnitEpoch::LegacyWholeUnits),
+        Some(field) => match field.as_i64() {
+            Some(v) if v == LEGACY_WHOLE_UNIT_SCHEMA_VERSION => {
+                Ok(QuantityUnitEpoch::LegacyWholeUnits)
+            }
+            Some(v) if v == MESSAGE_JSON_SCHEMA_VERSION => Ok(QuantityUnitEpoch::QtyMicros),
+            Some(v) if v > MESSAGE_JSON_SCHEMA_VERSION => Err(anyhow!(
+                "message_json schema_version {v} is newer than this build supports (current={MESSAGE_JSON_SCHEMA_VERSION})"
+            )),
+            _ => Err(anyhow!(
+                "message_json schema_version {field:?} is malformed or unrecognized (current={MESSAGE_JSON_SCHEMA_VERSION}, legacy={LEGACY_WHOLE_UNIT_SCHEMA_VERSION})"
+            )),
+        },
+    }
+}
+
+/// Convert a raw quantity integer read from a `message_json` numeric field
+/// (`delta_qty`, `cum_qty_after`, `new_total_qty`) into canonical 1e-6-scale
+/// micro-units, using the epoch [`quantity_unit_epoch`] determined for this
+/// envelope.
+///
+/// - [`QuantityUnitEpoch::LegacyWholeUnits`]: `raw` is a whole-unit count
+///   (e.g. equity shares); scaled up by [`LEGACY_TO_MICROS_SCALE`]. Fails
+///   closed on overflow rather than wrapping or truncating.
+/// - [`QuantityUnitEpoch::QtyMicros`]: `raw` is already at 1e-6 scale and is
+///   returned unchanged.
+///
+/// This is the single conversion point that prevents a historical whole-unit
+/// quantity from ever being silently reinterpreted as a micro-unit value (or
+/// vice versa): the epoch is derived exclusively from `schema_version`
+/// (never from `raw`'s magnitude), and every caller — new and replayed alike
+/// — must route through this function rather than reading `raw` directly.
+pub fn decode_quantity_micros(raw: i64, epoch: QuantityUnitEpoch) -> Result<i64> {
+    match epoch {
+        QuantityUnitEpoch::LegacyWholeUnits => raw.checked_mul(LEGACY_TO_MICROS_SCALE).ok_or_else(
+            || anyhow!("legacy whole-unit quantity {raw} overflows i64 at micros scale"),
+        ),
+        QuantityUnitEpoch::QtyMicros => Ok(raw),
+    }
+}
 
 /// Validate-and-stamp `message_json` with the current schema version before
 /// it is durably written. This is the single writer-side primitive for
@@ -62,24 +154,16 @@ fn stamp_message_json_schema_version(message_json: &Value) -> Result<Value> {
 /// Validate a `message_json` envelope's `schema_version` before it is
 /// trusted by a reader (e.g. before `serde_json::from_value::<BrokerEvent>`).
 ///
-/// Same fail-closed contract as
-/// [`crate::orders::validate_order_json_schema_version`]: missing is
-/// accepted (proven historical compatibility), the current version is
-/// accepted, a greater integer is refused as an unsupported future version,
-/// and anything else present under the key is refused as malformed.
+/// Delegates to [`quantity_unit_epoch`] for the actual classification: missing
+/// is accepted (proven historical compatibility, [`QuantityUnitEpoch::LegacyWholeUnits`]),
+/// [`LEGACY_WHOLE_UNIT_SCHEMA_VERSION`] is accepted (explicit legacy), the
+/// current version is accepted, a greater integer is refused as an
+/// unsupported future version, and anything else present under the key is
+/// refused as malformed. This function intentionally discards *which* epoch
+/// was found — callers that need the epoch itself (to decode quantity fields
+/// correctly) call [`quantity_unit_epoch`] directly.
 pub fn validate_message_json_schema_version(message_json: &Value) -> Result<()> {
-    let Some(field) = message_json.get("schema_version") else {
-        return Ok(());
-    };
-    match field.as_i64() {
-        Some(v) if v == MESSAGE_JSON_SCHEMA_VERSION => Ok(()),
-        Some(v) if v > MESSAGE_JSON_SCHEMA_VERSION => Err(anyhow!(
-            "message_json schema_version {v} is newer than this build supports (current={MESSAGE_JSON_SCHEMA_VERSION})"
-        )),
-        _ => Err(anyhow!(
-            "message_json schema_version {field:?} is malformed or unrecognized (current={MESSAGE_JSON_SCHEMA_VERSION})"
-        )),
-    }
+    quantity_unit_epoch(message_json).map(|_| ())
 }
 
 #[derive(Debug, Clone)]
@@ -842,5 +926,159 @@ mod message_json_schema_version_tests {
         let malformed = json!({"type": "ack", "schema_version": "one"});
         let err = validate_message_json_schema_version(&malformed).unwrap_err();
         assert!(err.to_string().contains("malformed"));
+    }
+
+    #[test]
+    fn sv14_explicit_legacy_version_one_is_accepted_by_validate() {
+        // Regression: every row written before this cutover carries an
+        // *explicit* schema_version=1 (stamped by the prior
+        // DB-OUTBOX-SCHEMA-VERSION-01 writer). Bumping MESSAGE_JSON_SCHEMA_VERSION
+        // to 2 must not turn every already-persisted row into a validation
+        // failure.
+        let legacy_explicit =
+            json!({"type": "ack", "schema_version": LEGACY_WHOLE_UNIT_SCHEMA_VERSION});
+        assert!(validate_message_json_schema_version(&legacy_explicit).is_ok());
+    }
+
+    #[test]
+    fn sv15_stamp_refuses_a_new_write_explicitly_claiming_legacy_version() {
+        // New writes must always carry the current version. A caller
+        // explicitly asserting the legacy version for a *new* write is
+        // refused, not silently upgraded -- this is not a case of "missing",
+        // and never depends on whether it is called from a code path that
+        // could interpret quantity fields differently.
+        let err = stamp_message_json_schema_version(
+            &json!({"type": "ack", "schema_version": LEGACY_WHOLE_UNIT_SCHEMA_VERSION}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not writable"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CUTOVER-1A-QTY-MICROS-INBOX-ENVELOPE-01: quantity-unit epoch tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod quantity_unit_epoch_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn qe01_missing_schema_version_is_legacy_whole_units() {
+        let legacy = json!({"type": "fill", "delta_qty": 3});
+        assert_eq!(
+            quantity_unit_epoch(&legacy).unwrap(),
+            QuantityUnitEpoch::LegacyWholeUnits
+        );
+    }
+
+    #[test]
+    fn qe02_explicit_legacy_version_is_legacy_whole_units() {
+        let legacy = json!({
+            "type": "fill",
+            "delta_qty": 3,
+            "schema_version": LEGACY_WHOLE_UNIT_SCHEMA_VERSION
+        });
+        assert_eq!(
+            quantity_unit_epoch(&legacy).unwrap(),
+            QuantityUnitEpoch::LegacyWholeUnits
+        );
+    }
+
+    #[test]
+    fn qe03_current_version_is_qty_micros() {
+        let current = json!({
+            "type": "fill",
+            "delta_qty": 3_000_000,
+            "schema_version": MESSAGE_JSON_SCHEMA_VERSION
+        });
+        assert_eq!(
+            quantity_unit_epoch(&current).unwrap(),
+            QuantityUnitEpoch::QtyMicros
+        );
+    }
+
+    #[test]
+    fn qe04_unknown_future_version_refuses() {
+        let future = json!({
+            "type": "fill",
+            "schema_version": MESSAGE_JSON_SCHEMA_VERSION + 1
+        });
+        let err = quantity_unit_epoch(&future).unwrap_err();
+        assert!(err.to_string().contains("newer than this build supports"));
+    }
+
+    #[test]
+    fn qe05_unknown_past_version_refuses() {
+        // A version older than the named legacy boundary (e.g. 0) is not
+        // silently treated as legacy -- only the exact named legacy version
+        // and the current version are recognized epochs.
+        let unknown_past = json!({"type": "fill", "schema_version": 0});
+        assert!(quantity_unit_epoch(&unknown_past).is_err());
+    }
+
+    #[test]
+    fn qe06_malformed_schema_version_refuses() {
+        let malformed = json!({"type": "fill", "schema_version": "two"});
+        assert!(quantity_unit_epoch(&malformed).is_err());
+    }
+
+    /// Compatibility proof: a legacy whole-unit event decodes to exactly the
+    /// same micro-unit value the pre-cutover code would have used as a raw
+    /// i64 (its own value, unscaled) -- CUTOVER-1A's job is only to make that
+    /// interpretation an explicit, checked step instead of an implicit one.
+    #[test]
+    fn qe10_legacy_whole_unit_decodes_scaled_by_micros_scale() {
+        let epoch = QuantityUnitEpoch::LegacyWholeUnits;
+        assert_eq!(decode_quantity_micros(3, epoch).unwrap(), 3_000_000);
+        assert_eq!(decode_quantity_micros(0, epoch).unwrap(), 0);
+        assert_eq!(decode_quantity_micros(-7, epoch).unwrap(), -7_000_000);
+    }
+
+    /// Compatibility proof: a new QtyMicros-epoch event round-trips exactly
+    /// -- the raw integer already IS the micro-unit value, untouched.
+    #[test]
+    fn qe11_qty_micros_epoch_round_trips_exactly() {
+        let epoch = QuantityUnitEpoch::QtyMicros;
+        assert_eq!(decode_quantity_micros(1_500_000, epoch).unwrap(), 1_500_000);
+        assert_eq!(decode_quantity_micros(0, epoch).unwrap(), 0);
+        assert_eq!(decode_quantity_micros(-100, epoch).unwrap(), -100);
+    }
+
+    #[test]
+    fn qe12_legacy_decode_fails_closed_on_overflow_rather_than_wrapping() {
+        let epoch = QuantityUnitEpoch::LegacyWholeUnits;
+        // i64::MAX whole units * 1_000_000 overflows i64 -- must error, not wrap.
+        assert!(decode_quantity_micros(i64::MAX, epoch).is_err());
+        assert!(decode_quantity_micros(i64::MIN, epoch).is_err());
+    }
+
+    /// The central CUTOVER-1A invariant: replay of an old durable row can
+    /// never change the economic quantity it recorded. A legacy row's raw
+    /// value `3` must decode to the same economic quantity (3 whole units,
+    /// expressed as 3_000_000 micros) no matter how many times, or how far
+    /// in the future, it is replayed -- it is never reinterpreted as
+    /// 3 micro-units (0.000003 units) by a later build that defaults to the
+    /// QtyMicros epoch.
+    #[test]
+    fn qe20_replay_of_old_durable_row_cannot_change_economic_quantity() {
+        let old_row = json!({
+            "type": "fill",
+            "broker_message_id": "m1",
+            "internal_order_id": "ord-1",
+            "delta_qty": 3
+            // no schema_version at all -- oldest possible durable shape.
+        });
+        let epoch = quantity_unit_epoch(&old_row).unwrap();
+        assert_eq!(epoch, QuantityUnitEpoch::LegacyWholeUnits);
+        let raw = old_row.get("delta_qty").and_then(Value::as_i64).unwrap();
+        let decoded_now = decode_quantity_micros(raw, epoch).unwrap();
+        // Simulate "replay in the future": the epoch classification is
+        // deterministic given the same JSON, so a second, later decode
+        // produces the identical result.
+        let epoch_later = quantity_unit_epoch(&old_row).unwrap();
+        let decoded_later = decode_quantity_micros(raw, epoch_later).unwrap();
+        assert_eq!(decoded_now, decoded_later);
+        assert_eq!(decoded_now, 3_000_000, "3 legacy shares == 3.0 units in micros");
     }
 }
