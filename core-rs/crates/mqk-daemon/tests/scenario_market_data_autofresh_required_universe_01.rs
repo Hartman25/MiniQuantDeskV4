@@ -1191,6 +1191,219 @@ async fn non_trading_day_makes_zero_provider_calls() {
 }
 
 // ---------------------------------------------------------------------------
+// M6-KRAKEN-CRYPTO-24-7-READINESS-01 (2/2): mixed equity+crypto universe
+// on a closed-NYSE day
+// ---------------------------------------------------------------------------
+
+/// A mixed equity (ZZAUTOFRMIXEQ, alpaca) + crypto (BTC/USD, kraken)
+/// instrument registry fixture. `instrument_registry_file` (used everywhere
+/// else in this file) is equity-only by construction, so this builds its
+/// own JSON rather than widening that shared helper's signature.
+fn mixed_equity_crypto_instrument_registry_file() -> NamedTempFile {
+    let mut file = NamedTempFile::new().expect("create mixed instrument registry");
+    let json = serde_json::json!([
+        {
+            "instrument_id": "equity:US:ZZAUTOFRMIXEQ",
+            "symbol": "ZZAUTOFRMIXEQ",
+            "asset_class": "equity",
+            "provider": "alpaca",
+            "provider_symbol": "ZZAUTOFRMIXEQ",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "M6-KRAKEN-CRYPTO-24-7-READINESS-01 mixed-universe test fixture"
+        },
+        {
+            "instrument_id": "crypto:GLOBAL:BTCUSD",
+            "symbol": "BTC/USD",
+            "asset_class": "crypto",
+            "provider": "kraken",
+            "provider_symbol": "XBTUSD",
+            "venue": "KRAKEN",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "M6-KRAKEN-CRYPTO-24-7-READINESS-01 mixed-universe test fixture"
+        }
+    ]);
+    file.write_all(json.to_string().as_bytes())
+        .expect("write mixed instrument registry");
+    file
+}
+
+/// Provider registry covering both `alpaca` (equity) and `kraken` (crypto) —
+/// `provider_registry_file` hardcodes `asset_classes: ["equity", "etf"]` for
+/// every entry, so this builds its own JSON to give kraken genuine crypto
+/// capability.
+fn equity_and_crypto_provider_registry_file() -> NamedTempFile {
+    let mut file = NamedTempFile::new().expect("create equity+crypto provider registry");
+    let entry = |id: &str, asset_classes: &[&str]| {
+        serde_json::json!({
+            "provider_id": id,
+            "display_name": id,
+            "asset_classes": asset_classes,
+            "free_tier_available": true,
+            "api_key_required": false,
+            "credential_env_vars": [],
+            "rate_limit_notes": "test",
+            "supported_timeframes": ["1D", "1m", "5m"],
+            "historical_depth_notes": "test",
+            "realtime_support_notes": "test",
+            "licensing_notes": "test",
+            "implementation_status": "implemented_equity_provider",
+            "enabled": true,
+            "verification_status": "repo_implemented_official_limits_unverified",
+            "docs_url": ""
+        })
+    };
+    let json = serde_json::json!([
+        entry("alpaca", &["equity", "etf"]),
+        entry("kraken", &["crypto"]),
+    ]);
+    file.write_all(json.to_string().as_bytes())
+        .expect("write equity+crypto provider registry");
+    file
+}
+
+/// This is the exact production defect M6-KRAKEN-CRYPTO-24-7-READINESS-01
+/// fixes: a required universe containing BOTH an equity and a crypto
+/// instrument, evaluated with a calendar_provider reporting NYSE closed
+/// (weekend/holiday). Before this patch, `run_required_universe_cycle`'s
+/// whole-cycle `!schedule.is_trading_day` early return would suppress
+/// evaluation of the crypto instrument too — it would never even reach the
+/// per-instrument freshness/refresh logic. After this patch, the equity
+/// instrument is correctly reported `market_closed` while the crypto
+/// instrument is genuinely evaluated (not silently skipped).
+#[tokio::test]
+async fn mixed_equity_closed_and_crypto_open_universe_evaluates_crypto_independently() {
+    let Some(pool) = maybe_db("mixed_equity_crypto_closed_nyse_day").await else {
+        return;
+    };
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    let watchlist_file = watchlist_v2_file(&["ZZAUTOFRMIXEQ", "BTC/USD"]);
+    std::env::set_var("MQK_PAPER_WATCHLIST_PATH", watchlist_file.path());
+
+    let instruments = mixed_equity_crypto_instrument_registry_file();
+    let providers = equity_and_crypto_provider_registry_file();
+    let provider = Arc::new(FakeUniverseProvider::new("alpaca"));
+    let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
+    let calendar = non_trading_day_calendar();
+
+    let result = run_required_universe_cycle(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now_fixture(),
+        true, // dry_run: no provider calls/DB writes needed to prove the gate
+    )
+    .await;
+
+    assert_eq!(
+        result.report.requirements.len(),
+        2,
+        "both the equity and the crypto requirement must be evaluated, not just one"
+    );
+
+    let equity_status = result
+        .report
+        .requirements
+        .iter()
+        .find(|r| r.symbol == "ZZAUTOFRMIXEQ")
+        .expect("equity requirement must be present");
+    assert_eq!(
+        equity_status.freshness_state, "market_closed",
+        "equity must still respect NYSE being closed"
+    );
+
+    let crypto_status = result
+        .report
+        .requirements
+        .iter()
+        .find(|r| r.symbol == "BTC/USD")
+        .expect("crypto requirement must be present");
+    assert_ne!(
+        crypto_status.freshness_state, "market_closed",
+        "crypto must NOT be suppressed by NYSE being closed — this is the exact defect \
+         M6-KRAKEN-CRYPTO-24-7-READINESS-01 fixes"
+    );
+
+    // Zero provider calls: dry_run, and neither symbol should have triggered
+    // a bounded refresh attempt (equity is gated pre-DB by market_closed;
+    // crypto's dry_run=true suppresses any attempted call regardless of its
+    // freshness state).
+    assert_eq!(provider.historical_calls(), 0);
+    assert_eq!(provider.latest_calls(), 0);
+    assert_eq!(result.provider_api_calls_made, 0);
+
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+}
+
+/// A required universe that is ENTIRELY crypto (no equity instrument at
+/// all) must still be genuinely evaluated on a day NYSE reports closed —
+/// proving the fix does not merely special-case "some equity present",
+/// and that the pre-existing whole-cycle `not_applicable` short-circuit
+/// (preserved for all-equity closed-day universes, see
+/// `non_trading_day_makes_zero_provider_calls`) correctly does NOT apply
+/// once any resolved requirement is crypto.
+#[tokio::test]
+async fn crypto_only_universe_is_evaluated_on_a_closed_nyse_day() {
+    let Some(pool) = maybe_db("crypto_only_closed_nyse_day").await else {
+        return;
+    };
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    let watchlist_file = watchlist_v2_file(&["BTC/USD"]);
+    std::env::set_var("MQK_PAPER_WATCHLIST_PATH", watchlist_file.path());
+
+    let mut file = NamedTempFile::new().expect("create crypto-only instrument registry");
+    let json = serde_json::json!([{
+        "instrument_id": "crypto:GLOBAL:BTCUSD",
+        "symbol": "BTC/USD",
+        "asset_class": "crypto",
+        "provider": "kraken",
+        "provider_symbol": "XBTUSD",
+        "venue": "KRAKEN",
+        "currency": "USD",
+        "enabled": true,
+        "timeframes": ["5m"],
+        "notes": "M6-KRAKEN-CRYPTO-24-7-READINESS-01 crypto-only test fixture"
+    }]);
+    file.write_all(json.to_string().as_bytes())
+        .expect("write crypto-only instrument registry");
+
+    let providers = equity_and_crypto_provider_registry_file();
+    let provider = Arc::new(FakeUniverseProvider::new("kraken"));
+    let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
+    let calendar = non_trading_day_calendar();
+
+    let result = run_required_universe_cycle(
+        Some(&pool),
+        file.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now_fixture(),
+        true,
+    )
+    .await;
+
+    assert_ne!(
+        result.report.overall_state, "not_applicable",
+        "a crypto-only universe must not be reported not_applicable merely because NYSE is closed"
+    );
+    assert_eq!(result.report.requirements.len(), 1);
+    assert_ne!(result.report.requirements[0].freshness_state, "market_closed");
+
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+}
+
+// ---------------------------------------------------------------------------
 // §36 test 14: readiness load-bearing negative control (no partial green)
 // ---------------------------------------------------------------------------
 

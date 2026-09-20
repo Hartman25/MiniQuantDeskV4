@@ -77,8 +77,8 @@ use crate::market_data_freshness::{
     RequiredSymbolsResolution,
 };
 use crate::state::market_calendar::{
-    active_calendar_provider_from_env, resolve_market_session_schedule, MarketCalendarProvider,
-    MarketSessionSchedule,
+    active_calendar_provider_from_env, resolve_market_session_schedule, Crypto24x7Provider,
+    MarketCalendarProvider, MarketSessionSchedule,
 };
 use crate::state::market_data_latest_bar::{
     instrument_authorizes_timeframe, poll_and_ingest_latest_closed_bar,
@@ -1226,12 +1226,17 @@ pub async fn run_required_universe_cycle(
         };
     }
 
-    if !schedule.is_trading_day {
-        return RequiredUniverseCycleResult {
-            report: not_applicable_report(&resolution, &schedule),
-            provider_api_calls_made: 0,
-        };
-    }
+    // M6-KRAKEN-CRYPTO-24-7-READINESS-01: the whole-cycle `!is_trading_day`
+    // early return that used to live here has been removed. `schedule`
+    // (from the caller's `calendar_provider`, ordinarily NYSE) no longer
+    // gates the entire cycle — only equity-class requirements below are
+    // gated on it. Crypto-class requirements are evaluated against
+    // `crypto_schedule` (always a trading day), so a closed NYSE day no
+    // longer suppresses required crypto refresh/readiness. Registries load
+    // unconditionally now, since a crypto-only required universe must still
+    // be able to resolve/evaluate even when `schedule.is_trading_day` is
+    // false.
+    let crypto_schedule = resolve_market_session_schedule(&Crypto24x7Provider, now_utc);
 
     let instruments = match load_validated_instrument_registry(instrument_registry_path) {
         Ok(instruments) => instruments,
@@ -1269,6 +1274,29 @@ pub async fn run_required_universe_cycle(
         schedule.market_date,
     );
 
+    // M6-KRAKEN-CRYPTO-24-7-READINESS-01: preserve the exact pre-existing
+    // whole-cycle `not_applicable` contract (empty `requirements`, zero
+    // provider calls) for a required set that resolves to NO crypto
+    // instrument at all — an all-equity universe on a closed NYSE day
+    // behaves byte-for-byte as before this patch. Only once a crypto
+    // instrument is genuinely present in the resolved plan does the more
+    // granular per-instrument evaluation below take over (needed so that
+    // instrument's crypto requirement is not suppressed by NYSE being
+    // closed).
+    let any_crypto_resolved = plan.resolutions.iter().any(|r| match r {
+        RequirementResolution::Resolved(resolved) => instruments.iter().any(|i| {
+            i.symbol.trim().eq_ignore_ascii_case(resolved.symbol.trim())
+                && i.asset_class.eq_ignore_ascii_case("crypto")
+        }),
+        RequirementResolution::Blocked(_) => false,
+    });
+    if !any_crypto_resolved && !schedule.is_trading_day {
+        return RequiredUniverseCycleResult {
+            report: not_applicable_report(&resolution, &schedule),
+            provider_api_calls_made: 0,
+        };
+    }
+
     // §2-4: the strict readiness authority's `required_history_bars` comes
     // from the strategy actually assigned to each required symbol, resolved
     // once per cycle from the same watchlist/legacy-env inputs the
@@ -1281,6 +1309,8 @@ pub async fn run_required_universe_cycle(
     let now_ts = now_utc.timestamp();
     let past_close_grace =
         now_ts > schedule.session_close_utc.timestamp() + SESSION_CLOSE_POLL_BUFFER_SECS;
+    let crypto_past_close_grace =
+        now_ts > crypto_schedule.session_close_utc.timestamp() + SESSION_CLOSE_POLL_BUFFER_SECS;
 
     for resolution_entry in &plan.resolutions {
         match resolution_entry {
@@ -1296,6 +1326,51 @@ pub async fn run_required_universe_cycle(
                 });
             }
             RequirementResolution::Resolved(resolved) => {
+                // M6-KRAKEN-CRYPTO-24-7-READINESS-01: each instrument is
+                // evaluated against its OWN session profile — equity keeps
+                // the caller's `calendar_provider`/`schedule` (NYSE by
+                // default) exactly as before; crypto uses the always-open
+                // `Crypto24x7Provider`/`crypto_schedule`. Mixed universes
+                // therefore evaluate each instrument independently, and a
+                // closed NYSE day blocks only the equity requirements, never
+                // the crypto ones.
+                let is_crypto = instruments
+                    .iter()
+                    .find(|i| i.symbol.trim().eq_ignore_ascii_case(resolved.symbol.trim()))
+                    .map(|i| i.asset_class.eq_ignore_ascii_case("crypto"))
+                    .unwrap_or(false);
+                let effective_calendar_provider: &dyn MarketCalendarProvider = if is_crypto {
+                    &Crypto24x7Provider
+                } else {
+                    calendar_provider
+                };
+                let effective_schedule = if is_crypto { &crypto_schedule } else { &schedule };
+                let effective_past_close_grace =
+                    if is_crypto { crypto_past_close_grace } else { past_close_grace };
+
+                // Equity-only gate: a crypto instrument is never blocked by
+                // NYSE being closed (`effective_schedule.is_trading_day` is
+                // unconditionally `true` for crypto, so this can only fire
+                // for an equity requirement).
+                if !effective_schedule.is_trading_day {
+                    statuses.push(RequiredMarketDataStatus {
+                        symbol: resolved.symbol.clone(),
+                        timeframe: resolved.timeframe.clone(),
+                        provider_id: Some(resolved.provider_id.clone()),
+                        provider_symbol: Some(resolved.provider_symbol.clone()),
+                        freshness_state: "market_closed".to_string(),
+                        latest_completed_bar_ts: None,
+                        blockers: vec![format!(
+                            "{} market is not a trading day for {:04}-{:02}-{:02}",
+                            effective_schedule.calendar_source,
+                            effective_schedule.market_date.0,
+                            effective_schedule.market_date.1,
+                            effective_schedule.market_date.2
+                        )],
+                    });
+                    continue;
+                }
+
                 let Some(db_pool) = pool else {
                     statuses.push(RequiredMarketDataStatus {
                         symbol: resolved.symbol.clone(),
@@ -1345,7 +1420,7 @@ pub async fn run_required_universe_cycle(
                     db_pool,
                     resolved,
                     &multi_symbol_config,
-                    calendar_provider,
+                    effective_calendar_provider,
                     &providers,
                     &instruments,
                     now_utc,
@@ -1373,7 +1448,7 @@ pub async fn run_required_universe_cycle(
                 // when the bar stage itself could not run (db_unavailable/
                 // query_failed).
                 let should_attempt_refresh = !dry_run
-                    && !past_close_grace
+                    && !effective_past_close_grace
                     && !readiness.is_ready()
                     && !matches!(readiness.readiness_state, "db_unavailable" | "query_failed")
                     && readiness.blockers.iter().any(|b| is_refreshable_reason(b));
@@ -1428,7 +1503,7 @@ pub async fn run_required_universe_cycle(
                             db_pool,
                             resolved,
                             &multi_symbol_config,
-                            calendar_provider,
+                            effective_calendar_provider,
                             &providers,
                             &instruments,
                             now_utc,
@@ -1508,7 +1583,13 @@ pub async fn run_required_universe_cycle(
         session_open_utc: Some(schedule.session_open_utc.to_rfc3339()),
         session_close_utc: Some(schedule.session_close_utc.to_rfc3339()),
         last_poll_utc: Some(now_utc.to_rfc3339()),
-        next_poll_utc: next_poll_time_for_groups(&plan.groups, &schedule, now_utc),
+        next_poll_utc: next_poll_time_for_groups(
+            &plan.groups,
+            &instruments,
+            &schedule,
+            &crypto_schedule,
+            now_utc,
+        ),
         provider_api_calls_made_this_cycle: provider_api_calls_made,
         operator_retry_required: false,
     };
@@ -1647,9 +1728,22 @@ fn next_session_anchored_boundary(
 /// to poll) or once every timeframe's own session-anchored horizon has
 /// passed for the day (§22/§23, session-close proof: the scheduler stops
 /// scheduling further polls for `market_date`).
+/// M6-KRAKEN-CRYPTO-24-7-READINESS-01: `next_cycle_utc` (via
+/// `run_and_record_cycle`) is load-bearing, not a display hint — the
+/// background scheduler loop wakes up and re-runs a cycle at exactly this
+/// computed instant, and stops scheduling further cycles once it returns
+/// `None`. Picking `equity_schedule` unconditionally for every group here
+/// would silently stop scheduling crypto refreshes the moment NYSE's
+/// session-close horizon passes for the day, even on an otherwise-required
+/// 24/7 crypto universe — this is why each group is now resolved against
+/// its OWN asset class's schedule (equity vs. crypto), exactly mirroring
+/// the per-instrument dispatch in [`run_required_universe_cycle`]'s main
+/// loop above.
 fn next_poll_time_for_groups(
     groups: &[ProviderTimeframeGroup],
-    schedule: &MarketSessionSchedule,
+    instruments: &[TrackedInstrument],
+    equity_schedule: &MarketSessionSchedule,
+    crypto_schedule: &MarketSessionSchedule,
     now_utc: DateTime<Utc>,
 ) -> Option<String> {
     if groups.is_empty() {
@@ -1661,6 +1755,18 @@ fn next_poll_time_for_groups(
     for group in groups {
         let Ok(timeframe) = mqk_md::Timeframe::parse(&group.timeframe) else {
             continue;
+        };
+        let is_crypto_group = group.symbols.iter().any(|symbol| {
+            instruments
+                .iter()
+                .find(|i| i.symbol.trim().eq_ignore_ascii_case(symbol.trim()))
+                .map(|i| i.asset_class.eq_ignore_ascii_case("crypto"))
+                .unwrap_or(false)
+        });
+        let schedule = if is_crypto_group {
+            crypto_schedule
+        } else {
+            equity_schedule
         };
         let grace = daily_data_readiness::effective_grace_seconds(
             configured_grace,
