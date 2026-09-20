@@ -124,6 +124,9 @@ pub enum AssetClass {
     Forex,
 }
 
+/// Scale factor for [`QtyMicros`]: 1.0 unit = `QTY_MICROS_SCALE` `QtyMicros`.
+pub const QTY_MICROS_SCALE: i64 = 1_000_000;
+
 /// A deterministic fixed-point quantity type at 1e-6 scale.
 ///
 /// Motivation: equities start as integer shares, but future assets (crypto,
@@ -133,6 +136,11 @@ pub enum AssetClass {
 ///
 /// **Equity invariant** (recommended): quantities should be multiples of
 /// 1_000_000 when `asset_class == Equity`.
+///
+/// All arithmetic is exposed only via `checked_*` methods (never `Add`/`Sub`
+/// operator overloads): integer overflow silently wraps in release builds
+/// under the standard operators, which would violate this repo's fail-closed
+/// invariant for a quantity type. Callers must handle `None` explicitly.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct QtyMicros(i64);
 
@@ -154,7 +162,378 @@ impl QtyMicros {
     /// True if this is an exact whole unit (multiple of 1_000_000).
     #[inline]
     pub const fn is_whole(self) -> bool {
-        self.0 % 1_000_000 == 0
+        self.0 % QTY_MICROS_SCALE == 0
+    }
+
+    #[inline]
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
+    pub const fn is_positive(self) -> bool {
+        self.0 > 0
+    }
+
+    #[inline]
+    pub const fn is_negative(self) -> bool {
+        self.0 < 0
+    }
+
+    /// -1 / 0 / 1, mirroring `i64::signum`.
+    #[inline]
+    pub const fn signum(self) -> i64 {
+        if self.0 > 0 {
+            1
+        } else if self.0 < 0 {
+            -1
+        } else {
+            0
+        }
+    }
+
+    /// Construct from a whole-unit integer quantity (e.g. equity shares).
+    /// Fails closed (`None`) on overflow rather than wrapping.
+    #[inline]
+    pub const fn from_whole_units(units: i64) -> Option<Self> {
+        match units.checked_mul(QTY_MICROS_SCALE) {
+            Some(v) => Some(QtyMicros(v)),
+            None => None,
+        }
+    }
+
+    /// Extract as a whole-unit integer. `None` if this value carries a
+    /// fractional remainder (`!is_whole()`) — never truncates silently.
+    #[inline]
+    pub const fn to_whole_units_checked(self) -> Option<i64> {
+        if self.is_whole() {
+            Some(self.0 / QTY_MICROS_SCALE)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub const fn checked_add(self, other: Self) -> Option<Self> {
+        match self.0.checked_add(other.0) {
+            Some(v) => Some(QtyMicros(v)),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub const fn checked_sub(self, other: Self) -> Option<Self> {
+        match self.0.checked_sub(other.0) {
+            Some(v) => Some(QtyMicros(v)),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub const fn checked_neg(self) -> Option<Self> {
+        match self.0.checked_neg() {
+            Some(v) => Some(QtyMicros(v)),
+            None => None,
+        }
+    }
+
+    /// Absolute value. Fails closed (`None`) on `i64::MIN`, the one value
+    /// whose magnitude cannot be represented as a positive `i64`.
+    #[inline]
+    pub const fn checked_abs(self) -> Option<Self> {
+        match self.0.checked_abs() {
+            Some(v) => Some(QtyMicros(v)),
+            None => None,
+        }
+    }
+
+    /// Round a fractional quantity down toward zero to the nearest multiple
+    /// of `increment_micros`. Returns `None` if `increment_micros <= 0`.
+    /// This never rounds a whole-share equity quantity — `is_whole()` values
+    /// with `increment_micros == QTY_MICROS_SCALE` round-trip unchanged.
+    #[inline]
+    pub const fn floor_to_increment(self, increment_micros: i64) -> Option<Self> {
+        if increment_micros <= 0 {
+            return None;
+        }
+        let sign = self.signum();
+        let magnitude = match self.0.checked_abs() {
+            Some(v) => v,
+            None => return None,
+        };
+        let floored = (magnitude / increment_micros) * increment_micros;
+        if sign < 0 {
+            match floored.checked_neg() {
+                Some(v) => Some(QtyMicros(v)),
+                None => None,
+            }
+        } else {
+            Some(QtyMicros(floored))
+        }
+    }
+}
+
+/// Error returned by [`QtyMicros`]'s `FromStr` implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QtyMicrosParseError(pub String);
+
+impl std::fmt::Display for QtyMicrosParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid QtyMicros decimal value: '{}'", self.0)
+    }
+}
+
+impl std::error::Error for QtyMicrosParseError {}
+
+/// Canonical decimal rendering: trims trailing fractional zeros, always emits
+/// at least the whole-unit digits (e.g. `1000000` -> `"1"`, `1500000` ->
+/// `"1.5"`, `-100` -> `"-0.0001"`, `0` -> `"0"`). Deterministic and
+/// round-trips exactly through `FromStr` (DETERMINISM: canonical
+/// serialization).
+impl std::fmt::Display for QtyMicros {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let neg = self.0 < 0;
+        let abs = self.0.unsigned_abs();
+        let whole = abs / QTY_MICROS_SCALE as u64;
+        let frac = abs % QTY_MICROS_SCALE as u64;
+        if neg {
+            write!(f, "-")?;
+        }
+        if frac == 0 {
+            write!(f, "{whole}")
+        } else {
+            let mut frac_str = format!("{frac:06}");
+            while frac_str.ends_with('0') {
+                frac_str.pop();
+            }
+            write!(f, "{whole}.{frac_str}")
+        }
+    }
+}
+
+/// Parses a plain-ASCII decimal string (optional leading `+`/`-`, optional
+/// `.` followed by 1-6 fraction digits) into `QtyMicros`. Rejects empty
+/// input, non-digit characters, more than 6 fraction digits (precision loss
+/// would be silent), and any value that would overflow `i64` — fails closed
+/// rather than approximating.
+impl std::str::FromStr for QtyMicros {
+    type Err = QtyMicrosParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = || QtyMicrosParseError(s.to_string());
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(err());
+        }
+        let (neg, rest) = match trimmed.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+        };
+        if rest.is_empty() {
+            return Err(err());
+        }
+        let mut parts = rest.splitn(2, '.');
+        let int_part = parts.next().unwrap_or_default();
+        let frac_part = parts.next();
+
+        if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(err());
+        }
+        let whole: i64 = int_part.parse().map_err(|_| err())?;
+
+        let frac_micros: i64 = match frac_part {
+            None => 0,
+            Some(f) => {
+                if f.is_empty() || f.len() > 6 || !f.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(err());
+                }
+                let mut padded = f.to_string();
+                while padded.len() < 6 {
+                    padded.push('0');
+                }
+                padded.parse().map_err(|_| err())?
+            }
+        };
+
+        let magnitude = whole
+            .checked_mul(QTY_MICROS_SCALE)
+            .and_then(|w| w.checked_add(frac_micros))
+            .ok_or_else(err)?;
+
+        Ok(QtyMicros(if neg { -magnitude } else { magnitude }))
+    }
+}
+
+#[cfg(test)]
+mod qty_micros_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn new_and_raw_round_trip() {
+        assert_eq!(QtyMicros::new(1_500_000).raw(), 1_500_000);
+        assert_eq!(QtyMicros::ZERO.raw(), 0);
+    }
+
+    #[test]
+    fn is_whole_true_for_exact_multiples_only() {
+        assert!(QtyMicros::new(0).is_whole());
+        assert!(QtyMicros::new(1_000_000).is_whole());
+        assert!(QtyMicros::new(-2_000_000).is_whole());
+        assert!(!QtyMicros::new(1_500_000).is_whole());
+        assert!(!QtyMicros::new(-1).is_whole());
+    }
+
+    #[test]
+    fn sign_predicates() {
+        assert!(QtyMicros::new(5).is_positive());
+        assert!(!QtyMicros::new(5).is_negative());
+        assert!(QtyMicros::new(-5).is_negative());
+        assert!(QtyMicros::ZERO.is_zero());
+        assert_eq!(QtyMicros::new(5).signum(), 1);
+        assert_eq!(QtyMicros::new(-5).signum(), -1);
+        assert_eq!(QtyMicros::ZERO.signum(), 0);
+    }
+
+    #[test]
+    fn from_whole_units_scales_by_1e6() {
+        assert_eq!(
+            QtyMicros::from_whole_units(1),
+            Some(QtyMicros::new(1_000_000))
+        );
+        assert_eq!(
+            QtyMicros::from_whole_units(-3),
+            Some(QtyMicros::new(-3_000_000))
+        );
+        assert_eq!(QtyMicros::from_whole_units(0), Some(QtyMicros::ZERO));
+    }
+
+    #[test]
+    fn from_whole_units_fails_closed_on_overflow() {
+        assert_eq!(QtyMicros::from_whole_units(i64::MAX), None);
+        assert_eq!(QtyMicros::from_whole_units(i64::MIN), None);
+    }
+
+    #[test]
+    fn to_whole_units_checked_round_trips_equity_quantities() {
+        assert_eq!(
+            QtyMicros::new(100_000_000).to_whole_units_checked(),
+            Some(100)
+        );
+        assert_eq!(
+            QtyMicros::new(-1_000_000).to_whole_units_checked(),
+            Some(-1)
+        );
+    }
+
+    #[test]
+    fn to_whole_units_checked_none_on_fractional_remainder() {
+        assert_eq!(QtyMicros::new(1_500_000).to_whole_units_checked(), None);
+        assert_eq!(QtyMicros::new(1).to_whole_units_checked(), None);
+    }
+
+    #[test]
+    fn checked_add_sub_neg_abs_happy_path() {
+        let a = QtyMicros::new(1_500_000);
+        let b = QtyMicros::new(500_000);
+        assert_eq!(a.checked_add(b), Some(QtyMicros::new(2_000_000)));
+        assert_eq!(a.checked_sub(b), Some(QtyMicros::new(1_000_000)));
+        assert_eq!(a.checked_neg(), Some(QtyMicros::new(-1_500_000)));
+        assert_eq!(QtyMicros::new(-7).checked_abs(), Some(QtyMicros::new(7)));
+    }
+
+    #[test]
+    fn checked_arithmetic_fails_closed_on_overflow() {
+        let max = QtyMicros::new(i64::MAX);
+        assert_eq!(max.checked_add(QtyMicros::new(1)), None);
+        let min = QtyMicros::new(i64::MIN);
+        assert_eq!(min.checked_sub(QtyMicros::new(1)), None);
+        assert_eq!(min.checked_neg(), None);
+        assert_eq!(min.checked_abs(), None);
+    }
+
+    #[test]
+    fn floor_to_increment_respects_positive_and_negative_sign() {
+        // Alpaca-style BTC min increment: 0.0001 = 100 QtyMicros.
+        let increment = 100;
+        assert_eq!(
+            QtyMicros::new(12_345).floor_to_increment(increment),
+            Some(QtyMicros::new(12_300))
+        );
+        assert_eq!(
+            QtyMicros::new(-12_345).floor_to_increment(increment),
+            Some(QtyMicros::new(-12_300))
+        );
+        // Equity: flooring a whole-share qty to a 1-unit increment is a no-op.
+        assert_eq!(
+            QtyMicros::new(3_000_000).floor_to_increment(QTY_MICROS_SCALE),
+            Some(QtyMicros::new(3_000_000))
+        );
+    }
+
+    #[test]
+    fn floor_to_increment_rejects_non_positive_increment() {
+        assert_eq!(QtyMicros::new(100).floor_to_increment(0), None);
+        assert_eq!(QtyMicros::new(100).floor_to_increment(-5), None);
+    }
+
+    #[test]
+    fn display_canonical_decimal_rendering() {
+        assert_eq!(QtyMicros::new(1_000_000).to_string(), "1");
+        assert_eq!(QtyMicros::new(1_500_000).to_string(), "1.5");
+        assert_eq!(QtyMicros::new(-100).to_string(), "-0.0001");
+        assert_eq!(QtyMicros::ZERO.to_string(), "0");
+        assert_eq!(QtyMicros::new(-1_000_000).to_string(), "-1");
+    }
+
+    #[test]
+    fn from_str_round_trips_through_display() {
+        for raw in [
+            0i64, 1_000_000, 1_500_000, -100, -1_000_000, 999_999, -999_999,
+        ] {
+            let v = QtyMicros::new(raw);
+            let parsed = QtyMicros::from_str(&v.to_string()).expect("parses own display output");
+            assert_eq!(parsed, v, "round-trip failed for raw={raw}");
+        }
+    }
+
+    #[test]
+    fn from_str_accepts_plain_forms() {
+        assert_eq!(QtyMicros::from_str("1").unwrap(), QtyMicros::new(1_000_000));
+        assert_eq!(
+            QtyMicros::from_str("+1").unwrap(),
+            QtyMicros::new(1_000_000)
+        );
+        assert_eq!(QtyMicros::from_str("0.0001").unwrap(), QtyMicros::new(100));
+        assert_eq!(
+            QtyMicros::from_str("-0.5").unwrap(),
+            QtyMicros::new(-500_000)
+        );
+        assert_eq!(
+            QtyMicros::from_str("  2.25  ").unwrap(),
+            QtyMicros::new(2_250_000)
+        );
+    }
+
+    #[test]
+    fn from_str_fails_closed_on_excess_precision() {
+        // 7 fraction digits would silently lose precision at 1e-6 scale.
+        assert!(QtyMicros::from_str("1.1234567").is_err());
+    }
+
+    #[test]
+    fn from_str_fails_closed_on_garbage() {
+        for bad in ["", "-", "+", ".", "1.", "abc", "1.2.3", "1,5", "--1"] {
+            assert!(
+                QtyMicros::from_str(bad).is_err(),
+                "expected error for '{bad}'"
+            );
+        }
+    }
+
+    #[test]
+    fn from_str_fails_closed_on_overflow() {
+        assert!(QtyMicros::from_str("99999999999999999999").is_err());
     }
 }
 
