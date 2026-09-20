@@ -465,7 +465,8 @@ mod tests {
             &config_fingerprint,
             &market_date,
             created_at_utc,
-        );
+        )
+        .expect("fixture scanner_rank values are within i32::MAX");
 
         let header = mqk_db::ExplicitMultiStrategyAuthorityRecord {
             authority_id: new_authority.authority_id,

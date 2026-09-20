@@ -547,6 +547,21 @@ pub(crate) fn derive_explicit_multi_strategy_authority_id(
 pub(crate) const EXPLICIT_MULTI_STRATEGY_AUTHORITY_WRITER_VERSION: &str =
     "mqk-daemon.explicit-multi-strategy-authority-writer.v1";
 
+/// IR-3 (independent review correction, V4-BULK-CODE-COMPLETION-STAGE-B-M2-01):
+/// `SelectionCandidateEvidence::scanner_rank` (`Option<u32>`) exceeded
+/// `i32::MAX` and could not be checked-converted to the durable
+/// `Option<i32>` column. The write is refused before any DB insert is
+/// attempted — never a bit-reinterpreted (`as i32`) value, even though the
+/// existing read-side validator would separately reject any negative stored
+/// value as corruption. This is a stronger invariant than "caught on read":
+/// no wrapped value may be deliberately persisted at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScannerRankOverflow {
+    pub symbol: String,
+    pub strategy_id: String,
+    pub scanner_rank: u32,
+}
+
 /// Build the durable evidence DTO for one resolved explicit authority,
 /// binding-count/authorized-count derived from `evaluations` itself (never a
 /// separately caller-supplied count that could drift). `authority_id` is
@@ -554,6 +569,12 @@ pub(crate) const EXPLICIT_MULTI_STRATEGY_AUTHORITY_WRITER_VERSION: &str =
 /// inputs. Bindings are carried in `evaluations`' own (artifact) order --
 /// ordinal, not a re-sort — mirroring `dynamic_selection_evidence_writer`'s
 /// own convention.
+///
+/// IR-3: `Err(ScannerRankOverflow)` iff any binding's `scanner_rank` exceeds
+/// `i32::MAX` — checked (`i32::try_from`), not bit-reinterpreted. Callers
+/// must propagate this as a fail-closed refusal through their own
+/// construction/start path, exactly like every other durable-evidence
+/// rejection in that path (never insert, never silently drop the binding).
 pub(crate) fn build_new_explicit_multi_strategy_authority(
     evaluations: &[ExplicitBindingEvaluation],
     run_id: Uuid,
@@ -562,7 +583,7 @@ pub(crate) fn build_new_explicit_multi_strategy_authority(
     config_fingerprint: &str,
     market_date: &str,
     created_at_utc: DateTime<Utc>,
-) -> mqk_db::NewExplicitMultiStrategyAuthority {
+) -> Result<mqk_db::NewExplicitMultiStrategyAuthority, ScannerRankOverflow> {
     let authority_id = derive_explicit_multi_strategy_authority_id(
         run_id,
         source_identity,
@@ -574,49 +595,59 @@ pub(crate) fn build_new_explicit_multi_strategy_authority(
 
     let bindings = evaluations
         .iter()
-        .map(|e| mqk_db::NewExplicitMultiStrategyAuthorityBinding {
-            symbol: e.symbol.clone(),
-            strategy_id: e.strategy_id.clone(),
-            timeframe_secs: e.timeframe_secs,
-            authorized: e.authorized,
-            reason_code: e.reason_code.clone(),
-            promotion_query_ok: e.evidence.promotion_query_ok,
-            promotion_state: e.evidence.promotion_state.clone(),
-            promotion_effective: e.evidence.promotion_effective,
-            promotion_expired: e.evidence.promotion_expired,
-            evidence_resolved: e.evidence.evidence_resolved,
-            review_state_is_paper_candidate: e.evidence.review_state_is_paper_candidate,
-            evidence_review_state: e.evidence.evidence_review_state.clone(),
-            durable_legacy_fingerprint: e.evidence.durable_legacy_fingerprint.clone(),
-            recomputed_legacy_fingerprint: e.evidence.recomputed_legacy_fingerprint.clone(),
-            legacy_fingerprint_matches: e.evidence.legacy_fingerprint_matches,
-            durable_exact_fingerprint_v2: e.evidence.durable_exact_fingerprint_v2.clone(),
-            recomputed_exact_fingerprint_v2: e.evidence.recomputed_exact_fingerprint_v2.clone(),
-            exact_fingerprint_v2_matches: e.evidence.exact_fingerprint_v2_matches,
-            config_identity_verified: e.evidence.config_identity_verified,
-            durable_config_fingerprint: e.evidence.durable_config_fingerprint.clone(),
-            current_config_fingerprint: e.evidence.current_config_fingerprint.clone(),
-            registry_enabled: e.evidence.registry_enabled,
-            plugin_instantiable: e.evidence.plugin_instantiable,
-            timeframe_matches: e.evidence.timeframe_matches,
-            data_ready: e.evidence.data_ready,
-            canonical_score_decimal: e.evidence.canonical_score_decimal.clone(),
-            canonical_score_micros: e.evidence.canonical_score_micros,
-            scanner_rank: e.evidence.scanner_rank.map(|r| r as i32),
-            watchlist_assigned: e.evidence.watchlist_assigned,
-            evidence_review_id: e.evidence.evidence_review_id.clone(),
-            evidence_scanner_scan_id: e.evidence.evidence_scanner_scan_id.clone(),
-            evidence_artifact_path: e.evidence.evidence_artifact_path.clone(),
-            evidence_git_hash: e.evidence.evidence_git_hash.clone(),
-            promotion_transition_id: e.evidence.promotion_transition_id.clone(),
-            promotion_effective_at: e.evidence.promotion_effective_at.clone(),
-            promotion_expires_at: e.evidence.promotion_expires_at.clone(),
-            evidence_transition_id: e.evidence.evidence_transition_id.clone(),
-            exact_reason: e.evidence.exact_reason.as_ref().map(|r| r.code()),
+        .map(|e| {
+            let scanner_rank = match e.evidence.scanner_rank {
+                None => None,
+                Some(r) => Some(i32::try_from(r).map_err(|_| ScannerRankOverflow {
+                    symbol: e.symbol.clone(),
+                    strategy_id: e.strategy_id.clone(),
+                    scanner_rank: r,
+                })?),
+            };
+            Ok(mqk_db::NewExplicitMultiStrategyAuthorityBinding {
+                symbol: e.symbol.clone(),
+                strategy_id: e.strategy_id.clone(),
+                timeframe_secs: e.timeframe_secs,
+                authorized: e.authorized,
+                reason_code: e.reason_code.clone(),
+                promotion_query_ok: e.evidence.promotion_query_ok,
+                promotion_state: e.evidence.promotion_state.clone(),
+                promotion_effective: e.evidence.promotion_effective,
+                promotion_expired: e.evidence.promotion_expired,
+                evidence_resolved: e.evidence.evidence_resolved,
+                review_state_is_paper_candidate: e.evidence.review_state_is_paper_candidate,
+                evidence_review_state: e.evidence.evidence_review_state.clone(),
+                durable_legacy_fingerprint: e.evidence.durable_legacy_fingerprint.clone(),
+                recomputed_legacy_fingerprint: e.evidence.recomputed_legacy_fingerprint.clone(),
+                legacy_fingerprint_matches: e.evidence.legacy_fingerprint_matches,
+                durable_exact_fingerprint_v2: e.evidence.durable_exact_fingerprint_v2.clone(),
+                recomputed_exact_fingerprint_v2: e.evidence.recomputed_exact_fingerprint_v2.clone(),
+                exact_fingerprint_v2_matches: e.evidence.exact_fingerprint_v2_matches,
+                config_identity_verified: e.evidence.config_identity_verified,
+                durable_config_fingerprint: e.evidence.durable_config_fingerprint.clone(),
+                current_config_fingerprint: e.evidence.current_config_fingerprint.clone(),
+                registry_enabled: e.evidence.registry_enabled,
+                plugin_instantiable: e.evidence.plugin_instantiable,
+                timeframe_matches: e.evidence.timeframe_matches,
+                data_ready: e.evidence.data_ready,
+                canonical_score_decimal: e.evidence.canonical_score_decimal.clone(),
+                canonical_score_micros: e.evidence.canonical_score_micros,
+                scanner_rank,
+                watchlist_assigned: e.evidence.watchlist_assigned,
+                evidence_review_id: e.evidence.evidence_review_id.clone(),
+                evidence_scanner_scan_id: e.evidence.evidence_scanner_scan_id.clone(),
+                evidence_artifact_path: e.evidence.evidence_artifact_path.clone(),
+                evidence_git_hash: e.evidence.evidence_git_hash.clone(),
+                promotion_transition_id: e.evidence.promotion_transition_id.clone(),
+                promotion_effective_at: e.evidence.promotion_effective_at.clone(),
+                promotion_expires_at: e.evidence.promotion_expires_at.clone(),
+                evidence_transition_id: e.evidence.evidence_transition_id.clone(),
+                exact_reason: e.evidence.exact_reason.as_ref().map(|r| r.code()),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, ScannerRankOverflow>>()?;
 
-    mqk_db::NewExplicitMultiStrategyAuthority {
+    Ok(mqk_db::NewExplicitMultiStrategyAuthority {
         authority_id,
         run_id,
         source_kind: mqk_db::EXPLICIT_MULTI_STRATEGY_SOURCE_KIND.to_string(),
@@ -628,7 +659,7 @@ pub(crate) fn build_new_explicit_multi_strategy_authority(
         writer_version: EXPLICIT_MULTI_STRATEGY_AUTHORITY_WRITER_VERSION.to_string(),
         created_at_utc,
         bindings,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1068,7 +1099,8 @@ mod tests {
             "cfg-a",
             "2026-09-18",
             created_at_utc,
-        );
+        )
+        .expect("fixture scanner_rank values are within i32::MAX");
 
         assert!(!new_authority.approved_for_live);
         assert_eq!(
@@ -1085,6 +1117,85 @@ mod tests {
         // DTO (correct binding_count/authorized_count derivation, no
         // duplicate binding) before any DB I/O is attempted.
         assert_eq!(mqk_db::validate_new_authority(&new_authority), Ok(()));
+    }
+
+    /// IR-3 (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01): a normal, small
+    /// `scanner_rank` must build and round-trip through the checked
+    /// conversion unchanged.
+    #[test]
+    fn ir3_normal_scanner_rank_succeeds() {
+        let mut e = authorized_evaluation("AAPL", "intraday_scalper");
+        e.evidence.scanner_rank = Some(7);
+        let new_authority = build_new_explicit_multi_strategy_authority(
+            &[e],
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"ir3-normal"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            Utc::now(),
+        )
+        .expect("scanner_rank=7 must build");
+        assert_eq!(new_authority.bindings[0].scanner_rank, Some(7));
+    }
+
+    /// IR-3: `i32::MAX` is the largest `u32` value that round-trips exactly
+    /// through a checked conversion — must succeed, not be refused.
+    #[test]
+    fn ir3_scanner_rank_i32_max_succeeds() {
+        let mut e = authorized_evaluation("AAPL", "intraday_scalper");
+        e.evidence.scanner_rank = Some(i32::MAX as u32);
+        let new_authority = build_new_explicit_multi_strategy_authority(
+            &[e],
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"ir3-i32-max"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            Utc::now(),
+        )
+        .expect("i32::MAX must round-trip exactly");
+        assert_eq!(new_authority.bindings[0].scanner_rank, Some(i32::MAX));
+    }
+
+    /// IR-3: `i32::MAX + 1` is the smallest `u32` value a checked conversion
+    /// cannot represent — the write must be refused before any DB insert is
+    /// attempted, never silently bit-reinterpreted into a negative i32.
+    #[test]
+    fn ir3_scanner_rank_i32_max_plus_one_refuses_before_persistence() {
+        let mut e = authorized_evaluation("AAPL", "intraday_scalper");
+        e.evidence.scanner_rank = Some((i32::MAX as u32) + 1);
+        let err = build_new_explicit_multi_strategy_authority(
+            &[e],
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"ir3-overflow-min"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            Utc::now(),
+        )
+        .expect_err("i32::MAX + 1 must be refused before persistence, never wrapped");
+        assert_eq!(err.scanner_rank, (i32::MAX as u32) + 1);
+        assert_eq!(err.symbol, "AAPL");
+    }
+
+    /// IR-3: `u32::MAX` (the maximum overflow magnitude) must also refuse
+    /// before persistence.
+    #[test]
+    fn ir3_scanner_rank_u32_max_refuses_before_persistence() {
+        let mut e = authorized_evaluation("AAPL", "intraday_scalper");
+        e.evidence.scanner_rank = Some(u32::MAX);
+        let err = build_new_explicit_multi_strategy_authority(
+            &[e],
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"ir3-overflow-max"),
+            "watchlist-v3.json",
+            "hash-a",
+            "cfg-a",
+            "2026-09-18",
+            Utc::now(),
+        )
+        .expect_err("u32::MAX must be refused before persistence, never wrapped");
+        assert_eq!(err.scanner_rank, u32::MAX);
     }
 
     #[test]

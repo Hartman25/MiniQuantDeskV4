@@ -1093,7 +1093,19 @@ impl AppState {
                 &config_fingerprint,
                 &market_date,
                 now_utc,
-            );
+            )
+            .map_err(|overflow| {
+                RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.explicit_multi_strategy_scanner_rank_overflow",
+                    DOMAIN,
+                    format!(
+                        "explicit multi-strategy paper_enforced start refused: binding \
+                         {}/{} carries scanner_rank={} which exceeds i32::MAX and cannot be \
+                         checked-converted for durable persistence ({CONTRACT})",
+                        overflow.symbol, overflow.strategy_id, overflow.scanner_rank
+                    ),
+                )
+            })?;
         let authority_id = new_authority.authority_id;
 
         let Some(db) = self.db.as_ref() else {
