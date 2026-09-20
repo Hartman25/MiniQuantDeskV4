@@ -3618,3 +3618,287 @@ pub async fn fetch_autonomous_daily_binding_states(
         .map(|r| row_to_binding_state_record(r).context("row decode failed"))
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// MULTI-STRATEGY-RUNTIME-DISPATCH-01 autonomous completed-bar driver
+// same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01):
+// durable per-BINDING bar-dispatch claim (migration 0075). Same claim
+// semantics as `claim_autonomous_daily_bar_dispatch`/
+// `complete_autonomous_daily_bar_dispatch`/`fail_autonomous_daily_bar_dispatch`
+// (migration 0050) above, but keyed additionally by `strategy_id` — required
+// because two different strategies may bind the same (symbol, timeframe)
+// under an approved watchlist-v3 fleet, which migration 0050's identity
+// cannot distinguish. Used exclusively by the host-pool dispatch route; the
+// legacy single-engine path continues to use the 0050 functions unchanged.
+// ---------------------------------------------------------------------------
+
+/// One row from `sys_autonomous_daily_binding_bar_dispatches`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutonomousDailyBindingBarDispatchRecord {
+    pub operation_id: Uuid,
+    pub symbol: String,
+    pub strategy_id: String,
+    pub timeframe: String,
+    pub bar_end_ts: i64,
+    pub status: String,
+    pub claimed_at_utc: DateTime<Utc>,
+    pub completed_at_utc: Option<DateTime<Utc>>,
+    pub evaluation_id: Option<Uuid>,
+    pub last_error: Option<String>,
+}
+
+const BINDING_BAR_DISPATCH_COLUMNS: &str = r#"
+    operation_id, symbol, strategy_id, timeframe, bar_end_ts, status,
+    claimed_at_utc, completed_at_utc, evaluation_id, last_error
+"#;
+
+fn row_to_binding_bar_dispatch_record(
+    r: sqlx::postgres::PgRow,
+) -> Result<AutonomousDailyBindingBarDispatchRecord, sqlx::Error> {
+    Ok(AutonomousDailyBindingBarDispatchRecord {
+        operation_id: r.try_get("operation_id")?,
+        symbol: r.try_get("symbol")?,
+        strategy_id: r.try_get("strategy_id")?,
+        timeframe: r.try_get("timeframe")?,
+        bar_end_ts: r.try_get("bar_end_ts")?,
+        status: r.try_get("status")?,
+        claimed_at_utc: r.try_get("claimed_at_utc")?,
+        completed_at_utc: r.try_get("completed_at_utc")?,
+        evaluation_id: r.try_get("evaluation_id")?,
+        last_error: r.try_get("last_error")?,
+    })
+}
+
+fn validate_binding_bar_identity(
+    symbol: &str,
+    strategy_id: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+) -> Result<()> {
+    if symbol.trim().is_empty() {
+        anyhow::bail!("symbol must not be empty");
+    }
+    if strategy_id.trim().is_empty() {
+        anyhow::bail!("strategy_id must not be empty");
+    }
+    if timeframe.trim().is_empty() {
+        anyhow::bail!("timeframe must not be empty");
+    }
+    if bar_end_ts <= 0 {
+        anyhow::bail!("bar_end_ts must be positive");
+    }
+    Ok(())
+}
+
+/// Race-safe claim of one `(symbol, strategy_id, timeframe, bar_end_ts)`
+/// binding-bar identity within one operation. Identical semantics to
+/// [`claim_autonomous_daily_bar_dispatch`]: `INSERT ... ON CONFLICT DO
+/// NOTHING` gives exactly-once claim creation; a `completed` row yields
+/// `AlreadyCompleted` unchanged; a `claimed` row on a second claim attempt
+/// (the observable signature of a prior attempt whose outcome was never
+/// confirmed — including across a crash/restart) is reclassified to
+/// `uncertain` in the same transaction and returned as `Unresolved`; an
+/// already-`uncertain`/`failed` row is returned as `Unresolved` unchanged.
+pub async fn claim_autonomous_daily_binding_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    symbol: &str,
+    strategy_id: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+    claimed_at_utc: DateTime<Utc>,
+) -> Result<BarDispatchClaimOutcome> {
+    validate_binding_bar_identity(symbol, strategy_id, timeframe, bar_end_ts)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("claim_autonomous_daily_binding_bar_dispatch: begin transaction failed")?;
+
+    let inserted = sqlx::query(&format!(
+        r#"
+        insert into sys_autonomous_daily_binding_bar_dispatches ({BINDING_BAR_DISPATCH_COLUMNS})
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        on conflict (operation_id, symbol, strategy_id, timeframe, bar_end_ts) do nothing
+        "#
+    ))
+    .bind(operation_id)
+    .bind(symbol)
+    .bind(strategy_id)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .bind(DISPATCH_STATUS_CLAIMED)
+    .bind(claimed_at_utc)
+    .bind(None::<DateTime<Utc>>)
+    .bind(None::<Uuid>)
+    .bind(None::<String>)
+    .execute(&mut *tx)
+    .await
+    .context("claim_autonomous_daily_binding_bar_dispatch: insert failed")?;
+
+    if inserted.rows_affected() == 1 {
+        tx.commit()
+            .await
+            .context("claim_autonomous_daily_binding_bar_dispatch: commit (claimed) failed")?;
+        return Ok(BarDispatchClaimOutcome::Claimed);
+    }
+
+    let existing = sqlx::query(&format!(
+        "select {BINDING_BAR_DISPATCH_COLUMNS} from sys_autonomous_daily_binding_bar_dispatches \
+         where operation_id = $1 and symbol = $2 and strategy_id = $3 and timeframe = $4 \
+           and bar_end_ts = $5 \
+         for update"
+    ))
+    .bind(operation_id)
+    .bind(symbol)
+    .bind(strategy_id)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .fetch_one(&mut *tx)
+    .await
+    .context("claim_autonomous_daily_binding_bar_dispatch: existing-row read failed")?;
+
+    let record = row_to_binding_bar_dispatch_record(existing)?;
+
+    let outcome = if record.status == DISPATCH_STATUS_COMPLETED {
+        BarDispatchClaimOutcome::AlreadyCompleted {
+            evaluation_id: record.evaluation_id,
+        }
+    } else if record.status == DISPATCH_STATUS_CLAIMED {
+        sqlx::query(
+            "update sys_autonomous_daily_binding_bar_dispatches set status = $6 \
+             where operation_id = $1 and symbol = $2 and strategy_id = $3 and timeframe = $4 \
+               and bar_end_ts = $5",
+        )
+        .bind(operation_id)
+        .bind(symbol)
+        .bind(strategy_id)
+        .bind(timeframe)
+        .bind(bar_end_ts)
+        .bind(DISPATCH_STATUS_UNCERTAIN)
+        .execute(&mut *tx)
+        .await
+        .context("claim_autonomous_daily_binding_bar_dispatch: reclassify to uncertain failed")?;
+        BarDispatchClaimOutcome::Unresolved {
+            status: DISPATCH_STATUS_UNCERTAIN.to_string(),
+        }
+    } else {
+        BarDispatchClaimOutcome::Unresolved {
+            status: record.status,
+        }
+    };
+
+    tx.commit()
+        .await
+        .context("claim_autonomous_daily_binding_bar_dispatch: commit (existing) failed")?;
+
+    Ok(outcome)
+}
+
+/// Mark a previously-`claimed` binding-bar identity as durably completed.
+/// Returns `true` iff the claim row was actually transitioned by this call
+/// (guarded on `status = 'claimed'`, so a second call is a safe no-op).
+/// Unlike [`complete_autonomous_daily_bar_dispatch`], this never advances
+/// `sys_autonomous_daily_operations.bars_dispatched`/`last_dispatched_bar_ts`
+/// — those fields are the legacy single-engine path's own evidence and must
+/// not be double-counted or raced by the host-pool path's independent
+/// per-binding claims.
+pub async fn complete_autonomous_daily_binding_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    symbol: &str,
+    strategy_id: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+    completed_at_utc: DateTime<Utc>,
+    evaluation_id: Option<Uuid>,
+) -> Result<bool> {
+    validate_binding_bar_identity(symbol, strategy_id, timeframe, bar_end_ts)?;
+
+    let updated = sqlx::query(
+        "update sys_autonomous_daily_binding_bar_dispatches \
+         set status = $6, completed_at_utc = $7, evaluation_id = $8 \
+         where operation_id = $1 and symbol = $2 and strategy_id = $3 and timeframe = $4 \
+           and bar_end_ts = $5 and status = $9",
+    )
+    .bind(operation_id)
+    .bind(symbol)
+    .bind(strategy_id)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .bind(DISPATCH_STATUS_COMPLETED)
+    .bind(completed_at_utc)
+    .bind(evaluation_id)
+    .bind(DISPATCH_STATUS_CLAIMED)
+    .execute(pool)
+    .await
+    .context("complete_autonomous_daily_binding_bar_dispatch: update failed")?;
+
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Mark a previously-`claimed` binding-bar identity as a known dispatch
+/// failure (`failed`) — e.g. the durable evaluation confirmation never
+/// arrived within the bounded retry window. Returns `true` iff the row was
+/// actually transitioned (guarded on `status = 'claimed'`).
+pub async fn fail_autonomous_daily_binding_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    symbol: &str,
+    strategy_id: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+    last_error: &str,
+) -> Result<bool> {
+    validate_binding_bar_identity(symbol, strategy_id, timeframe, bar_end_ts)?;
+    if last_error.len() > 4000 {
+        anyhow::bail!("fail_autonomous_daily_binding_bar_dispatch: last_error exceeds 4000 chars");
+    }
+    let updated = sqlx::query(
+        "update sys_autonomous_daily_binding_bar_dispatches \
+         set status = $6, last_error = $7 \
+         where operation_id = $1 and symbol = $2 and strategy_id = $3 and timeframe = $4 \
+           and bar_end_ts = $5 and status = $8",
+    )
+    .bind(operation_id)
+    .bind(symbol)
+    .bind(strategy_id)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .bind(DISPATCH_STATUS_FAILED)
+    .bind(last_error)
+    .bind(DISPATCH_STATUS_CLAIMED)
+    .execute(pool)
+    .await
+    .context("fail_autonomous_daily_binding_bar_dispatch: update failed")?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Fetch one binding-bar dispatch claim row, if any. `Ok(None)` is
+/// authoritative "no claim has ever been made for this exact binding-bar
+/// identity" — never a synthesized row. Read-only.
+pub async fn fetch_autonomous_daily_binding_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    symbol: &str,
+    strategy_id: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+) -> Result<Option<AutonomousDailyBindingBarDispatchRecord>> {
+    let row = sqlx::query(&format!(
+        "select {BINDING_BAR_DISPATCH_COLUMNS} from sys_autonomous_daily_binding_bar_dispatches \
+         where operation_id = $1 and symbol = $2 and strategy_id = $3 and timeframe = $4 \
+           and bar_end_ts = $5"
+    ))
+    .bind(operation_id)
+    .bind(symbol)
+    .bind(strategy_id)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_autonomous_daily_binding_bar_dispatch failed")?;
+    row.map(row_to_binding_bar_dispatch_record)
+        .transpose()
+        .map_err(Into::into)
+}

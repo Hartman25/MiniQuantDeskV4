@@ -15,7 +15,7 @@ use mqk_daemon::daily_data_readiness::AssignmentReadiness;
 use mqk_daemon::state::autonomous_completed_bar_driver::{
     resolve_autonomous_provider_call_authorization, resolve_effective_bindings,
     resolve_single_effective_binding, tick_autonomous_completed_bar_driver,
-    AutonomousAssignmentReadinessEvaluator, AutonomousBindingRejection,
+    AutonomousAssignmentReadinessEvaluator, AutonomousBindingRejection, BindingDispatchRoute,
     AutonomousCompletedBarDriverInput, AutonomousCompletedBarDriverMode,
     AutonomousCompletedBarDriverOutcome, AutonomousDriverSetupRejection,
     AutonomousLatestBarProviderResolver, AutonomousProviderCallAuthorization,
@@ -940,6 +940,8 @@ fn c4_multi_binding_resolves_each_assignment_independently() {
         &assignment_identity,
         &binding,
         &runtime_binding_identity,
+        None,
+        &[],
     )
     .expect("operation-level identity/engine checks pass");
 
@@ -953,9 +955,14 @@ fn c4_multi_binding_resolves_each_assignment_independently() {
             symbol: "AAA".to_string(),
             strategy_id: "swing_momentum".to_string(),
             timeframe: mqk_md::Timeframe::parse("5m").unwrap(),
+            dispatch_route: BindingDispatchRoute::LegacyBootstrap,
         })
     );
 
+    // BBB's strategy_id ("mean_reversion") matches neither the one active
+    // legacy engine ("swing_momentum") nor any host-pool selection (none is
+    // active this test — no host pool at all) — must still be a clean
+    // per-binding rejection, never silently resolved.
     let (bbb_assignment, bbb_result) = &resolved[1];
     assert_eq!(bbb_assignment.symbol, "BBB");
     assert_eq!(
@@ -969,6 +976,105 @@ fn c4_multi_binding_resolves_each_assignment_independently() {
         ccc_result,
         &Err(AutonomousBindingRejection::UnsupportedTimeframe)
     );
+}
+
+/// Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01):
+/// the exact §3 binary wiring question, proved directly against production
+/// resolution code. An approved watchlist-v3 fleet binding AAPL to two
+/// different strategies plus MSFT to a third —
+///   AAPL / strategy_A / 5m
+///   AAPL / strategy_B / 5m
+///   MSFT / strategy_C / 5m
+/// — with a genuinely Dormant legacy engine (no `MQK_STRATEGY_IDS`, exactly
+/// the real state whenever an explicit-v3 host pool is active) and the
+/// host-pool's own real selected-pairs snapshot, must resolve every one of
+/// the three bindings to `BindingDispatchRoute::HostPool` — never narrowed
+/// to "the first assignment", never refused merely for AAPL appearing
+/// twice, and never sharing one binding's resolved identity with another.
+#[test]
+fn same_symbol_multi_strategy_resolves_via_host_pool_never_narrowed_or_refused() {
+    let assignment_config = MultiSymbolRuntimeConfig {
+        schema_version: "v2".to_string(),
+        symbols: vec![
+            SymbolStrategyAssignment {
+                symbol: "AAPL".to_string(),
+                strategy_id: "strategy_A".to_string(),
+                timeframe: "5m".to_string(),
+            },
+            SymbolStrategyAssignment {
+                symbol: "AAPL".to_string(),
+                strategy_id: "strategy_B".to_string(),
+                timeframe: "5m".to_string(),
+            },
+            SymbolStrategyAssignment {
+                symbol: "MSFT".to_string(),
+                strategy_id: "strategy_C".to_string(),
+                timeframe: "5m".to_string(),
+            },
+        ],
+        max_concurrent_symbols: 3,
+        source: MultiSymbolConfigSource::EnvSingleSymbolFallback,
+    };
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    // Dormant legacy engine: no active native-strategy bootstrap at all —
+    // the real state whenever an explicit-v3 host pool is what's actually
+    // running. Resolution must not require a legacy engine to exist.
+    let dormant_binding = mqk_runtime::native_strategy::EffectiveRuntimeBinding {
+        effective_runtime_strategy_id: None,
+        effective_runtime_target_symbol: None,
+        effective_runtime_timeframe_secs: None,
+    };
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+            &dormant_binding,
+        );
+    let mut op = stub_operation("same-symbol-multi-strategy", "same-symbol-multi-strategy-2");
+    op.assignment_identity = assignment_identity.clone();
+    op.runtime_binding_identity = runtime_binding_identity.clone();
+
+    let run_id = Uuid::new_v4();
+    let host_pool_selected: Vec<(String, String, i64)> = vec![
+        ("AAPL".to_string(), "strategy_A".to_string(), 300),
+        ("AAPL".to_string(), "strategy_B".to_string(), 300),
+        ("MSFT".to_string(), "strategy_C".to_string(), 300),
+    ];
+
+    let resolved = resolve_effective_bindings(
+        &op,
+        &assignment_config,
+        &assignment_identity,
+        &dormant_binding,
+        &runtime_binding_identity,
+        Some(run_id),
+        &host_pool_selected,
+    )
+    .expect("operation-level identity checks pass; a dormant legacy engine is not itself a whole-tick rejection");
+
+    assert_eq!(resolved.len(), 3);
+    for (assignment, result) in &resolved {
+        let binding = result.as_ref().unwrap_or_else(|rejection| {
+            panic!("{}/{} must resolve, not be rejected as {rejection:?}", assignment.symbol, assignment.strategy_id)
+        });
+        assert_eq!(
+            binding.dispatch_route,
+            BindingDispatchRoute::HostPool { run_id },
+            "{}/{} must route through the host pool, not be narrowed to the legacy engine",
+            assignment.symbol,
+            assignment.strategy_id
+        );
+    }
+
+    // The two AAPL bindings are independently identified — same symbol,
+    // different strategy_id, both present and distinct.
+    let aapl_strategies: Vec<&str> = resolved
+        .iter()
+        .filter(|(a, _)| a.symbol == "AAPL")
+        .map(|(a, _)| a.strategy_id.as_str())
+        .collect();
+    assert_eq!(aapl_strategies, vec!["strategy_A", "strategy_B"]);
 }
 
 /// Minimal in-memory (non-DB) operation record for pure binding-logic tests

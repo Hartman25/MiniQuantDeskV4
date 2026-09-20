@@ -321,6 +321,35 @@ pub enum AutonomousBindingRejection {
     StrategyEngineMismatch,
 }
 
+/// Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01,
+/// correcting the prior session's C4 patch): which mechanism a resolved
+/// binding must dispatch through. Never inferred at the dispatch call site
+/// from ambient state — carried explicitly on [`ResolvedSingleBinding`] from
+/// the moment it is resolved, so a caller can never accidentally dispatch a
+/// host-pool binding through the single-engine path or vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingDispatchRoute {
+    /// Dispatch synchronously, in this call, via the process's one active
+    /// native-strategy engine (`AppState::dispatch_native_strategy_for_symbol_with_bar`).
+    /// Tier A single-strategy policy — exactly one binding per operation can
+    /// ever use this route, and only [`resolve_single_effective_binding`]
+    /// produces it.
+    LegacyBootstrap,
+    /// Dispatch via the approved watchlist-v3 host pool
+    /// (`crate::dynamic_selection_host_pool::DynamicSelectionHostPool`),
+    /// which is owned exclusively by the execution loop's own task for
+    /// `run_id` for the run's lifetime — this driver can never call into it
+    /// directly. Dispatch instead hands off through the existing
+    /// `AppState::pending_strategy_bar_input` mailbox (the same seam the
+    /// operator signal route already uses) and confirms completion by
+    /// reading the durable `strategy_signal_evaluations` row the loop's own
+    /// dispatch writes, deterministically identified via
+    /// `AppState::derive_strategy_signal_evaluation_id`. Only
+    /// [`resolve_effective_bindings`] produces this, and only for a binding
+    /// present in that exact run's [`super::types::DynamicSelectionRuntimeState::selected_pairs`].
+    HostPool { run_id: Uuid },
+}
+
 /// The one exactly-bound `(symbol, strategy_id, timeframe)` this driver may
 /// operate on for the current tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +357,7 @@ pub struct ResolvedSingleBinding {
     pub symbol: String,
     pub strategy_id: String,
     pub timeframe: mqk_md::Timeframe,
+    pub dispatch_route: BindingDispatchRoute,
 }
 
 /// Resolve exactly one autonomous-eligible binding, or a stable typed
@@ -386,6 +416,7 @@ pub fn resolve_single_effective_binding(
         symbol: target_symbol.to_string(),
         strategy_id: strategy_id.to_string(),
         timeframe,
+        dispatch_route: BindingDispatchRoute::LegacyBootstrap,
     })
 }
 
@@ -411,25 +442,37 @@ pub fn resolve_single_effective_binding(
 /// possible when the operation's own recorded identity no longer matches
 /// current truth.
 ///
-/// This process has exactly one active native-strategy engine (Tier A
-/// single-strategy policy — `mqk_runtime::native_strategy::
-/// NativeStrategyBootstrap::bootstrap`'s own docs: "Multi-strategy fleet
-/// execution is deferred to a later patch"). Unlike
-/// [`resolve_single_effective_binding`], this function does not require
-/// `runtime_binding.effective_runtime_target_symbol` to be set — that field
-/// is the legacy single-symbol `MQK_STRATEGY_SYMBOL` env read, orthogonal to
-/// a multi-symbol watchlist config, which names its own symbols directly.
-/// It does still require the engine itself (`effective_runtime_strategy_id`)
-/// and a bound timeframe to be present globally; a configured assignment
-/// whose own `strategy_id` does not equal that one active engine is resolved
-/// as [`AutonomousBindingRejection::StrategyEngineMismatch`] for that
+/// This process has at most one active legacy native-strategy engine (Tier A
+/// single-strategy policy for the *legacy* `NativeStrategyBootstrap` path —
+/// `mqk_runtime::native_strategy` module docs). That policy governs only
+/// the legacy engine itself; it is not a ceiling on this function's own
+/// output. A configured assignment whose `strategy_id` does not match the
+/// legacy engine is *not* rejected outright — it is checked against
+/// `host_pool` next (the exact `(symbol, strategy_id, timeframe_secs)`
+/// triples the approved watchlist-v3/Bundle-7 host pool actually selected
+/// for `host_pool_run_id`, from `AppState::dynamic_selection_runtime_snapshot`).
+/// A match there resolves to [`BindingDispatchRoute::HostPool`] — genuine,
+/// independent, same-symbol-multi-strategy dispatch, never narrowed to "the
+/// first assignment" or refused merely for not being the legacy engine.
+/// Only a configured assignment matching *neither* is resolved as
+/// [`AutonomousBindingRejection::StrategyEngineMismatch`], for that
 /// assignment only.
+///
+/// Unlike [`resolve_single_effective_binding`], this function does not
+/// require `runtime_binding.effective_runtime_target_symbol`/
+/// `effective_runtime_strategy_id`/`effective_runtime_timeframe_secs` to be
+/// set at all — a pure host-pool fleet runs with the legacy bootstrap
+/// genuinely `Dormant` (no `MQK_STRATEGY_IDS`), and requiring a legacy
+/// engine as a precondition would refuse every binding merely for being
+/// multi-strategy, which is exactly the defect this function corrects.
 pub fn resolve_effective_bindings(
     operation: &mqk_db::AutonomousDailyOperationRecord,
     assignment_config: &MultiSymbolRuntimeConfig,
     assignment_identity: &str,
     runtime_binding: &EffectiveRuntimeBinding,
     runtime_binding_identity: &str,
+    host_pool_run_id: Option<Uuid>,
+    host_pool_selected: &[(String, String, i64)],
 ) -> Result<
     Vec<(
         super::multi_symbol_config::SymbolStrategyAssignment,
@@ -448,11 +491,7 @@ pub fn resolve_effective_bindings(
         .effective_runtime_strategy_id
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or(AutonomousBindingRejection::BlankStrategyId)?;
-    runtime_binding
-        .effective_runtime_timeframe_secs
-        .ok_or(AutonomousBindingRejection::MissingTimeframeBinding)?;
+        .filter(|s| !s.is_empty());
 
     Ok(assignment_config
         .symbols
@@ -460,19 +499,26 @@ pub fn resolve_effective_bindings(
         .map(|assignment| {
             (
                 assignment.clone(),
-                resolve_one_configured_assignment(assignment, active_strategy_id),
+                resolve_one_configured_assignment(
+                    assignment,
+                    active_strategy_id,
+                    host_pool_run_id,
+                    host_pool_selected,
+                ),
             )
         })
         .collect())
 }
 
 /// Resolve one already-loaded configured assignment against the process's
-/// one active engine. Pure, no I/O — the same per-assignment checks
-/// [`resolve_single_effective_binding`] performs against its single
-/// assignment, applied independently to each entry of a multi-symbol config.
+/// legacy engine (if any) and the current run's host-pool selection (if
+/// any). Pure, no I/O — `host_pool_run_id`/`host_pool_selected` are already
+/// caller-resolved snapshots (see [`resolve_effective_bindings`]'s doc).
 fn resolve_one_configured_assignment(
     assignment: &super::multi_symbol_config::SymbolStrategyAssignment,
-    active_strategy_id: &str,
+    active_strategy_id: Option<&str>,
+    host_pool_run_id: Option<Uuid>,
+    host_pool_selected: &[(String, String, i64)],
 ) -> Result<ResolvedSingleBinding, AutonomousBindingRejection> {
     let symbol = assignment.symbol.trim();
     if symbol.is_empty() {
@@ -482,16 +528,30 @@ fn resolve_one_configured_assignment(
     if strategy_id.is_empty() {
         return Err(AutonomousBindingRejection::BlankStrategyId);
     }
-    if strategy_id != active_strategy_id {
-        return Err(AutonomousBindingRejection::StrategyEngineMismatch);
-    }
     let timeframe = mqk_md::Timeframe::parse(assignment.timeframe.trim())
         .map_err(|_| AutonomousBindingRejection::UnsupportedTimeframe)?;
+
+    let dispatch_route = if active_strategy_id == Some(strategy_id) {
+        BindingDispatchRoute::LegacyBootstrap
+    } else if let Some(run_id) = host_pool_run_id {
+        let selected = host_pool_selected.iter().any(|(sel_symbol, sel_strategy, sel_timeframe_secs)| {
+            sel_symbol.trim().eq_ignore_ascii_case(symbol)
+                && sel_strategy.trim() == strategy_id
+                && *sel_timeframe_secs == timeframe.duration_secs()
+        });
+        if !selected {
+            return Err(AutonomousBindingRejection::StrategyEngineMismatch);
+        }
+        BindingDispatchRoute::HostPool { run_id }
+    } else {
+        return Err(AutonomousBindingRejection::StrategyEngineMismatch);
+    };
 
     Ok(ResolvedSingleBinding {
         symbol: symbol.to_string(),
         strategy_id: strategy_id.to_string(),
         timeframe,
+        dispatch_route,
     })
 }
 
@@ -789,6 +849,55 @@ async fn prove_running_dispatch_eligibility(
         AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapFailed => Err(
             AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
                 reason_code: REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED,
+            },
+        ),
+    }
+}
+
+/// Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01):
+/// [`prove_running_dispatch_eligibility`]'s host-pool counterpart. Unlike the
+/// legacy check, this must never inspect `native_strategy_bootstrap` — that
+/// engine being `Dormant` is the expected, correct state whenever a
+/// host-pool binding is active, not a fault. Instead this re-reads
+/// [`AppState::dynamic_selection_runtime_snapshot`] fresh (the same
+/// read-only status witness [`resolve_effective_bindings`] used to resolve
+/// this binding in the first place) to confirm the run this binding was
+/// resolved against is still the one locally-owned, running operation with
+/// its host pool genuinely present — never dispatching against a stale
+/// snapshot from an earlier tick.
+async fn prove_host_pool_dispatch_eligibility(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+    expected_run_id: Uuid,
+) -> Result<(), AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+    if operation.state != mqk_db::STATE_RUNNING {
+        return Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_OPERATION_NOT_RUNNING,
+            },
+        );
+    }
+    let Some(operation_run_id) = operation.run_id else {
+        return Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_OPERATION_RUN_ID_MISSING,
+            },
+        );
+    };
+    if operation_run_id != expected_run_id {
+        return Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH,
+            },
+        );
+    }
+    match input.state.dynamic_selection_runtime_snapshot().await {
+        Some(snapshot) if snapshot.run_id == expected_run_id && snapshot.host_pool_present => {
+            Ok(())
+        }
+        _ => Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_LOCAL_RUNTIME_NOT_ACTIVE,
             },
         ),
     }
@@ -1293,12 +1402,32 @@ pub async fn tick_autonomous_completed_bar_driver_multi(
         return Ok(AutonomousMultiBindingTickOutcome::WholeOperationBlocked { outcome });
     }
 
+    // Same-symbol multi-strategy repair: read the current run's host-pool
+    // selection once, fresh, before resolving any binding — never cached
+    // across ticks. `None`/empty for every disposition that never builds a
+    // host pool (Legacy, Off, Shadow*, or no run active at all), which
+    // resolve_effective_bindings treats identically to "no host pool
+    // exists this tick" — every binding then falls back to the legacy
+    // engine-match check exactly as before this repair.
+    let dynamic_selection_snapshot = input.state.dynamic_selection_runtime_snapshot().await;
+    let host_pool_run_id = dynamic_selection_snapshot
+        .as_ref()
+        .filter(|s| s.host_pool_present)
+        .map(|s| s.run_id);
+    let host_pool_selected: &[(String, String, i64)] = dynamic_selection_snapshot
+        .as_ref()
+        .filter(|s| s.host_pool_present)
+        .map(|s| s.selected_pairs.as_slice())
+        .unwrap_or(&[]);
+
     let resolved = match resolve_effective_bindings(
         operation,
         input.assignment_config,
         input.assignment_identity,
         input.runtime_binding,
         input.runtime_binding_identity,
+        host_pool_run_id,
+        host_pool_selected,
     ) {
         Ok(resolved) => resolved,
         Err(rejection) => {
@@ -1778,12 +1907,25 @@ async fn observe_and_dispatch_if_ready(
                 AutonomousCompletedBarDriverMode::PrepareDataOnly => {
                     Ok(AutonomousCompletedBarDriverOutcome::BarObserved { bar_end_ts })
                 }
-                AutonomousCompletedBarDriverMode::RunningDispatch => {
-                    if let Err(not_ready) = prove_running_dispatch_eligibility(input).await {
-                        return Ok(not_ready);
+                AutonomousCompletedBarDriverMode::RunningDispatch => match binding.dispatch_route {
+                    BindingDispatchRoute::LegacyBootstrap => {
+                        if let Err(not_ready) = prove_running_dispatch_eligibility(input).await {
+                            return Ok(not_ready);
+                        }
+                        claim_and_dispatch_observed_bar(input, binding, bar_end_ts).await
                     }
-                    claim_and_dispatch_observed_bar(input, binding, bar_end_ts).await
-                }
+                    BindingDispatchRoute::HostPool { run_id } => {
+                        if let Err(not_ready) =
+                            prove_host_pool_dispatch_eligibility(input, run_id).await
+                        {
+                            return Ok(not_ready);
+                        }
+                        claim_and_dispatch_observed_bar_via_host_pool(
+                            input, binding, bar_end_ts, run_id,
+                        )
+                        .await
+                    }
+                },
             }
         }
     }
@@ -2035,6 +2177,197 @@ async fn claim_and_dispatch_observed_bar(
             .await
         }
     }
+}
+
+/// Bounded attempts/spacing for the host-pool deposit-and-confirm loop
+/// below. The host pool is owned exclusively by the execution loop's own
+/// task and ticks on its own cadence (well under a second in practice) —
+/// this bound (up to ~2s total) is generous enough to observe at least one
+/// or two of the loop's own ticks within one completed-bar driver
+/// invocation, and small enough to never meaningfully delay this
+/// (supervised, restart-budgeted) task's own shutdown responsiveness.
+const HOST_POOL_CONFIRM_MAX_ATTEMPTS: u32 = 8;
+const HOST_POOL_CONFIRM_ATTEMPT_DELAY_MS: u64 = 250;
+
+/// Same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01):
+/// [`claim_and_dispatch_observed_bar`]'s host-pool counterpart. The host
+/// pool (`DynamicSelectionHostPool`) is owned exclusively by the execution
+/// loop's own task for the run's lifetime — this driver can never call into
+/// it directly, by design (see [`BindingDispatchRoute::HostPool`]'s doc).
+///
+/// Instead: claim this exact `(symbol, strategy_id, timeframe, bar_end_ts)`
+/// binding-bar identity durably (migration 0075 — deliberately a separate
+/// table from [`claim_and_dispatch_observed_bar`]'s, since two different
+/// strategies may share one `(symbol, timeframe)` under an approved
+/// watchlist-v3 fleet); then hand the bar off through the existing
+/// `AppState::pending_strategy_bar_input` mailbox — the same seam the
+/// operator signal route already uses — and confirm completion by reading
+/// the durable `strategy_signal_evaluations` row the loop's own
+/// `tick_strategy_dispatch_selected_hosts_with_bar_facts` writes for this
+/// exact binding, deterministically identified via
+/// `AppState::derive_strategy_signal_evaluation_id`.
+///
+/// `now_tick` is derived from `bar_end_ts` itself (not a shared mutable
+/// counter — `operation.bars_observed` is one counter per *operation*, but
+/// this binding needs an identity independent of every sibling binding's own
+/// progress), so every deposit-and-confirm attempt for the same bar
+/// deterministically derives the identical expected evaluation id: a
+/// redundant redeposit after the row already exists writes nothing new
+/// (`record_signal_evaluation`'s own `ON CONFLICT DO NOTHING`) and
+/// confirmation simply succeeds on this or a later attempt — safe to retry,
+/// never a duplicate evaluation.
+///
+/// Uses [`crate::dynamic_selection_dispatch_authority::timeframe_secs_to_db_label`]
+/// for the identity's timeframe component, never
+/// `binding.timeframe.as_str()` — the two are NOT always the same string for
+/// the same underlying seconds value (`mqk_md::Timeframe::H1.as_str() ==
+/// "1h"` but the host pool's own `SelectedDispatchBinding::db_timeframe_label`
+/// for 3600s is `"1H"`), and `derive_strategy_signal_evaluation_id`'s UUIDv5
+/// seed is case-sensitive over that exact string. Using the wrong label
+/// would silently make confirmation impossible for every non-M5 timeframe.
+async fn claim_and_dispatch_observed_bar_via_host_pool(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+    binding: &ResolvedSingleBinding,
+    bar_end_ts: i64,
+    run_id: Uuid,
+) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+
+    let Some(db_timeframe_label) =
+        crate::dynamic_selection_dispatch_authority::timeframe_secs_to_db_label(
+            binding.timeframe.duration_secs(),
+        )
+    else {
+        // Unreachable in practice: this binding was only ever resolved as
+        // `HostPool` after matching an entry of `selected_pairs`, which is
+        // itself built from real `db_timeframe_label`s (see
+        // `resolve_effective_bindings`). Fails closed rather than panicking
+        // if that invariant is ever violated.
+        return Ok(AutonomousCompletedBarDriverOutcome::RegistryBlocked {
+            rejection: LatestBarRegistryAdmissionRejection::TimeframeNotAuthorized {
+                configured_timeframes: vec![binding.timeframe.as_str().to_string()],
+            },
+        });
+    };
+
+    let claim = mqk_db::claim_autonomous_daily_binding_bar_dispatch(
+        input.pool,
+        operation.operation_id,
+        &binding.symbol,
+        &binding.strategy_id,
+        db_timeframe_label,
+        bar_end_ts,
+        input.now_utc,
+    )
+    .await?;
+
+    match claim {
+        mqk_db::BarDispatchClaimOutcome::AlreadyCompleted { evaluation_id } => {
+            return Ok(AutonomousCompletedBarDriverOutcome::AlreadyDispatched { evaluation_id });
+        }
+        mqk_db::BarDispatchClaimOutcome::Unresolved { status } => {
+            return Ok(AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved { status });
+        }
+        mqk_db::BarDispatchClaimOutcome::Claimed => {}
+    }
+
+    let now_tick = bar_end_ts.max(0) as u64;
+    let expected_evaluation_id = AppState::derive_strategy_signal_evaluation_id(
+        Some(run_id),
+        &binding.strategy_id,
+        &binding.symbol,
+        db_timeframe_label,
+        now_tick,
+    );
+
+    for attempt in 0..HOST_POOL_CONFIRM_MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                HOST_POOL_CONFIRM_ATTEMPT_DELAY_MS,
+            ))
+            .await;
+        }
+
+        input
+            .state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick,
+                end_ts: bar_end_ts,
+                limit_price: None,
+                qty: 1,
+            })
+            .await;
+
+        let evaluation_row =
+            mqk_db::fetch_strategy_signal_evaluation(input.pool, expected_evaluation_id).await?;
+        let confirmed = evaluation_row.as_ref().is_some_and(|row| {
+            row.run_id == Some(run_id)
+                && row.strategy_id == binding.strategy_id
+                && row.symbol.eq_ignore_ascii_case(&binding.symbol)
+                && row.timeframe == db_timeframe_label
+        });
+
+        if confirmed {
+            let completed = mqk_db::complete_autonomous_daily_binding_bar_dispatch(
+                input.pool,
+                operation.operation_id,
+                &binding.symbol,
+                &binding.strategy_id,
+                db_timeframe_label,
+                bar_end_ts,
+                input.now_utc,
+                Some(expected_evaluation_id),
+            )
+            .await?;
+            if completed {
+                return Ok(AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts });
+            }
+            // The claim was no longer `claimed` by the time completion was
+            // attempted (e.g. a concurrent retry already completed or
+            // failed it) — re-read authoritative current status rather than
+            // assume success.
+            return Ok(
+                match mqk_db::fetch_autonomous_daily_binding_bar_dispatch(
+                    input.pool,
+                    operation.operation_id,
+                    &binding.symbol,
+                    &binding.strategy_id,
+                    db_timeframe_label,
+                    bar_end_ts,
+                )
+                .await?
+                {
+                    Some(row) if row.status == mqk_db::DISPATCH_STATUS_COMPLETED => {
+                        AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts }
+                    }
+                    Some(row) => {
+                        AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+                            status: row.status,
+                        }
+                    }
+                    None => AutonomousCompletedBarDriverOutcome::EvidencePersistenceFailed {
+                        detail: "binding-bar dispatch claim row disappeared between claim and \
+                                 completion"
+                            .to_string(),
+                    },
+                },
+            );
+        }
+    }
+
+    mqk_db::fail_autonomous_daily_binding_bar_dispatch(
+        input.pool,
+        operation.operation_id,
+        &binding.symbol,
+        &binding.strategy_id,
+        db_timeframe_label,
+        bar_end_ts,
+        "host-pool dispatch confirmation not observed within the bounded retry window",
+    )
+    .await?;
+    Ok(AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+        status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
+    })
 }
 
 /// REPAIR 4: the mandatory authoritative re-read reached when

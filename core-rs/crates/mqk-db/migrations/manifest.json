@@ -458,6 +458,12 @@
       "path": "0074_autonomous_daily_binding_state_strategy_mismatch_reason.sql",
       "status": "applied",
       "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 autonomous completed-bar driver multi-binding repair (R2B, V4-BULK-CODE-COMPLETION-STAGE-B-M2-01 C4): widen 0071's closed sys_autonomous_daily_binding_state_reason_known vocabulary (drop+re-add by the same constraint name, idempotent) with one new value, binding_strategy_engine_not_active, covering a configured multi-symbol binding whose strategy_id does not match the process's one active native-strategy engine (Tier A single-strategy policy) -- a real binding-local fault none of 0071's original five reasons describe honestly. Additive only -- 0071's table/columns are unchanged."
+    },
+    {
+      "id": "0075",
+      "path": "0075_autonomous_daily_binding_bar_dispatches.sql",
+      "status": "applied",
+      "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 autonomous completed-bar driver same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01, correcting the prior session's C4 patch): new additive table sys_autonomous_daily_binding_bar_dispatches, keyed (operation_id, symbol, strategy_id, timeframe, bar_end_ts) -- distinct from migration 0050's sys_autonomous_daily_bar_dispatches (no strategy_id; correct and unchanged for the legacy single-engine path only). Required because an approved watchlist-v3 fleet can bind two different strategies to the same (symbol, timeframe) (e.g. AAPL/strategy_A and AAPL/strategy_B), which 0050's identity cannot distinguish. Used exclusively by the new host-pool dispatch route in autonomous_completed_bar_driver.rs. No existing table/column altered."
     }
   ]
 }
