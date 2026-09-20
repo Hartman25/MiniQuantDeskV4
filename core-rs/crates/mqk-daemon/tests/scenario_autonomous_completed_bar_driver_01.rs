@@ -13,15 +13,16 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, NaiveDate, Utc};
 use mqk_daemon::daily_data_readiness::AssignmentReadiness;
 use mqk_daemon::state::autonomous_completed_bar_driver::{
-    resolve_autonomous_provider_call_authorization, resolve_single_effective_binding,
-    tick_autonomous_completed_bar_driver, AutonomousAssignmentReadinessEvaluator,
-    AutonomousBindingRejection, AutonomousCompletedBarDriverInput,
-    AutonomousCompletedBarDriverMode, AutonomousCompletedBarDriverOutcome,
-    AutonomousDriverSetupRejection, AutonomousLatestBarProviderResolver,
-    AutonomousProviderCallAuthorization, ResolvedSingleBinding, REASON_LOCAL_RUNTIME_NOT_ACTIVE,
-    REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH, REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT,
-    REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED, REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING,
-    REASON_OPERATION_NOT_RUNNING, REASON_OPERATION_RUN_ID_MISSING,
+    resolve_autonomous_provider_call_authorization, resolve_effective_bindings,
+    resolve_single_effective_binding, tick_autonomous_completed_bar_driver,
+    AutonomousAssignmentReadinessEvaluator, AutonomousBindingRejection,
+    AutonomousCompletedBarDriverInput, AutonomousCompletedBarDriverMode,
+    AutonomousCompletedBarDriverOutcome, AutonomousDriverSetupRejection,
+    AutonomousLatestBarProviderResolver, AutonomousProviderCallAuthorization,
+    ResolvedSingleBinding, REASON_LOCAL_RUNTIME_NOT_ACTIVE, REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH,
+    REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT, REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED,
+    REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING, REASON_OPERATION_NOT_RUNNING,
+    REASON_OPERATION_RUN_ID_MISSING,
 };
 use mqk_daemon::state::market_data_latest_bar::LatestBarRegistryAdmissionRejection;
 use mqk_daemon::state::{self, OperatorAuthMode};
@@ -882,6 +883,91 @@ fn admission_10_multi_symbol_assignment_not_exactly_bound() {
     assert_eq!(
         result,
         Err(AutonomousBindingRejection::MultiSymbolAssignmentNotExactlyBound)
+    );
+}
+
+/// C4 (MULTI-STRATEGY-RUNTIME-DISPATCH-01 R2B): the multi-binding
+/// generalization must resolve each configured assignment independently —
+/// unlike `resolve_single_effective_binding`, one assignment's rejection
+/// (here, a `strategy_id` that does not match the one active engine, and a
+/// timeframe the registry does not support) must never prevent a sibling
+/// assignment in the same config from resolving successfully. This is the
+/// load-bearing proof for C4/C5's core invariant: an old bug here would
+/// either (a) reject the whole config again (regressing to the exact
+/// single-binding restriction this patch removes), or (b) silently let a
+/// mismatched/invalid assignment through as if it resolved — either failure
+/// would show up as a wrong `Ok`/`Err` in one of the three assertions below.
+#[test]
+fn c4_multi_binding_resolves_each_assignment_independently() {
+    let assignment_config = MultiSymbolRuntimeConfig {
+        schema_version: "v2".to_string(),
+        symbols: vec![
+            SymbolStrategyAssignment {
+                symbol: "AAA".to_string(),
+                strategy_id: "swing_momentum".to_string(),
+                timeframe: "5m".to_string(),
+            },
+            SymbolStrategyAssignment {
+                symbol: "BBB".to_string(),
+                strategy_id: "mean_reversion".to_string(),
+                timeframe: "5m".to_string(),
+            },
+            SymbolStrategyAssignment {
+                symbol: "CCC".to_string(),
+                strategy_id: "swing_momentum".to_string(),
+                timeframe: "not_a_timeframe".to_string(),
+            },
+        ],
+        max_concurrent_symbols: 3,
+        source: MultiSymbolConfigSource::EnvSingleSymbolFallback,
+    };
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    // The one active engine is "swing_momentum" — matches AAA and CCC's
+    // configured strategy_id, not BBB's.
+    let binding = fixture_binding("AAA", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let mut op = stub_operation("c4-multi", "c4-multi-2");
+    op.assignment_identity = assignment_identity.clone();
+    op.runtime_binding_identity = runtime_binding_identity.clone();
+
+    let resolved = resolve_effective_bindings(
+        &op,
+        &assignment_config,
+        &assignment_identity,
+        &binding,
+        &runtime_binding_identity,
+    )
+    .expect("operation-level identity/engine checks pass");
+
+    assert_eq!(resolved.len(), 3);
+
+    let (aaa_assignment, aaa_result) = &resolved[0];
+    assert_eq!(aaa_assignment.symbol, "AAA");
+    assert_eq!(
+        aaa_result,
+        &Ok(ResolvedSingleBinding {
+            symbol: "AAA".to_string(),
+            strategy_id: "swing_momentum".to_string(),
+            timeframe: mqk_md::Timeframe::parse("5m").unwrap(),
+        })
+    );
+
+    let (bbb_assignment, bbb_result) = &resolved[1];
+    assert_eq!(bbb_assignment.symbol, "BBB");
+    assert_eq!(
+        bbb_result,
+        &Err(AutonomousBindingRejection::StrategyEngineMismatch)
+    );
+
+    let (ccc_assignment, ccc_result) = &resolved[2];
+    assert_eq!(ccc_assignment.symbol, "CCC");
+    assert_eq!(
+        ccc_result,
+        &Err(AutonomousBindingRejection::UnsupportedTimeframe)
     );
 }
 

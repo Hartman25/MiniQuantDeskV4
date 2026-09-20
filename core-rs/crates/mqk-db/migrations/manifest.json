@@ -452,6 +452,12 @@
       "path": "0073_explicit_multi_strategy_authority_full_evidence.sql",
       "status": "applied",
       "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 (V4-STAGE-B-M2-C1-C3-REPAIR-04 Patch D2): add every previously-omitted mqk_portfolio::SelectionCandidateEvidence field to sys_explicit_multi_strategy_authority_bindings (promotion_expired, evidence_resolved, review_state_is_paper_candidate, evidence_review_state, durable/recomputed legacy and v2 fingerprints plus their match flags, plugin_instantiable, timeframe_matches, canonical_score_decimal/micros, scanner_rank, watchlist_assigned, evidence_review_id/scanner_scan_id/artifact_path/git_hash, promotion_effective_at/expires_at, exact_reason) so every result-affecting field can be durably persisted and bound into authority_id. Additive only -- 0072 is not modified; every new column is nullable-or-defaulted."
+    },
+    {
+      "id": "0074",
+      "path": "0074_autonomous_daily_binding_state_strategy_mismatch_reason.sql",
+      "status": "applied",
+      "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 autonomous completed-bar driver multi-binding repair (R2B, V4-BULK-CODE-COMPLETION-STAGE-B-M2-01 C4): widen 0071's closed sys_autonomous_daily_binding_state_reason_known vocabulary (drop+re-add by the same constraint name, idempotent) with one new value, binding_strategy_engine_not_active, covering a configured multi-symbol binding whose strategy_id does not match the process's one active native-strategy engine (Tier A single-strategy policy) -- a real binding-local fault none of 0071's original five reasons describe honestly. Additive only -- 0071's table/columns are unchanged."
     }
   ]
 }

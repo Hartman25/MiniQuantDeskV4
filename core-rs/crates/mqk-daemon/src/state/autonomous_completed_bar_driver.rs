@@ -310,6 +310,15 @@ pub enum AutonomousBindingRejection {
     MissingTimeframeBinding,
     UnsupportedTimeframe,
     MultiSymbolAssignmentNotExactlyBound,
+    /// C4 (MULTI-STRATEGY-RUNTIME-DISPATCH-01 R2B): this configured
+    /// assignment's `strategy_id` does not equal the one active
+    /// native-strategy engine this process bootstrapped (Tier A
+    /// single-strategy policy — see `mqk_runtime::native_strategy` module
+    /// docs). Only [`resolve_effective_bindings`] produces this; the
+    /// original single-binding [`resolve_single_effective_binding`] already
+    /// rejects any config with more than one assignment before this
+    /// question can even arise.
+    StrategyEngineMismatch,
 }
 
 /// The one exactly-bound `(symbol, strategy_id, timeframe)` this driver may
@@ -375,6 +384,112 @@ pub fn resolve_single_effective_binding(
 
     Ok(ResolvedSingleBinding {
         symbol: target_symbol.to_string(),
+        strategy_id: strategy_id.to_string(),
+        timeframe,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// C4 (MULTI-STRATEGY-RUNTIME-DISPATCH-01 R2B, V4-BULK-CODE-COMPLETION-STAGE-
+// B-M2-01): multi-binding resolution.
+// ---------------------------------------------------------------------------
+
+/// [`resolve_single_effective_binding`]'s multi-binding generalization: every
+/// configured `(symbol, strategy_id, timeframe)` assignment in
+/// `assignment_config.symbols` is resolved independently, rather than
+/// requiring exactly one. A per-assignment failure never blocks any other
+/// assignment — it is returned inline (`Err` in that assignment's own
+/// position), so a caller can durably quarantine only the affected binding
+/// (`sys_autonomous_daily_binding_state`, migration 0071) while healthy
+/// bindings continue to progress.
+///
+/// The two operation-level identity checks
+/// (`assignment_identity`/`runtime_binding_identity`) remain global: an
+/// operator config or runtime-bootstrap change since the operation was
+/// created must still be treated as `Err` for the whole tick, exactly as in
+/// [`resolve_single_effective_binding`] — no per-binding continuation is
+/// possible when the operation's own recorded identity no longer matches
+/// current truth.
+///
+/// This process has exactly one active native-strategy engine (Tier A
+/// single-strategy policy — `mqk_runtime::native_strategy::
+/// NativeStrategyBootstrap::bootstrap`'s own docs: "Multi-strategy fleet
+/// execution is deferred to a later patch"). Unlike
+/// [`resolve_single_effective_binding`], this function does not require
+/// `runtime_binding.effective_runtime_target_symbol` to be set — that field
+/// is the legacy single-symbol `MQK_STRATEGY_SYMBOL` env read, orthogonal to
+/// a multi-symbol watchlist config, which names its own symbols directly.
+/// It does still require the engine itself (`effective_runtime_strategy_id`)
+/// and a bound timeframe to be present globally; a configured assignment
+/// whose own `strategy_id` does not equal that one active engine is resolved
+/// as [`AutonomousBindingRejection::StrategyEngineMismatch`] for that
+/// assignment only.
+pub fn resolve_effective_bindings(
+    operation: &mqk_db::AutonomousDailyOperationRecord,
+    assignment_config: &MultiSymbolRuntimeConfig,
+    assignment_identity: &str,
+    runtime_binding: &EffectiveRuntimeBinding,
+    runtime_binding_identity: &str,
+) -> Result<
+    Vec<(
+        super::multi_symbol_config::SymbolStrategyAssignment,
+        Result<ResolvedSingleBinding, AutonomousBindingRejection>,
+    )>,
+    AutonomousBindingRejection,
+> {
+    if operation.assignment_identity != assignment_identity {
+        return Err(AutonomousBindingRejection::AssignmentIdentityMismatch);
+    }
+    if operation.runtime_binding_identity != runtime_binding_identity {
+        return Err(AutonomousBindingRejection::RuntimeBindingIdentityMismatch);
+    }
+
+    let active_strategy_id = runtime_binding
+        .effective_runtime_strategy_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(AutonomousBindingRejection::BlankStrategyId)?;
+    runtime_binding
+        .effective_runtime_timeframe_secs
+        .ok_or(AutonomousBindingRejection::MissingTimeframeBinding)?;
+
+    Ok(assignment_config
+        .symbols
+        .iter()
+        .map(|assignment| {
+            (
+                assignment.clone(),
+                resolve_one_configured_assignment(assignment, active_strategy_id),
+            )
+        })
+        .collect())
+}
+
+/// Resolve one already-loaded configured assignment against the process's
+/// one active engine. Pure, no I/O — the same per-assignment checks
+/// [`resolve_single_effective_binding`] performs against its single
+/// assignment, applied independently to each entry of a multi-symbol config.
+fn resolve_one_configured_assignment(
+    assignment: &super::multi_symbol_config::SymbolStrategyAssignment,
+    active_strategy_id: &str,
+) -> Result<ResolvedSingleBinding, AutonomousBindingRejection> {
+    let symbol = assignment.symbol.trim();
+    if symbol.is_empty() {
+        return Err(AutonomousBindingRejection::BlankTargetSymbol);
+    }
+    let strategy_id = assignment.strategy_id.trim();
+    if strategy_id.is_empty() {
+        return Err(AutonomousBindingRejection::BlankStrategyId);
+    }
+    if strategy_id != active_strategy_id {
+        return Err(AutonomousBindingRejection::StrategyEngineMismatch);
+    }
+    let timeframe = mqk_md::Timeframe::parse(assignment.timeframe.trim())
+        .map_err(|_| AutonomousBindingRejection::UnsupportedTimeframe)?;
+
+    Ok(ResolvedSingleBinding {
+        symbol: symbol.to_string(),
         strategy_id: strategy_id.to_string(),
         timeframe,
     })
@@ -890,27 +1005,29 @@ pub struct AutonomousCompletedBarDriverInput<'a> {
     pub mode: AutonomousCompletedBarDriverMode,
 }
 
-/// Perform one autonomous completed-bar driver tick. Returns a stable typed
-/// outcome; returns `Err` only for an unexpected DB connectivity failure
-/// (which necessarily prevents dispatch — see C.11's "a DB failure before a
-/// provider call causes zero provider calls").
-pub async fn tick_autonomous_completed_bar_driver(
-    input: AutonomousCompletedBarDriverInput<'_>,
-) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
-    let operation = input.operation;
-
+/// Operation-level gates shared by every driver entrypoint (single-binding
+/// and multi-binding alike): terminal/manual-intervention state, the
+/// preopen/close window, `PrepareDataOnly`'s pre-runtime-only eligibility,
+/// and exchange-session truth presence. `Some(outcome)` means the whole tick
+/// is blocked before any binding is even resolved — none of these facts are
+/// per-binding, so a rejection here must apply to every configured binding
+/// identically, never just one.
+fn evaluate_operation_level_gates(
+    operation: &mqk_db::AutonomousDailyOperationRecord,
+    mode: AutonomousCompletedBarDriverMode,
+    now_utc: DateTime<Utc>,
+) -> Option<AutonomousCompletedBarDriverOutcome> {
     if mqk_db::is_terminal_operation_state(&operation.state)
         || operation.state == mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED
     {
-        return Ok(AutonomousCompletedBarDriverOutcome::NotApplicable {
+        return Some(AutonomousCompletedBarDriverOutcome::NotApplicable {
             reason_code: "operation_not_in_pollable_state",
         });
     }
 
-    if input.now_utc < operation.preopen_start_utc
-        || input.now_utc >= operation.effective_operation_close_utc
+    if now_utc < operation.preopen_start_utc || now_utc >= operation.effective_operation_close_utc
     {
-        return Ok(AutonomousCompletedBarDriverOutcome::OutsideOperationWindow);
+        return Some(AutonomousCompletedBarDriverOutcome::OutsideOperationWindow);
     }
 
     // REPAIR 8: `PrepareDataOnly` is a pre-runtime concern only. Once the
@@ -918,10 +1035,10 @@ pub async fn tick_autonomous_completed_bar_driver(
     // preparation (e.g. it is actually `running`, winding down, manually
     // blocked, or terminal), preparation-mode ticks must refuse rather than
     // silently continue polling/observing on the coordinator's behalf.
-    if input.mode == AutonomousCompletedBarDriverMode::PrepareDataOnly
+    if mode == AutonomousCompletedBarDriverMode::PrepareDataOnly
         && !prepare_data_only_state_eligible(&operation.state)
     {
-        return Ok(AutonomousCompletedBarDriverOutcome::NotApplicable {
+        return Some(AutonomousCompletedBarDriverOutcome::NotApplicable {
             reason_code: "operation_not_in_preparation_state",
         });
     }
@@ -932,11 +1049,27 @@ pub async fn tick_autonomous_completed_bar_driver(
         operation.exchange_is_early_close,
         operation.previous_trading_date,
     ) else {
-        return Ok(AutonomousCompletedBarDriverOutcome::ExchangeSessionTruthMissing);
+        return Some(AutonomousCompletedBarDriverOutcome::ExchangeSessionTruthMissing);
     };
     let _ = (exchange_open, exchange_close); // exchange truth proven present; consumers of the
                                              // exact values are the readiness/session-plan layers,
                                              // not this gate.
+
+    None
+}
+
+/// Perform one autonomous completed-bar driver tick. Returns a stable typed
+/// outcome; returns `Err` only for an unexpected DB connectivity failure
+/// (which necessarily prevents dispatch — see C.11's "a DB failure before a
+/// provider call causes zero provider calls").
+pub async fn tick_autonomous_completed_bar_driver(
+    input: AutonomousCompletedBarDriverInput<'_>,
+) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+
+    if let Some(outcome) = evaluate_operation_level_gates(operation, input.mode, input.now_utc) {
+        return Ok(outcome);
+    }
 
     // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01:
     // `authorization` is no longer checked here. It authorizes provider
@@ -958,9 +1091,25 @@ pub async fn tick_autonomous_completed_bar_driver(
         }
     };
 
+    tick_one_binding(&input, &binding, input.provider_id).await
+}
+
+/// C4: the reusable per-binding tail shared by
+/// [`tick_autonomous_completed_bar_driver`] (exactly one resolved binding)
+/// and [`tick_autonomous_completed_bar_driver_multi`] (one call per resolved
+/// binding, independently). Registry admission, the mandatory pre-poll
+/// readiness evaluation, and observation/dispatch reconciliation are
+/// identical either way — only which binding and which `provider_id` differ.
+async fn tick_one_binding(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+    binding: &ResolvedSingleBinding,
+    provider_id: &str,
+) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+
     let target: ResolvedLatestBarPollTarget = match resolve_latest_bar_poll_target(
         input.instruments,
-        input.provider_id,
+        provider_id,
         &binding.symbol,
         binding.timeframe,
     ) {
@@ -975,7 +1124,7 @@ pub async fn tick_autonomous_completed_bar_driver(
     // never blocks polling.
     let pre_poll_readiness = input
         .readiness_evaluator
-        .evaluate(operation, &binding, input.now_utc)
+        .evaluate(operation, binding, input.now_utc)
         .await?;
 
     let expected_ts = match classify_pre_poll_eligibility(&pre_poll_readiness) {
@@ -990,7 +1139,278 @@ pub async fn tick_autonomous_completed_bar_driver(
         PrePollEligibility::Known { expected_end_ts } => expected_end_ts,
     };
 
-    reconcile_observed_expected_bar(&input, &binding, &target, expected_ts).await
+    reconcile_observed_expected_bar(input, binding, &target, expected_ts).await
+}
+
+// ---------------------------------------------------------------------------
+// C4/C5 (MULTI-STRATEGY-RUNTIME-DISPATCH-01 R2B/R2C, V4-BULK-CODE-
+// COMPLETION-STAGE-B-M2-01): multi-binding tick entrypoint with per-binding
+// fault isolation.
+// ---------------------------------------------------------------------------
+
+/// One configured binding's outcome from one
+/// [`tick_autonomous_completed_bar_driver_multi`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutonomousBindingTickOutcome {
+    pub assignment: super::multi_symbol_config::SymbolStrategyAssignment,
+    pub outcome: AutonomousCompletedBarDriverOutcome,
+}
+
+/// C5 (frozen hybrid per-binding fault-isolation policy, migration 0071's
+/// header): classify one binding's tick outcome into exactly one of the
+/// three durable dispositions the operator decision defines. This match is
+/// intentionally exhaustive with no wildcard arm — adding a new
+/// [`AutonomousCompletedBarDriverOutcome`] variant must force this
+/// classifier to be updated rather than silently defaulting one bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingIsolationClass {
+    /// This binding made progress (or is in a normal, non-faulted resting
+    /// state) — durably marked `active`.
+    Healthy,
+    /// A binding-local fault — durably marked `locally_blocked` for the
+    /// given reason. Every *other* binding in this operation is unaffected.
+    LocalFault(mqk_db::BindingLocalBlockReason),
+    /// A global-critical fault — this operation's own
+    /// `sys_autonomous_daily_operations.state` machine owns the response
+    /// (unchanged); the multi-binding loop stops dispatching further
+    /// bindings this tick rather than continuing past an unresolved/
+    /// ambiguous durable claim or evidence-lineage/runtime-ownership fault.
+    GlobalCritical,
+}
+
+fn classify_binding_outcome_for_isolation(
+    outcome: &AutonomousCompletedBarDriverOutcome,
+) -> BindingIsolationClass {
+    use mqk_db::BindingLocalBlockReason as R;
+    use AutonomousCompletedBarDriverOutcome as O;
+    use BindingIsolationClass::{GlobalCritical, Healthy, LocalFault};
+
+    match outcome {
+        // Operation-level gates already run once, before any binding is
+        // resolved (`evaluate_operation_level_gates`), and
+        // `resolve_effective_bindings`'s own global checks are handled by
+        // the multi-binding entrypoint before this classifier is ever
+        // reached for a real binding. These arms are defensively classified
+        // as global-critical (never silently treated as one binding's local
+        // fault) so a future caller that somehow reaches this classifier
+        // with one of them still fails closed for the whole tick rather
+        // than mis-isolating it.
+        O::NotApplicable { .. }
+        | O::OutsideOperationWindow
+        | O::ExchangeSessionTruthMissing
+        | O::BindingBlocked { .. } => GlobalCritical,
+
+        O::RegistryBlocked { .. } | O::Unsupported { .. } => {
+            LocalFault(R::UnsupportedOrInvalidSymbolTimeframe)
+        }
+
+        O::AuthorizationDisabled
+        | O::AuthorizationInvalid { .. }
+        | O::PollNotDue
+        | O::PollSucceededNoNewBar
+        | O::NoNewCompletedBar => LocalFault(R::NoNewBarWaiting),
+
+        O::ReadinessBlocked { .. } | O::ReadinessBlockedAfterPoll { .. } => {
+            LocalFault(R::ReadinessBlocked)
+        }
+
+        O::PollFailedTransient { .. }
+        | O::PollFailedTerminal { .. }
+        | O::ProviderLaggingExpectedBar { .. }
+        | O::UnexpectedOrFutureBar { .. }
+        | O::ProviderSetupBlocked { .. } => LocalFault(R::ProviderFailureIsolated),
+
+        O::BarObserved { .. } | O::AlreadyDispatched { .. } | O::DispatchCompleted { .. } => {
+            Healthy
+        }
+
+        O::DispatchClaimUnresolved { .. }
+        | O::EvidencePersistenceFailed { .. }
+        | O::ObservedBarEvidenceInconsistent { .. }
+        | O::ObservedBarSequenceInconsistent { .. }
+        | O::RuntimeDispatchNotReady { .. }
+        | O::DispatchEvaluationEvidenceMissing { .. }
+        | O::DispatchCompletionUnconfirmed { .. } => GlobalCritical,
+    }
+}
+
+/// Result of one [`tick_autonomous_completed_bar_driver_multi`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AutonomousMultiBindingTickOutcome {
+    /// One of [`evaluate_operation_level_gates`]'s operation-wide checks
+    /// blocked the whole tick before any binding was resolved.
+    WholeOperationBlocked {
+        outcome: AutonomousCompletedBarDriverOutcome,
+    },
+    /// [`resolve_effective_bindings`]'s own operation-level identity/engine
+    /// checks failed — every configured binding is blocked identically.
+    WholeOperationBindingResolutionBlocked {
+        rejection: AutonomousBindingRejection,
+    },
+    /// Every configured assignment was resolved (successfully or not) and
+    /// given a chance to progress independently.
+    Ticked {
+        /// One entry per configured assignment that reached per-binding
+        /// resolution, in `assignment_config.symbols` order. Empty when a
+        /// global-critical outcome stopped the loop before any binding.
+        per_binding: Vec<AutonomousBindingTickOutcome>,
+        /// Configured assignments that failed per-binding resolution itself
+        /// (before ever reaching the poll/observe/dispatch pipeline) —
+        /// durably recorded `locally_blocked` the same as any other local
+        /// fault.
+        rejected_bindings: Vec<(
+            super::multi_symbol_config::SymbolStrategyAssignment,
+            AutonomousBindingRejection,
+        )>,
+        /// `true` iff a global-critical outcome stopped the loop before
+        /// every configured binding was given a chance this tick.
+        halted_on_global_critical: bool,
+    },
+}
+
+/// C4/C5/C6: resolve and tick every configured `(symbol, strategy_id,
+/// timeframe)` assignment independently, durably recording each one's
+/// health in `sys_autonomous_daily_binding_state` (migration 0071) per the
+/// frozen hybrid per-binding fault-isolation policy. Reuses every existing
+/// per-binding mechanism unchanged (`tick_one_binding`,
+/// `resolve_latest_bar_poll_target`, the readiness evaluator, the durable
+/// bar-observation/dispatch-claim pipeline) — this function only adds the
+/// loop, the per-assignment provider resolution, and the isolation
+/// bookkeeping around them.
+///
+/// Each binding resolves its own `provider_id` directly from
+/// `input.instruments` (mirroring the production adapter's own single-symbol
+/// resolution in `autonomous_completed_bar_task.rs`) rather than trusting
+/// `input.provider_id`, which is a single shared field meaningful only for
+/// the legacy exactly-one-symbol case — different configured symbols may be
+/// registered under different providers.
+pub async fn tick_autonomous_completed_bar_driver_multi(
+    input: AutonomousCompletedBarDriverInput<'_>,
+) -> anyhow::Result<AutonomousMultiBindingTickOutcome> {
+    let operation = input.operation;
+
+    if let Some(outcome) = evaluate_operation_level_gates(operation, input.mode, input.now_utc) {
+        return Ok(AutonomousMultiBindingTickOutcome::WholeOperationBlocked { outcome });
+    }
+
+    let resolved = match resolve_effective_bindings(
+        operation,
+        input.assignment_config,
+        input.assignment_identity,
+        input.runtime_binding,
+        input.runtime_binding_identity,
+    ) {
+        Ok(resolved) => resolved,
+        Err(rejection) => {
+            return Ok(
+                AutonomousMultiBindingTickOutcome::WholeOperationBindingResolutionBlocked {
+                    rejection,
+                },
+            );
+        }
+    };
+
+    let mut per_binding = Vec::with_capacity(resolved.len());
+    let mut rejected_bindings = Vec::new();
+    let mut halted_on_global_critical = false;
+
+    for (assignment, resolution) in resolved {
+        let binding = match resolution {
+            Ok(binding) => binding,
+            Err(rejection) => {
+                mqk_db::mark_autonomous_daily_binding_locally_blocked(
+                    input.pool,
+                    operation.operation_id,
+                    &assignment.symbol,
+                    &assignment.strategy_id,
+                    &assignment.timeframe,
+                    binding_rejection_to_local_block_reason(&rejection),
+                    None,
+                    input.now_utc,
+                )
+                .await?;
+                rejected_bindings.push((assignment, rejection));
+                continue;
+            }
+        };
+
+        let provider_id = input
+            .instruments
+            .iter()
+            .find(|i| i.symbol.trim().eq_ignore_ascii_case(&binding.symbol))
+            .map(|i| i.provider.clone())
+            .unwrap_or_default();
+
+        let outcome = tick_one_binding(&input, &binding, &provider_id).await?;
+
+        match classify_binding_outcome_for_isolation(&outcome) {
+            BindingIsolationClass::Healthy => {
+                mqk_db::mark_autonomous_daily_binding_active(
+                    input.pool,
+                    operation.operation_id,
+                    &binding.symbol,
+                    &binding.strategy_id,
+                    binding.timeframe.as_str(),
+                    input.now_utc,
+                )
+                .await?;
+                per_binding.push(AutonomousBindingTickOutcome { assignment, outcome });
+            }
+            BindingIsolationClass::LocalFault(reason) => {
+                mqk_db::mark_autonomous_daily_binding_locally_blocked(
+                    input.pool,
+                    operation.operation_id,
+                    &binding.symbol,
+                    &binding.strategy_id,
+                    binding.timeframe.as_str(),
+                    reason,
+                    None,
+                    input.now_utc,
+                )
+                .await?;
+                per_binding.push(AutonomousBindingTickOutcome { assignment, outcome });
+            }
+            BindingIsolationClass::GlobalCritical => {
+                per_binding.push(AutonomousBindingTickOutcome { assignment, outcome });
+                halted_on_global_critical = true;
+                break;
+            }
+        }
+    }
+
+    Ok(AutonomousMultiBindingTickOutcome::Ticked {
+        per_binding,
+        rejected_bindings,
+        halted_on_global_critical,
+    })
+}
+
+/// Map a per-assignment [`AutonomousBindingRejection`] (produced only by
+/// [`resolve_one_configured_assignment`] — never the operation-level
+/// identity variants, which [`resolve_effective_bindings`] already returns
+/// as a whole-tick `Err` before any per-binding rejection can exist) to its
+/// durable [`mqk_db::BindingLocalBlockReason`].
+fn binding_rejection_to_local_block_reason(
+    rejection: &AutonomousBindingRejection,
+) -> mqk_db::BindingLocalBlockReason {
+    use mqk_db::BindingLocalBlockReason as R;
+    match rejection {
+        AutonomousBindingRejection::StrategyEngineMismatch => R::StrategyEngineNotActive,
+        AutonomousBindingRejection::BlankTargetSymbol
+        | AutonomousBindingRejection::BlankStrategyId
+        | AutonomousBindingRejection::MissingTimeframeBinding
+        | AutonomousBindingRejection::UnsupportedTimeframe
+        | AutonomousBindingRejection::MultiSymbolAssignmentNotExactlyBound => {
+            R::UnsupportedOrInvalidSymbolTimeframe
+        }
+        // Never actually produced per-assignment (see doc comment above) —
+        // classified conservatively rather than panicking if that ever
+        // changes.
+        AutonomousBindingRejection::AssignmentIdentityMismatch
+        | AutonomousBindingRejection::RuntimeBindingIdentityMismatch => {
+            R::UnsupportedOrInvalidSymbolTimeframe
+        }
+    }
 }
 
 /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: the

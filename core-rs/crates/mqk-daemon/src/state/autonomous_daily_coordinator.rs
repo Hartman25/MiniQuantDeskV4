@@ -1540,6 +1540,7 @@ fn binding_rejection_label(
         R::MissingTimeframeBinding => "missing_timeframe_binding",
         R::UnsupportedTimeframe => "unsupported_timeframe",
         R::MultiSymbolAssignmentNotExactlyBound => "multi_symbol_assignment_not_exactly_bound",
+        R::StrategyEngineMismatch => "strategy_engine_mismatch",
     }
 }
 

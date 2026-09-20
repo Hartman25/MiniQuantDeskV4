@@ -3431,6 +3431,11 @@ pub enum BindingLocalBlockReason {
     ReadinessBlocked,
     UnsupportedOrInvalidSymbolTimeframe,
     ProviderFailureIsolated,
+    /// Migration 0074 (R2B): this binding's configured `strategy_id` does
+    /// not match the process's one active native-strategy engine (Tier A
+    /// single-strategy policy). See that migration's header for why this is
+    /// a distinct reason, not a reuse of one of the five above.
+    StrategyEngineNotActive,
 }
 
 impl BindingLocalBlockReason {
@@ -3443,6 +3448,7 @@ impl BindingLocalBlockReason {
                 "binding_unsupported_or_invalid_symbol_timeframe"
             }
             Self::ProviderFailureIsolated => "binding_provider_failure_isolated",
+            Self::StrategyEngineNotActive => "binding_strategy_engine_not_active",
         }
     }
 
@@ -3458,6 +3464,7 @@ impl BindingLocalBlockReason {
                 Self::UnsupportedOrInvalidSymbolTimeframe
             }
             "binding_provider_failure_isolated" => Self::ProviderFailureIsolated,
+            "binding_strategy_engine_not_active" => Self::StrategyEngineNotActive,
             _ => return None,
         })
     }

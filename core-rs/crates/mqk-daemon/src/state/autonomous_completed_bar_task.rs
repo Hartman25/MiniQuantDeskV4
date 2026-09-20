@@ -75,9 +75,10 @@ use uuid::Uuid;
 use super::autonomous_completed_bar_driver::{
     load_driver_instruments, resolve_autonomous_provider_call_authorization_from_env,
     run_bounded_cadence_task, tick_autonomous_completed_bar_driver,
-    AutonomousCompletedBarDriverInput, AutonomousCompletedBarDriverMode,
-    AutonomousCompletedBarDriverOutcome, AutonomousCompletedBarDriverTaskConfig,
-    AutonomousCompletedBarDriverTaskLiveness, AutonomousDriverSetupRejection,
+    tick_autonomous_completed_bar_driver_multi, AutonomousCompletedBarDriverInput,
+    AutonomousCompletedBarDriverMode, AutonomousCompletedBarDriverOutcome,
+    AutonomousCompletedBarDriverTaskConfig, AutonomousCompletedBarDriverTaskLiveness,
+    AutonomousDriverSetupRejection, AutonomousMultiBindingTickOutcome,
     ProductionAutonomousAssignmentReadinessEvaluator,
     ProductionAutonomousLatestBarProviderResolver,
 };
@@ -190,11 +191,21 @@ pub enum AutonomousCompletedBarProductionTickOutcome {
         rejection: AutonomousDriverSetupRejection,
     },
     /// The accepted Phase C driver was invoked exactly once and returned a
-    /// typed outcome.
+    /// typed outcome. Reached only for an exactly-one-symbol assignment
+    /// config — see [`Self::MultiBindingDriverOutcome`] for two or more.
     DriverOutcome {
         operation_id: Uuid,
         mode: AutonomousCompletedBarDriverMode,
         outcome: AutonomousCompletedBarDriverOutcome,
+    },
+    /// C4/C6 (MULTI-STRATEGY-RUNTIME-DISPATCH-01 R2B/R2C): the multi-binding
+    /// driver entrypoint was invoked exactly once for a configured
+    /// assignment naming two or more `(symbol, strategy_id, timeframe)`
+    /// bindings, each ticked independently.
+    MultiBindingDriverOutcome {
+        operation_id: Uuid,
+        mode: AutonomousCompletedBarDriverMode,
+        outcome: AutonomousMultiBindingTickOutcome,
     },
     /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
     /// LINEAGE-FOUNDATION (§6a): the mandatory per-tick coverage-authority
@@ -496,6 +507,92 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
         ProductionAutonomousLatestBarProviderResolver::new(state.provider_registry_path.clone());
     let authorization = resolve_autonomous_provider_call_authorization_from_env();
 
+    // C4/C6: an assignment config naming exactly one symbol keeps using the
+    // original single-binding driver entrypoint unchanged (byte-for-byte
+    // the same call this adapter always made). Two or more configured
+    // symbols route through the multi-binding entrypoint instead, which
+    // resolves and ticks each binding independently and durably records
+    // each one's own health in `sys_autonomous_daily_binding_state`
+    // (migration 0071) rather than forcing every symbol through one shared
+    // outcome.
+    if assignment_config.symbols.len() > 1 {
+        let multi_outcome =
+            tick_autonomous_completed_bar_driver_multi(AutonomousCompletedBarDriverInput {
+                state,
+                pool: &pool,
+                operation: &operation,
+                assignment_config: &assignment_config,
+                assignment_identity: &assignment_identity,
+                runtime_binding: &runtime_context.effective_runtime_binding,
+                runtime_binding_identity: &runtime_binding_identity,
+                now_utc,
+                authorization,
+                instruments: &instruments,
+                provider_id: &provider_id,
+                provider_resolver: &provider_resolver,
+                readiness_evaluator: &readiness_evaluator,
+                mode,
+            })
+            .await?;
+
+        // D3.14, generalized: the whole-operation dispositions degrade the
+        // operation exactly as the single-binding path would for the same
+        // outcome; a per-binding global-critical outcome (the last entry in
+        // `per_binding` when `halted_on_global_critical`) degrades the
+        // operation identically — every other, already-ticked binding's own
+        // health remains recorded independently in
+        // `sys_autonomous_daily_binding_state` and is never overwritten by
+        // this operation-level degrade. A purely local per-binding fault
+        // never reaches here at all (already a no-op via that same
+        // classification inside the multi-binding tick itself).
+        match &multi_outcome {
+            AutonomousMultiBindingTickOutcome::WholeOperationBlocked { outcome } => {
+                apply_completed_bar_driver_outcome(&pool, &operation, outcome, now_utc).await?;
+            }
+            AutonomousMultiBindingTickOutcome::WholeOperationBindingResolutionBlocked {
+                rejection,
+            } => {
+                // Every configured binding failed identically at
+                // whole-operation identity resolution (config/runtime-
+                // bootstrap changed since the operation was created) — the
+                // same durable condition `BindingBlocked` degrades for the
+                // single-binding path. Reuse that exact classification.
+                apply_completed_bar_driver_outcome(
+                    &pool,
+                    &operation,
+                    &AutonomousCompletedBarDriverOutcome::BindingBlocked {
+                        rejection: rejection.clone(),
+                    },
+                    now_utc,
+                )
+                .await?;
+            }
+            AutonomousMultiBindingTickOutcome::Ticked {
+                per_binding,
+                halted_on_global_critical,
+                ..
+            } => {
+                if *halted_on_global_critical {
+                    if let Some(last) = per_binding.last() {
+                        apply_completed_bar_driver_outcome(
+                            &pool,
+                            &operation,
+                            &last.outcome,
+                            now_utc,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+
+        return Ok(AutonomousCompletedBarProductionTickOutcome::MultiBindingDriverOutcome {
+            operation_id: operation.operation_id,
+            mode,
+            outcome: multi_outcome,
+        });
+    }
+
     let driver_outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
         state,
         pool: &pool,
@@ -538,7 +635,24 @@ fn production_outcome_code(outcome: &AutonomousCompletedBarProductionTickOutcome
         P::IdentityUnresolved { .. } => "identity_unresolved",
         P::RegistryUnavailable { .. } => "registry_unavailable",
         P::DriverOutcome { outcome, .. } => driver_outcome_code(outcome),
+        P::MultiBindingDriverOutcome { outcome, .. } => multi_binding_driver_outcome_code(outcome),
         P::CoverageAuthorityUnavailable { reason_code, .. } => reason_code,
+    }
+}
+
+/// C4/C6: bounded, stable classification code for one
+/// [`AutonomousMultiBindingTickOutcome`]. For `Ticked`, reflects the last
+/// (most recent) per-binding outcome — the same one the caller degrades the
+/// operation for on a global-critical halt — never a synthesized aggregate.
+fn multi_binding_driver_outcome_code(outcome: &AutonomousMultiBindingTickOutcome) -> &'static str {
+    use AutonomousMultiBindingTickOutcome as M;
+    match outcome {
+        M::WholeOperationBlocked { outcome } => driver_outcome_code(outcome),
+        M::WholeOperationBindingResolutionBlocked { .. } => "multi_binding_resolution_blocked",
+        M::Ticked { per_binding, .. } => per_binding
+            .last()
+            .map(|b| driver_outcome_code(&b.outcome))
+            .unwrap_or("multi_binding_no_configured_bindings"),
     }
 }
 
@@ -586,6 +700,7 @@ fn production_outcome_operation_id(
         | P::IdentityUnresolved { operation_id, .. }
         | P::RegistryUnavailable { operation_id, .. }
         | P::DriverOutcome { operation_id, .. }
+        | P::MultiBindingDriverOutcome { operation_id, .. }
         | P::CoverageAuthorityUnavailable { operation_id, .. } => Some(*operation_id),
     }
 }
@@ -594,7 +709,10 @@ fn production_outcome_mode(
     outcome: &AutonomousCompletedBarProductionTickOutcome,
 ) -> Option<AutonomousCompletedBarDriverMode> {
     match outcome {
-        AutonomousCompletedBarProductionTickOutcome::DriverOutcome { mode, .. } => Some(*mode),
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome { mode, .. }
+        | AutonomousCompletedBarProductionTickOutcome::MultiBindingDriverOutcome {
+            mode, ..
+        } => Some(*mode),
         _ => None,
     }
 }
