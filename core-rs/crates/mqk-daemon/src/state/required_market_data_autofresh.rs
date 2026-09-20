@@ -283,6 +283,24 @@ impl RequiredMarketDataRefreshPlan {
     }
 }
 
+/// Asset classes the required-universe autofresh controller admits for
+/// registry/provider resolution (M6-KRAKEN-AUTOFRESH-WIRING-01, replacing
+/// the former hardcoded equity-only check in this function).
+///
+/// **Scope note:** this only widens `resolve_one_requirement`'s own
+/// registry/provider-capability resolution. It deliberately does NOT touch
+/// `run_required_universe_cycle`'s `schedule.is_trading_day` early return
+/// (an NYSE-calendar-only gate applied to the whole cycle before any
+/// per-instrument resolution runs) or `daily_data_readiness::
+/// evaluate_assignment`'s readiness engine, neither of which yet has a
+/// continuous/24-7 session branch for `crypto`. A crypto instrument
+/// resolved here on an NYSE non-trading day (a weekend) is still not
+/// autofreshed — that 24/7-session-cadence gap remains open, tracked as the
+/// concrete next M6 seam. On an NYSE trading weekday, resolution now
+/// correctly admits a crypto instrument rather than fail-closing it as a
+/// registry defect.
+const SUPPORTED_AUTOFRESH_ASSET_CLASSES: &[&str] = &["equity", "crypto"];
+
 /// Resolve one required `(symbol, timeframe)` pair against already-loaded,
 /// already-validated instrument and provider registries. Pure: no DB,
 /// network, or broker access. Provider identity always comes from the
@@ -313,11 +331,15 @@ fn resolve_one_requirement(
             ),
         });
     }
-    if instrument.asset_class.trim() != "equity" {
+    let instrument_asset_class = instrument.asset_class.trim();
+    if !SUPPORTED_AUTOFRESH_ASSET_CLASSES
+        .iter()
+        .any(|ac| ac.eq_ignore_ascii_case(instrument_asset_class))
+    {
         return Err(RequirementConfigBlocker::InstrumentRegistryInvalid {
             detail: format!(
-                "instrument '{}' has asset_class '{}'; required-universe autofresh is scoped \
-                 to Paper US equity/ETF only",
+                "instrument '{}' has asset_class '{}'; required-universe autofresh currently \
+                 supports only {SUPPORTED_AUTOFRESH_ASSET_CLASSES:?}",
                 req.symbol, instrument.asset_class
             ),
         });
@@ -361,10 +383,10 @@ fn resolve_one_requirement(
             provider_id: provider.provider_id.clone(),
         });
     }
-    if !provider.supports_asset_class("equity") {
+    if !provider.supports_asset_class(instrument_asset_class) {
         return Err(RequirementConfigBlocker::ProviderCapabilityMismatch {
             detail: format!(
-                "provider '{}' does not declare support for asset_class 'equity'",
+                "provider '{}' does not declare support for asset_class '{instrument_asset_class}'",
                 provider.provider_id
             ),
         });
@@ -381,6 +403,138 @@ fn resolve_one_requirement(
         provider_id: provider.provider_id.clone(),
         provider_symbol: provider_symbol.to_string(),
     })
+}
+
+#[cfg(test)]
+mod resolve_one_requirement_asset_class_tests {
+    use super::*;
+
+    fn equity_instrument() -> TrackedInstrument {
+        TrackedInstrument {
+            instrument_id: "equity:US:AAPL".to_string(),
+            symbol: "AAPL".to_string(),
+            asset_class: "equity".to_string(),
+            provider: "twelvedata".to_string(),
+            provider_symbol: "AAPL".to_string(),
+            venue: "NASDAQ".to_string(),
+            currency: "USD".to_string(),
+            enabled: true,
+            timeframes: vec!["1D".to_string()],
+            notes: String::new(),
+            instrument_kind: None,
+            sector: None,
+            category: None,
+        }
+    }
+
+    fn crypto_instrument() -> TrackedInstrument {
+        TrackedInstrument {
+            instrument_id: "crypto:GLOBAL:BTCUSD".to_string(),
+            symbol: "BTC/USD".to_string(),
+            asset_class: "crypto".to_string(),
+            provider: "kraken".to_string(),
+            provider_symbol: "XBTUSD".to_string(),
+            venue: "KRAKEN".to_string(),
+            currency: "USD".to_string(),
+            enabled: true,
+            timeframes: vec!["1D".to_string()],
+            notes: String::new(),
+            instrument_kind: None,
+            sector: None,
+            category: None,
+        }
+    }
+
+    fn provider(provider_id: &str, asset_classes: &[&str]) -> ProviderConfig {
+        ProviderConfig {
+            provider_id: provider_id.to_string(),
+            display_name: provider_id.to_string(),
+            asset_classes: asset_classes.iter().map(|s| s.to_string()).collect(),
+            free_tier_available: true,
+            api_key_required: false,
+            credential_env_vars: Vec::new(),
+            rate_limit_notes: String::new(),
+            supported_timeframes: vec!["1D".to_string()],
+            historical_depth_notes: String::new(),
+            realtime_support_notes: String::new(),
+            licensing_notes: String::new(),
+            implementation_status: "implemented_equity_provider".to_string(),
+            enabled: true,
+            verification_status: "repo_implemented_official_limits_unverified".to_string(),
+            docs_url: String::new(),
+        }
+    }
+
+    fn req(symbol: &str) -> RequiredSymbolTimeframe {
+        RequiredSymbolTimeframe {
+            symbol: symbol.to_string(),
+            timeframe: "1D".to_string(),
+        }
+    }
+
+    /// M6: equity resolution is byte-for-byte unaffected by widening the
+    /// asset-class allow-list — the exact pre-existing happy path.
+    #[test]
+    fn equity_still_resolves() {
+        let instruments = vec![equity_instrument()];
+        let providers = vec![provider("twelvedata", &["equity"])];
+        let resolved = resolve_one_requirement(&instruments, &providers, &req("AAPL")).unwrap();
+        assert_eq!(resolved.provider_id, "twelvedata");
+        assert_eq!(resolved.provider_symbol, "AAPL");
+    }
+
+    /// M6-KRAKEN-AUTOFRESH-WIRING-01: a crypto instrument backed by a
+    /// provider that declares crypto support now resolves instead of
+    /// failing closed as a registry defect.
+    #[test]
+    fn crypto_now_resolves_against_a_crypto_capable_provider() {
+        let instruments = vec![crypto_instrument()];
+        let providers = vec![provider("kraken", &["crypto"])];
+        let resolved = resolve_one_requirement(&instruments, &providers, &req("BTC/USD")).unwrap();
+        assert_eq!(resolved.provider_id, "kraken");
+        assert_eq!(resolved.provider_symbol, "XBTUSD");
+    }
+
+    /// The provider capability check now matches against the INSTRUMENT's
+    /// own asset class, not a hardcoded `"equity"` literal — a provider
+    /// that supports equity but not crypto must still refuse a crypto
+    /// instrument routed to it by misconfiguration, not silently pass
+    /// because the old check only ever asked about `"equity"`.
+    #[test]
+    fn crypto_instrument_on_an_equity_only_provider_fails_closed() {
+        let instruments = vec![crypto_instrument()];
+        let providers = vec![provider("kraken", &["equity"])];
+        let err = resolve_one_requirement(&instruments, &providers, &req("BTC/USD")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RequirementConfigBlocker::ProviderCapabilityMismatch { .. }
+            ),
+            "expected ProviderCapabilityMismatch, got {err:?}"
+        );
+    }
+
+    /// Every other asset class remains refused fail-closed — widening to
+    /// `crypto` must not implicitly widen to `option`/`future`/`forex` too.
+    #[test]
+    fn unsupported_asset_classes_still_fail_closed() {
+        for asset_class in ["option", "future", "forex", "garbage"] {
+            let mut instrument = crypto_instrument();
+            instrument.asset_class = asset_class.to_string();
+            let instruments = vec![instrument];
+            let providers = vec![provider("kraken", &["crypto", "option", "future", "forex"])];
+            let err =
+                resolve_one_requirement(&instruments, &providers, &req("BTC/USD")).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    RequirementConfigBlocker::InstrumentRegistryInvalid { .. }
+                ),
+                "asset_class '{asset_class}' must still fail closed at the instrument-registry \
+                 gate, got {err:?}"
+            );
+        }
+    }
 }
 
 /// Build the one authoritative [`RequiredMarketDataRefreshPlan`] for

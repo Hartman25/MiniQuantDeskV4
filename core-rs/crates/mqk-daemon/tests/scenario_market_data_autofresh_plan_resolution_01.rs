@@ -417,30 +417,38 @@ fn plan_blank_provider_symbol_blocks() {
     }
 }
 
-/// Instrument registered for a non-equity asset class is out of this
-/// patch's Paper equity/ETF scope and must block, not silently trade.
+/// Instrument registered for an asset class this controller does not yet
+/// admit (M6-KRAKEN-AUTOFRESH-WIRING-01 widened the allow-list to
+/// `equity`+`crypto`; `forex` — like `option`/`future` — remains outside it)
+/// must block, not silently trade. `crypto` itself is deliberately NOT used
+/// here any more: it is now a supported asset class
+/// (`resolve_one_requirement_asset_class_tests::
+/// crypto_now_resolves_against_a_crypto_capable_provider` in
+/// `state/required_market_data_autofresh.rs` proves the positive case), so
+/// asserting it blocks would contradict the mission-authorized capability
+/// this same wave intentionally added, not prove a regression.
 #[test]
 fn plan_non_equity_asset_class_blocks() {
-    let mut inst = instrument("BTCUSD", "alpaca", "BTCUSD", &["5m"]);
-    inst.asset_class = "crypto".to_string();
+    let mut inst = instrument("EURUSD", "alpaca", "EURUSD", &["5m"]);
+    inst.asset_class = "forex".to_string();
     let instruments = vec![inst];
     let providers = vec![provider(
         "alpaca",
         true,
-        &["equity", "crypto"],
+        &["equity", "crypto", "forex"],
         &["1D", "1m", "5m"],
     )];
     let plan = build_required_market_data_refresh_plan(
         &instruments,
         &providers,
-        &resolution(vec![req("BTCUSD", "5m")]),
+        &resolution(vec![req("EURUSD", "5m")]),
         MARKET_DATE,
     );
     match &plan.resolutions[0] {
         RequirementResolution::Blocked(b) => {
             assert_eq!(b.blocker.reason_code(), "instrument_registry_invalid");
         }
-        RequirementResolution::Resolved(_) => panic!("non-equity asset_class must not resolve"),
+        RequirementResolution::Resolved(_) => panic!("forex asset_class must not resolve"),
     }
 }
 
