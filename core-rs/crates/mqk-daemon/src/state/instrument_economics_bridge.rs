@@ -152,8 +152,10 @@ pub fn instrument_v2_to_economics(
         }
     }
 
-    let explicit_multiplier_override =
-        instrument.economics.as_ref().and_then(|e| e.contract_multiplier);
+    let explicit_multiplier_override = instrument
+        .economics
+        .as_ref()
+        .and_then(|e| e.contract_multiplier);
     if let Some(m) = explicit_multiplier_override {
         if m <= 0 {
             return bridge_failure(
@@ -312,6 +314,27 @@ pub fn instrument_v2_to_economics(
         MICROS_SCALE
     };
 
+    // M6-REGISTRY-V2-PRODUCTION-CONTRACT-01: surface the registry's own
+    // order-validation economics through the bridge instead of hardcoding
+    // `min_trade_qty_micros: None` regardless of what the registry actually
+    // says. `economics.price_tick_micros` (generic, any asset class) takes
+    // precedence over the contract-derived `tick_size_micros` (futures
+    // only) when both are present, mirroring `explicit_multiplier_override`'s
+    // existing precedence rule above.
+    let min_trade_qty_micros = instrument
+        .economics
+        .as_ref()
+        .and_then(|e| e.min_trade_qty_micros);
+    let quantity_increment_micros = instrument
+        .economics
+        .as_ref()
+        .and_then(|e| e.quantity_increment_micros);
+    let tick_size_micros = instrument
+        .economics
+        .as_ref()
+        .and_then(|e| e.price_tick_micros)
+        .or(tick_size_micros);
+
     let economics = InstrumentEconomics {
         instrument_id: instrument.instrument_id.clone(),
         symbol: instrument.symbol.clone(),
@@ -319,8 +342,9 @@ pub fn instrument_v2_to_economics(
         quote_currency: instrument.currency.clone(),
         contract_multiplier_micros,
         quantity_scale,
-        min_trade_qty_micros: None,
+        min_trade_qty_micros,
         tick_size_micros,
+        quantity_increment_micros,
     };
 
     InstrumentEconomicsBridgeResult {

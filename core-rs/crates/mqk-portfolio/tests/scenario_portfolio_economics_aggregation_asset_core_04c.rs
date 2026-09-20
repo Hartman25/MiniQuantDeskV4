@@ -75,6 +75,7 @@ fn future_value(
         quantity_scale: M,
         min_trade_qty_micros: None,
         tick_size_micros: Some(250_000),
+        quantity_increment_micros: None,
     };
     value_position_economics(PositionEconomicsInput {
         instrument,
@@ -99,6 +100,7 @@ fn option_value(
         quantity_scale: M,
         min_trade_qty_micros: None,
         tick_size_micros: None,
+        quantity_increment_micros: None,
     };
     value_position_economics(PositionEconomicsInput {
         instrument,
@@ -118,6 +120,7 @@ fn crypto_value(symbol: &str, qty_micros: i64, mark: i64) -> PositionEconomicsVa
         quantity_scale: 1,
         min_trade_qty_micros: Some(1),
         tick_size_micros: None,
+        quantity_increment_micros: None,
     };
     value_position_economics(PositionEconomicsInput {
         instrument,

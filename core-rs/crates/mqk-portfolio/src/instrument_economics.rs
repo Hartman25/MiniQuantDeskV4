@@ -95,10 +95,26 @@ pub struct InstrumentEconomics {
     pub contract_multiplier_micros: i64,
     /// Descriptive only -- see module docs. Not read by [`value_position_economics`].
     pub quantity_scale: i64,
-    /// Descriptive only -- see module docs. Not read by [`value_position_economics`].
+    /// Not read by [`value_position_economics`] (position valuation), but
+    /// IS read by [`validate_order_against_economics`] (order-time
+    /// validation, M6-REGISTRY-V2-PRODUCTION-CONTRACT-01) — the minimum
+    /// order quantity a broker will accept.
     pub min_trade_qty_micros: Option<i64>,
-    /// Descriptive only -- see module docs. Not read by [`value_position_economics`].
+    /// Not read by [`value_position_economics`], but IS read by
+    /// [`validate_order_against_economics`] — the finest price increment a
+    /// broker will accept for a limit price.
     pub tick_size_micros: Option<i64>,
+    /// Not read by [`value_position_economics`], but IS read by
+    /// [`validate_order_against_economics`] — the finest quantity increment
+    /// a broker will accept (distinct from `min_trade_qty_micros`: a pair
+    /// can have a smaller minimum than its increment step, or vice versa).
+    /// `None` means this instrument has no increment constraint to enforce
+    /// (equity's default) — the guarantee that a genuinely constrained
+    /// instrument (Crypto) is never constructed with `None` here belongs to
+    /// the registry-validation layer
+    /// (`mqk_md::instrument_registry_v2::validate_registry_v2`'s crypto-
+    /// trading-economics-completeness rule), not to this per-order check.
+    pub quantity_increment_micros: Option<i64>,
 }
 
 impl InstrumentEconomics {
@@ -126,8 +142,83 @@ impl InstrumentEconomics {
             quantity_scale: crate::MICROS_SCALE,
             min_trade_qty_micros: None,
             tick_size_micros: None,
+            quantity_increment_micros: None,
         }
     }
+}
+
+/// Why [`validate_order_against_economics`] refused an order. Every variant
+/// names the exact instrument-economics field the order violated — never a
+/// vague "invalid order" bucket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderEconomicsViolation {
+    /// `qty` is not positive.
+    NonPositiveQuantity,
+    /// `qty` is below `InstrumentEconomics::min_trade_qty_micros`.
+    BelowMinimumQuantity { min_trade_qty_micros: i64 },
+    /// `qty` is not an exact multiple of `InstrumentEconomics::quantity_increment_micros`.
+    QuantityNotOnIncrement { increment_micros: i64 },
+    /// `limit_price_micros` is not an exact multiple of `InstrumentEconomics::tick_size_micros`.
+    PriceNotOnTick { tick_micros: i64 },
+}
+
+/// M6-REGISTRY-V2-PRODUCTION-CONTRACT-01: validate one proposed order's
+/// quantity (and, for a limit order, price) against the instrument's own
+/// canonical economics — the "order/risk validation" consumer of
+/// `mqk_md::instrument_registry_v2` -> `InstrumentEconomics` this crate's
+/// [`value_position_economics`] deliberately does not provide (that function
+/// values an existing POSITION; this one validates a proposed ORDER before
+/// it exists).
+///
+/// A `None` field on `economics` means "this instrument has no such
+/// constraint to enforce" (equity's default — see [`InstrumentEconomics::equity`]),
+/// not "unknown, refuse": the guarantee that a genuinely constrained
+/// instrument is never passed here with an incomplete `economics` value
+/// belongs to `mqk_md::instrument_registry_v2::validate_registry_v2`'s
+/// crypto-trading-economics-completeness rule (schema-validation time), not
+/// to this per-order runtime check — duplicating that fail-closed guarantee
+/// here would not add safety (a caller that bypasses registry validation to
+/// construct a hand-rolled `InstrumentEconomics` can bypass any check this
+/// function might apply just as easily) and would incorrectly reject every
+/// equity order, which legitimately has no increment/tick constraint.
+///
+/// `qty_micros` follows this crate's `*_micros` (1e-6) fixed-point
+/// convention (matching [`PositionEconomicsInput::signed_qty_micros`],
+/// except always positive here — an order has a `side`, not a sign, at this
+/// crate's boundary). `mqk-portfolio` has zero Cargo dependencies (see
+/// crate-level docs), so this takes a plain `i64` rather than
+/// `mqk_execution::QtyMicros` — callers with that type pass `.raw()`.
+///
+/// Pure; no IO.
+pub fn validate_order_against_economics(
+    economics: &InstrumentEconomics,
+    qty_micros: i64,
+    limit_price_micros: Option<i64>,
+) -> Result<(), OrderEconomicsViolation> {
+    let qty_raw = qty_micros;
+    if qty_raw <= 0 {
+        return Err(OrderEconomicsViolation::NonPositiveQuantity);
+    }
+    if let Some(min) = economics.min_trade_qty_micros {
+        if qty_raw < min {
+            return Err(OrderEconomicsViolation::BelowMinimumQuantity {
+                min_trade_qty_micros: min,
+            });
+        }
+    }
+    if let Some(increment) = economics.quantity_increment_micros {
+        if increment > 0 && qty_raw % increment != 0 {
+            return Err(OrderEconomicsViolation::QuantityNotOnIncrement {
+                increment_micros: increment,
+            });
+        }
+    }
+    if let (Some(price), Some(tick)) = (limit_price_micros, economics.tick_size_micros) {
+        if tick > 0 && price % tick != 0 {
+            return Err(OrderEconomicsViolation::PriceNotOnTick { tick_micros: tick });
+        }
+    }
+    Ok(())
 }
 
 /// One position's economics valuation request: an instrument, a signed
@@ -243,6 +334,7 @@ pub fn value_position_economics(input: PositionEconomicsInput) -> PositionEconom
         quantity_scale: _,
         min_trade_qty_micros: _,
         tick_size_micros: _,
+        quantity_increment_micros: _,
     } = instrument;
 
     if quote_currency.trim().is_empty() || account_currency.trim().is_empty() {

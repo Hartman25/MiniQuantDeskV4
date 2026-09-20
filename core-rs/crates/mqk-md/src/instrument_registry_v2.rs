@@ -2125,9 +2125,9 @@ mod tests {
             contract_multiplier: None,
             initial_margin_micros: None,
             maintenance_margin_micros: None,
-            quantity_increment_micros: Some(100),  // 0.0001 BTC
-            min_trade_qty_micros: Some(100),        // 0.0001 BTC
-            price_tick_micros: Some(1_000_000),     // $1.00
+            quantity_increment_micros: Some(100), // 0.0001 BTC
+            min_trade_qty_micros: Some(100),      // 0.0001 BTC
+            price_tick_micros: Some(1_000_000),   // $1.00
             session_profile: Some(SESSION_PROFILE_CRYPTO_24_7.to_string()),
         });
         inst
@@ -2198,8 +2198,7 @@ mod tests {
     #[test]
     fn rc05_wrong_session_profile_fails_closed() {
         let mut inst = concrete_btc_usd_v2();
-        inst.economics.as_mut().unwrap().session_profile =
-            Some("equity_nyse".to_string());
+        inst.economics.as_mut().unwrap().session_profile = Some("equity_nyse".to_string());
         let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
         assert!(err.to_string().contains("session_profile"));
     }

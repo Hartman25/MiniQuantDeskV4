@@ -119,8 +119,9 @@ pub use valuation::unrealized_pnl_micros;
 // ASSET-CORE-04A: pure, default-unused instrument economics model
 // (multiplier/currency/quantity-scale-aware single-position valuation).
 pub use instrument_economics::{
-    value_position_economics, InstrumentEconomics, InstrumentEconomicsTruthState,
-    PositionEconomicsInput, PositionEconomicsValue,
+    validate_order_against_economics, value_position_economics, InstrumentEconomics,
+    InstrumentEconomicsTruthState, OrderEconomicsViolation, PositionEconomicsInput,
+    PositionEconomicsValue,
 };
 
 // ASSET-CORE-04C: pure, default-unused multi-asset portfolio NAV/exposure

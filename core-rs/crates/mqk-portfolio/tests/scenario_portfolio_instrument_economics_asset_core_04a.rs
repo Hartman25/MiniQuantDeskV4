@@ -4,7 +4,14 @@
 //! (multiplier=1, single currency, whole shares) an explicit special case of
 //! a more general multiplier/currency/quantity-scale-aware single-position
 //! valuation, without wiring anything into live/paper trading, broker, OMS,
-//! risk, runtime, or DB. This module has zero production callers.
+//! risk, runtime, or DB.
+//!
+//! Also proves `validate_order_against_economics`
+//! (M6-REGISTRY-V2-PRODUCTION-CONTRACT-01) — the order-time counterpart to
+//! `value_position_economics`'s position-time valuation — using the exact
+//! BTC/USD economics `mqk_md::instrument_registry_v2`'s concrete registry
+//! entry carries (Alpaca's real published min_order_size/min_trade_increment/
+//! price_increment).
 //!
 //! # Proof matrix
 //!
@@ -41,12 +48,22 @@
 //! | ORDER-02  | Flat position with invalid multiplier still fails closed (no bypass)   |
 //! | REGR-01   | `compute_portfolio_weights` (PORTFOLIO-LIVE-WEIGHTS-01) is untouched    |
 //! | REGR-02   | `evaluate_sector_risk` (ETF-RISK-CLOSURE-01) is untouched               |
+//! | OE-01     | Equity order (no increment/min/tick constraints) always validates      |
+//! | OE-02     | BTC/USD order below min_trade_qty_micros is refused                    |
+//! | OE-03     | BTC/USD order exactly at min_trade_qty_micros validates                |
+//! | OE-04     | BTC/USD order not on the quantity increment is refused                 |
+//! | OE-05     | BTC/USD order on an exact increment multiple validates                 |
+//! | OE-06     | Non-positive quantity is refused regardless of instrument               |
+//! | OE-07     | BTC/USD limit price not on the price tick is refused                   |
+//! | OE-08     | BTC/USD limit price on an exact tick multiple validates                 |
+//! | OE-09     | A market order (no limit price) skips the price-tick check entirely    |
 
 use std::collections::BTreeMap;
 
 use mqk_portfolio::{
-    compute_portfolio_weights, value_position_economics, InstrumentEconomics,
-    InstrumentEconomicsTruthState, PositionEconomicsInput, PositionMark, PositionWeightInput,
+    compute_portfolio_weights, validate_order_against_economics, value_position_economics,
+    InstrumentEconomics, InstrumentEconomicsTruthState, OrderEconomicsViolation,
+    PositionEconomicsInput, PositionMark, PositionWeightInput,
 };
 
 const M: i64 = 1_000_000; // micro-dollar / micro-unit scale factor
@@ -279,6 +296,7 @@ fn futures_economics() -> InstrumentEconomics {
         quantity_scale: M,
         min_trade_qty_micros: None,
         tick_size_micros: Some(250_000),
+        quantity_increment_micros: None,
     }
 }
 
@@ -321,6 +339,7 @@ fn opt01_one_contract_2_50_price_100x_multiplier_is_250_notional() {
         quantity_scale: M,
         min_trade_qty_micros: None,
         tick_size_micros: None,
+        quantity_increment_micros: None,
     };
     let value = value_position_economics(PositionEconomicsInput {
         instrument,
@@ -346,6 +365,7 @@ fn crypto_economics() -> InstrumentEconomics {
         quantity_scale: 1,
         min_trade_qty_micros: Some(1),
         tick_size_micros: None,
+        quantity_increment_micros: None,
     }
 }
 
@@ -429,6 +449,7 @@ fn ovf01_extreme_magnitudes_report_overflow_not_panic() {
         quantity_scale: M,
         min_trade_qty_micros: None,
         tick_size_micros: None,
+        quantity_increment_micros: None,
     };
     let value = value_position_economics(PositionEconomicsInput {
         instrument,
@@ -455,6 +476,7 @@ fn ovf02_large_but_representable_values_compute_without_overflow() {
         quantity_scale: M,
         min_trade_qty_micros: None,
         tick_size_micros: None,
+        quantity_increment_micros: None,
     };
     let value = value_position_economics(PositionEconomicsInput {
         instrument,
@@ -480,6 +502,7 @@ fn ovf03_extreme_short_side_magnitude_also_reports_overflow_not_panic() {
         quantity_scale: M,
         min_trade_qty_micros: None,
         tick_size_micros: None,
+        quantity_increment_micros: None,
     };
     let value = value_position_economics(PositionEconomicsInput {
         instrument,
@@ -599,4 +622,117 @@ fn regr02_evaluate_sector_risk_disabled_passthrough_is_unchanged() {
     );
     assert!(evaluation.allowed);
     assert_eq!(evaluation.truth_state, "sector_risk_disabled");
+}
+
+// ---------------------------------------------------------------------------
+// OE: validate_order_against_economics (M6-REGISTRY-V2-PRODUCTION-CONTRACT-01)
+// ---------------------------------------------------------------------------
+
+/// The concrete BTC/USD economics `mqk_md::instrument_registry_v2`'s registry
+/// entry carries: Alpaca's real published `min_order_size` = `min_trade_increment`
+/// = "0.0001" BTC (100 raw QtyMicros) and `price_increment` = "1" ($1, i.e.
+/// 1_000_000 price-micros).
+fn btc_usd_order_economics() -> InstrumentEconomics {
+    InstrumentEconomics {
+        instrument_id: "crypto:GLOBAL:BTCUSD".to_string(),
+        symbol: "BTC/USD".to_string(),
+        asset_class: "crypto".to_string(),
+        quote_currency: "USD".to_string(),
+        contract_multiplier_micros: M,
+        quantity_scale: 1,
+        min_trade_qty_micros: Some(100),
+        tick_size_micros: Some(1_000_000),
+        quantity_increment_micros: Some(100),
+    }
+}
+
+#[test]
+fn oe01_equity_order_always_validates_no_constraints() {
+    let equity = InstrumentEconomics::equity("equity:US:AAPL", "AAPL", "USD");
+    // An arbitrary, non-round quantity and price -- equity has no
+    // increment/min/tick fields set, so nothing here can refuse it.
+    validate_order_against_economics(&equity, 7 * M + 12345, Some(150 * M + 3))
+        .expect("equity order must always validate: no increment/min/tick constraints exist");
+}
+
+#[test]
+fn oe02_btc_usd_order_below_minimum_is_refused() {
+    let err = validate_order_against_economics(&btc_usd_order_economics(), 99, None)
+        .expect_err("99 raw micros is below the 100 raw micros minimum");
+    assert_eq!(
+        err,
+        OrderEconomicsViolation::BelowMinimumQuantity {
+            min_trade_qty_micros: 100
+        }
+    );
+}
+
+#[test]
+fn oe03_btc_usd_order_at_exact_minimum_validates() {
+    validate_order_against_economics(&btc_usd_order_economics(), 100, None)
+        .expect("exactly the minimum quantity must validate");
+}
+
+#[test]
+fn oe04_btc_usd_order_not_on_increment_is_refused() {
+    // 150 is above the 100 minimum but not a multiple of the 100 increment.
+    let err = validate_order_against_economics(&btc_usd_order_economics(), 150, None)
+        .expect_err("150 is not a multiple of the 100 increment");
+    assert_eq!(
+        err,
+        OrderEconomicsViolation::QuantityNotOnIncrement {
+            increment_micros: 100
+        }
+    );
+}
+
+#[test]
+fn oe05_btc_usd_order_on_increment_multiple_validates() {
+    for qty in [100, 200, 500, 100_000] {
+        validate_order_against_economics(&btc_usd_order_economics(), qty, None)
+            .unwrap_or_else(|e| panic!("qty={qty} is an exact increment multiple, got {e:?}"));
+    }
+}
+
+#[test]
+fn oe06_non_positive_quantity_refused_regardless_of_instrument() {
+    for economics in [
+        InstrumentEconomics::equity("equity:US:AAPL", "AAPL", "USD"),
+        btc_usd_order_economics(),
+    ] {
+        for qty in [0, -1, -100] {
+            let err = validate_order_against_economics(&economics, qty, None)
+                .expect_err("non-positive quantity must always refuse");
+            assert_eq!(err, OrderEconomicsViolation::NonPositiveQuantity);
+        }
+    }
+}
+
+#[test]
+fn oe07_btc_usd_limit_price_not_on_tick_is_refused() {
+    // price_tick_micros = 1_000_000 ($1) -- a $60,000.50 limit price is not
+    // an exact multiple.
+    let err =
+        validate_order_against_economics(&btc_usd_order_economics(), 100, Some(60_000 * M + M / 2))
+            .expect_err("$60,000.50 is not a multiple of the $1 tick");
+    assert_eq!(
+        err,
+        OrderEconomicsViolation::PriceNotOnTick {
+            tick_micros: 1_000_000
+        }
+    );
+}
+
+#[test]
+fn oe08_btc_usd_limit_price_on_tick_multiple_validates() {
+    validate_order_against_economics(&btc_usd_order_economics(), 100, Some(60_000 * M))
+        .expect("a whole-dollar limit price is an exact multiple of the $1 tick");
+}
+
+#[test]
+fn oe09_market_order_with_no_limit_price_skips_tick_check() {
+    // No limit_price_micros at all (a market order) -- the tick check must
+    // never fire, regardless of how the quantity checks resolve.
+    validate_order_against_economics(&btc_usd_order_economics(), 100, None)
+        .expect("a market order (no limit price) must skip the price-tick check entirely");
 }
