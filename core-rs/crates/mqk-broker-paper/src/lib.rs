@@ -108,8 +108,14 @@ impl LockedPaperBroker {
                 ExecSide::Buy => mqk_reconcile::Side::Buy,
                 ExecSide::Sell => mqk_reconcile::Side::Sell,
             },
-            qty: s.original_qty,
-            filled_qty: filled,
+            // CUTOVER-1G-RECONCILE-QTY-MICROS-01: this paper broker's own
+            // order tracking (PaperOrderState) stays whole-unit i64 -- it
+            // simulates equity fills only; Crypto execution is not wired
+            // through here yet.
+            qty: mqk_reconcile::QtyMicros::from_whole_units(s.original_qty)
+                .expect("paper order qty is whole-unit i64 by construction"),
+            filled_qty: mqk_reconcile::QtyMicros::from_whole_units(filled)
+                .expect("paper order filled qty is whole-unit i64 by construction"),
             status,
         }
     }
@@ -389,7 +395,7 @@ mod tests {
         let snap = broker.snapshot();
         let ord = snap.orders.get("ord-sell").expect("order must exist");
         assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
-        assert_eq!(ord.qty, 100);
+        assert_eq!(ord.qty, mqk_reconcile::QtyMicros::from_whole_units(100).unwrap());
     }
 
     #[test]
@@ -428,7 +434,7 @@ mod tests {
         let snap = broker.snapshot();
         let ord = snap.orders.get("ord-1").expect("order must exist");
         assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
-        assert_eq!(ord.qty, 75);
+        assert_eq!(ord.qty, mqk_reconcile::QtyMicros::from_whole_units(75).unwrap());
     }
 
     #[test]
@@ -467,11 +473,11 @@ mod tests {
         let ord = snap.orders.get("ord-pf").expect("order must exist");
         assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
         assert_eq!(
-            ord.qty, 65,
+            ord.qty, mqk_reconcile::QtyMicros::from_whole_units(65).unwrap(),
             "qty must equal preserved filled + new remaining"
         );
         assert_eq!(
-            ord.filled_qty, 40,
+            ord.filled_qty, mqk_reconcile::QtyMicros::from_whole_units(40).unwrap(),
             "replace must preserve already-filled quantity"
         );
         assert!(matches!(ord.status, OrderStatus::PartiallyFilled));
