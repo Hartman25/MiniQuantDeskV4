@@ -129,15 +129,23 @@ pub(crate) async fn replay_paper_portfolio_accounting(
 
     let (broker_qty_by_symbol, mut blockers) = normalize_broker_positions(broker_positions);
 
+    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionState::qty_signed()` is
+    // `QtyMicros`; this broker/replay accounting comparison is whole-unit
+    // `i64` on both sides (the broker side is already parsed whole-unit by
+    // `parse_signed_qty` above), and Crypto execution is not wired yet, so
+    // a fractional replay position cannot occur in production today.
     let replay_qty_by_symbol: BTreeMap<String, i64> = portfolio
         .positions
         .iter()
         .filter_map(|(symbol, pos)| {
-            let net: i64 = pos.lots.iter().map(|lot| lot.qty_signed).sum();
-            if net == 0 {
+            let net = pos.qty_signed();
+            if net.is_zero() {
                 None
             } else {
-                Some((symbol.clone(), net))
+                let whole = net.to_whole_units_checked().expect(
+                    "fractional replay position unsupported by paper accounting reconciliation",
+                );
+                Some((symbol.clone(), whole))
             }
         })
         .collect();

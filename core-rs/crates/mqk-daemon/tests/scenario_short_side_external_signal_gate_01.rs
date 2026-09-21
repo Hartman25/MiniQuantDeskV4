@@ -134,7 +134,7 @@ async fn set_position(st: &Arc<AppState>, symbol: &str, qty: i64) {
             realized_pnl_micros: 0,
             positions: vec![mqk_runtime::observability::PositionSnapshot {
                 symbol: symbol.to_string(),
-                net_qty: qty,
+                net_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
             }],
         },
         system_block_state: None,

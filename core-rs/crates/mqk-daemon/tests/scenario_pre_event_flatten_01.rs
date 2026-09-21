@@ -50,6 +50,7 @@ use mqk_daemon::pre_event_flatten::{
     evaluate_flatten_trigger_from_earnings, evaluate_flatten_trigger_from_env,
     FlattenTriggerOutcome, DEFAULT_FLATTEN_LEAD_SECS, FLATTEN_SIGNAL_SOURCE,
 };
+use mqk_execution::QtyMicros;
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -596,14 +597,14 @@ const RUN_ID: uuid::Uuid = uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c
 
 #[test]
 fn pf_20_long_position_produces_sell_close_order() {
-    let (key, json) = build_flatten_close_order_json("AAPL", 100, TS_NOW, RUN_ID);
+    let (key, json) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(100).unwrap(), TS_NOW, RUN_ID);
 
     assert_eq!(json["symbol"], "AAPL", "PF-20: symbol must be AAPL");
     assert_eq!(
         json["side"], "sell",
         "PF-20: long position must produce side=sell"
     );
-    assert_eq!(json["qty"], 100, "PF-20: qty must equal abs(net_qty)");
+    assert_eq!(json["qty"], "100", "PF-20: qty must equal abs(net_qty)");
     assert_eq!(
         json["order_type"], "market",
         "PF-20: order_type must be market"
@@ -627,14 +628,14 @@ fn pf_20_long_position_produces_sell_close_order() {
 
 #[test]
 fn pf_21_short_position_produces_buy_close_order() {
-    let (key, json) = build_flatten_close_order_json("MSFT", -50, TS_NOW, RUN_ID);
+    let (key, json) = build_flatten_close_order_json("MSFT", QtyMicros::from_whole_units(-50).unwrap(), TS_NOW, RUN_ID);
 
     assert_eq!(json["symbol"], "MSFT", "PF-21: symbol must be MSFT");
     assert_eq!(
         json["side"], "buy",
         "PF-21: short position must produce side=buy"
     );
-    assert_eq!(json["qty"], 50, "PF-21: qty must equal abs(net_qty)");
+    assert_eq!(json["qty"], "50", "PF-21: qty must equal abs(net_qty)");
     assert_eq!(
         json["order_type"], "market",
         "PF-21: order_type must be market"
@@ -651,8 +652,8 @@ fn pf_21_short_position_produces_buy_close_order() {
 
 #[test]
 fn pf_22_idempotency_key_is_deterministic() {
-    let (key_a, _) = build_flatten_close_order_json("AAPL", 100, TS_NOW, RUN_ID);
-    let (key_b, _) = build_flatten_close_order_json("AAPL", 100, TS_NOW, RUN_ID);
+    let (key_a, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(100).unwrap(), TS_NOW, RUN_ID);
+    let (key_b, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(100).unwrap(), TS_NOW, RUN_ID);
     assert_eq!(
         key_a, key_b,
         "PF-22: same inputs must produce the same idempotency key"
@@ -676,8 +677,8 @@ fn pf_23_different_minute_produces_different_key() {
         ts_minute_2 / 60,
         "fixture check: timestamps must be in different minutes"
     );
-    let (key_a, _) = build_flatten_close_order_json("AAPL", 100, ts_minute_1, RUN_ID);
-    let (key_b, _) = build_flatten_close_order_json("AAPL", 100, ts_minute_2, RUN_ID);
+    let (key_a, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(100).unwrap(), ts_minute_1, RUN_ID);
+    let (key_b, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(100).unwrap(), ts_minute_2, RUN_ID);
     assert_ne!(
         key_a, key_b,
         "PF-23: different minutes must produce different keys"
@@ -693,8 +694,8 @@ fn pf_23_different_minute_produces_different_key() {
 
 #[test]
 fn pf_24_different_symbols_produce_different_keys() {
-    let (key_aapl, _) = build_flatten_close_order_json("AAPL", 100, TS_NOW, RUN_ID);
-    let (key_msft, _) = build_flatten_close_order_json("MSFT", 100, TS_NOW, RUN_ID);
+    let (key_aapl, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(100).unwrap(), TS_NOW, RUN_ID);
+    let (key_msft, _) = build_flatten_close_order_json("MSFT", QtyMicros::from_whole_units(100).unwrap(), TS_NOW, RUN_ID);
     assert_ne!(
         key_aapl, key_msft,
         "PF-24: different symbols must produce different idempotency keys"

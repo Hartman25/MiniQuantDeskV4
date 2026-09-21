@@ -147,7 +147,12 @@ pub(crate) async fn compute_broker_positions_pnl(
     };
 
     for p in non_flat {
-        let qty = p.qty.parse::<i64>().unwrap_or(0);
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: parse as `QtyMicros` (its
+        // `FromStr` accepts both plain integers and decimal strings) rather
+        // than lossy-parsing as `i64` first -- the prior `i64`-only parse
+        // would have silently treated any genuinely fractional
+        // broker-reported qty as flat (0).
+        let qty = p.qty.parse::<mqk_portfolio::QtyMicros>().unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         let Some(avg_price_micros) = parse_decimal_micros(&p.avg_price) else {
             results.insert(
                 p.symbol.clone(),
@@ -868,7 +873,14 @@ fn clamp_i128_to_i64(x: i128) -> i64 {
 fn live_weight_row_from_pure(row: mqk_portfolio::PositionWeightRow) -> PortfolioLiveWeightRow {
     PortfolioLiveWeightRow {
         symbol: row.symbol,
-        signed_qty: row.signed_qty,
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionWeightRow.signed_qty`
+        // is `QtyMicros`; this API row stays whole-unit `i64` (Crypto
+        // execution is not wired yet, so a fractional weight row cannot
+        // occur in production today).
+        signed_qty: row
+            .signed_qty
+            .to_whole_units_checked()
+            .expect("fractional position unsupported by this live-weights API row"),
         mark_price_micros: row.mark_price_micros,
         mark_ts_utc: row.mark_ts_utc,
         mark_source: row.mark_source,
@@ -930,7 +942,7 @@ pub(crate) async fn portfolio_live_weights(
 
     let non_flat_symbols: Vec<&str> = inputs
         .iter()
-        .filter(|p| p.signed_qty != 0)
+        .filter(|p| !p.signed_qty.is_zero())
         .map(|p| p.symbol.as_str())
         .collect();
 
@@ -1165,7 +1177,7 @@ struct PortfolioEconomicsPositionContext {
 /// fabricated regardless of which bucket the position lands in.
 fn resolve_position_economics(
     symbol: &str,
-    net_qty: i64,
+    net_qty: mqk_portfolio::QtyMicros,
     bridge_by_symbol: &BTreeMap<String, &InstrumentEconomicsBridgeResult>,
     mark: Option<(i64, i64, String)>,
     account_currency: &str,
@@ -1177,35 +1189,11 @@ fn resolve_position_economics(
     let mark_ts_utc = mark.as_ref().map(|(_, ts, _)| *ts);
     let mark_source = mark.as_ref().map(|(_, _, src)| src.clone());
 
-    let Some(qty_micros) = (net_qty as i128)
-        .checked_mul(mqk_portfolio::MICROS_SCALE as i128)
-        .and_then(|v| i64::try_from(v).ok())
-    else {
-        let value = mqk_portfolio::PositionEconomicsValue {
-            instrument_id: String::new(),
-            symbol: symbol.to_string(),
-            asset_class: String::new(),
-            quote_currency: account_currency.to_string(),
-            account_currency: account_currency.to_string(),
-            signed_qty_micros: 0,
-            mark_price_micros,
-            contract_multiplier_micros: 0,
-            notional_micros: None,
-            absolute_notional_micros: None,
-            truth_state: mqk_portfolio::InstrumentEconomicsTruthState::Overflow,
-            reason_code: "qty_scale_overflowed_i64".to_string(),
-        };
-        return (
-            value,
-            PortfolioEconomicsPositionContext {
-                mark_price_micros,
-                mark_ts_utc,
-                mark_source,
-                model_only: false,
-                resolved: false,
-            },
-        );
-    };
+    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `net_qty` is already `QtyMicros`
+    // (raw 1e-6-scale i64) at the caller, so this is a direct, always-safe
+    // extraction -- no whole-unit-to-micros scaling (and no overflow branch
+    // for it) is needed any more.
+    let qty_micros = net_qty.raw();
 
     match bridge_by_symbol.get(symbol) {
         Some(bridge) if bridge.economics.is_some() => {
@@ -1574,7 +1562,7 @@ pub(crate) async fn portfolio_economics_status(
         .portfolio
         .positions
         .iter()
-        .filter(|p| p.net_qty != 0)
+        .filter(|p| !p.net_qty.is_zero())
         .map(|p| p.symbol.as_str())
         .collect();
 

@@ -105,7 +105,14 @@ fn map_closure_fragments(
                 run_id,
                 symbol: f.symbol.clone(),
                 direction: f.direction.to_string(),
-                qty: f.qty,
+                // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `ClosureFragment.qty`
+                // is `QtyMicros`; this API row stays whole-unit `i64`
+                // (Crypto execution is not wired yet, so a fractional
+                // closure fragment cannot occur in production today).
+                qty: f
+                    .qty
+                    .to_whole_units_checked()
+                    .expect("fractional closure fragment unsupported by this API row"),
                 entry_price_micros: f.entry_price_micros,
                 exit_price_micros: f.exit_price_micros,
                 gross_realized_pnl_micros: f.gross_realized_pnl_micros,

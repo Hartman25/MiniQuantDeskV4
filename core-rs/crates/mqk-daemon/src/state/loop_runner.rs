@@ -1057,14 +1057,14 @@ pub(super) fn spawn_execution_loop(
                     // re-evaluating the same trigger within the same 60-second window is
                     // a no-op.  Enqueue failure is non-fatal (logged, retried next tick).
                     if let Some(ref pool) = db {
-                        let positions_to_check: Vec<(String, i64)> = {
+                        let positions_to_check: Vec<(String, mqk_execution::QtyMicros)> = {
                             let snap = snapshot_cache.read().await;
                             snap.as_ref()
                                 .map(|s| {
                                     s.portfolio
                                         .positions
                                         .iter()
-                                        .filter(|p| p.net_qty != 0)
+                                        .filter(|p| !p.net_qty.is_zero())
                                         .map(|p| (p.symbol.clone(), p.net_qty))
                                         .collect()
                                 })
@@ -1269,13 +1269,37 @@ pub(super) fn spawn_execution_loop(
                         // settled above.  Symbols absent from the map are flat (qty=0).
                         // Q2: one shared snapshot read covers every symbol dispatched
                         // this tick — no torn-snapshot race across symbols.
+                        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty`
+                        // is `QtyMicros`, but the shared native-strategy dispatch
+                        // seam (`mqk_execution::targets_to_order_intents`, the
+                        // exact function `mqk-backtest` also calls -- see its
+                        // "Backtest/Live Semantics Alignment" proof) is
+                        // whole-unit `i64` only; widening it to fractional
+                        // Crypto quantities is Phase 5/6 (crypto autonomy)
+                        // scope, not this cutover. Crypto execution is not
+                        // wired yet (Alpaca `supports_asset_class(Crypto) ==
+                        // false`), so a fractional position cannot occur in
+                        // production today; if it ever does before that
+                        // widening lands, excluding the symbol here (loudly)
+                        // is safer than reporting a false qty=0 that could
+                        // cause the strategy to double an existing position.
                         let current_positions: Option<BTreeMap<String, i64>> = {
                             let snap = snapshot_cache.read().await;
                             snap.as_ref().map(|s| {
                                 s.portfolio
                                     .positions
                                     .iter()
-                                    .map(|p| (p.symbol.clone(), p.net_qty))
+                                    .filter_map(|p| match p.net_qty.to_whole_units_checked() {
+                                        Some(whole) => Some((p.symbol.clone(), whole)),
+                                        None => {
+                                            tracing::error!(
+                                                symbol = %p.symbol,
+                                                net_qty = %p.net_qty,
+                                                "b1c_native_strategy_position_book_excludes_fractional_qty"
+                                            );
+                                            None
+                                        }
+                                    })
                                     .collect()
                             })
                         };

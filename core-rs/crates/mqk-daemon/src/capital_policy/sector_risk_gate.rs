@@ -203,6 +203,15 @@ pub(crate) async fn evaluate_sector_risk_gate(
     } else {
         -qty
     };
+    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `evaluate_sector_risk` takes
+    // `QtyMicros`. Both callers of this function (internal Gate 1h,
+    // external strategy-signal route) validate `qty` as whole-unit `i64`
+    // before this point -- this gate does not yet accept fractional Crypto
+    // quantities (that widening belongs to the crypto-risk phase, not this
+    // portfolio-quantity cutover), so the conversion cannot legitimately
+    // fail.
+    let delta_micros = mqk_portfolio::QtyMicros::from_whole_units(delta)
+        .expect("sector risk gate qty is validated whole-unit i64 by both callers");
 
     let cash_micros = snapshot.portfolio.cash_micros;
     let current_positions: Vec<mqk_portfolio::PositionWeightInput> = snapshot
@@ -217,7 +226,7 @@ pub(crate) async fn evaluate_sector_risk_gate(
 
     let mut symbols_needing_marks: Vec<String> = current_positions
         .iter()
-        .filter(|p| p.signed_qty != 0)
+        .filter(|p| !p.signed_qty.is_zero())
         .map(|p| p.symbol.clone())
         .collect();
     if !symbols_needing_marks.iter().any(|s| s == candidate_symbol) {
@@ -260,7 +269,7 @@ pub(crate) async fn evaluate_sector_risk_gate(
         &sector_map,
         &sector_limits_bps,
         candidate_symbol,
-        delta,
+        delta_micros,
     );
 
     SectorRiskGateResult::from_evaluation(evaluation)

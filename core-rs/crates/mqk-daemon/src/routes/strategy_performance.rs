@@ -177,8 +177,16 @@ fn build_attributed_close_events(
             f.close_inbox_id,
             f.close_internal_order_id.clone(),
         );
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `ClosureFragment.qty` is
+        // `QtyMicros`; this aggregation stays whole-unit `i64` (Crypto
+        // execution is not wired yet, so a fractional closure fragment
+        // cannot occur in production today).
+        let whole_qty = f
+            .qty
+            .to_whole_units_checked()
+            .expect("fractional closure fragment unsupported by strategy-performance aggregation");
         let entry = event_map.entry(key).or_insert((0, 0, 0));
-        entry.0 = entry.0.saturating_add(f.qty);
+        entry.0 = entry.0.saturating_add(whole_qty);
         entry.1 = entry.1.saturating_add(f.gross_realized_pnl_micros);
         entry.2 = entry.2.saturating_add(1);
     }

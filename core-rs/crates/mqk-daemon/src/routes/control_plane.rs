@@ -1957,24 +1957,25 @@ pub(crate) async fn ops_action(
             // route fails closed before enqueuing any close orders.
             let symbol_filter = body.symbol.as_deref().map(|s| s.trim().to_uppercase());
             let mut seen_position_symbols = BTreeSet::new();
-            let raw_positions_to_flatten: Vec<(String, String, i64)> = exec_snap
-                .portfolio
-                .positions
-                .iter()
-                .filter(|p| p.net_qty != 0)
-                .filter(|p| {
-                    symbol_filter
-                        .as_deref()
-                        .is_none_or(|f| p.symbol.to_uppercase() == f)
-                })
-                .map(|p| {
-                    let normalized = p.symbol.trim().to_ascii_uppercase();
-                    (p.symbol.clone(), normalized, p.net_qty)
-                })
-                .collect::<Vec<_>>();
+            let raw_positions_to_flatten: Vec<(String, String, mqk_execution::QtyMicros)> =
+                exec_snap
+                    .portfolio
+                    .positions
+                    .iter()
+                    .filter(|p| !p.net_qty.is_zero())
+                    .filter(|p| {
+                        symbol_filter
+                            .as_deref()
+                            .is_none_or(|f| p.symbol.to_uppercase() == f)
+                    })
+                    .map(|p| {
+                        let normalized = p.symbol.trim().to_ascii_uppercase();
+                        (p.symbol.clone(), normalized, p.net_qty)
+                    })
+                    .collect::<Vec<_>>();
             let mut malformed_positions = Vec::new();
             let mut duplicate_positions = Vec::new();
-            let positions_to_flatten: Vec<(String, i64)> = raw_positions_to_flatten
+            let positions_to_flatten: Vec<(String, mqk_execution::QtyMicros)> = raw_positions_to_flatten
                 .into_iter()
                 .filter_map(|(raw_symbol, normalized, net_qty)| {
                     if normalized.is_empty() {
@@ -2085,10 +2086,12 @@ pub(crate) async fn ops_action(
                             "operator_flatten_close_enqueued"
                         );
                         enqueued_symbols.push(symbol.clone());
-                        let side = if *net_qty > 0 { "sell" } else { "buy" };
+                        let side = if net_qty.is_positive() { "sell" } else { "buy" };
                         warnings.push(format!(
                             "enqueued: symbol={symbol} qty={} side={side} key={key}",
-                            net_qty.abs()
+                            net_qty
+                                .checked_abs()
+                                .expect("flatten candidate qty is bounded by upstream position/exposure gates")
                         ));
                     }
                     Ok(mqk_db::OutboxEnqueueOutcome::Duplicate) => {

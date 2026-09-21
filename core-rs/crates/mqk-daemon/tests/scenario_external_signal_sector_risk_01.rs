@@ -236,7 +236,7 @@ fn make_snapshot(
                 .iter()
                 .map(|(sym, qty)| mqk_runtime::observability::PositionSnapshot {
                     symbol: sym.to_string(),
-                    net_qty: *qty,
+                    net_qty: mqk_execution::QtyMicros::from_whole_units(*qty).unwrap(),
                 })
                 .collect(),
         },

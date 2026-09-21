@@ -1647,7 +1647,18 @@ fn current_qty_for_symbol(snapshot: &ExecutionSnapshot, symbol: &str) -> Result<
                 "short-entry gate cannot determine position truth: duplicate position rows for symbol '{target}'"
             ));
         }
-        found = Some(position.net_qty);
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty` is
+        // `QtyMicros`; this short-entry gate is whole-unit `i64` only
+        // (Crypto execution is not wired yet). Fail closed via the same
+        // `Err` path as the duplicate-row case above rather than panicking
+        // this live risk-decision route.
+        let Some(whole_qty) = position.net_qty.to_whole_units_checked() else {
+            return Err(format!(
+                "short-entry gate cannot determine position truth: fractional position quantity \
+                 for symbol '{target}' is not supported by this whole-unit-only gate"
+            ));
+        };
+        found = Some(whole_qty);
     }
     Ok(found.unwrap_or(0))
 }

@@ -352,7 +352,7 @@ fn dis03_t11_trade_lifecycle_event_variants_compile() {
             run_id,
             order_id: "ord-1".to_string(),
             symbol: "SPY".to_string(),
-            qty: 10,
+            qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         },
         TradeLifecycleEvent::OrderAcked {
             run_id,

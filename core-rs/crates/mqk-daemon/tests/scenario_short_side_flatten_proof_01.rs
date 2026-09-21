@@ -45,6 +45,8 @@
 
 use uuid::Uuid;
 
+use mqk_execution::QtyMicros;
+
 use mqk_daemon::capital_policy::{
     classify_order_intent, evaluate_short_entry_policy, order_intent_to_short_entry_intent,
     OrderIntent, ShortEntryConfig, ShortEntryPolicyDecision,
@@ -66,15 +68,15 @@ const FIXED_TS_SECS: i64 = 1_750_000_000;
 
 #[test]
 fn sf01_flatten_long_emits_sell() {
-    let (_, order) = build_flatten_close_order_json("AAPL", 100, FIXED_TS_SECS, fixed_run_id());
+    let (_, order) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(100).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_eq!(
         order["side"].as_str(),
         Some("sell"),
         "SF01: long position (+100) must produce side=sell; got: {order}"
     );
     assert_eq!(
-        order["qty"].as_i64(),
-        Some(100),
+        order["qty"].as_str(),
+        Some("100"),
         "SF01: qty must equal the long position size (100); got: {order}"
     );
 }
@@ -85,15 +87,15 @@ fn sf01_flatten_long_emits_sell() {
 
 #[test]
 fn sf02_flatten_short_emits_buy_to_cover() {
-    let (_, order) = build_flatten_close_order_json("AAPL", -50, FIXED_TS_SECS, fixed_run_id());
+    let (_, order) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(-50).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_eq!(
         order["side"].as_str(),
         Some("buy"),
         "SF02: short position (-50) must produce side=buy (buy-to-cover); got: {order}"
     );
     assert_eq!(
-        order["qty"].as_i64(),
-        Some(50),
+        order["qty"].as_str(),
+        Some("50"),
         "SF02: qty must equal abs(short position) = 50; got: {order}"
     );
 }
@@ -104,10 +106,12 @@ fn sf02_flatten_short_emits_buy_to_cover() {
 
 #[test]
 fn sf03_flatten_short_uses_abs_qty() {
-    let (_, order) = build_flatten_close_order_json("SPY", -200, FIXED_TS_SECS, fixed_run_id());
-    let qty = order["qty"]
-        .as_i64()
-        .expect("SF03: qty field must be present");
+    let (_, order) = build_flatten_close_order_json("SPY", QtyMicros::from_whole_units(-200).unwrap(), FIXED_TS_SECS, fixed_run_id());
+    let qty: i64 = order["qty"]
+        .as_str()
+        .expect("SF03: qty field must be present")
+        .parse()
+        .expect("SF03: qty field must be a valid decimal string");
     assert!(
         qty > 0,
         "SF03: flatten qty must always be positive (abs of signed qty); got qty={qty}"
@@ -122,8 +126,12 @@ fn sf03_flatten_short_uses_abs_qty() {
 #[test]
 fn sf04_flatten_short_never_emits_sell() {
     for signed_qty in &[-1_i64, -75, -500] {
-        let (_, order) =
-            build_flatten_close_order_json("TSLA", *signed_qty, FIXED_TS_SECS, fixed_run_id());
+        let (_, order) = build_flatten_close_order_json(
+            "TSLA",
+            QtyMicros::from_whole_units(*signed_qty).unwrap(),
+            FIXED_TS_SECS,
+            fixed_run_id(),
+        );
         assert_ne!(
             order["side"].as_str(),
             Some("sell"),
@@ -145,8 +153,12 @@ fn sf04_flatten_short_never_emits_sell() {
 #[test]
 fn sf05_flatten_long_never_emits_buy() {
     for signed_qty in &[1_i64, 50, 1000] {
-        let (_, order) =
-            build_flatten_close_order_json("MSFT", *signed_qty, FIXED_TS_SECS, fixed_run_id());
+        let (_, order) = build_flatten_close_order_json(
+            "MSFT",
+            QtyMicros::from_whole_units(*signed_qty).unwrap(),
+            FIXED_TS_SECS,
+            fixed_run_id(),
+        );
         assert_ne!(
             order["side"].as_str(),
             Some("buy"),
@@ -168,23 +180,23 @@ fn sf05_flatten_long_never_emits_buy() {
 #[test]
 fn sf06_flatten_idempotency_key_is_deterministic() {
     // Same inputs for a short position → same key on repeated calls.
-    let (key1, _) = build_flatten_close_order_json("AAPL", -50, FIXED_TS_SECS, fixed_run_id());
-    let (key2, _) = build_flatten_close_order_json("AAPL", -50, FIXED_TS_SECS, fixed_run_id());
+    let (key1, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(-50).unwrap(), FIXED_TS_SECS, fixed_run_id());
+    let (key2, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(-50).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_eq!(
         key1, key2,
         "SF06: same inputs must produce the same idempotency key (UUIDv5, not random new_v4)"
     );
 
     // Same inputs for a long position → same key on repeated calls.
-    let (key_long1, _) = build_flatten_close_order_json("AAPL", 50, FIXED_TS_SECS, fixed_run_id());
-    let (key_long2, _) = build_flatten_close_order_json("AAPL", 50, FIXED_TS_SECS, fixed_run_id());
+    let (key_long1, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(50).unwrap(), FIXED_TS_SECS, fixed_run_id());
+    let (key_long2, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(50).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_eq!(
         key_long1, key_long2,
         "SF06: long flatten same inputs must also produce the same idempotency key"
     );
 
     // Different symbol → different key.
-    let (key_spy, _) = build_flatten_close_order_json("SPY", -50, FIXED_TS_SECS, fixed_run_id());
+    let (key_spy, _) = build_flatten_close_order_json("SPY", QtyMicros::from_whole_units(-50).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_ne!(
         key1, key_spy,
         "SF06: AAPL(-50) and SPY(-50) must produce different idempotency keys"
@@ -192,7 +204,7 @@ fn sf06_flatten_idempotency_key_is_deterministic() {
 
     // Different run_id → different key.
     let alt_run = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"sf06-alt-run");
-    let (key_alt_run, _) = build_flatten_close_order_json("AAPL", -50, FIXED_TS_SECS, alt_run);
+    let (key_alt_run, _) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(-50).unwrap(), FIXED_TS_SECS, alt_run);
     assert_ne!(
         key1, key_alt_run,
         "SF06: different run_id must produce different idempotency key"
@@ -201,7 +213,7 @@ fn sf06_flatten_idempotency_key_is_deterministic() {
     // Different minute bucket → different key.
     let next_minute_ts = FIXED_TS_SECS + 60; // advances to the next minute bucket
     let (key_later, _) =
-        build_flatten_close_order_json("AAPL", -50, next_minute_ts, fixed_run_id());
+        build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(-50).unwrap(), next_minute_ts, fixed_run_id());
     assert_ne!(
         key1, key_later,
         "SF06: different minute bucket must produce different idempotency key"
@@ -215,22 +227,22 @@ fn sf06_flatten_idempotency_key_is_deterministic() {
 #[test]
 fn sf07_operator_flatten_short_emits_buy_with_abs_qty() {
     let (_, order) =
-        build_operator_flatten_close_order_json("NVDA", -30, FIXED_TS_SECS, fixed_run_id());
+        build_operator_flatten_close_order_json("NVDA", QtyMicros::from_whole_units(-30).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_eq!(
         order["side"].as_str(),
         Some("buy"),
         "SF07: operator_flatten short position (-30) must produce side=buy; got: {order}"
     );
     assert_eq!(
-        order["qty"].as_i64(),
-        Some(30),
+        order["qty"].as_str(),
+        Some("30"),
         "SF07: operator_flatten qty must be abs(-30) = 30; got: {order}"
     );
     // Operator flatten key must differ from pre-event flatten key for the same inputs
     // (different namespace: "mqk-op-flatten.v1." vs "mqk-flatten.v1.").
-    let (pre_key, _) = build_flatten_close_order_json("NVDA", -30, FIXED_TS_SECS, fixed_run_id());
+    let (pre_key, _) = build_flatten_close_order_json("NVDA", QtyMicros::from_whole_units(-30).unwrap(), FIXED_TS_SECS, fixed_run_id());
     let (op_key, _) =
-        build_operator_flatten_close_order_json("NVDA", -30, FIXED_TS_SECS, fixed_run_id());
+        build_operator_flatten_close_order_json("NVDA", QtyMicros::from_whole_units(-30).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_ne!(
         pre_key, op_key,
         "SF07: operator_flatten and pre_event_flatten must produce different idempotency keys \
@@ -245,7 +257,7 @@ fn sf07_operator_flatten_short_emits_buy_with_abs_qty() {
 #[test]
 fn sf08_signal_source_correct_for_short_flatten() {
     // pre_event_flatten path for short position.
-    let (_, pre_order) = build_flatten_close_order_json("AAPL", -40, FIXED_TS_SECS, fixed_run_id());
+    let (_, pre_order) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(-40).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_eq!(
         pre_order["signal_source"].as_str(),
         Some(FLATTEN_SIGNAL_SOURCE),
@@ -259,7 +271,7 @@ fn sf08_signal_source_correct_for_short_flatten() {
 
     // operator_flatten path for short position.
     let (_, op_order) =
-        build_operator_flatten_close_order_json("AAPL", -40, FIXED_TS_SECS, fixed_run_id());
+        build_operator_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(-40).unwrap(), FIXED_TS_SECS, fixed_run_id());
     assert_eq!(
         op_order["signal_source"].as_str(),
         Some(OPERATOR_FLATTEN_SIGNAL_SOURCE),
@@ -396,8 +408,12 @@ fn sf12_zero_qty_is_degenerate_caller_contract() {
     //
     // This test documents the degenerate behavior without asserting it is "safe" —
     // it is the caller's responsibility to skip flat positions.
-    let (_, order) = build_flatten_close_order_json("AAPL", 0, FIXED_TS_SECS, fixed_run_id());
-    let qty = order["qty"].as_i64().expect("SF12: qty must be present");
+    let (_, order) = build_flatten_close_order_json("AAPL", QtyMicros::from_whole_units(0).unwrap(), FIXED_TS_SECS, fixed_run_id());
+    let qty: i64 = order["qty"]
+        .as_str()
+        .expect("SF12: qty must be present")
+        .parse()
+        .expect("SF12: qty field must be a valid decimal string");
     assert_eq!(
         qty, 0,
         "SF12: zero net_qty_signed produces qty=0 (degenerate; callers must not pass zero)"

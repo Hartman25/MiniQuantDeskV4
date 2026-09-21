@@ -217,6 +217,12 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
         .map(|v| v.trim().to_string());
 
     // current_position_qty: look up symbol in exec snapshot portfolio.
+    //
+    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty` is
+    // `QtyMicros` (fractional-capable, for Crypto); this diagnostic field
+    // stays whole-unit `i64` (mirrors `TradeEventPayload.qty`'s established
+    // precedent) -- `None` for a genuinely fractional position, same as an
+    // absent lookup, since this route has no fractional-quantity consumer.
     let current_position_qty: Option<i64> = current_symbol.as_deref().and_then(|sym| {
         exec_snap
             .as_ref()?
@@ -225,7 +231,7 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
             .iter()
             .find_map(|p| {
                 if p.symbol == sym {
-                    Some(p.net_qty)
+                    p.net_qty.to_whole_units_checked()
                 } else {
                     None
                 }

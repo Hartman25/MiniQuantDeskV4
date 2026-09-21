@@ -125,11 +125,25 @@ pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
     snapshot: &mqk_runtime::observability::ExecutionSnapshot,
     sides: &BTreeMap<String, mqk_reconcile::Side>,
 ) -> mqk_reconcile::LocalSnapshot {
+    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty` is
+    // `QtyMicros`; `mqk_reconcile::LocalSnapshot.positions` remains
+    // whole-unit `i64` pending its own QtyMicros cutover (CUTOVER-1G:
+    // reconciliation exact fractional quantity comparison). Crypto
+    // execution is not wired yet (Alpaca `supports_asset_class(Crypto) ==
+    // false` blocks it at `BrokerGateway::submit`), so no fractional
+    // position can exist in memory today -- `.expect` surfaces a violated
+    // precondition loudly rather than silently corrupting a reconcile-drift
+    // comparison that gates a halt decision.
     let positions = snapshot
         .portfolio
         .positions
         .iter()
-        .map(|pos| (pos.symbol.clone(), pos.net_qty))
+        .map(|pos| {
+            let qty = pos.net_qty.to_whole_units_checked().expect(
+                "fractional position unsupported by mqk_reconcile pending CUTOVER-1G",
+            );
+            (pos.symbol.clone(), qty)
+        })
         .collect();
 
     let orders = snapshot
@@ -141,14 +155,10 @@ pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
                 .cloned()
                 .unwrap_or(mqk_reconcile::Side::Buy);
             let status = oms_execution_status_to_reconcile(&order.status);
-            // CUTOVER-1B-OMS-QTY-MICROS-01: `mqk_reconcile::OrderSnapshot`
-            // remains whole-unit `i64` pending its own QtyMicros cutover
-            // (CUTOVER-1G: reconciliation exact fractional quantity
-            // comparison). `dispatch_submit_claimed_outbox_row` still fails
-            // closed on any fractional submit, so no fractional `OmsOrder`
-            // can exist in memory yet -- `.expect` surfaces a violated
-            // precondition loudly rather than silently corrupting a
-            // reconcile-drift comparison that gates a halt decision.
+            // `mqk_reconcile::OrderSnapshot` remains whole-unit `i64`
+            // pending the same CUTOVER-1G reconciliation cutover -- see the
+            // comment above `positions` for why a fractional value cannot
+            // occur in production today.
             let snap = mqk_reconcile::OrderSnapshot {
                 order_id: order.order_id.clone(),
                 symbol: order.symbol.clone(),
@@ -257,12 +267,16 @@ pub(crate) fn synthesize_paper_broker_snapshot(
         .positions
         .iter()
         .filter_map(|(symbol, pos)| {
-            let net: i64 = pos.lots.iter().map(|l| l.qty_signed).sum();
-            if net == 0 {
+            let net = pos.qty_signed();
+            if net.is_zero() {
                 None
             } else {
                 Some(mqk_schemas::BrokerPosition {
                     symbol: symbol.clone(),
+                    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `qty` is a decimal
+                    // string, so `QtyMicros::Display`'s canonical rendering
+                    // carries a fractional Crypto quantity exactly, unlike
+                    // the whole-unit `i64` this replaced.
                     qty: net.to_string(),
                     avg_price: "0".to_string(),
                 })
@@ -564,7 +578,12 @@ pub(crate) fn seed_portfolio_from_baseline(
             continue;
         }
         let side = if bl_qty > 0 { Side::Buy } else { Side::Sell };
-        let fill = Fill::new(sym.clone(), side, bl_qty.abs(), 1, 0);
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `baseline.positions` is
+        // `mqk_reconcile`'s own whole-unit `i64` (pending its separate
+        // CUTOVER-1G), converted here at the `Fill::new` boundary.
+        let qty_micros = mqk_execution::QtyMicros::from_whole_units(bl_qty.abs())
+            .expect("baseline qty is whole-unit i64 by mqk_reconcile's own type, always in range");
+        let fill = Fill::new(sym.clone(), side, qty_micros, 1, 0);
         apply_entry(portfolio, LedgerEntry::Fill(fill));
     }
 }
@@ -1289,18 +1308,22 @@ mod position_seed_tests {
         );
     }
 
+    fn qty(n: i64) -> mqk_portfolio::QtyMicros {
+        mqk_portfolio::QtyMicros::from_whole_units(n).unwrap()
+    }
+
     // P02: baseline AAPL=1 → portfolio has AAPL qty=1
     #[test]
     fn p02_aapl_baseline_seeds_qty_one() {
         let mut pf = flat_portfolio();
         let baseline = baseline_with(&[("AAPL", 1)]);
         seed_portfolio_from_baseline(&mut pf, &baseline);
-        let qty = pf
+        let current = pf
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
-        assert_eq!(qty, 1, "AAPL qty must be 1 after seeding from baseline");
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        assert_eq!(current, qty(1), "AAPL qty must be 1 after seeding from baseline");
     }
 
     // P03: target=0 minus seeded AAPL qty=1 → delta=-1 (sell signal)
@@ -1313,11 +1336,12 @@ mod position_seed_tests {
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
-        let target: i64 = 0;
-        let delta = target - current;
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        let target = qty(0);
+        let delta = target.checked_sub(current).unwrap();
         assert_eq!(
-            delta, -1,
+            delta,
+            qty(-1),
             "delta must be -1 (sell) when target=0 and seeded position=1"
         );
     }
@@ -1332,11 +1356,12 @@ mod position_seed_tests {
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
-        let target: i64 = 1;
-        let delta = target - current;
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        let target = qty(1);
+        let delta = target.checked_sub(current).unwrap();
         assert_eq!(
-            delta, 0,
+            delta,
+            qty(0),
             "delta must be 0 (already_at_target) when target=1 and seeded position=1"
         );
     }
@@ -1349,18 +1374,19 @@ mod position_seed_tests {
         // Simulate a fill that happened in this run (price > 0 required by apply_fill).
         apply_entry(
             &mut pf,
-            LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 1, 313_000_000, 0)),
+            LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, qty(1), 313_000_000, 0)),
         );
         // Now seed from baseline (prior run had AAPL=1 already).
         let baseline = baseline_with(&[("AAPL", 1)]);
         seed_portfolio_from_baseline(&mut pf, &baseline);
-        let qty = pf
+        let current = pf
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         assert_eq!(
-            qty, 2,
+            current,
+            qty(2),
             "total qty must be 2: 1 from current-run fill + 1 from baseline"
         );
     }
@@ -1375,14 +1401,14 @@ mod position_seed_tests {
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         let nvda = pf
             .positions
             .get("NVDA")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
-        assert_eq!(aapl, 2, "AAPL must be 2 from multi-symbol baseline");
-        assert_eq!(nvda, 3, "NVDA must be 3 from multi-symbol baseline");
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        assert_eq!(aapl, qty(2), "AAPL must be 2 from multi-symbol baseline");
+        assert_eq!(nvda, qty(3), "NVDA must be 3 from multi-symbol baseline");
     }
 
     // P07: zero-qty entries in baseline are skipped
@@ -1399,9 +1425,10 @@ mod position_seed_tests {
             .positions
             .get("NVDA")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         assert_eq!(
-            nvda, 1,
+            nvda,
+            qty(1),
             "NVDA=1 must still be seeded when AAPL=0 is skipped"
         );
     }
@@ -1471,7 +1498,13 @@ mod baseline_double_count_fix_tests {
         for &(side, qty) in fills {
             apply_entry(
                 &mut pf,
-                LedgerEntry::Fill(Fill::new(symbol, side, qty, 313_000_000, 0)),
+                LedgerEntry::Fill(Fill::new(
+                    symbol,
+                    side,
+                    mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap(),
+                    313_000_000,
+                    0,
+                )),
             );
         }
 
@@ -1638,6 +1671,10 @@ mod baseline_ledger_parity_tests {
         );
     }
 
+    fn qty(n: i64) -> mqk_portfolio::QtyMicros {
+        mqk_portfolio::QtyMicros::from_whole_units(n).unwrap()
+    }
+
     // BLP01: long broker baseline (AAPL=1) is ledger-replayable and invariant-safe.
     #[test]
     fn blp01_long_baseline_is_invariant_safe() {
@@ -1645,12 +1682,12 @@ mod baseline_ledger_parity_tests {
         let baseline = baseline_with(&[("AAPL", 1)]);
         seed_portfolio_from_baseline(&mut pf, &baseline);
 
-        let qty = pf
+        let current = pf
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
-        assert_eq!(qty, 1, "AAPL position qty must be 1 after seeding");
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        assert_eq!(current, qty(1), "AAPL position qty must be 1 after seeding");
         assert!(!pf.ledger.is_empty(), "seeding must append a ledger entry");
         assert_capital_invariants_hold(&pf);
     }
@@ -1666,14 +1703,14 @@ mod baseline_ledger_parity_tests {
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         let msft = pf
             .positions
             .get("MSFT")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
-        assert_eq!(aapl, 1, "AAPL must be 1 from multi-symbol baseline");
-        assert_eq!(msft, 2, "MSFT must be 2 from multi-symbol baseline");
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        assert_eq!(aapl, qty(1), "AAPL must be 1 from multi-symbol baseline");
+        assert_eq!(msft, qty(2), "MSFT must be 2 from multi-symbol baseline");
         assert!(!pf.ledger.is_empty(), "seeding must append ledger entries");
         assert_capital_invariants_hold(&pf);
     }
@@ -1690,12 +1727,12 @@ mod baseline_ledger_parity_tests {
         let baseline = baseline_with(&[("AAPL", -3)]);
         seed_portfolio_from_baseline(&mut pf, &baseline);
 
-        let qty = pf
+        let current = pf
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
-        assert_eq!(qty, -3, "AAPL short position qty must be -3 after seeding");
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        assert_eq!(current, qty(-3), "AAPL short position qty must be -3 after seeding");
         assert!(!pf.ledger.is_empty(), "seeding must append a ledger entry");
         assert_capital_invariants_hold(&pf);
     }
@@ -1708,19 +1745,20 @@ mod baseline_ledger_parity_tests {
         let mut pf = flat_portfolio();
         apply_entry(
             &mut pf,
-            LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 1, 313_000_000, 0)),
+            LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, qty(1), 313_000_000, 0)),
         );
 
         let baseline = baseline_with(&[("AAPL", 1)]);
         seed_portfolio_from_baseline(&mut pf, &baseline);
 
-        let qty = pf
+        let current = pf
             .positions
             .get("AAPL")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         assert_eq!(
-            qty, 2,
+            current,
+            qty(2),
             "total qty must be 2: 1 from current-run fill + 1 from baseline"
         );
         assert_capital_invariants_hold(&pf);
@@ -1981,9 +2019,9 @@ mod fill_economic_authority_closure_tests {
                 .positions
                 .get("AAPL")
                 .map(|p| p.qty_signed())
-                .unwrap_or(0);
+                .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, 10,
+                qty, mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
                 "cross-lane WS-then-REST duplicate of one physical 10@$100 execution \
                  must replay to qty=10, not 20"
             );
@@ -2037,9 +2075,9 @@ mod fill_economic_authority_closure_tests {
                 .positions
                 .get("AAPL")
                 .map(|p| p.qty_signed())
-                .unwrap_or(0);
+                .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, 10,
+                qty, mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
                 "cross-lane REST-then-WS duplicate of one physical 10@$100 execution \
                  must replay to qty=10, not 20 — order of raw observation must not matter"
             );
@@ -2110,9 +2148,9 @@ mod fill_economic_authority_closure_tests {
                 .positions
                 .get("AAPL")
                 .map(|p| p.qty_signed())
-                .unwrap_or(0);
+                .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, 20,
+                qty, mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(),
                 "late duplicate of an earlier partial arriving after a newer partial \
                  must no-op; final qty must be A+B=20, never 30"
             );
@@ -2177,8 +2215,8 @@ mod fill_economic_authority_closure_tests {
                 .positions
                 .get("AAPL")
                 .map(|p| p.qty_signed())
-                .unwrap_or(0);
-            assert_eq!(qty, 20, "10@$100 + 10@$102 must total 20 shares exactly");
+                .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+            assert_eq!(qty, mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(), "10@$100 + 10@$102 must total 20 shares exactly");
             let expected_cash = 100_000_000_000 - (10 * 100_000_000 + 10 * 102_000_000);
             assert_eq!(
                 portfolio.cash_micros, expected_cash,
@@ -2295,7 +2333,7 @@ mod fill_economic_authority_closure_tests {
         }
     }
 
-    fn ledger_fills(portfolio: &PortfolioState) -> Vec<(i64, i64)> {
+    fn ledger_fills(portfolio: &PortfolioState) -> Vec<(mqk_portfolio::QtyMicros, i64)> {
         portfolio
             .ledger
             .iter()
@@ -2367,9 +2405,9 @@ mod fill_economic_authority_closure_tests {
                 .positions
                 .get("AAPL")
                 .map(|p| p.qty_signed())
-                .unwrap_or(0);
+                .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, 3,
+                qty, mqk_portfolio::QtyMicros::from_whole_units(3).unwrap(),
                 "FC-1: 2@$100 + true-remainder 1@$102 must total qty=3, not qty=4 from the \
                  raw terminal delta_qty=2"
             );
@@ -2381,7 +2419,7 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&portfolio),
-                vec![(2, 100_000_000), (1, 102_000_000)],
+                vec![(mqk_portfolio::QtyMicros::from_whole_units(2).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(1).unwrap(), 102_000_000)],
                 "FC-1: ledger fill quantities/prices must be exactly [2@$100, 1@$102]"
             );
             assert!(
@@ -2525,7 +2563,7 @@ mod fill_economic_authority_closure_tests {
             // ---- Side A: live apply semantics.
             let mut live_order =
                 OmsOrder::new(order_id, "AAPL", mqk_execution::QtyMicros::from_whole_units(3).unwrap());
-            let mut live_fills: Vec<(i64, i64)> = Vec::new();
+            let mut live_fills: Vec<(mqk_portfolio::QtyMicros, i64)> = Vec::new();
 
             let pre1 = live_order.filled_qty;
             live_order
@@ -2561,7 +2599,7 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 live_fills,
-                vec![(2, 100_000_000), (1, 102_000_000)],
+                vec![(mqk_portfolio::QtyMicros::from_whole_units(2).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(1).unwrap(), 102_000_000)],
                 "Section 8 LIVE: effective fills must be [2@$100, 1@$102]"
             );
 
@@ -2604,11 +2642,11 @@ mod fill_economic_authority_closure_tests {
                 .positions
                 .get("AAPL")
                 .map(|p| p.qty_signed())
-                .unwrap_or(0);
+                .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             let durable_fills = ledger_fills(&portfolio);
 
             assert_eq!(
-                durable_qty, 3,
+                durable_qty, mqk_portfolio::QtyMicros::from_whole_units(3).unwrap(),
                 "Section 8 DURABLE: portfolio qty must be 3, matching LIVE"
             );
             assert_eq!(
@@ -2672,8 +2710,8 @@ mod fill_economic_authority_closure_tests {
                 pf.positions
                     .get("AAPL")
                     .map(|p| p.qty_signed())
-                    .unwrap_or(0),
-                10,
+                    .unwrap_or(mqk_portfolio::QtyMicros::ZERO),
+                mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
                 "D01: qty must be 10"
             );
             assert_eq!(
@@ -2683,7 +2721,7 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(10, 100_000_000)],
+                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
                 "D01: ledger must have exactly one fill entry"
             );
         })
@@ -2735,8 +2773,8 @@ mod fill_economic_authority_closure_tests {
                 pf.positions
                     .get("AAPL")
                     .map(|p| p.qty_signed())
-                    .unwrap_or(0),
-                10,
+                    .unwrap_or(mqk_portfolio::QtyMicros::ZERO),
+                mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
                 "D02: qty must be 10"
             );
             assert_eq!(
@@ -2746,7 +2784,7 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(10, 100_000_000)],
+                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
                 "D02: ledger must have exactly one fill entry"
             );
         })
@@ -2811,8 +2849,8 @@ mod fill_economic_authority_closure_tests {
                 pf.positions
                     .get("AAPL")
                     .map(|p| p.qty_signed())
-                    .unwrap_or(0),
-                20,
+                    .unwrap_or(mqk_portfolio::QtyMicros::ZERO),
+                mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(),
                 "D03: qty must be A+B=20, never 30"
             );
             assert_eq!(
@@ -2822,7 +2860,7 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(10, 100_000_000), (10, 101_000_000)],
+                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 101_000_000)],
                 "D03: ledger must have exactly the two legitimate fills"
             );
         })
@@ -2875,8 +2913,8 @@ mod fill_economic_authority_closure_tests {
                 pf.positions
                     .get("AAPL")
                     .map(|p| p.qty_signed())
-                    .unwrap_or(0),
-                20,
+                    .unwrap_or(mqk_portfolio::QtyMicros::ZERO),
+                mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(),
                 "D04: two distinct same-size/same-price partials must both apply: qty=20"
             );
             assert_eq!(
@@ -2886,7 +2924,7 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(10, 100_000_000), (10, 100_000_000)],
+                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
                 "D04: ledger must have TWO separate fill entries, not one"
             );
         })
@@ -2955,8 +2993,8 @@ mod fill_economic_authority_closure_tests {
                 pf.positions
                     .get("AAPL")
                     .map(|p| p.qty_signed())
-                    .unwrap_or(0),
-                10,
+                    .unwrap_or(mqk_portfolio::QtyMicros::ZERO),
+                mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
                 "D05: duplicate terminal fill across lanes must apply exactly once: qty=10"
             );
             assert_eq!(
@@ -2966,7 +3004,7 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(10, 100_000_000)],
+                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
                 "D05: ledger must have exactly one fill entry"
             );
         })
@@ -2995,9 +3033,9 @@ mod fill_economic_authority_closure_tests {
             fixture_applied_event(&pool, run_id, terminal.broker_message_id(), None, order_id, "broker-order-1", "fill", &terminal, at).await;
 
             let (_, _, pf) = recover_oms_and_portfolio(&pool, run_id, 0).await.expect("D06 replay");
-            assert_eq!(pf.positions.get("AAPL").map(|p| p.qty_signed()).unwrap_or(0), 3, "D06: oversized terminal delta_qty=5 must still cap at true remainder; qty=3, not 7");
+            assert_eq!(pf.positions.get("AAPL").map(|p| p.qty_signed()).unwrap_or(mqk_portfolio::QtyMicros::ZERO), mqk_portfolio::QtyMicros::from_whole_units(3).unwrap(), "D06: oversized terminal delta_qty=5 must still cap at true remainder; qty=3, not 7");
             assert_eq!(pf.cash_micros, -(2 * 100_000_000 + 102_000_000), "D06: cash must reflect only the effective 1-share terminal fill");
-            assert_eq!(ledger_fills(&pf), vec![(2, 100_000_000), (1, 102_000_000)], "D06: ledger must show the effective 1-share terminal fill, not the raw 5");
+            assert_eq!(ledger_fills(&pf), vec![(mqk_portfolio::QtyMicros::from_whole_units(2).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(1).unwrap(), 102_000_000)], "D06: ledger must show the effective 1-share terminal fill, not the raw 5");
         })
         .await;
     }

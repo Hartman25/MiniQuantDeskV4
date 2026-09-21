@@ -33,6 +33,7 @@
 //! - `FlattenRequired` from any source → enqueue close.
 //! - `NotConfigured` only when **neither** source is configured → no-op.
 
+use mqk_execution::QtyMicros;
 use serde::Deserialize;
 
 /// Default flatten lead: 30 minutes before blackout start.
@@ -406,21 +407,34 @@ pub const OPERATOR_FLATTEN_SIGNAL_SOURCE: &str = "operator_flatten";
 /// `{ symbol, qty, side, order_type: "market", signal_source, request_type: "submit" }`.
 pub fn build_flatten_close_order_json(
     symbol: &str,
-    net_qty_signed: i64,
+    net_qty_signed: QtyMicros,
     ts_secs: i64,
     run_id: uuid::Uuid,
 ) -> (String, serde_json::Value) {
     let ts_minute = ts_secs / 60;
-    let side = if net_qty_signed > 0 { "sell" } else { "buy" };
-    let qty = net_qty_signed.abs();
+    let side = if net_qty_signed.is_positive() {
+        "sell"
+    } else {
+        "buy"
+    };
+    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: a position of magnitude i64::MIN
+    // micros is precluded by every position-size/notional/exposure gate
+    // upstream of this function; the abs() cannot legitimately fail.
+    let qty = net_qty_signed
+        .checked_abs()
+        .expect("flatten candidate qty is bounded by upstream position/exposure gates");
 
     let key_input = format!("mqk-flatten.v1.{run_id}.{symbol}.{ts_minute}");
     let idempotency_key =
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, key_input.as_bytes()).to_string();
 
+    // `qty` is serialized as a decimal string (not a JSON number) so a
+    // fractional Crypto quantity round-trips exactly through
+    // `parse_signed_qty_micros_field` -- a whole-unit equity qty (e.g.
+    // "100") parses identically either way.
     let order_json = serde_json::json!({
         "symbol": symbol,
-        "qty": qty,
+        "qty": qty.to_string(),
         "side": side,
         "order_type": "market",
         "signal_source": FLATTEN_SIGNAL_SOURCE,
@@ -440,13 +454,19 @@ pub fn build_flatten_close_order_json(
 ///   signal source is distinguishable in order flow analysis.
 pub fn build_operator_flatten_close_order_json(
     symbol: &str,
-    net_qty_signed: i64,
+    net_qty_signed: QtyMicros,
     ts_secs: i64,
     run_id: uuid::Uuid,
 ) -> (String, serde_json::Value) {
     let ts_minute = ts_secs / 60;
-    let side = if net_qty_signed > 0 { "sell" } else { "buy" };
-    let qty = net_qty_signed.abs();
+    let side = if net_qty_signed.is_positive() {
+        "sell"
+    } else {
+        "buy"
+    };
+    let qty = net_qty_signed
+        .checked_abs()
+        .expect("flatten candidate qty is bounded by upstream position/exposure gates");
 
     let key_input = format!("mqk-op-flatten.v1.{run_id}.{symbol}.{ts_minute}");
     let idempotency_key =
@@ -454,7 +474,7 @@ pub fn build_operator_flatten_close_order_json(
 
     let order_json = serde_json::json!({
         "symbol": symbol,
-        "qty": qty,
+        "qty": qty.to_string(),
         "side": side,
         "order_type": "market",
         "signal_source": OPERATOR_FLATTEN_SIGNAL_SOURCE,

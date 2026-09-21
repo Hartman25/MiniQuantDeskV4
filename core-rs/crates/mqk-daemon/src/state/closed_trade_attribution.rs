@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use mqk_portfolio::Side;
+use mqk_portfolio::{QtyMicros, Side};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -179,7 +179,9 @@ fn combine_attribution(open: &ResolvedLineage, close: &ResolvedLineage) -> Closu
 pub(crate) struct ClosureFragment {
     pub(crate) symbol: String,
     pub(crate) direction: &'static str,
-    pub(crate) qty: i64,
+    /// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: fractional-capable (Crypto),
+    /// mirroring `mqk_portfolio::Fill.qty`/`Lot.qty_signed`.
+    pub(crate) qty: QtyMicros,
     pub(crate) entry_price_micros: i64,
     pub(crate) exit_price_micros: i64,
     pub(crate) gross_realized_pnl_micros: i64,
@@ -195,7 +197,7 @@ pub(crate) struct ClosureFragment {
 /// A read-model FIFO lot carrying opening provenance. Deliberately separate
 /// from `mqk_portfolio::Lot` -- that type must never carry strategy data.
 struct AttributedLot {
-    qty_signed: i64,
+    qty_signed: QtyMicros,
     entry_price_micros: i64,
     open_inbox_id: i64,
     open_internal_order_id: String,
@@ -203,14 +205,16 @@ struct AttributedLot {
 }
 
 impl AttributedLot {
-    fn abs_qty(&self) -> i64 {
-        self.qty_signed.abs()
+    fn abs_qty(&self) -> QtyMicros {
+        self.qty_signed
+            .checked_abs()
+            .expect("lot quantity magnitude must be representable as its own negation")
     }
     fn is_long(&self) -> bool {
-        self.qty_signed > 0
+        self.qty_signed.is_positive()
     }
     fn is_short(&self) -> bool {
-        self.qty_signed < 0
+        self.qty_signed.is_negative()
     }
 }
 
@@ -244,7 +248,7 @@ fn attribute_buy(
     let buy_px = caf.fill.price_micros;
 
     let mut i = 0usize;
-    while qty > 0 && i < lots.len() {
+    while qty.is_positive() && i < lots.len() {
         if !lots[i].is_short() {
             i += 1;
             continue;
@@ -252,7 +256,10 @@ fn attribute_buy(
 
         let coverable = lots[i].abs_qty().min(qty);
         let entry_px = lots[i].entry_price_micros;
-        let pnl = i128_to_i64_clamp((entry_px as i128 - buy_px as i128) * (coverable as i128));
+        let pnl = i128_to_i64_clamp(
+            (entry_px as i128 - buy_px as i128) * (coverable.raw() as i128)
+                / (mqk_schemas::QTY_MICROS_SCALE as i128),
+        );
         *sum_gross_realized_pnl_micros = sum_gross_realized_pnl_micros.saturating_add(pnl);
 
         let attribution = combine_attribution(&lots[i].open_lineage, fill_lineage);
@@ -272,17 +279,24 @@ fn attribute_buy(
             attribution,
         });
 
-        let remaining_abs = lots[i].abs_qty() - coverable;
-        if remaining_abs == 0 {
+        let remaining_abs = lots[i]
+            .abs_qty()
+            .checked_sub(coverable)
+            .expect("coverable is bounded by abs_qty(), so this subtraction cannot underflow");
+        if remaining_abs.is_zero() {
             lots.remove(i);
         } else {
-            lots[i].qty_signed = -(remaining_abs);
+            lots[i].qty_signed = remaining_abs
+                .checked_neg()
+                .expect("remaining_abs magnitude must be representable as its own negation");
             i += 1;
         }
-        qty -= coverable;
+        qty = qty
+            .checked_sub(coverable)
+            .expect("coverable is bounded by qty (via .min()), so this subtraction cannot underflow");
     }
 
-    if qty > 0 {
+    if qty.is_positive() {
         lots.push(AttributedLot {
             qty_signed: qty,
             entry_price_micros: buy_px,
@@ -308,7 +322,7 @@ fn attribute_sell(
     let sell_px = caf.fill.price_micros;
 
     let mut i = 0usize;
-    while qty > 0 && i < lots.len() {
+    while qty.is_positive() && i < lots.len() {
         if !lots[i].is_long() {
             i += 1;
             continue;
@@ -316,7 +330,10 @@ fn attribute_sell(
 
         let sellable = lots[i].abs_qty().min(qty);
         let entry_px = lots[i].entry_price_micros;
-        let pnl = i128_to_i64_clamp((sell_px as i128 - entry_px as i128) * (sellable as i128));
+        let pnl = i128_to_i64_clamp(
+            (sell_px as i128 - entry_px as i128) * (sellable.raw() as i128)
+                / (mqk_schemas::QTY_MICROS_SCALE as i128),
+        );
         *sum_gross_realized_pnl_micros = sum_gross_realized_pnl_micros.saturating_add(pnl);
 
         let attribution = combine_attribution(&lots[i].open_lineage, fill_lineage);
@@ -336,19 +353,26 @@ fn attribute_sell(
             attribution,
         });
 
-        let remaining_abs = lots[i].abs_qty() - sellable;
-        if remaining_abs == 0 {
+        let remaining_abs = lots[i]
+            .abs_qty()
+            .checked_sub(sellable)
+            .expect("sellable is bounded by abs_qty(), so this subtraction cannot underflow");
+        if remaining_abs.is_zero() {
             lots.remove(i);
         } else {
             lots[i].qty_signed = remaining_abs;
             i += 1;
         }
-        qty -= sellable;
+        qty = qty
+            .checked_sub(sellable)
+            .expect("sellable is bounded by qty (via .min()), so this subtraction cannot underflow");
     }
 
-    if qty > 0 {
+    if qty.is_positive() {
         lots.push(AttributedLot {
-            qty_signed: -qty,
+            qty_signed: qty
+                .checked_neg()
+                .expect("remaining qty magnitude must be representable as its own negation"),
             entry_price_micros: sell_px,
             open_inbox_id: caf.inbox_id,
             open_internal_order_id: caf.internal_order_id.clone(),

@@ -52,7 +52,7 @@ fn make_snapshot(cash_micros: i64, positions: &[(&str, i64)]) -> ExecutionSnapsh
                 .iter()
                 .map(|(sym, qty)| PositionSnapshot {
                     symbol: sym.to_string(),
-                    net_qty: *qty,
+                    net_qty: mqk_execution::QtyMicros::from_whole_units(*qty).unwrap(),
                 })
                 .collect(),
         },

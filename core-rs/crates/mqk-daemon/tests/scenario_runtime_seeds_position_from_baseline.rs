@@ -32,7 +32,9 @@
 //! | SP07  | Baseline zero-qty entry is skipped                                          |
 //! | SP08  | Symbol absent from baseline → portfolio stays flat for that symbol          |
 
-use mqk_portfolio::{apply_entry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, Side};
+use mqk_portfolio::{
+    apply_entry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, QtyMicros, Side,
+};
 use mqk_runtime::observability::build_portfolio_snapshot;
 
 // ---------------------------------------------------------------------------
@@ -43,11 +45,15 @@ fn flat_portfolio() -> PortfolioState {
     PortfolioState::new(100_000_000_000) // $100k initial equity in micros
 }
 
+fn qty(n: i64) -> QtyMicros {
+    QtyMicros::from_whole_units(n).unwrap()
+}
+
 /// Seed the portfolio directly using public `mqk_portfolio` types.
 /// Mirrors `seed_portfolio_from_baseline` using the same public API.
 fn seed_from_positions(portfolio: &mut PortfolioState, positions: &[(&str, i64)]) {
-    for &(sym, qty) in positions {
-        if qty == 0 {
+    for &(sym, whole_qty) in positions {
+        if whole_qty == 0 {
             continue;
         }
         let pos = portfolio
@@ -55,7 +61,7 @@ fn seed_from_positions(portfolio: &mut PortfolioState, positions: &[(&str, i64)]
             .entry(sym.to_string())
             .or_insert_with(|| PositionState::new(sym.to_string()));
         pos.lots.push(Lot {
-            qty_signed: qty,
+            qty_signed: qty(whole_qty),
             entry_price_micros: 1,
         });
     }
@@ -89,7 +95,7 @@ fn sp02_baseline_aapl_one_seeds_portfolio_qty_one() {
         aapl.is_some(),
         "SP02: AAPL position must be present after seeding"
     );
-    assert_eq!(aapl.unwrap().net_qty, 1, "SP02: AAPL net_qty must be 1");
+    assert_eq!(aapl.unwrap().net_qty, qty(1), "SP02: AAPL net_qty must be 1");
 }
 
 // ---------------------------------------------------------------------------
@@ -104,21 +110,22 @@ fn sp03_seeded_long_plus_target_zero_yields_sell_delta() {
 
     // Mirror the loop_runner delta calculation:
     // delta = target_qty - current_qty
-    let current: i64 = snap
+    let current = snap
         .positions
         .iter()
         .find(|p| p.symbol == "AAPL")
         .map(|p| p.net_qty)
-        .unwrap_or(0);
-    let target: i64 = 0;
-    let delta = target - current;
+        .unwrap_or(QtyMicros::ZERO);
+    let target = qty(0);
+    let delta = target.checked_sub(current).unwrap();
 
     assert_eq!(
-        delta, -1,
+        delta,
+        qty(-1),
         "SP03: delta must be -1 (sell 1 share) when current=1 and target=0"
     );
     assert!(
-        delta < 0,
+        delta.is_negative(),
         "SP03: negative delta must trigger sell order path (not already_at_target)"
     );
 }
@@ -133,17 +140,18 @@ fn sp04_seeded_long_plus_target_one_yields_zero_delta() {
     seed_from_positions(&mut pf, &[("AAPL", 1)]);
     let snap = build_portfolio_snapshot(&pf);
 
-    let current: i64 = snap
+    let current = snap
         .positions
         .iter()
         .find(|p| p.symbol == "AAPL")
         .map(|p| p.net_qty)
-        .unwrap_or(0);
-    let target: i64 = 1;
-    let delta = target - current;
+        .unwrap_or(QtyMicros::ZERO);
+    let target = qty(1);
+    let delta = target.checked_sub(current).unwrap();
 
     assert_eq!(
-        delta, 0,
+        delta,
+        qty(0),
         "SP04: delta must be 0 (already_at_target) when current=1 and target=1"
     );
 }
@@ -159,22 +167,23 @@ fn sp05_current_run_fill_plus_baseline_no_double_count() {
     // Simulate a fill that happened in this run (uses apply_entry, price > 0 required).
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 1, 313_000_000, 0)),
+        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, qty(1), 313_000_000, 0)),
     );
 
     // Now seed from baseline (prior run had AAPL=1 already).
     seed_from_positions(&mut pf, &[("AAPL", 1)]);
 
     let snap = build_portfolio_snapshot(&pf);
-    let qty = snap
+    let current = snap
         .positions
         .iter()
         .find(|p| p.symbol == "AAPL")
         .map(|p| p.net_qty)
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
 
     assert_eq!(
-        qty, 2,
+        current,
+        qty(2),
         "SP05: total qty must be 2 (1 current-run fill + 1 baseline); no double-count"
     );
 }
@@ -194,16 +203,16 @@ fn sp06_multi_symbol_baseline_seeds_all_positions() {
         .iter()
         .find(|p| p.symbol == "AAPL")
         .map(|p| p.net_qty)
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     let nvda = snap
         .positions
         .iter()
         .find(|p| p.symbol == "NVDA")
         .map(|p| p.net_qty)
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
 
-    assert_eq!(aapl, 2, "SP06: AAPL must be 2 from multi-symbol baseline");
-    assert_eq!(nvda, 3, "SP06: NVDA must be 3 from multi-symbol baseline");
+    assert_eq!(aapl, qty(2), "SP06: AAPL must be 2 from multi-symbol baseline");
+    assert_eq!(nvda, qty(3), "SP06: NVDA must be 3 from multi-symbol baseline");
     assert_eq!(
         snap.positions.len(),
         2,
@@ -232,9 +241,10 @@ fn sp07_zero_qty_baseline_entry_skipped() {
         .iter()
         .find(|p| p.symbol == "NVDA")
         .map(|p| p.net_qty)
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
-        nvda, 1,
+        nvda,
+        qty(1),
         "SP07: NVDA=1 must still be seeded when AAPL=0 is skipped"
     );
 }
@@ -255,10 +265,11 @@ fn sp08_absent_symbol_remains_flat() {
         .iter()
         .find(|p| p.symbol == "AAPL")
         .map(|p| p.net_qty)
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
 
     assert_eq!(
-        aapl, 0,
+        aapl,
+        qty(0),
         "SP08: AAPL absent from baseline must have qty=0 (flat)"
     );
 }

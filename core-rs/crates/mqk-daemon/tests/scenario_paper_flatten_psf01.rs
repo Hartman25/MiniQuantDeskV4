@@ -207,7 +207,7 @@ async fn set_execution_snapshot(st: &Arc<AppState>, run_id: Uuid, positions: Vec
                 .into_iter()
                 .map(|(sym, qty)| mqk_runtime::observability::PositionSnapshot {
                     symbol: sym,
-                    net_qty: qty,
+                    net_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
                 })
                 .collect(),
         },
@@ -494,7 +494,7 @@ async fn psf_09_short_position_enqueues_buy_to_cover() {
     let order_json = &outbox_row.order_json;
     assert_eq!(order_json["symbol"].as_str(), Some("AAPL"), "{order_json}");
     assert_eq!(order_json["side"].as_str(), Some("buy"), "{order_json}");
-    assert_eq!(order_json["qty"].as_i64(), Some(50), "{order_json}");
+    assert_eq!(order_json["qty"].as_str(), Some("50"), "{order_json}");
     assert_eq!(
         order_json["signal_source"].as_str(),
         Some("operator_flatten"),
@@ -588,8 +588,8 @@ async fn psf_10_flatten_all_long_positions_enqueues_outbox_row() {
         "PSF-10: outbox row must be sell"
     );
     assert_eq!(
-        order_json["qty"].as_i64(),
-        Some(100),
+        order_json["qty"].as_str(),
+        Some("100"),
         "PSF-10: qty must be exactly 100 (no oversell)"
     );
     assert_eq!(

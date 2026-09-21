@@ -2353,12 +2353,18 @@ pub(crate) async fn repair_halted_run_portfolio_snapshot(
     };
 
     // Build derived positions summary (flat symbols omitted).
+    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionState::qty_signed()` is
+    // `QtyMicros`; this repair-route API row stays whole-unit `i64` (Crypto
+    // execution is not wired yet, so a fractional position cannot occur in
+    // production today).
     let positions: Vec<PortfolioPositionSummary> = pf
         .positions
         .iter()
         .map(|(sym, pos)| PortfolioPositionSummary {
             symbol: sym.clone(),
-            qty_signed: pos.qty_signed(),
+            qty_signed: pos.qty_signed().to_whole_units_checked().expect(
+                "fractional position unsupported by this halted-run repair route",
+            ),
             lot_count: pos.lots.len(),
         })
         .collect();

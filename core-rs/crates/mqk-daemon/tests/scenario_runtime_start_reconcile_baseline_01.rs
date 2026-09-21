@@ -350,7 +350,7 @@ fn exec_snapshot_with_position(symbol: &str, qty: i64) -> ExecutionSnapshot {
         .positions
         .push(mqk_runtime::observability::PositionSnapshot {
             symbol: symbol.to_string(),
-            net_qty: qty,
+            net_qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
         });
     snap
 }
@@ -404,8 +404,13 @@ fn patched_local_provider(
     // seed_portfolio_from_baseline + apply_entry).
     let mut local = LocalSnapshot::empty();
     for pos in &snapshot.portfolio.positions {
-        if pos.net_qty != 0 {
-            local.positions.insert(pos.symbol.clone(), pos.net_qty);
+        if !pos.net_qty.is_zero() {
+            local.positions.insert(
+                pos.symbol.clone(),
+                pos.net_qty
+                    .to_whole_units_checked()
+                    .expect("fractional position unsupported by this whole-unit test helper"),
+            );
         }
     }
     local
