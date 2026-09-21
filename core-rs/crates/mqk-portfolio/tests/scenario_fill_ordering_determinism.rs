@@ -22,8 +22,8 @@
 //! All tests are pure; no IO, no DB, no network.
 
 use mqk_portfolio::{
-    apply_fills_canonical, sort_fills_canonical, Fill, Ledger, LedgerSnapshot, Side, TaggedFill,
-    MICROS_SCALE,
+    apply_fills_canonical, sort_fills_canonical, Fill, Ledger, LedgerSnapshot, QtyMicros, Side,
+    TaggedFill, MICROS_SCALE,
 };
 
 const M: i64 = MICROS_SCALE;
@@ -35,7 +35,13 @@ const M: i64 = MICROS_SCALE;
 fn tf(seq_no: u64, symbol: &str, side: Side, qty: i64, price_dollars: i64) -> TaggedFill {
     TaggedFill {
         seq_no,
-        fill: Fill::new(symbol, side, qty, price_dollars * M, 0),
+        fill: Fill::new(
+            symbol,
+            side,
+            QtyMicros::from_whole_units(qty).unwrap(),
+            price_dollars * M,
+            0,
+        ),
     }
 }
 
@@ -106,13 +112,31 @@ fn non_canonical_order_produces_different_pnl() {
     // demonstrating that FIFO lot accounting IS order-sensitive.
     let mut ledger_wrong = Ledger::new(100_000 * M);
     ledger_wrong
-        .append_fill(Fill::new("AAPL", Side::Buy, 5, 80 * M, 0))
+        .append_fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(5).unwrap(),
+            80 * M,
+            0,
+        ))
         .unwrap();
     ledger_wrong
-        .append_fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, 0))
+        .append_fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        ))
         .unwrap();
     ledger_wrong
-        .append_fill(Fill::new("AAPL", Side::Sell, 10, 90 * M, 0))
+        .append_fill(Fill::new(
+            "AAPL",
+            Side::Sell,
+            QtyMicros::from_whole_units(10).unwrap(),
+            90 * M,
+            0,
+        ))
         .unwrap();
 
     let snap_wrong = ledger_wrong.snapshot();

@@ -104,7 +104,9 @@ pub use fixedpoint::Micros;
 // R3-2: canonical fill ordering policy
 pub use ordering::{apply_fills_canonical, sort_fills_canonical, TaggedFill};
 
-pub use types::{CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, Side};
+pub use types::{
+    CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, QtyMicros, Side,
+};
 
 // PORTFOLIO-LIVE-WEIGHTS-01: live position valuation / weight truth seam
 pub use valuation::{

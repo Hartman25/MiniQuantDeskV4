@@ -17,15 +17,20 @@
 
 use std::collections::BTreeMap;
 
+use crate::types::QtyMicros;
+
 /// A single position's signed quantity.
 ///
 /// Decoupled from any specific portfolio-state representation (no
 /// dependency on runtime/broker types) so this module stays a pure seam.
+///
+/// CUTOVER-1C: `signed_qty` is [`QtyMicros`] (fractional-capable) —
+/// previously a plain whole-unit `i64` share count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PositionWeightInput {
     pub symbol: String,
     /// Positive = long, negative = short, 0 = flat.
-    pub signed_qty: i64,
+    pub signed_qty: QtyMicros,
 }
 
 /// An explicit mark price for one symbol, with provenance.
@@ -48,7 +53,7 @@ pub struct PositionMark {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PositionWeightRow {
     pub symbol: String,
-    pub signed_qty: i64,
+    pub signed_qty: QtyMicros,
     pub mark_price_micros: Option<i64>,
     pub mark_ts_utc: Option<i64>,
     pub mark_source: Option<String>,
@@ -146,11 +151,11 @@ pub fn compute_portfolio_weights(
     let mut rows: Vec<PositionWeightRow> = Vec::with_capacity(positions.len());
 
     for p in positions {
-        if p.signed_qty == 0 {
+        if p.signed_qty.is_zero() {
             let mark = marks.get(&p.symbol);
             rows.push(PositionWeightRow {
                 symbol: p.symbol.clone(),
-                signed_qty: 0,
+                signed_qty: QtyMicros::ZERO,
                 mark_price_micros: mark.map(|m| m.mark_price_micros),
                 mark_ts_utc: mark.and_then(|m| m.mark_ts_utc),
                 mark_source: mark.map(|m| m.source.clone()),
@@ -164,7 +169,8 @@ pub fn compute_portfolio_weights(
 
         match marks.get(&p.symbol) {
             Some(mark) => {
-                let mv = (p.signed_qty as i128) * (mark.mark_price_micros as i128);
+                let mv = (p.signed_qty.raw() as i128) * (mark.mark_price_micros as i128)
+                    / (mqk_schemas::QTY_MICROS_SCALE as i128);
                 rows.push(PositionWeightRow {
                     symbol: p.symbol.clone(),
                     signed_qty: p.signed_qty,
@@ -265,28 +271,34 @@ pub fn compute_portfolio_weights(
 /// Computed in `i128`: two `i64` factors multiplied can never overflow
 /// `i128` (max magnitude `2^126 < 2^127`).
 pub fn unrealized_pnl_micros(
-    signed_qty: i64,
+    signed_qty: QtyMicros,
     avg_price_micros: i64,
     mark_price_micros: i64,
 ) -> i128 {
-    (mark_price_micros as i128 - avg_price_micros as i128) * (signed_qty as i128)
+    (mark_price_micros as i128 - avg_price_micros as i128) * (signed_qty.raw() as i128)
+        / (mqk_schemas::QTY_MICROS_SCALE as i128)
 }
 
 #[cfg(test)]
 mod pnl_tests {
     use super::unrealized_pnl_micros;
+    use crate::types::QtyMicros;
+
+    fn qty(n: i64) -> QtyMicros {
+        QtyMicros::from_whole_units(n).unwrap()
+    }
 
     #[test]
     fn long_position_mark_above_avg_is_positive_pnl() {
         // 10 long shares, avg 100.00, mark 110.00 -> +100.00 (in micros)
-        let pnl = unrealized_pnl_micros(10, 100_000_000, 110_000_000);
+        let pnl = unrealized_pnl_micros(qty(10), 100_000_000, 110_000_000);
         assert_eq!(pnl, 100_000_000);
     }
 
     #[test]
     fn long_position_mark_below_avg_is_negative_pnl() {
         // 10 long shares, avg 100.00, mark 90.00 -> -100.00
-        let pnl = unrealized_pnl_micros(10, 100_000_000, 90_000_000);
+        let pnl = unrealized_pnl_micros(qty(10), 100_000_000, 90_000_000);
         assert_eq!(pnl, -100_000_000);
     }
 
@@ -294,34 +306,41 @@ mod pnl_tests {
     fn short_position_mark_above_avg_is_negative_pnl() {
         // 10 short shares (signed_qty = -10), avg 100.00, mark 110.00 ->
         // loss for the short: -100.00
-        let pnl = unrealized_pnl_micros(-10, 100_000_000, 110_000_000);
+        let pnl = unrealized_pnl_micros(qty(-10), 100_000_000, 110_000_000);
         assert_eq!(pnl, -100_000_000);
     }
 
     #[test]
     fn short_position_mark_below_avg_is_positive_pnl() {
         // 10 short shares, avg 100.00, mark 90.00 -> gain for the short: +100.00
-        let pnl = unrealized_pnl_micros(-10, 100_000_000, 90_000_000);
+        let pnl = unrealized_pnl_micros(qty(-10), 100_000_000, 90_000_000);
         assert_eq!(pnl, 100_000_000);
     }
 
     #[test]
     fn flat_position_is_always_zero_regardless_of_prices() {
-        assert_eq!(unrealized_pnl_micros(0, 100_000_000, 999_000_000), 0);
-        assert_eq!(unrealized_pnl_micros(0, 0, 0), 0);
+        assert_eq!(
+            unrealized_pnl_micros(QtyMicros::ZERO, 100_000_000, 999_000_000),
+            0
+        );
+        assert_eq!(unrealized_pnl_micros(QtyMicros::ZERO, 0, 0), 0);
     }
 
     #[test]
     fn mark_equal_avg_is_zero_pnl() {
-        assert_eq!(unrealized_pnl_micros(5, 314_810_000, 314_810_000), 0);
+        assert_eq!(unrealized_pnl_micros(qty(5), 314_810_000, 314_810_000), 0);
     }
 
     #[test]
     fn extreme_magnitudes_do_not_overflow_i128() {
-        // Largest i64 qty and price factors -- must not panic, and the
-        // widened i128 product must exactly equal the mathematical value.
-        let pnl = unrealized_pnl_micros(i64::MAX, 0, i64::MAX);
-        let expected = (i64::MAX as i128) * (i64::MAX as i128);
+        // Largest representable QtyMicros raw value and largest i64 price
+        // factor -- must not panic, and the widened i128 product,
+        // descaled by QTY_MICROS_SCALE, must exactly equal the
+        // mathematical value.
+        let max_qty = QtyMicros::new(i64::MAX);
+        let pnl = unrealized_pnl_micros(max_qty, 0, i64::MAX);
+        let expected =
+            (i64::MAX as i128) * (i64::MAX as i128) / (mqk_schemas::QTY_MICROS_SCALE as i128);
         assert_eq!(pnl, expected);
     }
 
@@ -331,7 +350,7 @@ mod pnl_tests {
         // A mark of 320.00 must show a positive unrealized gain.
         let avg_price_micros = 314_810_000i64;
         let mark_price_micros = 320_000_000i64;
-        let pnl = unrealized_pnl_micros(3, avg_price_micros, mark_price_micros);
+        let pnl = unrealized_pnl_micros(qty(3), avg_price_micros, mark_price_micros);
         assert_eq!(pnl, (320_000_000 - 314_810_000) * 3);
         assert!(pnl > 0);
     }

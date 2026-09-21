@@ -19,14 +19,14 @@
 
 use std::collections::BTreeMap;
 
-use mqk_portfolio::{compute_portfolio_weights, PositionMark, PositionWeightInput};
+use mqk_portfolio::{compute_portfolio_weights, PositionMark, PositionWeightInput, QtyMicros};
 
 const M: i64 = 1_000_000; // micro-dollar scale factor
 
 fn pos(symbol: &str, signed_qty: i64) -> PositionWeightInput {
     PositionWeightInput {
         symbol: symbol.to_string(),
-        signed_qty,
+        signed_qty: QtyMicros::from_whole_units(signed_qty).unwrap(),
     }
 }
 
@@ -216,11 +216,19 @@ fn pw06b_exact_zero_nav_blocks_weights() {
 
 #[test]
 fn pw07_extreme_magnitude_is_overflow_safe_and_exact() {
-    let qty = i64::MAX;
+    // Extreme RAW QtyMicros magnitude directly -- `pos()`'s `from_whole_units`
+    // helper would itself overflow scaling `i64::MAX` *whole units* up by
+    // 1e6, which is not what this test proves (it proves
+    // `compute_portfolio_weights`'s own i128 math never panics/overflows on
+    // an extreme quantity, not that every i64 is a valid whole-unit count).
     let price = i64::MAX;
-    let expected_mv = (qty as i128) * (price as i128);
+    let expected_mv =
+        (i64::MAX as i128) * (price as i128) / (mqk_schemas::QTY_MICROS_SCALE as i128);
 
-    let positions = vec![pos("ZMAX", qty)];
+    let positions = vec![PositionWeightInput {
+        symbol: "ZMAX".to_string(),
+        signed_qty: QtyMicros::new(i64::MAX),
+    }];
     let marks = marks_map(&[("ZMAX", price)]);
 
     // cash = 0 so NAV == this single position's market value exactly.

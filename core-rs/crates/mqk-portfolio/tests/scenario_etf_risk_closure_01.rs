@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use mqk_portfolio::{evaluate_sector_risk, PositionMark, PositionWeightInput};
+use mqk_portfolio::{evaluate_sector_risk, PositionMark, PositionWeightInput, QtyMicros};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,7 +37,7 @@ fn positions(items: &[(&str, i64)]) -> Vec<PositionWeightInput> {
         .iter()
         .map(|(sym, qty)| PositionWeightInput {
             symbol: sym.to_string(),
-            signed_qty: *qty,
+            signed_qty: QtyMicros::from_whole_units(*qty).unwrap(),
         })
         .collect()
 }
@@ -87,7 +87,15 @@ fn sr01_disabled_config_allows_without_marks_or_sector_map() {
     let no_sectors: HashMap<String, String> = HashMap::new();
     let no_limits: HashMap<String, i64> = HashMap::new();
 
-    let eval = evaluate_sector_risk(cash, &pos, &no_marks, &no_sectors, &no_limits, "AAPL", 10);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &no_marks,
+        &no_sectors,
+        &no_limits,
+        "AAPL",
+        QtyMicros::from_whole_units(10).unwrap(),
+    );
 
     assert!(eval.allowed);
     assert_eq!(eval.truth_state, "sector_risk_disabled");
@@ -115,7 +123,15 @@ fn sr02_configured_cap_allows_within_limit() {
     let sectors = sector_map(&[("XLK", "sector_technology")]);
     let lims = limits(&[("sector_technology", 10_000)]);
 
-    let eval = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", 2);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(2).unwrap(),
+    );
 
     assert!(eval.allowed, "eval={eval:?}");
     assert_eq!(eval.truth_state, "sector_limit_ok");
@@ -141,7 +157,15 @@ fn sr03_configured_cap_denies_exceed() {
     // already 1000/1000=10000 bps too (single-position portfolio is always
     // 100% of its own NAV) -- so this is NOT risk-reducing (same exposure),
     // and must be denied.
-    let eval = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", 5);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(5).unwrap(),
+    );
 
     assert!(!eval.allowed, "eval={eval:?}");
     assert_eq!(eval.truth_state, "sector_limit_exceeded");
@@ -168,7 +192,15 @@ fn sr04_risk_reducing_sell_allowed_when_it_lowers_exposure_even_if_still_over_ca
     let sectors = sector_map(&[("XLK", "sector_technology")]);
     let lims = limits(&[("sector_technology", 6_000)]); // 60% cap
 
-    let eval = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", -10);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(-10).unwrap(),
+    );
 
     assert!(eval.allowed, "eval={eval:?}");
     assert_eq!(eval.truth_state, "sector_risk_reducing_allowed");
@@ -193,13 +225,29 @@ fn sr05_missing_mark_fails_closed_only_when_enabled_for_this_sector() {
     let sectors = sector_map(&[("XLK", "sector_technology")]);
 
     // Disabled: must allow even though the mark is missing.
-    let disabled = evaluate_sector_risk(cash, &pos, &no_marks, &sectors, &HashMap::new(), "XLK", 5);
+    let disabled = evaluate_sector_risk(
+        cash,
+        &pos,
+        &no_marks,
+        &sectors,
+        &HashMap::new(),
+        "XLK",
+        QtyMicros::from_whole_units(5).unwrap(),
+    );
     assert!(disabled.allowed);
     assert_eq!(disabled.truth_state, "sector_risk_disabled");
 
     // Enabled for sector_technology: must fail closed.
     let lims = limits(&[("sector_technology", 5_000)]);
-    let enabled = evaluate_sector_risk(cash, &pos, &no_marks, &sectors, &lims, "XLK", 5);
+    let enabled = evaluate_sector_risk(
+        cash,
+        &pos,
+        &no_marks,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(5).unwrap(),
+    );
     assert!(!enabled.allowed, "eval={enabled:?}");
     assert_eq!(enabled.truth_state, "sector_weights_missing");
     assert!(enabled.reason_code.unwrap().contains("XLK"));
@@ -217,12 +265,28 @@ fn sr06_nav_unavailable_fails_closed_only_when_enabled_for_this_sector() {
     let mk = marks(&[("XLK", 1_000_000)]); // $1/share: nav = -1000 + 1 = still negative
     let sectors = sector_map(&[("XLK", "sector_technology")]);
 
-    let disabled = evaluate_sector_risk(cash, &pos, &mk, &sectors, &HashMap::new(), "XLK", 1);
+    let disabled = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &HashMap::new(),
+        "XLK",
+        QtyMicros::from_whole_units(1).unwrap(),
+    );
     assert!(disabled.allowed);
     assert_eq!(disabled.truth_state, "sector_risk_disabled");
 
     let lims = limits(&[("sector_technology", 5_000)]);
-    let enabled = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", 1);
+    let enabled = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(1).unwrap(),
+    );
     assert!(!enabled.allowed, "eval={enabled:?}");
     assert_eq!(enabled.truth_state, "sector_nav_unavailable");
 }
@@ -239,7 +303,15 @@ fn sr07_unclassified_symbol_does_not_panic_and_is_allowed() {
     let sectors: HashMap<String, String> = HashMap::new(); // AAPL untagged
     let lims = limits(&[("sector_technology", 5_000)]);
 
-    let eval = evaluate_sector_risk(cash, &pos, &no_marks, &sectors, &lims, "AAPL", 5);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &no_marks,
+        &sectors,
+        &lims,
+        "AAPL",
+        QtyMicros::from_whole_units(5).unwrap(),
+    );
 
     assert!(eval.allowed);
     assert_eq!(eval.truth_state, "sector_metadata_missing");
@@ -259,7 +331,15 @@ fn sr08_known_sector_without_configured_cap_allows_without_marks() {
     // Cap configured for a different sector only.
     let lims = limits(&[("sector_technology", 5_000)]);
 
-    let eval = evaluate_sector_risk(cash, &pos, &no_marks, &sectors, &lims, "GLD", 5);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &no_marks,
+        &sectors,
+        &lims,
+        "GLD",
+        QtyMicros::from_whole_units(5).unwrap(),
+    );
 
     assert!(eval.allowed);
     assert_eq!(eval.truth_state, "sector_limit_ok");
@@ -274,18 +354,43 @@ fn sr08_known_sector_without_configured_cap_allows_without_marks() {
 #[test]
 fn sr09_extreme_quantities_and_prices_never_panic() {
     let cash = i64::MAX / 4;
-    let pos = positions(&[("XLK", i64::MAX / 4)]);
+    // Extreme RAW QtyMicros magnitude directly -- `positions()`'s
+    // `from_whole_units` helper would itself overflow trying to scale
+    // `i64::MAX / 4` *whole units* up by 1e6, which is not what this test
+    // is proving (it proves `evaluate_sector_risk`'s own i128 math never
+    // panics on an extreme quantity, not that every i64 is a valid
+    // whole-unit count).
+    let pos = vec![PositionWeightInput {
+        symbol: "XLK".to_string(),
+        signed_qty: QtyMicros::new(i64::MAX / 4),
+    }];
     let mk = marks(&[("XLK", i64::MAX / 4)]);
     let sectors = sector_map(&[("XLK", "sector_technology")]);
     let lims = limits(&[("sector_technology", 1)]); // tiny cap, guaranteed breach
 
     // Must not panic regardless of outcome; this is the proof, not the
     // specific allowed/denied value.
-    let eval = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", i64::MIN / 4);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::new(i64::MIN / 4),
+    );
     assert!(!eval.truth_state.is_empty());
 
     // i64::MIN delta is the abs() panic edge case for a naive implementation.
-    let eval2 = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", i64::MIN);
+    let eval2 = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::new(i64::MIN),
+    );
     assert!(!eval2.truth_state.is_empty());
 }
 
@@ -303,14 +408,30 @@ fn sr10_opening_new_position_in_capped_sector_is_evaluated() {
 
     // Buy 6 shares @ $100 = $600 notional. NAV = 1000 (cash unmodeled) + 600 = 1600.
     // weight = 600/1600 = 3750 bps <= 5000 -> allowed.
-    let eval = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", 6);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(6).unwrap(),
+    );
     assert!(eval.allowed, "eval={eval:?}");
     assert_eq!(eval.current_weight_bps, Some(0), "no prior XLK position");
     assert_eq!(eval.prospective_weight_bps, Some(3_750));
 
     // Buy 20 shares @ $100 = $2000 notional. NAV = 1000 + 2000 = 3000.
     // weight = 2000/3000 = 6667 bps > 5000 -> denied (not risk-reducing from 0).
-    let eval2 = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", 20);
+    let eval2 = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(20).unwrap(),
+    );
     assert!(!eval2.allowed, "eval2={eval2:?}");
     assert_eq!(eval2.truth_state, "sector_limit_exceeded");
 }
@@ -331,7 +452,15 @@ fn sr11_unrelated_sector_exposure_is_not_aggregated_in() {
 
     // current: XLK=$1000, XLF=$100,000, NAV=$101,000.
     // XLK weight = 1000/101000 ~= 99 bps, far under cap regardless of XLF size.
-    let eval = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", 1);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(1).unwrap(),
+    );
     assert!(eval.allowed, "eval={eval:?}");
     assert_eq!(eval.truth_state, "sector_limit_ok");
 }
@@ -353,7 +482,15 @@ fn sr12_exactly_at_cap_boundary_is_allowed() {
     let lims = limits(&[("sector_technology", 7_500)]);
 
     // This must be allowed (<=), not denied.
-    let eval = evaluate_sector_risk(cash, &pos, &mk, &sectors, &lims, "XLK", 30);
+    let eval = evaluate_sector_risk(
+        cash,
+        &pos,
+        &mk,
+        &sectors,
+        &lims,
+        "XLK",
+        QtyMicros::from_whole_units(30).unwrap(),
+    );
     assert!(eval.allowed, "eval={eval:?}");
     assert_eq!(eval.current_weight_bps, Some(0));
     assert_eq!(eval.prospective_weight_bps, Some(7_500));

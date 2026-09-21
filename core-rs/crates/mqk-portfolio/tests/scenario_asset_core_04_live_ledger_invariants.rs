@@ -43,15 +43,16 @@ use mqk_portfolio::{
     aggregate_portfolio_economics, apply_entry, compute_equity_micros, compute_exposure_micros,
     compute_portfolio_weights, marks, recompute_from_ledger, value_position_economics, Fill,
     InstrumentEconomics, InstrumentEconomicsTruthState, LedgerEntry, PortfolioEconomicsInput,
-    PortfolioEconomicsTruthState, PortfolioState, PositionMark, PositionWeightInput, Side,
+    PortfolioEconomicsTruthState, PortfolioState, PositionMark, PositionWeightInput, QtyMicros,
+    Side,
 };
 
 const M: i64 = 1_000_000; // MICROS_SCALE
 
-fn equity_notional(symbol: &str, signed_qty: i64, mark_price_micros: i64) -> i128 {
+fn equity_notional(symbol: &str, signed_qty: QtyMicros, mark_price_micros: i64) -> i128 {
     let value = value_position_economics(mqk_portfolio::PositionEconomicsInput {
         instrument: InstrumentEconomics::equity(format!("equity:US:{symbol}"), symbol, "USD"),
-        signed_qty_micros: signed_qty * M,
+        signed_qty_micros: signed_qty.raw(),
         mark_price_micros: Some(mark_price_micros),
         account_currency: "USD".to_string(),
     });
@@ -70,12 +71,18 @@ fn eq01_live_long_market_value_matches_scaffold_notional() {
     let mut pf = PortfolioState::new(100_000 * M);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        )),
     );
 
     let pos = &pf.positions["AAPL"];
     let signed_qty = pos.qty_signed();
-    assert_eq!(signed_qty, 10);
+    assert_eq!(signed_qty, QtyMicros::from_whole_units(10).unwrap());
 
     let mark_price = 110 * M; // marked away from entry, proves this isn't a cost-basis coincidence
     let mm = marks([("AAPL", mark_price)]);
@@ -91,12 +98,18 @@ fn eq02_live_short_market_value_matches_scaffold_notional_and_is_negative() {
     let mut pf = PortfolioState::new(100_000 * M);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("TSLA", Side::Sell, 5, 200 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "TSLA",
+            Side::Sell,
+            QtyMicros::from_whole_units(5).unwrap(),
+            200 * M,
+            0,
+        )),
     );
 
     let pos = &pf.positions["TSLA"];
     let signed_qty = pos.qty_signed();
-    assert_eq!(signed_qty, -5);
+    assert_eq!(signed_qty, QtyMicros::from_whole_units(-5).unwrap());
 
     let mark_price = 210 * M;
     let mm = marks([("TSLA", mark_price)]);
@@ -122,13 +135,23 @@ fn eq03_partial_fill_fifo_sequence_gross_exposure_matches_scaffold() {
     ] {
         apply_entry(
             &mut pf,
-            LedgerEntry::Fill(Fill::new("MSFT", side, qty, px, 0)),
+            LedgerEntry::Fill(Fill::new(
+                "MSFT",
+                side,
+                QtyMicros::from_whole_units(qty).unwrap(),
+                px,
+                0,
+            )),
         );
     }
 
     let pos = &pf.positions["MSFT"];
     let signed_qty = pos.qty_signed();
-    assert_eq!(signed_qty, 7, "10 + 5 - 8 = 7 remaining long");
+    assert_eq!(
+        signed_qty,
+        QtyMicros::from_whole_units(7).unwrap(),
+        "10 + 5 - 8 = 7 remaining long"
+    );
 
     let mark_price = 65 * M;
     let mm = marks([("MSFT", mark_price)]);
@@ -152,11 +175,23 @@ fn eq04_live_equity_matches_scaffold_nav_for_multi_symbol_book() {
     let mut pf = PortfolioState::new(50_000 * M);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        )),
     );
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("TSLA", Side::Sell, 5, 200 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "TSLA",
+            Side::Sell,
+            QtyMicros::from_whole_units(5).unwrap(),
+            200 * M,
+            0,
+        )),
     );
 
     let mm = marks([("AAPL", 110 * M), ("TSLA", 190 * M)]);
@@ -164,13 +199,13 @@ fn eq04_live_equity_matches_scaffold_nav_for_multi_symbol_book() {
 
     let aapl_value = value_position_economics(mqk_portfolio::PositionEconomicsInput {
         instrument: InstrumentEconomics::equity("equity:US:AAPL", "AAPL", "USD"),
-        signed_qty_micros: pf.positions["AAPL"].qty_signed() * M,
+        signed_qty_micros: pf.positions["AAPL"].qty_signed().raw(),
         mark_price_micros: Some(110 * M),
         account_currency: "USD".to_string(),
     });
     let tsla_value = value_position_economics(mqk_portfolio::PositionEconomicsInput {
         instrument: InstrumentEconomics::equity("equity:US:TSLA", "TSLA", "USD"),
-        signed_qty_micros: pf.positions["TSLA"].qty_signed() * M,
+        signed_qty_micros: pf.positions["TSLA"].qty_signed().raw(),
         mark_price_micros: Some(190 * M),
         account_currency: "USD".to_string(),
     });
@@ -190,11 +225,23 @@ fn eq05_compute_portfolio_weights_nav_matches_aggregate_portfolio_economics_nav(
     let mut pf = PortfolioState::new(50_000 * M);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        )),
     );
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("TSLA", Side::Sell, 5, 200 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "TSLA",
+            Side::Sell,
+            QtyMicros::from_whole_units(5).unwrap(),
+            200 * M,
+            0,
+        )),
     );
 
     let aapl_qty = pf.positions["AAPL"].qty_signed();
@@ -236,13 +283,13 @@ fn eq05_compute_portfolio_weights_nav_matches_aggregate_portfolio_economics_nav(
     // Scaffold seam (ASSET-CORE-04A/04C).
     let aapl_value = value_position_economics(mqk_portfolio::PositionEconomicsInput {
         instrument: InstrumentEconomics::equity("equity:US:AAPL", "AAPL", "USD"),
-        signed_qty_micros: aapl_qty * M,
+        signed_qty_micros: aapl_qty.raw(),
         mark_price_micros: Some(110 * M),
         account_currency: "USD".to_string(),
     });
     let tsla_value = value_position_economics(mqk_portfolio::PositionEconomicsInput {
         instrument: InstrumentEconomics::equity("equity:US:TSLA", "TSLA", "USD"),
-        signed_qty_micros: tsla_qty * M,
+        signed_qty_micros: tsla_qty.raw(),
         mark_price_micros: Some(190 * M),
         account_currency: "USD".to_string(),
     });
@@ -264,11 +311,23 @@ fn eq06_flat_position_values_to_zero_on_both_paths_without_a_mark() {
     let mut pf = PortfolioState::new(10_000 * M);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("NFLX", Side::Buy, 3, 400 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "NFLX",
+            Side::Buy,
+            QtyMicros::from_whole_units(3).unwrap(),
+            400 * M,
+            0,
+        )),
     );
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("NFLX", Side::Sell, 3, 420 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "NFLX",
+            Side::Sell,
+            QtyMicros::from_whole_units(3).unwrap(),
+            420 * M,
+            0,
+        )),
     );
 
     // Live path drops flat positions entirely (accounting.rs: "if flat, drop
@@ -304,14 +363,29 @@ fn sep01_live_accounting_produces_a_correct_position_with_no_economics_types_inv
     let mut pf = PortfolioState::new(100_000 * M);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("GOOG", Side::Buy, 4, 150 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "GOOG",
+            Side::Buy,
+            QtyMicros::from_whole_units(4).unwrap(),
+            150 * M,
+            0,
+        )),
     );
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("GOOG", Side::Sell, 1, 160 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "GOOG",
+            Side::Sell,
+            QtyMicros::from_whole_units(1).unwrap(),
+            160 * M,
+            0,
+        )),
     );
 
-    assert_eq!(pf.positions["GOOG"].qty_signed(), 3);
+    assert_eq!(
+        pf.positions["GOOG"].qty_signed(),
+        QtyMicros::from_whole_units(3).unwrap()
+    );
     // realized pnl on the 1-share sale: (160 - 150) * 1 = 10 * M
     assert_eq!(pf.realized_pnl_micros, 10 * M);
 }
@@ -320,14 +394,36 @@ fn sep01_live_accounting_produces_a_correct_position_with_no_economics_types_inv
 fn sep02_recompute_from_ledger_replay_still_agrees_with_scaffold() {
     let initial_cash = 25_000 * M;
     let ledger = vec![
-        LedgerEntry::Fill(Fill::new("AMZN", Side::Buy, 6, 130 * M, 0)),
-        LedgerEntry::Fill(Fill::new("AMZN", Side::Buy, 2, 140 * M, 0)),
-        LedgerEntry::Fill(Fill::new("AMZN", Side::Sell, 3, 150 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AMZN",
+            Side::Buy,
+            QtyMicros::from_whole_units(6).unwrap(),
+            130 * M,
+            0,
+        )),
+        LedgerEntry::Fill(Fill::new(
+            "AMZN",
+            Side::Buy,
+            QtyMicros::from_whole_units(2).unwrap(),
+            140 * M,
+            0,
+        )),
+        LedgerEntry::Fill(Fill::new(
+            "AMZN",
+            Side::Sell,
+            QtyMicros::from_whole_units(3).unwrap(),
+            150 * M,
+            0,
+        )),
     ];
 
     let (cash, _realized, positions) = recompute_from_ledger(initial_cash, &ledger);
     let signed_qty = positions["AMZN"].qty_signed();
-    assert_eq!(signed_qty, 5, "6 + 2 - 3 = 5 remaining long");
+    assert_eq!(
+        signed_qty,
+        QtyMicros::from_whole_units(5).unwrap(),
+        "6 + 2 - 3 = 5 remaining long"
+    );
 
     let mark_price = 155 * M;
     let mm = marks([("AMZN", mark_price)]);

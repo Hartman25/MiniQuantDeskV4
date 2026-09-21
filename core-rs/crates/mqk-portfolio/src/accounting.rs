@@ -1,9 +1,18 @@
 use std::collections::BTreeMap;
 
-use crate::types::{CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, Side};
+use crate::types::{
+    CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, QtyMicros, Side,
+};
 
-fn mul_qty_price_micros(qty: i64, price_micros: i64) -> i128 {
-    (qty as i128) * (price_micros as i128)
+/// `qty_raw` (QtyMicros raw units, 1e-6 scale) * `price_micros` (1e-6 scale),
+/// descaled back to a plain micros-scale cash value by dividing out the one
+/// extra factor of `QTY_MICROS_SCALE` the quantity operand carries — the
+/// same convention `mqk_portfolio::instrument_economics::checked_notional_micros`
+/// already uses for its qty*price*multiplier product. Integer division
+/// truncates toward zero, losing precision only at sub-micro-dollar
+/// magnitudes no real fill can reach (same trade-off documented there).
+fn mul_qty_price_micros(qty: QtyMicros, price_micros: i64) -> i128 {
+    (qty.raw() as i128) * (price_micros as i128) / (mqk_schemas::QTY_MICROS_SCALE as i128)
 }
 
 fn i128_to_i64_clamp(x: i128) -> i64 {
@@ -47,7 +56,7 @@ fn apply_cash(pf: &mut PortfolioState, c: &CashEntry) {
 ///   - remaining opens short lot
 ///   - cash += qty*price - fee
 pub fn apply_fill(pf: &mut PortfolioState, f: &Fill) {
-    debug_assert!(f.qty > 0);
+    debug_assert!(f.qty.is_positive());
     debug_assert!(f.price_micros >= 0);
     debug_assert!(f.fee_micros >= 0);
 
@@ -86,10 +95,21 @@ pub fn apply_fill(pf: &mut PortfolioState, f: &Fill) {
 }
 
 /// Buy FIFO: covers shorts first, then opens long lot.
-fn buy_fifo(pos: &mut PositionState, realized_pnl_micros: &mut i64, mut qty: i64, buy_px: i64) {
+///
+/// CUTOVER-1C: `qty` is [`QtyMicros`]; every reduction/comparison uses
+/// checked arithmetic. Overflow/underflow here would mean a lot's own
+/// magnitude cannot represent its own quantity, which is unreachable for any
+/// input that passed [`Lot::long`]/[`Lot::short`]'s construction, but is
+/// still never assumed via an unchecked operator.
+fn buy_fifo(
+    pos: &mut PositionState,
+    realized_pnl_micros: &mut i64,
+    mut qty: QtyMicros,
+    buy_px: i64,
+) {
     // cover shorts FIFO
     let mut i = 0usize;
-    while qty > 0 && i < pos.lots.len() {
+    while qty.is_positive() && i < pos.lots.len() {
         if !pos.lots[i].is_short() {
             i += 1;
             continue;
@@ -99,32 +119,45 @@ fn buy_fifo(pos: &mut PositionState, realized_pnl_micros: &mut i64, mut qty: i64
         let entry_px = pos.lots[i].entry_price_micros;
 
         // realized PnL for short cover: (entry_short - buy_px) * coverable
-        let pnl = (entry_px as i128 - buy_px as i128) * (coverable as i128);
+        let pnl = (entry_px as i128 - buy_px as i128) * (coverable.raw() as i128)
+            / (mqk_schemas::QTY_MICROS_SCALE as i128);
         *realized_pnl_micros = realized_pnl_micros.saturating_add(i128_to_i64_clamp(pnl));
 
         // reduce short lot quantity (remember qty_signed is negative)
-        let remaining_abs = pos.lots[i].abs_qty() - coverable;
-        if remaining_abs == 0 {
+        let remaining_abs = pos.lots[i]
+            .abs_qty()
+            .checked_sub(coverable)
+            .expect("coverable is bounded by abs_qty(), so this subtraction cannot underflow");
+        if remaining_abs.is_zero() {
             pos.lots.remove(i); // keep FIFO order; removing current preserves remaining order
         } else {
-            pos.lots[i].qty_signed = -(remaining_abs);
+            pos.lots[i].qty_signed = remaining_abs
+                .checked_neg()
+                .expect("remaining_abs magnitude must be representable as its own negation");
             i += 1;
         }
 
-        qty -= coverable;
+        qty = qty.checked_sub(coverable).expect(
+            "coverable is bounded by qty (via .min()), so this subtraction cannot underflow",
+        );
     }
 
     // remaining opens new long lot
-    if qty > 0 {
+    if qty.is_positive() {
         pos.lots.push(Lot::long(qty, buy_px));
     }
 }
 
 /// Sell FIFO: reduces longs first, then opens short lot.
-fn sell_fifo(pos: &mut PositionState, realized_pnl_micros: &mut i64, mut qty: i64, sell_px: i64) {
+fn sell_fifo(
+    pos: &mut PositionState,
+    realized_pnl_micros: &mut i64,
+    mut qty: QtyMicros,
+    sell_px: i64,
+) {
     // reduce longs FIFO
     let mut i = 0usize;
-    while qty > 0 && i < pos.lots.len() {
+    while qty.is_positive() && i < pos.lots.len() {
         if !pos.lots[i].is_long() {
             i += 1;
             continue;
@@ -134,22 +167,28 @@ fn sell_fifo(pos: &mut PositionState, realized_pnl_micros: &mut i64, mut qty: i6
         let entry_px = pos.lots[i].entry_price_micros;
 
         // realized PnL for long sell: (sell_px - entry_long) * sellable
-        let pnl = (sell_px as i128 - entry_px as i128) * (sellable as i128);
+        let pnl = (sell_px as i128 - entry_px as i128) * (sellable.raw() as i128)
+            / (mqk_schemas::QTY_MICROS_SCALE as i128);
         *realized_pnl_micros = realized_pnl_micros.saturating_add(i128_to_i64_clamp(pnl));
 
-        let remaining_abs = pos.lots[i].abs_qty() - sellable;
-        if remaining_abs == 0 {
+        let remaining_abs = pos.lots[i]
+            .abs_qty()
+            .checked_sub(sellable)
+            .expect("sellable is bounded by abs_qty(), so this subtraction cannot underflow");
+        if remaining_abs.is_zero() {
             pos.lots.remove(i);
         } else {
             pos.lots[i].qty_signed = remaining_abs;
             i += 1;
         }
 
-        qty -= sellable;
+        qty = qty.checked_sub(sellable).expect(
+            "sellable is bounded by qty (via .min()), so this subtraction cannot underflow",
+        );
     }
 
     // remaining opens new short lot
-    if qty > 0 {
+    if qty.is_positive() {
         pos.lots.push(Lot::short(qty, sell_px));
     }
 }

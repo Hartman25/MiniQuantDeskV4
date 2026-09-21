@@ -14,13 +14,13 @@
 //!
 //! # Usage
 //! ```
-//! use mqk_portfolio::{Fill, Ledger, Side, MICROS_SCALE};
+//! use mqk_portfolio::{Fill, Ledger, QtyMicros, Side, MICROS_SCALE};
 //!
 //! let mut ledger = Ledger::new(100_000 * MICROS_SCALE);
-//! ledger.append_fill(Fill::new("AAPL", Side::Buy, 10, 150_000_000, 0))?;
+//! ledger.append_fill(Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150_000_000, 0))?;
 //! let snap = ledger.snapshot();
 //! println!("cash ≈ {}", snap.cash_micros);
-//! assert_eq!(snap.qty_signed("AAPL"), 10);
+//! assert_eq!(snap.qty_signed("AAPL"), QtyMicros::from_whole_units(10).unwrap());
 //! # Ok::<(), mqk_portfolio::LedgerError>(())
 //! ```
 //!
@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     accounting::{apply_fill, recompute_from_ledger},
-    types::{CashEntry, Fill, LedgerEntry, PortfolioState, PositionState},
+    types::{CashEntry, Fill, LedgerEntry, PortfolioState, PositionState, QtyMicros},
     MarkMap,
 };
 
@@ -45,7 +45,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerError {
     /// `Fill.qty` must be strictly positive.
-    NonPositiveQty { qty: i64 },
+    NonPositiveQty { qty: QtyMicros },
     /// `Fill.price_micros` must be strictly positive.
     NonPositivePrice { price_micros: i64 },
     /// `Fill.fee_micros` must be non-negative.
@@ -109,11 +109,11 @@ pub struct LedgerSnapshot {
 
 impl LedgerSnapshot {
     /// Signed net quantity for a symbol (0 if not held).
-    pub fn qty_signed(&self, symbol: &str) -> i64 {
+    pub fn qty_signed(&self, symbol: &str) -> QtyMicros {
         self.positions
             .get(symbol)
             .map(|p| p.qty_signed())
-            .unwrap_or(0)
+            .unwrap_or(QtyMicros::ZERO)
     }
 
     /// Whether the portfolio is flat (no open positions).
@@ -232,12 +232,12 @@ impl Ledger {
     }
 
     /// Signed net quantity for a symbol (0 if flat / not held).
-    pub fn qty_signed(&self, symbol: &str) -> i64 {
+    pub fn qty_signed(&self, symbol: &str) -> QtyMicros {
         self.state
             .positions
             .get(symbol)
             .map(|p| p.qty_signed())
-            .unwrap_or(0)
+            .unwrap_or(QtyMicros::ZERO)
     }
 
     /// `true` if no open positions exist.
@@ -278,7 +278,7 @@ impl Ledger {
         if fill.symbol.trim().is_empty() {
             return Err(LedgerError::EmptySymbol);
         }
-        if fill.qty <= 0 {
+        if !fill.qty.is_positive() {
             return Err(LedgerError::NonPositiveQty { qty: fill.qty });
         }
         if fill.price_micros <= 0 {
@@ -307,7 +307,13 @@ mod tests {
     const M: i64 = MICROS_SCALE;
 
     fn fill(symbol: &str, side: Side, qty: i64, price: i64, fee: i64) -> Fill {
-        Fill::new(symbol, side, qty, price * M, fee * M)
+        Fill::new(
+            symbol,
+            side,
+            QtyMicros::from_whole_units(qty).unwrap(),
+            price * M,
+            fee * M,
+        )
     }
 
     // Helper: construct a Fill bypassing Fill::new()'s debug_assert! guards,
@@ -316,7 +322,7 @@ mod tests {
         Fill {
             symbol: symbol.to_string(),
             side,
-            qty,
+            qty: QtyMicros::from_whole_units(qty).unwrap(),
             price_micros,
             fee_micros,
         }
@@ -328,7 +334,12 @@ mod tests {
     fn rejects_zero_qty() {
         let mut l = Ledger::new(100_000 * M);
         let err = l.append_fill(bad_fill("AAPL", Side::Buy, 0, 100 * M, 0));
-        assert_eq!(err, Err(LedgerError::NonPositiveQty { qty: 0 }));
+        assert_eq!(
+            err,
+            Err(LedgerError::NonPositiveQty {
+                qty: QtyMicros::ZERO
+            })
+        );
         assert_eq!(l.entry_count(), 0); // ledger not mutated
     }
 
@@ -336,7 +347,12 @@ mod tests {
     fn rejects_negative_qty() {
         let mut l = Ledger::new(100_000 * M);
         let err = l.append_fill(bad_fill("AAPL", Side::Buy, -1, 100 * M, 0));
-        assert_eq!(err, Err(LedgerError::NonPositiveQty { qty: -1 }));
+        assert_eq!(
+            err,
+            Err(LedgerError::NonPositiveQty {
+                qty: QtyMicros::from_whole_units(-1).unwrap()
+            })
+        );
     }
 
     #[test]
@@ -363,14 +379,26 @@ mod tests {
     #[test]
     fn rejects_empty_symbol() {
         let mut l = Ledger::new(100_000 * M);
-        let err = l.append_fill(Fill::new("", Side::Buy, 10, 100 * M, 0));
+        let err = l.append_fill(Fill::new(
+            "",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        ));
         assert_eq!(err, Err(LedgerError::EmptySymbol));
     }
 
     #[test]
     fn rejects_whitespace_symbol() {
         let mut l = Ledger::new(100_000 * M);
-        let err = l.append_fill(Fill::new("  ", Side::Buy, 10, 100 * M, 0));
+        let err = l.append_fill(Fill::new(
+            "  ",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        ));
         assert_eq!(err, Err(LedgerError::EmptySymbol));
     }
 
@@ -427,7 +455,10 @@ mod tests {
         l.append_fill(fill("MSFT", Side::Buy, 20, 300, 0)).unwrap();
         l.append_fill(fill("MSFT", Side::Sell, 5, 310, 0)).unwrap();
 
-        assert_eq!(l.qty_signed("MSFT"), 15);
+        assert_eq!(
+            l.qty_signed("MSFT"),
+            QtyMicros::from_whole_units(15).unwrap()
+        );
         // realized = (310-300)*5 = $50
         assert_eq!(l.realized_pnl_micros(), 50 * M);
     }
@@ -436,8 +467,14 @@ mod tests {
     fn fees_reduce_cash() {
         let mut l = Ledger::new(100_000 * M);
         // Buy 10 @ $100 with $1 fee (= 1_000_000 micros)
-        l.append_fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, M))
-            .unwrap();
+        l.append_fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            M,
+        ))
+        .unwrap();
 
         // cash = 100_000 - 10*100 - 1 = 98_999
         assert_eq!(l.cash_micros(), 98_999 * M);
@@ -470,7 +507,10 @@ mod tests {
         let snap = l.snapshot();
         assert_eq!(snap.cash_micros, 10_000 * M - 5 * 100 * M);
         assert_eq!(snap.entry_count, 1);
-        assert_eq!(snap.qty_signed("AAPL"), 5);
+        assert_eq!(
+            snap.qty_signed("AAPL"),
+            QtyMicros::from_whole_units(5).unwrap()
+        );
         assert!(!snap.is_flat());
     }
 
@@ -524,6 +564,6 @@ mod tests {
     fn snapshot_qty_signed_zero_for_unknown_symbol() {
         let l = Ledger::new(1_000 * M);
         let snap = l.snapshot();
-        assert_eq!(snap.qty_signed("UNKNOWN"), 0);
+        assert_eq!(snap.qty_signed("UNKNOWN"), QtyMicros::ZERO);
     }
 }

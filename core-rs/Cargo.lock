@@ -1962,6 +1962,9 @@ dependencies = [
 [[package]]
 name = "mqk-portfolio"
 version = "0.1.0"
+dependencies = [
+ "mqk-schemas",
+]
 
 [[package]]
 name = "mqk-promotion"

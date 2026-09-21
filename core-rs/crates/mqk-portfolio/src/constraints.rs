@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::types::QtyMicros;
 use crate::valuation::{
     compute_portfolio_weights, PortfolioWeightsSnapshot, PositionMark, PositionWeightInput,
 };
@@ -521,7 +522,7 @@ pub fn evaluate_sector_risk(
     sector_map: &HashMap<String, String>,
     sector_limits_bps: &HashMap<String, i64>,
     candidate_symbol: &str,
-    candidate_signed_delta_qty: i64,
+    candidate_signed_delta_qty: QtyMicros,
 ) -> SectorRiskEvaluation {
     if sector_limits_bps.is_empty() {
         return sector_risk_passthrough("sector_risk_disabled", None);
@@ -542,7 +543,24 @@ pub fn evaluate_sector_risk(
         .iter_mut()
         .find(|p| p.symbol == candidate_symbol)
     {
-        Some(p) => p.signed_qty = p.signed_qty.saturating_add(candidate_signed_delta_qty),
+        Some(p) => match p.signed_qty.checked_add(candidate_signed_delta_qty) {
+            Some(sum) => p.signed_qty = sum,
+            // CUTOVER-1C: overflow fails closed as a denial, never a panic
+            // or a silent wrap -- this evaluator must always return an
+            // answer, even for an economically-impossible candidate delta.
+            None => {
+                return sector_risk_fail_closed(
+                    "sector_candidate_delta_overflow",
+                    sector,
+                    max_weight_bps,
+                    format!(
+                        "candidate delta {candidate_signed_delta_qty} overflowed against \
+                         existing position {p_qty}",
+                        p_qty = p.signed_qty
+                    ),
+                )
+            }
+        },
         None => prospective_positions.push(PositionWeightInput {
             symbol: candidate_symbol.to_string(),
             signed_qty: candidate_signed_delta_qty,

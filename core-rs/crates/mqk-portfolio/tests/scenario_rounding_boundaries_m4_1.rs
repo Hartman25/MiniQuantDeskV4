@@ -13,7 +13,8 @@
 //!    detected at 2^53 + 1, a value f64 cannot represent exactly
 
 use mqk_portfolio::{
-    apply_entry, enforce_max_gross_exposure, marks, Fill, LedgerEntry, PortfolioState, Side,
+    apply_entry, enforce_max_gross_exposure, marks, Fill, LedgerEntry, PortfolioState, QtyMicros,
+    Side,
 };
 
 const M: i64 = 1_000_000; // micro-dollar scale factor
@@ -24,7 +25,13 @@ fn build_portfolio(symbol: &str) -> PortfolioState {
     let mut pf = PortfolioState::new(100_000 * M);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new(symbol, Side::Buy, 1, 100 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            symbol,
+            Side::Buy,
+            QtyMicros::from_whole_units(1).unwrap(),
+            100 * M,
+            0,
+        )),
     );
     pf
 }

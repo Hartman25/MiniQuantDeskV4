@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 
-use crate::types::PositionState;
+use crate::types::{PositionState, QtyMicros};
 use crate::MarkMap;
 
-fn mul_qty_price_micros_i128(qty: i64, price_micros: i64) -> i128 {
-    (qty as i128) * (price_micros as i128)
+/// `qty_raw` (QtyMicros raw units) * `price_micros`, descaled by
+/// `QTY_MICROS_SCALE` — see `accounting::mul_qty_price_micros`'s identical
+/// convention.
+fn mul_qty_price_micros_i128(qty: QtyMicros, price_micros: i64) -> i128 {
+    (qty.raw() as i128) * (price_micros as i128) / (mqk_schemas::QTY_MICROS_SCALE as i128)
 }
 
 fn i128_to_i64_clamp(x: i128) -> i64 {
@@ -47,7 +50,10 @@ pub fn compute_exposure_micros(
     for (sym, pos) in positions {
         let mark = *marks.get(sym).unwrap_or(&0);
         let qty = pos.qty_signed();
-        gross += mul_qty_price_micros_i128(qty.abs(), mark);
+        let qty_abs = qty
+            .checked_abs()
+            .expect("position quantity magnitude must be representable as its own absolute value");
+        gross += mul_qty_price_micros_i128(qty_abs, mark);
         net += mul_qty_price_micros_i128(qty, mark);
     }
 
@@ -72,10 +78,14 @@ pub fn compute_unrealized_pnl_micros(
         for lot in &pos.lots {
             let entry = lot.entry_price_micros;
             let q = lot.qty_signed;
-            if q > 0 {
-                pnl += (mark as i128 - entry as i128) * (q as i128);
-            } else if q < 0 {
-                pnl += (entry as i128 - mark as i128) * ((-q) as i128);
+            let scale = mqk_schemas::QTY_MICROS_SCALE as i128;
+            if q.is_positive() {
+                pnl += (mark as i128 - entry as i128) * (q.raw() as i128) / scale;
+            } else if q.is_negative() {
+                let abs_q = q.checked_abs().expect(
+                    "lot quantity magnitude must be representable as its own absolute value",
+                );
+                pnl += (entry as i128 - mark as i128) * (abs_q.raw() as i128) / scale;
             }
         }
     }

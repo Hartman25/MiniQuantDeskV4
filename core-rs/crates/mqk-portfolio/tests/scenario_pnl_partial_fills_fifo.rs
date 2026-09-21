@@ -1,6 +1,6 @@
 use mqk_portfolio::{
     apply_entry, compute_equity_micros, compute_exposure_micros, compute_unrealized_pnl_micros,
-    marks, recompute_from_ledger, Fill, LedgerEntry, PortfolioState, Side,
+    marks, recompute_from_ledger, Fill, LedgerEntry, PortfolioState, QtyMicros, Side,
 };
 
 const M: i64 = 1_000_000;
@@ -13,19 +13,37 @@ fn scenario_pnl_correctness_under_partial_fills_fifo() {
     // Buy 10 @ $100
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        )),
     );
 
     // Buy 10 @ $110
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 110 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            110 * M,
+            0,
+        )),
     );
 
     // Sell 5 @ $120 (FIFO sells from first lot at $100)
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Sell, 5, 120 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Sell,
+            QtyMicros::from_whole_units(5).unwrap(),
+            120 * M,
+            0,
+        )),
     );
 
     // THEN: realized PnL = (120 - 100) * 5 = $100
@@ -33,7 +51,7 @@ fn scenario_pnl_correctness_under_partial_fills_fifo() {
 
     // Remaining position: +15 shares
     let pos = pf.positions.get("AAPL").expect("AAPL position exists");
-    assert_eq!(pos.qty_signed(), 15);
+    assert_eq!(pos.qty_signed(), QtyMicros::from_whole_units(15).unwrap());
 
     // Marks at $115
     let mk = marks([("AAPL", 115 * M)]);

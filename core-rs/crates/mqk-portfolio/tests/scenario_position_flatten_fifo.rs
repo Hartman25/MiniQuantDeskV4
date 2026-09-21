@@ -1,4 +1,4 @@
-use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, Side};
+use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, QtyMicros, Side};
 
 const M: i64 = 1_000_000;
 
@@ -9,13 +9,25 @@ fn scenario_position_flatten_behavior() {
     // Buy 10 @ 100
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            100 * M,
+            0,
+        )),
     );
 
     // Sell 10 @ 90 (flatten)
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("AAPL", Side::Sell, 10, 90 * M, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "AAPL",
+            Side::Sell,
+            QtyMicros::from_whole_units(10).unwrap(),
+            90 * M,
+            0,
+        )),
     );
 
     // Position should be removed (flat)

@@ -63,7 +63,7 @@ use std::collections::BTreeMap;
 use mqk_portfolio::{
     compute_portfolio_weights, validate_order_against_economics, value_position_economics,
     InstrumentEconomics, InstrumentEconomicsTruthState, OrderEconomicsViolation,
-    PositionEconomicsInput, PositionMark, PositionWeightInput,
+    PositionEconomicsInput, PositionMark, PositionWeightInput, QtyMicros,
 };
 
 const M: i64 = 1_000_000; // micro-dollar / micro-unit scale factor
@@ -579,7 +579,7 @@ fn order02_flat_position_with_invalid_multiplier_still_fails_closed() {
 fn regr01_compute_portfolio_weights_equity_behavior_is_unchanged() {
     let positions = vec![PositionWeightInput {
         symbol: "AAPL".to_string(),
-        signed_qty: 10,
+        signed_qty: QtyMicros::from_whole_units(10).unwrap(),
     }];
     let mut marks = BTreeMap::new();
     marks.insert(
@@ -603,7 +603,7 @@ fn regr02_evaluate_sector_risk_disabled_passthrough_is_unchanged() {
 
     let positions = vec![PositionWeightInput {
         symbol: "SPY".to_string(),
-        signed_qty: 0,
+        signed_qty: QtyMicros::ZERO,
     }];
     let marks: BTreeMap<String, PositionMark> = BTreeMap::new();
     let sector_map: HashMap<String, String> = HashMap::new();
@@ -618,7 +618,7 @@ fn regr02_evaluate_sector_risk_disabled_passthrough_is_unchanged() {
         &sector_map,
         &sector_limits_bps,
         "SPY",
-        0,
+        QtyMicros::ZERO,
     );
     assert!(evaluation.allowed);
     assert_eq!(evaluation.truth_state, "sector_risk_disabled");

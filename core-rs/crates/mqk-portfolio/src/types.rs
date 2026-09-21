@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+pub use mqk_schemas::QtyMicros;
+
 /// BUY or SELL for fills.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -9,6 +11,12 @@ pub enum Side {
 
 /// A single executed fill (the accounting atom).
 ///
+/// CUTOVER-1C: `qty` is [`QtyMicros`] (fractional-capable, 1e-6 scale) —
+/// previously a plain whole-unit `i64` share/contract count. A whole equity
+/// share is `QtyMicros::from_whole_units(1)` (raw `1_000_000`); a fractional
+/// Crypto fill (e.g. 0.0001 BTC) is exactly representable and never rounded
+/// or truncated on this path.
+///
 /// qty is always positive.
 /// price_micros is price per unit in micros (1e-6).
 /// fee_micros is absolute cash fee in micros (>= 0).
@@ -16,7 +24,7 @@ pub enum Side {
 pub struct Fill {
     pub symbol: String,
     pub side: Side,
-    pub qty: i64,
+    pub qty: QtyMicros,
     pub price_micros: i64,
     pub fee_micros: i64,
 }
@@ -25,11 +33,11 @@ impl Fill {
     pub fn new<S: Into<String>>(
         symbol: S,
         side: Side,
-        qty: i64,
+        qty: QtyMicros,
         price_micros: i64,
         fee_micros: i64,
     ) -> Self {
-        debug_assert!(qty > 0, "Fill.qty must be > 0");
+        debug_assert!(qty.is_positive(), "Fill.qty must be > 0");
         debug_assert!(price_micros >= 0, "Fill.price_micros must be >= 0");
         debug_assert!(fee_micros >= 0, "Fill.fee_micros must be >= 0");
         Self {
@@ -69,39 +77,48 @@ pub enum LedgerEntry {
 
 /// A FIFO lot. qty_signed carries direction:
 /// +qty = long lot, -qty = short lot.
+///
+/// CUTOVER-1C: `qty_signed` is [`QtyMicros`] raw units — see [`Fill`]'s doc
+/// for the scale convention. Negation uses `QtyMicros::checked_neg`, which
+/// fails closed on `i64::MIN` (never reachable from a real quantity, but
+/// never silently wrapped either).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lot {
-    pub qty_signed: i64,
+    pub qty_signed: QtyMicros,
     pub entry_price_micros: i64,
 }
 
 impl Lot {
-    pub fn long(qty: i64, entry_price_micros: i64) -> Self {
-        debug_assert!(qty > 0);
+    pub fn long(qty: QtyMicros, entry_price_micros: i64) -> Self {
+        debug_assert!(qty.is_positive());
         Self {
             qty_signed: qty,
             entry_price_micros,
         }
     }
 
-    pub fn short(qty: i64, entry_price_micros: i64) -> Self {
-        debug_assert!(qty > 0);
+    pub fn short(qty: QtyMicros, entry_price_micros: i64) -> Self {
+        debug_assert!(qty.is_positive());
         Self {
-            qty_signed: -qty,
+            qty_signed: qty
+                .checked_neg()
+                .expect("lot quantity magnitude must be representable as its own negation"),
             entry_price_micros,
         }
     }
 
     pub fn is_long(&self) -> bool {
-        self.qty_signed > 0
+        self.qty_signed.is_positive()
     }
 
     pub fn is_short(&self) -> bool {
-        self.qty_signed < 0
+        self.qty_signed.is_negative()
     }
 
-    pub fn abs_qty(&self) -> i64 {
-        self.qty_signed.abs()
+    pub fn abs_qty(&self) -> QtyMicros {
+        self.qty_signed
+            .checked_abs()
+            .expect("lot quantity magnitude must be representable as its own absolute value")
     }
 }
 
@@ -121,13 +138,19 @@ impl PositionState {
         }
     }
 
-    /// Signed position quantity (+long, -short, 0 flat).
-    pub fn qty_signed(&self) -> i64 {
-        self.lots.iter().map(|l| l.qty_signed).sum()
+    /// Signed position quantity (+long, -short, 0 flat). Checked summation:
+    /// overflow across lots panics rather than silently wrapping (CUTOVER-1C
+    /// #9/#10) -- unreachable for any realistic position size, but never
+    /// assumed.
+    pub fn qty_signed(&self) -> QtyMicros {
+        self.lots.iter().fold(QtyMicros::ZERO, |acc, l| {
+            acc.checked_add(l.qty_signed)
+                .expect("position quantity overflowed QtyMicros summing lots")
+        })
     }
 
     pub fn is_flat(&self) -> bool {
-        self.qty_signed() == 0
+        self.qty_signed().is_zero()
     }
 }
 

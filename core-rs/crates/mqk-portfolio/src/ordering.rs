@@ -15,11 +15,11 @@
 //! # Usage
 //!
 //! ```
-//! use mqk_portfolio::{TaggedFill, Fill, Side, Ledger, apply_fills_canonical, MICROS_SCALE};
+//! use mqk_portfolio::{TaggedFill, Fill, QtyMicros, Side, Ledger, apply_fills_canonical, MICROS_SCALE};
 //!
 //! let fills = vec![
-//!     TaggedFill { seq_no: 2, fill: Fill::new("AAPL", Side::Buy, 5, 100 * MICROS_SCALE, 0) },
-//!     TaggedFill { seq_no: 1, fill: Fill::new("AAPL", Side::Buy, 5, 100 * MICROS_SCALE, 0) },
+//!     TaggedFill { seq_no: 2, fill: Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), 100 * MICROS_SCALE, 0) },
+//!     TaggedFill { seq_no: 1, fill: Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), 100 * MICROS_SCALE, 0) },
 //! ];
 //! let mut ledger = Ledger::new(100_000 * MICROS_SCALE);
 //! apply_fills_canonical(&mut ledger, fills).unwrap();

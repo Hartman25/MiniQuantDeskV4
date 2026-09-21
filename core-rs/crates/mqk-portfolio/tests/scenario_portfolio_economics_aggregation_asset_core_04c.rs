@@ -41,7 +41,7 @@ use mqk_portfolio::{
     aggregate_portfolio_economics, compute_portfolio_weights, evaluate_sector_risk,
     value_position_economics, InstrumentEconomics, InstrumentEconomicsTruthState,
     PortfolioEconomicsInput, PortfolioEconomicsTruthState, PositionEconomicsInput,
-    PositionEconomicsValue, PositionMark, PositionWeightInput,
+    PositionEconomicsValue, PositionMark, PositionWeightInput, QtyMicros,
 };
 
 const M: i64 = 1_000_000; // micro-dollar / micro-unit scale factor
@@ -613,7 +613,7 @@ fn regr01_value_position_economics_asset_core_04a_is_unchanged() {
 fn regr02_compute_portfolio_weights_live_weights_01_is_unchanged() {
     let positions = vec![PositionWeightInput {
         symbol: "AAPL".to_string(),
-        signed_qty: 10,
+        signed_qty: QtyMicros::from_whole_units(10).unwrap(),
     }];
     let mut marks = BTreeMap::new();
     marks.insert(
@@ -636,7 +636,7 @@ fn regr03_evaluate_sector_risk_etf_risk_closure_01_is_unchanged() {
 
     let positions = vec![PositionWeightInput {
         symbol: "SPY".to_string(),
-        signed_qty: 0,
+        signed_qty: QtyMicros::ZERO,
     }];
     let marks: BTreeMap<String, PositionMark> = BTreeMap::new();
     let sector_map: HashMap<String, String> = HashMap::new();
@@ -649,7 +649,7 @@ fn regr03_evaluate_sector_risk_etf_risk_closure_01_is_unchanged() {
         &sector_map,
         &sector_limits_bps,
         "SPY",
-        0,
+        QtyMicros::ZERO,
     );
     assert!(evaluation.allowed);
     assert_eq!(evaluation.truth_state, "sector_risk_disabled");

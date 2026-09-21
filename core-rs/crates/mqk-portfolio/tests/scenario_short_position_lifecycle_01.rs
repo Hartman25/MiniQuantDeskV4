@@ -40,7 +40,7 @@
 //! | SP14 | Two-step cover lifecycle: integrity check at every stage                     |
 //! | SP15 | Negative position is not confused with zero/missing                          |
 
-use mqk_portfolio::{Fill, Ledger, Side, MICROS_SCALE};
+use mqk_portfolio::{Fill, Ledger, QtyMicros, Side, MICROS_SCALE};
 
 const M: i64 = MICROS_SCALE; // 1_000_000 micros per dollar
 const INITIAL_CASH: i64 = 100_000 * M; // $100,000 starting cash
@@ -50,11 +50,23 @@ fn make_ledger() -> Ledger {
 }
 
 fn sell_fill(symbol: &str, qty: i64, price_dollars: i64) -> Fill {
-    Fill::new(symbol, Side::Sell, qty, price_dollars * M, 0)
+    Fill::new(
+        symbol,
+        Side::Sell,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        price_dollars * M,
+        0,
+    )
 }
 
 fn buy_fill(symbol: &str, qty: i64, price_dollars: i64) -> Fill {
-    Fill::new(symbol, Side::Buy, qty, price_dollars * M, 0)
+    Fill::new(
+        symbol,
+        Side::Buy,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        price_dollars * M,
+        0,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +80,8 @@ fn sp01_sell_from_flat_creates_negative_position() {
 
     let qty = ledger.qty_signed("GME");
     assert_eq!(
-        qty, -100,
+        qty,
+        QtyMicros::from_whole_units(-100).unwrap(),
         "SP01: sell 100 from flat must create qty_signed=-100; got {qty}"
     );
     assert!(
@@ -93,7 +106,8 @@ fn sp02_sell_again_while_short_increases_negative_position() {
 
     let qty = ledger.qty_signed("GME");
     assert_eq!(
-        qty, -150,
+        qty,
+        QtyMicros::from_whole_units(-150).unwrap(),
         "SP02: selling 50 more while at -100 must yield qty_signed=-150; got {qty}"
     );
     assert!(
@@ -114,7 +128,8 @@ fn sp03_partial_cover_leaves_negative_position() {
 
     let qty = ledger.qty_signed("GME");
     assert_eq!(
-        qty, -70,
+        qty,
+        QtyMicros::from_whole_units(-70).unwrap(),
         "SP03: covering 30 of -100 short must leave qty_signed=-70; got {qty}"
     );
     assert!(!ledger.is_flat(), "SP03: partial cover must not reach flat");
@@ -136,7 +151,8 @@ fn sp04_full_cover_returns_to_flat() {
 
     let qty = ledger.qty_signed("GME");
     assert_eq!(
-        qty, 0,
+        qty,
+        QtyMicros::from_whole_units(0).unwrap(),
         "SP04: covering exact 100 of a -100 short must return to flat; got {qty}"
     );
     assert!(
@@ -165,7 +181,8 @@ fn sp05_buy_beyond_cover_crosses_to_long() {
 
     let qty = ledger.qty_signed("GME");
     assert_eq!(
-        qty, 50,
+        qty,
+        QtyMicros::from_whole_units(50).unwrap(),
         "SP05: buying 150 to cover -100 short must produce residual long qty_signed=+50; got {qty}"
     );
     assert!(
@@ -257,11 +274,12 @@ fn sp08_qty_signed_is_negative_for_short() {
 
     let qty = ledger.qty_signed("TSLA");
     assert!(
-        qty < 0,
+        qty < QtyMicros::ZERO,
         "SP08: qty_signed for a short position must be negative; got {qty}"
     );
     assert_eq!(
-        qty, -75,
+        qty,
+        QtyMicros::from_whole_units(-75).unwrap(),
         "SP08: qty_signed must equal -(sell qty) = -75; got {qty}"
     );
 }
@@ -282,11 +300,12 @@ fn sp09_short_position_is_not_absent() {
     );
     let qty = snap.qty_signed("NVDA");
     assert!(
-        qty < 0,
+        qty < QtyMicros::ZERO,
         "SP09: positions map must store negative qty for short; got {qty}"
     );
     assert_ne!(
-        qty, 0,
+        qty,
+        QtyMicros::from_whole_units(0).unwrap(),
         "SP09: short position is not flat/absent (qty must not be 0)"
     );
 }
@@ -309,7 +328,10 @@ fn sp10_integrity_holds_through_full_short_lifecycle() {
         ledger.verify_integrity(),
         "SP10: integrity after opening short"
     );
-    assert_eq!(ledger.qty_signed("SPY"), -200);
+    assert_eq!(
+        ledger.qty_signed("SPY"),
+        QtyMicros::from_whole_units(-200).unwrap()
+    );
 
     // Stage 2: add to short
     ledger.append_fill(sell_fill("SPY", 100, 495)).unwrap();
@@ -317,7 +339,10 @@ fn sp10_integrity_holds_through_full_short_lifecycle() {
         ledger.verify_integrity(),
         "SP10: integrity after adding to short"
     );
-    assert_eq!(ledger.qty_signed("SPY"), -300);
+    assert_eq!(
+        ledger.qty_signed("SPY"),
+        QtyMicros::from_whole_units(-300).unwrap()
+    );
 
     // Stage 3: partial cover (buy 100 from -300)
     // FIFO covers from the first lot (200 @ $500): covers 100 → lot becomes -100 @ $500
@@ -327,7 +352,10 @@ fn sp10_integrity_holds_through_full_short_lifecycle() {
         ledger.verify_integrity(),
         "SP10: integrity after partial cover"
     );
-    assert_eq!(ledger.qty_signed("SPY"), -200);
+    assert_eq!(
+        ledger.qty_signed("SPY"),
+        QtyMicros::from_whole_units(-200).unwrap()
+    );
 
     // Stage 4: full cover (buy remaining 200)
     // FIFO: first covers remaining -100 @ $500: pnl = (500-485)*100 = $1500
@@ -365,9 +393,15 @@ fn sp11_paper_fill_proxy_sell_side_opens_short() {
     let mut ledger = make_ledger();
 
     // Mirrors what the fill engine produces: side=Sell, qty=abs_qty (positive)
-    let paper_fill = Fill::new("GME", Side::Sell, 200, 50 * M, 0);
+    let paper_fill = Fill::new(
+        "GME",
+        Side::Sell,
+        QtyMicros::from_whole_units(200).unwrap(),
+        50 * M,
+        0,
+    );
     assert!(
-        paper_fill.qty > 0,
+        paper_fill.qty > QtyMicros::ZERO,
         "SP11: paper fill qty must be positive (fill engine P1-01 invariant)"
     );
 
@@ -375,11 +409,12 @@ fn sp11_paper_fill_proxy_sell_side_opens_short() {
 
     let qty = ledger.qty_signed("GME");
     assert_eq!(
-        qty, -200,
+        qty,
+        QtyMicros::from_whole_units(-200).unwrap(),
         "SP11: Side::Sell fill qty=200 must open short lot qty_signed=-200; got {qty}"
     );
     assert!(
-        qty < 0,
+        qty < QtyMicros::ZERO,
         "SP11: accounting result of Side::Sell on flat position must be negative"
     );
     assert!(
@@ -402,14 +437,29 @@ fn sp12_paper_cover_proxy_buy_side_covers_short() {
 
     // Open the short (simulating fill engine sell output)
     ledger
-        .append_fill(Fill::new("GME", Side::Sell, 200, 50 * M, 0))
+        .append_fill(Fill::new(
+            "GME",
+            Side::Sell,
+            QtyMicros::from_whole_units(200).unwrap(),
+            50 * M,
+            0,
+        ))
         .unwrap();
-    assert_eq!(ledger.qty_signed("GME"), -200);
+    assert_eq!(
+        ledger.qty_signed("GME"),
+        QtyMicros::from_whole_units(-200).unwrap()
+    );
 
     // Mirrors what the fill engine produces for buy-to-cover: side=Buy, qty > 0
-    let cover_fill = Fill::new("GME", Side::Buy, 200, 45 * M, 0);
+    let cover_fill = Fill::new(
+        "GME",
+        Side::Buy,
+        QtyMicros::from_whole_units(200).unwrap(),
+        45 * M,
+        0,
+    );
     assert!(
-        cover_fill.qty > 0,
+        cover_fill.qty > QtyMicros::ZERO,
         "SP12: cover fill qty must be positive (fill engine P1-01 invariant)"
     );
 
@@ -421,7 +471,8 @@ fn sp12_paper_cover_proxy_buy_side_covers_short() {
     );
     let qty = ledger.qty_signed("GME");
     assert_eq!(
-        qty, 0,
+        qty,
+        QtyMicros::from_whole_units(0).unwrap(),
         "SP12: qty_signed after full cover must be 0; got {qty}"
     );
     assert!(
@@ -440,16 +491,28 @@ fn sp12_paper_cover_proxy_buy_side_covers_short() {
 
 #[test]
 fn sp13_paper_fill_qty_is_always_absolute_positive() {
-    let sell = Fill::new("GME", Side::Sell, 100, 50 * M, 0);
-    let buy = Fill::new("GME", Side::Buy, 100, 45 * M, 0);
+    let sell = Fill::new(
+        "GME",
+        Side::Sell,
+        QtyMicros::from_whole_units(100).unwrap(),
+        50 * M,
+        0,
+    );
+    let buy = Fill::new(
+        "GME",
+        Side::Buy,
+        QtyMicros::from_whole_units(100).unwrap(),
+        45 * M,
+        0,
+    );
 
     assert!(
-        sell.qty > 0,
+        sell.qty > QtyMicros::ZERO,
         "SP13: sell fill qty must be positive (absolute); got {}",
         sell.qty
     );
     assert!(
-        buy.qty > 0,
+        buy.qty > QtyMicros::ZERO,
         "SP13: buy fill qty must be positive (absolute); got {}",
         buy.qty
     );
@@ -476,7 +539,7 @@ fn sp14_two_step_cover_lifecycle_integrity_at_every_stage() {
     ledger.append_fill(sell_fill("AAPL", 100, 180)).unwrap();
     assert_eq!(
         ledger.qty_signed("AAPL"),
-        -100,
+        QtyMicros::from_whole_units(-100).unwrap(),
         "SP14 stage 1: qty must be -100"
     );
     assert!(ledger.verify_integrity(), "SP14: integrity at stage 1");
@@ -486,7 +549,7 @@ fn sp14_two_step_cover_lifecycle_integrity_at_every_stage() {
     ledger.append_fill(buy_fill("AAPL", 40, 170)).unwrap();
     assert_eq!(
         ledger.qty_signed("AAPL"),
-        -60,
+        QtyMicros::from_whole_units(-60).unwrap(),
         "SP14 stage 2: qty must be -60 after covering 40"
     );
     assert!(!ledger.is_flat(), "SP14: partial cover must not be flat");
@@ -497,7 +560,7 @@ fn sp14_two_step_cover_lifecycle_integrity_at_every_stage() {
     ledger.append_fill(buy_fill("AAPL", 60, 175)).unwrap();
     assert_eq!(
         ledger.qty_signed("AAPL"),
-        0,
+        QtyMicros::ZERO,
         "SP14 stage 3: qty must be 0 after full cover"
     );
     assert!(ledger.is_flat(), "SP14: full cover must be flat");
@@ -524,7 +587,8 @@ fn sp15_negative_position_not_confused_with_zero_or_missing() {
     // Unknown symbol: qty_signed returns 0 (missing, not short)
     let missing_qty = ledger.qty_signed("UNKNOWN");
     assert_eq!(
-        missing_qty, 0,
+        missing_qty,
+        QtyMicros::from_whole_units(0).unwrap(),
         "SP15: missing symbol must return qty_signed=0"
     );
 
@@ -532,7 +596,8 @@ fn sp15_negative_position_not_confused_with_zero_or_missing() {
     ledger.append_fill(sell_fill("GME", 50, 100)).unwrap();
     let short_qty = ledger.qty_signed("GME");
     assert_eq!(
-        short_qty, -50,
+        short_qty,
+        QtyMicros::from_whole_units(-50).unwrap(),
         "SP15: short position must return qty_signed=-50"
     );
 
@@ -551,7 +616,8 @@ fn sp15_negative_position_not_confused_with_zero_or_missing() {
     ledger.append_fill(buy_fill("GME", 50, 95)).unwrap();
     let flat_qty = ledger.qty_signed("GME");
     assert_eq!(
-        flat_qty, 0,
+        flat_qty,
+        QtyMicros::from_whole_units(0).unwrap(),
         "SP15: after full cover, qty_signed must return 0 (flat)"
     );
     assert!(

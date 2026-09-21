@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# CUTOVER-1C: canonical fractional quantity type (QtyMicros). mqk-schemas is
+# a leaf crate (serde/uuid/chrono only) already depended on by every
+# execution-adjacent crate in the workspace -- this is the first and only
+# new Cargo dependency edge mqk-portfolio has ever needed.
+mqk-schemas = { path = "../mqk-schemas" }
