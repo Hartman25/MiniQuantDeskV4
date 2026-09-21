@@ -55,6 +55,7 @@
 //! `AlpacaBrokerAdapter` itself introduces no timestamps or UUIDs.  All
 //! identifiers used in canonical events come from the Alpaca response payload
 //! and are normalised through `normalize_trade_update`.
+pub mod fee_attribution;
 pub mod fill_authority;
 pub mod inbound;
 pub mod normalize;
@@ -62,11 +63,12 @@ pub mod snapshot;
 pub mod types;
 use crate::normalize::normalize_trade_update;
 use crate::types::{
-    AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFetchCursor, AlpacaOpenOrderRaw, AlpacaOrder,
-    AlpacaOrderActivity, AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody,
+    AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFeeActivity, AlpacaFetchCursor, AlpacaOpenOrderRaw,
+    AlpacaOrder, AlpacaOrderActivity, AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody,
     AlpacaReplaceResponse, AlpacaSubmitBody, AlpacaSubmitResponse, AlpacaTradeUpdate,
     AlpacaTradeUpdatesResume,
 };
+pub use fee_attribution::{normalize_fee_activity, FeeAttributionRecord, FeeNormalizeError};
 pub use inbound::{
     build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
     InboundBatch, WsParseError,
@@ -489,6 +491,68 @@ impl AlpacaBrokerAdapter {
                     detail: format!(
                         "fetch_fill_activities_since: pagination made no progress at \
                          page_token={prev_page_token:?}; refusing to loop"
+                    ),
+                });
+            }
+
+            all_activities.extend(activities);
+
+            if page_len < FILL_ACTIVITIES_PAGE_SIZE {
+                break;
+            }
+        }
+
+        Ok(all_activities)
+    }
+
+    // -----------------------------------------------------------------------
+    // CRYPTO-FEE-ATTRIBUTION-01: day-end CFEE/FEE account-activity fetch
+    // -----------------------------------------------------------------------
+    /// Fetch all activities of one Alpaca fee activity type (`"CFEE"` or
+    /// `"FEE"`) since `after_id` (exclusive), paginating to exhaustion.
+    ///
+    /// Mirrors [`Self::fetch_fill_activities_since`]'s pagination and
+    /// no-progress-guard shape exactly, against the type-specific
+    /// `GET /v2/account/activities/{type}` endpoint. Returns raw
+    /// [`AlpacaFeeActivity`] records — no normalization, no ledger
+    /// application; callers pass each record to
+    /// [`fee_attribution::normalize_fee_activity`] and apply the result
+    /// themselves (this crate does not own portfolio/ledger state).
+    ///
+    /// `activity_type` must be one of [`fee_attribution::ALPACA_FEE_ACTIVITY_TYPES`];
+    /// any other value is a caller programming error, not a broker error —
+    /// this function does not validate it beyond passing it into the URL.
+    pub fn fetch_fee_activities_since(
+        &self,
+        activity_type: &str,
+        after_id: Option<&str>,
+    ) -> Result<Vec<AlpacaFeeActivity>, BrokerError> {
+        let mut current_page_token: Option<String> = after_id.map(str::to_owned);
+        let mut all_activities: Vec<AlpacaFeeActivity> = Vec::new();
+
+        loop {
+            let mut path = format!(
+                "/v2/account/activities/{activity_type}?direction=asc&page_size={FILL_ACTIVITIES_PAGE_SIZE}"
+            );
+            if let Some(token) = current_page_token.as_deref() {
+                path.push_str("&page_token=");
+                path.push_str(token);
+            }
+
+            let activities: Vec<AlpacaFeeActivity> = self.get(&path)?;
+            let page_len = activities.len();
+            let prev_page_token = current_page_token.clone();
+
+            if let Some(last) = activities.last() {
+                current_page_token = Some(last.id.clone());
+            }
+
+            if page_len == FILL_ACTIVITIES_PAGE_SIZE && current_page_token == prev_page_token {
+                return Err(BrokerError::Transient {
+                    detail: format!(
+                        "fetch_fee_activities_since: pagination made no progress at \
+                         activity_type={activity_type:?} page_token={prev_page_token:?}; \
+                         refusing to loop"
                     ),
                 });
             }
@@ -1202,6 +1266,79 @@ mod crypto_replace_fractional_filled_qty_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// CRYPTO-FEE-ATTRIBUTION-01: fetch_fee_activities_since proof tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod fetch_fee_activities_since_tests {
+    use super::*;
+    use httpmock::prelude::*;
+
+    #[test]
+    fn single_page_of_cfee_activities_is_returned_in_full() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/v2/account/activities/CFEE")
+                .query_param("direction", "asc");
+            then.status(200).json_body(serde_json::json!([
+                {
+                    "id": "20220812000000000::53be51ba-46f9-43de-b81f-576f241dc680",
+                    "activity_type": "CFEE",
+                    "date": "2022-08-12",
+                    "net_amount": "-0.01",
+                    "description": "Coin Pair Transaction Fee (Non USD)",
+                    "symbol": "BTCUSD",
+                    "qty": "0",
+                    "price": "50000",
+                    "status": "executed"
+                }
+            ]));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let activities = adapter
+            .fetch_fee_activities_since("CFEE", None)
+            .expect("fee activity fetch must succeed");
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].net_amount, "-0.01");
+        mock.assert_hits(1);
+    }
+
+    #[test]
+    fn empty_page_returns_no_activities() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/v2/account/activities/FEE");
+            then.status(200).json_body(serde_json::json!([]));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let activities = adapter
+            .fetch_fee_activities_since("FEE", None)
+            .expect("fee activity fetch must succeed");
+        assert!(activities.is_empty());
+    }
+
+    #[test]
+    fn after_id_is_threaded_through_as_page_token() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/v2/account/activities/CFEE")
+                .query_param("page_token", "prior-activity-id");
+            then.status(200).json_body(serde_json::json!([]));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        adapter
+            .fetch_fee_activities_since("CFEE", Some("prior-activity-id"))
+            .expect("fee activity fetch must succeed");
+        mock.assert_hits(1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public pure functions (exported for testing)
 // ---------------------------------------------------------------------------

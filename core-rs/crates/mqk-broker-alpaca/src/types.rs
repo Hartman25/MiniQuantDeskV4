@@ -312,6 +312,57 @@ pub struct AlpacaOrderActivity {
     pub cum_qty: Option<String>,
 }
 // ---------------------------------------------------------------------------
+// CRYPTO-FEE-ATTRIBUTION-01: day-end fee activity —
+// GET /v2/account/activities/CFEE, GET /v2/account/activities/FEE
+// ---------------------------------------------------------------------------
+
+/// Raw Alpaca day-end fee account activity (legacy Activities REST schema,
+/// not the newer Activity SSE schema).
+///
+/// Alpaca calculates and posts crypto trading fees once per day as a
+/// separate `CFEE` (coin-pair transaction fee) or `FEE` (e.g. TAF/OCC
+/// regulatory fee) account activity — never as part of the synchronous fill
+/// event. This is a distinct wire shape from [`AlpacaOrderActivity`]: it has
+/// no `order_id`/`side`/`cum_qty`, and carries `net_amount` (the confirmed
+/// dollar fee) and `description` instead.
+///
+/// Fields absent from a real payload deserialize to `None` — a fee activity
+/// missing an optional field must not fail the whole page; only a missing
+/// or unparseable `net_amount` (the one field ingestion cannot proceed
+/// without) fails closed, in [`crate::fee_attribution::normalize_fee_activity`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaFeeActivity {
+    /// Unique activity ID. Used as the pagination cursor and as the
+    /// deterministic idempotency key for ledger application (an activity
+    /// must never be applied to the portfolio twice).
+    pub id: String,
+    /// `"CFEE"` or `"FEE"`.
+    pub activity_type: String,
+    /// Calendar date the fee was posted (e.g. `"2022-08-12"`).
+    #[serde(default)]
+    pub date: Option<String>,
+    /// The confirmed dollar fee amount as a decimal string. Negative for a
+    /// debit (the normal case for a fee). This is the ONE field ingestion
+    /// requires — everything else here is descriptive/diagnostic.
+    pub net_amount: String,
+    /// Human-readable description, e.g. `"Coin Pair Transaction Fee (Non USD)"`.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Trading pair symbol this fee is attributed to, when applicable.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Present when the fee was charged in the traded asset itself rather
+    /// than fiat (an asset-denominated fee) — see that case's handling in
+    /// `normalize_fee_activity`.
+    #[serde(default)]
+    pub qty: Option<String>,
+    /// Reference price at the time of the fee, when applicable.
+    #[serde(default)]
+    pub price: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+// ---------------------------------------------------------------------------
 // Snapshot fetch wire types — AP-03
 // GET /v2/account, GET /v2/positions, GET /v2/orders?status=open
 // ---------------------------------------------------------------------------
