@@ -29,7 +29,7 @@ use mqk_backtest::{
     BacktestEconomicsReport, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
     OrderStatus, StrategySizingConfig,
 };
-use mqk_portfolio::{Fill, Side};
+use mqk_portfolio::{Fill, QtyMicros, Side};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -128,6 +128,12 @@ impl From<OrderStatusDto> for OrderStatus {
     }
 }
 
+/// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `qty` stays whole-unit `i64` on the
+/// wire -- mqk-backtest is equities-only (no fractional Crypto quantities
+/// are ever produced here), and this is a durable on-disk artifact format;
+/// widening it to `QtyMicros` would be a gratuitous schema break for a case
+/// this crate never actually exercises. See `whole_qty_signed` in
+/// mqk-backtest's engine.rs for the same reasoning at the live boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FillDto {
     symbol: String,
@@ -142,7 +148,10 @@ impl From<&Fill> for FillDto {
         Self {
             symbol: f.symbol.clone(),
             side: f.side.into(),
-            qty: f.qty,
+            qty: f
+                .qty
+                .to_whole_units_checked()
+                .expect("backtest fills are built exclusively from whole-unit orders"),
             price_micros: f.price_micros,
             fee_micros: f.fee_micros,
         }
@@ -151,7 +160,13 @@ impl From<&Fill> for FillDto {
 
 impl From<FillDto> for Fill {
     fn from(f: FillDto) -> Self {
-        Fill::new(f.symbol, f.side.into(), f.qty, f.price_micros, f.fee_micros)
+        Fill::new(
+            f.symbol,
+            f.side.into(),
+            QtyMicros::from_whole_units(f.qty).expect("FillDto.qty is validated whole-unit i64"),
+            f.price_micros,
+            f.fee_micros,
+        )
     }
 }
 

@@ -930,7 +930,16 @@ fn compute_fifo_trade_pnls(fills: &[mqk_backtest::BacktestFill]) -> Vec<i64> {
 
     for fill in fills {
         let sym = fill.symbol.clone();
-        let qty = fill.qty;
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `fill.qty` (via Deref to
+        // `mqk_portfolio::Fill`) is `QtyMicros`; this FIFO PnL calculator
+        // works in whole-unit shares (mqk-backtest is equities-only, and
+        // every fill here was built from a whole-unit backtest order), so
+        // this conversion can never legitimately observe a fractional
+        // remainder.
+        let qty = fill
+            .qty
+            .to_whole_units_checked()
+            .expect("backtest fills are built exclusively from whole-unit orders");
         let price = fill.price_micros;
         let fee = fill.fee_micros;
 
@@ -1030,9 +1039,13 @@ fn count_exposure_bars(fills: &[mqk_backtest::BacktestFill], equity_curve: &[(i6
         // Apply all fills whose fill_ts <= this bar's timestamp.
         while fill_idx < fills.len() && fills[fill_idx].fill_ts <= bar_ts {
             let f = &fills[fill_idx];
+            let whole_qty = f
+                .qty
+                .to_whole_units_checked()
+                .expect("backtest fills are built exclusively from whole-unit orders");
             let delta = match &f.inner.side {
-                Side::Buy => f.qty,
-                Side::Sell => -f.qty,
+                Side::Buy => whole_qty,
+                Side::Sell => -whole_qty,
             };
             *net_positions.entry(f.symbol.clone()).or_insert(0) += delta;
             fill_idx += 1;
@@ -1704,7 +1717,7 @@ mod tests {
         derive_input_data_hash, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
         OrderStatus,
     };
-    use mqk_portfolio::{Fill, Side};
+    use mqk_portfolio::{Fill, QtyMicros, Side};
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -1740,7 +1753,7 @@ mod tests {
                 order_id,
                 signal_ts: 1_000,
                 fill_ts: 1_000,
-                inner: Fill::new("SPY", Side::Buy, 10, 150_000_000, 5_000),
+                inner: Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150_000_000, 5_000),
             }],
             last_prices: {
                 let mut m = BTreeMap::new();
@@ -2013,7 +2026,7 @@ mod tests {
                 order_id,
                 signal_ts: 1_000,
                 fill_ts: 1_000,
-                inner: Fill::new("SPY", Side::Buy, 10, 150_000_000, 5_000),
+                inner: Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150_000_000, 5_000),
             }],
             last_prices: {
                 let mut m = BTreeMap::new();
@@ -2115,7 +2128,13 @@ mod tests {
             order_id,
             signal_ts: bar_ts,
             fill_ts: bar_ts,
-            inner: Fill::new(symbol, side, qty, price_micros, fee_micros),
+            inner: Fill::new(
+                symbol,
+                side,
+                QtyMicros::from_whole_units(qty).unwrap(),
+                price_micros,
+                fee_micros,
+            ),
         }
     }
 
