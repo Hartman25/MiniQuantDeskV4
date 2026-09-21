@@ -563,7 +563,17 @@ fn fifo_pnls(fills: &[BacktestFill]) -> Vec<i64> {
 
     for fill in fills {
         let sym = fill.symbol.clone();
-        let qty = fill.qty;
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `fill.qty` (via Deref to
+        // `mqk_portfolio::Fill`) is `QtyMicros`; this FIFO PnL calculator
+        // works in whole-unit shares (mirrors the backtest engine's own
+        // equities-only domain -- see engine.rs::whole_qty_signed), and
+        // every fill here was built from a whole-unit backtest order, so
+        // this conversion can never legitimately observe a fractional
+        // remainder.
+        let qty = fill
+            .qty
+            .to_whole_units_checked()
+            .expect("backtest fills are built exclusively from whole-unit orders");
         let price = fill.price_micros;
         let fee = fill.fee_micros;
 

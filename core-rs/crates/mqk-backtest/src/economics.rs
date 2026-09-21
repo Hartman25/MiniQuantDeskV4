@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn bmw_ledger_matches_portfolio_state_at_multiplier_one() {
-        use mqk_portfolio::{apply_fill as pf_apply_fill, Fill, PortfolioState, Side};
+        use mqk_portfolio::{apply_fill as pf_apply_fill, Fill, PortfolioState, QtyMicros, Side};
         use std::collections::BTreeMap;
 
         let initial_cash = 100_000 * M;
@@ -656,7 +656,7 @@ mod tests {
 
         for (is_buy, qty, price, fee) in fills {
             let side = if is_buy { Side::Buy } else { Side::Sell };
-            let fill = Fill::new("AAPL", side, qty, price, fee);
+            let fill = Fill::new("AAPL", side, QtyMicros::from_whole_units(qty).unwrap(), price, fee);
             pf_apply_fill(&mut pf, &fill);
             ledger.apply_fill("AAPL", is_buy, qty, price, fee);
         }

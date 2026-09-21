@@ -24,7 +24,7 @@
 
 use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
 use mqk_execution::{targets_to_order_intents, Side, StrategyOutput, TargetPosition};
-use mqk_portfolio::{apply_fill, compute_equity_micros, PortfolioState, MICROS_SCALE};
+use mqk_portfolio::{apply_fill, compute_equity_micros, PortfolioState, QtyMicros, MICROS_SCALE};
 use mqk_risk::{
     evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput,
     RiskState,
@@ -184,9 +184,9 @@ fn backtest_applies_same_delta_rule_as_direct_call() {
     // Tick 3: no intent (already at 5)
     assert_eq!(report.fills.len(), 2, "expected BUY then SELL");
     assert_eq!(report.fills[0].side, mqk_portfolio::Side::Buy);
-    assert_eq!(report.fills[0].qty, 10);
+    assert_eq!(report.fills[0].qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(report.fills[1].side, mqk_portfolio::Side::Sell);
-    assert_eq!(report.fills[1].qty, 5);
+    assert_eq!(report.fills[1].qty, QtyMicros::from_whole_units(5).unwrap());
 }
 
 // ---------------------------------------------------------------------------

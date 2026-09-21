@@ -1,5 +1,6 @@
 use mqk_backtest::{BacktestConfig, BacktestEngine};
 use mqk_execution::{StrategyOutput, TargetPosition};
+use mqk_portfolio::QtyMicros;
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
 
 const BARS_CSV: &str = include_str!("fixtures/bkt4_bars.csv");
@@ -63,7 +64,7 @@ fn determinism_equity_curve_and_fills_are_stable() {
 
     assert_eq!(report.fills[0].symbol, "TEST");
     assert_eq!(format!("{:?}", report.fills[0].side), "Buy");
-    assert_eq!(report.fills[0].qty, 10);
+    assert_eq!(report.fills[0].qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(report.fills[0].signal_ts, 60);
     assert_eq!(report.fills[0].fill_ts, 120);
     assert_eq!(report.fills[0].price_micros, 1_030_000);
@@ -71,7 +72,7 @@ fn determinism_equity_curve_and_fills_are_stable() {
 
     assert_eq!(report.fills[1].symbol, "TEST");
     assert_eq!(format!("{:?}", report.fills[1].side), "Sell");
-    assert_eq!(report.fills[1].qty, 10);
+    assert_eq!(report.fills[1].qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(report.fills[1].signal_ts, 120);
     assert_eq!(report.fills[1].fill_ts, 180);
     assert_eq!(report.fills[1].price_micros, 1_000_000);

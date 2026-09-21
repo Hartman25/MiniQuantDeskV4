@@ -1,6 +1,6 @@
 use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
 use mqk_execution::{StrategyOutput, TargetPosition};
-use mqk_portfolio::Side as PfSide;
+use mqk_portfolio::{QtyMicros, Side as PfSide};
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
 
 /// BuyOnce: purchases 10 shares at bar 1 (fills at bar 2, the first later
@@ -64,7 +64,7 @@ fn buy_fills_at_high_not_close() {
     assert_eq!(report.fills.len(), 1, "expected exactly 1 fill");
     let fill = &report.fills[0];
     assert_eq!(fill.side, PfSide::Buy);
-    assert_eq!(fill.qty, 10);
+    assert_eq!(fill.qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(fill.signal_ts, bar1.end_ts, "signal made on bar 1");
     assert_eq!(fill.fill_ts, bar2.end_ts, "priced from bar 2, not bar 1");
 
@@ -151,7 +151,7 @@ fn sell_fills_at_low_not_close() {
 
     let sell_fill = &report.fills[1];
     assert_eq!(sell_fill.side, PfSide::Sell);
-    assert_eq!(sell_fill.qty, 10);
+    assert_eq!(sell_fill.qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(
         sell_fill.signal_ts, bars[1].end_ts,
         "sell signalled on bar 2"

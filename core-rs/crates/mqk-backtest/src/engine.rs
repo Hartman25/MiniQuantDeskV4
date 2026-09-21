@@ -27,6 +27,29 @@ use mqk_execution::{targets_to_order_intents, Side as ExecSide};
 
 type PositionBook = BTreeMap<String, i64>;
 
+/// Read a position's signed quantity as whole-unit `i64` shares.
+///
+/// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionState::qty_signed()` returns
+/// `QtyMicros` (fractional-capable, for Crypto). The backtest engine is
+/// equities-only (`PositionBook`, `BacktestOrder.qty`, and every strategy
+/// interface here are whole-unit `i64` by design -- see module docs); every
+/// position it holds is built exclusively from this crate's own whole-unit
+/// `Fill`s (via `whole_qty_to_micros` below), so this conversion can never
+/// legitimately observe a fractional remainder.
+fn whole_qty_signed(p: &PositionState) -> i64 {
+    p.qty_signed()
+        .to_whole_units_checked()
+        .expect("backtest positions are built exclusively from whole-unit fills")
+}
+
+/// Convert a whole-unit `i64` order/fill quantity to `QtyMicros` for the
+/// `mqk_portfolio::Fill` boundary. See `whole_qty_signed` for why the
+/// backtest engine's own domain stays whole-unit `i64`.
+fn whole_qty_to_micros(qty: i64) -> QtyMicros {
+    QtyMicros::from_whole_units(qty)
+        .expect("backtest order/fill qty is validated whole-unit i64 by construction")
+}
+
 use mqk_integrity::{
     evaluate_bar as integrity_evaluate_bar, Bar as IntegrityBar, BarKey, FeedId, IntegrityAction,
     IntegrityConfig, IntegrityState, Timeframe as IntegrityTimeframe,
@@ -34,7 +57,7 @@ use mqk_integrity::{
 use mqk_isolation::enforce_allocation_cap_micros;
 use mqk_portfolio::{
     apply_fill, compute_equity_micros, compute_exposure_micros, Fill, MarkMap, PortfolioState,
-    Side as PfSide,
+    PositionState, QtyMicros, Side as PfSide,
 };
 use mqk_risk::{
     evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput,
@@ -1155,7 +1178,7 @@ impl BacktestEngine {
                 .portfolio
                 .positions
                 .get(&pending.symbol)
-                .map(|p| p.qty_signed())
+                .map(whole_qty_signed)
                 .unwrap_or(0);
             let reducing_capacity = match exec_side {
                 // Buy only reduces risk while covering a short.
@@ -1234,7 +1257,7 @@ impl BacktestEngine {
         let inner = Fill::new(
             pending.symbol.clone(),
             pf_side,
-            pending.qty,
+            whole_qty_to_micros(pending.qty),
             fill_price,
             fee,
         );
@@ -1269,7 +1292,7 @@ impl BacktestEngine {
     fn build_position_book(&self) -> PositionBook {
         let mut book = PositionBook::new();
         for (sym, pos) in &self.portfolio.positions {
-            let qty = pos.qty_signed();
+            let qty = whole_qty_signed(pos);
             if qty != 0 {
                 book.insert(sym.clone(), qty);
             }
@@ -1348,7 +1371,7 @@ impl BacktestEngine {
             .portfolio
             .positions
             .get(&intent.symbol)
-            .map(|p| p.qty_signed())
+            .map(whole_qty_signed)
             .unwrap_or(0);
 
         match intent.side {
@@ -1374,7 +1397,7 @@ impl BacktestEngine {
         let symbols: Vec<String> = self.portfolio.positions.keys().cloned().collect();
         for (symbol_seq, sym) in symbols.into_iter().enumerate() {
             let qty = match self.portfolio.positions.get(&sym) {
-                Some(pos) => pos.qty_signed(),
+                Some(pos) => whole_qty_signed(pos),
                 None => continue,
             };
             if qty == 0 {
@@ -1392,7 +1415,7 @@ impl BacktestEngine {
             let fill_id = BacktestFill::make_fill_id(&order_id);
             // BKT-03P: apply commission to flatten fills too
             let fee = self.config.commission.compute_fee(abs_qty, mark);
-            let inner = Fill::new(sym.clone(), pf_side, abs_qty, mark, fee);
+            let inner = Fill::new(sym.clone(), pf_side, whole_qty_to_micros(abs_qty), mark, fee);
             apply_fill(&mut self.portfolio, &inner);
             // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel multiplier-aware
             // shadow ledger update, mirroring the intent-fill call site.
