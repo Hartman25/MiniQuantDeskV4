@@ -12,7 +12,7 @@ mod common;
 use mqk_backtest::{
     derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
 };
-use mqk_portfolio::{Fill, Side};
+use mqk_portfolio::{Fill, QtyMicros, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
     // fill_id / order_id are not used by promotion metric evaluation;
@@ -72,10 +72,10 @@ fn make_profitable_report() -> BacktestReport {
 
     // Profitable round-trip trades
     let fills = vec![
-        bf(Fill::new("AAPL", Side::Buy, 100, 10_000_000, 0)),
-        bf(Fill::new("AAPL", Side::Sell, 100, 12_000_000, 0)),
-        bf(Fill::new("MSFT", Side::Buy, 50, 20_000_000, 0)),
-        bf(Fill::new("MSFT", Side::Sell, 50, 25_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(100).unwrap(), 10_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Sell, QtyMicros::from_whole_units(100).unwrap(), 12_000_000, 0)),
+        bf(Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(50).unwrap(), 20_000_000, 0)),
+        bf(Fill::new("MSFT", Side::Sell, QtyMicros::from_whole_units(50).unwrap(), 25_000_000, 0)),
     ];
 
     make_report_with_provenance("pipeline_profitable_v1", equity_curve, fills, false, None)
@@ -95,10 +95,10 @@ fn make_unprofitable_report() -> BacktestReport {
 
     // Losing round-trip trades
     let fills = vec![
-        bf(Fill::new("AAPL", Side::Buy, 100, 12_000_000, 0)),
-        bf(Fill::new("AAPL", Side::Sell, 100, 10_000_000, 0)), // loss
-        bf(Fill::new("MSFT", Side::Buy, 50, 25_000_000, 0)),
-        bf(Fill::new("MSFT", Side::Sell, 50, 20_000_000, 0)), // loss
+        bf(Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(100).unwrap(), 12_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Sell, QtyMicros::from_whole_units(100).unwrap(), 10_000_000, 0)), // loss
+        bf(Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(50).unwrap(), 25_000_000, 0)),
+        bf(Fill::new("MSFT", Side::Sell, QtyMicros::from_whole_units(50).unwrap(), 20_000_000, 0)), // loss
     ];
 
     make_report_with_provenance("pipeline_losing_v1", equity_curve, fills, false, None)
@@ -257,8 +257,8 @@ fn halted_backtest_metrics_computed_from_partial_curve() {
     ];
 
     let fills = vec![
-        bf(Fill::new("AAPL", Side::Buy, 10, 10_000_000, 0)),
-        bf(Fill::new("AAPL", Side::Sell, 10, 10_500_000, 0)),
+        bf(Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 10_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), 10_500_000, 0)),
     ];
 
     let report = make_report_with_provenance(

@@ -738,7 +738,15 @@ fn compute_profit_factor(fills: &[Fill]) -> (f64, usize) {
 
     for fill in fills {
         let lots = positions.entry(fill.symbol.clone()).or_default();
-        let fill_qty = fill.qty; // always positive
+        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `fill.qty` is `QtyMicros`.
+        // Promotion evaluation is equities-only (no fractional Crypto
+        // quantity is ever produced by the backtest/paper fills this
+        // evaluates), so this whole-unit conversion is a provable-safe
+        // invariant, not a fallible boundary.
+        let fill_qty: i64 = fill
+            .qty
+            .to_whole_units_checked()
+            .expect("promotion-evaluated fills are whole-unit by construction"); // always positive
         let fill_price = fill.price_micros;
         let fee = fill.fee_micros as i128;
 
