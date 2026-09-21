@@ -72,7 +72,7 @@ pub use inbound::{
     InboundBatch, WsParseError,
 };
 use mqk_execution::{
-    micros_to_price, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent,
+    micros_to_price, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent,
     BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
     BrokerSubmitResponse, QtyMicros, Side,
 };
@@ -90,6 +90,63 @@ pub const FILL_ACTIVITIES_PAGE_SIZE: usize = 50;
 /// 40 pages * 50/page = 2000 activities — a generous operational bound for a
 /// single-order repair lookup; see that method's doc comment.
 pub const FILL_ACTIVITIES_FOR_ORDER_MAX_PAGES: usize = 40;
+// ---------------------------------------------------------------------------
+// CUTOVER-1C Phase 2: Alpaca crypto order-quantity validation
+// ---------------------------------------------------------------------------
+/// The only crypto trading pair this adapter validates order quantities for.
+///
+/// Alpaca supports many crypto pairs; this adapter only claims correctness
+/// for BTC/USD (the mission-scoped pair). A Crypto-class order for any other
+/// symbol fails closed rather than silently applying BTC/USD's min-qty and
+/// increment constants to a pair they were never verified against — there is
+/// no pair registry yet (`mqk_execution::asset_risk_policy::crypto_policy`
+/// documents this gap explicitly).
+pub const ALPACA_CRYPTO_SUPPORTED_SYMBOL: &str = "BTC/USD";
+/// Alpaca's documented BTC/USD minimum order size, in raw `QtyMicros` units
+/// (0.0001 BTC * 1_000_000 micros/unit = 100).
+pub const ALPACA_BTCUSD_MIN_ORDER_QTY_RAW: i64 = 100;
+/// Alpaca's documented BTC/USD minimum trade increment, in raw `QtyMicros`
+/// units. Order quantity must be an exact whole multiple of this value.
+pub const ALPACA_BTCUSD_QTY_INCREMENT_RAW: i64 = 100;
+/// Validate a Crypto-class order quantity against Alpaca's documented
+/// per-pair minimum order size and trade increment before any HTTP call is
+/// made. Fails closed (`BrokerError::Reject`) rather than letting the broker
+/// reject it after the fact, so a malformed crypto order quantity never
+/// consumes an outbox submit attempt.
+///
+/// Only `symbol == "BTC/USD"` is validated; any other Crypto symbol is
+/// refused as unsupported (see [`ALPACA_CRYPTO_SUPPORTED_SYMBOL`]).
+pub fn validate_alpaca_crypto_order_qty(symbol: &str, qty: QtyMicros) -> Result<(), BrokerError> {
+    if symbol != ALPACA_CRYPTO_SUPPORTED_SYMBOL {
+        return Err(BrokerError::Reject {
+            code: "crypto_pair_unsupported".to_string(),
+            detail: format!(
+                "validate_alpaca_crypto_order_qty: only {ALPACA_CRYPTO_SUPPORTED_SYMBOL} is \
+                 supported by this adapter; got symbol={symbol:?}"
+            ),
+        });
+    }
+    let raw = qty.raw();
+    if raw < ALPACA_BTCUSD_MIN_ORDER_QTY_RAW {
+        return Err(BrokerError::Reject {
+            code: "crypto_qty_below_minimum".to_string(),
+            detail: format!(
+                "validate_alpaca_crypto_order_qty: qty={qty} is below BTC/USD minimum order \
+                 size of 0.0001 BTC"
+            ),
+        });
+    }
+    if raw % ALPACA_BTCUSD_QTY_INCREMENT_RAW != 0 {
+        return Err(BrokerError::Reject {
+            code: "crypto_qty_not_multiple_of_increment".to_string(),
+            detail: format!(
+                "validate_alpaca_crypto_order_qty: qty={qty} is not an exact multiple of \
+                 BTC/USD's minimum trade increment of 0.0001 BTC"
+            ),
+        });
+    }
+    Ok(())
+}
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -540,6 +597,9 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
     ) -> Result<BrokerSubmitResponse, BrokerError> {
+        if req.asset_class == AssetClass::Crypto {
+            validate_alpaca_crypto_order_qty(&req.symbol, req.quantity)?;
+        }
         let body = build_submit_body(&req);
         let url = format!("{}/v2/orders", self.cfg.base_url);
         let client = self.client.clone();
@@ -908,6 +968,121 @@ mod supports_asset_class_tests {
         assert!(!a.supports_asset_class(AssetClass::Option));
         assert!(!a.supports_asset_class(AssetClass::Future));
         assert!(!a.supports_asset_class(AssetClass::Forex));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CUTOVER-1C Phase 2: validate_alpaca_crypto_order_qty proof tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod crypto_qty_validation_tests {
+    use super::*;
+
+    fn qty(s: &str) -> QtyMicros {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn exact_minimum_order_size_is_accepted() {
+        assert!(validate_alpaca_crypto_order_qty("BTC/USD", qty("0.0001")).is_ok());
+    }
+
+    #[test]
+    fn an_exact_larger_multiple_of_the_increment_is_accepted() {
+        assert!(validate_alpaca_crypto_order_qty("BTC/USD", qty("0.5")).is_ok());
+        assert!(validate_alpaca_crypto_order_qty("BTC/USD", qty("1.2345")).is_ok());
+    }
+
+    #[test]
+    fn below_minimum_order_size_is_rejected() {
+        let err = validate_alpaca_crypto_order_qty("BTC/USD", qty("0.00005")).unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "crypto_qty_below_minimum"
+        ));
+    }
+
+    #[test]
+    fn zero_qty_is_rejected_as_below_minimum() {
+        let err = validate_alpaca_crypto_order_qty("BTC/USD", QtyMicros::ZERO).unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "crypto_qty_below_minimum"
+        ));
+    }
+
+    #[test]
+    fn a_qty_not_aligned_to_the_increment_is_rejected() {
+        // 0.00015 BTC = 150 raw micros; not a multiple of the 100-raw-micro increment.
+        let err = validate_alpaca_crypto_order_qty("BTC/USD", qty("0.00015")).unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "crypto_qty_not_multiple_of_increment"
+        ));
+    }
+
+    #[test]
+    fn an_unsupported_crypto_pair_is_rejected() {
+        let err = validate_alpaca_crypto_order_qty("ETH/USD", qty("1.0")).unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "crypto_pair_unsupported"
+        ));
+    }
+
+    #[test]
+    fn submit_order_rejects_a_crypto_order_below_minimum_before_any_http_call() {
+        // MockServer is intentionally not started: a network call here would
+        // panic/hang, proving the reject happens before any HTTP attempt.
+        let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:0".to_string());
+        let token = BrokerInvokeToken::for_test();
+        let req = BrokerSubmitRequest {
+            order_id: "ord-1".to_string(),
+            symbol: "BTC/USD".to_string(),
+            side: Side::Buy,
+            quantity: qty("0.00001"),
+            order_type: "market".to_string(),
+            limit_price: None,
+            time_in_force: "gtc".to_string(),
+            asset_class: AssetClass::Crypto,
+        };
+        let err = adapter.submit_order(req, &token).unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "crypto_qty_below_minimum"
+        ));
+    }
+
+    #[test]
+    fn submit_order_does_not_apply_crypto_qty_validation_to_equity_orders() {
+        // An equity order with a "sub-minimum-if-it-were-crypto" quantity must
+        // not be rejected by this gate -- it is asset-class gated, not blanket.
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST).path("/v2/orders");
+            then.status(200).json_body(serde_json::json!({
+                "id": "broker-order-1",
+                "client_order_id": "ord-1",
+                "created_at": "2024-01-01T00:00:00Z"
+            }));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let token = BrokerInvokeToken::for_test();
+        let req = BrokerSubmitRequest {
+            order_id: "ord-1".to_string(),
+            symbol: "AAPL".to_string(),
+            side: Side::Buy,
+            quantity: QtyMicros::from_whole_units(10).unwrap(),
+            order_type: "market".to_string(),
+            limit_price: None,
+            time_in_force: "day".to_string(),
+            asset_class: AssetClass::Equity,
+        };
+        assert!(adapter.submit_order(req, &token).is_ok());
+        mock.assert_hits(1);
     }
 }
 // ---------------------------------------------------------------------------
