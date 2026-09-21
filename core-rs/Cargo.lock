@@ -1989,6 +1989,7 @@ dependencies = [
 name = "mqk-reconcile"
 version = "0.1.0"
 dependencies = [
+ "mqk-schemas",
  "serde",
  "serde_json",
 ]
