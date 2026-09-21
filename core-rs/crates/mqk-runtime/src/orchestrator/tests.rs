@@ -124,6 +124,75 @@ fn broker_event_to_fill_converts_correctly() {
     assert_eq!(fill.side, mqk_portfolio::Side::Sell);
 }
 #[test]
+fn broker_event_to_fill_marks_equity_fee_as_confirmed() {
+    use mqk_execution::Side;
+    let ev = BrokerEvent::Fill {
+        broker_message_id: "msg-eq".to_string(),
+        broker_fill_id: None,
+        internal_order_id: "ord-eq".to_string(),
+        broker_order_id: None,
+        symbol: "AAPL".to_string(),
+        side: Side::Buy,
+        delta_qty: QtyMicros::from_whole_units(1).unwrap(),
+        price_micros: 150_000_000,
+        fee_micros: 0,
+    };
+    let fill = broker_event_to_fill(&ev).unwrap().unwrap();
+    assert_eq!(
+        fill.fee_attribution,
+        mqk_portfolio::FeeAttributionStatus::Confirmed,
+        "CRYPTO-FEE-ATTRIBUTION-01: equity's zero fee IS the confirmed economic truth"
+    );
+}
+#[test]
+fn broker_event_to_fill_marks_crypto_fee_as_pending_attribution() {
+    use mqk_execution::Side;
+    let ev = BrokerEvent::Fill {
+        broker_message_id: "msg-btc".to_string(),
+        broker_fill_id: None,
+        internal_order_id: "ord-btc".to_string(),
+        broker_order_id: None,
+        symbol: "BTC/USD".to_string(),
+        side: Side::Buy,
+        delta_qty: "0.0001".parse().unwrap(),
+        price_micros: 50_000_000_000,
+        fee_micros: 0,
+    };
+    let fill = broker_event_to_fill(&ev).unwrap().unwrap();
+    assert_eq!(fill.fee_micros, 0, "a crypto fill carries no synchronous fee");
+    assert_eq!(
+        fill.fee_attribution,
+        mqk_portfolio::FeeAttributionStatus::PendingAttribution,
+        "CRYPTO-FEE-ATTRIBUTION-01: fee_micros=0 for crypto must never be read as confirmed \
+         zero cost -- the real fee is posted separately, at day's end"
+    );
+}
+#[test]
+fn effective_portfolio_fill_also_marks_crypto_fee_as_pending_attribution() {
+    use mqk_execution::Side;
+    let ev = BrokerEvent::PartialFill {
+        broker_message_id: "msg-btc-pf".to_string(),
+        broker_fill_id: None,
+        internal_order_id: "ord-btc-pf".to_string(),
+        broker_order_id: None,
+        symbol: "BTC/USD".to_string(),
+        side: Side::Buy,
+        delta_qty: "0.0001".parse().unwrap(),
+        price_micros: 50_000_000_000,
+        fee_micros: 0,
+        cum_qty_after: Some("0.0001".parse().unwrap()),
+    };
+    let fill = effective_portfolio_fill(&ev, QtyMicros::ZERO, "0.0001".parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fill.fee_attribution,
+        mqk_portfolio::FeeAttributionStatus::PendingAttribution,
+        "the OMS-derived-delta apply path must apply the same fee-attribution rule as the \
+         primary apply path"
+    );
+}
+#[test]
 fn broker_event_to_fill_returns_none_for_ack() {
     let ev = BrokerEvent::Ack {
         broker_message_id: "msg-3".to_string(),

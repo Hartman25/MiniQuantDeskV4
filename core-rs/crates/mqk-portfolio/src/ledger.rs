@@ -325,6 +325,7 @@ mod tests {
             qty: QtyMicros::from_whole_units(qty).unwrap(),
             price_micros,
             fee_micros,
+            fee_attribution: crate::types::FeeAttributionStatus::Confirmed,
         }
     }
 

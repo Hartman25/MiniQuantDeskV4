@@ -20,7 +20,10 @@ use anyhow::anyhow;
 use mqk_db::InboxRow;
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{BrokerEvent, BrokerOrderMap};
-use mqk_portfolio::{recompute_from_ledger, Fill, PortfolioState};
+use mqk_portfolio::{
+    recompute_from_ledger, symbol_is_crypto_pair_format, FeeAttributionStatus, Fill,
+    PortfolioState,
+};
 use sqlx::types::chrono;
 use std::collections::BTreeMap;
 
@@ -51,6 +54,21 @@ pub(super) fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
 // ---------------------------------------------------------------------------
 // Fill extraction
 // ---------------------------------------------------------------------------
+
+/// CRYPTO-FEE-ATTRIBUTION-01: a synchronous fill's `fee_micros` is
+/// broker-confirmed for equity (Alpaca genuinely charges no commission) but
+/// is only a placeholder for crypto (Alpaca posts the real fee separately,
+/// at day's end — see `mqk-broker-alpaca::fee_attribution`). Every
+/// production `BrokerEvent`-to-`Fill` conversion site must derive
+/// [`FeeAttributionStatus`] this same way so a crypto fill's `fee_micros =
+/// 0` is never mistaken for confirmed zero cost.
+fn fee_attribution_for_symbol(symbol: &str) -> FeeAttributionStatus {
+    if symbol_is_crypto_pair_format(symbol) {
+        FeeAttributionStatus::PendingAttribution
+    } else {
+        FeeAttributionStatus::Confirmed
+    }
+}
 
 /// Extract a portfolio `Fill` from a `BrokerEvent`, if the event carries fill data.
 ///
@@ -87,12 +105,13 @@ pub(super) fn broker_event_to_fill(event: &BrokerEvent) -> anyhow::Result<Option
                 mqk_execution::Side::Buy => mqk_portfolio::Side::Buy,
                 mqk_execution::Side::Sell => mqk_portfolio::Side::Sell,
             };
-            Ok(Some(Fill::new(
+            Ok(Some(Fill::new_with_fee_attribution(
                 symbol.clone(),
                 portfolio_side,
                 *delta_qty,
                 *price_micros,
                 *fee_micros,
+                fee_attribution_for_symbol(symbol),
             )))
         }
         _ => Ok(None),
@@ -340,12 +359,13 @@ fn build_effective_fill(
                 mqk_execution::Side::Buy => mqk_portfolio::Side::Buy,
                 mqk_execution::Side::Sell => mqk_portfolio::Side::Sell,
             };
-            Ok(Some(Fill::new(
+            Ok(Some(Fill::new_with_fee_attribution(
                 symbol.clone(),
                 portfolio_side,
                 effective_delta,
                 *price_micros,
                 *fee_micros,
+                fee_attribution_for_symbol(symbol),
             )))
         }
         _ => Ok(None),

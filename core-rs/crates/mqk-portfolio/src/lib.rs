@@ -105,7 +105,8 @@ pub use fixedpoint::Micros;
 pub use ordering::{apply_fills_canonical, sort_fills_canonical, TaggedFill};
 
 pub use types::{
-    CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, QtyMicros, Side,
+    symbol_is_crypto_pair_format, CashEntry, FeeAttributionStatus, Fill, LedgerEntry, Lot,
+    PortfolioState, PositionState, QtyMicros, Side,
 };
 
 // PORTFOLIO-LIVE-WEIGHTS-01: live position valuation / weight truth seam

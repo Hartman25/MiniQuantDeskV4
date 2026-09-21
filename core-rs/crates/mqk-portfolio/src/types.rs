@@ -9,6 +9,42 @@ pub enum Side {
     Sell,
 }
 
+/// Whether `Fill.fee_micros` is the broker-confirmed final fee for this
+/// fill, or a fill-time placeholder pending later attribution.
+///
+/// CRYPTO-FEE-ATTRIBUTION-01 (operator decision): a synchronous Alpaca
+/// crypto fill carries no fee — Alpaca calculates and posts crypto trading
+/// fees once, at day's end, as a separate account activity, never as part
+/// of the fill itself. `fee_micros = 0` on such a fill must never be read
+/// as "this trade had zero economic cost." Equity is the opposite case:
+/// Alpaca genuinely charges no commission, so `fee_micros = 0` there IS the
+/// final, confirmed economic truth. This status makes the distinction
+/// explicit and inspectable rather than leaving `fee_micros = 0` ambiguous
+/// between the two meanings.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FeeAttributionStatus {
+    /// `fee_micros` is the final, broker-confirmed fee for this fill (or
+    /// this asset class is known to genuinely carry no fee, e.g. equity).
+    Confirmed,
+    /// `fee_micros` is a placeholder (always `0` today); the real fee is
+    /// not yet known and may arrive later via a separate broker account
+    /// activity. Never report this fill's cost as proven zero.
+    PendingAttribution,
+}
+
+/// True when `symbol` is in canonical crypto-pair wire format (contains
+/// `/`, e.g. `"BTC/USD"`) rather than a bare equity ticker (e.g. `"AAPL"`).
+///
+/// This is this system's own canonical crypto-symbol convention (see
+/// `mqk-broker-alpaca`'s identical `is_alpaca_crypto_symbol`, which the
+/// broker-adapter layer uses for the same distinction), not a broker-wire
+/// quirk local to one adapter — safe to use at this broker-agnostic layer
+/// to decide [`FeeAttributionStatus`] for a fill whose broker is unknown
+/// here.
+pub fn symbol_is_crypto_pair_format(symbol: &str) -> bool {
+    symbol.contains('/')
+}
+
 /// A single executed fill (the accounting atom).
 ///
 /// CUTOVER-1C: `qty` is [`QtyMicros`] (fractional-capable, 1e-6 scale) —
@@ -19,7 +55,9 @@ pub enum Side {
 ///
 /// qty is always positive.
 /// price_micros is price per unit in micros (1e-6).
-/// fee_micros is absolute cash fee in micros (>= 0).
+/// fee_micros is absolute cash fee in micros (>= 0). See
+/// [`FeeAttributionStatus`] for whether that value is broker-confirmed or
+/// merely a fill-time placeholder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fill {
     pub symbol: String,
@@ -27,15 +65,43 @@ pub struct Fill {
     pub qty: QtyMicros,
     pub price_micros: i64,
     pub fee_micros: i64,
+    pub fee_attribution: FeeAttributionStatus,
 }
 
 impl Fill {
+    /// Construct a fill whose `fee_micros` is the final, broker-confirmed
+    /// value (`FeeAttributionStatus::Confirmed`). Every pre-existing call
+    /// site (equity execution, backtest, synthetic/test fixtures) keeps
+    /// this exact meaning unchanged.
     pub fn new<S: Into<String>>(
         symbol: S,
         side: Side,
         qty: QtyMicros,
         price_micros: i64,
         fee_micros: i64,
+    ) -> Self {
+        Self::new_with_fee_attribution(
+            symbol,
+            side,
+            qty,
+            price_micros,
+            fee_micros,
+            FeeAttributionStatus::Confirmed,
+        )
+    }
+
+    /// Construct a fill with an explicit [`FeeAttributionStatus`] — used by
+    /// the production BrokerEvent-to-Fill conversion path
+    /// (`mqk-runtime::orchestrator::apply`) for a crypto fill, whose
+    /// `fee_micros = 0` at fill time is a placeholder, not a confirmed
+    /// zero-cost claim.
+    pub fn new_with_fee_attribution<S: Into<String>>(
+        symbol: S,
+        side: Side,
+        qty: QtyMicros,
+        price_micros: i64,
+        fee_micros: i64,
+        fee_attribution: FeeAttributionStatus,
     ) -> Self {
         debug_assert!(qty.is_positive(), "Fill.qty must be > 0");
         debug_assert!(price_micros >= 0, "Fill.price_micros must be >= 0");
@@ -46,6 +112,7 @@ impl Fill {
             qty,
             price_micros,
             fee_micros,
+            fee_attribution,
         }
     }
 }
