@@ -2425,14 +2425,20 @@ fn make_lease_test_orchestrator(
 }
 fn broker_snapshot_with_position(fetched_at_ms: i64, qty: i64) -> mqk_reconcile::BrokerSnapshot {
     let mut broker = mqk_reconcile::BrokerSnapshot::empty_at(fetched_at_ms);
-    broker.positions.insert("SPY".to_string(), qty);
+    broker.positions.insert(
+        "SPY".to_string(),
+        mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap(),
+    );
     broker
 }
 #[test]
 fn runtime_reconcile_gate_remains_dirty_after_stale_snapshot() {
     let mut watermark = SnapshotWatermark::new();
     let mut local = mqk_reconcile::LocalSnapshot::empty();
-    local.positions.insert("SPY".to_string(), 100);
+    local.positions.insert(
+        "SPY".to_string(),
+        mqk_reconcile::QtyMicros::from_whole_units(100).unwrap(),
+    );
     let dirty = broker_snapshot_with_position(2_000, 200);
     let err = evaluate_monotonic_reconcile(&mut watermark, &local, &dirty)
         .expect_err("fresh dirty snapshot must block dispatch");

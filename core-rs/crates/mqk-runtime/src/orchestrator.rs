@@ -312,10 +312,30 @@ fn drift_is_consistent_with_pending_fills(
     all_syms.extend(broker.positions.keys().cloned());
 
     for sym in &all_syms {
-        let lq = local.positions.get(sym).copied().unwrap_or(0);
-        let bq = broker.positions.get(sym).copied().unwrap_or(0);
-        let actual = bq - lq;
-        if actual != 0 {
+        // CUTOVER-1G-RECONCILE-QTY-MICROS-01: `local`/`broker`.positions are
+        // `QtyMicros` (fractional-capable, for Crypto), but `expected_deltas`
+        // is derived from whole-unit-only sources (order_json `qty` parsed
+        // via `as_i64`) by design. A fractional actual delta therefore can
+        // never be explained by this whole-unit expectation -- treat it the
+        // same as "no pending fill" (fail closed, not truncate) rather than
+        // silently rounding a real Crypto delta away.
+        let lq = local
+            .positions
+            .get(sym)
+            .copied()
+            .unwrap_or(mqk_execution::QtyMicros::ZERO);
+        let bq = broker
+            .positions
+            .get(sym)
+            .copied()
+            .unwrap_or(mqk_execution::QtyMicros::ZERO);
+        let actual_micros = bq
+            .checked_sub(lq)
+            .expect("position delta overflowed QtyMicros");
+        if !actual_micros.is_zero() {
+            let Some(actual) = actual_micros.to_whole_units_checked() else {
+                return false; // fractional drift cannot be explained by a whole-unit expectation
+            };
             let expected = expected_deltas.get(sym).copied().unwrap_or(0);
             if expected == 0 {
                 return false; // drift on a symbol with no pending fill
@@ -392,10 +412,28 @@ fn drift_is_consistent_with_recent_terminal_fills(
     all_syms.extend(broker.positions.keys().cloned());
 
     for sym in &all_syms {
-        let lq = local.positions.get(sym).copied().unwrap_or(0);
-        let bq = broker.positions.get(sym).copied().unwrap_or(0);
-        let actual = lq - bq; // positive = local ahead of broker
-        if actual != 0 {
+        // CUTOVER-1G-RECONCILE-QTY-MICROS-01: see the analogous comment in
+        // `drift_is_consistent_with_pending_fills` -- `expected` here is
+        // built from `RecentTerminalFill.signed_delta` (whole-unit i64 by
+        // design; fractional fills are never recorded into the ring buffer
+        // at all -- see the push site's `to_whole_units_checked()` guard).
+        let lq = local
+            .positions
+            .get(sym)
+            .copied()
+            .unwrap_or(mqk_execution::QtyMicros::ZERO);
+        let bq = broker
+            .positions
+            .get(sym)
+            .copied()
+            .unwrap_or(mqk_execution::QtyMicros::ZERO);
+        let actual_micros = lq
+            .checked_sub(bq)
+            .expect("position delta overflowed QtyMicros"); // positive = local ahead of broker
+        if !actual_micros.is_zero() {
+            let Some(actual) = actual_micros.to_whole_units_checked() else {
+                return false; // fractional drift cannot be explained by a whole-unit expectation
+            };
             let exp = expected.get(sym).copied().unwrap_or(0);
             if exp == 0 {
                 return false; // unexplained drift on this symbol
@@ -446,10 +484,25 @@ fn has_expired_terminal_fill_explaining_drift(
     all_syms.extend(local.positions.keys().cloned());
     all_syms.extend(broker.positions.keys().cloned());
     for sym in &all_syms {
-        let lq = local.positions.get(sym).copied().unwrap_or(0);
-        let bq = broker.positions.get(sym).copied().unwrap_or(0);
-        let actual = lq - bq;
-        if actual != 0 {
+        // CUTOVER-1G-RECONCILE-QTY-MICROS-01: see the analogous comment in
+        // `drift_is_consistent_with_pending_fills`.
+        let lq = local
+            .positions
+            .get(sym)
+            .copied()
+            .unwrap_or(mqk_execution::QtyMicros::ZERO);
+        let bq = broker
+            .positions
+            .get(sym)
+            .copied()
+            .unwrap_or(mqk_execution::QtyMicros::ZERO);
+        let actual_micros = lq
+            .checked_sub(bq)
+            .expect("position delta overflowed QtyMicros");
+        if !actual_micros.is_zero() {
+            let Some(actual) = actual_micros.to_whole_units_checked() else {
+                return false;
+            };
             let exp = expected.get(sym).copied().unwrap_or(0);
             if exp == 0 {
                 return false;
