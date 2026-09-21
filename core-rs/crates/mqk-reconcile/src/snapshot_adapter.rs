@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::{BrokerSnapshot, OrderSnapshot, OrderStatus, Side};
+use crate::{BrokerSnapshot, OrderSnapshot, OrderStatus, QtyMicros, Side};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -46,6 +46,12 @@ pub enum SnapshotAdapterError {
         qty: i64,
         filled_qty: i64,
     },
+    /// A whole-unit order `qty`/`filled_qty` value overflows `QtyMicros`'s
+    /// 1e-6 fixed-point range once scaled.
+    QtyOutOfRange { order_id: String, qty: i64 },
+    /// A whole-unit position `qty_signed` value overflows `QtyMicros`'s
+    /// 1e-6 fixed-point range once scaled.
+    PositionQtyOutOfRange { symbol: String, qty_signed: i64 },
 }
 
 impl std::fmt::Display for SnapshotAdapterError {
@@ -84,6 +90,18 @@ impl std::fmt::Display for SnapshotAdapterError {
                 write!(
                     f,
                     "broker order '{order_id}' filled_qty {filled_qty} exceeds qty {qty}"
+                )
+            }
+            Self::QtyOutOfRange { order_id, qty } => {
+                write!(
+                    f,
+                    "broker order '{order_id}' qty {qty} overflows QtyMicros range"
+                )
+            }
+            Self::PositionQtyOutOfRange { symbol, qty_signed } => {
+                write!(
+                    f,
+                    "broker position '{symbol}' qty_signed {qty_signed} overflows QtyMicros range"
                 )
             }
         }
@@ -215,13 +233,36 @@ fn normalize_order(raw: RawBrokerOrder) -> Result<OrderSnapshot, SnapshotAdapter
         });
     }
 
+    let Some(qty) = QtyMicros::from_whole_units(raw.qty) else {
+        return Err(SnapshotAdapterError::QtyOutOfRange {
+            order_id,
+            qty: raw.qty,
+        });
+    };
+    let Some(filled_qty) = QtyMicros::from_whole_units(raw.filled_qty) else {
+        return Err(SnapshotAdapterError::QtyOutOfRange {
+            order_id,
+            qty: raw.filled_qty,
+        });
+    };
+
     Ok(OrderSnapshot {
         order_id,
         symbol,
         side,
-        qty: raw.qty,
-        filled_qty: raw.filled_qty,
+        qty,
+        filled_qty,
         status,
+    })
+}
+
+/// Normalize a raw broker position's whole-unit `qty_signed` to `QtyMicros`.
+fn normalize_position_qty(symbol: &str, qty_signed: i64) -> Result<QtyMicros, SnapshotAdapterError> {
+    QtyMicros::from_whole_units(qty_signed).ok_or_else(|| {
+        SnapshotAdapterError::PositionQtyOutOfRange {
+            symbol: symbol.to_string(),
+            qty_signed,
+        }
     })
 }
 
@@ -247,11 +288,11 @@ pub fn normalize(raw: RawBrokerSnapshot) -> Result<BrokerSnapshot, SnapshotAdapt
         orders.insert(snap.order_id.clone(), snap);
     }
 
-    let mut positions: BTreeMap<String, i64> = BTreeMap::new();
+    let mut positions: BTreeMap<String, QtyMicros> = BTreeMap::new();
     for pos in raw.positions {
         let sym = pos.symbol.trim().to_string();
         if !sym.is_empty() {
-            positions.insert(sym, pos.qty_signed);
+            positions.insert(sym.clone(), normalize_position_qty(&sym, pos.qty_signed)?);
         }
     }
 
@@ -282,11 +323,17 @@ pub fn normalize_lenient(raw: RawBrokerSnapshot) -> (BrokerSnapshot, Vec<Snapsho
         }
     }
 
-    let mut positions: BTreeMap<String, i64> = BTreeMap::new();
+    let mut positions: BTreeMap<String, QtyMicros> = BTreeMap::new();
     for pos in raw.positions {
         let sym = pos.symbol.trim().to_string();
-        if !sym.is_empty() {
-            positions.insert(sym, pos.qty_signed);
+        if sym.is_empty() {
+            continue;
+        }
+        match normalize_position_qty(&sym, pos.qty_signed) {
+            Ok(qty) => {
+                positions.insert(sym, qty);
+            }
+            Err(e) => errors.push(e),
         }
     }
 
@@ -451,8 +498,8 @@ mod tests {
         assert_eq!(snap.order_id, "ord-1");
         assert_eq!(snap.symbol, "TSLA");
         assert_eq!(snap.side, Side::Sell);
-        assert_eq!(snap.qty, 50);
-        assert_eq!(snap.filled_qty, 25);
+        assert_eq!(snap.qty, QtyMicros::from_whole_units(50).unwrap());
+        assert_eq!(snap.filled_qty, QtyMicros::from_whole_units(25).unwrap());
         assert_eq!(snap.status, OrderStatus::PartiallyFilled);
     }
 
@@ -487,8 +534,8 @@ mod tests {
             fetched_at_ms: 0,
         };
         let snap = normalize(raw).unwrap();
-        assert_eq!(snap.positions["AAPL"], 100);
-        assert_eq!(snap.positions["TSLA"], -50);
+        assert_eq!(snap.positions["AAPL"], QtyMicros::from_whole_units(100).unwrap());
+        assert_eq!(snap.positions["TSLA"], QtyMicros::from_whole_units(-50).unwrap());
     }
 
     #[test]
@@ -544,10 +591,10 @@ mod tests {
         let ord = &snap.orders["abc-123"];
         assert_eq!(ord.symbol, "MSFT");
         assert_eq!(ord.side, Side::Buy);
-        assert_eq!(ord.qty, 200);
-        assert_eq!(ord.filled_qty, 200);
+        assert_eq!(ord.qty, QtyMicros::from_whole_units(200).unwrap());
+        assert_eq!(ord.filled_qty, QtyMicros::from_whole_units(200).unwrap());
         assert_eq!(ord.status, OrderStatus::Filled);
-        assert_eq!(snap.positions["MSFT"], 200);
+        assert_eq!(snap.positions["MSFT"], QtyMicros::from_whole_units(200).unwrap());
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use mqk_schemas::QtyMicros;
+
 /// Micros scale (1e-6) used for prices and currency where needed.
 pub const MICROS_SCALE: i64 = 1_000_000;
 
@@ -29,8 +31,10 @@ pub struct OrderSnapshot {
     pub order_id: String,
     pub symbol: String,
     pub side: Side,
-    pub qty: i64,
-    pub filled_qty: i64,
+    /// CUTOVER-1G-RECONCILE-QTY-MICROS-01: fractional-capable (Crypto),
+    /// mirroring `mqk_portfolio::Fill.qty`.
+    pub qty: QtyMicros,
+    pub filled_qty: QtyMicros,
     pub status: OrderStatus,
 }
 
@@ -39,8 +43,8 @@ impl OrderSnapshot {
         order_id: impl Into<String>,
         symbol: impl Into<String>,
         side: Side,
-        qty: i64,
-        filled_qty: i64,
+        qty: QtyMicros,
+        filled_qty: QtyMicros,
         status: OrderStatus,
     ) -> Self {
         Self {
@@ -58,11 +62,11 @@ impl OrderSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PositionSnapshot {
     pub symbol: String,
-    pub qty_signed: i64,
+    pub qty_signed: QtyMicros,
 }
 
 impl PositionSnapshot {
-    pub fn new(symbol: impl Into<String>, qty_signed: i64) -> Self {
+    pub fn new(symbol: impl Into<String>, qty_signed: QtyMicros) -> Self {
         Self {
             symbol: symbol.into(),
             qty_signed,
@@ -78,7 +82,7 @@ pub struct LocalSnapshot {
     pub orders: BTreeMap<String, OrderSnapshot>,
 
     /// Positions we believe we hold (symbol -> qty_signed).
-    pub positions: BTreeMap<String, i64>,
+    pub positions: BTreeMap<String, QtyMicros>,
 }
 
 impl LocalSnapshot {
@@ -106,7 +110,7 @@ pub struct BrokerSnapshot {
     pub orders: BTreeMap<String, OrderSnapshot>,
 
     /// Positions visible at broker (symbol -> qty_signed).
-    pub positions: BTreeMap<String, i64>,
+    pub positions: BTreeMap<String, QtyMicros>,
 
     /// Epoch-milliseconds when this snapshot was fetched from the broker.
     /// `0` = no timestamp — treated as stale by `SnapshotWatermark`.
@@ -173,8 +177,8 @@ pub enum ReconcileDiff {
 
     PositionQtyMismatch {
         symbol: String,
-        local_qty: i64,
-        broker_qty: i64,
+        local_qty: QtyMicros,
+        broker_qty: QtyMicros,
     },
 
     OrderMismatch {
@@ -189,7 +193,7 @@ pub enum ReconcileDiff {
     UnknownBrokerFill {
         order_id: String,
         /// `filled_qty` as reported by the broker snapshot.
-        filled_qty: i64,
+        filled_qty: QtyMicros,
     },
 
     /// Local active order has no counterpart in the broker snapshot.

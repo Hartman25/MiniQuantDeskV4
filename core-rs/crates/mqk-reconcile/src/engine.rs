@@ -1,7 +1,7 @@
 use crate::watermark::{SnapshotFreshness, SnapshotWatermark};
 use crate::{
-    BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, ReconcileDiff,
-    ReconcileReason, ReconcileReport,
+    BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, QtyMicros, ReconcileAction,
+    ReconcileDiff, ReconcileReason, ReconcileReport,
 };
 
 fn push_reason_once(reasons: &mut Vec<ReconcileReason>, r: ReconcileReason) {
@@ -101,7 +101,7 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
             // Economic exposure has changed if the unknown order has been filled
             // (partially or fully).  Classify more specifically so callers can
             // distinguish timing artifacts (open, unfilled) from real exposure drift.
-            let fill_touched = broker_ord.filled_qty > 0
+            let fill_touched = broker_ord.filled_qty.is_positive()
                 || matches!(
                     broker_ord.status,
                     OrderStatus::Filled | OrderStatus::PartiallyFilled
@@ -149,8 +149,8 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
     for sym in &symbols {
         let local_has = local.positions.contains_key(sym);
         let broker_has = broker.positions.contains_key(sym);
-        let lq = *local.positions.get(sym).unwrap_or(&0);
-        let bq = *broker.positions.get(sym).unwrap_or(&0);
+        let lq = *local.positions.get(sym).unwrap_or(&QtyMicros::ZERO);
+        let bq = *broker.positions.get(sym).unwrap_or(&QtyMicros::ZERO);
         if lq != bq {
             diffs.push(ReconcileDiff::PositionQtyMismatch {
                 symbol: sym.clone(),
@@ -201,7 +201,14 @@ mod section_e_tests {
     };
 
     fn order(id: &str, status: OrderStatus, qty: i64, filled: i64) -> OrderSnapshot {
-        OrderSnapshot::new(id, "SPY", Side::Buy, qty, filled, status)
+        OrderSnapshot::new(
+            id,
+            "SPY",
+            Side::Buy,
+            QtyMicros::from_whole_units(qty).unwrap(),
+            QtyMicros::from_whole_units(filled).unwrap(),
+            status,
+        )
     }
 
     // E-T1: UnknownBrokerFill — broker reports a filled order we have no OMS record of.
@@ -228,7 +235,7 @@ mod section_e_tests {
                 filled_qty,
             } = d
             {
-                order_id == "fill-ord-1" && *filled_qty == 100
+                order_id == "fill-ord-1" && *filled_qty == QtyMicros::from_whole_units(100).unwrap()
             } else {
                 false
             }
@@ -249,7 +256,9 @@ mod section_e_tests {
     fn unknown_broker_position_triggers_halt() {
         let local = LocalSnapshot::empty(); // no positions
         let mut broker = BrokerSnapshot::empty();
-        broker.positions.insert("AAPL".to_string(), 200);
+        broker
+            .positions
+            .insert("AAPL".to_string(), QtyMicros::from_whole_units(200).unwrap());
 
         let r = reconcile(&local, &broker);
 
@@ -322,9 +331,13 @@ mod section_e_tests {
     #[test]
     fn position_qty_mismatch_both_sides_known_triggers_halt() {
         let mut local = LocalSnapshot::empty();
-        local.positions.insert("TSLA".to_string(), 100);
+        local
+            .positions
+            .insert("TSLA".to_string(), QtyMicros::from_whole_units(100).unwrap());
         let mut broker = BrokerSnapshot::empty();
-        broker.positions.insert("TSLA".to_string(), 80);
+        broker
+            .positions
+            .insert("TSLA".to_string(), QtyMicros::from_whole_units(80).unwrap());
 
         let r = reconcile(&local, &broker);
 

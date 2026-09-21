@@ -16,7 +16,7 @@
 
 use mqk_reconcile::{
     build_repair_plan, classify_diff, reconcile, BrokerSnapshot, DriftSeverity, LocalSnapshot,
-    OrderSnapshot, OrderStatus, ReconcileDiff, RepairAction, Side,
+    OrderSnapshot, OrderStatus, QtyMicros, ReconcileDiff, RepairAction, Side,
 };
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,14 @@ use mqk_reconcile::{
 // ---------------------------------------------------------------------------
 
 fn order(id: &str, status: OrderStatus, qty: i64, filled: i64) -> OrderSnapshot {
-    OrderSnapshot::new(id, "SPY", Side::Buy, qty, filled, status)
+    OrderSnapshot::new(
+        id,
+        "SPY",
+        Side::Buy,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        QtyMicros::from_whole_units(filled).unwrap(),
+        status,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -35,7 +42,7 @@ fn order(id: &str, status: OrderStatus, qty: i64, filled: i64) -> OrderSnapshot 
 fn s1_unknown_broker_fill_is_halt_required() {
     let diff = ReconcileDiff::UnknownBrokerFill {
         order_id: "fill-1".to_string(),
-        filled_qty: 50,
+        filled_qty: QtyMicros::from_whole_units(50).unwrap(),
     };
     let c = classify_diff(&diff);
     assert_eq!(c.severity, DriftSeverity::HaltRequired);
@@ -51,8 +58,8 @@ fn s1_unknown_broker_fill_is_halt_required() {
 fn s2_position_qty_mismatch_is_halt_required() {
     let diff = ReconcileDiff::PositionQtyMismatch {
         symbol: "AAPL".to_string(),
-        local_qty: 100,
-        broker_qty: 80,
+        local_qty: QtyMicros::from_whole_units(100).unwrap(),
+        broker_qty: QtyMicros::from_whole_units(80).unwrap(),
     };
     let c = classify_diff(&diff);
     assert_eq!(c.severity, DriftSeverity::HaltRequired);
@@ -296,8 +303,8 @@ fn s10_repair_plan_captures_every_diff_in_order() {
         order("unknown-open", OrderStatus::New, 20, 0),
     );
     // Position mismatch (halt-required).
-    local.positions.insert("TSLA".to_string(), 50);
-    broker.positions.insert("TSLA".to_string(), 30);
+    local.positions.insert("TSLA".to_string(), QtyMicros::from_whole_units(50).unwrap());
+    broker.positions.insert("TSLA".to_string(), QtyMicros::from_whole_units(30).unwrap());
 
     let report = reconcile(&local, &broker);
     let plan = build_repair_plan(&report);

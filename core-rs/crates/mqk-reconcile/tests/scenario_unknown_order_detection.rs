@@ -11,8 +11,8 @@ fn scenario_unknown_broker_order_triggers_halt() {
             "broker_only_1",
             "SPY",
             Side::Buy,
-            1,
-            0,
+            QtyMicros::from_whole_units(1).unwrap(),
+            QtyMicros::from_whole_units(0).unwrap(),
             OrderStatus::Accepted,
         ),
     );

@@ -25,9 +25,13 @@
 //! | RS08 | normalize_json round-trip: JSON qty_signed=-50 → -50 preserved               |
 
 use mqk_reconcile::{
-    normalize, normalize_json, reconcile, BrokerSnapshot, LocalSnapshot, RawBrokerPosition,
-    RawBrokerSnapshot, ReconcileAction, ReconcileDiff, ReconcileReason,
+    normalize, normalize_json, reconcile, BrokerSnapshot, LocalSnapshot, QtyMicros,
+    RawBrokerPosition, RawBrokerSnapshot, ReconcileAction, ReconcileDiff, ReconcileReason,
 };
+
+fn qty(n: i64) -> QtyMicros {
+    QtyMicros::from_whole_units(n).unwrap()
+}
 
 // ---------------------------------------------------------------------------
 // RS01 — BrokerSnapshot positions map stores negative qty
@@ -36,15 +40,16 @@ use mqk_reconcile::{
 #[test]
 fn rs01_broker_snapshot_negative_qty_is_short() {
     let mut broker = BrokerSnapshot::empty_at(1_000);
-    broker.positions.insert("GME".to_string(), -50);
+    broker.positions.insert("GME".to_string(), qty(-50));
 
-    let qty = broker.positions.get("GME").copied().unwrap_or(0);
+    let q = broker.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
     assert_eq!(
-        qty, -50,
+        q,
+        qty(-50),
         "RS01: BrokerSnapshot must store -50 for a short position"
     );
     assert!(
-        qty < 0,
+        q.is_negative(),
         "RS01: negative qty in broker positions represents a short"
     );
     assert!(
@@ -60,15 +65,16 @@ fn rs01_broker_snapshot_negative_qty_is_short() {
 #[test]
 fn rs02_local_snapshot_negative_qty_is_short() {
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("GME".to_string(), -50);
+    local.positions.insert("GME".to_string(), qty(-50));
 
-    let qty = local.positions.get("GME").copied().unwrap_or(0);
+    let q = local.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
     assert_eq!(
-        qty, -50,
+        q,
+        qty(-50),
         "RS02: LocalSnapshot must store -50 for a short position"
     );
     assert!(
-        qty < 0,
+        q.is_negative(),
         "RS02: negative qty in local positions represents a short"
     );
     assert!(
@@ -84,10 +90,10 @@ fn rs02_local_snapshot_negative_qty_is_short() {
 #[test]
 fn rs03_matching_short_position_reconciles_clean() {
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("GME".to_string(), -50);
+    local.positions.insert("GME".to_string(), qty(-50));
 
     let mut broker = BrokerSnapshot::empty_at(1_000);
-    broker.positions.insert("GME".to_string(), -50);
+    broker.positions.insert("GME".to_string(), qty(-50));
 
     let r = reconcile(&local, &broker);
     assert_eq!(
@@ -109,7 +115,7 @@ fn rs03_matching_short_position_reconciles_clean() {
 #[test]
 fn rs04_local_short_vs_broker_flat_is_halt() {
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("GME".to_string(), -50);
+    local.positions.insert("GME".to_string(), qty(-50));
 
     let broker = BrokerSnapshot::empty_at(1_000); // GME absent (flat at broker)
 
@@ -131,7 +137,7 @@ fn rs04_local_short_vs_broker_flat_is_halt() {
             broker_qty,
         } = d
         {
-            symbol == "GME" && *local_qty == -50 && *broker_qty == 0
+            symbol == "GME" && *local_qty == qty(-50) && *broker_qty == QtyMicros::ZERO
         } else {
             false
         }
@@ -152,7 +158,7 @@ fn rs05_local_flat_vs_broker_short_is_halt_unknown_position() {
     let local = LocalSnapshot::empty(); // GME absent locally
 
     let mut broker = BrokerSnapshot::empty_at(1_000);
-    broker.positions.insert("GME".to_string(), -50);
+    broker.positions.insert("GME".to_string(), qty(-50));
 
     let r = reconcile(&local, &broker);
     assert_eq!(
@@ -189,13 +195,14 @@ fn rs06_normalize_preserves_negative_qty_signed() {
     };
 
     let snap = normalize(raw).unwrap();
-    let qty = snap.positions.get("GME").copied().unwrap_or(0);
+    let q = snap.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
     assert_eq!(
-        qty, -50,
-        "RS06: normalize() must preserve negative qty_signed=-50; got {qty}"
+        q,
+        qty(-50),
+        "RS06: normalize() must preserve negative qty_signed=-50; got {q}"
     );
     assert!(
-        qty < 0,
+        q.is_negative(),
         "RS06: short position must survive normalization as negative"
     );
 }
@@ -207,10 +214,10 @@ fn rs06_normalize_preserves_negative_qty_signed() {
 #[test]
 fn rs07_local_short_vs_broker_long_is_halt() {
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("GME".to_string(), -50);
+    local.positions.insert("GME".to_string(), qty(-50));
 
     let mut broker = BrokerSnapshot::empty_at(1_000);
-    broker.positions.insert("GME".to_string(), 50); // broker shows LONG
+    broker.positions.insert("GME".to_string(), qty(50)); // broker shows LONG
 
     let r = reconcile(&local, &broker);
     assert_eq!(
@@ -230,7 +237,7 @@ fn rs07_local_short_vs_broker_long_is_halt() {
             broker_qty,
         } = d
         {
-            symbol == "GME" && *local_qty == -50 && *broker_qty == 50
+            symbol == "GME" && *local_qty == qty(-50) && *broker_qty == qty(50)
         } else {
             false
         }
@@ -257,13 +264,14 @@ fn rs08_normalize_json_roundtrip_short_position() {
     }"#;
 
     let snap = normalize_json(json).unwrap();
-    let qty = snap.positions.get("GME").copied().unwrap_or(0);
+    let q = snap.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
     assert_eq!(
-        qty, -50,
-        "RS08: normalize_json must parse qty_signed=-50 and preserve it; got {qty}"
+        q,
+        qty(-50),
+        "RS08: normalize_json must parse qty_signed=-50 and preserve it; got {q}"
     );
     assert!(
-        qty < 0,
+        q.is_negative(),
         "RS08: parsed short qty must be negative after JSON round-trip"
     );
     assert_eq!(

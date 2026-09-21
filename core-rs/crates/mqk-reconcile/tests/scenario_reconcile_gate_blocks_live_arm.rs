@@ -22,18 +22,18 @@ fn local_with_orders_and_positions() -> LocalSnapshot {
     // One open order
     local.orders.insert(
         "ORD-001".to_string(),
-        OrderSnapshot::new("ORD-001", "SPY", Side::Buy, 100, 0, OrderStatus::Accepted),
+        OrderSnapshot::new("ORD-001", "SPY", Side::Buy, QtyMicros::from_whole_units(100).unwrap(), QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
     );
 
     // One filled order
     local.orders.insert(
         "ORD-002".to_string(),
-        OrderSnapshot::new("ORD-002", "AAPL", Side::Sell, 50, 50, OrderStatus::Filled),
+        OrderSnapshot::new("ORD-002", "AAPL", Side::Sell, QtyMicros::from_whole_units(50).unwrap(), QtyMicros::from_whole_units(50).unwrap(), OrderStatus::Filled),
     );
 
     // Positions
-    local.positions.insert("SPY".to_string(), 200);
-    local.positions.insert("AAPL".to_string(), -50);
+    local.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(200).unwrap());
+    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(-50).unwrap());
 
     local
 }
@@ -74,7 +74,7 @@ fn position_mismatch_blocks_arming() {
     let mut broker = matching_broker_snapshot(&local);
 
     // Broker thinks we have 199 SPY instead of 200
-    broker.positions.insert("SPY".to_string(), 199);
+    broker.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(199).unwrap());
 
     assert!(
         !is_clean_reconcile(&local, &broker),
@@ -96,7 +96,7 @@ fn order_qty_drift_blocks_arming() {
 
     // Broker shows different qty for ORD-001
     let mut drifted = broker.orders.get("ORD-001").unwrap().clone();
-    drifted.qty = 150; // local says 100, broker says 150
+    drifted.qty = QtyMicros::from_whole_units(150).unwrap(); // local says 100, broker says 150
     broker.orders.insert("ORD-001".to_string(), drifted);
 
     assert!(
@@ -124,8 +124,8 @@ fn unknown_broker_order_blocks_arming() {
             "ORD-UNKNOWN",
             "TSLA",
             Side::Buy,
-            500,
-            0,
+            QtyMicros::from_whole_units(500).unwrap(),
+            QtyMicros::from_whole_units(0).unwrap(),
             OrderStatus::Accepted,
         ),
     );
@@ -153,7 +153,7 @@ fn order_status_drift_blocks_arming() {
     // Broker shows ORD-001 as Filled, but local shows Accepted
     let mut drifted = broker.orders.get("ORD-001").unwrap().clone();
     drifted.status = OrderStatus::Filled;
-    drifted.filled_qty = 100;
+    drifted.filled_qty = QtyMicros::from_whole_units(100).unwrap();
     broker.orders.insert("ORD-001".to_string(), drifted);
 
     assert!(
@@ -168,7 +168,7 @@ fn broker_has_extra_position_blocks_arming() {
     let mut broker = matching_broker_snapshot(&local);
 
     // Broker has a position we don't know about
-    broker.positions.insert("TSLA".to_string(), 100);
+    broker.positions.insert("TSLA".to_string(), QtyMicros::from_whole_units(100).unwrap());
 
     assert!(
         !is_clean_reconcile(&local, &broker),
@@ -200,12 +200,12 @@ fn multiple_mismatches_all_reported() {
     let mut broker = matching_broker_snapshot(&local);
 
     // Position mismatch
-    broker.positions.insert("SPY".to_string(), 199);
+    broker.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(199).unwrap());
 
     // Unknown order
     broker.orders.insert(
         "ORD-ROGUE".to_string(),
-        OrderSnapshot::new("ORD-ROGUE", "GOOG", Side::Sell, 10, 0, OrderStatus::New),
+        OrderSnapshot::new("ORD-ROGUE", "GOOG", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), QtyMicros::from_whole_units(0).unwrap(), OrderStatus::New),
     );
 
     // Order drift on existing
@@ -244,10 +244,10 @@ fn multiple_mismatches_all_reported() {
 fn reconcile_report_is_deterministic() {
     let local = local_with_orders_and_positions();
     let mut broker = matching_broker_snapshot(&local);
-    broker.positions.insert("SPY".to_string(), 199);
+    broker.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(199).unwrap());
     broker.orders.insert(
         "ORD-ROGUE".to_string(),
-        OrderSnapshot::new("ORD-ROGUE", "GOOG", Side::Sell, 10, 0, OrderStatus::New),
+        OrderSnapshot::new("ORD-ROGUE", "GOOG", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), QtyMicros::from_whole_units(0).unwrap(), OrderStatus::New),
     );
 
     // Run twice, should produce identical reports
