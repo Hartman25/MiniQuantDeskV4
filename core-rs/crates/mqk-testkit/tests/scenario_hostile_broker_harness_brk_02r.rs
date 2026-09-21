@@ -524,8 +524,8 @@ async fn duplicate_fills_different_envelopes_do_not_double_mutate_portfolio() ->
             .positions
             .get("SPY")
             .map(|p| p.qty_signed())
-            .unwrap_or(0),
-        10,
+            .unwrap_or(QtyMicros::ZERO),
+        QtyMicros::from_whole_units(10).unwrap(),
         "duplicate hostile delivery must still leave exactly one applied long fill"
     );
 
@@ -634,8 +634,8 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
             .positions
             .get("SPY")
             .map(|p| p.qty_signed())
-            .unwrap_or(0),
-        10
+            .unwrap_or(QtyMicros::ZERO),
+        QtyMicros::from_whole_units(10).unwrap()
     );
 
     cleanup_run(&pool, run_id, ENGINE_REPLACE_FILL_RACE_ID).await?;
@@ -754,8 +754,8 @@ async fn replay_after_cursor_loss_is_deduped_and_state_safe() -> Result<()> {
             .positions
             .get("SPY")
             .map(|p| p.qty_signed())
-            .unwrap_or(0),
-        10
+            .unwrap_or(QtyMicros::ZERO),
+        QtyMicros::from_whole_units(10).unwrap()
     );
 
     cleanup_run(&pool, run_id, ENGINE_REPLAY_CURSOR_LOSS_ID).await?;

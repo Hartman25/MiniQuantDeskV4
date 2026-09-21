@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use mqk_portfolio::{Fill, Ledger, Side, MICROS_SCALE};
+use mqk_portfolio::{Fill, Ledger, QtyMicros, Side, MICROS_SCALE};
 
 const M: i64 = MICROS_SCALE;
 
@@ -55,13 +55,13 @@ fn duplicate_fill_id_does_not_apply_twice() {
     let mut seen = HashSet::new();
     let mut ledger = Ledger::new(100_000 * M);
 
-    let fill = Fill::new("SPY", Side::Buy, 10, 450 * M, 0);
+    let fill = Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 450 * M, 0);
 
     // First delivery: gate opens → apply runs.
     let applied = apply_if_new(&mut seen, &mut ledger, "BROKER-FILL-1", fill.clone()).unwrap();
     assert!(applied, "first delivery must be applied");
     assert_eq!(ledger.entry_count(), 1);
-    assert_eq!(ledger.qty_signed("SPY"), 10);
+    assert_eq!(ledger.qty_signed("SPY"), QtyMicros::from_whole_units(10).unwrap());
 
     // Duplicate delivery (same ID): gate closed → apply skipped.
     let applied = apply_if_new(&mut seen, &mut ledger, "BROKER-FILL-1", fill.clone()).unwrap();
@@ -73,7 +73,7 @@ fn duplicate_fill_id_does_not_apply_twice() {
     );
     assert_eq!(
         ledger.qty_signed("SPY"),
-        10,
+        QtyMicros::from_whole_units(10).unwrap(),
         "position must not change on duplicate fill"
     );
 
@@ -91,9 +91,9 @@ fn distinct_fill_ids_each_apply_exactly_once() {
     let mut ledger = Ledger::new(100_000 * M);
 
     let fills = vec![
-        ("FILL-1", Fill::new("AAPL", Side::Buy, 5, 150 * M, 0)),
-        ("FILL-2", Fill::new("AAPL", Side::Buy, 5, 155 * M, 0)),
-        ("FILL-3", Fill::new("AAPL", Side::Sell, 3, 160 * M, 0)),
+        ("FILL-1", Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), 150 * M, 0)),
+        ("FILL-2", Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), 155 * M, 0)),
+        ("FILL-3", Fill::new("AAPL", Side::Sell, QtyMicros::from_whole_units(3).unwrap(), 160 * M, 0)),
     ];
 
     // First pass: all apply.
@@ -102,7 +102,7 @@ fn distinct_fill_ids_each_apply_exactly_once() {
         assert!(applied, "first delivery of fill {id} must be applied");
     }
     assert_eq!(ledger.entry_count(), 3);
-    assert_eq!(ledger.qty_signed("AAPL"), 7); // 5 + 5 - 3
+    assert_eq!(ledger.qty_signed("AAPL"), QtyMicros::from_whole_units(7).unwrap()); // 5 + 5 - 3
 
     // Replay: none must double-apply.
     for (id, fill) in &fills {
@@ -116,7 +116,7 @@ fn distinct_fill_ids_each_apply_exactly_once() {
     );
     assert_eq!(
         ledger.qty_signed("AAPL"),
-        7,
+        QtyMicros::from_whole_units(7).unwrap(),
         "position must be unchanged after replay"
     );
 }
@@ -131,9 +131,9 @@ fn repeated_replay_produces_identical_ledger_state() {
     let mut ledger = Ledger::new(50_000 * M);
 
     let events = vec![
-        ("F-1", Fill::new("QQQ", Side::Buy, 20, 300 * M, M)),
-        ("F-2", Fill::new("QQQ", Side::Buy, 10, 305 * M, 0)),
-        ("F-3", Fill::new("QQQ", Side::Sell, 15, 310 * M, 0)),
+        ("F-1", Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(20).unwrap(), 300 * M, M)),
+        ("F-2", Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 305 * M, 0)),
+        ("F-3", Fill::new("QQQ", Side::Sell, QtyMicros::from_whole_units(15).unwrap(), 310 * M, 0)),
     ];
 
     // Apply the event stream once.
@@ -172,8 +172,8 @@ fn same_content_different_fill_id_applies_twice() {
     let mut seen = HashSet::new();
     let mut ledger = Ledger::new(200_000 * M);
 
-    let fill_a = Fill::new("MSFT", Side::Buy, 10, 300 * M, 0);
-    let fill_b = Fill::new("MSFT", Side::Buy, 10, 300 * M, 0); // identical content
+    let fill_a = Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 300 * M, 0);
+    let fill_b = Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 300 * M, 0); // identical content
 
     apply_if_new(&mut seen, &mut ledger, "FILL-A", fill_a).unwrap();
     apply_if_new(&mut seen, &mut ledger, "FILL-B", fill_b).unwrap();
@@ -185,7 +185,7 @@ fn same_content_different_fill_id_applies_twice() {
     );
     assert_eq!(
         ledger.qty_signed("MSFT"),
-        20,
+        QtyMicros::from_whole_units(20).unwrap(),
         "both fills must accumulate into position"
     );
 }
@@ -200,11 +200,11 @@ fn multi_symbol_partial_replay_is_idempotent() {
     let mut ledger = Ledger::new(500_000 * M);
 
     let events = vec![
-        ("f1", Fill::new("AAPL", Side::Buy, 10, 150 * M, 0)),
-        ("f2", Fill::new("MSFT", Side::Buy, 20, 300 * M, 0)),
-        ("f3", Fill::new("AAPL", Side::Sell, 5, 155 * M, 0)),
-        ("f4", Fill::new("TSLA", Side::Buy, 3, 250 * M, M)),
-        ("f5", Fill::new("MSFT", Side::Sell, 10, 310 * M, 0)),
+        ("f1", Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150 * M, 0)),
+        ("f2", Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(20).unwrap(), 300 * M, 0)),
+        ("f3", Fill::new("AAPL", Side::Sell, QtyMicros::from_whole_units(5).unwrap(), 155 * M, 0)),
+        ("f4", Fill::new("TSLA", Side::Buy, QtyMicros::from_whole_units(3).unwrap(), 250 * M, M)),
+        ("f5", Fill::new("MSFT", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), 310 * M, 0)),
     ];
 
     // Full first pass.

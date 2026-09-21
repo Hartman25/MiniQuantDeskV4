@@ -547,7 +547,13 @@ fn fdp08_recovery_dedup_prevents_double_portfolio_apply() {
         let oms_advanced = order.filled_qty != pre_qty;
 
         if oms_advanced {
-            let fill = Fill::new("AAPL", Side::Buy, 1, AAPL_PRICE, 0);
+            let fill = Fill::new(
+                "AAPL",
+                Side::Buy,
+                QtyMicros::from_whole_units(1).unwrap(),
+                AAPL_PRICE,
+                0,
+            );
             apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
         }
         // OMS no-op → skip portfolio (prevents double-counting).
@@ -556,7 +562,7 @@ fn fdp08_recovery_dedup_prevents_double_portfolio_apply() {
     let aapl_qty: i64 = portfolio
         .positions
         .get("AAPL")
-        .map(|pos| pos.lots.iter().map(|l| l.qty_signed).sum())
+        .map(|pos| pos.qty_signed().to_whole_units_checked().unwrap())
         .unwrap_or(0);
 
     assert_eq!(

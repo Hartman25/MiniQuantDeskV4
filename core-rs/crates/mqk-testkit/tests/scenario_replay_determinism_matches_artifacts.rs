@@ -24,7 +24,7 @@
 use chrono::DateTime;
 use mqk_artifacts::{init_run_artifacts, InitRunArtifactsArgs};
 use mqk_audit::{verify_hash_chain, AuditWriter, DurabilityPolicy, VerifyResult};
-use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, Side, MICROS_SCALE};
+use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, QtyMicros, Side, MICROS_SCALE};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -108,7 +108,13 @@ fn extract_fill(ev: &Value) -> Option<Fill> {
         "Buy" => Side::Buy,
         _ => Side::Sell,
     };
-    Some(Fill::new(sym, side, qty, price, fee))
+    Some(Fill::new(
+        sym,
+        side,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        price,
+        fee,
+    ))
 }
 
 /// Apply the inbox log to a fresh portfolio; return the final state.

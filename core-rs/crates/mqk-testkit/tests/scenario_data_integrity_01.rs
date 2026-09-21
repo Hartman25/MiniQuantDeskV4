@@ -67,17 +67,17 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
         (
             "fill-pf-1",
             OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() },
-            Fill::new("SPY", Side::Buy, 30, 500 * MICROS_SCALE, 0),
+            Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 500 * MICROS_SCALE, 0),
         ),
         (
             "fill-pf-2",
             OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() },
-            Fill::new("SPY", Side::Buy, 40, 501 * MICROS_SCALE, 0),
+            Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(40).unwrap(), 501 * MICROS_SCALE, 0),
         ),
         (
             "fill-final",
             OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() },
-            Fill::new("SPY", Side::Buy, 30, 502 * MICROS_SCALE, 0),
+            Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 502 * MICROS_SCALE, 0),
         ),
     ];
 
@@ -100,8 +100,8 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
         .positions
         .get("SPY")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
-    assert_eq!(spy_qty, 100, "single-pass: SPY must be 100");
+        .unwrap_or(QtyMicros::ZERO);
+    assert_eq!(spy_qty, QtyMicros::from_whole_units(100).unwrap(), "single-pass: SPY must be 100");
 
     // 10 restart cycles: replay all events with the same seen set.
     // All inserts must return false (already in inbox) → zero new OMS/portfolio effects.
@@ -132,9 +132,9 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
             .positions
             .get("SPY")
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
+            .unwrap_or(QtyMicros::ZERO);
         assert_eq!(
-            qty, 100,
+            qty, QtyMicros::from_whole_units(100).unwrap(),
             "cycle {cycle}: portfolio SPY qty must remain 100 after restart replay"
         );
     }
@@ -163,7 +163,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
             .unwrap();
         apply_entry(
             &mut portfolio,
-            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, 30, 400 * MICROS_SCALE, 0)),
+            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 400 * MICROS_SCALE, 0)),
         );
     }
 
@@ -173,7 +173,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
             .unwrap();
         apply_entry(
             &mut portfolio,
-            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, 40, 401 * MICROS_SCALE, 0)),
+            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(40).unwrap(), 401 * MICROS_SCALE, 0)),
         );
     }
 
@@ -183,7 +183,7 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
             .unwrap();
         apply_entry(
             &mut portfolio,
-            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, 30, 402 * MICROS_SCALE, 0)),
+            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 402 * MICROS_SCALE, 0)),
         );
     }
 
@@ -194,9 +194,9 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
         .positions
         .get("QQQ")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
-        qqq_qty, total_qty,
+        qqq_qty, total_qty_micros,
         "portfolio must hold exactly total_qty after normal sequence"
     );
 
@@ -247,9 +247,9 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
         .positions
         .get("QQQ")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
-        qqq_qty_final, total_qty,
+        qqq_qty_final, total_qty_micros,
         "portfolio QQQ qty must remain total_qty after all duplicates and late events"
     );
 }
@@ -403,19 +403,19 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
     let events: &[(&str, Fill)] = &[
         (
             "ev-1",
-            Fill::new("AAPL", Side::Buy, 10, 150 * MICROS_SCALE, 0),
+            Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150 * MICROS_SCALE, 0),
         ),
         (
             "ev-2",
-            Fill::new("AAPL", Side::Buy, 20, 151 * MICROS_SCALE, 0),
+            Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(20).unwrap(), 151 * MICROS_SCALE, 0),
         ),
         (
             "ev-3",
-            Fill::new("AAPL", Side::Buy, 30, 152 * MICROS_SCALE, 0),
+            Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 152 * MICROS_SCALE, 0),
         ),
         (
             "ev-4",
-            Fill::new("MSFT", Side::Buy, 5, 300 * MICROS_SCALE, 0),
+            Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), 300 * MICROS_SCALE, 0),
         ),
     ];
 
@@ -425,14 +425,14 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
         .positions
         .get("AAPL")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     let clean_msft = clean_pf
         .positions
         .get("MSFT")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
-    assert_eq!(clean_aapl, 60, "clean run: AAPL must be 60");
-    assert_eq!(clean_msft, 5, "clean run: MSFT must be 5");
+        .unwrap_or(QtyMicros::ZERO);
+    assert_eq!(clean_aapl, QtyMicros::from_whole_units(60).unwrap(), "clean run: AAPL must be 60");
+    assert_eq!(clean_msft, QtyMicros::from_whole_units(5).unwrap(), "clean run: MSFT must be 5");
     assert_eq!(clean_applied, 4, "clean run: all 4 events must be applied");
     assert_eq!(clean_unapplied, 0, "clean run: no unapplied events");
 
@@ -443,12 +443,12 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
         .positions
         .get("AAPL")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     let crash_b_msft = crash_b_pf
         .positions
         .get("MSFT")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
         crash_b_aapl, clean_aapl,
         "crash-after-ev2: AAPL must equal clean-run after D2 recovery"
@@ -473,7 +473,7 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
         .positions
         .get("AAPL")
         .map(|p| p.qty_signed())
-        .unwrap_or(0);
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
         crash_c_aapl, clean_aapl,
         "crash-after-ev1: AAPL must equal clean-run after D2 recovery"
@@ -484,11 +484,11 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
     // Alignment invariant: after recovery, portfolio reflects exactly all
     // events in the inbox — no more, no less, regardless of crash timing.
     assert_eq!(
-        crash_b_aapl, 60,
+        crash_b_aapl, QtyMicros::from_whole_units(60).unwrap(),
         "alignment: AAPL qty must be exactly 60 after crash-B recovery"
     );
     assert_eq!(
-        crash_c_aapl, 60,
+        crash_c_aapl, QtyMicros::from_whole_units(60).unwrap(),
         "alignment: AAPL qty must be exactly 60 after crash-C recovery"
     );
 }

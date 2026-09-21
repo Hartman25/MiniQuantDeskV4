@@ -30,7 +30,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, Side, MICROS_SCALE};
+use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, QtyMicros, Side, MICROS_SCALE};
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
@@ -102,7 +102,13 @@ fn fill_from_row(row: &mqk_db::InboxRow) -> Fill {
     let qty = j["delta_qty"].as_i64().unwrap_or(0);
     let price = j["price_micros"].as_i64().unwrap_or(0);
     let fee = j["fee_micros"].as_i64().unwrap_or(0);
-    Fill::new(symbol, side, qty, price, fee)
+    Fill::new(
+        symbol,
+        side,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        price,
+        fee,
+    )
 }
 
 /// Replay a slice of inbox rows (ordered inbox_id asc — as returned by both
@@ -120,7 +126,9 @@ fn qty_of(pf: &PortfolioState, symbol: &str) -> i64 {
     pf.positions
         .get(symbol)
         .map(|p| p.qty_signed())
-        .unwrap_or(0)
+        .unwrap_or(QtyMicros::ZERO)
+        .to_whole_units_checked()
+        .unwrap()
 }
 
 /// Best-effort cleanup: inbox rows must be deleted before the run row due to FK.

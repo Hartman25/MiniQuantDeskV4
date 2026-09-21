@@ -42,7 +42,7 @@ use mqk_backtest::{
 use mqk_execution::StrategyOutput;
 use mqk_portfolio::{
     apply_entry, compute_equity_micros, compute_unrealized_pnl_micros, marks,
-    recompute_from_ledger, Fill, LedgerEntry, PortfolioState, Side,
+    recompute_from_ledger, Fill, LedgerEntry, PortfolioState, QtyMicros, Side,
 };
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
 
@@ -64,7 +64,13 @@ const PRICE_50: i64 = 50_000_000;
 // ---------------------------------------------------------------------------
 
 fn buy_fill(symbol: &str, qty: i64, price_micros: i64) -> LedgerEntry {
-    LedgerEntry::Fill(Fill::new(symbol, Side::Buy, qty, price_micros, 0))
+    LedgerEntry::Fill(Fill::new(
+        symbol,
+        Side::Buy,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        price_micros,
+        0,
+    ))
 }
 
 fn bar(symbol: &str, end_ts: i64) -> BacktestBar {

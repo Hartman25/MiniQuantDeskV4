@@ -105,7 +105,7 @@ fn duplicate_ack_produces_same_final_oms_state() {
 /// converge to the same OMS observable state and the same LedgerSnapshot.
 #[test]
 fn duplicate_fill_produces_same_oms_and_portfolio_state() {
-    let fill = Fill::new("SPY", Side::Buy, 50, SPY_PRICE, 0);
+    let fill = Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(50).unwrap(), SPY_PRICE, 0);
 
     // ── OMS layer ────────────────────────────────────────────────────────────
 

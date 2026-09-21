@@ -40,7 +40,7 @@
 
 use mqk_portfolio::{
     apply_entry, compute_equity_micros, marks, Fill, Ledger, LedgerEntry, LedgerError,
-    PortfolioState, Side, MICROS_SCALE,
+    PortfolioState, QtyMicros, Side, MICROS_SCALE,
 };
 use mqk_testkit::assert_capital_conservation;
 
@@ -63,7 +63,7 @@ fn partial_fill_conservation() {
     // Partial fill 1: buy 5 SPY @ $100, no fee.
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, 5, SPY_PRICE, 0)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), SPY_PRICE, 0)),
     );
     assert_capital_conservation(
         &state,
@@ -74,7 +74,7 @@ fn partial_fill_conservation() {
     // Partial fill 2: buy remaining 5 SPY @ $100, no fee.
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, 5, SPY_PRICE, 0)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), SPY_PRICE, 0)),
     );
     assert_capital_conservation(
         &state,
@@ -89,7 +89,7 @@ fn partial_fill_conservation() {
     // Closing sell: sell all 10 SPY @ $110, no fee.
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Sell, 10, SPY_PRICE_HI, 0)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), SPY_PRICE_HI, 0)),
     );
     assert_capital_conservation(&state, &m_hi, "S1: after closing sell — sell 10 @ $110");
 
@@ -122,7 +122,7 @@ fn late_fill_after_cancel_conservation() {
     // Partial fill: buy 5 SPY @ $100 with fee.
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, 5, SPY_PRICE, FEE)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), SPY_PRICE, FEE)),
     );
     assert_capital_conservation(
         &state,
@@ -137,7 +137,7 @@ fn late_fill_after_cancel_conservation() {
     let late_price = 102 * MICROS_SCALE;
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, 5, late_price, FEE)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), late_price, FEE)),
     );
     let m2 = marks([("SPY", late_price)]);
     assert_capital_conservation(&state, &m2, "S2: after late fill (5 more @ $102 + fee)");
@@ -146,7 +146,7 @@ fn late_fill_after_cancel_conservation() {
     let close_price = 105 * MICROS_SCALE;
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Sell, 10, close_price, FEE)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), close_price, FEE)),
     );
     let m3 = marks([("SPY", close_price)]);
     assert_capital_conservation(
@@ -189,7 +189,7 @@ fn replace_reject_then_fill_conservation() {
     // Original order fills in full: buy 10 SPY @ $100 with fee.
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, 10, SPY_PRICE, FEE)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), SPY_PRICE, FEE)),
     );
     assert_capital_conservation(&state, &m, "S3: after original fill (10 @ $100 + fee)");
 
@@ -197,7 +197,7 @@ fn replace_reject_then_fill_conservation() {
     let close_price = 108 * MICROS_SCALE;
     apply_entry(
         &mut state,
-        LedgerEntry::Fill(Fill::new("SPY", Side::Sell, 10, close_price, FEE)),
+        LedgerEntry::Fill(Fill::new("SPY", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), close_price, FEE)),
     );
     let m2 = marks([("SPY", close_price)]);
     assert_capital_conservation(&state, &m2, "S3: after close sell (10 @ $108 + fee)");
@@ -231,7 +231,7 @@ fn duplicate_fill_not_double_counted() {
     let mut ledger = Ledger::new(INITIAL_CASH);
     let m = marks([("SPY", SPY_PRICE)]);
 
-    let fill = Fill::new("SPY", Side::Buy, 5, SPY_PRICE, 0);
+    let fill = Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), SPY_PRICE, 0);
 
     // First application — seq_no 1: must succeed.
     ledger
