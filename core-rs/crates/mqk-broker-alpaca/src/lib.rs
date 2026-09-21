@@ -689,13 +689,35 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
     ) -> Result<BrokerReplaceResponse, BrokerError> {
-        // Step 1: fetch current order state to obtain filled_qty.
+        // Step 1: fetch current order state to obtain filled_qty and symbol.
         let order: AlpacaOrderFull = self.fetch_order(&req.broker_order_id)?;
         // Parse filled_qty - fail closed if it is malformed.
-        let filled_qty =
-            parse_broker_qty(&order.filled_qty).map_err(|raw| BrokerError::Transient {
+        //
+        // CUTOVER-1C Phase 2: `BrokerReplaceRequest` carries no asset-class
+        // field (it is the broker-agnostic choke-point type shared by every
+        // adapter), so crypto-ness is determined here from the broker's own
+        // authoritative `order.symbol` — the same field already fetched for
+        // this call, no additional plumbing required. A Crypto-formatted
+        // symbol (contains '/', e.g. "BTC/USD") parses filled_qty as
+        // fractional-capable QtyMicros; every other symbol keeps the
+        // pre-existing whole-share-only fail-closed parse unchanged, so
+        // equity's guard against an anomalous fractional filled_qty is not
+        // weakened by this change.
+        let filled_qty = if is_alpaca_crypto_symbol(&order.symbol) {
+            normalize::parse_alpaca_qty_micros(&order.filled_qty).map_err(|raw| {
+                BrokerError::Transient {
+                    detail: format!("replace: non-parseable filled_qty from broker: {raw:?}"),
+                }
+            })?
+        } else {
+            let whole = parse_broker_qty(&order.filled_qty).map_err(|raw| BrokerError::Transient {
                 detail: format!("replace: non-parseable filled_qty from broker: {raw:?}"),
             })?;
+            QtyMicros::from_whole_units(whole).ok_or_else(|| BrokerError::Reject {
+                code: "replace_filled_qty_overflow".to_string(),
+                detail: format!("replace: filled_qty={whole} overflows QtyMicros range"),
+            })?
+        };
         // Step 2: build replace body with Alpaca total-qty semantics.
         let body = build_replace_body(
             req.quantity,
@@ -1085,6 +1107,101 @@ mod crypto_qty_validation_tests {
         mock.assert_hits(1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// CUTOVER-1C Phase 2: replace_order fractional filled_qty proof tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod crypto_replace_fractional_filled_qty_tests {
+    use super::*;
+    use httpmock::prelude::*;
+    use httpmock::Method::PATCH;
+
+    #[test]
+    fn is_alpaca_crypto_symbol_distinguishes_pairs_from_tickers() {
+        assert!(is_alpaca_crypto_symbol("BTC/USD"));
+        assert!(!is_alpaca_crypto_symbol("AAPL"));
+    }
+
+    /// A crypto order that already has a fractional broker-reported
+    /// filled_qty must no longer fail closed on replace -- CUTOVER-1C Phase 2
+    /// closes the gap `build_replace_body`'s prior doc comment documented
+    /// ("a fractional Crypto order that already has a fractional fill cannot
+    /// reach this function at all yet").
+    #[test]
+    fn replace_order_accepts_a_crypto_order_with_fractional_filled_qty() {
+        let server = MockServer::start();
+        let get_mock = server.mock(|when, then| {
+            when.method(GET).path("/v2/orders/btc-order-1");
+            then.status(200).json_body(serde_json::json!({
+                "id": "btc-order-1",
+                "client_order_id": "internal-1",
+                "symbol": "BTC/USD",
+                "side": "buy",
+                "qty": "0.0001",
+                "filled_qty": "0.0001"
+            }));
+        });
+        // Total sent to Alpaca must be filled (0.0001) + new leaves (0.0002) = 0.0003.
+        let patch_mock = server.mock(|when, then| {
+            when.method(PATCH)
+                .path("/v2/orders/btc-order-1")
+                .json_body_partial(r#"{"qty": "0.0003"}"#);
+            then.status(200).json_body(serde_json::json!({
+                "id": "btc-order-1-replaced",
+                "qty": "0.0003"
+            }));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let token = BrokerInvokeToken::for_test();
+        let req = BrokerReplaceRequest {
+            broker_order_id: "btc-order-1".to_string(),
+            quantity: "0.0002".parse().unwrap(),
+            limit_price: None,
+            time_in_force: "gtc".to_string(),
+        };
+        let resp = adapter
+            .replace_order(req, &token)
+            .expect("replace of a fractionally-filled crypto order must succeed, not fail closed");
+        assert_eq!(resp.broker_order_id, "btc-order-1-replaced");
+        get_mock.assert_hits(1);
+        patch_mock.assert_hits(1);
+    }
+
+    /// Negative control: an Equity order with a malformed/fractional
+    /// filled_qty must still fail closed exactly as before this patch --
+    /// widening the crypto path must not weaken the equity guard.
+    #[test]
+    fn replace_order_still_fails_closed_on_fractional_filled_qty_for_equity() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/v2/orders/eq-order-1");
+            then.status(200).json_body(serde_json::json!({
+                "id": "eq-order-1",
+                "client_order_id": "internal-2",
+                "symbol": "AAPL",
+                "side": "buy",
+                "qty": "100",
+                "filled_qty": "30.5"
+            }));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let token = BrokerInvokeToken::for_test();
+        let req = BrokerReplaceRequest {
+            broker_order_id: "eq-order-1".to_string(),
+            quantity: QtyMicros::from_whole_units(20).unwrap(),
+            limit_price: None,
+            time_in_force: "day".to_string(),
+        };
+        let err = adapter.replace_order(req, &token).unwrap_err();
+        assert!(
+            matches!(err, BrokerError::Transient { .. }),
+            "an anomalous fractional filled_qty for an Equity symbol must still fail closed: {err:?}"
+        );
+    }
+}
 // ---------------------------------------------------------------------------
 // Public pure functions (exported for testing)
 // ---------------------------------------------------------------------------
@@ -1114,20 +1231,20 @@ pub fn build_submit_body(req: &BrokerSubmitRequest) -> AlpacaSubmitBody {
 /// Alpaca PATCH interprets `qty` as the **new total** (filled + open leaves).
 /// The canonical `BrokerReplaceRequest.quantity` carries the new open-leaves
 /// count, fractional-capable (QTY-MICROS-PRODUCTION-CUTOVER-01) for Crypto.
-/// `filled_qty` is whole-unit `i64` (`parse_alpaca_whole_share_qty` fails
-/// closed on any fractional broker-reported filled_qty, so a fractional
-/// Crypto order that already has a fractional fill cannot reach this
-/// function at all yet -- see `mqk-broker-alpaca::normalize`'s doc comment).
-/// This function computes `new_total = filled_qty + new_leaves_qty`, failing
-/// closed on overflow rather than wrapping.
+/// `filled_qty` is fractional-capable `QtyMicros` (CUTOVER-1C Phase 2): the
+/// caller (`replace_order`) parses it as whole-share-only for Equity symbols
+/// and as fractional for Crypto symbols, converting either representation to
+/// `QtyMicros` before calling this function -- see that call site's doc
+/// comment. This function computes `new_total = filled_qty + new_leaves_qty`,
+/// failing closed on overflow rather than wrapping.
 pub fn build_replace_body(
     new_leaves_qty: QtyMicros,
-    filled_qty: i64,
+    filled_qty: QtyMicros,
     limit_price: Option<i64>,
     time_in_force: &str,
 ) -> Result<AlpacaReplaceBody, BrokerError> {
-    let new_total_qty = QtyMicros::from_whole_units(filled_qty)
-        .and_then(|f| f.checked_add(new_leaves_qty))
+    let new_total_qty = filled_qty
+        .checked_add(new_leaves_qty)
         .ok_or_else(|| BrokerError::Reject {
             code: "replace_quantity_overflow".to_string(),
             detail: format!(
@@ -1139,6 +1256,13 @@ pub fn build_replace_body(
         limit_price: limit_price.map(format_alpaca_price),
         time_in_force: time_in_force.to_string(),
     })
+}
+/// True when an Alpaca symbol string is in canonical crypto-pair wire format
+/// (contains `/`, e.g. `"BTC/USD"`) rather than a bare equity ticker (e.g.
+/// `"AAPL"`). Used by [`AlpacaBrokerAdapter::replace_order`] to decide
+/// whether a broker-reported `filled_qty` may legitimately be fractional.
+fn is_alpaca_crypto_symbol(symbol: &str) -> bool {
+    symbol.contains('/')
 }
 /// Convert Alpaca's `PATCH /v2/orders/{id}` response into a `BrokerReplaceResponse`.
 ///

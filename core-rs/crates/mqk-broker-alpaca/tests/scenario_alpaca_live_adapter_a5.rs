@@ -201,8 +201,13 @@ fn l4_parse_submit_response_created_at_is_optional() {
 #[test]
 fn l5_build_replace_body_total_qty_semantics() {
     // Alpaca filled 20 shares; operator wants 80 more open leaves → total = 100.
-    let body = build_replace_body(QtyMicros::from_whole_units(80).unwrap(), 20, None, "day")
-        .expect("replace body must build");
+    let body = build_replace_body(
+        QtyMicros::from_whole_units(80).unwrap(),
+        QtyMicros::from_whole_units(20).unwrap(),
+        None,
+        "day",
+    )
+    .expect("replace body must build");
     assert_eq!(
         body.qty, "100",
         "replace qty must be total (filled + new leaves), got {}",
@@ -212,15 +217,20 @@ fn l5_build_replace_body_total_qty_semantics() {
 #[test]
 fn l5_build_replace_body_zero_filled() {
     // No fills yet; new open leaves = 50 → total = 50.
-    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), 0, None, "day")
+    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), QtyMicros::ZERO, None, "day")
         .expect("replace body must build");
     assert_eq!(body.qty, "50");
 }
 #[test]
 fn l5_build_replace_body_large_fill() {
     // Heavily-filled order: 900 filled, want 100 more → total = 1000.
-    let body = build_replace_body(QtyMicros::from_whole_units(100).unwrap(), 900, None, "gtc")
-        .expect("replace body must build");
+    let body = build_replace_body(
+        QtyMicros::from_whole_units(100).unwrap(),
+        QtyMicros::from_whole_units(900).unwrap(),
+        None,
+        "gtc",
+    )
+    .expect("replace body must build");
     assert_eq!(body.qty, "1000");
 }
 // ---------------------------------------------------------------------------
@@ -229,8 +239,13 @@ fn l5_build_replace_body_large_fill() {
 #[test]
 fn l6_build_replace_body_limit_price_at_wire_boundary() {
     // $150.75 = 150_750_000 micros
-    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), 0, Some(150_750_000), "gtc")
-        .expect("replace body must build");
+    let body = build_replace_body(
+        QtyMicros::from_whole_units(50).unwrap(),
+        QtyMicros::ZERO,
+        Some(150_750_000),
+        "gtc",
+    )
+    .expect("replace body must build");
     let price_str = body
         .limit_price
         .as_deref()
@@ -239,7 +254,7 @@ fn l6_build_replace_body_limit_price_at_wire_boundary() {
 }
 #[test]
 fn l6_build_replace_body_no_limit_price_for_market() {
-    let body = build_replace_body(QtyMicros::from_whole_units(100).unwrap(), 0, None, "day")
+    let body = build_replace_body(QtyMicros::from_whole_units(100).unwrap(), QtyMicros::ZERO, None, "day")
         .expect("replace body must build");
     assert!(body.limit_price.is_none());
 }

@@ -209,8 +209,13 @@ fn fp07_whole_dollar_price_formats_with_two_decimal_places() {
 #[test]
 fn fp08_replace_body_qty_uses_format_alpaca_qty() {
     // new_leaves=80, filled=20 → total=100
-    let body = build_replace_body(QtyMicros::from_whole_units(80).unwrap(), 20, None, "day")
-        .expect("replace body must build");
+    let body = build_replace_body(
+        QtyMicros::from_whole_units(80).unwrap(),
+        QtyMicros::from_whole_units(20).unwrap(),
+        None,
+        "day",
+    )
+    .expect("replace body must build");
     assert_eq!(body.qty, format_alpaca_qty(QtyMicros::from_whole_units(100).unwrap()));
     assert_eq!(body.qty, "100");
 }
@@ -222,8 +227,13 @@ fn fp08_replace_body_qty_uses_format_alpaca_qty() {
 #[test]
 fn fp09_replace_body_price_uses_format_alpaca_price() {
     // $150.75 = 150_750_000 micros.
-    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), 0, Some(150_750_000), "gtc")
-        .expect("replace body must build");
+    let body = build_replace_body(
+        QtyMicros::from_whole_units(50).unwrap(),
+        QtyMicros::ZERO,
+        Some(150_750_000),
+        "gtc",
+    )
+    .expect("replace body must build");
     let price_str = body
         .limit_price
         .as_deref()
