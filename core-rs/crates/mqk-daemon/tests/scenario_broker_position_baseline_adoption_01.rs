@@ -166,8 +166,8 @@ async fn pba01_no_baseline_means_reconcile_dirty_for_unknown_broker_order() {
             "fake-alpaca-order-id-001",
             "AAPL",
             mqk_reconcile::Side::Buy,
-            1,
-            0,
+            mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(),
+            mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(),
             mqk_reconcile::OrderStatus::Accepted,
         ),
     );

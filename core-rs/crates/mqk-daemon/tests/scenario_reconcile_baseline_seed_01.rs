@@ -57,7 +57,7 @@ use mqk_reconcile::{
 
 fn broker_with_position(symbol: &str, qty: i64, ts_ms: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty_at(ts_ms);
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions.insert(symbol.to_string(), mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap());
     s
 }
 
@@ -81,7 +81,7 @@ fn local_from_seeded_snapshot(seeded_positions: &[(&str, i64)]) -> LocalSnapshot
     let mut local = LocalSnapshot::empty();
     for &(sym, qty) in seeded_positions {
         if qty != 0 {
-            local.positions.insert(sym.to_string(), qty);
+            local.positions.insert(sym.to_string(), mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap());
         }
     }
     local
@@ -105,7 +105,7 @@ fn rbs01_seeded_baseline_no_fills_matching_broker_is_clean() {
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(4),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(4).unwrap()),
         "RBS01: seeded snapshot AAPL=4 must read through as local AAPL=4 (not re-merged to 8)"
     );
 
@@ -137,7 +137,7 @@ fn rbs02_seeded_baseline_plus_fill_matches_broker_is_clean() {
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(5),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(5).unwrap()),
         "RBS02: seeded snapshot AAPL=5 (baseline 4 + fill 1) must read through as local AAPL=5"
     );
 
@@ -226,8 +226,8 @@ fn rbs05_seeded_baseline_with_ackd_order_no_position_mismatch() {
             "order-aapl-smoke-001",
             "AAPL",
             Side::Buy,
-            1,
-            0,
+            mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(),
+            mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(),
             OrderStatus::New,
         ),
     );
@@ -251,7 +251,7 @@ fn rbs05_seeded_baseline_with_ackd_order_no_position_mismatch() {
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(4),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(4).unwrap()),
         "RBS05: seeded local must read AAPL=4 (baseline, no fill delta) — not re-merged to 8"
     );
 }
@@ -308,7 +308,7 @@ fn rbs07_derivation_is_pure_read_no_remerge_no_synthetic_fills() {
     // baseline addition occurs (that re-merge is exactly what was removed).
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(5),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(5).unwrap()),
         "RBS07: seeded total(5) must pass through unchanged — no re-merge"
     );
 

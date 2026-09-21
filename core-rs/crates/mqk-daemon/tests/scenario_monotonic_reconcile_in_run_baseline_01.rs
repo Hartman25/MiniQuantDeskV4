@@ -67,13 +67,19 @@ use tokio::sync::RwLock;
 
 fn local_with_position(symbol: &str, qty: i64) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions.insert(
+        symbol.to_string(),
+        mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
 fn broker_with_position(symbol: &str, qty: i64, ts_ms: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty_at(ts_ms);
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions.insert(
+        symbol.to_string(),
+        mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
@@ -134,12 +140,7 @@ fn patched_in_run_local_fn(
         let mut local = LocalSnapshot::empty();
         for pos in &snapshot.portfolio.positions {
             if !pos.net_qty.is_zero() {
-                local.positions.insert(
-                    pos.symbol.clone(),
-                    pos.net_qty
-                        .to_whole_units_checked()
-                        .expect("fractional position unsupported by this whole-unit test helper"),
-                );
+                local.positions.insert(pos.symbol.clone(), pos.net_qty);
             }
         }
         local
@@ -188,7 +189,7 @@ fn mrir01_seeded_exec_snap_matching_broker_is_clean() {
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(1),
+        Some(mqk_execution::QtyMicros::from_whole_units(1).unwrap()),
         "MRIR01: local_fn must read the seeded snapshot's AAPL=1 directly \
          (re-merging baseline would double it to 2)"
     );
@@ -284,7 +285,7 @@ fn mrir03_seeded_exec_snap_broker_drift_is_dirty_real_drift_still_halts() {
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(1),
+        Some(mqk_execution::QtyMicros::from_whole_units(1).unwrap()),
         "MRIR03: local_fn must read the seeded snapshot's AAPL=1 directly"
     );
 
@@ -320,7 +321,7 @@ fn mrir04_fill_position_no_baseline_is_read_through_correctly() {
     // Direct read: snapshot AAPL=1 (fill only) → local AAPL=1. No baseline to add.
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(1),
+        Some(mqk_execution::QtyMicros::from_whole_units(1).unwrap()),
         "MRIR04: snapshot(AAPL=1, fill only) must read through as local AAPL=1"
     );
 
@@ -424,7 +425,7 @@ fn mrir06_local_fn_derivation_is_read_only_no_outbox() {
     // Direct read: snapshot AAPL=1 → local AAPL=1. No re-merge, no writes.
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(1),
+        Some(mqk_execution::QtyMicros::from_whole_units(1).unwrap()),
         "MRIR06: derivation must return AAPL=1 — only read ops occurred, no re-merge"
     );
     // No assertions on external state: patched_in_run_local_fn is a pure function.

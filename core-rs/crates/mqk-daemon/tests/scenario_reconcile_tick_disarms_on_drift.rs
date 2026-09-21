@@ -34,7 +34,7 @@ async fn armed_state() -> Arc<AppState> {
 
 fn broker_snapshot_with_position(fetched_at_ms: i64, qty: i64) -> BrokerSnapshot {
     let mut snap = BrokerSnapshot::empty_at(fetched_at_ms);
-    snap.positions.insert("SPY".to_string(), qty);
+    snap.positions.insert("SPY".to_string(), mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap());
     snap
 }
 
@@ -44,7 +44,7 @@ async fn daemon_or_runtime_path_uses_monotonic_reconcile() {
 
     let local_fn = || {
         let mut snap = LocalSnapshot::empty();
-        snap.positions.insert("SPY".to_string(), 100);
+        snap.positions.insert("SPY".to_string(), mqk_reconcile::QtyMicros::from_whole_units(100).unwrap());
         snap
     };
     let broker_fn = || Some(broker_snapshot_with_position(2_000, 200));
@@ -73,7 +73,7 @@ async fn reconcile_tick_does_not_disarm_on_clean_fresh_snapshot() {
 
     let local_fn = || {
         let mut snap = LocalSnapshot::empty();
-        snap.positions.insert("SPY".to_string(), 100);
+        snap.positions.insert("SPY".to_string(), mqk_reconcile::QtyMicros::from_whole_units(100).unwrap());
         snap
     };
     let broker_fn = || Some(broker_snapshot_with_position(2_000, 100));
@@ -110,7 +110,7 @@ async fn stale_snapshot_cannot_reenable_dispatch() {
 
     let local_fn = || {
         let mut snap = LocalSnapshot::empty();
-        snap.positions.insert("SPY".to_string(), 100);
+        snap.positions.insert("SPY".to_string(), mqk_reconcile::QtyMicros::from_whole_units(100).unwrap());
         snap
     };
     let broker_fn = {
@@ -190,7 +190,7 @@ async fn missing_broker_snapshot_fails_closed() {
 
     let local_fn = || {
         let mut snap = LocalSnapshot::empty();
-        snap.positions.insert("SPY".to_string(), 100);
+        snap.positions.insert("SPY".to_string(), mqk_reconcile::QtyMicros::from_whole_units(100).unwrap());
         snap
     };
     let broker_fn = || -> Option<BrokerSnapshot> { None };

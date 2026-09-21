@@ -69,14 +69,20 @@ use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot};
 /// Build a LocalSnapshot with a single long-position entry.
 fn local_with_position(symbol: &str, qty: i64) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions.insert(
+        symbol.to_string(),
+        mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
 /// Build a BrokerSnapshot with a single position and a timestamp.
 fn broker_with_position(symbol: &str, qty: i64, ts_ms: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty_at(ts_ms);
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions.insert(
+        symbol.to_string(),
+        mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
@@ -85,7 +91,14 @@ fn broker_with_order(order_id: &str, symbol: &str, ts_ms: i64) -> BrokerSnapshot
     let mut s = BrokerSnapshot::empty_at(ts_ms);
     s.orders.insert(
         order_id.to_string(),
-        OrderSnapshot::new(order_id, symbol, Side::Buy, 1, 0, OrderStatus::Accepted),
+        OrderSnapshot::new(
+            order_id,
+            symbol,
+            Side::Buy,
+            mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(),
+            mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(),
+            OrderStatus::Accepted,
+        ),
     );
     s
 }
@@ -125,7 +138,7 @@ async fn rsb01_baseline_matching_broker_position_is_clean() {
     };
     assert_eq!(
         local_seed.positions.get("AAPL").copied(),
-        Some(1),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(1).unwrap()),
         "RSB01: local seed must carry AAPL position from baseline"
     );
 
@@ -285,13 +298,13 @@ fn rsb07_baseline_with_order_and_position_matching_broker_is_clean() {
     let mut local = local_with_position("AAPL", 1);
     local.orders.insert(
         "ord-001".to_string(),
-        OrderSnapshot::new("ord-001", "AAPL", Side::Buy, 1, 0, OrderStatus::Accepted),
+        OrderSnapshot::new("ord-001", "AAPL", Side::Buy, mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(), mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
     );
 
     let mut broker = broker_with_position("AAPL", 1, ts());
     broker.orders.insert(
         "ord-001".to_string(),
-        OrderSnapshot::new("ord-001", "AAPL", Side::Buy, 1, 0, OrderStatus::Accepted),
+        OrderSnapshot::new("ord-001", "AAPL", Side::Buy, mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(), mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
     );
 
     let mut wm = SnapshotWatermark::new();
@@ -405,12 +418,7 @@ fn patched_local_provider(
     let mut local = LocalSnapshot::empty();
     for pos in &snapshot.portfolio.positions {
         if !pos.net_qty.is_zero() {
-            local.positions.insert(
-                pos.symbol.clone(),
-                pos.net_qty
-                    .to_whole_units_checked()
-                    .expect("fractional position unsupported by this whole-unit test helper"),
-            );
+            local.positions.insert(pos.symbol.clone(), pos.net_qty);
         }
     }
     local
@@ -440,7 +448,7 @@ fn rdl01_seeded_exec_snap_with_matching_baseline_is_clean() {
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(1),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(1).unwrap()),
         "RDL01: provider must read the seeded snapshot's AAPL=1 directly (a re-merge would yield 2)"
     );
 
@@ -502,7 +510,7 @@ fn rdl03_seeded_exec_snap_broker_drift_is_dirty() {
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(1),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(1).unwrap()),
         "RDL03: provider must read the seeded snapshot's AAPL=1 directly"
     );
 
@@ -543,7 +551,7 @@ fn rdl04_seeded_baseline_plus_fill_reads_through_to_correct_total() {
     // Direct read: snapshot already shows the folded total = 2. No re-merge.
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(2),
+        Some(mqk_reconcile::QtyMicros::from_whole_units(2).unwrap()),
         "RDL04: seeded snapshot AAPL=2 (baseline 1 + fill 1, folded) must read through as local=2 \
          (a re-merge would have produced local=3)"
     );

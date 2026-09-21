@@ -92,6 +92,19 @@ pub(crate) fn parse_signed_qty(raw: &str) -> Option<i64> {
     Some(sign * base)
 }
 
+/// CUTOVER-1G-RECONCILE-QTY-MICROS-01: fractional-capable counterpart of
+/// `parse_signed_qty`, used only by `reconcile_broker_snapshot_from_schema`
+/// (the in-memory reconcile comparison path). Every other `parse_signed_qty`
+/// caller feeds a whole-unit-only durable DB column or accounting
+/// comparison and is deliberately left unchanged -- widening those is a
+/// separate DB-migration-bearing concern, not a reconcile-comparison one.
+/// Accepts the same decimal-string wire convention as `QtyMicros::FromStr`
+/// (used elsewhere for order submission), so a real Alpaca Crypto position
+/// like `"0.5"` round-trips exactly instead of being rejected.
+pub(crate) fn parse_signed_qty_micros(raw: &str) -> Option<mqk_execution::QtyMicros> {
+    raw.trim().parse::<mqk_execution::QtyMicros>().ok()
+}
+
 pub(crate) fn reconcile_side_from_schema(raw: &str) -> mqk_reconcile::Side {
     if raw.eq_ignore_ascii_case("sell") {
         mqk_reconcile::Side::Sell
@@ -125,25 +138,15 @@ pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
     snapshot: &mqk_runtime::observability::ExecutionSnapshot,
     sides: &BTreeMap<String, mqk_reconcile::Side>,
 ) -> mqk_reconcile::LocalSnapshot {
-    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty` is
-    // `QtyMicros`; `mqk_reconcile::LocalSnapshot.positions` remains
-    // whole-unit `i64` pending its own QtyMicros cutover (CUTOVER-1G:
-    // reconciliation exact fractional quantity comparison). Crypto
-    // execution is not wired yet (Alpaca `supports_asset_class(Crypto) ==
-    // false` blocks it at `BrokerGateway::submit`), so no fractional
-    // position can exist in memory today -- `.expect` surfaces a violated
-    // precondition loudly rather than silently corrupting a reconcile-drift
-    // comparison that gates a halt decision.
+    // CUTOVER-1G-RECONCILE-QTY-MICROS-01: `PositionSnapshot.net_qty` and
+    // `mqk_reconcile::LocalSnapshot.positions`/`OrderSnapshot.{qty,filled_qty}`
+    // are both `QtyMicros` -- fractional Crypto positions/orders now flow
+    // through the reconcile comparison exactly, no whole-unit conversion.
     let positions = snapshot
         .portfolio
         .positions
         .iter()
-        .map(|pos| {
-            let qty = pos.net_qty.to_whole_units_checked().expect(
-                "fractional position unsupported by mqk_reconcile pending CUTOVER-1G",
-            );
-            (pos.symbol.clone(), qty)
-        })
+        .map(|pos| (pos.symbol.clone(), pos.net_qty))
         .collect();
 
     let orders = snapshot
@@ -155,22 +158,12 @@ pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
                 .cloned()
                 .unwrap_or(mqk_reconcile::Side::Buy);
             let status = oms_execution_status_to_reconcile(&order.status);
-            // `mqk_reconcile::OrderSnapshot` remains whole-unit `i64`
-            // pending the same CUTOVER-1G reconciliation cutover -- see the
-            // comment above `positions` for why a fractional value cannot
-            // occur in production today.
             let snap = mqk_reconcile::OrderSnapshot {
                 order_id: order.order_id.clone(),
                 symbol: order.symbol.clone(),
                 side,
-                qty: order
-                    .total_qty
-                    .to_whole_units_checked()
-                    .expect("fractional OmsOrder.total_qty unsupported by mqk_reconcile pending CUTOVER-1G"),
-                filled_qty: order
-                    .filled_qty
-                    .to_whole_units_checked()
-                    .expect("fractional OmsOrder.filled_qty unsupported by mqk_reconcile pending CUTOVER-1G"),
+                qty: order.total_qty,
+                filled_qty: order.filled_qty,
                 status,
             };
             (order.order_id.clone(), snap)
@@ -384,24 +377,23 @@ pub(crate) fn reconcile_broker_snapshot_from_schema(
 
     let mut positions = BTreeMap::new();
     for position in &snapshot.positions {
-        let qty = parse_signed_qty(&position.qty).ok_or(
-            "broker snapshot contains non-integer position qty; refusing ambiguous broker truth",
+        let qty = parse_signed_qty_micros(&position.qty).ok_or(
+            "broker snapshot contains an unparseable position qty; refusing ambiguous broker truth",
         )?;
         positions.insert(position.symbol.clone(), qty);
     }
 
     let mut orders = BTreeMap::new();
     for order in &snapshot.orders {
-        let qty = parse_signed_qty(&order.qty).ok_or(
-            "broker snapshot contains non-integer order qty; refusing ambiguous broker truth",
+        let qty = parse_signed_qty_micros(&order.qty).ok_or(
+            "broker snapshot contains an unparseable order qty; refusing ambiguous broker truth",
         )?;
         // F1-RECONCILE-FILLED-QTY-WIRING-01: the broker-reported filled_qty
-        // must flow through untouched. `parse_signed_qty` rejects fractional
-        // shares (e.g. "1.5") and malformed strings, so a broker value that
-        // cannot be represented under the whole-share reconcile contract
-        // fails the whole snapshot closed rather than silently becoming 0.
-        let filled_qty = parse_signed_qty(&order.filled_qty).ok_or(
-            "broker snapshot contains non-integer order filled_qty; refusing ambiguous broker truth",
+        // must flow through untouched. `parse_signed_qty_micros` rejects
+        // malformed strings, so a broker value that cannot be parsed fails
+        // the whole snapshot closed rather than silently becoming 0.
+        let filled_qty = parse_signed_qty_micros(&order.filled_qty).ok_or(
+            "broker snapshot contains an unparseable order filled_qty; refusing ambiguous broker truth",
         )?;
         let order_id = if order.client_order_id.trim().is_empty() {
             order.broker_order_id.clone()
@@ -574,15 +566,20 @@ pub(crate) fn seed_portfolio_from_baseline(
     baseline: &mqk_reconcile::LocalSnapshot,
 ) {
     for (sym, &bl_qty) in &baseline.positions {
-        if bl_qty == 0 {
+        if bl_qty.is_zero() {
             continue;
         }
-        let side = if bl_qty > 0 { Side::Buy } else { Side::Sell };
-        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `baseline.positions` is
-        // `mqk_reconcile`'s own whole-unit `i64` (pending its separate
-        // CUTOVER-1G), converted here at the `Fill::new` boundary.
-        let qty_micros = mqk_execution::QtyMicros::from_whole_units(bl_qty.abs())
-            .expect("baseline qty is whole-unit i64 by mqk_reconcile's own type, always in range");
+        let side = if bl_qty.is_positive() {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
+        // CUTOVER-1G-RECONCILE-QTY-MICROS-01: `baseline.positions` is
+        // `mqk_reconcile`'s own `QtyMicros` -- fractional-capable, flows
+        // straight through.
+        let qty_micros = bl_qty
+            .checked_abs()
+            .expect("baseline qty magnitude must be representable as its own negation");
         let fill = Fill::new(sym.clone(), side, qty_micros, 1, 0);
         apply_entry(portfolio, LedgerEntry::Fill(fill));
     }
@@ -1097,7 +1094,8 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
 mod reconcile_status_map_tests {
     use super::oms_execution_status_to_reconcile;
     use mqk_reconcile::{
-        reconcile, BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, Side,
+        reconcile, BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, QtyMicros,
+        ReconcileAction, Side,
     };
 
     // Helper: build a minimal matched order pair (same id/symbol/side/qty/filled_qty).
@@ -1108,12 +1106,12 @@ mod reconcile_status_map_tests {
         let mut local = LocalSnapshot::empty();
         local.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 1, 0, local_status),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, QtyMicros::from_whole_units(1).unwrap(), QtyMicros::from_whole_units(0).unwrap(), local_status),
         );
         let mut broker = BrokerSnapshot::empty_at(1_000);
         broker.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 1, 0, broker_status),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, QtyMicros::from_whole_units(1).unwrap(), QtyMicros::from_whole_units(0).unwrap(), broker_status),
         );
         (local, broker)
     }
@@ -1156,8 +1154,8 @@ mod reconcile_status_map_tests {
                 "ord-1",
                 "AAPL",
                 Side::Buy,
-                10,
-                3,
+                QtyMicros::from_whole_units(10).unwrap(),
+                QtyMicros::from_whole_units(3).unwrap(),
                 OrderStatus::PartiallyFilled,
             ),
         );
@@ -1168,8 +1166,8 @@ mod reconcile_status_map_tests {
                 "ord-1",
                 "AAPL",
                 Side::Buy,
-                10,
-                3,
+                QtyMicros::from_whole_units(10).unwrap(),
+                QtyMicros::from_whole_units(3).unwrap(),
                 OrderStatus::PartiallyFilled,
             ),
         );
@@ -1291,7 +1289,7 @@ mod position_seed_tests {
     fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
         let mut s = LocalSnapshot::empty();
         for &(sym, qty) in positions {
-            s.positions.insert(sym.to_string(), qty);
+            s.positions.insert(sym.to_string(), mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap());
         }
         s
     }
@@ -1473,7 +1471,7 @@ mod baseline_double_count_fix_tests {
     fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
         let mut s = LocalSnapshot::empty();
         for &(sym, qty) in positions {
-            s.positions.insert(sym.to_string(), qty);
+            s.positions.insert(sym.to_string(), mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap());
         }
         s
     }
@@ -1533,7 +1531,13 @@ mod baseline_double_count_fix_tests {
         // the exact function `local_snapshot_provider` / `local_fn` call directly.
         let sides: BTreeMap<String, mqk_reconcile::Side> = BTreeMap::new();
         let local = reconcile_local_snapshot_from_runtime_with_sides(&exec_snapshot, &sides);
-        local.positions.get(symbol).copied().unwrap_or(0)
+        local
+            .positions
+            .get(symbol)
+            .copied()
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO)
+            .to_whole_units_checked()
+            .unwrap()
     }
 
     // BDC01: baseline-only (no same-run fills) → local qty == N
@@ -1642,7 +1646,7 @@ mod baseline_ledger_parity_tests {
     fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
         let mut s = LocalSnapshot::empty();
         for &(sym, qty) in positions {
-            s.positions.insert(sym.to_string(), qty);
+            s.positions.insert(sym.to_string(), mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap());
         }
         s
     }
@@ -3266,7 +3270,8 @@ mod f1_filled_qty_wiring_tests {
     use super::reconcile_broker_snapshot_from_schema;
     use chrono::{TimeZone, Utc};
     use mqk_reconcile::{
-        reconcile, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, ReconcileDiff, Side,
+        reconcile, LocalSnapshot, OrderSnapshot, OrderStatus, QtyMicros, ReconcileAction,
+        ReconcileDiff, Side,
     };
     use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
 
@@ -3313,9 +3318,10 @@ mod f1_filled_qty_wiring_tests {
             .orders
             .get("ord-1")
             .expect("order must be present");
-        assert_eq!(order.qty, 10);
+        assert_eq!(order.qty, QtyMicros::from_whole_units(10).unwrap());
         assert_eq!(
-            order.filled_qty, 4,
+            order.filled_qty,
+            QtyMicros::from_whole_units(4).unwrap(),
             "filled_qty must be the real broker value, not a fabricated zero"
         );
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
@@ -3331,8 +3337,8 @@ mod f1_filled_qty_wiring_tests {
                 "ord-1",
                 "AAPL",
                 Side::Buy,
-                10,
-                4,
+                QtyMicros::from_whole_units(10).unwrap(),
+                QtyMicros::from_whole_units(4).unwrap(),
                 OrderStatus::PartiallyFilled,
             ),
         );
@@ -3368,8 +3374,8 @@ mod f1_filled_qty_wiring_tests {
                 "ord-1",
                 "AAPL",
                 Side::Buy,
-                10,
-                4,
+                QtyMicros::from_whole_units(10).unwrap(),
+                QtyMicros::from_whole_units(4).unwrap(),
                 OrderStatus::PartiallyFilled,
             ),
         );
@@ -3401,7 +3407,7 @@ mod f1_filled_qty_wiring_tests {
         let mut local = LocalSnapshot::empty();
         local.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 10, 0, OrderStatus::Accepted),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
         );
         let schema_snap = schema_snapshot(schema_order("10", "0", "accepted"));
         let broker = reconcile_broker_snapshot_from_schema(&schema_snap)
@@ -3428,15 +3434,24 @@ mod f1_filled_qty_wiring_tests {
         );
     }
 
-    // F1-T8: fractional broker filled_qty fails closed under the whole-share
-    // reconcile contract.
+    // F1-T8: CUTOVER-1G-RECONCILE-QTY-MICROS-01 superseded the whole-share-only
+    // reconcile contract this test previously enforced (a fractional filled_qty
+    // used to be rejected as an error). A real Crypto broker snapshot can
+    // legitimately report a fractional filled_qty (e.g. "0.5" BTC), and it must
+    // now parse exactly rather than being refused.
     #[test]
-    fn f1_t8_fractional_filled_qty_fails_closed() {
+    fn f1_t8_fractional_filled_qty_is_accepted_exactly() {
         let snap = schema_snapshot(schema_order("10", "1.5", "partially_filled"));
-        let result = reconcile_broker_snapshot_from_schema(&snap);
-        assert!(
-            result.is_err(),
-            "fractional broker filled_qty must be rejected under the whole-share contract"
+        let reconcile_snap =
+            reconcile_broker_snapshot_from_schema(&snap).expect("fractional filled_qty must parse");
+        let order = reconcile_snap
+            .orders
+            .get("ord-1")
+            .expect("order must be present");
+        assert_eq!(
+            order.filled_qty,
+            "1.5".parse::<QtyMicros>().unwrap(),
+            "fractional filled_qty must be preserved exactly, not truncated or rejected"
         );
     }
 }
