@@ -1,10 +1,12 @@
-use mqk_reconcile::{check_arm_gate, BrokerSnapshot, LocalSnapshot};
+use mqk_reconcile::{check_arm_gate, BrokerSnapshot, LocalSnapshot, QtyMicros};
 
 #[test]
 fn clean_reconcile_required_before_live_arm() {
     // DIRTY: local thinks we hold something, broker says we hold nothing -> blocked.
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("SPY".to_string(), 1);
+    local
+        .positions
+        .insert("SPY".to_string(), QtyMicros::from_whole_units(1).unwrap());
 
     let broker = BrokerSnapshot::empty_at(1);
 

@@ -36,13 +36,13 @@ fn empty_portfolio() -> PortfolioState {
 
 fn local_with_pos(symbol: &str, qty: i64) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions.insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
     s
 }
 
 fn broker_with_pos(symbol: &str, qty: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty();
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions.insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
     s
 }
 
@@ -308,8 +308,8 @@ fn reconcile_detects_long_horizon_divergence_without_silent_acceptance() {
 
     // Multi-symbol: a broker position unknown to local also halts.
     let mut dirty_unknown = BrokerSnapshot::empty();
-    dirty_unknown.positions.insert("SPY".to_string(), 100);
-    dirty_unknown.positions.insert("QQQ".to_string(), 5);
+    dirty_unknown.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
+    dirty_unknown.positions.insert("QQQ".to_string(), QtyMicros::from_whole_units(5).unwrap());
     assert!(
         reconcile_tick(&local, &dirty_unknown).requires_halt_and_disarm(),
         "broker position unknown to local must prescribe HaltAndDisarm"

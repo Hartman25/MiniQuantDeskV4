@@ -43,7 +43,7 @@ use mqk_execution::{
     BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::PortfolioState;
-use mqk_reconcile::{BrokerSnapshot, LocalSnapshot};
+use mqk_reconcile::{BrokerSnapshot, LocalSnapshot, QtyMicros};
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
 
 // ---------------------------------------------------------------------------
@@ -269,7 +269,7 @@ async fn release_asb_runtime_leadership(
 /// broker snapshot but not yet applied to the local portfolio.
 fn dirty_local() -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert("AAPL".to_string(), 1);
+    s.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
     s
 }
 

@@ -12,7 +12,8 @@
 use std::collections::BTreeMap;
 
 use mqk_reconcile::{
-    reconcile_tick, BrokerSnapshot, DriftAction, LocalSnapshot, OrderSnapshot, OrderStatus, Side,
+    reconcile_tick, BrokerSnapshot, DriftAction, LocalSnapshot, OrderSnapshot, OrderStatus,
+    QtyMicros, Side,
 };
 
 fn local_empty() -> LocalSnapshot {
@@ -38,16 +39,23 @@ fn make_order(
     filled_qty: i64,
     status: OrderStatus,
 ) -> OrderSnapshot {
-    OrderSnapshot::new(order_id, symbol, side, qty, filled_qty, status)
+    OrderSnapshot::new(
+        order_id,
+        symbol,
+        side,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        QtyMicros::from_whole_units(filled_qty).unwrap(),
+        status,
+    )
 }
 
 #[test]
 fn position_drift_then_correction_returns_to_continue() {
     let mut local = local_empty();
-    local.positions.insert("SPY".to_string(), 100);
+    local.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
 
     let mut broker_dirty = broker_empty();
-    broker_dirty.positions.insert("SPY".to_string(), 50);
+    broker_dirty.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(50).unwrap());
 
     let dirty = reconcile_tick(&local, &broker_dirty);
     assert!(
@@ -56,7 +64,7 @@ fn position_drift_then_correction_returns_to_continue() {
     );
 
     let mut broker_clean = broker_empty();
-    broker_clean.positions.insert("SPY".to_string(), 100);
+    broker_clean.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
 
     let clean = reconcile_tick(&local, &broker_clean);
     assert_eq!(

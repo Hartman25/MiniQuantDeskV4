@@ -13,7 +13,7 @@
 
 use mqk_reconcile::{
     check_arm_gate, check_start_gate, ArmStartGate, BrokerSnapshot, LocalSnapshot, OrderSnapshot,
-    OrderStatus, ReconcileAction, Side,
+    OrderStatus, QtyMicros, ReconcileAction, Side,
 };
 
 // ---------------------------------------------------------------------------
@@ -30,18 +30,27 @@ fn broker_empty() -> BrokerSnapshot {
 
 fn local_with_position(symbol: &str, qty: i64) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions
+        .insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
     s
 }
 
 fn broker_with_position(symbol: &str, qty: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty();
-    s.positions.insert(symbol.to_string(), qty);
+    s.positions
+        .insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
     s
 }
 
 fn make_order(id: &str, symbol: &str, qty: i64, filled: i64, status: OrderStatus) -> OrderSnapshot {
-    OrderSnapshot::new(id, symbol, Side::Buy, qty, filled, status)
+    OrderSnapshot::new(
+        id,
+        symbol,
+        Side::Buy,
+        QtyMicros::from_whole_units(qty).unwrap(),
+        QtyMicros::from_whole_units(filled).unwrap(),
+        status,
+    )
 }
 
 // ---------------------------------------------------------------------------
