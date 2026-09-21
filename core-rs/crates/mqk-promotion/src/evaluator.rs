@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mqk_portfolio::{Fill, Side};
+use mqk_portfolio::{FeeAttributionStatus, Fill, Side};
 use uuid::Uuid;
 
 use crate::types::{
@@ -430,6 +430,39 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
             fail_reasons,
             metrics,
         };
+    }
+
+    // CRYPTO-FEE-ATTRIBUTION-01 (operator decision) — cost-model evidence gate.
+    //
+    // A fill carrying `FeeAttributionStatus::PendingAttribution` had
+    // fee_micros=0 at backtest/fill time as a placeholder, not a validated
+    // zero-cost claim (see `mqk_portfolio::Fill::fee_attribution`'s doc).
+    // Attractive Sharpe/CAGR/profit-factor numbers computed over such fills
+    // have not been proven net of real trading cost for that symbol's asset
+    // class. Promotion must fail closed here rather than let an unattributed
+    // cost silently pass as cost-aware evidence — this is checked
+    // unconditionally, independent of whether the metric thresholds below
+    // would otherwise pass.
+    let unattributed_fills: Vec<&str> = input
+        .report
+        .fills
+        .iter()
+        .filter(|f| f.inner.fee_attribution == FeeAttributionStatus::PendingAttribution)
+        .map(|f| f.inner.symbol.as_str())
+        .collect();
+    if !unattributed_fills.is_empty() {
+        let mut distinct_symbols: Vec<&str> = unattributed_fills.clone();
+        distinct_symbols.sort_unstable();
+        distinct_symbols.dedup();
+        fail_reasons.push(format!(
+            "Cost model not validated: {} fill(s) across symbol(s) [{}] carry \
+             FeeAttributionStatus::PendingAttribution (fee not yet broker-confirmed) — \
+             promotion requires either a validated cost model or actual attributed fee \
+             evidence for these symbols before their backtest metrics can count as \
+             cost-aware evidence (CRYPTO-FEE-ATTRIBUTION-01)",
+            unattributed_fills.len(),
+            distinct_symbols.join(", ")
+        ));
     }
 
     // Gate checks — stable ordering matches field order in PromotionConfig.
