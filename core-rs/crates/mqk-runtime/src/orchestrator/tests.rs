@@ -81,7 +81,7 @@ fn invariant_check_detects_cash_corruption() {
 fn invariant_check_passes_after_apply_entry() {
     use mqk_portfolio::{Fill, LedgerEntry, Side};
     let mut pf = PortfolioState::new(1_000_000_000_i64);
-    let fill = Fill::new("AAPL", Side::Buy, 10, 150_000_000, 0);
+    let fill = Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150_000_000, 0);
     apply_entry(&mut pf, LedgerEntry::Fill(fill));
     // After apply_entry (which appends to ledger), invariant must hold.
     check_capital_invariants(&pf).unwrap();
@@ -118,7 +118,7 @@ fn broker_event_to_fill_converts_correctly() {
         fee_micros: 1_000,
     };
     let fill = broker_event_to_fill(&ev).unwrap().unwrap();
-    assert_eq!(fill.qty, 5);
+    assert_eq!(fill.qty, QtyMicros::from_whole_units(5).unwrap());
     assert_eq!(fill.price_micros, 300_000_000);
     assert_eq!(fill.fee_micros, 1_000);
     assert_eq!(fill.side, mqk_portfolio::Side::Sell);
@@ -1107,7 +1107,7 @@ fn known_order_fill_succeeds_and_returns_fill() {
     let fill = result
         .unwrap()
         .expect("expected Some(fill) for known order fill");
-    assert_eq!(fill.qty, 100);
+    assert_eq!(fill.qty, QtyMicros::from_whole_units(100).unwrap());
     // OMS state must have advanced.
     assert_eq!(oms["ord-1"].filled_qty, QtyMicros::from_whole_units(100).unwrap());
 }
@@ -1172,7 +1172,7 @@ fn alpaca_paper_terminal_fill_cumulative_qty_uses_effective_delta() {
 
     // Portfolio fill must use effective delta (1), not broker delta (2).
     assert_eq!(
-        fill.qty, 1,
+        fill.qty, QtyMicros::from_whole_units(1).unwrap(),
         "portfolio fill must use effective delta (total_qty - prior_filled = 1), \
          not broker-reported delta_qty (2)"
     );
@@ -1197,7 +1197,7 @@ fn duplicate_fill_replay_does_not_double_apply_portfolio() {
     let first = apply_fill_step(&mut oms, "ord-3", &ev, "pf-msg-dup")
         .unwrap()
         .expect("first application must return Some(fill)");
-    assert_eq!(first.qty, 60);
+    assert_eq!(first.qty, QtyMicros::from_whole_units(60).unwrap());
     assert_eq!(oms["ord-3"].filled_qty, QtyMicros::from_whole_units(60).unwrap());
     // Second application with the same msg_id: OMS dedup → no state change.
     let second = apply_fill_step(&mut oms, "ord-3", &ev, "pf-msg-dup").unwrap();
@@ -1226,7 +1226,7 @@ fn duplicate_economic_fill_id_across_messages_is_deduped() {
     let first = apply_fill_step(&mut oms, "ord-3b", &ev1, "transport-msg-1")
         .unwrap()
         .expect("first apply should mutate portfolio");
-    assert_eq!(first.qty, 60);
+    assert_eq!(first.qty, QtyMicros::from_whole_units(60).unwrap());
     assert_eq!(oms["ord-3b"].filled_qty, QtyMicros::from_whole_units(60).unwrap());
 
     let second = apply_fill_step(&mut oms, "ord-3b", &ev2, "transport-msg-2").unwrap();
@@ -1297,7 +1297,7 @@ fn alpaca_paper_two_partials_then_cumulative_terminal_fill_uses_effective_delta(
 
     // Portfolio fill must use effective delta (1 = total - prior_filled), not broker delta (2).
     assert_eq!(
-        fill.qty, 1,
+        fill.qty, QtyMicros::from_whole_units(1).unwrap(),
         "T4c: portfolio fill must use effective_delta=1 (total_qty - prior_filled = 3 - 2), \
          not broker-reported delta_qty=2"
     );
@@ -1341,7 +1341,7 @@ fn a1_ws_then_rest_same_physical_partial_fill_applies_once() {
     let first = apply_fill_step(&mut oms, "ord-a1", &ws_ev, "ws-msg-1")
         .unwrap()
         .expect("A1: WS delivery must apply");
-    assert_eq!(first.qty, 10);
+    assert_eq!(first.qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(oms["ord-a1"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
 
     let rest_ev = make_partial_fill_event_with_watermark(
@@ -1378,7 +1378,7 @@ fn a2_rest_then_ws_same_physical_partial_fill_applies_once() {
     let first = apply_fill_step(&mut oms, "ord-a2", &rest_ev, "rest-activity-xyz")
         .unwrap()
         .expect("A2: REST delivery must apply");
-    assert_eq!(first.qty, 10);
+    assert_eq!(first.qty, QtyMicros::from_whole_units(10).unwrap());
 
     let ws_ev = make_partial_fill_event_with_watermark("ord-a2", "ws-msg-1", None, 10, Some(10));
     let second = apply_fill_step(&mut oms, "ord-a2", &ws_ev, "ws-msg-1").unwrap();
@@ -1406,7 +1406,7 @@ fn a3_same_lane_retry_applies_once() {
     let first = apply_fill_step(&mut oms, "ord-a3", &ev, "rest-activity-xyz")
         .unwrap()
         .expect("A3: first delivery must apply");
-    assert_eq!(first.qty, 10);
+    assert_eq!(first.qty, QtyMicros::from_whole_units(10).unwrap());
 
     // Exact retry: identical msg_id (the actual production retry scenario —
     // a transport-level resend of the same message).
@@ -1428,7 +1428,7 @@ fn a4_two_legitimate_same_size_fills_less_than_3s_apart_both_apply() {
     let first = apply_fill_step(&mut oms, "ord-a4", &ev1, "ws-msg-1")
         .unwrap()
         .expect("A4: first fill must apply");
-    assert_eq!(first.qty, 10);
+    assert_eq!(first.qty, QtyMicros::from_whole_units(10).unwrap());
 
     // Second fill: identical qty (10) and identical price (both use the
     // helper's fixed price_micros=450_000_000), 700ms later in wall time —
@@ -1437,7 +1437,7 @@ fn a4_two_legitimate_same_size_fills_less_than_3s_apart_both_apply() {
     let second = apply_fill_step(&mut oms, "ord-a4", &ev2, "ws-msg-2")
         .unwrap()
         .expect("A4: second, genuinely distinct fill must ALSO apply");
-    assert_eq!(second.qty, 10);
+    assert_eq!(second.qty, QtyMicros::from_whole_units(10).unwrap());
 
     assert_eq!(
         oms["ord-a4"].filled_qty, QtyMicros::from_whole_units(20).unwrap(),
@@ -1480,7 +1480,7 @@ fn a6_same_price_extremely_close_timestamps_still_distinct() {
     let second = apply_fill_step(&mut oms, "ord-a6", &ev2, "ws-msg-2")
         .unwrap()
         .expect("A6: second execution at the same price must still apply");
-    assert_eq!(second.qty, 5);
+    assert_eq!(second.qty, QtyMicros::from_whole_units(5).unwrap());
     assert_eq!(oms["ord-a6"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
 }
 
@@ -1514,7 +1514,7 @@ fn a8_partial_dedup_then_terminal_fill_yields_correct_final_qty() {
     let terminal = apply_fill_step(&mut oms, "ord-a8", &fill_ev, "fill-terminal")
         .unwrap()
         .expect("A8: terminal fill must apply");
-    assert_eq!(terminal.qty, 20);
+    assert_eq!(terminal.qty, QtyMicros::from_whole_units(20).unwrap());
     assert_eq!(
         oms["ord-a8"].filled_qty, QtyMicros::from_whole_units(30).unwrap(),
         "A8: final cumulative quantity must be exactly 30 (10 real partial + 20 terminal), \
@@ -1542,19 +1542,27 @@ fn a9_restart_replay_does_not_double_apply_cross_lane_duplicate() {
             broker_fill_id: None,
             broker_sequence_id: None,
             broker_timestamp: None,
-            message_json: serde_json::to_value(BrokerEvent::PartialFill {
-                broker_message_id: "ws-msg-1".into(),
-                broker_fill_id: None,
-                internal_order_id: "ord-a9".into(),
-                broker_order_id: None,
-                symbol: "SPY".into(),
-                side: Side::Buy,
-                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
-                price_micros: 450_000_000,
-                fee_micros: 0,
-                cum_qty_after: Some(QtyMicros::from_whole_units(10).unwrap()),
-            })
-            .unwrap(),
+            message_json: {
+                let mut v = serde_json::to_value(BrokerEvent::PartialFill {
+                    broker_message_id: "ws-msg-1".into(),
+                    broker_fill_id: None,
+                    internal_order_id: "ord-a9".into(),
+                    broker_order_id: None,
+                    symbol: "SPY".into(),
+                    side: Side::Buy,
+                    delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+                    price_micros: 450_000_000,
+                    fee_micros: 0,
+                    cum_qty_after: Some(QtyMicros::from_whole_units(10).unwrap()),
+                })
+                .unwrap();
+                // A9 constructs message_json directly (bypassing the production
+                // writer's stamp_message_json_schema_version), so it must stamp
+                // the current epoch itself or decode_broker_event will classify
+                // it as LEGACY_WHOLE_UNIT_SCHEMA_VERSION and double-scale.
+                v["schema_version"] = serde_json::json!(mqk_db::MESSAGE_JSON_SCHEMA_VERSION);
+                v
+            },
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
             event_kind: "partial_fill".to_string(),
@@ -1566,19 +1574,23 @@ fn a9_restart_replay_does_not_double_apply_cross_lane_duplicate() {
             broker_fill_id: Some("exec-1".into()),
             broker_sequence_id: None,
             broker_timestamp: None,
-            message_json: serde_json::to_value(BrokerEvent::PartialFill {
-                broker_message_id: "rest-activity-1".into(),
-                broker_fill_id: Some("exec-1".into()),
-                internal_order_id: "ord-a9".into(),
-                broker_order_id: None,
-                symbol: "SPY".into(),
-                side: Side::Buy,
-                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
-                price_micros: 450_000_000,
-                fee_micros: 0,
-                cum_qty_after: Some(QtyMicros::from_whole_units(10).unwrap()),
-            })
-            .unwrap(),
+            message_json: {
+                let mut v = serde_json::to_value(BrokerEvent::PartialFill {
+                    broker_message_id: "rest-activity-1".into(),
+                    broker_fill_id: Some("exec-1".into()),
+                    internal_order_id: "ord-a9".into(),
+                    broker_order_id: None,
+                    symbol: "SPY".into(),
+                    side: Side::Buy,
+                    delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+                    price_micros: 450_000_000,
+                    fee_micros: 0,
+                    cum_qty_after: Some(QtyMicros::from_whole_units(10).unwrap()),
+                })
+                .unwrap();
+                v["schema_version"] = serde_json::json!(mqk_db::MESSAGE_JSON_SCHEMA_VERSION);
+                v
+            },
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
             event_kind: "partial_fill".to_string(),
@@ -1704,7 +1716,7 @@ fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
     .unwrap()
     .expect("A03-1-NEG: partial fill applies");
     assert_eq!(
-        first.qty, 10,
+        first.qty, QtyMicros::from_whole_units(10).unwrap(),
         "A03-1-NEG: applied quantity is always the event's own 10 shares, \
          never a value derived from the (wrong) cum_qty_after=20"
     );
@@ -1736,7 +1748,7 @@ fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
     let second = apply_fill_step(&mut oms, "ord-a03-neg", &real_terminal, "rest-act-2")
         .unwrap()
         .expect("A03-1-NEG: the real $102 terminal fill must apply, not be swallowed");
-    assert_eq!(second.qty, 10);
+    assert_eq!(second.qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(second.price_micros, 102_000_000);
     assert_eq!(oms["ord-a03-neg"].filled_qty, QtyMicros::from_whole_units(20).unwrap());
 }
@@ -1765,7 +1777,7 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
     let first = apply_fill_step(&mut oms, "ord-a03", &partial, "rest-act-1")
         .unwrap()
         .expect("A03-1: partial fill applies");
-    assert_eq!(first.qty, 10, "A03-1: partial fill's own 10 shares, not 20");
+    assert_eq!(first.qty, QtyMicros::from_whole_units(10).unwrap(), "A03-1: partial fill's own 10 shares, not 20");
     assert_eq!(first.price_micros, 100_000_000);
     assert_eq!(oms["ord-a03"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(
@@ -1791,7 +1803,7 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
         .unwrap()
         .expect("A03-1: terminal fill must apply -- it must NOT be swallowed");
     assert_eq!(
-        second.qty, 10,
+        second.qty, QtyMicros::from_whole_units(10).unwrap(),
         "A03-1: terminal fill's own 10 shares, distinct from the partial fill"
     );
     assert_eq!(
@@ -1810,7 +1822,7 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
 
     // Economic truth is 10@$100 + 10@$102 -- never collapsed into 20@$100.
     assert!(
-        !(first.qty == 20 && first.price_micros == 100_000_000),
+        !(first.qty == QtyMicros::from_whole_units(20).unwrap() && first.price_micros == 100_000_000),
         "A03-1: must never observe the defect-A failure mode (20 shares at \
          the partial fill's price)"
     );

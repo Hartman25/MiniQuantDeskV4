@@ -40,34 +40,14 @@ where
         let symbol = req.symbol.clone();
         let side = req.side;
 
-        // QTY-MICROS-PRODUCTION-CUTOVER-01 / CUTOVER-1A / CUTOVER-1B:
-        // `BrokerSubmitRequest.quantity` is fractional-capable (QtyMicros).
-        // As of CUTOVER-1A (oms_inbox schema-version-gated envelope) and
-        // CUTOVER-1B (BrokerEvent/OmsEvent/OmsOrder converted to QtyMicros),
-        // the OMS lifecycle layer itself is also fully fractional-capable —
-        // a durable replay can no longer misread a historical whole-unit row
-        // as micro-units or vice versa.
-        //
-        // The remaining blocker is `mqk_portfolio` (Fill/Lot/position
-        // quantity), which is still whole-unit `i64` pending CUTOVER-1C. A
-        // fractional order that reached the broker here would eventually
-        // produce a fractional fill that the portfolio apply boundary cannot
-        // yet represent — so this dispatcher still fails closed on a
-        // fractional submit, now specifically to avoid placing a live broker
-        // order this build cannot safely account for, rather than to protect
-        // OMS replay (which is already safe).
-        let Some(qty) = req.quantity.to_whole_units_checked() else {
-            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-            return Err(anyhow!(
-                "FRACTIONAL_QTY_DISPATCH_UNSUPPORTED: outbox row {} (order_id={}, qty={}) carries \
-                 a fractional quantity; portfolio accounting (mqk_portfolio::Fill/Lot) is \
-                 whole-unit only pending CUTOVER-1C -- refusing dispatch fail-closed rather than \
-                 placing a broker order this build cannot account for",
-                outbox_id,
-                order_id,
-                req.quantity
-            ));
-        };
+        // QTY-MICROS-PRODUCTION-CUTOVER-01 / CUTOVER-1A / CUTOVER-1B / CUTOVER-1C:
+        // `BrokerSubmitRequest.quantity` is fractional-capable (QtyMicros),
+        // and as of CUTOVER-1C so is every downstream consumer: the OMS
+        // lifecycle layer (CUTOVER-1B) and now `mqk_portfolio::Fill`/`Lot`/
+        // position quantity too. There is no remaining whole-unit boundary
+        // in this dispatch path -- a fractional Crypto order flows straight
+        // through, exactly preserved.
+        let qty = req.quantity;
 
         // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
         //
@@ -125,7 +105,7 @@ where
             .positions
             .get(&symbol)
             .map(|p| p.qty_signed())
-            .unwrap_or(0);
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         let is_risk_reducing = is_submit_risk_reducing(current_qty, side, qty);
         let risk_ctx = RiskRequestContext { is_risk_reducing };
 
@@ -275,15 +255,8 @@ where
             qty = %qty,
             "exec_submit_sent"
         );
-        self.oms_orders.insert(
-            order_id.clone(),
-            OmsOrder::new(
-                &order_id,
-                &symbol,
-                mqk_execution::QtyMicros::from_whole_units(qty)
-                    .expect("qty already proven whole-unit-representable above"),
-            ),
-        );
+        self.oms_orders
+            .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));
         // DISCORD-TRADE-LIFECYCLE-ALERTS-01: best-effort alert after durable SENT.
         self.fire_alert(crate::TradeLifecycleEvent::OrderSubmitted {
             run_id: self.run_id,
@@ -518,13 +491,20 @@ where
 ///   `quantity <= |current_qty|`.
 /// - `Sell` is risk-reducing only when `current_qty > 0` (long) and
 ///   `quantity <= current_qty`.
-pub(super) fn is_submit_risk_reducing(current_qty: i64, side: Side, quantity: i64) -> bool {
-    if quantity <= 0 {
+pub(super) fn is_submit_risk_reducing(
+    current_qty: mqk_portfolio::QtyMicros,
+    side: Side,
+    quantity: mqk_portfolio::QtyMicros,
+) -> bool {
+    if !quantity.is_positive() {
         return false;
     }
     match side {
-        Side::Buy => current_qty < 0 && quantity <= current_qty.abs(),
-        Side::Sell => current_qty > 0 && quantity <= current_qty,
+        Side::Buy => {
+            current_qty.is_negative()
+                && quantity <= current_qty.checked_abs().unwrap_or(mqk_portfolio::QtyMicros::ZERO)
+        }
+        Side::Sell => current_qty.is_positive() && quantity <= current_qty,
     }
 }
 
@@ -532,43 +512,59 @@ pub(super) fn is_submit_risk_reducing(current_qty: i64, side: Side, quantity: i6
 mod is_submit_risk_reducing_tests {
     use super::*;
 
+    fn q(n: i64) -> mqk_portfolio::QtyMicros {
+        mqk_portfolio::QtyMicros::from_whole_units(n).unwrap()
+    }
+
     #[test]
     fn long_position_sell_within_size_is_risk_reducing() {
-        assert!(is_submit_risk_reducing(10, Side::Sell, 10));
-        assert!(is_submit_risk_reducing(10, Side::Sell, 5));
+        assert!(is_submit_risk_reducing(q(10), Side::Sell, q(10)));
+        assert!(is_submit_risk_reducing(q(10), Side::Sell, q(5)));
     }
 
     #[test]
     fn long_position_buy_is_not_risk_reducing() {
-        assert!(!is_submit_risk_reducing(10, Side::Buy, 5));
+        assert!(!is_submit_risk_reducing(q(10), Side::Buy, q(5)));
     }
 
     #[test]
     fn short_position_buy_within_size_is_risk_reducing() {
-        assert!(is_submit_risk_reducing(-10, Side::Buy, 10));
-        assert!(is_submit_risk_reducing(-10, Side::Buy, 5));
+        assert!(is_submit_risk_reducing(q(-10), Side::Buy, q(10)));
+        assert!(is_submit_risk_reducing(q(-10), Side::Buy, q(5)));
     }
 
     #[test]
     fn short_position_sell_is_not_risk_reducing() {
-        assert!(!is_submit_risk_reducing(-10, Side::Sell, 5));
+        assert!(!is_submit_risk_reducing(q(-10), Side::Sell, q(5)));
     }
 
     #[test]
     fn quantity_exceeding_position_is_not_risk_reducing() {
-        assert!(!is_submit_risk_reducing(10, Side::Sell, 15));
-        assert!(!is_submit_risk_reducing(-10, Side::Buy, 15));
+        assert!(!is_submit_risk_reducing(q(10), Side::Sell, q(15)));
+        assert!(!is_submit_risk_reducing(q(-10), Side::Buy, q(15)));
     }
 
     #[test]
     fn flat_position_is_never_risk_reducing() {
-        assert!(!is_submit_risk_reducing(0, Side::Buy, 1));
-        assert!(!is_submit_risk_reducing(0, Side::Sell, 1));
+        assert!(!is_submit_risk_reducing(
+            mqk_portfolio::QtyMicros::ZERO,
+            Side::Buy,
+            q(1)
+        ));
+        assert!(!is_submit_risk_reducing(
+            mqk_portfolio::QtyMicros::ZERO,
+            Side::Sell,
+            q(1)
+        ));
     }
 
     #[test]
     fn non_positive_quantity_is_never_risk_reducing() {
-        assert!(!is_submit_risk_reducing(10, Side::Sell, 0));
-        assert!(!is_submit_risk_reducing(10, Side::Sell, -5));
+        assert!(!is_submit_risk_reducing(
+            q(10),
+            Side::Sell,
+            mqk_portfolio::QtyMicros::ZERO
+        ));
+        assert!(!is_submit_risk_reducing(q(10), Side::Sell, q(-5)));
     }
 }

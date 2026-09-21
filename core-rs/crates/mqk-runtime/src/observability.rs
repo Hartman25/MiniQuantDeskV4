@@ -77,11 +77,18 @@ pub struct InboxEventSnapshot {
 }
 
 /// Read-only snapshot of a single position.
+///
+/// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `net_qty` is `QtyMicros`, not a
+/// whole-unit `i64` share count as before this cutover — this snapshot is a
+/// live, non-persisted read model, so widening its wire shape here is a
+/// genuine visibility improvement (fractional Crypto positions are now
+/// representable) rather than a compatibility break against any durable
+/// record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionSnapshot {
     pub symbol: String,
     /// Signed quantity: positive = long, negative = short, 0 = flat.
-    pub net_qty: i64,
+    pub net_qty: QtyMicros,
 }
 
 /// Read-only snapshot of portfolio state.

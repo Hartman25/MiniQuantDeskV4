@@ -24,7 +24,8 @@ pub enum TradeLifecycleEvent {
         run_id: Uuid,
         order_id: String,
         symbol: String,
-        qty: i64,
+        /// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: fractional-capable (Crypto).
+        qty: mqk_execution::QtyMicros,
     },
     /// A broker ACK was received and durably applied.
     ///

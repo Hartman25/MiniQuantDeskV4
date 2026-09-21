@@ -137,12 +137,14 @@ fn b4_6_portfolio_snapshot_positions() {
 
     // Long 10 AAPL @ 150 USD each.
     let mut pos = PositionState::new("AAPL");
-    pos.lots.push(Lot::long(10, 150_000_000));
+    pos.lots
+        .push(Lot::long(QtyMicros::from_whole_units(10).unwrap(), 150_000_000));
     p.positions.insert("AAPL".to_string(), pos);
 
     // Short 5 MSFT @ 300 USD each.
     let mut pos2 = PositionState::new("MSFT");
-    pos2.lots.push(Lot::short(5, 300_000_000));
+    pos2.lots
+        .push(Lot::short(QtyMicros::from_whole_units(5).unwrap(), 300_000_000));
     p.positions.insert("MSFT".to_string(), pos2);
 
     let snap = build_portfolio_snapshot(&p);
@@ -153,14 +155,14 @@ fn b4_6_portfolio_snapshot_positions() {
         .iter()
         .find(|pos| pos.symbol == "AAPL")
         .unwrap();
-    assert_eq!(aapl.net_qty, 10);
+    assert_eq!(aapl.net_qty, QtyMicros::from_whole_units(10).unwrap());
 
     let msft = snap
         .positions
         .iter()
         .find(|pos| pos.symbol == "MSFT")
         .unwrap();
-    assert_eq!(msft.net_qty, -5);
+    assert_eq!(msft.net_qty, QtyMicros::from_whole_units(-5).unwrap());
 }
 
 // ---------------------------------------------------------------------------

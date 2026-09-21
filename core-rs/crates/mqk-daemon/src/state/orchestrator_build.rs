@@ -641,7 +641,12 @@ impl AppState {
                         run_id: Some(format!("{:.8}", run_id.to_string())),
                         symbol: Some(symbol.clone()),
                         side: None,
-                        qty: Some(qty),
+                        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `TradeEventPayload.qty`
+                        // remains whole-unit `i64`; a fractional Crypto qty
+                        // cannot fit it, so the structured field is `None`
+                        // while `summary` still shows the true fractional
+                        // value via `QtyMicros::Display`.
+                        qty: qty.to_whole_units_checked(),
                         price_micros: None,
                         order_id: Some(order_id.clone()),
                         detail: None,
