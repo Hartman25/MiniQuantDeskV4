@@ -841,6 +841,17 @@ pub struct AppState {
     /// read by live/paper trading, broker adapters, risk gates, OMS, or
     /// ingestion — read-only backtest economics suggestions only.
     pub instrument_registry_v2_path: Option<String>,
+    /// M6-TRADING-REGISTRY-SNAPSHOT-WRITER-01: optional registry-v2 source
+    /// whose sole purpose is Paper trading instrument identity/economics.
+    ///
+    /// Deliberately separate from `instrument_registry_v2_path`, which keeps
+    /// its existing read-only backtest/diagnostic contract. `None` means no
+    /// registry-v2 instrument may acquire trading authority through this
+    /// seam. Captured once when AppState is constructed; never reread from
+    /// ambient environment state while an order is being admitted.
+    ///
+    /// Environment: MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH.
+    pub trading_instrument_registry_v2_path: Option<String>,
     /// ASSET-CORE-04F: Optional filesystem path to a registry-v2 source
     /// consumed only by `GET /api/v1/portfolio/economics/status` when a
     /// caller explicitly requests `?registry_source=v2`.
@@ -2073,6 +2084,12 @@ impl AppState {
             instrument_registry_path: std::env::var("MQK_INSTRUMENT_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             instrument_registry_v2_path: std::env::var("MQK_INSTRUMENT_REGISTRY_V2_PATH").ok(),
+            trading_instrument_registry_v2_path: std::env::var(
+                "MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH",
+            )
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
             portfolio_economics_registry_v2_path: std::env::var(
                 "MQK_PORTFOLIO_ECONOMICS_REGISTRY_V2_PATH",
             )

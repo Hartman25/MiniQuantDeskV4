@@ -201,8 +201,239 @@ fn validate_fields(d: &InternalStrategyDecision) -> Result<(), Vec<String>> {
 // order_json shape for the outbox
 // ---------------------------------------------------------------------------
 
-fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
-    serde_json::json!({
+#[derive(Debug, Clone)]
+struct DurableOrderInstrumentContext {
+    asset_class: String,
+    economics_snapshot: Option<serde_json::Value>,
+}
+
+impl DurableOrderInstrumentContext {
+    fn legacy_equity() -> Self {
+        Self {
+            asset_class: "equity".to_string(),
+            economics_snapshot: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum OrderInstrumentContextError {
+    Unavailable(String),
+    Rejected(String),
+}
+
+fn resolve_order_instrument_context_from_registry(
+    registry: &mqk_md::instrument_registry_v2::InstrumentRegistryV2,
+    deployment_mode: crate::state::DeploymentMode,
+    symbol: &str,
+) -> Result<DurableOrderInstrumentContext, OrderInstrumentContextError> {
+    mqk_md::instrument_registry_v2::validate_registry_v2(registry)
+        .map_err(|err| {
+            OrderInstrumentContextError::Unavailable(format!(
+                "trading registry-v2 validation failed: {err}"
+            ))
+        })?;
+
+    let symbol = symbol.trim();
+
+    let Some(instrument) = registry
+        .instruments
+        .iter()
+        .find(|instrument| instrument.symbol.trim() == symbol)
+    else {
+        // Additive M6 behavior: a configured trading-v2 source only
+        // overrides symbols actually present in that source. Existing Equity
+        // symbols retain their accepted legacy path.
+        return Ok(DurableOrderInstrumentContext::legacy_equity());
+    };
+
+    match instrument.asset_class.trim() {
+        "equity" => Ok(DurableOrderInstrumentContext::legacy_equity()),
+
+        "crypto" => {
+            if deployment_mode != crate::state::DeploymentMode::Paper {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' is registry-v2 trading configured \
+                     but M6 permits this production cutover only in Paper mode",
+                    instrument.symbol
+                )));
+            }
+
+            if !instrument.paper_trading_enabled {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' is not paper_trading_enabled in \
+                     the trading registry-v2 source",
+                    instrument.symbol
+                )));
+            }
+
+            // B1 must never create Live authority as a side effect of Paper
+            // enablement.
+            if instrument.live_trading_enabled {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' has live_trading_enabled=true; \
+                     B1 Paper cutover refuses Live-enabled registry rows",
+                    instrument.symbol
+                )));
+            }
+
+            let broker_symbol = instrument
+                .broker_symbols
+                .get("alpaca")
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    OrderInstrumentContextError::Rejected(format!(
+                        "crypto instrument '{}' has no Alpaca broker symbol",
+                        instrument.symbol
+                    ))
+                })?;
+
+            // B1 BTC/USD uses the same canonical and Alpaca wire symbol.
+            // Do not silently invent a translation mechanism here.
+            if broker_symbol != instrument.symbol.trim() {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' maps to Alpaca symbol '{}'; \
+                     B1 requires exact canonical/broker symbol identity",
+                    instrument.symbol,
+                    broker_symbol
+                )));
+            }
+
+            let session_profile = instrument
+                .economics
+                .as_ref()
+                .and_then(|economics| economics.session_profile.as_deref())
+                .ok_or_else(|| {
+                    OrderInstrumentContextError::Rejected(format!(
+                        "crypto instrument '{}' has no economics.session_profile",
+                        instrument.symbol
+                    ))
+                })?;
+
+            if session_profile
+                != mqk_md::instrument_registry_v2::SESSION_PROFILE_CRYPTO_24_7
+            {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' session_profile '{}' is not '{}'",
+                    instrument.symbol,
+                    session_profile,
+                    mqk_md::instrument_registry_v2::SESSION_PROFILE_CRYPTO_24_7
+                )));
+            }
+
+            let bridged =
+                crate::state::instrument_economics_bridge::instrument_v2_to_economics(
+                    instrument,
+                );
+
+            let economics = bridged.economics.ok_or_else(|| {
+                OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' could not bridge to order economics: \
+                     truth_state={} reason_code={}",
+                    instrument.symbol,
+                    bridged.truth_state,
+                    bridged.reason_code
+                ))
+            })?;
+
+            let min_trade_qty_micros =
+                economics.min_trade_qty_micros.ok_or_else(|| {
+                    OrderInstrumentContextError::Rejected(format!(
+                        "crypto instrument '{}' is missing min_trade_qty_micros",
+                        instrument.symbol
+                    ))
+                })?;
+
+            let tick_size_micros =
+                economics.tick_size_micros.ok_or_else(|| {
+                    OrderInstrumentContextError::Rejected(format!(
+                        "crypto instrument '{}' is missing tick_size_micros",
+                        instrument.symbol
+                    ))
+                })?;
+
+            let quantity_increment_micros =
+                economics.quantity_increment_micros.ok_or_else(|| {
+                    OrderInstrumentContextError::Rejected(format!(
+                        "crypto instrument '{}' is missing \
+                         quantity_increment_micros",
+                        instrument.symbol
+                    ))
+                })?;
+
+            let snapshot = serde_json::json!({
+                "source": "registry_v2",
+                "authority": "MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH",
+                "registry_schema_version": registry.schema_version,
+                "instrument_id": economics.instrument_id,
+                "symbol": economics.symbol,
+                "asset_class": economics.asset_class,
+                "quote_currency": economics.quote_currency,
+                "contract_multiplier_micros":
+                    economics.contract_multiplier_micros,
+                "quantity_scale": economics.quantity_scale,
+                "min_trade_qty_micros": min_trade_qty_micros,
+                "tick_size_micros": tick_size_micros,
+                "quantity_increment_micros":
+                    quantity_increment_micros,
+                "session_profile": session_profile,
+                "broker": "alpaca",
+                "broker_symbol": broker_symbol,
+            });
+
+            Ok(DurableOrderInstrumentContext {
+                asset_class: "crypto".to_string(),
+                economics_snapshot: Some(snapshot),
+            })
+        }
+
+        other => Err(OrderInstrumentContextError::Rejected(format!(
+            "instrument '{}' resolved from the trading registry-v2 source \
+             with unsupported B1 asset_class '{}'",
+            instrument.symbol,
+            other
+        ))),
+    }
+}
+
+fn resolve_order_instrument_context(
+    state: &AppState,
+    symbol: &str,
+) -> Result<DurableOrderInstrumentContext, OrderInstrumentContextError> {
+    let Some(path) = state
+        .trading_instrument_registry_v2_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(DurableOrderInstrumentContext::legacy_equity());
+    };
+
+    let registry =
+        mqk_md::instrument_registry_v2::load_instrument_registry_v2(
+            std::path::Path::new(path),
+        )
+        .map_err(|err| {
+            OrderInstrumentContextError::Unavailable(format!(
+                "trading registry-v2 load failed from '{}': {err}",
+                path
+            ))
+        })?;
+
+    resolve_order_instrument_context_from_registry(
+        &registry,
+        state.deployment_mode(),
+        symbol,
+    )
+}
+
+fn build_order_json(
+    d: &InternalStrategyDecision,
+    instrument: &DurableOrderInstrumentContext,
+) -> serde_json::Value {
+    let mut order = serde_json::json!({
         "symbol":         d.symbol.trim(),
         "side":           d.side.trim().to_ascii_lowercase(),
         "qty":            d.qty,
@@ -210,21 +441,22 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
         "time_in_force":  d.time_in_force.trim().to_ascii_lowercase(),
         "limit_price":    d.limit_price,
         "strategy_id":    d.strategy_id.trim(),
-        // WAVE05-PAPER-JOURNAL-STRATEGY-LINEAGE-01: the exact semantic
-        // fingerprint the promotion gate already validated this decision
-        // against (never re-resolved from current registry/promotion state)
-        // so a later fill can recover the identity of the order that
-        // actually produced it, not "whatever config is current now".
-        "strategy_semantic_fingerprint": d.strategy_semantic_fingerprint.trim(),
-        // WAVE05-P4-DURABLE-TIMEFRAME-PROVENANCE-REPAIR-01: the exact
-        // timeframe this decision was evaluated under (already validated
-        // positive at Gate 0) -- durable provenance only, never re-derived
-        // from current config/registry state. Read back by
-        // `mqk_db::fetch_order_symbol_timeframe_context` for P4's
-        // observational regime context.
+        "strategy_semantic_fingerprint":
+            d.strategy_semantic_fingerprint.trim(),
         "timeframe_secs": d.timeframe_secs,
         "signal_source":  "internal_strategy_decision",
-    })
+    });
+
+    if instrument.asset_class != "equity" {
+        order["asset_class"] =
+            serde_json::Value::String(instrument.asset_class.clone());
+    }
+
+    if let Some(snapshot) = instrument.economics_snapshot.as_ref() {
+        order["instrument_economics"] = snapshot.clone();
+    }
+
+    order
 }
 
 // ---------------------------------------------------------------------------
@@ -952,8 +1184,39 @@ pub async fn submit_internal_strategy_decision(
         );
     }
 
-    // Gate 7: enqueue to outbox (idempotent).
-    let order_json = build_order_json(&decision);
+    // Gate 7: resolve the exact trading-instrument context before the
+    // durable enqueue. Crypto economics are frozen into order_json here so
+    // dispatch/restart never depend on later ambient registry state.
+    let instrument_context =
+        match resolve_order_instrument_context(state, &decision.symbol) {
+            Ok(context) => context,
+            Err(OrderInstrumentContextError::Unavailable(blocker)) => {
+                return outcome(
+                    false,
+                    "unavailable",
+                    &did,
+                    &sid,
+                    Some(active_run_id),
+                    vec![blocker],
+                );
+            }
+            Err(OrderInstrumentContextError::Rejected(blocker)) => {
+                return outcome(
+                    false,
+                    "rejected",
+                    &did,
+                    &sid,
+                    Some(active_run_id),
+                    vec![blocker],
+                );
+            }
+        };
+
+    let order_json = build_order_json(
+        &decision,
+        &instrument_context,
+    );
+
     match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &did, order_json).await {
         Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
@@ -993,5 +1256,218 @@ pub async fn submit_internal_strategy_decision(
             Some(active_run_id),
             vec![format!("outbox enqueue failed: {err}")],
         ),
+    }
+}
+
+
+#[cfg(test)]
+mod m6_trading_registry_snapshot_writer_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use mqk_md::instrument_registry_v2::{
+        ContractDefinitionV2,
+        InstrumentDefinitionV2,
+        InstrumentEconomicsMetadataV2,
+        InstrumentMetadataV2,
+        InstrumentRegistryV2,
+        SESSION_PROFILE_CRYPTO_24_7,
+    };
+
+    fn btc_registry() -> InstrumentRegistryV2 {
+        InstrumentRegistryV2 {
+            schema_version: 1,
+            instruments: vec![InstrumentDefinitionV2 {
+                instrument_id: "crypto:GLOBAL:BTCUSD".to_string(),
+                symbol: "BTC/USD".to_string(),
+                asset_class: "crypto".to_string(),
+                instrument_kind: None,
+                venue: Some("GLOBAL".to_string()),
+                currency: "USD".to_string(),
+                quote_currency: Some("USD".to_string()),
+                provider_symbols: BTreeMap::from([(
+                    "kraken".to_string(),
+                    "XBTUSD".to_string(),
+                )]),
+                broker_symbols: BTreeMap::from([(
+                    "alpaca".to_string(),
+                    "BTC/USD".to_string(),
+                )]),
+                enabled: false,
+                paper_trading_enabled: true,
+                live_trading_enabled: false,
+                timeframes: vec!["5m".to_string()],
+                contract: Some(ContractDefinitionV2::CryptoPair {
+                    base: "BTC".to_string(),
+                    quote: "USD".to_string(),
+                }),
+                metadata: InstrumentMetadataV2::default(),
+                notes: Some(
+                    "M6 trading-registry writer proof".to_string(),
+                ),
+                allow_enabled_non_equity_for_testing: false,
+                economics: Some(InstrumentEconomicsMetadataV2 {
+                    contract_multiplier: None,
+                    initial_margin_micros: None,
+                    maintenance_margin_micros: None,
+                    quantity_increment_micros: Some(100),
+                    min_trade_qty_micros: Some(100),
+                    price_tick_micros: Some(1_000_000),
+                    session_profile: Some(
+                        SESSION_PROFILE_CRYPTO_24_7.to_string(),
+                    ),
+                }),
+            }],
+        }
+    }
+
+    fn decision() -> InternalStrategyDecision {
+        InternalStrategyDecision {
+            decision_id: "m6-registry-writer-test".to_string(),
+            strategy_id: "test-strategy".to_string(),
+            symbol: "BTC/USD".to_string(),
+            timeframe_secs: 300,
+            strategy_semantic_fingerprint:
+                "test-fingerprint".to_string(),
+            side: "buy".to_string(),
+            qty: 1,
+            order_type: "market".to_string(),
+            time_in_force: "gtc".to_string(),
+            limit_price: None,
+        }
+    }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_stamps_crypto_economics() {
+        let registry = btc_registry();
+
+        let context = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            "BTC/USD",
+        )
+        .expect("valid BTC/USD Paper registry row must resolve");
+
+        assert_eq!(context.asset_class, "crypto");
+
+        let order = build_order_json(
+            &decision(),
+            &context,
+        );
+
+        assert_eq!(
+            order.get("asset_class").and_then(|v| v.as_str()),
+            Some("crypto")
+        );
+
+        let economics = order
+            .get("instrument_economics")
+            .expect("Crypto order must carry durable economics");
+
+        assert_eq!(
+            economics
+                .get("source")
+                .and_then(|v| v.as_str()),
+            Some("registry_v2")
+        );
+
+        assert_eq!(
+            economics
+                .get("authority")
+                .and_then(|v| v.as_str()),
+            Some("MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH")
+        );
+
+        assert_eq!(
+            economics
+                .get("min_trade_qty_micros")
+                .and_then(|v| v.as_i64()),
+            Some(100)
+        );
+
+        assert_eq!(
+            economics
+                .get("tick_size_micros")
+                .and_then(|v| v.as_i64()),
+            Some(1_000_000)
+        );
+
+        assert_eq!(
+            economics
+                .get("quantity_increment_micros")
+                .and_then(|v| v.as_i64()),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_absent_symbol_preserves_equity_shape() {
+        let registry = btc_registry();
+
+        let context = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            "AAPL",
+        )
+        .expect("symbol absent from additive v2 source keeps legacy Equity");
+
+        assert_eq!(context.asset_class, "equity");
+        assert!(context.economics_snapshot.is_none());
+    }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_non_paper_mode_fails_closed() {
+        let registry = btc_registry();
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::LiveShadow,
+            "BTC/USD",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OrderInstrumentContextError::Rejected(message)
+                if message.contains("only in Paper mode")
+        ));
+    }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_missing_broker_identity_fails_closed() {
+        let mut registry = btc_registry();
+        registry.instruments[0].broker_symbols.clear();
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            "BTC/USD",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OrderInstrumentContextError::Rejected(message)
+                if message.contains("no Alpaca broker symbol")
+        ));
+    }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_live_enabled_row_fails_closed() {
+        let mut registry = btc_registry();
+        registry.instruments[0].live_trading_enabled = true;
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            "BTC/USD",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OrderInstrumentContextError::Rejected(message)
+                if message.contains("live_trading_enabled=true")
+        ));
     }
 }
