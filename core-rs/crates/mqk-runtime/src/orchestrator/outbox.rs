@@ -90,6 +90,19 @@ pub(super) fn build_validated_submit_request(
         ));
     }
 
+    // BRK-PRICE-01B / M6:
+    // Crypto cannot reach BrokerSubmitRequest construction unless the
+    // durable outbox row carries the instrument-economics snapshot that
+    // authorized the economic intent.
+    if asset_class == AssetClass::Crypto {
+        validate_crypto_order_economics(
+            order_json,
+            &symbol,
+            quantity.quantity,
+            limit_price,
+        )?;
+    }
+
     Ok(BrokerSubmitRequest {
         order_id: order_id.to_string(),
         symbol,
@@ -104,6 +117,150 @@ pub(super) fn build_validated_submit_request(
 
 pub(super) fn build_submit_request(row: &mqk_db::OutboxRow) -> anyhow::Result<BrokerSubmitRequest> {
     build_validated_submit_request(&row.idempotency_key, &row.order_json)
+}
+
+// ---------------------------------------------------------------------------
+// BRK-PRICE-01B / M6 durable Crypto order-economics authority
+// ---------------------------------------------------------------------------
+
+/// Validate one Crypto order against the instrument-economics snapshot
+/// persisted in its outbox envelope.
+///
+/// Every Crypto constraint is explicit. Missing or partial economics fail
+/// closed. Equity retains its existing path and does not require this
+/// additive envelope.
+fn validate_crypto_order_economics(
+    order_json: &serde_json::Value,
+    order_symbol: &str,
+    quantity: QtyMicros,
+    limit_price_micros: Option<i64>,
+) -> anyhow::Result<()> {
+    let economics_json = order_json
+        .get("instrument_economics")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            anyhow!(
+                "invalid crypto submit payload: instrument_economics \
+                 missing or not an object"
+            )
+        })?;
+
+    let required_string = |name: &str| -> anyhow::Result<String> {
+        economics_json
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow!(
+                    "invalid crypto submit payload: \
+                     instrument_economics.{} missing or blank",
+                    name
+                )
+            })
+    };
+
+    let required_positive_i64 = |name: &str| -> anyhow::Result<i64> {
+        let value = economics_json
+            .get(name)
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| {
+                anyhow!(
+                    "invalid crypto submit payload: \
+                     instrument_economics.{} missing or not an integer",
+                    name
+                )
+            })?;
+
+        if value <= 0 {
+            return Err(anyhow!(
+                "invalid crypto submit payload: \
+                 instrument_economics.{} must be positive",
+                name
+            ));
+        }
+
+        Ok(value)
+    };
+
+    let source = required_string("source")?;
+
+    if source != "registry_v2" {
+        return Err(anyhow!(
+            "invalid crypto submit payload: instrument_economics.source \
+             must be 'registry_v2', got '{}'",
+            source
+        ));
+    }
+
+    let instrument_id = required_string("instrument_id")?;
+    let economics_symbol = required_string("symbol")?;
+
+    if economics_symbol != order_symbol {
+        return Err(anyhow!(
+            "invalid crypto submit payload: instrument_economics.symbol \
+             '{}' does not match order symbol '{}'",
+            economics_symbol,
+            order_symbol
+        ));
+    }
+
+    let economics_asset_class =
+        required_string("asset_class")?;
+
+    if economics_asset_class != "crypto" {
+        return Err(anyhow!(
+            "invalid crypto submit payload: \
+             instrument_economics.asset_class must be 'crypto', got '{}'",
+            economics_asset_class
+        ));
+    }
+
+    let quote_currency =
+        required_string("quote_currency")?;
+
+    let contract_multiplier_micros =
+        required_positive_i64("contract_multiplier_micros")?;
+
+    let quantity_scale =
+        required_positive_i64("quantity_scale")?;
+
+    let min_trade_qty_micros =
+        required_positive_i64("min_trade_qty_micros")?;
+
+    let tick_size_micros =
+        required_positive_i64("tick_size_micros")?;
+
+    let quantity_increment_micros =
+        required_positive_i64("quantity_increment_micros")?;
+
+    let economics = mqk_portfolio::InstrumentEconomics {
+        instrument_id,
+        symbol: economics_symbol,
+        asset_class: economics_asset_class,
+        quote_currency,
+        contract_multiplier_micros,
+        quantity_scale,
+        min_trade_qty_micros: Some(min_trade_qty_micros),
+        tick_size_micros: Some(tick_size_micros),
+        quantity_increment_micros: Some(
+            quantity_increment_micros,
+        ),
+    };
+
+    mqk_portfolio::validate_order_against_economics(
+        &economics,
+        quantity.raw(),
+        limit_price_micros,
+    )
+    .map_err(|violation| {
+        anyhow!(
+            "invalid crypto submit payload: registry-v2 instrument \
+             economics rejected order: {:?}",
+            violation
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +618,21 @@ mod disabled_asset_gate_tests {
     use super::*;
     use serde_json::json;
 
+    fn crypto_economics_fixture() -> serde_json::Value {
+        json!({
+            "source": "registry_v2",
+            "instrument_id": "crypto:GLOBAL:BTCUSD",
+            "symbol": "BTC/USD",
+            "asset_class": "crypto",
+            "quote_currency": "USD",
+            "contract_multiplier_micros": 1_000_000,
+            "quantity_scale": 1,
+            "min_trade_qty_micros": 100,
+            "tick_size_micros": 1_000_000,
+            "quantity_increment_micros": 100
+        })
+    }
+
     fn equity_payload() -> serde_json::Value {
         json!({
             "symbol": "AAPL",
@@ -582,12 +754,19 @@ mod disabled_asset_gate_tests {
     #[test]
     fn o14_fractional_qty_with_explicit_side_parses_exactly() {
         let mut payload = with_asset_class(json!("crypto"));
-        payload["symbol"] = json!("BTCUSD");
+        payload["symbol"] = json!("BTC/USD");
         payload["qty"] = json!("0.5");
-        let req = build_validated_submit_request("test-order-id", &payload)
-            .expect("valid fractional crypto payload must parse successfully");
+        payload["instrument_economics"] = crypto_economics_fixture();
+
+        let req = build_validated_submit_request(
+            "test-order-id",
+            &payload,
+        )
+        .expect("valid fractional crypto payload must parse successfully");
+
         assert_eq!(req.quantity, QtyMicros::new(500_000));
         assert_eq!(req.asset_class, AssetClass::Crypto);
+        assert_eq!(req.symbol, "BTC/USD");
     }
 
     // O15 — a bare JSON float is rejected outright (precision-loss guard),
@@ -599,5 +778,215 @@ mod disabled_asset_gate_tests {
         payload["qty"] = json!(0.5);
         let err = build_validated_submit_request("test-order-id", &payload).unwrap_err();
         assert!(err.to_string().contains("floating-point"), "{err}");
+    }
+}
+
+
+#[cfg(test)]
+mod crypto_order_economics_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn economics() -> serde_json::Value {
+        json!({
+            "source": "registry_v2",
+            "instrument_id": "crypto:GLOBAL:BTCUSD",
+            "symbol": "BTC/USD",
+            "asset_class": "crypto",
+            "quote_currency": "USD",
+            "contract_multiplier_micros": 1_000_000,
+            "quantity_scale": 1,
+            "min_trade_qty_micros": 100,
+            "tick_size_micros": 1_000_000,
+            "quantity_increment_micros": 100
+        })
+    }
+
+    fn crypto_payload(
+        qty: &str,
+        order_type: &str,
+        limit_price: Option<i64>,
+    ) -> serde_json::Value {
+        let mut payload = json!({
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "qty": qty,
+            "order_type": order_type,
+            "time_in_force": "gtc",
+            "asset_class": "crypto",
+            "instrument_economics": economics()
+        });
+
+        if let Some(price) = limit_price {
+            payload["limit_price"] = json!(price);
+        }
+
+        payload
+    }
+
+    #[test]
+    fn crypto_order_economics_missing_snapshot_fails_closed() {
+        let mut payload =
+            crypto_payload("0.0001", "market", None);
+
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("instrument_economics");
+
+        let err = build_validated_submit_request(
+            "crypto-1",
+            &payload,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("instrument_economics"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn crypto_order_economics_below_minimum_fails_closed() {
+        let payload =
+            crypto_payload("0.00001", "market", None);
+
+        let err = build_validated_submit_request(
+            "crypto-2",
+            &payload,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("BelowMinimumQuantity"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn crypto_order_economics_off_increment_fails_closed() {
+        let payload =
+            crypto_payload("0.00015", "market", None);
+
+        let err = build_validated_submit_request(
+            "crypto-3",
+            &payload,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("QuantityNotOnIncrement"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn crypto_order_economics_off_tick_limit_fails_closed() {
+        let payload =
+            crypto_payload(
+                "0.0001",
+                "limit",
+                Some(60_000_500_000),
+            );
+
+        let err = build_validated_submit_request(
+            "crypto-4",
+            &payload,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("PriceNotOnTick"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn crypto_order_economics_exact_minimum_and_tick_pass() {
+        let payload =
+            crypto_payload(
+                "0.0001",
+                "limit",
+                Some(60_000_000_000),
+            );
+
+        let req = build_validated_submit_request(
+            "crypto-5",
+            &payload,
+        )
+        .expect(
+            "complete on-tick BTC/USD order must validate"
+        );
+
+        assert_eq!(req.asset_class, AssetClass::Crypto);
+        assert_eq!(req.symbol, "BTC/USD");
+        assert_eq!(req.quantity, QtyMicros::new(100));
+        assert_eq!(
+            req.limit_price,
+            Some(60_000_000_000)
+        );
+    }
+
+    #[test]
+    fn crypto_order_economics_symbol_mismatch_fails_closed() {
+        let mut payload =
+            crypto_payload("0.0001", "market", None);
+
+        payload["instrument_economics"]["symbol"] =
+            json!("ETH/USD");
+
+        let err = build_validated_submit_request(
+            "crypto-6",
+            &payload,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("does not match order symbol"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn crypto_order_economics_non_registry_source_fails_closed() {
+        let mut payload =
+            crypto_payload("0.0001", "market", None);
+
+        payload["instrument_economics"]["source"] =
+            json!("hand_written");
+
+        let err = build_validated_submit_request(
+            "crypto-7",
+            &payload,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("must be 'registry_v2'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn crypto_order_economics_partial_snapshot_fails_closed() {
+        let mut payload =
+            crypto_payload("0.0001", "market", None);
+
+        payload["instrument_economics"]
+            .as_object_mut()
+            .unwrap()
+            .remove("tick_size_micros");
+
+        let err = build_validated_submit_request(
+            "crypto-8",
+            &payload,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("tick_size_micros"),
+            "{err}"
+        );
     }
 }
