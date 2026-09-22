@@ -225,7 +225,9 @@ enum OrderInstrumentContextError {
 fn resolve_order_instrument_context_from_registry(
     registry: &mqk_md::instrument_registry_v2::InstrumentRegistryV2,
     deployment_mode: crate::state::DeploymentMode,
+    broker_kind: Option<crate::state::BrokerKind>,
     symbol: &str,
+    legacy_equity_allowed: bool,
 ) -> Result<DurableOrderInstrumentContext, OrderInstrumentContextError> {
     mqk_md::instrument_registry_v2::validate_registry_v2(registry)
         .map_err(|err| {
@@ -234,6 +236,17 @@ fn resolve_order_instrument_context_from_registry(
             ))
         })?;
 
+    if registry
+        .instruments
+        .iter()
+        .any(|instrument| instrument.allow_enabled_non_equity_for_testing)
+    {
+        return Err(OrderInstrumentContextError::Unavailable(
+            "trading registry-v2 contains              allow_enabled_non_equity_for_testing=true;              test-only validator bypasses are forbidden in production              trading authority"
+                .to_string(),
+        ));
+    }
+
     let symbol = symbol.trim();
 
     let Some(instrument) = registry
@@ -241,20 +254,40 @@ fn resolve_order_instrument_context_from_registry(
         .iter()
         .find(|instrument| instrument.symbol.trim() == symbol)
     else {
-        // Additive M6 behavior: a configured trading-v2 source only
-        // overrides symbols actually present in that source. Existing Equity
-        // symbols retain their accepted legacy path.
-        return Ok(DurableOrderInstrumentContext::legacy_equity());
+        if legacy_equity_allowed {
+            return Ok(DurableOrderInstrumentContext::legacy_equity());
+        }
+
+        return Err(OrderInstrumentContextError::Rejected(format!(
+            "symbol '{}' is neither present in the configured trading              registry-v2 source nor an enabled canonical legacy Equity",
+            symbol
+        )));
     };
 
     match instrument.asset_class.trim() {
-        "equity" => Ok(DurableOrderInstrumentContext::legacy_equity()),
+        "equity" if legacy_equity_allowed => {
+            Ok(DurableOrderInstrumentContext::legacy_equity())
+        }
+
+        "equity" => Err(OrderInstrumentContextError::Rejected(format!(
+            "registry-v2 symbol '{}' is tagged Equity but is not enabled in              the canonical legacy Equity registry",
+            instrument.symbol
+        ))),
 
         "crypto" => {
             if deployment_mode != crate::state::DeploymentMode::Paper {
                 return Err(OrderInstrumentContextError::Rejected(format!(
                     "crypto instrument '{}' is registry-v2 trading configured \
                      but M6 permits this production cutover only in Paper mode",
+                    instrument.symbol
+                )));
+            }
+
+            if broker_kind
+                != Some(crate::state::BrokerKind::Alpaca)
+            {
+                return Err(OrderInstrumentContextError::Rejected(format!(
+                    "crypto instrument '{}' requires the configured broker                      to be Alpaca before Alpaca broker provenance may be                      persisted",
                     instrument.symbol
                 )));
             }
@@ -398,17 +431,59 @@ fn resolve_order_instrument_context_from_registry(
     }
 }
 
+fn legacy_equity_symbol_is_enabled(
+    state: &AppState,
+    symbol: &str,
+) -> Result<bool, OrderInstrumentContextError> {
+    let instruments =
+        mqk_md::instrument_registry::load_instrument_registry(
+            std::path::Path::new(&state.instrument_registry_path),
+        )
+        .map_err(|err| {
+            OrderInstrumentContextError::Unavailable(format!(
+                "canonical legacy Equity registry load failed from '{}': {err}",
+                state.instrument_registry_path
+            ))
+        })?;
+
+    mqk_md::instrument_registry::validate_registry(&instruments)
+        .map_err(|err| {
+            OrderInstrumentContextError::Unavailable(format!(
+                "canonical legacy Equity registry validation failed: {err}"
+            ))
+        })?;
+
+    let symbol = symbol.trim();
+
+    Ok(
+        mqk_md::instrument_registry::enabled_equities(&instruments)
+            .into_iter()
+            .any(|instrument| instrument.symbol.trim() == symbol),
+    )
+}
+
 fn resolve_order_instrument_context(
     state: &AppState,
     symbol: &str,
 ) -> Result<DurableOrderInstrumentContext, OrderInstrumentContextError> {
-    let Some(path) = state
+    let trading_registry_path = state
         .trading_instrument_registry_v2_path
         .as_deref()
         .map(str::trim)
-        .filter(|path| !path.is_empty())
-    else {
-        return Ok(DurableOrderInstrumentContext::legacy_equity());
+        .filter(|path| !path.is_empty());
+
+    // Even without a v2 trading source, legacy Equity authority is explicit:
+    // the canonical v1 registry must independently prove this symbol enabled.
+    let Some(path) = trading_registry_path else {
+        if legacy_equity_symbol_is_enabled(state, symbol)? {
+            return Ok(DurableOrderInstrumentContext::legacy_equity());
+        }
+
+        return Err(OrderInstrumentContextError::Rejected(format!(
+            "symbol '{}' is not an enabled canonical legacy Equity and no \
+             trading registry-v2 authority is configured",
+            symbol.trim()
+        )));
     };
 
     let registry =
@@ -422,10 +497,39 @@ fn resolve_order_instrument_context(
             ))
         })?;
 
+    let matching = registry
+        .instruments
+        .iter()
+        .find(|instrument| {
+            instrument.symbol.trim() == symbol.trim()
+        });
+
+    // Only an absent or explicitly Equity v2 row may fall back to v1,
+    // and v1 must prove that Equity authority independently.
+    let legacy_equity_allowed = match matching {
+        None => legacy_equity_symbol_is_enabled(
+            state,
+            symbol,
+        )?,
+
+        Some(instrument)
+            if instrument.asset_class.trim() == "equity" =>
+        {
+            legacy_equity_symbol_is_enabled(
+                state,
+                symbol,
+            )?
+        }
+
+        Some(_) => false,
+    };
+
     resolve_order_instrument_context_from_registry(
         &registry,
         state.deployment_mode(),
+        state.runtime_selection().broker_kind,
         symbol,
+        legacy_equity_allowed,
     )
 }
 
@@ -1344,7 +1448,9 @@ mod m6_trading_registry_snapshot_writer_tests {
         let context = resolve_order_instrument_context_from_registry(
             &registry,
             crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
             "BTC/USD",
+            false,
         )
         .expect("valid BTC/USD Paper registry row must resolve");
 
@@ -1407,7 +1513,9 @@ mod m6_trading_registry_snapshot_writer_tests {
         let context = resolve_order_instrument_context_from_registry(
             &registry,
             crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
             "AAPL",
+            true,
         )
         .expect("symbol absent from additive v2 source keeps legacy Equity");
 
@@ -1422,7 +1530,9 @@ mod m6_trading_registry_snapshot_writer_tests {
         let err = resolve_order_instrument_context_from_registry(
             &registry,
             crate::state::DeploymentMode::LiveShadow,
+            Some(crate::state::BrokerKind::Alpaca),
             "BTC/USD",
+            false,
         )
         .unwrap_err();
 
@@ -1441,7 +1551,9 @@ mod m6_trading_registry_snapshot_writer_tests {
         let err = resolve_order_instrument_context_from_registry(
             &registry,
             crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
             "BTC/USD",
+            false,
         )
         .unwrap_err();
 
@@ -1460,7 +1572,9 @@ mod m6_trading_registry_snapshot_writer_tests {
         let err = resolve_order_instrument_context_from_registry(
             &registry,
             crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
             "BTC/USD",
+            false,
         )
         .unwrap_err();
 
@@ -1470,4 +1584,68 @@ mod m6_trading_registry_snapshot_writer_tests {
                 if message.contains("live_trading_enabled=true")
         ));
     }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_non_alpaca_broker_fails_closed() {
+        let registry = btc_registry();
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Paper),
+            "BTC/USD",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OrderInstrumentContextError::Rejected(message)
+                if message.contains("requires the configured broker")
+        ));
+    }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_unknown_symbol_does_not_become_equity() {
+        let registry = btc_registry();
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTCUSD",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OrderInstrumentContextError::Rejected(message)
+                if message.contains("neither present")
+        ));
+    }
+
+    #[test]
+    fn m6_trading_registry_snapshot_writer_test_only_bypass_fails_closed() {
+        let mut registry = btc_registry();
+
+        registry.instruments[0]
+            .allow_enabled_non_equity_for_testing = true;
+
+        let err = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTC/USD",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OrderInstrumentContextError::Unavailable(message)
+                if message.contains("test-only validator bypasses")
+        ));
+    }
+
 }
