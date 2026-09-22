@@ -16,7 +16,10 @@ fn bf(inner: Fill) -> BacktestFill {
     }
 }
 
-use mqk_promotion::{evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult, REQUIRED_STRESS_PROTOCOL_VERSION};
+use mqk_promotion::{
+    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
+    REQUIRED_STRESS_PROTOCOL_VERSION,
+};
 
 /// Shared scaffolding: a monotonic equity curve + all non-fee evidence gates
 /// satisfied, so the ONLY thing under test is the fee-attribution gate.
@@ -85,16 +88,14 @@ fn candidate_with_pending_attribution_fee_fails_closed() {
             12_000_000,
             0,
         )),
-        // NOTE: mqk-promotion's profit-factor FIFO matcher is documented
-        // equities-only and asserts whole-unit qty (evaluator.rs's
-        // `compute_profit_factor`) — a separate, pre-existing boundary not
-        // touched by this gate. A whole-unit BTC quantity here is a valid
-        // exercise of THIS gate (which keys only on symbol + fee_attribution,
-        // never on fractional-ness) without conflating the two concerns.
+        // PROMOTION-FRACTIONAL-QTY-01 negative control:
+        // use the actual minimum supported BTC quantity (0.0001 BTC,
+        // QtyMicros raw=100). Promotion metric computation must accept this
+        // canonical fractional quantity without whole-unit coercion or panic.
         bf(Fill::new_with_fee_attribution(
             "BTC/USD",
             Side::Buy,
-            QtyMicros::from_whole_units(1).unwrap(),
+            QtyMicros::new(100),
             50_000_000_000,
             0,
             FeeAttributionStatus::PendingAttribution,
@@ -102,7 +103,7 @@ fn candidate_with_pending_attribution_fee_fails_closed() {
         bf(Fill::new_with_fee_attribution(
             "BTC/USD",
             Side::Sell,
-            QtyMicros::from_whole_units(1).unwrap(),
+            QtyMicros::new(100),
             52_000_000_000,
             0,
             FeeAttributionStatus::PendingAttribution,
@@ -184,7 +185,7 @@ fn crypto_fill_with_confirmed_fee_does_not_trip_the_gate() {
         bf(Fill::new_with_fee_attribution(
             "BTC/USD",
             Side::Buy,
-            QtyMicros::from_whole_units(1).unwrap(),
+            QtyMicros::new(100),
             50_000_000_000,
             5_000,
             FeeAttributionStatus::Confirmed,
@@ -192,7 +193,7 @@ fn crypto_fill_with_confirmed_fee_does_not_trip_the_gate() {
         bf(Fill::new_with_fee_attribution(
             "BTC/USD",
             Side::Sell,
-            QtyMicros::from_whole_units(1).unwrap(),
+            QtyMicros::new(100),
             52_000_000_000,
             5_000,
             FeeAttributionStatus::Confirmed,

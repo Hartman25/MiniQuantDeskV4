@@ -762,84 +762,115 @@ fn compute_sharpe_daily(eq: &[(i64, i64)]) -> f64 {
 /// A "trade" = a round-trip: open + close.
 /// PF = sum(profits) / abs(sum(losses)). No losses & profits > 0 => +INF. No trades => 0.
 fn compute_profit_factor(fills: &[Fill]) -> (f64, usize) {
-    // Per-symbol FIFO lots: (qty_signed, entry_price_micros)
-    // Positive qty_signed = long lots, negative = short lots.
+    // Per-symbol FIFO lots: (signed QtyMicros raw units, entry_price_micros).
+    //
+    // CUTOVER-1C / PROMOTION-FRACTIONAL-QTY-01:
+    // quantity stays in canonical 1e-6 QtyMicros scale throughout this
+    // matcher. A whole equity share is raw 1_000_000; 0.0001 BTC is raw 100.
+    // No whole-unit conversion, rounding, or fractional rejection occurs.
     let mut positions: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
     let mut total_profit: i128 = 0;
     let mut total_loss: i128 = 0;
     let mut num_trades: usize = 0;
 
+    // QtyMicros and monetary micros both use the repository's canonical
+    // 1e-6 scale. qty_raw * price_micros therefore carries one extra 1e-6
+    // factor and must be descaled once. This matches mqk-portfolio FIFO
+    // accounting.
+    const QTY_SCALE: i128 = mqk_portfolio::MICROS_SCALE as i128;
+
     for fill in fills {
+        // Do not permit malformed hand-built evidence to panic or silently
+        // participate in promotion metrics. Returning NaN feeds the existing
+        // fail-closed promotion metric validation.
+        let fill_qty_raw = fill.qty.raw();
+
+        if fill_qty_raw <= 0 || fill.price_micros < 0 || fill.fee_micros < 0 {
+            return (f64::NAN, num_trades);
+        }
+
         let lots = positions.entry(fill.symbol.clone()).or_default();
-        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `fill.qty` is `QtyMicros`.
-        // Promotion evaluation is equities-only (no fractional Crypto
-        // quantity is ever produced by the backtest/paper fills this
-        // evaluates), so this whole-unit conversion is a provable-safe
-        // invariant, not a fallible boundary.
-        let fill_qty: i64 = fill
-            .qty
-            .to_whole_units_checked()
-            .expect("promotion-evaluated fills are whole-unit by construction"); // always positive
         let fill_price = fill.price_micros;
         let fee = fill.fee_micros as i128;
 
-        let fill_signed_qty: i64 = match fill.side {
-            Side::Buy => fill_qty,
-            Side::Sell => -fill_qty,
+        let fill_signed_qty_raw = match fill.side {
+            Side::Buy => fill_qty_raw,
+            Side::Sell => -fill_qty_raw,
         };
 
-        // Check if this fill closes existing lots (opposite direction)
-        let existing_direction = lots.first().map(|(q, _)| q.signum()).unwrap_or(0);
+        let existing_direction = lots.first().map(|(qty, _)| qty.signum()).unwrap_or(0);
 
-        if existing_direction != 0 && existing_direction != fill_signed_qty.signum() {
-            // This fill closes (partially or fully) existing lots
-            let mut remaining = fill_qty; // unsigned qty to close
+        if existing_direction != 0 && existing_direction != fill_signed_qty_raw.signum() {
+            let mut remaining_raw = fill_qty_raw;
 
-            while remaining > 0 && !lots.is_empty() {
+            while remaining_raw > 0 && !lots.is_empty() {
                 let lot = &mut lots[0];
-                let lot_abs = lot.0.unsigned_abs() as i64;
-                let close_qty = remaining.min(lot_abs);
 
-                // PnL for this partial close
-                let pnl: i128 = if lot.0 > 0 {
-                    // Was long, now selling
-                    (fill_price as i128 - lot.1 as i128) * close_qty as i128
-                } else {
-                    // Was short, now buying
-                    (lot.1 as i128 - fill_price as i128) * close_qty as i128
+                let lot_abs_raw = match lot.0.checked_abs() {
+                    Some(value) => value,
+                    None => return (f64::NAN, num_trades),
                 };
 
-                if pnl > 0 {
-                    total_profit += pnl;
-                } else if pnl < 0 {
-                    total_loss += -pnl; // store as positive
-                }
-                num_trades += 1;
+                let close_qty_raw = remaining_raw.min(lot_abs_raw);
 
-                remaining -= close_qty;
-                if close_qty == lot_abs {
+                // Monetary-micros PnL:
+                //
+                // price_diff_micros * qty_raw / 1_000_000
+                //
+                // i128 prevents the i64 multiplication from overflowing.
+                // Integer division matches mqk-portfolio's deterministic
+                // sub-micro truncation convention.
+                let price_diff_micros: i128 = if lot.0 > 0 {
+                    fill_price as i128 - lot.1 as i128
+                } else {
+                    lot.1 as i128 - fill_price as i128
+                };
+
+                let pnl_micros = price_diff_micros * close_qty_raw as i128 / QTY_SCALE;
+
+                if pnl_micros > 0 {
+                    total_profit = match total_profit.checked_add(pnl_micros) {
+                        Some(value) => value,
+                        None => return (f64::NAN, num_trades),
+                    };
+                } else if pnl_micros < 0 {
+                    total_loss = match total_loss.checked_add(-pnl_micros) {
+                        Some(value) => value,
+                        None => return (f64::NAN, num_trades),
+                    };
+                }
+
+                num_trades += 1;
+                remaining_raw -= close_qty_raw;
+
+                if close_qty_raw == lot_abs_raw {
                     lots.remove(0);
                 } else {
-                    // Reduce lot size, keep direction
                     let sign = lot.0.signum();
-                    lot.0 = sign * (lot_abs - close_qty);
+                    lot.0 = sign * (lot_abs_raw - close_qty_raw);
                 }
             }
 
-            // Subtract fee from profit side (or add to loss side)
-            // Simple: treat fee as loss
-            total_loss += fee;
+            // Preserve the existing promotion convention: cash fees count
+            // against the loss side of profit factor.
+            total_loss = match total_loss.checked_add(fee) {
+                Some(value) => value,
+                None => return (f64::NAN, num_trades),
+            };
 
-            // If remaining > 0, this fill also opens in the new direction
-            if remaining > 0 {
-                lots.push((fill_signed_qty.signum() * remaining, fill_price));
+            // A crossing fill may close the old direction and open a
+            // residual lot in the new direction.
+            if remaining_raw > 0 {
+                lots.push((fill_signed_qty_raw.signum() * remaining_raw, fill_price));
             }
         } else {
-            // Same direction or flat — opens new lot
-            lots.push((fill_signed_qty, fill_price));
-            // Fee on open reduces eventual profit (absorbed into cost basis
-            // in a proper system, but here we just charge it as loss)
-            total_loss += fee;
+            // Flat or same direction: open another FIFO lot.
+            lots.push((fill_signed_qty_raw, fill_price));
+
+            total_loss = match total_loss.checked_add(fee) {
+                Some(value) => value,
+                None => return (f64::NAN, num_trades),
+            };
         }
     }
 
@@ -847,7 +878,7 @@ fn compute_profit_factor(fills: &[Fill]) -> (f64, usize) {
         return (0.0, 0);
     }
 
-    let pf = if total_loss == 0 {
+    let profit_factor = if total_loss == 0 {
         if total_profit > 0 {
             f64::INFINITY
         } else {
@@ -857,7 +888,7 @@ fn compute_profit_factor(fills: &[Fill]) -> (f64, usize) {
         total_profit as f64 / total_loss as f64
     };
 
-    (pf, num_trades)
+    (profit_factor, num_trades)
 }
 
 // ============================================================================
