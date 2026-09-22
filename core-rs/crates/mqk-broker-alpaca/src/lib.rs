@@ -783,11 +783,12 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             })?
         };
         // Step 2: build replace body with Alpaca total-qty semantics.
-        let body = build_replace_body(
+        let body = build_replace_body_for_symbol(
             req.quantity,
             filled_qty,
             req.limit_price,
             &req.time_in_force,
+            &order.symbol,
         )?;
         // Step 3: send PATCH.
         let resp: AlpacaReplaceResponse =
@@ -1352,7 +1353,13 @@ mod fetch_fee_activities_since_tests {
 ///   on every lifecycle event, enabling `internal_order_id` mapping.
 pub fn build_submit_body(req: &BrokerSubmitRequest) -> AlpacaSubmitBody {
     let side = side_to_str(&req.side);
-    let limit_price = req.limit_price.map(format_alpaca_price);
+    let limit_price = req.limit_price.map(|price_micros| {
+        if req.asset_class == AssetClass::Crypto {
+            format_alpaca_crypto_price(price_micros)
+        } else {
+            format_alpaca_price(price_micros)
+        }
+    });
     AlpacaSubmitBody {
         symbol: req.symbol.clone(),
         qty: format_alpaca_qty(req.quantity),
@@ -1394,6 +1401,40 @@ pub fn build_replace_body(
         time_in_force: time_in_force.to_string(),
     })
 }
+/// Build the production Alpaca replace body with asset-aware exact
+/// price serialization.
+///
+/// `replace_order` already fetched the broker's authoritative order symbol.
+/// Crypto pair symbols therefore use [`format_alpaca_crypto_price`], while
+/// bare Equity tickers retain the existing [`format_alpaca_price`] behavior.
+///
+/// Price-tick validation is intentionally not duplicated here. The canonical
+/// order-economics gate owns that authorization decision.
+fn build_replace_body_for_symbol(
+    new_leaves_qty: QtyMicros,
+    filled_qty: QtyMicros,
+    limit_price: Option<i64>,
+    time_in_force: &str,
+    symbol: &str,
+) -> Result<AlpacaReplaceBody, BrokerError> {
+    let mut body = build_replace_body(
+        new_leaves_qty,
+        filled_qty,
+        None,
+        time_in_force,
+    )?;
+
+    body.limit_price = limit_price.map(|price_micros| {
+        if is_alpaca_crypto_symbol(symbol) {
+            format_alpaca_crypto_price(price_micros)
+        } else {
+            format_alpaca_price(price_micros)
+        }
+    });
+
+    Ok(body)
+}
+
 /// True when an Alpaca symbol string is in canonical crypto-pair wire format
 /// (contains `/`, e.g. `"BTC/USD"`) rather than a bare equity ticker (e.g.
 /// `"AAPL"`). Used by [`AlpacaBrokerAdapter::replace_order`] to decide
@@ -1595,6 +1636,47 @@ pub fn format_alpaca_price(micros: i64) -> String {
     // micros_to_price returns f64; format to 2 decimal places for US equity wire.
     format!("{:.2}", micros_to_price(micros))
 }
+
+/// Format a Crypto price from canonical price micros as an exact decimal.
+///
+/// BRK-PRICE-01A: Crypto must never pass through the Equity `f64`/2dp
+/// formatter. This function serializes the canonical integer-micros value
+/// exactly, trimming only insignificant trailing fractional zeroes.
+///
+/// It does NOT decide whether a price is on the instrument's valid price
+/// tick. That authority belongs to the canonical instrument-economics gate.
+///
+/// Examples:
+/// - 60_000_000_000 -> "60000"
+/// - 60_000_500_000 -> "60000.5"
+/// - 1 -> "0.000001"
+pub fn format_alpaca_crypto_price(micros: i64) -> String {
+    let value = micros as i128;
+    let negative = value < 0;
+    let absolute = value.abs();
+
+    let whole = absolute / 1_000_000;
+    let fraction = absolute % 1_000_000;
+
+    let mut rendered = if fraction == 0 {
+        whole.to_string()
+    } else {
+        let mut fraction_text = format!("{fraction:06}");
+
+        while fraction_text.ends_with('0') {
+            fraction_text.pop();
+        }
+
+        format!("{whole}.{fraction_text}")
+    };
+
+    if negative {
+        rendered.insert(0, '-');
+    }
+
+    rendered
+}
+
 
 /// Convert integer micros to a decimal price string for the Alpaca broker wire.
 ///

@@ -345,3 +345,55 @@ fn fp14_common_equity_prices_format_without_drift() {
         );
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// FP15 ? Crypto whole-dollar limit price bypasses Equity f64/2dp formatting
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fp15_crypto_whole_dollar_limit_price_is_exact() {
+    let req = BrokerSubmitRequest {
+        order_id: "fp15".to_string(),
+        symbol: "BTC/USD".to_string(),
+        side: Side::Buy,
+        quantity: QtyMicros::new(100),
+        order_type: "limit".to_string(),
+        limit_price: Some(60_000_000_000),
+        time_in_force: "gtc".to_string(),
+        asset_class: AssetClass::Crypto,
+    };
+
+    let body = build_submit_body(&req);
+
+    assert_eq!(
+        body.limit_price.as_deref(),
+        Some("60000")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FP16 ? Crypto fractional-dollar micros serialize exactly, never round
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fp16_crypto_fractional_dollar_price_is_exact() {
+    let req = BrokerSubmitRequest {
+        order_id: "fp16".to_string(),
+        symbol: "BTC/USD".to_string(),
+        side: Side::Buy,
+        quantity: QtyMicros::new(100),
+        order_type: "limit".to_string(),
+        limit_price: Some(60_000_500_000),
+        time_in_force: "gtc".to_string(),
+        asset_class: AssetClass::Crypto,
+    };
+
+    let body = build_submit_body(&req);
+
+    assert_eq!(
+        body.limit_price.as_deref(),
+        Some("60000.5"),
+        "Crypto formatter must preserve canonical integer micros exactly"
+    );
+}
