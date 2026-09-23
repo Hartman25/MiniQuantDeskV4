@@ -1,18 +1,21 @@
 //! Instrument registry v2 — additive schema, loader, and validator (ASSET-CORE-01B).
 //!
-//! This module is a **model + loader seam, not a production cutover**. It exists
-//! so a future unified instrument registry (futures/options/crypto/forex/rates)
-//! has a real schema to build on, without changing any current trading behavior:
+//! This module is the canonical additive registry-v2 schema, loader, and
+//! validator.
 //!
-//! - The canonical v1 registry (`super::instrument_registry`, `TrackedInstrument`,
-//!   `config/instruments/equities.json`) remains the only registry any daemon,
-//!   CLI, ingestion, backtest, or GUI code path reads.
-//! - Nothing in this module is wired into any consumer. `InstrumentRegistryV2` is
-//!   parsed and validated only by the tests in this file.
-//! - Non-equity asset classes are representable here but [`validate_registry_v2`]
-//!   fail-closed rejects `enabled = true` for any non-equity instrument unless the
-//!   explicit, test-only [`InstrumentDefinitionV2::allow_enabled_non_equity_for_testing`]
-//!   flag is set — there is no production enablement path through this schema.
+//! M6 adds one narrow production consumer: when
+//! `MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH` is explicitly configured, the
+//! Paper Crypto order-authority seam may resolve instrument identity and
+//! economics through this schema.
+//!
+//! Production trading use is deliberately narrower than schema
+//! representability:
+//! - the legacy v1 registry remains canonical for Equity/ETF trading;
+//! - M6 Crypto authority is Paper-only and Alpaca-only;
+//! - exact validated economics are persisted into the durable outbox;
+//! - Live authority is rejected;
+//! - `allow_enabled_non_equity_for_testing` is rejected by the production
+//!   trading authority even though isolated schema tests may use it.
 //!
 //! # Relationship to other asset-class types (ASSET-CORE-01A carry-forward)
 //!
@@ -123,20 +126,20 @@ pub struct InstrumentDefinitionV2 {
     /// Free-form note.
     #[serde(default)]
     pub notes: Option<String>,
-    /// Test/fixture-only escape hatch: when `false` (the default), the
-    /// `enabled = true` + non-equity combination always fails
-    /// [`validate_registry_v2`]. Setting this `true` only changes what the
-    /// *validator* accepts in this schema/loader module — nothing in any
-    /// production daemon, CLI, ingestion, backtest, or GUI path reads
-    /// `InstrumentRegistryV2` at all, so this flag has no trading effect. It
-    /// exists solely so a test fixture can prove the fail-closed rule is an
-    /// explicit, deliberate gate rather than an accidental omission.
+    /// Test/fixture-only escape hatch for the generic registry validator.
+    ///
+    /// Setting this `true` never grants production trading authority. The M6
+    /// Paper Crypto resolver explicitly rejects any trading registry carrying
+    /// this test-only bypass.
     #[serde(default)]
     pub allow_enabled_non_equity_for_testing: bool,
-    /// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: optional backtest-economics
-    /// metadata (contract multiplier + margin scaffold). Metadata only — see
-    /// [`InstrumentEconomicsMetadataV2`]. Never read by any trading/execution
-    /// path; never enables or implies enablement of any asset class.
+    /// Registry-v2 instrument economics metadata.
+    ///
+    /// Originally introduced for backtest economics. M6 also consumes the
+    /// validated quantity increment, minimum quantity, price tick, and session
+    /// profile subset when explicitly authorizing a Paper Crypto order.
+    ///
+    /// Presence of economics metadata alone never grants trading authority.
     #[serde(default)]
     pub economics: Option<InstrumentEconomicsMetadataV2>,
 }
@@ -250,10 +253,12 @@ pub struct InstrumentMetadataV2 {
     pub tags: Vec<String>,
 }
 
-/// Parse a v2 instrument registry JSON file at `path`. Pure parse — does not
-/// call [`validate_registry_v2`]. No production file exists for this schema
-/// today; this exists for symmetry with `load_instrument_registry` (v1) and
-/// for future use once a real multi-provider registry file is introduced.
+/// Parse a v2 instrument registry JSON file at `path`.
+///
+/// This is a pure parse and does not call [`validate_registry_v2`]. Callers
+/// own authority selection and validation. The M6 Paper Crypto trading seam
+/// uses this loader only when its dedicated trading-registry path is
+/// explicitly configured.
 pub fn load_instrument_registry_v2(path: &Path) -> Result<InstrumentRegistryV2> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("instrument registry v2 read failed: {}", path.display()))?;
@@ -381,7 +386,7 @@ pub fn validate_registry_v2(registry: &InstrumentRegistryV2) -> Result<()> {
             && !inst.allow_enabled_non_equity_for_testing
         {
             anyhow::bail!(
-                "instrument_registry_v2: enabled non-equity instrument symbol={} asset_class={} requires allow_enabled_non_equity_for_testing=true (test/fixture only; no production path reads this schema)",
+                "instrument_registry_v2: enabled non-equity instrument symbol={} asset_class={} requires allow_enabled_non_equity_for_testing=true (test/fixture-only validator bypass; production trading authority rejects registries carrying this flag)",
                 inst.symbol,
                 inst.asset_class
             );
@@ -2217,10 +2222,9 @@ mod tests {
 
     // ── BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: suggestion helper ──────────
 
-    // SUG-01: explicit registry-v2 economics on a non-equity fixture wins
-    // truth_state="active" with the explicit multiplier/margins, even though
-    // no production non-equity registry data exists today (this proves the
-    // helper, not a wired production path -- see module docs).
+    // SUG-01: explicit registry-v2 economics on a non-equity fixture wins.
+    // This proves the read-only suggestion helper independently of the M6
+    // Paper Crypto trading-authority seam described in the module contract.
     #[test]
     fn sug01_explicit_economics_on_non_equity_fixture_returns_active() {
         let inst = with_economics(
