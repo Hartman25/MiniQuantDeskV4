@@ -464,6 +464,12 @@
       "path": "0075_autonomous_daily_binding_bar_dispatches.sql",
       "status": "applied",
       "intent": "MULTI-STRATEGY-RUNTIME-DISPATCH-01 autonomous completed-bar driver same-symbol multi-strategy repair (V4-BULK-CODE-COMPLETION-STAGE-B-M2-01, correcting the prior session's C4 patch): new additive table sys_autonomous_daily_binding_bar_dispatches, keyed (operation_id, symbol, strategy_id, timeframe, bar_end_ts) -- distinct from migration 0050's sys_autonomous_daily_bar_dispatches (no strategy_id; correct and unchanged for the legacy single-engine path only). Required because an approved watchlist-v3 fleet can bind two different strategies to the same (symbol, timeframe) (e.g. AAPL/strategy_A and AAPL/strategy_B), which 0050's identity cannot distinguish. Used exclusively by the new host-pool dispatch route in autonomous_completed_bar_driver.rs. No existing table/column altered."
+    },
+    {
+      "id": "0076",
+      "path": "0076_runtime_qty_micros_evidence.sql",
+      "status": "applied",
+      "intent": "CUTOVER-1D-A1: add an explicit qty_micros_v1 evidence encoding to Bundle 5 runtime opportunity-allocation candidates and Bundle 6 runtime strategy-conflict candidates without reinterpreting historical whole-unit bigint values. Historical rows retain quantity_schema_version=NULL and legacy quantity columns; new CUTOVER-1D writers will set quantity_schema_version=qty_micros_v1, write only *_qty_micros quantity authority, and leave legacy quantity columns NULL. CHECK constraints make the two encodings mutually exclusive. No historical row is rescaled; no trading authority, risk policy, order sizing, Paper/Live state, broker routing, or execution capability is changed by this migration."
     }
   ]
 }
