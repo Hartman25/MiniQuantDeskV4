@@ -69,7 +69,7 @@
 //! declaring its own, so the SQL fetch bound and the validator's bound can
 //! never silently drift apart.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -85,6 +85,113 @@ use uuid::Uuid;
 /// generous headroom while still refusing an unbounded read for a
 /// pathological/corrupted row.
 pub const RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND: usize = 64;
+
+/// CUTOVER-1D-A2: durable quantity evidence encoding written by all new
+/// Bundle 6 candidate rows. Historical rows remain `NULL` and use the
+/// pre-0076 whole-unit columns.
+const RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1: &str = "qty_micros_v1";
+const RUNTIME_QTY_MICROS_SCALE: i64 = 1_000_000;
+
+fn whole_qty_to_micros(field: &str, value: i64) -> Result<i64> {
+    value.checked_mul(RUNTIME_QTY_MICROS_SCALE).ok_or_else(|| {
+        anyhow!(
+            "CUTOVER-1D-A2: {} whole-unit quantity {} overflows QtyMicros",
+            field,
+            value
+        )
+    })
+}
+
+fn micros_to_whole_qty(field: &str, value: i64) -> Result<i64> {
+    if value % RUNTIME_QTY_MICROS_SCALE != 0 {
+        return Err(anyhow!(
+            "CUTOVER-1D-A2: {} contains fractional QtyMicros value {}; the current public record seam is still whole-unit and must fail closed",
+            field,
+            value
+        ));
+    }
+    Ok(value / RUNTIME_QTY_MICROS_SCALE)
+}
+
+fn decode_required_quantity(
+    row: &sqlx::postgres::PgRow,
+    quantity_schema_version: Option<&str>,
+    legacy_field: &str,
+    micros_field: &str,
+) -> Result<i64> {
+    use sqlx::Row;
+
+    let legacy: Option<i64> = row
+        .try_get(legacy_field)
+        .with_context(|| format!("CUTOVER-1D-A2: read legacy quantity field {legacy_field}"))?;
+    let micros: Option<i64> = row
+        .try_get(micros_field)
+        .with_context(|| format!("CUTOVER-1D-A2: read QtyMicros field {micros_field}"))?;
+
+    match quantity_schema_version {
+        None => match (legacy, micros) {
+            (Some(value), None) => Ok(value),
+            _ => Err(anyhow!(
+                "CUTOVER-1D-A2: historical quantity row has mixed/missing authority for {}/{}",
+                legacy_field,
+                micros_field
+            )),
+        },
+        Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1) => match (legacy, micros) {
+            (None, Some(value)) => micros_to_whole_qty(micros_field, value),
+            _ => Err(anyhow!(
+                "CUTOVER-1D-A2: qty_micros_v1 row has mixed/missing authority for {}/{}",
+                legacy_field,
+                micros_field
+            )),
+        },
+        Some(other) => Err(anyhow!(
+            "CUTOVER-1D-A2: unsupported quantity_schema_version '{other}'"
+        )),
+    }
+}
+
+fn decode_optional_quantity(
+    row: &sqlx::postgres::PgRow,
+    quantity_schema_version: Option<&str>,
+    legacy_field: &str,
+    micros_field: &str,
+) -> Result<Option<i64>> {
+    use sqlx::Row;
+
+    let legacy: Option<i64> = row
+        .try_get(legacy_field)
+        .with_context(|| format!("CUTOVER-1D-A2: read legacy quantity field {legacy_field}"))?;
+    let micros: Option<i64> = row
+        .try_get(micros_field)
+        .with_context(|| format!("CUTOVER-1D-A2: read QtyMicros field {micros_field}"))?;
+
+    match quantity_schema_version {
+        None => {
+            if micros.is_some() {
+                return Err(anyhow!(
+                    "CUTOVER-1D-A2: historical quantity row carries unexpected QtyMicros authority in {}",
+                    micros_field
+                ));
+            }
+            Ok(legacy)
+        }
+        Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1) => {
+            if legacy.is_some() {
+                return Err(anyhow!(
+                    "CUTOVER-1D-A2: qty_micros_v1 row carries unexpected legacy quantity authority in {}",
+                    legacy_field
+                ));
+            }
+            micros
+                .map(|value| micros_to_whole_qty(micros_field, value))
+                .transpose()
+        }
+        Some(other) => Err(anyhow!(
+            "CUTOVER-1D-A2: unsupported quantity_schema_version '{other}'"
+        )),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NewRuntimeStrategyConflictCandidate {
@@ -396,10 +503,11 @@ pub async fn insert_runtime_strategy_conflict_plan(
     if let Some(row) = existing_plan_row {
         let existing_record = plan_row_to_record(&row);
         let existing_candidate_rows = sqlx::query(
-            "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty, \
-             current_qty, order_type, time_in_force, limit_price, proposed_target_qty, \
-             bar_present, bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts, \
-             close_micros, selected, disposition, reason_code \
+            "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, \
+             quantity_schema_version, qty, qty_micros, current_qty, current_qty_micros, \
+             order_type, time_in_force, limit_price, proposed_target_qty, \
+             proposed_target_qty_micros, bar_present, bar_symbol, bar_strategy_id, \
+             bar_timeframe, bar_end_ts, close_micros, selected, disposition, reason_code \
              from sys_runtime_strategy_conflict_candidates where plan_id = $1",
         )
         .bind(plan.plan_id)
@@ -410,7 +518,10 @@ pub async fn insert_runtime_strategy_conflict_plan(
             existing_candidate_rows
                 .iter()
                 .map(candidate_row_to_record)
-                .collect();
+                .collect::<Result<Vec<_>>>()
+                .context(
+                    "insert_runtime_strategy_conflict_plan: decode existing candidates failed",
+                )?;
 
         tx.rollback()
             .await
@@ -460,15 +571,23 @@ pub async fn insert_runtime_strategy_conflict_plan(
     .context("insert_runtime_strategy_conflict_plan: insert plan row failed")?;
 
     for c in &plan.candidates {
+        let qty_micros = whole_qty_to_micros("qty", c.qty)?;
+        let current_qty_micros = whole_qty_to_micros("current_qty", c.current_qty)?;
+        let proposed_target_qty_micros = c
+            .proposed_target_qty
+            .map(|value| whole_qty_to_micros("proposed_target_qty", value))
+            .transpose()?;
+
         sqlx::query(
             r#"
             insert into sys_runtime_strategy_conflict_candidates
-                (plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty,
-                 current_qty, order_type, time_in_force, limit_price, proposed_target_qty,
+                (plan_id, ordinal, symbol, strategy_id, timeframe_secs, side,
+                 quantity_schema_version, qty_micros, current_qty_micros,
+                 order_type, time_in_force, limit_price, proposed_target_qty_micros,
                  bar_present, bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts,
                  close_micros, selected, disposition, reason_code)
             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                    $17, $18, $19, $20, $21)
+                    $17, $18, $19, $20, $21, $22)
             "#,
         )
         .bind(plan.plan_id)
@@ -477,12 +596,13 @@ pub async fn insert_runtime_strategy_conflict_plan(
         .bind(&c.strategy_id)
         .bind(c.timeframe_secs)
         .bind(&c.side)
-        .bind(c.qty)
-        .bind(c.current_qty)
+        .bind(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1)
+        .bind(qty_micros)
+        .bind(current_qty_micros)
         .bind(&c.order_type)
         .bind(&c.time_in_force)
         .bind(c.limit_price)
-        .bind(c.proposed_target_qty)
+        .bind(proposed_target_qty_micros)
         .bind(c.bar_present)
         .bind(&c.bar_symbol)
         .bind(&c.bar_strategy_id)
@@ -524,21 +644,43 @@ fn plan_row_to_record(row: &sqlx::postgres::PgRow) -> RuntimeStrategyConflictPla
     }
 }
 
-fn candidate_row_to_record(row: &sqlx::postgres::PgRow) -> RuntimeStrategyConflictCandidateRecord {
+fn candidate_row_to_record(
+    row: &sqlx::postgres::PgRow,
+) -> Result<RuntimeStrategyConflictCandidateRecord> {
     use sqlx::Row;
-    RuntimeStrategyConflictCandidateRecord {
+
+    let quantity_schema_version: Option<String> = row
+        .try_get("quantity_schema_version")
+        .context("CUTOVER-1D-A2: read conflict quantity_schema_version")?;
+
+    Ok(RuntimeStrategyConflictCandidateRecord {
         plan_id: row.get("plan_id"),
         ordinal: row.get("ordinal"),
         symbol: row.get("symbol"),
         strategy_id: row.get("strategy_id"),
         timeframe_secs: row.get("timeframe_secs"),
         side: row.get("side"),
-        qty: row.get("qty"),
-        current_qty: row.get("current_qty"),
+        qty: decode_required_quantity(
+            row,
+            quantity_schema_version.as_deref(),
+            "qty",
+            "qty_micros",
+        )?,
+        current_qty: decode_required_quantity(
+            row,
+            quantity_schema_version.as_deref(),
+            "current_qty",
+            "current_qty_micros",
+        )?,
         order_type: row.get("order_type"),
         time_in_force: row.get("time_in_force"),
         limit_price: row.get("limit_price"),
-        proposed_target_qty: row.get("proposed_target_qty"),
+        proposed_target_qty: decode_optional_quantity(
+            row,
+            quantity_schema_version.as_deref(),
+            "proposed_target_qty",
+            "proposed_target_qty_micros",
+        )?,
         bar_present: row.get("bar_present"),
         bar_symbol: row.get("bar_symbol"),
         bar_strategy_id: row.get("bar_strategy_id"),
@@ -548,7 +690,7 @@ fn candidate_row_to_record(row: &sqlx::postgres::PgRow) -> RuntimeStrategyConfli
         selected: row.get("selected"),
         disposition: row.get("disposition"),
         reason_code: row.get("reason_code"),
-    }
+    })
 }
 
 /// Fetch one plan and its candidates (ordered by `ordinal`) by `plan_id`.
@@ -576,10 +718,11 @@ pub async fn fetch_runtime_strategy_conflict_plan(
     };
 
     let candidate_rows = sqlx::query(
-        "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty, current_qty, \
-         order_type, time_in_force, limit_price, proposed_target_qty, bar_present, bar_symbol, \
-         bar_strategy_id, bar_timeframe, bar_end_ts, close_micros, selected, disposition, \
-         reason_code \
+        "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, \
+         quantity_schema_version, qty, qty_micros, current_qty, current_qty_micros, \
+         order_type, time_in_force, limit_price, proposed_target_qty, proposed_target_qty_micros, \
+         bar_present, bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts, close_micros, \
+         selected, disposition, reason_code \
          from sys_runtime_strategy_conflict_candidates where plan_id = $1 order by ordinal",
     )
     .bind(plan_id)
@@ -587,7 +730,11 @@ pub async fn fetch_runtime_strategy_conflict_plan(
     .await
     .context("fetch_runtime_strategy_conflict_plan: candidates query failed")?;
 
-    let candidates = candidate_rows.iter().map(candidate_row_to_record).collect();
+    let candidates = candidate_rows
+        .iter()
+        .map(candidate_row_to_record)
+        .collect::<Result<Vec<_>>>()
+        .context("fetch_runtime_strategy_conflict_plan: decode candidates failed")?;
     Ok(Some((plan_row_to_record(&plan_row), candidates)))
 }
 
@@ -649,10 +796,11 @@ pub async fn fetch_runtime_strategy_conflict_plan_for_read(
         .context("fetch_runtime_strategy_conflict_plan_for_read: bound does not fit in i64")?;
 
     let candidate_rows = sqlx::query(
-        "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty, current_qty, \
-         order_type, time_in_force, limit_price, proposed_target_qty, bar_present, bar_symbol, \
-         bar_strategy_id, bar_timeframe, bar_end_ts, close_micros, selected, disposition, \
-         reason_code \
+        "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, \
+         quantity_schema_version, qty, qty_micros, current_qty, current_qty_micros, \
+         order_type, time_in_force, limit_price, proposed_target_qty, proposed_target_qty_micros, \
+         bar_present, bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts, close_micros, \
+         selected, disposition, reason_code \
          from sys_runtime_strategy_conflict_candidates where plan_id = $1 order by ordinal \
          limit $2",
     )
@@ -669,7 +817,11 @@ pub async fn fetch_runtime_strategy_conflict_plan_for_read(
         });
     }
 
-    let candidates = candidate_rows.iter().map(candidate_row_to_record).collect();
+    let candidates = candidate_rows
+        .iter()
+        .map(candidate_row_to_record)
+        .collect::<Result<Vec<_>>>()
+        .context("fetch_runtime_strategy_conflict_plan_for_read: decode candidates failed")?;
     Ok(BoundedConflictPlanFetch::Complete(plan_record, candidates))
 }
 
@@ -693,4 +845,185 @@ pub async fn fetch_recent_runtime_strategy_conflict_plans(
     .context("fetch_recent_runtime_strategy_conflict_plans: query failed")?;
 
     Ok(rows.iter().map(plan_row_to_record).collect())
+}
+
+
+#[cfg(test)]
+mod cutover_1d_a2_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use sqlx::Row;
+
+    async fn cleanup_fixture(pool: &PgPool, run_id: Uuid) {
+        let _ = sqlx::query(
+            "delete from sys_runtime_strategy_conflict_candidates where plan_id in \
+             (select plan_id from sys_runtime_strategy_conflict_plans where run_id = $1)",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("delete from sys_runtime_strategy_conflict_plans where run_id = $1")
+            .bind(run_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("delete from runs where run_id = $1")
+            .bind(run_id)
+            .execute(pool)
+            .await;
+    }
+
+    #[test]
+    fn cutover_1d_a2_conflict_checked_scaling_and_fractional_refusal() {
+        assert_eq!(whole_qty_to_micros("qty", 2).unwrap(), 2_000_000);
+        assert_eq!(whole_qty_to_micros("qty", -3).unwrap(), -3_000_000);
+        assert!(whole_qty_to_micros("qty", i64::MAX).is_err());
+        assert_eq!(
+            micros_to_whole_qty("qty_micros", 4_000_000).unwrap(),
+            4
+        );
+        let err = micros_to_whole_qty("qty_micros", 500_000).unwrap_err();
+        assert!(
+            err.to_string().contains("fractional QtyMicros"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; CUTOVER-1D-A2 durable writer/read proof"]
+    async fn cutover_1d_a2_conflict_writer_uses_qty_micros_v1_and_fractional_read_fails_closed() {
+        if std::env::var(crate::ENV_DB_URL).is_err() {
+            eprintln!("skipped: requires MQK_DATABASE_URL");
+            return;
+        }
+        let pool = crate::testkit_db_pool()
+            .await
+            .expect("CUTOVER-1D-A2 conflict test DB");
+
+        let run_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"cutover-1d-a2-conflict-writer-v1",
+        );
+        let plan_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"cutover-1d-a2-conflict-plan-v1",
+        );
+
+        cleanup_fixture(&pool, run_id).await;
+
+        crate::insert_run(
+            &pool,
+            &crate::NewRun {
+                run_id,
+                engine_id: "cutover-1d-a2-conflict".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc.with_ymd_and_hms(2099, 9, 22, 12, 0, 0).unwrap(),
+                git_hash: "cutover-1d-a2".to_string(),
+                config_hash: "cutover-1d-a2".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "cutover-1d-a2".to_string(),
+            },
+        )
+        .await
+        .expect("fixture run insert");
+
+        let plan = NewRuntimeStrategyConflictPlan {
+            plan_id,
+            cycle_id: plan_id,
+            run_id,
+            mode: "shadow".to_string(),
+            configured_mode: "shadow".to_string(),
+            market_date: "2099-09-22".to_string(),
+            policy_schema_version: "multi-strategy-conflict-policy-v1".to_string(),
+            symbol_group_count: 1,
+            candidate_count: 1,
+            selected_count: 1,
+            refused_count: 0,
+            truth_state: "computed".to_string(),
+            blockers: vec![],
+            created_at_utc: Utc.with_ymd_and_hms(2099, 9, 22, 12, 1, 0).unwrap(),
+            candidates: vec![NewRuntimeStrategyConflictCandidate {
+                ordinal: 0,
+                symbol: "AAPL".to_string(),
+                strategy_id: "fixture".to_string(),
+                timeframe_secs: 300,
+                side: "buy".to_string(),
+                qty: 2,
+                current_qty: 1,
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
+                proposed_target_qty: Some(3),
+                bar_present: true,
+                bar_symbol: Some("AAPL".to_string()),
+                bar_strategy_id: Some("fixture".to_string()),
+                bar_timeframe: Some("5m".to_string()),
+                bar_end_ts: Some(1_000),
+                close_micros: Some(100_000_000),
+                selected: true,
+                disposition: "selected".to_string(),
+                reason_code: "fixture".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            insert_runtime_strategy_conflict_plan(&pool, plan)
+                .await
+                .expect("insert QtyMicros-v1 conflict evidence"),
+            InsertRuntimeStrategyConflictPlanOutcome::Inserted
+        );
+
+        let row = sqlx::query(
+            "select quantity_schema_version, qty, current_qty, proposed_target_qty, \
+             qty_micros, current_qty_micros, proposed_target_qty_micros \
+             from sys_runtime_strategy_conflict_candidates where plan_id = $1",
+        )
+        .bind(plan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("raw conflict evidence row");
+
+        assert_eq!(
+            row.get::<String, _>("quantity_schema_version"),
+            RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1
+        );
+        assert_eq!(row.get::<Option<i64>, _>("qty"), None);
+        assert_eq!(row.get::<Option<i64>, _>("current_qty"), None);
+        assert_eq!(row.get::<Option<i64>, _>("proposed_target_qty"), None);
+        assert_eq!(row.get::<Option<i64>, _>("qty_micros"), Some(2_000_000));
+        assert_eq!(
+            row.get::<Option<i64>, _>("current_qty_micros"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            row.get::<Option<i64>, _>("proposed_target_qty_micros"),
+            Some(3_000_000)
+        );
+
+        let (_, records) = fetch_runtime_strategy_conflict_plan(&pool, plan_id)
+            .await
+            .expect("fetch QtyMicros-v1 conflict evidence")
+            .expect("plan exists");
+        assert_eq!(records[0].qty, 2);
+        assert_eq!(records[0].current_qty, 1);
+        assert_eq!(records[0].proposed_target_qty, Some(3));
+
+        sqlx::query(
+            "update sys_runtime_strategy_conflict_candidates \
+             set qty_micros = 500000 where plan_id = $1",
+        )
+        .bind(plan_id)
+        .execute(&pool)
+        .await
+        .expect("inject valid fractional durable QtyMicros evidence");
+
+        let err = fetch_runtime_strategy_conflict_plan(&pool, plan_id)
+            .await
+            .expect_err("whole-unit record seam must reject fractional durable evidence");
+        assert!(
+            format!("{err:#}").contains("fractional QtyMicros"),
+            "{err:#}"
+        );
+
+        cleanup_fixture(&pool, run_id).await;
+    }
 }
