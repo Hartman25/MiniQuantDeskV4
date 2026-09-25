@@ -54,10 +54,12 @@
 //! Default target_qty=1 with no caps set preserves the prior conservative behavior.
 
 use crate::semantic_identity::{SemanticIdentityBuilder, SEMANTIC_IDENTITY_SCHEMA_V1};
+use crate::sizing::TargetSizing;
 use crate::{
     BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
     StrategySpec, TargetPosition,
 };
+use mqk_execution::{AssetClass, QtyMicros, QTY_MICROS_SCALE};
 
 // ── Decision vocabulary (STRATEGY-DECISION-OBSERVABILITY-01) ─────────────────
 pub const DECISION_SIGNAL_LONG: &str = "signal_long";
@@ -295,15 +297,22 @@ pub fn meta_short() -> StrategyMeta {
     })
 }
 
+/// Equity/ETF sizing from the environment (historical whole-share semantics).
+fn equity_sizing_from_env() -> TargetSizing {
+    TargetSizing::equity_whole_units(
+        target_qty_from_env(),
+        max_target_qty_from_env(),
+        max_notional_usd_from_env(),
+    )
+    .expect("whole-share sizing must be representable as QtyMicros")
+}
+
 #[derive(Clone, Debug)]
 pub struct IntradayScalperStrategy {
     symbol: String,
-    /// Absolute target share count requested by operator configuration.
-    target_qty: i64,
-    /// Hard cap on target share count (None = no cap).
-    max_target_qty: Option<i64>,
-    /// Hard cap on position notional in whole USD (None = no cap).
-    max_notional_usd: Option<i64>,
+    /// Resolved exact sizing (target, optional quantity cap, optional
+    /// notional cap) for the asset class this instance trades.
+    sizing: TargetSizing,
     /// When `true`, bearish displacement (direction=-1) produces a negative
     /// target qty instead of 0.  Default: `false` (long-only).
     ///
@@ -322,12 +331,7 @@ pub struct IntradayScalperStrategy {
 impl IntradayScalperStrategy {
     /// Construct using env vars for all three sizing parameters.
     pub fn new(symbol: impl Into<String>) -> Self {
-        Self::with_caps(
-            symbol,
-            target_qty_from_env(),
-            max_target_qty_from_env(),
-            max_notional_usd_from_env(),
-        )
+        Self::with_sizing(symbol, equity_sizing_from_env())
     }
 
     /// Construct with an explicit target qty and no caps (for tests or callers
@@ -345,11 +349,19 @@ impl IntradayScalperStrategy {
         max_notional_usd: Option<i64>,
     ) -> Self {
         debug_assert!(target_qty > 0, "target_qty must be positive");
+        // Whole-share Equity sizing. A target too large to represent as
+        // QtyMicros is not a valid configuration: fail closed at construction.
+        let sizing = TargetSizing::equity_whole_units(target_qty, max_target_qty, max_notional_usd)
+            .expect("whole-share sizing must be representable as QtyMicros");
+        Self::with_sizing(symbol, sizing)
+    }
+
+    /// Construct from already-resolved exact sizing (any supported asset
+    /// class). Long-only, identity `NAME`.
+    pub fn with_sizing(symbol: impl Into<String>, sizing: TargetSizing) -> Self {
         Self {
             symbol: symbol.into(),
-            target_qty: target_qty.max(1),
-            max_target_qty,
-            max_notional_usd,
+            sizing,
             allow_short_signals: false,
             strategy_name: NAME,
             is_short_only: false,
@@ -382,11 +394,14 @@ impl IntradayScalperStrategy {
     /// construction time, identical to [`new`].  Downstream B5 guard and
     /// risk gates remain active; this constructor does not bypass them.
     pub fn new_short(symbol: impl Into<String>) -> Self {
+        Self::new_short_with_sizing(symbol, equity_sizing_from_env())
+    }
+
+    /// Short-only variant from already-resolved exact sizing.
+    pub fn new_short_with_sizing(symbol: impl Into<String>, sizing: TargetSizing) -> Self {
         Self {
             symbol: symbol.into(),
-            target_qty: target_qty_from_env(),
-            max_target_qty: max_target_qty_from_env(),
-            max_notional_usd: max_notional_usd_from_env(),
+            sizing,
             allow_short_signals: true,
             strategy_name: SHORT_NAME,
             is_short_only: true,
@@ -429,15 +444,15 @@ impl IntradayScalperStrategy {
     /// Returns `(effective_target, capped_by)` where `capped_by` is a
     /// diagnostic label: `"none"`, `"max_qty"`, `"max_notional"`, or
     /// `"max_notional_no_price"` (fail-closed when close is zero).
-    fn apply_caps(&self, requested: i64, bars: &[BarStub]) -> (i64, &'static str) {
-        // Cap 1: hard max shares.
-        let (after_qty_cap, qty_cap_fired) = match self.max_target_qty {
+    fn apply_caps(&self, requested: QtyMicros, bars: &[BarStub]) -> (QtyMicros, &'static str) {
+        // Cap 1: hard max quantity.
+        let (after_qty_cap, qty_cap_fired) = match self.sizing.max_target_qty() {
             Some(max_qty) if requested > max_qty => (max_qty, true),
             _ => (requested, false),
         };
 
         // Cap 2: hard max notional (USD).
-        let (effective, capped_by) = match self.max_notional_usd {
+        let (effective, capped_by) = match self.sizing.max_notional_usd() {
             None => (
                 after_qty_cap,
                 if qty_cap_fired { "max_qty" } else { "none" },
@@ -446,12 +461,18 @@ impl IntradayScalperStrategy {
                 let last_close_micros = bars.last().map(|b| b.close_micros).unwrap_or(0);
                 if last_close_micros <= 0 {
                     // Fail-closed: cannot compute notional without price reference.
-                    return (0, "max_notional_no_price");
+                    return (QtyMicros::ZERO, "max_notional_no_price");
                 }
-                // max_qty_from_notional = max_notional_usd * 1_000_000 / close_micros
-                // Example: max=$1000, close=$200 → 1000*1_000_000/200_000_000 = 5
-                let max_from_notional = (max_notional_usd * 1_000_000) / last_close_micros;
-                let max_from_notional = max_from_notional.max(0);
+                // max qty (raw micros) = usd * 1e6 (usd micros) * QTY_MICROS_SCALE
+                //                        / close_micros, floored to the asset
+                // class's cap granularity (whole shares for Equity), never up.
+                // Example: max=$1000, close=$200 → 5 shares (5_000_000 micros).
+                let raw = (max_notional_usd as i128 * 1_000_000i128 * QTY_MICROS_SCALE as i128)
+                    / last_close_micros as i128;
+                let floor = self.sizing.notional_cap_floor_micros() as i128;
+                let floored = (raw / floor) * floor;
+                let max_from_notional =
+                    QtyMicros::new(i64::try_from(floored).unwrap_or(i64::MAX)).max(QtyMicros::ZERO);
                 if after_qty_cap > max_from_notional {
                     (max_from_notional, "max_notional")
                 } else if qty_cap_fired {
@@ -462,7 +483,7 @@ impl IntradayScalperStrategy {
             }
         };
 
-        (effective.max(0), capped_by)
+        (effective.max(QtyMicros::ZERO), capped_by)
     }
 }
 
@@ -481,17 +502,44 @@ impl Strategy for IntradayScalperStrategy {
     /// blank, or "0" all resolving to `target_qty=1`) never reach this
     /// method at all — only the resolved `i64`/`bool` fields do.
     fn semantic_fingerprint(&self) -> String {
-        SemanticIdentityBuilder::new(SEMANTIC_IDENTITY_SCHEMA_V1, self.strategy_name, VERSION)
-            .push_str(&self.symbol)
+        let mut b =
+            SemanticIdentityBuilder::new(SEMANTIC_IDENTITY_SCHEMA_V1, self.strategy_name, VERSION);
+        b.push_str(&self.symbol)
             .push_i64(TIMEFRAME_SECS)
             .push_i64(LOOKBACK as i64)
-            .push_i64(MICRO_MOVE_BPS)
-            .push_i64(self.target_qty)
-            .push_opt_i64(self.max_target_qty)
-            .push_opt_i64(self.max_notional_usd)
+            .push_i64(MICRO_MOVE_BPS);
+        // Whole quantities keep their historical whole-unit encoding so an
+        // unchanged effective Equity size keeps its identity; a fractional
+        // quantity is marked with `i64::MIN` (never a valid whole-unit
+        // count) followed by its exact raw micros.
+        let push_qty =
+            |b: &mut SemanticIdentityBuilder, q: QtyMicros| match q.to_whole_units_checked() {
+                Some(units) => {
+                    b.push_i64(units);
+                }
+                None => {
+                    b.push_i64(i64::MIN).push_i64(q.raw());
+                }
+            };
+        push_qty(&mut b, self.sizing.target_qty());
+        match self.sizing.max_target_qty() {
+            Some(q) => {
+                b.push_bool(true);
+                push_qty(&mut b, q);
+            }
+            None => {
+                b.push_bool(false);
+            }
+        }
+        b.push_opt_i64(self.sizing.max_notional_usd())
             .push_bool(self.allow_short_signals)
-            .push_bool(self.is_short_only)
-            .finish()
+            .push_bool(self.is_short_only);
+        // Non-Equity sizing changes cap flooring semantics: bind the class.
+        // Equity appends nothing (historical byte stream).
+        if self.sizing.asset_class() != AssetClass::Equity {
+            b.push_str(&format!("asset_class:{:?}", self.sizing.asset_class()));
+        }
+        b.finish()
     }
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
@@ -510,22 +558,29 @@ impl Strategy for IntradayScalperStrategy {
         // to [0, 1].  direction=+1 → +target_qty; direction=0/-1 → 0 (go flat).
         // SHORT-SIDE-STRATEGY-GATE-01 (allow_short_signals=true): direction=-1 produces
         // -target_qty instead of 0.  Downstream B5 and risk gates remain active.
-        let requested_target = if self.allow_short_signals {
-            effective_direction * self.target_qty
+        let signed_direction = if self.allow_short_signals {
+            effective_direction
         } else {
-            effective_direction.max(0) * self.target_qty
+            effective_direction.max(0)
         };
 
         // STRATEGY-POSITION-SIZING-01: apply caps for all non-zero targets.
         // Neutral exits (0) bypass caps. Short signals apply caps to magnitude then
         // restore the sign — same sizing rules as the long side.
-        let (effective_target, capped_by) = if requested_target > 0 {
-            self.apply_caps(requested_target, &ctx.recent.bars)
-        } else if requested_target < 0 {
-            let (capped_mag, cap_label) = self.apply_caps(-requested_target, &ctx.recent.bars);
-            (-capped_mag, cap_label)
+        let (effective_target, capped_by) = if signed_direction > 0 {
+            self.apply_caps(self.sizing.target_qty(), &ctx.recent.bars)
+        } else if signed_direction < 0 {
+            let (capped_mag, cap_label) =
+                self.apply_caps(self.sizing.target_qty(), &ctx.recent.bars);
+            // A capped magnitude is bounded by a positive i64, so negation
+            // cannot overflow; an impossible failure emits flat, never a
+            // wrapped or optimistic quantity.
+            match capped_mag.checked_neg() {
+                Some(neg) => (neg, cap_label),
+                None => (QtyMicros::ZERO, "negation_overflow"),
+            }
         } else {
-            (0, "none")
+            (QtyMicros::ZERO, "none")
         };
 
         // Sizing diagnostic fields are surfaced via the return value.
@@ -534,7 +589,7 @@ impl Strategy for IntradayScalperStrategy {
         let _ = capped_by; // used in tests; suppress unused-variable warning in release
 
         StrategyOutput {
-            targets: vec![TargetPosition::whole(self.symbol.clone(), effective_target)],
+            targets: vec![TargetPosition::new(self.symbol.clone(), effective_target)],
         }
     }
 }

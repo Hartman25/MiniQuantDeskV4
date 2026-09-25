@@ -175,6 +175,8 @@ pub enum RegistryError {
         meta_secs: i64,
         spec_secs: i64,
     },
+    /// The supplied sizing could not be represented / validated.
+    InvalidSizing(String),
 }
 
 impl std::fmt::Display for RegistryError {
@@ -195,6 +197,7 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "strategy '{name}': metadata timeframe {meta_secs}s != spec timeframe {spec_secs}s"
             ),
+            Self::InvalidSizing(reason) => write!(f, "invalid strategy sizing: {reason}"),
         }
     }
 }

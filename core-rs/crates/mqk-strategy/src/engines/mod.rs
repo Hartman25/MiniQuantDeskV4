@@ -1,4 +1,6 @@
+use crate::sizing::TargetSizing;
 use crate::{PluginRegistry, RegistryError, Strategy};
+use mqk_execution::AssetClass;
 
 pub mod intraday_scalper;
 pub mod mean_reversion;
@@ -99,42 +101,72 @@ pub fn register_builtin_strategies_with_sizing(
     max_notional_usd: Option<i64>,
 ) -> Result<(), RegistryError> {
     let symbol = symbol.into();
+    let sizing = TargetSizing::equity_whole_units(target_qty, max_target_qty, max_notional_usd)
+        .map_err(|e| RegistryError::InvalidSizing(e.to_string()))?;
+    // Historical behavior: the short-only identity stays env-sized here.
+    register_with_sizing(registry, symbol, sizing, false)
+}
 
-    // Non-scalper strategies do not yet have configurable sizing; they are
-    // registered with their default env-reading constructors. When they gain
-    // explicit sizing support, add parameters here.
-    let swing_symbol = symbol.clone();
-    registry.register(swing_momentum::meta(), move || {
-        Box::new(SwingMomentumStrategy::new(swing_symbol.clone())) as Box<dyn Strategy>
-    })?;
+/// Register built-in strategies from already-resolved exact [`TargetSizing`].
+///
+/// Equity registers the full built-in set. Any other supported asset class
+/// registers ONLY the sizing-configurable intraday scalper identities: the
+/// other engines emit a fixed one-share signal and must never trade a
+/// non-Equity instrument, so they are left unregistered
+/// (`instantiate` => unknown strategy, fail closed).
+pub fn register_builtin_strategies_with_target_sizing(
+    registry: &mut PluginRegistry,
+    symbol: impl Into<String>,
+    sizing: TargetSizing,
+) -> Result<(), RegistryError> {
+    register_with_sizing(registry, symbol, sizing, true)
+}
 
-    let mr_symbol = symbol.clone();
-    registry.register(mean_reversion::meta(), move || {
-        Box::new(MeanReversionStrategy::new(mr_symbol.clone())) as Box<dyn Strategy>
-    })?;
+fn register_with_sizing(
+    registry: &mut PluginRegistry,
+    symbol: impl Into<String>,
+    sizing: TargetSizing,
+    short_uses_resolved_sizing: bool,
+) -> Result<(), RegistryError> {
+    let symbol = symbol.into();
 
-    let vb_symbol = symbol.clone();
-    registry.register(volatility_breakout::meta(), move || {
-        Box::new(VolatilityBreakoutStrategy::new(vb_symbol.clone())) as Box<dyn Strategy>
-    })?;
+    // Non-scalper strategies do not have configurable sizing (fixed one-share
+    // signal): Equity only.
+    if sizing.asset_class() == AssetClass::Equity {
+        let swing_symbol = symbol.clone();
+        registry.register(swing_momentum::meta(), move || {
+            Box::new(SwingMomentumStrategy::new(swing_symbol.clone())) as Box<dyn Strategy>
+        })?;
+
+        let mr_symbol = symbol.clone();
+        registry.register(mean_reversion::meta(), move || {
+            Box::new(MeanReversionStrategy::new(mr_symbol.clone())) as Box<dyn Strategy>
+        })?;
+
+        let vb_symbol = symbol.clone();
+        registry.register(volatility_breakout::meta(), move || {
+            Box::new(VolatilityBreakoutStrategy::new(vb_symbol.clone())) as Box<dyn Strategy>
+        })?;
+    }
 
     let scalp_symbol = symbol.clone();
     registry.register(intraday_scalper::meta(), move || {
-        Box::new(IntradayScalperStrategy::with_caps(
+        Box::new(IntradayScalperStrategy::with_sizing(
             scalp_symbol.clone(),
-            target_qty,
-            max_target_qty,
-            max_notional_usd,
+            sizing,
         )) as Box<dyn Strategy>
     })?;
 
-    // SHORT-SIDE-PARALLEL-STRATEGY-DRY-RUN-01: short-only variant registered
-    // with the same env-based sizing as new_short().  Disabled by default.
+    // SHORT-SIDE-PARALLEL-STRATEGY-DRY-RUN-01: short-only variant. The i64
+    // whole-unit entry point keeps its historical env sizing; the explicit
+    // `TargetSizing` entry point sizes it identically to the long identity.
     let short_scalp_symbol = symbol;
     registry.register(intraday_scalper::meta_short(), move || {
-        Box::new(IntradayScalperStrategy::new_short(
-            short_scalp_symbol.clone(),
-        )) as Box<dyn Strategy>
+        Box::new(if short_uses_resolved_sizing {
+            IntradayScalperStrategy::new_short_with_sizing(short_scalp_symbol.clone(), sizing)
+        } else {
+            IntradayScalperStrategy::new_short(short_scalp_symbol.clone())
+        }) as Box<dyn Strategy>
     })?;
 
     Ok(())

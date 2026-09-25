@@ -3,6 +3,7 @@ use crate::{
     BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
     StrategySpec, TargetPosition,
 };
+use mqk_execution::QtyMicros;
 
 pub(crate) const NAME: &str = "swing_momentum";
 const VERSION: &str = "0.1.0";
@@ -82,7 +83,12 @@ impl Strategy for SwingMomentumStrategy {
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         let qty = Self::signal_from_recent(&ctx.recent.bars);
         StrategyOutput {
-            targets: vec![TargetPosition::whole(self.symbol.clone(), qty)],
+            // Fixed one-share Equity signal (direction -1/0/+1): never sized
+            // for, or registered against, a non-Equity asset class.
+            targets: vec![TargetPosition::new(
+                self.symbol.clone(),
+                QtyMicros::from_whole_units(qty).unwrap_or(QtyMicros::ZERO),
+            )],
         }
     }
 }
