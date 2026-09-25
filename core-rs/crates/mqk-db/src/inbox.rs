@@ -56,12 +56,9 @@ pub enum QuantityUnitEpoch {
 }
 
 /// Scale factor separating [`QuantityUnitEpoch::LegacyWholeUnits`] from
-/// [`QuantityUnitEpoch::QtyMicros`] raw integers. Mirrors
-/// `mqk_schemas::QTY_MICROS_SCALE` exactly; duplicated here (rather than
-/// depending on `mqk-schemas`) to keep `mqk-db` free of a dependency on the
-/// execution-facing quantity type — this crate only ever produces/consumes
-/// the raw scaled integer, never the `QtyMicros` newtype itself.
-pub const LEGACY_TO_MICROS_SCALE: i64 = 1_000_000;
+/// [`QuantityUnitEpoch::QtyMicros`] raw integers. Derived from the single
+/// canonical scale authority, `mqk_schemas::QTY_MICROS_SCALE`.
+pub const LEGACY_TO_MICROS_SCALE: i64 = mqk_schemas::QTY_MICROS_SCALE;
 
 /// Classify a `message_json` envelope's `schema_version` into the quantity
 /// unit convention its numeric quantity fields use.

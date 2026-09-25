@@ -531,13 +531,16 @@ fn outbox_row_to_api(r: mqk_db::OutboxSupervisorRow) -> PaperLifecycleOutboxRow 
         .get("side")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let qty = r.order_json.get("qty").and_then(|v| v.as_i64());
+    let qty_exact = crate::state::outbox_json_qty(&r.order_json);
+    let qty = qty_exact.and_then(mqk_execution::QtyMicros::to_whole_units_checked);
+    let qty_micros = qty_exact.map(mqk_execution::QtyMicros::raw);
     PaperLifecycleOutboxRow {
         idempotency_key: r.idempotency_key,
         status: r.status,
         symbol,
         side,
         qty,
+        qty_micros,
         created_at_utc: r.created_at_utc.to_rfc3339(),
         claimed_at_utc: r.claimed_at_utc.map(|t| t.to_rfc3339()),
         dispatching_at_utc: r.dispatching_at_utc.map(|t| t.to_rfc3339()),

@@ -4815,8 +4815,12 @@ pub struct ExecutionOutboxRow {
     pub symbol: Option<String>,
     /// `"buy"` or `"sell"` from `order_json["side"]`. `None` if absent.
     pub side: Option<String>,
-    /// Ordered qty from `order_json["qty"]`. `None` if absent.
+    /// Whole-unit ordered qty from `order_json["qty"]`. `None` if absent,
+    /// malformed, or fractional (never rounded; see `qty_micros`).
     pub qty: Option<i64>,
+    /// Exact ordered qty, raw `QtyMicros` (1.0 unit == 1_000_000). `None` if
+    /// absent or malformed.
+    pub qty_micros: Option<i64>,
     /// `"market"` or `"limit"` from `order_json["order_type"]`. `None` if absent.
     pub order_type: Option<String>,
     /// Originating strategy from `order_json["strategy_id"]`. `None` if absent
@@ -5337,6 +5341,8 @@ pub struct PaperLifecycleOutboxRow {
     pub symbol: Option<String>,
     pub side: Option<String>,
     pub qty: Option<i64>,
+    /// Exact ordered qty, raw `QtyMicros`; `None` if absent or malformed.
+    pub qty_micros: Option<i64>,
     pub created_at_utc: String,
     pub claimed_at_utc: Option<String>,
     pub dispatching_at_utc: Option<String>,

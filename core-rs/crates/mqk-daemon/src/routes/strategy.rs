@@ -1648,6 +1648,17 @@ async fn evaluate_external_signal_short_entry_gate(
     }
 }
 
+/// This short-entry gate is whole-unit only: a fractional position fails
+/// closed (`Err`) instead of being truncated or reported as flat.
+fn whole_unit_position_qty(target: &str, net_qty: mqk_portfolio::QtyMicros) -> Result<i64, String> {
+    net_qty.to_whole_units_checked().ok_or_else(|| {
+        format!(
+            "short-entry gate cannot determine position truth: fractional position quantity \
+             for symbol '{target}' is not supported by this whole-unit-only gate"
+        )
+    })
+}
+
 fn current_qty_for_symbol(snapshot: &ExecutionSnapshot, symbol: &str) -> Result<i64, String> {
     let target = symbol.trim().to_ascii_uppercase();
     let mut found: Option<i64> = None;
@@ -1660,18 +1671,7 @@ fn current_qty_for_symbol(snapshot: &ExecutionSnapshot, symbol: &str) -> Result<
                 "short-entry gate cannot determine position truth: duplicate position rows for symbol '{target}'"
             ));
         }
-        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty` is
-        // `QtyMicros`; this short-entry gate is whole-unit `i64` only
-        // (Crypto execution is not wired yet). Fail closed via the same
-        // `Err` path as the duplicate-row case above rather than panicking
-        // this live risk-decision route.
-        let Some(whole_qty) = position.net_qty.to_whole_units_checked() else {
-            return Err(format!(
-                "short-entry gate cannot determine position truth: fractional position quantity \
-                 for symbol '{target}' is not supported by this whole-unit-only gate"
-            ));
-        };
-        found = Some(whole_qty);
+        found = Some(whole_unit_position_qty(&target, position.net_qty)?);
     }
     Ok(found.unwrap_or(0))
 }
@@ -1874,5 +1874,16 @@ mod tests {
         // the derivation must be robust).
         assert!(!is_intent_placed(true, "duplicate"));
         assert!(!is_intent_placed(true, "unavailable"));
+    }
+
+    #[test]
+    fn a3_5_short_entry_gate_refuses_a_fractional_position() {
+        assert_eq!(
+            whole_unit_position_qty("AAPL", mqk_portfolio::QtyMicros::new(7_000_000)),
+            Ok(7)
+        );
+        let err = whole_unit_position_qty("BTC/USD", mqk_portfolio::QtyMicros::new(500_000))
+            .expect_err("fractional position must fail closed");
+        assert!(err.contains("fractional position quantity"), "{err}");
     }
 }

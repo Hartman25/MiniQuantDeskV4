@@ -580,6 +580,55 @@ fn resolve_order_instrument_context(
     )
 }
 
+/// Non-Equity admission guard: a Crypto order is only ever admitted against an
+/// explicit, exactly-parsed operator size. Missing/blank/malformed size
+/// inputs fail closed (never a default of one unit), and a decision larger
+/// than the explicit target is refused -- e.g. a strategy that silently fell
+/// back to its whole-share default. Equity is unaffected.
+///
+/// Pure: the raw operator inputs are parameters (the caller reads env).
+pub(crate) fn non_equity_explicit_size_gate(
+    asset_class: &str,
+    decision_qty: QtyMicros,
+    raw_target: Option<&str>,
+    raw_max_target: Option<&str>,
+    raw_max_notional_usd: Option<&str>,
+) -> Result<(), String> {
+    use mqk_execution::AssetClass;
+    let class = match asset_class {
+        "equity" => return Ok(()),
+        "crypto" => AssetClass::Crypto,
+        other => {
+            return Err(format!(
+                "internal decision refused: asset_class '{other}' has no supported \
+                 explicit target-sizing policy"
+            ))
+        }
+    };
+    let sizing = mqk_strategy::TargetSizing::resolve(
+        class,
+        raw_target,
+        raw_max_target,
+        raw_max_notional_usd,
+    )
+    .map_err(|e| {
+        format!(
+            "internal decision refused: crypto order requires an explicit exact size \
+             (MQK_STRATEGY_TARGET_QTY): {e}"
+        )
+    })?;
+    let limit = sizing
+        .max_target_qty()
+        .map_or(sizing.target_qty(), |m| m.min(sizing.target_qty()));
+    if decision_qty > limit {
+        return Err(format!(
+            "internal decision refused: crypto order qty {decision_qty} exceeds the explicit \
+             configured size {limit}; no default or fallback quantity is ever admitted"
+        ));
+    }
+    Ok(())
+}
+
 fn build_order_json(
     d: &InternalStrategyDecision,
     instrument: &DurableOrderInstrumentContext,
@@ -1378,6 +1427,18 @@ pub async fn submit_internal_strategy_decision(
             }
         };
 
+    if let Err(blocker) = non_equity_explicit_size_gate(
+        &instrument_context.asset_class,
+        decision.qty,
+        std::env::var("MQK_STRATEGY_TARGET_QTY").ok().as_deref(),
+        std::env::var("MQK_STRATEGY_MAX_TARGET_QTY").ok().as_deref(),
+        std::env::var("MQK_STRATEGY_MAX_POSITION_NOTIONAL_USD")
+            .ok()
+            .as_deref(),
+    ) {
+        return outcome(false, "rejected", &did, &sid, Some(active_run_id), vec![blocker]);
+    }
+
     let order_json = build_order_json(
         &decision,
         &instrument_context,
@@ -1865,5 +1926,43 @@ mod m6_trading_registry_snapshot_writer_tests {
             }),
             "no default 1 BTC"
         );
+    }
+
+    #[test]
+    fn a3_5_non_equity_size_gate_fails_closed_and_never_defaults_to_one_unit() {
+        let gate = |class: &str, qty: i64, target: Option<&str>| {
+            non_equity_explicit_size_gate(
+                class,
+                mqk_schemas::QtyMicros::new(qty),
+                target,
+                None,
+                None,
+            )
+        };
+        // Equity is untouched.
+        assert!(gate("equity", 1_000_000, None).is_ok());
+        // Crypto with no explicit size: refused (no default 1 BTC).
+        assert!(gate("crypto", 1_000_000, None).is_err());
+        assert!(gate("crypto", 100, Some("  ")).is_err());
+        assert!(gate("crypto", 100, Some("0.0000001")).is_err());
+        assert!(gate("crypto", 100, Some("abc")).is_err());
+        // Explicit exact size admits at most that size.
+        assert!(gate("crypto", 100, Some("0.0001")).is_ok());
+        assert!(gate("crypto", 50, Some("0.0001")).is_ok());
+        assert!(
+            gate("crypto", 1_000_000, Some("0.0001")).is_err(),
+            "a whole-share fallback quantity must be refused"
+        );
+        // Unsupported asset classes refuse.
+        assert!(gate("option", 100, Some("1")).is_err());
+        // A max cap below the target lowers the admitted ceiling.
+        assert!(non_equity_explicit_size_gate(
+            "crypto",
+            mqk_schemas::QtyMicros::new(200),
+            Some("0.0005"),
+            Some("0.0001"),
+            None,
+        )
+        .is_err());
     }
 }

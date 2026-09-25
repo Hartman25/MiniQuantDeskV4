@@ -96,11 +96,13 @@ pub(super) async fn build_fill_quality_row(
     let (ordered_qty, reference_price_micros, submit_ts_utc) =
         match mqk_db::outbox_fetch_by_idempotency_key(pool, &internal_order_id).await {
             Ok(Some(outbox)) => {
-                let ordered_qty = outbox
-                    .order_json
-                    .get("qty")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(fill_qty);
+                let Some(ordered_qty) = ordered_qty_from_order_json(&outbox.order_json, fill_qty)
+                else {
+                    // The order quantity is present but not a whole unit (a
+                    // fractional Crypto order). Whole-unit telemetry cannot
+                    // represent it and must not substitute the fill quantity.
+                    return None;
+                };
                 let reference_price_micros = outbox
                     .order_json
                     .get("limit_price")
@@ -154,9 +156,34 @@ pub(super) async fn build_fill_quality_row(
     })
 }
 
+/// Ordered quantity for whole-unit telemetry. An absent `qty` falls back to the
+/// whole fill quantity (unchanged best-effort behavior); a present-but-non-whole
+/// `qty` (fractional decimal string or malformed) yields `None` -- never the
+/// fill quantity standing in for an order size that is not knowable here.
+fn ordered_qty_from_order_json(order_json: &serde_json::Value, fill_qty: i64) -> Option<i64> {
+    match order_json.get("qty") {
+        None => Some(fill_qty),
+        Some(v) => v.as_i64(),
+    }
+}
+
 fn side_to_str(side: &mqk_execution::Side) -> &'static str {
     match side {
         mqk_execution::Side::Buy => "buy",
         mqk_execution::Side::Sell => "sell",
+    }
+}
+
+#[cfg(test)]
+mod cutover_1d_a3_tests {
+    use super::*;
+
+    #[test]
+    fn ordered_qty_is_never_fabricated_for_a_fractional_order() {
+        let j = |v: serde_json::Value| ordered_qty_from_order_json(&v, 3);
+        assert_eq!(j(serde_json::json!({"qty": 10})), Some(10));
+        assert_eq!(j(serde_json::json!({})), Some(3));
+        assert_eq!(j(serde_json::json!({"qty": "0.0001"})), None);
+        assert_eq!(j(serde_json::json!({"qty": 0.5})), None);
     }
 }

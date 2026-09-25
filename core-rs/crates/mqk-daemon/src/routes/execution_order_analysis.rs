@@ -110,7 +110,9 @@ pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl In
                 .get("side")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let qty = r.order_json.get("qty").and_then(|v| v.as_i64());
+            let qty_exact = crate::state::outbox_json_qty(&r.order_json);
+            let qty = qty_exact.and_then(mqk_execution::QtyMicros::to_whole_units_checked);
+            let qty_micros = qty_exact.map(mqk_execution::QtyMicros::raw);
             let order_type = r
                 .order_json
                 .get("order_type")
@@ -136,6 +138,7 @@ pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl In
                 symbol,
                 side,
                 qty,
+                qty_micros,
                 order_type,
                 strategy_id,
                 signal_source,
