@@ -440,7 +440,13 @@ mod tests {
         let result = bootstrap
             .invoke_on_bar_from_window(0, window)
             .expect("SC-NS-02: Active bootstrap must return Some");
-        let qty: i64 = result.intents.output.targets.iter().map(|t| t.qty).sum();
+        let qty: i64 = result
+            .intents
+            .output
+            .targets
+            .iter()
+            .map(|t| t.qty.to_whole_units_checked().unwrap())
+            .sum();
         assert_eq!(
             qty, 0,
             "SC-NS-02: insufficient lookback → signal_qty must be 0"
@@ -465,7 +471,13 @@ mod tests {
         let result = bootstrap
             .invoke_on_bar_from_window(1, window)
             .expect("SC-NS-03: Active bootstrap must return Some");
-        let qty: i64 = result.intents.output.targets.iter().map(|t| t.qty).sum();
+        let qty: i64 = result
+            .intents
+            .output
+            .targets
+            .iter()
+            .map(|t| t.qty.to_whole_units_checked().unwrap())
+            .sum();
         assert_eq!(
             qty, 1,
             "SC-NS-03: 5 complete bars with 25 bps displacement must produce signal_qty=1"
@@ -488,7 +500,13 @@ mod tests {
         let result = bootstrap
             .invoke_on_bar_from_window(2, window)
             .expect("SC-NS-04: Active bootstrap must return Some");
-        let qty: i64 = result.intents.output.targets.iter().map(|t| t.qty).sum();
+        let qty: i64 = result
+            .intents
+            .output
+            .targets
+            .iter()
+            .map(|t| t.qty.to_whole_units_checked().unwrap())
+            .sum();
         assert_eq!(
             qty, 0,
             "SC-NS-04: incomplete last bar → signal_qty must be 0"

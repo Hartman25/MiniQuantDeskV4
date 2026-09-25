@@ -18,6 +18,7 @@ use mqk_db::{
     InsertRuntimeOpportunityAllocationPlanOutcome, NewRun,
     NewRuntimeOpportunityAllocationCandidate, NewRuntimeOpportunityAllocationPlan, ENV_DB_URL,
 };
+use mqk_schemas::QtyMicros;
 use uuid::Uuid;
 
 async fn test_pool() -> anyhow::Result<sqlx::PgPool> {
@@ -104,10 +105,10 @@ fn sample_plan(run_id: Uuid, plan_id: Uuid) -> NewRuntimeOpportunityAllocationPl
                 strategy_id: "intraday_scalper".to_string(),
                 input_score_micros: 900_000,
                 target_weight_micros: 200_000,
-                current_qty: 0,
-                strategy_target_qty: 10,
-                allocation_target_qty: 10,
-                final_target_qty: 10,
+                current_qty: QtyMicros::from_whole_units(0).unwrap(),
+                strategy_target_qty: QtyMicros::from_whole_units(10).unwrap(),
+                allocation_target_qty: QtyMicros::from_whole_units(10).unwrap(),
+                final_target_qty: QtyMicros::from_whole_units(10).unwrap(),
                 disposition: "allowed".to_string(),
                 reason_code: "allocator_full_target_granted".to_string(),
                 evaluation_price_micros: 100_000_000,
@@ -118,10 +119,10 @@ fn sample_plan(run_id: Uuid, plan_id: Uuid) -> NewRuntimeOpportunityAllocationPl
                 strategy_id: "intraday_scalper".to_string(),
                 input_score_micros: 100_000,
                 target_weight_micros: 0,
-                current_qty: 0,
-                strategy_target_qty: 5,
-                allocation_target_qty: 0,
-                final_target_qty: 0,
+                current_qty: QtyMicros::from_whole_units(0).unwrap(),
+                strategy_target_qty: QtyMicros::from_whole_units(5).unwrap(),
+                allocation_target_qty: QtyMicros::from_whole_units(0).unwrap(),
+                final_target_qty: QtyMicros::from_whole_units(0).unwrap(),
                 disposition: "refused_no_capital".to_string(),
                 reason_code: "allocator_max_positions_reached".to_string(),
                 evaluation_price_micros: 50_000_000,

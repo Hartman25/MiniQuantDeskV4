@@ -19,6 +19,7 @@ use mqk_db::{
     InsertRuntimeStrategyConflictPlanOutcome, NewRun, NewRuntimeStrategyConflictCandidate,
     NewRuntimeStrategyConflictPlan, ENV_DB_URL, RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND,
 };
+use mqk_schemas::QtyMicros;
 use uuid::Uuid;
 
 async fn test_pool() -> anyhow::Result<sqlx::PgPool> {
@@ -104,12 +105,12 @@ fn sample_plan(run_id: Uuid, plan_id: Uuid) -> NewRuntimeStrategyConflictPlan {
                 strategy_id: "strategy_a".to_string(),
                 timeframe_secs: 300,
                 side: "sell".to_string(),
-                qty: 5,
-                current_qty: 20,
+                qty: QtyMicros::from_whole_units(5).unwrap(),
+                current_qty: QtyMicros::from_whole_units(20).unwrap(),
                 order_type: "market".to_string(),
                 time_in_force: "day".to_string(),
                 limit_price: None,
-                proposed_target_qty: Some(15),
+                proposed_target_qty: Some(QtyMicros::from_whole_units(15).unwrap()),
                 bar_present: true,
                 bar_symbol: Some("AAPL".to_string()),
                 bar_strategy_id: Some("strategy_a".to_string()),
@@ -126,12 +127,12 @@ fn sample_plan(run_id: Uuid, plan_id: Uuid) -> NewRuntimeStrategyConflictPlan {
                 strategy_id: "strategy_b".to_string(),
                 timeframe_secs: 300,
                 side: "buy".to_string(),
-                qty: 10,
-                current_qty: 20,
+                qty: QtyMicros::from_whole_units(10).unwrap(),
+                current_qty: QtyMicros::from_whole_units(20).unwrap(),
                 order_type: "market".to_string(),
                 time_in_force: "day".to_string(),
                 limit_price: None,
-                proposed_target_qty: Some(30),
+                proposed_target_qty: Some(QtyMicros::from_whole_units(30).unwrap()),
                 bar_present: true,
                 bar_symbol: Some("AAPL".to_string()),
                 bar_strategy_id: Some("strategy_b".to_string()),
@@ -297,7 +298,7 @@ async fn divergent_candidate_quantity_under_same_plan_id_is_a_payload_collision(
     let plan_id = fixed_plan_id("collision_qty");
     let original = sample_plan(run_id, plan_id);
     let mut mutated = sample_plan(run_id, plan_id);
-    mutated.candidates[0].qty = 999;
+    mutated.candidates[0].qty = QtyMicros::from_whole_units(999).unwrap();
 
     assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
     cleanup(&pool, &[run_id]).await;
@@ -635,12 +636,12 @@ fn placeholder_candidate(ordinal: i32) -> NewRuntimeStrategyConflictCandidate {
         strategy_id: "strategy_a".to_string(),
         timeframe_secs: 300,
         side: "buy".to_string(),
-        qty: 10,
-        current_qty: 0,
+        qty: QtyMicros::from_whole_units(10).unwrap(),
+        current_qty: QtyMicros::from_whole_units(0).unwrap(),
         order_type: "market".to_string(),
         time_in_force: "day".to_string(),
         limit_price: None,
-        proposed_target_qty: Some(10),
+        proposed_target_qty: Some(QtyMicros::from_whole_units(10).unwrap()),
         bar_present: true,
         bar_symbol: Some(format!("SYM{ordinal}")),
         bar_strategy_id: Some("strategy_a".to_string()),
