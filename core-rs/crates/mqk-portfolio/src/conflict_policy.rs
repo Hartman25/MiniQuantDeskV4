@@ -47,6 +47,8 @@
 
 use std::collections::BTreeMap;
 
+use mqk_schemas::QtyMicros;
+
 // ---------------------------------------------------------------------------
 // Reason codes — bounded, closed vocabulary
 // ---------------------------------------------------------------------------
@@ -167,8 +169,8 @@ pub struct ConflictCandidateInput {
     /// `"buy"` or `"sell"`, case-insensitive; anything else is structurally
     /// invalid.
     pub side: String,
-    pub qty: i64,
-    pub current_qty: i64,
+    pub qty: QtyMicros,
+    pub current_qty: QtyMicros,
     /// Order type used for economic identity (`"market"` / `"limit"`, etc.)
     /// — never inspected for validity here (that is
     /// `decision.rs::validate_fields`'s job); carried through for exact
@@ -219,13 +221,13 @@ pub struct ConflictCandidateResult {
     pub strategy_id: String,
     pub timeframe_secs: i64,
     pub side: String,
-    pub qty: i64,
-    pub current_qty: i64,
+    pub qty: QtyMicros,
+    pub current_qty: QtyMicros,
     pub order_type: String,
     pub time_in_force: String,
     pub limit_price: Option<i64>,
     /// `None` only when the candidate's own delta arithmetic overflowed.
-    pub proposed_target_qty: Option<i64>,
+    pub proposed_target_qty: Option<QtyMicros>,
     pub bar_symbol: Option<String>,
     pub bar_strategy_id: Option<String>,
     pub bar_timeframe: Option<String>,
@@ -290,7 +292,7 @@ fn parse_side(raw: &str) -> Option<Side> {
 /// Outcome of validating one candidate in isolation (no knowledge of its
 /// siblings yet).
 struct Validated {
-    proposed_target_qty: Option<i64>,
+    proposed_target_qty: Option<QtyMicros>,
     valid: bool,
     reason_code: &'static str,
 }
@@ -308,7 +310,7 @@ fn validate_candidate(c: &ConflictCandidateInput) -> Validated {
     let Some(side) = parse_side(&c.side) else {
         return invalid(REASON_INVALID_CANDIDATE_REFUSED);
     };
-    if c.qty <= 0 {
+    if !c.qty.is_positive() {
         return invalid(REASON_INVALID_CANDIDATE_REFUSED);
     }
 
@@ -323,7 +325,7 @@ fn validate_candidate(c: &ConflictCandidateInput) -> Validated {
             reason_code: REASON_ARITHMETIC_OVERFLOW,
         };
     };
-    if proposed_target_qty < 0 {
+    if proposed_target_qty.is_negative() {
         return Validated {
             proposed_target_qty: Some(proposed_target_qty),
             valid: false,
@@ -391,8 +393,8 @@ fn tie_break_key(c: &ConflictCandidateInput) -> (String, i64, i64, String, i64, 
         c.timeframe_secs,
         c.bar_end_ts.unwrap_or(i64::MIN),
         c.side.trim().to_ascii_lowercase(),
-        c.qty,
-        c.current_qty,
+        c.qty.raw(),
+        c.current_qty.raw(),
     )
 }
 
@@ -408,8 +410,8 @@ fn tie_break_key(c: &ConflictCandidateInput) -> (String, i64, i64, String, i64, 
 struct EconomicIdentity {
     strategy_id: String,
     side: String,
-    qty: i64,
-    current_qty: i64,
+    qty: QtyMicros,
+    current_qty: QtyMicros,
     order_type: String,
     time_in_force: String,
     limit_price: Option<i64>,
@@ -794,6 +796,11 @@ pub fn resolve_conflict_cycle(
 mod tests {
     use super::*;
 
+    /// Whole-unit test quantity (`1` == one share == `QTY_MICROS_SCALE` raw).
+    fn q(units: i64) -> QtyMicros {
+        QtyMicros::from_whole_units(units).unwrap()
+    }
+
     fn ctx() -> ConflictCycleContext {
         ConflictCycleContext {
             cycle_id: "cycle-1".to_string(),
@@ -818,8 +825,8 @@ mod tests {
             strategy_id: strategy_id.to_string(),
             timeframe_secs: 300,
             side: "buy".to_string(),
-            qty,
-            current_qty,
+            qty: q(qty),
+            current_qty: q(current_qty),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -847,8 +854,8 @@ mod tests {
             strategy_id: strategy_id.to_string(),
             timeframe_secs: 300,
             side: "sell".to_string(),
-            qty,
-            current_qty,
+            qty: q(qty),
+            current_qty: q(current_qty),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -875,8 +882,8 @@ mod tests {
             strategy_id: strategy_id.to_string(),
             timeframe_secs: 300,
             side: "sell".to_string(),
-            qty,
-            current_qty,
+            qty: q(qty),
+            current_qty: q(current_qty),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -1047,7 +1054,7 @@ mod tests {
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.selected_ordinal, Some(1));
         let winner = aapl.candidates.iter().find(|c| c.selected).unwrap();
-        assert_eq!(winner.proposed_target_qty, Some(12));
+        assert_eq!(winner.proposed_target_qty, Some(q(12)));
     }
 
     #[test]
@@ -1090,7 +1097,7 @@ mod tests {
             .unwrap();
         // Winner's qty must be exactly one input's qty (8), never 3+8=11 or
         // (3+8)/2=5.5.
-        assert_eq!(winner.qty, 8);
+        assert_eq!(winner.qty, q(8));
     }
 
     // ── Safety and exactness ──────────────────────────────────────────────
@@ -1139,16 +1146,19 @@ mod tests {
 
     #[test]
     fn checked_add_overflow_is_refused() {
-        let candidates = vec![buy(0, "AAPL", "s1", i64::MAX, 1, 1_000, 100_000_000)];
-        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let mut c = buy(0, "AAPL", "s1", 1, 1, 1_000, 100_000_000);
+        c.qty = QtyMicros::new(i64::MAX);
+        let res = resolve_conflict_cycle(ctx(), &[c]);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.reason_code, REASON_ARITHMETIC_OVERFLOW);
     }
 
     #[test]
     fn checked_sub_overflow_is_refused() {
-        let candidates = vec![unbound_sell(0, "AAPL", "s1", i64::MAX, i64::MIN)];
-        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let mut c = unbound_sell(0, "AAPL", "s1", 1, 1);
+        c.qty = QtyMicros::new(i64::MAX);
+        c.current_qty = QtyMicros::new(i64::MIN);
+        let res = resolve_conflict_cycle(ctx(), &[c]);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.reason_code, REASON_ARITHMETIC_OVERFLOW);
     }
@@ -1361,7 +1371,8 @@ mod tests {
 
     #[test]
     fn valid_buy_plus_overflow_sibling_is_refused_ambiguous() {
-        let overflow = buy(1, "AAPL", "s2", i64::MAX, 1, 1_000, 100_000_000);
+        let mut overflow = buy(1, "AAPL", "s2", 1, 1, 1_000, 100_000_000);
+        overflow.qty = QtyMicros::new(i64::MAX);
         let candidates = vec![buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000), overflow];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
@@ -1469,5 +1480,63 @@ mod tests {
     fn canonical_symbol_trims_and_uppercases() {
         assert_eq!(canonical_symbol(" aapl "), "AAPL");
         assert_eq!(canonical_symbol("AAPL"), "AAPL");
+    }
+
+    // ── A3-3: exact fractional quantity ───────────────────────────────────
+
+    #[test]
+    fn fractional_candidate_survives_exactly() {
+        let mut c = buy(0, "BTC/USD", "s1", 1, 0, 1_000, 100_000_000);
+        c.qty = QtyMicros::new(100); // 0.0001
+        c.current_qty = QtyMicros::new(250); // 0.00025
+        let res = resolve_conflict_cycle(ctx(), &[c]);
+        let btc = result_for(&res, "BTC/USD");
+        assert_eq!(btc.selected_ordinal, Some(0));
+        let row = &btc.candidates[0];
+        assert_eq!(row.qty, QtyMicros::new(100));
+        assert_eq!(row.current_qty, QtyMicros::new(250));
+        assert_eq!(row.proposed_target_qty, Some(QtyMicros::new(350)));
+    }
+
+    #[test]
+    fn fractional_sell_is_exact_and_never_creates_short() {
+        let mut ok = unbound_sell(0, "BTC/USD", "s1", 1, 1);
+        ok.qty = QtyMicros::new(100);
+        ok.current_qty = QtyMicros::new(100);
+        ok.bar_symbol = Some("BTC/USD".to_string());
+        ok.bar_strategy_id = Some("s1".to_string());
+        ok.bar_timeframe = Some("5m".to_string());
+        ok.bar_end_ts = Some(1_000);
+        ok.close_micros = Some(0);
+        let res = resolve_conflict_cycle(ctx(), &[ok.clone()]);
+        assert_eq!(
+            result_for(&res, "BTC/USD").candidates[0].proposed_target_qty,
+            Some(QtyMicros::ZERO)
+        );
+        ok.qty = QtyMicros::new(101);
+        let res = resolve_conflict_cycle(ctx(), &[ok]);
+        assert_eq!(
+            result_for(&res, "BTC/USD").candidates[0].reason_code,
+            REASON_WOULD_CREATE_SHORT
+        );
+    }
+
+    #[test]
+    fn divergent_fractional_quantities_are_conflicting_targets() {
+        let mk = |ord: usize, sid: &str, raw: i64| {
+            let mut c = buy(ord, "BTC/USD", sid, 1, 0, 1_000, 100_000_000);
+            c.qty = QtyMicros::new(raw);
+            c
+        };
+        let res = resolve_conflict_cycle(ctx(), &[mk(0, "s1", 100), mk(1, "s2", 101)]);
+        assert_eq!(
+            result_for(&res, "BTC/USD").reason_code,
+            REASON_CONFLICTING_INCREASE_TARGETS_REFUSED
+        );
+        let res = resolve_conflict_cycle(ctx(), &[mk(0, "s1", 100), mk(1, "s2", 100)]);
+        assert_eq!(
+            result_for(&res, "BTC/USD").reason_code,
+            REASON_TARGET_CONSENSUS_PASSTHROUGH
+        );
     }
 }

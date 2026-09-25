@@ -25,6 +25,7 @@
 use std::collections::BTreeMap;
 
 use crate::allocator::{AllocationConstraints, Allocator, Candidate, RejectionReason};
+use mqk_schemas::{QtyMicros, QTY_MICROS_SCALE};
 
 // ---------------------------------------------------------------------------
 // Reason codes — bounded, closed vocabulary
@@ -40,6 +41,8 @@ pub const REASON_ALLOCATOR_NET_WEIGHT_CAP_EXCEEDED: &str = "allocator_net_weight
 pub const REASON_NONPOSITIVE_OR_MISSING_PRICE: &str = "nonpositive_or_missing_price";
 pub const REASON_INVALID_SCORE: &str = "invalid_score";
 pub const REASON_NOT_AN_INCREASE: &str = "not_an_increase";
+pub const REASON_INVALID_QUANTITY_FLOOR: &str = "invalid_quantity_floor";
+pub const REASON_QUANTITY_ARITHMETIC_OVERFLOW: &str = "quantity_arithmetic_overflow";
 pub const REASON_FAIL_CLOSED_NONPOSITIVE_EQUITY: &str = "fail_closed_nonpositive_equity";
 pub const REASON_FAIL_CLOSED_DUPLICATE_SYMBOL: &str = "fail_closed_duplicate_symbol_in_cycle";
 pub const REASON_FAIL_CLOSED_ALLOCATOR_ERROR: &str = "fail_closed_allocator_error";
@@ -85,8 +88,13 @@ pub struct AllocationCandidateInput {
     pub score: f64,
     /// Latest completed-bar close price, in micros.
     pub evaluation_price_micros: i64,
-    pub current_qty: i64,
-    pub strategy_target_qty: i64,
+    pub current_qty: QtyMicros,
+    pub strategy_target_qty: QtyMicros,
+    /// Granularity (raw micros, `> 0`) the allocator's quantity is floored
+    /// to. Caller-supplied: `QTY_MICROS_SCALE` keeps whole-share flooring
+    /// (Equity), `1` allows exact fractional allocation. This crate never
+    /// derives it from a venue increment or minimum.
+    pub quantity_floor_micros: i64,
 }
 
 /// Closed disposition vocabulary for one candidate's outcome.
@@ -109,22 +117,25 @@ pub struct AllocationCandidateResult {
     pub strategy_id: String,
     pub input_score: f64,
     pub target_weight: f64,
-    pub current_qty: i64,
-    pub strategy_target_qty: i64,
-    /// Whole-share quantity implied by `target_weight * equity_micros /
-    /// evaluation_price_micros`, floored (conservative — never rounds up).
-    pub allocation_target_qty: i64,
+    pub current_qty: QtyMicros,
+    pub strategy_target_qty: QtyMicros,
+    /// Quantity implied by `target_weight * equity_micros /
+    /// evaluation_price_micros`, computed in checked fixed point and floored
+    /// to the candidate's `quantity_floor_micros` (conservative — never
+    /// rounds up).
+    pub allocation_target_qty: QtyMicros,
     /// `allocation_target_qty` clamped to `[current_qty, strategy_target_qty]`.
-    pub final_target_qty: i64,
+    pub final_target_qty: QtyMicros,
     pub disposition: AllocationDisposition,
     pub reason_code: String,
     pub evaluation_price_micros: i64,
 }
 
 impl AllocationCandidateResult {
-    /// Net quantity this candidate would buy, if submitted as-is.
-    pub fn buy_delta(&self) -> i64 {
-        self.final_target_qty - self.current_qty
+    /// Net quantity this candidate would buy, if submitted as-is. `None`
+    /// only if the checked subtraction overflows.
+    pub fn buy_delta(&self) -> Option<QtyMicros> {
+        self.final_target_qty.checked_sub(self.current_qty)
     }
 }
 
@@ -187,6 +198,37 @@ fn rejection_reason_code(reason: &RejectionReason) -> &'static str {
     }
 }
 
+/// Deterministic, checked fixed-point allocation quantity:
+/// `floor(weight * equity_micros / price_micros)` in raw quantity micros,
+/// floored again to `floor_micros`. The f64 weight is converted once to a
+/// 1e-12 integer scale (floored, so it never rounds up); everything after
+/// that is checked i128 integer math. `None` on a non-finite/negative
+/// weight, a non-positive price/floor, or any overflow.
+fn allocation_qty_fixed_point(
+    weight: f64,
+    equity_micros: i64,
+    price_micros: i64,
+    floor_micros: i64,
+) -> Option<QtyMicros> {
+    const WEIGHT_SCALE: i128 = 1_000_000_000_000;
+    if !weight.is_finite() || weight < 0.0 || price_micros <= 0 || floor_micros <= 0 {
+        return None;
+    }
+    let weight_scaled = (weight * WEIGHT_SCALE as f64).floor();
+    if weight_scaled > i64::MAX as f64 {
+        return None;
+    }
+    let weight_scaled = weight_scaled as i128;
+    let numerator = (equity_micros as i128)
+        .checked_mul(weight_scaled)?
+        .checked_mul(QTY_MICROS_SCALE as i128)?;
+    let denominator = (price_micros as i128).checked_mul(WEIGHT_SCALE)?;
+    let raw = numerator.checked_div(denominator)?;
+    let floor = floor_micros as i128;
+    let floored = (raw / floor).checked_mul(floor)?;
+    Some(QtyMicros::new(i64::try_from(floored).ok()?))
+}
+
 /// Compute one allocation cycle: run every eligible new/increasing-buy
 /// candidate through the long-only allocator seam and clamp each strategy
 /// target to what the allocator actually grants.
@@ -244,6 +286,8 @@ pub fn compute_allocation_cycle(
             Some(REASON_NONPOSITIVE_OR_MISSING_PRICE)
         } else if !c.score.is_finite() || c.score <= 0.0 {
             Some(REASON_INVALID_SCORE)
+        } else if c.quantity_floor_micros <= 0 {
+            Some(REASON_INVALID_QUANTITY_FLOOR)
         } else if c.strategy_target_qty <= c.current_qty {
             Some(REASON_NOT_AN_INCREASE)
         } else {
@@ -307,12 +351,35 @@ pub fn compute_allocation_cycle(
 
     for c in &eligible {
         if let Some(&weight) = decision.weights.get(&c.symbol) {
-            let notional_cap = weight * context.equity_micros as f64;
-            let allocation_target_qty =
-                (notional_cap / c.evaluation_price_micros as f64).floor() as i64;
-            let allocation_target_qty = allocation_target_qty.max(0);
-            let final_target_qty =
-                allocation_target_qty.clamp(c.current_qty, c.strategy_target_qty);
+            let Some(allocation_target_qty) = allocation_qty_fixed_point(
+                weight,
+                context.equity_micros,
+                c.evaluation_price_micros,
+                c.quantity_floor_micros,
+            ) else {
+                results.insert(
+                    c.symbol.clone(),
+                    AllocationCandidateResult {
+                        symbol: c.symbol.clone(),
+                        strategy_id: c.strategy_id.clone(),
+                        input_score: c.score,
+                        target_weight: 0.0,
+                        current_qty: c.current_qty,
+                        strategy_target_qty: c.strategy_target_qty,
+                        allocation_target_qty: c.current_qty,
+                        final_target_qty: c.current_qty,
+                        disposition: AllocationDisposition::RefusedFailClosed,
+                        reason_code: REASON_QUANTITY_ARITHMETIC_OVERFLOW.to_string(),
+                        evaluation_price_micros: c.evaluation_price_micros,
+                    },
+                );
+                continue;
+            };
+            // `strategy_target_qty > current_qty` was enforced above, so
+            // this clamp range is well-formed.
+            let final_target_qty = allocation_target_qty
+                .max(c.current_qty)
+                .min(c.strategy_target_qty);
             let (disposition, reason_code) = if final_target_qty == c.strategy_target_qty {
                 (
                     AllocationDisposition::Allowed,
@@ -400,6 +467,11 @@ pub fn compute_allocation_cycle(
 mod tests {
     use super::*;
 
+    /// Whole-unit test quantity (`1` == one share == `QTY_MICROS_SCALE` raw).
+    fn q(units: i64) -> QtyMicros {
+        QtyMicros::from_whole_units(units).unwrap()
+    }
+
     const NAV: i64 = 100_000 * 1_000_000; // $100,000 in micros
 
     fn ctx() -> AllocationCycleContext {
@@ -426,8 +498,9 @@ mod tests {
             strategy_id: "intraday_scalper".to_string(),
             score,
             evaluation_price_micros: price_micros,
-            current_qty: current,
-            strategy_target_qty: target,
+            current_qty: q(current),
+            strategy_target_qty: q(target),
+            quantity_floor_micros: QTY_MICROS_SCALE,
         }
     }
 
@@ -447,7 +520,7 @@ mod tests {
         c.equity_micros = 0;
         let res = compute_allocation_cycle(c, &[buy("AAPL", 0.5, 100_000_000, 0, 10)], 5);
         assert_eq!(res.truth_state, REASON_FAIL_CLOSED_NONPOSITIVE_EQUITY);
-        assert_eq!(result_for(&res, "AAPL").final_target_qty, 0);
+        assert_eq!(result_for(&res, "AAPL").final_target_qty, q(0));
         assert_eq!(
             result_for(&res, "AAPL").disposition,
             AllocationDisposition::RefusedFailClosed
@@ -475,7 +548,7 @@ mod tests {
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.disposition, AllocationDisposition::RefusedFailClosed);
         assert_eq!(aapl.reason_code, REASON_NONPOSITIVE_OR_MISSING_PRICE);
-        assert_eq!(aapl.final_target_qty, 0);
+        assert_eq!(aapl.final_target_qty, q(0));
         // MSFT is unaffected by AAPL's bad price.
         let msft = result_for(&res, "MSFT");
         assert_ne!(msft.disposition, AllocationDisposition::RefusedFailClosed);
@@ -490,7 +563,7 @@ mod tests {
         let res = compute_allocation_cycle(ctx(), &candidates, 5);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.reason_code, REASON_INVALID_SCORE);
-        assert_eq!(aapl.final_target_qty, 0);
+        assert_eq!(aapl.final_target_qty, q(0));
     }
 
     #[test]
@@ -500,7 +573,7 @@ mod tests {
         let res = compute_allocation_cycle(ctx(), &candidates, 5);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.reason_code, REASON_NOT_AN_INCREASE);
-        assert_eq!(aapl.final_target_qty, 10);
+        assert_eq!(aapl.final_target_qty, q(10));
     }
 
     #[test]
@@ -510,7 +583,7 @@ mod tests {
         let res = compute_allocation_cycle(ctx(), &candidates, 5);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.reason_code, REASON_NOT_AN_INCREASE);
-        assert_eq!(aapl.final_target_qty, 20);
+        assert_eq!(aapl.final_target_qty, q(20));
     }
 
     #[test]
@@ -522,7 +595,7 @@ mod tests {
         let aapl = result_for(&res, "AAPL");
         assert!(aapl.final_target_qty <= aapl.strategy_target_qty);
         assert_eq!(aapl.disposition, AllocationDisposition::Allowed);
-        assert_eq!(aapl.final_target_qty, 5);
+        assert_eq!(aapl.final_target_qty, q(5));
     }
 
     #[test]
@@ -533,7 +606,7 @@ mod tests {
         let candidates = vec![buy("AAPL", 1.0, 3_000_000, 0, 100_000)];
         let res = compute_allocation_cycle(ctx(), &candidates, 5);
         let aapl = result_for(&res, "AAPL");
-        assert_eq!(aapl.allocation_target_qty, 6666);
+        assert_eq!(aapl.allocation_target_qty, q(6666));
     }
 
     #[test]
@@ -569,7 +642,7 @@ mod tests {
         let candidates = vec![buy("AAPL", 0.5, 100_000_000, 0, 10)];
         let res = compute_allocation_cycle(ctx(), &candidates, 0);
         assert_eq!(res.truth_state, REASON_FAIL_CLOSED_ALLOCATOR_ERROR);
-        assert_eq!(result_for(&res, "AAPL").final_target_qty, 0);
+        assert_eq!(result_for(&res, "AAPL").final_target_qty, q(0));
     }
 
     #[test]
@@ -630,8 +703,8 @@ mod tests {
         let candidates = vec![buy("AAPL", 1.0, 1_000_000, 3, 5)];
         let res = compute_allocation_cycle(ctx(), &candidates, 5);
         let aapl = result_for(&res, "AAPL");
-        assert_eq!(aapl.final_target_qty, 5);
-        assert_eq!(aapl.buy_delta(), 2);
+        assert_eq!(aapl.final_target_qty, q(5));
+        assert_eq!(aapl.buy_delta(), Some(q(2)));
     }
 
     #[test]
@@ -639,5 +712,91 @@ mod tests {
         let res = compute_allocation_cycle(ctx(), &[], 5);
         assert_eq!(res.truth_state, TRUTH_STATE_COMPUTED);
         assert!(res.candidates.is_empty());
+    }
+
+    // ── A3-3: exact fixed-point fractional allocation ─────────────────────
+
+    fn frac(price_micros: i64, current: i64, target: i64, floor: i64) -> AllocationCandidateInput {
+        AllocationCandidateInput {
+            symbol: "BTC/USD".to_string(),
+            strategy_id: "intraday_scalper".to_string(),
+            score: 1.0,
+            evaluation_price_micros: price_micros,
+            current_qty: QtyMicros::new(current),
+            strategy_target_qty: QtyMicros::new(target),
+            quantity_floor_micros: floor,
+        }
+    }
+
+    #[test]
+    fn fractional_strategy_target_is_granted_exactly() {
+        // $100k NAV, 20% single-position cap, price $60,000: cap buys 0.333..
+        // BTC, far above the 0.0001 target -> full fractional target granted.
+        let res = compute_allocation_cycle(ctx(), &[frac(60_000_000_000, 0, 100, 1)], 5);
+        let r = result_for(&res, "BTC/USD");
+        assert_eq!(r.disposition, AllocationDisposition::Allowed);
+        assert_eq!(r.final_target_qty, QtyMicros::new(100));
+        assert_eq!(r.buy_delta(), Some(QtyMicros::new(100)));
+    }
+
+    #[test]
+    fn fractional_floor_never_rounds_up_and_whole_floor_is_whole_share() {
+        // $20,000 cap at $60,000/BTC = 0.333333.. BTC -> 333_333 micros
+        // (floored, never 333_334).
+        let res = compute_allocation_cycle(ctx(), &[frac(60_000_000_000, 0, 5_000_000, 1)], 5);
+        let r = result_for(&res, "BTC/USD");
+        assert_eq!(r.allocation_target_qty, QtyMicros::new(333_333));
+        assert_eq!(r.disposition, AllocationDisposition::ClampedDown);
+        // Same candidate with whole-unit floor (Equity semantics): 0 whole
+        // units affordable -> no capital, never a fractional residue.
+        let res = compute_allocation_cycle(
+            ctx(),
+            &[frac(60_000_000_000, 0, 5_000_000, QTY_MICROS_SCALE)],
+            5,
+        );
+        let r = result_for(&res, "BTC/USD");
+        assert_eq!(r.allocation_target_qty, QtyMicros::ZERO);
+        assert_eq!(r.disposition, AllocationDisposition::RefusedNoCapital);
+    }
+
+    #[test]
+    fn invalid_quantity_floor_fails_closed_for_that_symbol() {
+        for bad in [0, -1] {
+            let res = compute_allocation_cycle(ctx(), &[frac(60_000_000_000, 0, 100, bad)], 5);
+            let r = result_for(&res, "BTC/USD");
+            assert_eq!(r.disposition, AllocationDisposition::RefusedFailClosed);
+            assert_eq!(r.reason_code, REASON_INVALID_QUANTITY_FLOOR);
+            assert_eq!(r.final_target_qty, QtyMicros::ZERO);
+        }
+    }
+
+    #[test]
+    fn allocation_quantity_overflow_fails_closed() {
+        // Enormous equity x tiny price overflows i64 micros: refused, not
+        // wrapped and not saturated.
+        let mut c = ctx();
+        c.equity_micros = i64::MAX;
+        let res = compute_allocation_cycle(c, &[frac(1, 0, i64::MAX, 1)], 5);
+        let r = result_for(&res, "BTC/USD");
+        assert_eq!(r.disposition, AllocationDisposition::RefusedFailClosed);
+        assert_eq!(r.reason_code, REASON_QUANTITY_ARITHMETIC_OVERFLOW);
+        assert_eq!(r.final_target_qty, QtyMicros::ZERO);
+    }
+
+    #[test]
+    fn fixed_point_helper_edges() {
+        assert_eq!(allocation_qty_fixed_point(f64::NAN, 1, 1, 1), None);
+        assert_eq!(allocation_qty_fixed_point(-0.1, 1, 1, 1), None);
+        assert_eq!(allocation_qty_fixed_point(0.5, 1, 0, 1), None);
+        assert_eq!(allocation_qty_fixed_point(0.5, 1, 1, 0), None);
+        // 0.25 * $1,000 / $100 = 2.5 shares -> whole floor 2; micro floor 2.5.
+        assert_eq!(
+            allocation_qty_fixed_point(0.25, 1_000_000_000, 100_000_000, QTY_MICROS_SCALE),
+            Some(QtyMicros::new(2_000_000))
+        );
+        assert_eq!(
+            allocation_qty_fixed_point(0.25, 1_000_000_000, 100_000_000, 1),
+            Some(QtyMicros::new(2_500_000))
+        );
     }
 }

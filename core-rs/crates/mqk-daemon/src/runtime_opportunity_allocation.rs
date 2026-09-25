@@ -263,10 +263,10 @@ fn refused_candidate_result(
         strategy_id: d.strategy_id.clone(),
         input_score: 0.0,
         target_weight: 0.0,
-        current_qty: current,
-        strategy_target_qty: current + d.qty,
-        allocation_target_qty: current,
-        final_target_qty: current,
+        current_qty: crate::decision::whole_to_qty(current),
+        strategy_target_qty: crate::decision::whole_to_qty(current.saturating_add(d.qty)),
+        allocation_target_qty: crate::decision::whole_to_qty(current),
+        final_target_qty: crate::decision::whole_to_qty(current),
         disposition: AllocationDisposition::RefusedFailClosed,
         reason_code: reason.to_string(),
         evaluation_price_micros,
@@ -292,8 +292,9 @@ fn fail_closed_plan(
                 strategy_id: d.strategy_id.clone(),
                 score: 0.0,
                 evaluation_price_micros: 0,
-                current_qty: current,
-                strategy_target_qty: current + d.qty,
+                current_qty: crate::decision::whole_to_qty(current),
+                strategy_target_qty: crate::decision::whole_to_qty(current.saturating_add(d.qty)),
+                quantity_floor_micros: mqk_schemas::QTY_MICROS_SCALE,
             }
         })
         .collect();
@@ -482,8 +483,9 @@ pub fn apply_runtime_opportunity_allocation(
                 strategy_id: d.strategy_id.clone(),
                 score: oc.score,
                 evaluation_price_micros: close_micros,
-                current_qty: current,
-                strategy_target_qty: current + d.qty,
+                current_qty: crate::decision::whole_to_qty(current),
+                strategy_target_qty: crate::decision::whole_to_qty(current.saturating_add(d.qty)),
+                quantity_floor_micros: mqk_schemas::QTY_MICROS_SCALE,
             }),
             None => refused_individually.push(refused_candidate_result(
                 d,
@@ -517,7 +519,12 @@ pub fn apply_runtime_opportunity_allocation(
                 else {
                     continue; // defensive: every buy decision has a plan entry by construction
                 };
-                let delta = result.buy_delta();
+                // `buy_delta` is `None` only on checked-subtraction overflow:
+                // treated as no trade (fail closed).
+                let delta = result
+                    .buy_delta()
+                    .map(crate::decision::qty_to_whole)
+                    .unwrap_or(0);
                 if delta > 0 {
                     // Blocker 1: only `decision` (qty/decision_id) is
                     // rebuilt — `bar_facts` and `dynamic_selection_provenance`
@@ -584,10 +591,10 @@ fn plan_to_new_db_plan(
             strategy_id: c.strategy_id.clone(),
             input_score_micros: mqk_db::scale_to_micros(c.input_score),
             target_weight_micros: mqk_db::scale_to_micros(c.target_weight),
-            current_qty: c.current_qty,
-            strategy_target_qty: c.strategy_target_qty,
-            allocation_target_qty: c.allocation_target_qty,
-            final_target_qty: c.final_target_qty,
+            current_qty: crate::decision::qty_to_whole(c.current_qty),
+            strategy_target_qty: crate::decision::qty_to_whole(c.strategy_target_qty),
+            allocation_target_qty: crate::decision::qty_to_whole(c.allocation_target_qty),
+            final_target_qty: crate::decision::qty_to_whole(c.final_target_qty),
             disposition: disposition_str(c.disposition).to_string(),
             reason_code: c.reason_code.clone(),
             evaluation_price_micros: c.evaluation_price_micros,

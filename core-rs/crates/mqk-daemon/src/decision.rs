@@ -50,6 +50,20 @@ pub(crate) fn target_qty_whole_units(t: &mqk_strategy::TargetPosition) -> Option
     whole
 }
 
+/// Transitional whole-unit -> `QtyMicros` bridge for the daemon's `i64`
+/// decision seam. An unrepresentable value maps to `i64::MAX` raw, which every
+/// downstream checked add refuses (fail closed).
+pub(crate) fn whole_to_qty(units: i64) -> mqk_schemas::QtyMicros {
+    mqk_schemas::QtyMicros::from_whole_units(units).unwrap_or(mqk_schemas::QtyMicros::new(i64::MAX))
+}
+
+/// Inverse bridge. Whole inputs only ever produce whole quantities on this
+/// seam; the sole non-whole value is the `whole_to_qty` overflow sentinel
+/// (already refused upstream), which maps back to `i64::MAX`.
+pub(crate) fn qty_to_whole(q: mqk_schemas::QtyMicros) -> i64 {
+    q.to_whole_units_checked().unwrap_or(i64::MAX)
+}
+
 /// Sum of whole-unit target quantities (fractional targets excluded loudly).
 pub(crate) fn sum_target_qty_whole_units<'a>(
     targets: impl IntoIterator<Item = &'a mqk_strategy::TargetPosition>,
