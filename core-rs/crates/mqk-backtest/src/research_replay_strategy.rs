@@ -331,8 +331,8 @@ mod tests {
         schedule.insert(
             1_000,
             vec![
-                TargetPosition::new("AAA", 5),
-                TargetPosition::new("BBB", -5),
+                TargetPosition::whole("AAA", 5),
+                TargetPosition::whole("BBB", -5),
             ],
         );
         let mut strat = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
@@ -346,8 +346,8 @@ mod tests {
         assert_eq!(
             second.targets,
             vec![
-                TargetPosition::new("AAA", 5),
-                TargetPosition::new("BBB", -5)
+                TargetPosition::whole("AAA", 5),
+                TargetPosition::whole("BBB", -5)
             ]
         );
     }
@@ -375,7 +375,7 @@ mod tests {
     fn permutation_of_same_timestamp_rows_is_irrelevant_to_output() {
         let bars = two_symbol_two_day_bars();
         let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule.insert(1_000, vec![TargetPosition::new("AAA", 5)]);
+        schedule.insert(1_000, vec![TargetPosition::whole("AAA", 5)]);
 
         let mut order_a = ResearchOosReplayStrategy::new(semantic(), schedule.clone(), &bars);
         let a1 = order_a.on_bar(&ctx_for(1_000));
@@ -430,12 +430,12 @@ mod tests {
         baseline_schedule.insert(
             1_000,
             vec![
-                TargetPosition::new("AAA", 5),
-                TargetPosition::new("BBB", -5),
+                TargetPosition::whole("AAA", 5),
+                TargetPosition::whole("BBB", -5),
             ],
         );
         let mut loo_schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        loo_schedule.insert(1_000, vec![TargetPosition::new("AAA", 10)]); // BBB excluded
+        loo_schedule.insert(1_000, vec![TargetPosition::whole("AAA", 10)]); // BBB excluded
 
         let baseline = ResearchOosReplayStrategy::new(semantic(), baseline_schedule, &bars);
         let loo = ResearchOosReplayStrategy::new(semantic(), loo_schedule, &bars);
@@ -481,13 +481,13 @@ mod tests {
     fn same_trial_id_same_fingerprint_regardless_of_schedule_content() {
         let bars = two_symbol_two_day_bars();
         let mut schedule_a: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule_a.insert(1_000, vec![TargetPosition::new("AAA", 5)]);
+        schedule_a.insert(1_000, vec![TargetPosition::whole("AAA", 5)]);
         let mut schedule_b: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
         schedule_b.insert(
             1_000,
             vec![
-                TargetPosition::new("AAA", -5),
-                TargetPosition::new("BBB", 5),
+                TargetPosition::whole("AAA", -5),
+                TargetPosition::whole("BBB", 5),
             ],
         );
 

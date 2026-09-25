@@ -206,7 +206,7 @@ async fn so01_db_loaded_evaluation_persists_with_full_context_and_no_outbox_rows
         .output
         .targets
         .iter()
-        .map(|t| t.qty)
+        .map(|t| t.qty.to_whole_units_checked().expect("whole-unit target"))
         .sum();
 
     let rows = mqk_db::fetch_recent_strategy_signal_evaluations(&pool, 50)

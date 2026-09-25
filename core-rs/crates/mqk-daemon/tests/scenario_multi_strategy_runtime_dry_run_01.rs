@@ -119,10 +119,7 @@ fn dr01_no_dry_run_ids_configured_is_a_pure_noop() {
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput {
-                targets: vec![TargetPosition {
-                    symbol: "AAPL".to_string(),
-                    qty: 1,
-                }],
+                targets: vec![TargetPosition::whole("AAPL".to_string(), 1)],
             },
         },
     };
@@ -193,10 +190,7 @@ fn dr03_primary_long_strategy_result_remains_eligible_for_existing_path() {
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput {
-                targets: vec![TargetPosition {
-                    symbol: "AAPL".to_string(),
-                    qty: 3,
-                }],
+                targets: vec![TargetPosition::whole("AAPL".to_string(), 3)],
             },
         },
     };

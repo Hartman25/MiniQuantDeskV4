@@ -38,13 +38,13 @@ const M: i64 = MICROS_SCALE;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn position_book<I>(pairs: I) -> BTreeMap<String, i64>
+fn position_book<I>(pairs: I) -> BTreeMap<String, QtyMicros>
 where
     I: IntoIterator<Item = (&'static str, i64)>,
 {
     pairs
         .into_iter()
-        .map(|(sym, qty)| (sym.to_string(), qty))
+        .map(|(sym, qty)| (sym.to_string(), QtyMicros::from_whole_units(qty).unwrap()))
         .collect()
 }
 
@@ -130,31 +130,40 @@ impl Strategy for StaticTarget {
 fn intent_conversion_delta_rule_is_deterministic() {
     // flat → 10: BUY 10
     let book = position_book(std::iter::empty());
-    let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]);
+    let out = StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)]);
     let dec = targets_to_order_intents(&out.targets, &book);
     assert_eq!(dec.intents().len(), 1);
     assert_eq!(dec.intents()[0].side, Side::Buy);
-    assert_eq!(dec.intents()[0].qty, 10);
+    assert_eq!(
+        dec.intents()[0].qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 
     // 10 → 5: SELL 5
     let book = position_book([("SPY", 10_i64)]);
-    let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 5)]);
+    let out = StrategyOutput::new(vec![TargetPosition::whole("SPY", 5)]);
     let dec = targets_to_order_intents(&out.targets, &book);
     assert_eq!(dec.intents().len(), 1);
     assert_eq!(dec.intents()[0].side, Side::Sell);
-    assert_eq!(dec.intents()[0].qty, 5);
+    assert_eq!(
+        dec.intents()[0].qty,
+        QtyMicros::from_whole_units(5).unwrap()
+    );
 
     // 10 → 0: SELL 10 (full close)
     let book = position_book([("SPY", 10_i64)]);
-    let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 0)]);
+    let out = StrategyOutput::new(vec![TargetPosition::whole("SPY", 0)]);
     let dec = targets_to_order_intents(&out.targets, &book);
     assert_eq!(dec.intents().len(), 1);
     assert_eq!(dec.intents()[0].side, Side::Sell);
-    assert_eq!(dec.intents()[0].qty, 10);
+    assert_eq!(
+        dec.intents()[0].qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 
     // 10 → 10: no intent (already at target)
     let book = position_book([("SPY", 10_i64)]);
-    let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]);
+    let out = StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)]);
     let dec = targets_to_order_intents(&out.targets, &book);
     assert_eq!(dec.intents().len(), 0);
 }
@@ -170,9 +179,9 @@ fn backtest_applies_same_delta_rule_as_direct_call() {
     ];
 
     let strategy = StaticTarget::new(vec![
-        (1, vec![TargetPosition::new("SPY", 10)]), // tick 1: buy to 10
-        (2, vec![TargetPosition::new("SPY", 5)]),  // tick 2: reduce to 5 (-5)
-        (3, vec![TargetPosition::new("SPY", 5)]),  // tick 3: hold (no change)
+        (1, vec![TargetPosition::whole("SPY", 10)]), // tick 1: buy to 10
+        (2, vec![TargetPosition::whole("SPY", 5)]),  // tick 2: reduce to 5 (-5)
+        (3, vec![TargetPosition::whole("SPY", 5)]),  // tick 3: hold (no change)
     ]);
 
     let mut engine = BacktestEngine::new(alignment_config(100_000 * M, 0));
@@ -211,7 +220,7 @@ fn buy_fill_price_is_at_least_close_conservative_bound() {
     let close = bar2.close_micros;
     let high = bar2.high_micros;
 
-    let strategy = StaticTarget::new(vec![(1, vec![TargetPosition::new("SPY", 10)])]);
+    let strategy = StaticTarget::new(vec![(1, vec![TargetPosition::whole("SPY", 10)])]);
 
     let mut engine = BacktestEngine::new(alignment_config(100_000 * M, 0));
     engine.add_strategy(Box::new(strategy)).unwrap();
@@ -259,8 +268,8 @@ fn sell_fill_price_is_at_most_close_conservative_bound() {
     let low = bar3.low_micros;
 
     let strategy = StaticTarget::new(vec![
-        (1, vec![TargetPosition::new("SPY", 10)]),
-        (2, vec![TargetPosition::new("SPY", 0)]),
+        (1, vec![TargetPosition::whole("SPY", 10)]),
+        (2, vec![TargetPosition::whole("SPY", 0)]),
     ]);
 
     let mut engine = BacktestEngine::new(alignment_config(100_000 * M, 0));
@@ -354,9 +363,9 @@ fn risk_daily_loss_limit_governs_backtest_and_direct_evaluate_identically() {
     let bar3 = flat_bar("SPY", 1_700_000_180, 40 * M); // crash: equity drops to $9,400
 
     let strategy = StaticTarget::new(vec![
-        (1, vec![TargetPosition::new("SPY", 10)]),
-        (2, vec![TargetPosition::new("SPY", 10)]), // hold once the buy has resolved
-        (3, vec![TargetPosition::new("SPY", 0)]),  // sell intent triggers risk check
+        (1, vec![TargetPosition::whole("SPY", 10)]),
+        (2, vec![TargetPosition::whole("SPY", 10)]), // hold once the buy has resolved
+        (3, vec![TargetPosition::whole("SPY", 0)]),  // sell intent triggers risk check
     ]);
 
     let mut engine = BacktestEngine::new(alignment_config(INITIAL, LIMIT));
@@ -395,9 +404,9 @@ fn backtest_fills_replay_identically_via_shared_apply_fill() {
     ];
 
     let strategy = StaticTarget::new(vec![
-        (1, vec![TargetPosition::new("SPY", 10)]),
-        (2, vec![TargetPosition::new("SPY", 10)]),
-        (3, vec![TargetPosition::new("SPY", 0)]),
+        (1, vec![TargetPosition::whole("SPY", 10)]),
+        (2, vec![TargetPosition::whole("SPY", 10)]),
+        (3, vec![TargetPosition::whole("SPY", 0)]),
     ]);
 
     let mut engine = BacktestEngine::new(alignment_config(INITIAL, 0));

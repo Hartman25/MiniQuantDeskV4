@@ -34,11 +34,11 @@ impl Strategy for BuySellStrategy {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         match self.bar_idx {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)]),
             // Hold position (re-emit target) until sell at bar 7
-            7 => StrategyOutput::new(vec![TargetPosition::new("SPY", 0)]),
+            7 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 0)]),
             // Maintain current position by re-emitting the target
-            _ => StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]),
+            _ => StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)]),
         }
     }
 }
@@ -65,7 +65,7 @@ impl Strategy for BuyEveryBarStrategy {
         self.bar_idx += 1;
         // Every bar: target 10 * bar_idx shares (increasing position)
         let target = (self.bar_idx * 10) as i64;
-        StrategyOutput::new(vec![TargetPosition::new("SPY", target)])
+        StrategyOutput::new(vec![TargetPosition::whole("SPY", target)])
     }
 }
 

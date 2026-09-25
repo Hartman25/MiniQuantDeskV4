@@ -92,7 +92,7 @@ fn test1_no_same_bar_fill() {
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             1,
-            vec![TargetPosition::new("AAPL", 5)],
+            vec![TargetPosition::whole("AAPL", 5)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -126,8 +126,8 @@ fn test2_fills_from_exact_next_target_symbol_bar() {
     let mut engine = BacktestEngine::new(wide_cfg());
     engine
         .add_strategy(Box::new(TickScript::new(vec![
-            (1, vec![TargetPosition::new("AAPL", 5)]),
-            (2, vec![TargetPosition::new("AAPL", 5)]),
+            (1, vec![TargetPosition::whole("AAPL", 5)]),
+            (2, vec![TargetPosition::whole("AAPL", 5)]),
         ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -197,9 +197,9 @@ fn test3_correct_symbol_pricing_never_uses_other_symbol_price() {
     let mut engine = BacktestEngine::new(wide_cfg());
     engine
         .add_strategy(Box::new(TickScript::new(vec![
-            (2, vec![TargetPosition::new("AMD", 5)]),
-            (3, vec![TargetPosition::new("AMD", 5)]),
-            (4, vec![TargetPosition::new("AMD", 5)]),
+            (2, vec![TargetPosition::whole("AMD", 5)]),
+            (3, vec![TargetPosition::whole("AMD", 5)]),
+            (4, vec![TargetPosition::whole("AMD", 5)]),
         ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -261,7 +261,7 @@ fn test4_missing_symbol_delays_fill_no_substitution() {
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             1,
-            vec![TargetPosition::new("AMD", 5)],
+            vec![TargetPosition::whole("AMD", 5)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -284,7 +284,7 @@ fn test5_end_of_data_leaves_order_unfilled_not_fabricated() {
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             1,
-            vec![TargetPosition::new("AAPL", 5)],
+            vec![TargetPosition::whole("AAPL", 5)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -322,8 +322,8 @@ fn test6_sell_obeys_future_execution_chronology() {
     let mut engine = BacktestEngine::new(wide_cfg());
     engine
         .add_strategy(Box::new(TickScript::new(vec![
-            (1, vec![TargetPosition::new("AAPL", 10)]),
-            (2, vec![TargetPosition::new("AAPL", 0)]),
+            (1, vec![TargetPosition::whole("AAPL", 10)]),
+            (2, vec![TargetPosition::whole("AAPL", 0)]),
         ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -377,8 +377,8 @@ fn test7_slippage_remains_adverse_on_the_future_bar() {
     let mut engine = BacktestEngine::new(cfg);
     engine
         .add_strategy(Box::new(TickScript::new(vec![
-            (1, vec![TargetPosition::new("AAPL", 10)]),
-            (2, vec![TargetPosition::new("AAPL", 0)]),
+            (1, vec![TargetPosition::whole("AAPL", 10)]),
+            (2, vec![TargetPosition::whole("AAPL", 0)]),
         ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -424,7 +424,7 @@ fn test8_commission_charged_only_at_fill_time() {
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             1,
-            vec![TargetPosition::new("AAPL", 10)],
+            vec![TargetPosition::whole("AAPL", 10)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -464,7 +464,7 @@ fn test9_portfolio_unchanged_while_order_is_pending() {
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             1,
-            vec![TargetPosition::new("AAPL", 500)],
+            vec![TargetPosition::whole("AAPL", 500)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -524,14 +524,14 @@ fn test10_multiple_symbols_pending_resolve_independently() {
     let mut engine = BacktestEngine::new(wide_cfg());
     engine
         .add_strategy(Box::new(TickScript::new(vec![
-            (1, vec![TargetPosition::new("AAPL", 10)]),
-            (2, vec![TargetPosition::new("AMD", 10)]),
-            (3, vec![TargetPosition::new("AAPL", 10)]),
+            (1, vec![TargetPosition::whole("AAPL", 10)]),
+            (2, vec![TargetPosition::whole("AMD", 10)]),
+            (3, vec![TargetPosition::whole("AAPL", 10)]),
             (
                 4,
                 vec![
-                    TargetPosition::new("AAPL", 10),
-                    TargetPosition::new("AMD", 10),
+                    TargetPosition::whole("AAPL", 10),
+                    TargetPosition::whole("AMD", 10),
                 ],
             ),
         ])))
@@ -614,14 +614,14 @@ fn test11a_same_timestamp_row_order_does_not_change_fill_chronology() {
     ];
     // tick3 = AAPL@1000 fills here -> restate AAPL. tick4 = AMD@1000 fills -> restate both.
     let schedule_a = vec![
-        (1, vec![TargetPosition::new("AAPL", 10)]),
-        (2, vec![TargetPosition::new("AMD", 10)]),
-        (3, vec![TargetPosition::new("AAPL", 10)]),
+        (1, vec![TargetPosition::whole("AAPL", 10)]),
+        (2, vec![TargetPosition::whole("AMD", 10)]),
+        (3, vec![TargetPosition::whole("AAPL", 10)]),
         (
             4,
             vec![
-                TargetPosition::new("AAPL", 10),
-                TargetPosition::new("AMD", 10),
+                TargetPosition::whole("AAPL", 10),
+                TargetPosition::whole("AMD", 10),
             ],
         ),
     ];
@@ -630,14 +630,14 @@ fn test11a_same_timestamp_row_order_does_not_change_fill_chronology() {
     let bars_b = [signal_aapl, signal_amd, fill_amd, fill_aapl];
     // tick3 = AMD@1000 fills here -> restate AMD. tick4 = AAPL@1000 fills -> restate both.
     let schedule_b = vec![
-        (1, vec![TargetPosition::new("AAPL", 10)]),
-        (2, vec![TargetPosition::new("AMD", 10)]),
-        (3, vec![TargetPosition::new("AMD", 10)]),
+        (1, vec![TargetPosition::whole("AAPL", 10)]),
+        (2, vec![TargetPosition::whole("AMD", 10)]),
+        (3, vec![TargetPosition::whole("AMD", 10)]),
         (
             4,
             vec![
-                TargetPosition::new("AAPL", 10),
-                TargetPosition::new("AMD", 10),
+                TargetPosition::whole("AAPL", 10),
+                TargetPosition::whole("AMD", 10),
             ],
         ),
     ];
@@ -762,9 +762,9 @@ fn test13_daily_loss_limit_halt_still_fires_at_signal_time() {
     let mut engine = BacktestEngine::new(cfg);
     engine
         .add_strategy(Box::new(TickScript::new(vec![
-            (1, vec![TargetPosition::new("AAPL", 10)]),
-            (2, vec![TargetPosition::new("AAPL", 10)]), // hold once resolved
-            (3, vec![TargetPosition::new("AAPL", 0)]),  // sell intent triggers risk check
+            (1, vec![TargetPosition::whole("AAPL", 10)]),
+            (2, vec![TargetPosition::whole("AAPL", 10)]), // hold once resolved
+            (3, vec![TargetPosition::whole("AAPL", 0)]),  // sell intent triggers risk check
         ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -854,14 +854,14 @@ fn test15_multi_symbol_replay_is_fully_deterministic() {
     ];
     let schedule = || {
         vec![
-            (1, vec![TargetPosition::new("AAPL", 10)]),
-            (2, vec![TargetPosition::new("AMD", 10)]),
-            (3, vec![TargetPosition::new("AAPL", 10)]),
+            (1, vec![TargetPosition::whole("AAPL", 10)]),
+            (2, vec![TargetPosition::whole("AMD", 10)]),
+            (3, vec![TargetPosition::whole("AAPL", 10)]),
             (
                 4,
                 vec![
-                    TargetPosition::new("AAPL", 10),
-                    TargetPosition::new("AMD", 10),
+                    TargetPosition::whole("AAPL", 10),
+                    TargetPosition::whole("AMD", 10),
                 ],
             ),
         ]
@@ -936,7 +936,7 @@ fn high_value_extreme_decoy_price_never_prices_the_wrong_symbol() {
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             2,
-            vec![TargetPosition::new("AMD", 10)],
+            vec![TargetPosition::whole("AMD", 10)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();

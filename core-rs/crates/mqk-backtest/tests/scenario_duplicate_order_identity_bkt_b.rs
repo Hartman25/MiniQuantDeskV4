@@ -86,8 +86,8 @@ fn b1_duplicate_order_identity_within_same_batch_fails_closed_before_second_appl
         flat_bar("BBB", 60, 50_000_000),
     ];
     let script = TickScript::new(vec![
-        (1, vec![TargetPosition::new("AAA", 10)]),
-        (2, vec![TargetPosition::new("AAA", 10)]),
+        (1, vec![TargetPosition::whole("AAA", 10)]),
+        (2, vec![TargetPosition::whole("AAA", 10)]),
     ]);
     let mut engine = BacktestEngine::new(wide_cfg());
     engine.add_strategy(Box::new(script)).unwrap();
@@ -120,8 +120,8 @@ fn b2_single_legitimate_order_produces_one_unchanged_fill() {
         flat_bar("AAA", 120, 100_000_000),
     ];
     let script = TickScript::new(vec![
-        (1, vec![TargetPosition::new("AAA", 10)]),
-        (2, vec![TargetPosition::new("AAA", 10)]), // same target reasserted -- zero delta
+        (1, vec![TargetPosition::whole("AAA", 10)]),
+        (2, vec![TargetPosition::whole("AAA", 10)]), // same target reasserted -- zero delta
     ]);
     let mut engine = BacktestEngine::new(wide_cfg());
     engine.add_strategy(Box::new(script)).unwrap();
@@ -188,8 +188,8 @@ fn b7_differing_qty_with_identical_identity_fields_still_collides() {
         flat_bar("BBB", 60, 50_000_000),
     ];
     let script = TickScript::new(vec![
-        (1, vec![TargetPosition::new("AAA", 10)]),
-        (2, vec![TargetPosition::new("AAA", 15)]), // same identity fields, different qty
+        (1, vec![TargetPosition::whole("AAA", 10)]),
+        (2, vec![TargetPosition::whole("AAA", 15)]), // same identity fields, different qty
     ]);
     let mut engine = BacktestEngine::new(wide_cfg());
     engine.add_strategy(Box::new(script)).unwrap();
@@ -227,12 +227,12 @@ fn ordinary_multi_day_bars_and_script() -> (Vec<BacktestBar>, TickScript) {
         flat_bar("BBB", 240, 52_000_000),
     ];
     let script = TickScript::new(vec![
-        (1, vec![TargetPosition::new("AAA", 10)]), // order1: BUY AAA 10 @ ts=60
-        (2, vec![TargetPosition::new("BBB", 5)]),  // order2: BUY BBB 5 @ ts=120
+        (1, vec![TargetPosition::whole("AAA", 10)]), // order1: BUY AAA 10 @ ts=60
+        (2, vec![TargetPosition::whole("BBB", 5)]),  // order2: BUY BBB 5 @ ts=120
         // ts=180: resolves+fills order1 (AAA bar, 180>60), then a new decision.
-        (3, vec![TargetPosition::new("AAA", 4)]), // order3: SELL AAA 6 @ ts=180 (stays pending)
+        (3, vec![TargetPosition::whole("AAA", 4)]), // order3: SELL AAA 6 @ ts=180 (stays pending)
         // ts=240: resolves+fills order2 (BBB bar, 240>120), then a new decision.
-        (4, vec![TargetPosition::new("BBB", 0)]), // order4: SELL BBB 5 @ ts=240 (stays pending)
+        (4, vec![TargetPosition::whole("BBB", 0)]), // order4: SELL BBB 5 @ ts=240 (stays pending)
     ]);
     (bars, script)
 }

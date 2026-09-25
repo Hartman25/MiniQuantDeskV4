@@ -95,7 +95,7 @@ impl Strategy for ScriptedStrategy {
         self.bar_idx += 1;
         for (idx, qty) in &self.plan {
             if *idx == self.bar_idx {
-                return StrategyOutput::new(vec![TargetPosition::new(SYMBOL, *qty)]);
+                return StrategyOutput::new(vec![TargetPosition::whole(SYMBOL, *qty)]);
             }
         }
         StrategyOutput::new(vec![])

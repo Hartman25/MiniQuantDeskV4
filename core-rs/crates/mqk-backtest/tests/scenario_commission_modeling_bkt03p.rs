@@ -42,7 +42,7 @@ impl Strategy for BuyTen {
     }
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-        StrategyOutput::new(vec![TargetPosition::new("SPY", 10)])
+        StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)])
     }
 }
 

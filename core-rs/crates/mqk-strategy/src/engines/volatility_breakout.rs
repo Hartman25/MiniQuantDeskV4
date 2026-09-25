@@ -83,10 +83,7 @@ impl Strategy for VolatilityBreakoutStrategy {
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         let qty = Self::signal_from_recent(&ctx.recent.bars);
         StrategyOutput {
-            targets: vec![TargetPosition {
-                symbol: self.symbol.clone(),
-                qty,
-            }],
+            targets: vec![TargetPosition::whole(self.symbol.clone(), qty)],
         }
     }
 }
@@ -246,6 +243,10 @@ mod tests {
             out.targets[0].symbol, "AAPL",
             "VB-10: target symbol matches"
         );
-        assert_eq!(out.targets[0].qty, -1, "VB-10: qty matches raw signal");
+        assert_eq!(
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            -1,
+            "VB-10: qty matches raw signal"
+        );
     }
 }

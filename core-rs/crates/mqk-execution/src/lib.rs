@@ -95,8 +95,8 @@ pub fn stable_sort_intents(mut xs: Vec<OrderIntent>) -> Vec<OrderIntent> {
 }
 
 /// Convert a list of `TargetPosition` into a map symbol -> qty.
-pub fn targets_to_map(xs: &[TargetPosition]) -> std::collections::BTreeMap<String, i64> {
-    let mut book = std::collections::BTreeMap::<String, i64>::new();
+pub fn targets_to_map(xs: &[TargetPosition]) -> std::collections::BTreeMap<String, QtyMicros> {
+    let mut book = std::collections::BTreeMap::<String, QtyMicros>::new();
     for x in xs {
         book.insert(x.symbol.clone(), x.qty);
     }
@@ -104,16 +104,17 @@ pub fn targets_to_map(xs: &[TargetPosition]) -> std::collections::BTreeMap<Strin
 }
 
 /// Convert a list of `BrokerPosition` into a map symbol -> qty.
+///
+/// Fails closed on any quantity string that is not an exact decimal with at
+/// most 6 fractional digits; a position is never silently dropped.
 pub fn broker_positions_to_map(
     xs: &[mqk_schemas::BrokerPosition],
-) -> std::collections::BTreeMap<String, i64> {
-    let mut book = std::collections::BTreeMap::<String, i64>::new();
+) -> Result<std::collections::BTreeMap<String, QtyMicros>, mqk_schemas::QtyMicrosParseError> {
+    let mut book = std::collections::BTreeMap::<String, QtyMicros>::new();
     for x in xs {
-        if let Ok(q) = x.qty.parse::<i64>() {
-            book.insert(x.symbol.clone(), q);
-        }
+        book.insert(x.symbol.clone(), x.qty.parse::<QtyMicros>()?);
     }
-    book
+    Ok(book)
 }
 
 #[cfg(feature = "runtime-boundary")]
@@ -123,9 +124,9 @@ use std::collections::BTreeMap;
 
 /// Helper for tests/examples: build a symbol->qty map from an iterator.
 #[must_use]
-pub fn position_book<I, S>(items: I) -> BTreeMap<String, i64>
+pub fn position_book<I, S>(items: I) -> BTreeMap<String, QtyMicros>
 where
-    I: IntoIterator<Item = (S, i64)>,
+    I: IntoIterator<Item = (S, QtyMicros)>,
     S: Into<String>,
 {
     items

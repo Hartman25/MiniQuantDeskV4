@@ -129,7 +129,7 @@ async fn i02_fresh_5m_bar_within_default_cap_dispatches_normally() {
             .output
             .targets
             .iter()
-            .any(|t| t.symbol == symbol && t.qty > 0),
+            .any(|t| t.symbol == symbol && t.qty.is_positive()),
         "I02: fresh bullish 5m bars should produce a positive target for {symbol}; got {:?}",
         result.intents.output.targets
     );

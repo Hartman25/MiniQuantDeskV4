@@ -38,7 +38,7 @@ impl Strategy for OneRoundTrip {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         let target = if self.bar_idx == 0 { self.qty } else { 0 };
         self.bar_idx += 1;
-        StrategyOutput::new(vec![TargetPosition::new("ES", target)])
+        StrategyOutput::new(vec![TargetPosition::whole("ES", target)])
     }
 }
 

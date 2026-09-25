@@ -79,7 +79,7 @@ impl Strategy for SpyBuyOnFirst {
         });
         if !self.fired {
             self.fired = true;
-            StrategyOutput::new(vec![TargetPosition::new("SPY", 10)])
+            StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)])
         } else {
             StrategyOutput::new(vec![])
         }

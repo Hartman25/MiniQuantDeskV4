@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use mqk_execution::{targets_to_order_intents, Side as ExecSide};
 
-type PositionBook = BTreeMap<String, i64>;
+type PositionBook = BTreeMap<String, QtyMicros>;
 
 /// Read a position's signed quantity as whole-unit `i64` shares.
 ///
@@ -712,6 +712,18 @@ impl BacktestEngine {
                     });
                 }
 
+                // The backtest engine is equities-only (whole-unit order/fill
+                // domain). A fractional intent quantity is unsupported here:
+                // fail closed rather than truncating.
+                let Some(intent_qty) = intent.qty.to_whole_units_checked() else {
+                    self.halted = true;
+                    self.halt_reason = Some(format!(
+                        "fractional_intent_qty_unsupported_in_backtest: {} {}",
+                        intent.symbol, intent.qty
+                    ));
+                    break;
+                };
+
                 let is_risk_reducing = self.is_intent_risk_reducing(intent);
 
                 let risk_input = RiskInput {
@@ -735,7 +747,7 @@ impl BacktestEngine {
                             order_id,
                             symbol: intent.symbol.clone(),
                             side: bkt_side,
-                            qty: intent.qty,
+                            qty: intent_qty,
                             signal_ts: bar.end_ts,
                         });
                     }
@@ -746,7 +758,7 @@ impl BacktestEngine {
                             signal_ts: bar.end_ts,
                             symbol: intent.symbol.clone(),
                             side: bkt_side,
-                            qty: intent.qty,
+                            qty: intent_qty,
                             status: OrderStatus::Rejected,
                         });
                     }
@@ -757,7 +769,7 @@ impl BacktestEngine {
                             signal_ts: bar.end_ts,
                             symbol: intent.symbol.clone(),
                             side: bkt_side,
-                            qty: intent.qty,
+                            qty: intent_qty,
                             status: OrderStatus::HaltTriggered,
                         });
                         self.halted = true;
@@ -774,7 +786,7 @@ impl BacktestEngine {
                             signal_ts: bar.end_ts,
                             symbol: intent.symbol.clone(),
                             side: bkt_side,
-                            qty: intent.qty,
+                            qty: intent_qty,
                             status: OrderStatus::HaltTriggered,
                         });
                         self.flatten_all(bar);
@@ -1292,8 +1304,8 @@ impl BacktestEngine {
     fn build_position_book(&self) -> PositionBook {
         let mut book = PositionBook::new();
         for (sym, pos) in &self.portfolio.positions {
-            let qty = whole_qty_signed(pos);
-            if qty != 0 {
+            let qty = pos.qty_signed();
+            if !qty.is_zero() {
                 book.insert(sym.clone(), qty);
             }
         }

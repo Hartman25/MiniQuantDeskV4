@@ -37,8 +37,8 @@ impl Strategy for BuyThenSell {
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         match _ctx.now_tick {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]),
-            2 => StrategyOutput::new(vec![TargetPosition::new("SPY", 0)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)]),
+            2 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 0)]),
             _ => StrategyOutput::new(vec![]),
         }
     }
@@ -101,7 +101,7 @@ impl Strategy for OverExposeOnce {
         if !self.fired {
             self.fired = true;
             // Target a 100-share position with a tight exposure cap → rejected.
-            StrategyOutput::new(vec![TargetPosition::new("SPY", 100)])
+            StrategyOutput::new(vec![TargetPosition::whole("SPY", 100)])
         } else {
             StrategyOutput::new(vec![])
         }

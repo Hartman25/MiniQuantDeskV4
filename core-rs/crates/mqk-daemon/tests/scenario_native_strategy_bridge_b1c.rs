@@ -179,7 +179,7 @@ async fn bare_state() -> Arc<AppState> {
 /// outbox write, no admission attempt.
 #[test]
 fn b1c_c01_shadow_intent_produces_no_decisions() {
-    let result = shadow_result(vec![TargetPosition::new("AAPL", 10)]);
+    let result = shadow_result(vec![TargetPosition::whole("AAPL", 10)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
 
     assert!(
@@ -224,7 +224,7 @@ fn b1c_c02_empty_targets_produces_no_decisions() {
 #[test]
 fn b1c_c03_live_buy_target_correct_fields() {
     // Flat position: target=+15, current=0 → delta=+15 → buy 15.
-    let result = live_result(vec![TargetPosition::new("AAPL", 15)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", 15)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
 
     assert_eq!(decisions.len(), 1, "C03: one target → one decision");
@@ -270,7 +270,7 @@ fn b1c_c03_live_buy_target_correct_fields() {
 fn b1c_c04_live_sell_target_correct_fields() {
     // Long 8 TSLA: target=0 (flat), current=8 → delta=-8 → sell 8 to close long.
     // B5 guard: current(8) > 0 and qty_to_sell(8) <= current(8) → passes.
-    let result = live_result(vec![TargetPosition::new("TSLA", 0)]);
+    let result = live_result(vec![TargetPosition::whole("TSLA", 0)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("TSLA", 8));
 
@@ -312,10 +312,10 @@ fn b1c_c05_zero_qty_target_skipped() {
     // MSFT:      target=+5, current=0 → delta=+5 → buy 5 (valid).
     // TSLA:      target=-3, current=0 → delta=-3 → sell from flat → B5 guard blocks.
     let result = live_result(vec![
-        TargetPosition::new("AAPL", 0),  // delta=0, skip
-        TargetPosition::new("MSFT", 5),  // delta=+5, buy → include
-        TargetPosition::new("GOOG", 0),  // delta=0, skip
-        TargetPosition::new("TSLA", -3), // delta=-3, flat → B5 short-sale guard blocks
+        TargetPosition::whole("AAPL", 0),  // delta=0, skip
+        TargetPosition::whole("MSFT", 5),  // delta=+5, buy → include
+        TargetPosition::whole("GOOG", 0),  // delta=0, skip
+        TargetPosition::whole("TSLA", -3), // delta=-3, flat → B5 short-sale guard blocks
     ]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
 
@@ -353,7 +353,7 @@ fn b1c_c05_zero_qty_target_skipped() {
 async fn b1c_c06_live_intent_reaches_canonical_seam() {
     let st = bare_state().await;
 
-    let result = live_result(vec![TargetPosition::new("AAPL", 10)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", 10)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
     assert_eq!(
         decisions.len(),
@@ -388,7 +388,7 @@ async fn b1c_c06_live_intent_reaches_canonical_seam() {
 /// deduplicates safely (ON CONFLICT DO NOTHING).
 #[test]
 fn b1c_c07_decision_id_is_deterministic() {
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
     let run_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
 
     let d1 = bar_result_to_decisions(&result, run_id, FIXED_NOW_MICROS, &flat());
@@ -421,9 +421,9 @@ fn b1c_c08_multi_target_produces_one_decision_each() {
     positions.insert("MSFT".to_string(), 5i64);
 
     let result = live_result(vec![
-        TargetPosition::new("AAPL", 5),
-        TargetPosition::new("MSFT", 0), // close long; B5 guard passes (sell 5 == current 5)
-        TargetPosition::new("GOOG", 1),
+        TargetPosition::whole("AAPL", 5),
+        TargetPosition::whole("MSFT", 0), // close long; B5 guard passes (sell 5 == current 5)
+        TargetPosition::whole("GOOG", 1),
     ]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &positions);
 
@@ -459,7 +459,7 @@ fn b1c_c08_multi_target_produces_one_decision_each() {
 /// the order is for 5 (the incremental amount), not 15.
 #[test]
 fn b1c_c09_delta_buy_from_partial_position() {
-    let result = live_result(vec![TargetPosition::new("AAPL", 15)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", 15)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("AAPL", 10));
 
@@ -475,7 +475,7 @@ fn b1c_c09_delta_buy_from_partial_position() {
 /// generated.  This prevents unnecessary round-trip orders on re-ticks.
 #[test]
 fn b1c_c10_already_at_target_produces_no_decision() {
-    let result = live_result(vec![TargetPosition::new("AAPL", 10)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", 10)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("AAPL", 10));
 
@@ -495,7 +495,7 @@ fn b1c_c10_already_at_target_produces_no_decision() {
 /// not a no-op (which the old qty!=0 filter would have incorrectly produced).
 #[test]
 fn b1c_c11_close_long_position() {
-    let result = live_result(vec![TargetPosition::new("AAPL", 0)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", 0)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("AAPL", 10));
 
@@ -514,7 +514,7 @@ fn b1c_c11_close_long_position() {
 /// Proves that a direction reversal is computed correctly: delta = +5 - (-3) = +8.
 #[test]
 fn b1c_c12_short_cover_and_go_long() {
-    let result = live_result(vec![TargetPosition::new("TSLA", 5)]);
+    let result = live_result(vec![TargetPosition::whole("TSLA", 5)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("TSLA", -3));
 
@@ -534,7 +534,7 @@ fn b1c_c12_short_cover_and_go_long() {
 /// generates a buy, not a no-op.
 #[test]
 fn b1c_c13_close_short_position() {
-    let result = live_result(vec![TargetPosition::new("NVDA", 0)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 0)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("NVDA", -7));
 
@@ -633,7 +633,7 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
 
         // --- Exercise the loop-owned translation path ---
         // Flat current position: target=+10, current=0 → delta=+10 → buy 10.
-        let result = live_result(vec![TargetPosition::new("AAPL", 10)]);
+        let result = live_result(vec![TargetPosition::whole("AAPL", 10)]);
         let decisions = bar_result_to_decisions(&result, run_id, FIXED_NOW_MICROS, &flat());
         assert_eq!(
             decisions.len(),

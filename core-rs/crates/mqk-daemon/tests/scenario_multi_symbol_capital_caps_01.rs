@@ -200,57 +200,49 @@ fn cleanup(dir: &PathBuf) {
 // Cap #2 — clamp_targets_to_per_symbol_position_cap (pure)
 // ===========================================================================
 
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
+}
+
 /// C2-01: target qty within the cap is left unchanged; no clamp recorded.
 #[test]
 fn c2_01_target_within_cap_unchanged() {
-    let mut targets = vec![TargetPosition {
-        symbol: "AAPL".to_string(),
-        qty: 300,
-    }];
+    let mut targets = vec![TargetPosition::whole("AAPL".to_string(), 300)];
     let clamped = state::AppState::clamp_targets_to_per_symbol_position_cap(&mut targets, 500);
     assert!(clamped.is_empty(), "no clamp expected; got: {clamped:?}");
-    assert_eq!(targets[0].qty, 300);
+    assert_eq!(targets[0].qty, q(300));
 }
 
 /// C2-02: target qty exactly at the cap boundary is NOT clamped — only
 /// strict `> cap` clamps.
 #[test]
 fn c2_02_target_at_cap_boundary_unchanged() {
-    let mut targets = vec![TargetPosition {
-        symbol: "AAPL".to_string(),
-        qty: 500,
-    }];
+    let mut targets = vec![TargetPosition::whole("AAPL".to_string(), 500)];
     let clamped = state::AppState::clamp_targets_to_per_symbol_position_cap(&mut targets, 500);
     assert!(
         clamped.is_empty(),
         "exact-boundary qty must not be clamped; got: {clamped:?}"
     );
-    assert_eq!(targets[0].qty, 500);
+    assert_eq!(targets[0].qty, q(500));
 }
 
 /// C2-03: positive target over the cap is clamped to `+cap`, sign preserved.
 #[test]
 fn c2_03_positive_target_over_cap_clamped_preserving_sign() {
-    let mut targets = vec![TargetPosition {
-        symbol: "AAPL".to_string(),
-        qty: 1000,
-    }];
+    let mut targets = vec![TargetPosition::whole("AAPL".to_string(), 1000)];
     let clamped = state::AppState::clamp_targets_to_per_symbol_position_cap(&mut targets, 500);
-    assert_eq!(clamped, vec![("AAPL".to_string(), 1000, 500)]);
-    assert_eq!(targets[0].qty, 500);
+    assert_eq!(clamped, vec![("AAPL".to_string(), q(1000), q(500))]);
+    assert_eq!(targets[0].qty, q(500));
 }
 
 /// C2-04: negative (short) target over the cap in magnitude is clamped to
 /// `-cap`, sign preserved.
 #[test]
 fn c2_04_negative_target_over_cap_clamped_preserving_sign() {
-    let mut targets = vec![TargetPosition {
-        symbol: "TSLA".to_string(),
-        qty: -1000,
-    }];
+    let mut targets = vec![TargetPosition::whole("TSLA".to_string(), -1000)];
     let clamped = state::AppState::clamp_targets_to_per_symbol_position_cap(&mut targets, 500);
-    assert_eq!(clamped, vec![("TSLA".to_string(), -1000, -500)]);
-    assert_eq!(targets[0].qty, -500);
+    assert_eq!(clamped, vec![("TSLA".to_string(), q(-1000), q(-500))]);
+    assert_eq!(targets[0].qty, q(-500));
 }
 
 /// C2-05: multi-target — only over-cap targets are clamped and reported, in
@@ -258,30 +250,21 @@ fn c2_04_negative_target_over_cap_clamped_preserving_sign() {
 #[test]
 fn c2_05_multi_target_only_over_cap_clamped_in_order() {
     let mut targets = vec![
-        TargetPosition {
-            symbol: "AAPL".to_string(),
-            qty: 1000,
-        },
-        TargetPosition {
-            symbol: "MSFT".to_string(),
-            qty: 200,
-        },
-        TargetPosition {
-            symbol: "TSLA".to_string(),
-            qty: -2000,
-        },
+        TargetPosition::whole("AAPL".to_string(), 1000),
+        TargetPosition::whole("MSFT".to_string(), 200),
+        TargetPosition::whole("TSLA".to_string(), -2000),
     ];
     let clamped = state::AppState::clamp_targets_to_per_symbol_position_cap(&mut targets, 500);
     assert_eq!(
         clamped,
         vec![
-            ("AAPL".to_string(), 1000, 500),
-            ("TSLA".to_string(), -2000, -500),
+            ("AAPL".to_string(), q(1000), q(500)),
+            ("TSLA".to_string(), q(-2000), q(-500)),
         ]
     );
-    assert_eq!(targets[0].qty, 500);
-    assert_eq!(targets[1].qty, 200, "MSFT within cap must be untouched");
-    assert_eq!(targets[2].qty, -500);
+    assert_eq!(targets[0].qty, q(500));
+    assert_eq!(targets[1].qty, q(200), "MSFT within cap must be untouched");
+    assert_eq!(targets[2].qty, q(-500));
 }
 
 // ===========================================================================

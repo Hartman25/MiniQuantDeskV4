@@ -184,10 +184,10 @@ fn cap_binding_same_timestamp_permutation_produces_identical_result() {
     let winner_qty = if winner == "AAPL" { 550 } else { 275 };
     let schedule = || {
         vec![
-            (1, vec![TargetPosition::new("AAPL", 550)]),
-            (2, vec![TargetPosition::new("AMD", 275)]),
-            (3, vec![TargetPosition::new(winner, winner_qty)]),
-            (4, vec![TargetPosition::new(winner, winner_qty)]),
+            (1, vec![TargetPosition::whole("AAPL", 550)]),
+            (2, vec![TargetPosition::whole("AMD", 275)]),
+            (3, vec![TargetPosition::whole(winner, winner_qty)]),
+            (4, vec![TargetPosition::whole(winner, winner_qty)]),
         ]
     };
 
@@ -326,20 +326,20 @@ fn non_binding_cap_same_timestamp_permutation_both_fill_identically() {
     // delta for both symbols, regardless of row order.
     let schedule = || {
         vec![
-            (1, vec![TargetPosition::new("AAPL", 550)]),
-            (2, vec![TargetPosition::new("AMD", 275)]),
+            (1, vec![TargetPosition::whole("AAPL", 550)]),
+            (2, vec![TargetPosition::whole("AMD", 275)]),
             (
                 3,
                 vec![
-                    TargetPosition::new("AAPL", 550),
-                    TargetPosition::new("AMD", 275),
+                    TargetPosition::whole("AAPL", 550),
+                    TargetPosition::whole("AMD", 275),
                 ],
             ),
             (
                 4,
                 vec![
-                    TargetPosition::new("AAPL", 550),
-                    TargetPosition::new("AMD", 275),
+                    TargetPosition::whole("AAPL", 550),
+                    TargetPosition::whole("AMD", 275),
                 ],
             ),
         ]
@@ -610,10 +610,10 @@ fn pending_order_orphaned_by_early_halt_is_labeled_canceled_on_halt() {
     let mut engine = BacktestEngine::new(cfg);
     engine
         .add_strategy(Box::new(TickScript::new(vec![
-            (1, vec![TargetPosition::new("MSFT", 5)]),
-            (2, vec![TargetPosition::new("AAPL", 10)]),
-            (3, vec![TargetPosition::new("AAPL", 10)]), // hold once resolved
-            (4, vec![TargetPosition::new("AAPL", 0)]),  // sell intent trips the halt
+            (1, vec![TargetPosition::whole("MSFT", 5)]),
+            (2, vec![TargetPosition::whole("AAPL", 10)]),
+            (3, vec![TargetPosition::whole("AAPL", 10)]), // hold once resolved
+            (4, vec![TargetPosition::whole("AAPL", 0)]),  // sell intent trips the halt
         ])))
         .unwrap();
     let report = engine.run(&bars).unwrap();
@@ -643,7 +643,7 @@ fn pending_order_orphaned_by_end_of_data_without_halt_is_labeled_unfilled_end_of
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             1,
-            vec![TargetPosition::new("AAPL", 5)],
+            vec![TargetPosition::whole("AAPL", 5)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();

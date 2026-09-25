@@ -534,10 +534,7 @@ impl Strategy for IntradayScalperStrategy {
         let _ = capped_by; // used in tests; suppress unused-variable warning in release
 
         StrategyOutput {
-            targets: vec![TargetPosition {
-                symbol: self.symbol.clone(),
-                qty: effective_target,
-            }],
+            targets: vec![TargetPosition::whole(self.symbol.clone(), effective_target)],
         }
     }
 }
@@ -792,7 +789,11 @@ mod tests {
         let base = 200_000_000i64; // $200
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
-        assert_eq!(out.targets[0].qty, 1, "SPS01: default target_qty=1");
+        assert_eq!(
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            1,
+            "SPS01: default target_qty=1"
+        );
     }
 
     /// SPS02: MQK_STRATEGY_TARGET_QTY=5 targets 5 shares on bullish signal.
@@ -801,7 +802,11 @@ mod tests {
         let base = 200_000_000i64;
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 5);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
-        assert_eq!(out.targets[0].qty, 5, "SPS02: target_qty=5");
+        assert_eq!(
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            5,
+            "SPS02: target_qty=5"
+        );
     }
 
     /// SPS03: MQK_STRATEGY_MAX_TARGET_QTY caps target_qty.
@@ -811,7 +816,11 @@ mod tests {
         // target_qty=10, max_target_qty=3 → effective=3
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 10, Some(3), None);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
-        assert_eq!(out.targets[0].qty, 3, "SPS03: capped by max_target_qty=3");
+        assert_eq!(
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            3,
+            "SPS03: capped by max_target_qty=3"
+        );
     }
 
     /// SPS03b: max_target_qty >= target_qty → no cap applied.
@@ -821,7 +830,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 5, Some(10), None);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 5,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            5,
             "SPS03b: max_target_qty=10 ≥ target=5 → no cap"
         );
     }
@@ -837,7 +847,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 10, None, Some(700));
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 3,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            3,
             "SPS04: close=$200.50, notional=$700 → max 3 shares"
         );
     }
@@ -851,7 +862,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 5, None, Some(100));
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SPS04b: max_notional < 1 share → effective=0 (fail-closed)"
         );
     }
@@ -866,7 +878,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 10, Some(5), Some(500));
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 2,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            2,
             "SPS04c: notional cap=2 binds tighter than qty cap=5"
         );
     }
@@ -879,7 +892,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 10, Some(1), Some(1000));
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 1,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            1,
             "SPS04d: qty cap=1 binds tighter than notional cap=5"
         );
     }
@@ -917,7 +931,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 10, Some(5), Some(1000));
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SPS06: bearish signal → target=0 regardless of caps"
         );
     }
@@ -929,7 +944,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 10, Some(5), Some(1000));
         let out = s.on_bar(&ctx_with_bars(flat_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SPS07: neutral signal → target=0 regardless of caps"
         );
     }
@@ -946,12 +962,13 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 5, None, Some(400));
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SPS08: bearish target=0 for B5 sell path"
         );
 
         let current = 2i64;
-        let delta = out.targets[0].qty - current; // 0 - 2 = -2
+        let delta = out.targets[0].qty.to_whole_units_checked().unwrap() - current; // 0 - 2 = -2
         let qty_to_sell = -delta; // 2
         assert!(
             qty_to_sell <= current,
@@ -966,9 +983,13 @@ mod tests {
         let base = 200_000_000i64; // $200; $1200 notional → max 6 shares
         let mut s = IntradayScalperStrategy::with_caps("AAPL", 5, None, Some(1200));
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
-        assert_eq!(out.targets[0].qty, 5, "SPS09: effective_target=5");
+        assert_eq!(
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            5,
+            "SPS09: effective_target=5"
+        );
         let current = 2i64;
-        let delta = out.targets[0].qty - current;
+        let delta = out.targets[0].qty.to_whole_units_checked().unwrap() - current;
         assert_eq!(delta, 3, "SPS09: buy 3 to reach target=5 from current=2");
     }
 
@@ -978,9 +999,9 @@ mod tests {
         let base = 200_000_000i64;
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 2);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
-        assert_eq!(out.targets[0].qty, 2);
+        assert_eq!(out.targets[0].qty.to_whole_units_checked().unwrap(), 2);
         let current = 2i64;
-        let delta = out.targets[0].qty - current;
+        let delta = out.targets[0].qty.to_whole_units_checked().unwrap() - current;
         assert_eq!(delta, 0, "SPS09b: already at target → no order");
     }
 
@@ -996,7 +1017,8 @@ mod tests {
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         // $200 close, $800 notional → max 4 shares; qty cap=3 → effective=3
         assert_eq!(
-            out.targets[0].qty, 3,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            3,
             "SPS10: sizing is config-only, no account balance"
         );
     }
@@ -1010,7 +1032,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 1,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            1,
             "SS-01: bullish signal, target_qty=1 → target=1"
         );
     }
@@ -1022,7 +1045,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 5);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 5,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            5,
             "SS-02: bullish signal, target_qty=5 → target=5"
         );
     }
@@ -1034,7 +1058,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 5);
         let out = s.on_bar(&ctx_with_bars(flat_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SS-03: hold signal → target=0 regardless of target_qty"
         );
     }
@@ -1046,7 +1071,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SS-04: bearish signal → direction.max(0)=0 → target=0 (go flat, not net-short)"
         );
     }
@@ -1062,7 +1088,11 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
         let strategy_out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            strategy_out.targets[0].qty, 0,
+            strategy_out.targets[0]
+                .qty
+                .to_whole_units_checked()
+                .unwrap(),
+            0,
             "ER-01 precondition: bearish → target=0"
         );
 
@@ -1079,7 +1109,10 @@ mod tests {
         let mut positions = BTreeMap::new();
         positions.insert("AAPL".to_string(), 1i64);
 
-        let target = bar_result.intents.output.targets[0].qty; // 0
+        let target = bar_result.intents.output.targets[0]
+            .qty
+            .to_whole_units_checked()
+            .unwrap(); // 0
         let current = *positions.get("AAPL").unwrap_or(&0); // 1
         let delta = target - current; // -1
         let qty_to_sell = -delta; // 1
@@ -1097,7 +1130,7 @@ mod tests {
         let base = 200_000_000i64;
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
-        let delta = out.targets[0].qty;
+        let delta = out.targets[0].qty.to_whole_units_checked().unwrap();
         assert_eq!(delta, 0, "ER-02: bearish from flat → delta=0 → no order");
     }
 
@@ -1108,7 +1141,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 3);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 3,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            3,
             "ER-03: bullish with target_qty=3 → target=3"
         );
     }
@@ -1136,7 +1170,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SSG01: default allow_short_signals=false → bearish maps to 0"
         );
     }
@@ -1148,7 +1183,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 3);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SSG02: target_qty=3, bearish, default → target=0 (long-only)"
         );
     }
@@ -1160,7 +1196,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SSG03: ss04 continuity — bearish → target=0 with default (long-only)"
         );
     }
@@ -1172,7 +1209,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1).short_signals(true);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, -1,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            -1,
             "SSG04: bearish + allow_short_signals=true → target=-1"
         );
     }
@@ -1184,7 +1222,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 3).short_signals(true);
         let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 3,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            3,
             "SSG05: bullish + short_signals=true → target=3 (positive; unchanged)"
         );
     }
@@ -1196,7 +1235,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1).short_signals(true);
         let out = s.on_bar(&ctx_with_bars(flat_bars(base)));
         assert_eq!(
-            out.targets[0].qty, 0,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            0,
             "SSG06: below-threshold + short_signals=true → target=0 (no signal)"
         );
     }
@@ -1208,7 +1248,8 @@ mod tests {
         let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 5).short_signals(true);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, -5,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            -5,
             "SSG07: target_qty=5, bearish + short_signals=true → target=-5"
         );
     }
@@ -1252,7 +1293,8 @@ mod tests {
             IntradayScalperStrategy::with_caps("AAPL", 10, Some(3), None).short_signals(true);
         let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_eq!(
-            out.targets[0].qty, -3,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            -3,
             "SSG10: target_qty=10 capped at 3, bearish + short_signals → target=-3"
         );
     }
@@ -1267,14 +1309,15 @@ mod tests {
         let out = strategy.on_bar(&ctx_with_bars(bearish_bars(base)));
 
         assert_eq!(
-            out.targets[0].qty, -1,
+            out.targets[0].qty.to_whole_units_checked().unwrap(),
+            -1,
             "SSG11: strategy emits target=-1 (short signal expressed)"
         );
 
         // B5 guard in decision.rs: delta < 0 AND (current <= 0 OR abs(delta) > current)
         // → ShortOpen intent → filtered (no decision produced).
         let current = 0i64; // flat position
-        let delta = out.targets[0].qty - current; // -1
+        let delta = out.targets[0].qty.to_whole_units_checked().unwrap() - current; // -1
         let is_b5_blocked = delta < 0 && current <= 0;
         assert!(
             is_b5_blocked,
@@ -1416,7 +1459,8 @@ mod tests {
         let out_a = a.on_bar(&ctx_with_bars(bullish_bars(base)));
         let out_b = b.on_bar(&ctx_with_bars(bearish_bars(base)));
         assert_ne!(
-            out_a.targets[0].qty, out_b.targets[0].qty,
+            out_a.targets[0].qty.to_whole_units_checked().unwrap(),
+            out_b.targets[0].qty.to_whole_units_checked().unwrap(),
             "sanity: the two on_bar calls produced different outputs"
         );
         assert_eq!(

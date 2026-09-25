@@ -35,6 +35,31 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+/// Whole-unit projection of a strategy target quantity for the daemon's
+/// whole-unit runtime seams (decision/conflict/allocation still `i64`).
+/// A fractional target is excluded loudly, never truncated.
+pub(crate) fn target_qty_whole_units(t: &mqk_strategy::TargetPosition) -> Option<i64> {
+    let whole = t.qty.to_whole_units_checked();
+    if whole.is_none() {
+        tracing::error!(
+            symbol = %t.symbol,
+            target_qty = %t.qty,
+            "fractional_target_qty_unsupported_by_whole_unit_runtime_seam"
+        );
+    }
+    whole
+}
+
+/// Sum of whole-unit target quantities (fractional targets excluded loudly).
+pub(crate) fn sum_target_qty_whole_units<'a>(
+    targets: impl IntoIterator<Item = &'a mqk_strategy::TargetPosition>,
+) -> i64 {
+    targets
+        .into_iter()
+        .filter_map(target_qty_whole_units)
+        .fold(0i64, |a, q| a.saturating_add(q))
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -696,8 +721,9 @@ pub fn bar_result_to_decisions(
             // Delta-to-target: TargetPosition.qty is a target portfolio state,
             // not an incremental order size.  Symbols absent from the map are
             // treated as flat (current = 0).
+            let target_qty = target_qty_whole_units(t)?;
             let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
-            let delta = t.qty - current;
+            let delta = target_qty - current;
             if delta == 0 {
                 return None; // already at target; no order needed
             }
@@ -729,7 +755,7 @@ pub fn bar_result_to_decisions(
                     "mqk.strategy-decision.v3|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{target_qty}|{bar_end_ts}",
                     symbol = t.symbol,
                     timeframe_secs = result.spec.timeframe_secs,
-                    target_qty = t.qty,
+                    target_qty = target_qty,
                 )
                 .as_bytes(),
             )

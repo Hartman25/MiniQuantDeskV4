@@ -382,10 +382,7 @@ mod tests {
 
         fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
             StrategyOutput {
-                targets: vec![TargetPosition {
-                    symbol: "SPY".to_string(),
-                    qty: self.target_qty,
-                }],
+                targets: vec![TargetPosition::whole("SPY".to_string(), self.target_qty)],
             }
         }
     }

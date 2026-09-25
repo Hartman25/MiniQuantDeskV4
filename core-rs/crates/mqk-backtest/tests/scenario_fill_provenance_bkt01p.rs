@@ -67,8 +67,8 @@ impl Strategy for BuyOnBar1ExitOnBar2 {
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         match _ctx.now_tick {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]),
-            2 => StrategyOutput::new(vec![TargetPosition::new("SPY", 0)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 10)]),
+            2 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 0)]),
             _ => StrategyOutput::new(vec![]),
         }
     }

@@ -96,7 +96,8 @@ fn p01_long_strategy_bearish_returns_flat() {
     let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
     let out = s.on_bar(&ctx(bearish_bars()));
     assert_eq!(
-        out.targets[0].qty, 0,
+        out.targets[0].qty.to_whole_units_checked().unwrap(),
+        0,
         "P01: long-only default: bearish displacement → target=0 (flat, not short)"
     );
 }
@@ -110,7 +111,8 @@ fn p02_long_strategy_bullish_returns_positive() {
     let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 3);
     let out = s.on_bar(&ctx(bullish_bars()));
     assert_eq!(
-        out.targets[0].qty, 3,
+        out.targets[0].qty.to_whole_units_checked().unwrap(),
+        3,
         "P02: long strategy bullish → target=+3"
     );
 }
@@ -124,9 +126,9 @@ fn p03_long_strategy_bearish_is_not_negative() {
     let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 5);
     let out = s.on_bar(&ctx(bearish_bars()));
     assert!(
-        out.targets[0].qty >= 0,
+        out.targets[0].qty.to_whole_units_checked().unwrap() >= 0,
         "P03: long-only strategy: bearish target must never be negative; got {}",
-        out.targets[0].qty
+        out.targets[0].qty.to_whole_units_checked().unwrap()
     );
 }
 
@@ -158,12 +160,13 @@ fn p05_short_strategy_bearish_returns_negative_target() {
     let mut s = IntradayScalperStrategy::new_short("AAPL");
     let out = s.on_bar(&ctx(bearish_bars()));
     assert!(
-        out.targets[0].qty < 0,
+        out.targets[0].qty.to_whole_units_checked().unwrap() < 0,
         "P05: short strategy bearish → negative target; got {}",
-        out.targets[0].qty
+        out.targets[0].qty.to_whole_units_checked().unwrap()
     );
     assert_eq!(
-        out.targets[0].qty, -1,
+        out.targets[0].qty.to_whole_units_checked().unwrap(),
+        -1,
         "P05: default target_qty=1 → bearish short target=-1"
     );
 }
@@ -177,7 +180,8 @@ fn p06_short_strategy_bullish_returns_flat() {
     let mut s = IntradayScalperStrategy::new_short("AAPL");
     let out = s.on_bar(&ctx(bullish_bars()));
     assert_eq!(
-        out.targets[0].qty, 0,
+        out.targets[0].qty.to_whole_units_checked().unwrap(),
+        0,
         "P06: short-only strategy: bullish displacement → target=0 (long direction suppressed)"
     );
 }
@@ -191,7 +195,8 @@ fn p07_short_strategy_below_threshold_returns_flat() {
     let mut s = IntradayScalperStrategy::new_short("AAPL");
     let out = s.on_bar(&ctx(flat_bars()));
     assert_eq!(
-        out.targets[0].qty, 0,
+        out.targets[0].qty.to_whole_units_checked().unwrap(),
+        0,
         "P07: short strategy below-threshold → target=0 (no signal)"
     );
 }
@@ -319,7 +324,8 @@ fn p12_short_target_magnitude_follows_sizing_caps() {
     // For the short-only variant the same cap logic applies on the negative path.
     let out = s.on_bar(&ctx(bearish_bars()));
     assert_eq!(
-        out.targets[0].qty, -3,
+        out.targets[0].qty.to_whole_units_checked().unwrap(),
+        -3,
         "P12: target_qty=10 capped to 3; bearish + short_signals → target=-3"
     );
 }
@@ -339,13 +345,14 @@ fn p13_b5_logic_blocks_short_from_flat_for_new_short_variant() {
     let out = s.on_bar(&ctx(bearish_bars()));
 
     assert_eq!(
-        out.targets[0].qty, -1,
+        out.targets[0].qty.to_whole_units_checked().unwrap(),
+        -1,
         "P13 precondition: new_short() emits target=-1 on bearish"
     );
 
     // Replicate decision.rs B5 guard: delta < 0 AND (current <= 0 OR abs(delta) > current).
     let current = 0i64; // flat position
-    let delta = out.targets[0].qty - current; // -1 - 0 = -1
+    let delta = out.targets[0].qty.to_whole_units_checked().unwrap() - current; // -1 - 0 = -1
     let is_b5_blocked = delta < 0 && current <= 0;
     assert!(
         is_b5_blocked,

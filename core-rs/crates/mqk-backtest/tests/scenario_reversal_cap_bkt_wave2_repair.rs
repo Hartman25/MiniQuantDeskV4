@@ -45,7 +45,7 @@ impl Strategy for ScriptedStrategy {
         StrategyOutput::new(
             targets
                 .into_iter()
-                .map(|(sym, qty)| TargetPosition::new(sym, qty))
+                .map(|(sym, qty)| TargetPosition::whole(sym, qty))
                 .collect(),
         )
     }

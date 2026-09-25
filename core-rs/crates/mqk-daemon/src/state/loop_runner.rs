@@ -1402,8 +1402,8 @@ pub(super) fn spawn_execution_loop(
                                     tracing::warn!(
                                         run_id = %run_id,
                                         symbol = %symbol,
-                                        original_qty,
-                                        clamped_qty,
+                                        original_qty = %original_qty,
+                                        clamped_qty = %clamped_qty,
                                         cap,
                                         "b1c_target_qty_clamped_per_symbol_cap: strategy target \
                                          qty exceeds per_symbol_max_position_qty; clamped to cap"
@@ -1426,7 +1426,7 @@ pub(super) fn spawn_execution_loop(
                                                     run_id: Some(run_id_short.clone()),
                                                     symbol: Some(symbol_owned.clone()),
                                                     side: None,
-                                                    qty: Some(clamped_qty),
+                                                    qty: clamped_qty.to_whole_units_checked(),
                                                     price_micros: None,
                                                     order_id: None,
                                                     detail: Some(format!(
@@ -1452,13 +1452,9 @@ pub(super) fn spawn_execution_loop(
                             // AUTON-NO-TRADE-01: record signal qty before decisions are
                             // derived. This is the raw strategy output — zero means the
                             // strategy returned hold/flat for all targets this tick.
-                            let raw_signal_qty: i64 = bar_result
-                                .intents
-                                .output
-                                .targets
-                                .iter()
-                                .map(|t| t.qty)
-                                .sum();
+                            let raw_signal_qty: i64 = crate::decision::sum_target_qty_whole_units(
+                                &bar_result.intents.output.targets,
+                            );
                             state_arc.record_bar_tick_outcome(raw_signal_qty);
 
                             if bar_result.intents.output.targets.is_empty() && dropped == 0 {
@@ -1482,7 +1478,10 @@ pub(super) fn spawn_execution_loop(
                             // per (run, symbol) when B5 short-sale guard blocks a sell.
                             for t in &bar_result.intents.output.targets {
                                 let symbol = t.symbol.clone();
-                                let target_qty = t.qty;
+                                let Some(target_qty) = crate::decision::target_qty_whole_units(t)
+                                else {
+                                    continue;
+                                };
                                 let current = current_positions.get(&symbol).copied().unwrap_or(0);
                                 let delta = target_qty - current;
                                 let no_order_reason = if delta == 0 {
@@ -1495,7 +1494,7 @@ pub(super) fn spawn_execution_loop(
                                 tracing::info!(
                                     run_id = %run_id,
                                     symbol = %t.symbol,
-                                    strategy_target_qty = t.qty,
+                                    strategy_target_qty = target_qty,
                                     current_position_qty = current,
                                     computed_delta_qty = delta,
                                     no_order_reason,

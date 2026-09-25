@@ -254,14 +254,14 @@ pub fn evaluate_dry_run_strategy(
         }
     };
 
-    let target_qty: i64 = bar_result
-        .intents
-        .output
-        .targets
-        .iter()
-        .filter(|t| t.symbol.trim().eq_ignore_ascii_case(symbol))
-        .map(|t| t.qty)
-        .sum();
+    let target_qty: i64 = crate::decision::sum_target_qty_whole_units(
+        bar_result
+            .intents
+            .output
+            .targets
+            .iter()
+            .filter(|t| t.symbol.trim().eq_ignore_ascii_case(symbol)),
+    );
 
     let delta_qty = target_qty - current_qty;
     let intent = classify_order_intent(current_qty, delta_qty);

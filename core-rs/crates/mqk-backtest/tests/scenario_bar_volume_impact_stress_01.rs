@@ -27,7 +27,7 @@ impl Strategy for BuyOnce {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         match self.bar_idx {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", self.qty)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", self.qty)]),
             _ => StrategyOutput::new(vec![]),
         }
     }
@@ -55,7 +55,7 @@ impl Strategy for SellOnce {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         match self.bar_idx {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", -self.qty)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", -self.qty)]),
             _ => StrategyOutput::new(vec![]),
         }
     }

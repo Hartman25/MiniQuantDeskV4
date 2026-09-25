@@ -417,7 +417,7 @@ fn i11_unknown_shortable_blocks_when_check_required() {
 
 #[test]
 fn i12_bar_result_b5_backstop_blocks_short_open_from_flat() {
-    let result = live_result(vec![TargetPosition::new("AAPL", -10)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", -10)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
     assert!(
         decisions.is_empty(),
@@ -454,7 +454,7 @@ fn i13_long_only_strategy_produces_long_open_and_buy_decision() {
     assert!(!intent_add.requires_short_entry_policy());
 
     // integration: bar_result_to_decisions produces a buy
-    let result = live_result(vec![TargetPosition::new("AAPL", 5)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", 5)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
     assert_eq!(
         decisions.len(),

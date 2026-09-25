@@ -70,7 +70,7 @@ impl Strategy for HoldQty {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         // Always target qty — on bar 1 opens; on subsequent bars holds (no intent).
-        StrategyOutput::new(vec![TargetPosition::new("SPY", self.qty)])
+        StrategyOutput::new(vec![TargetPosition::whole("SPY", self.qty)])
     }
 }
 
@@ -94,8 +94,8 @@ impl Strategy for RoundTrip {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         match self.bar_idx {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", self.qty)]),
-            _ => StrategyOutput::new(vec![TargetPosition::new("SPY", 0)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", self.qty)]),
+            _ => StrategyOutput::new(vec![TargetPosition::whole("SPY", 0)]),
         }
     }
 }

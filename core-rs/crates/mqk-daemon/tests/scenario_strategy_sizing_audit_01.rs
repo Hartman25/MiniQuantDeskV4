@@ -47,7 +47,7 @@ fn live_result_with_target(symbol: &str, target: i64) -> StrategyBarResult {
         intents: StrategyIntents {
             mode: IntentMode::Live,
             output: StrategyOutput {
-                targets: vec![TargetPosition::new(symbol, target)],
+                targets: vec![TargetPosition::whole(symbol, target)],
             },
         },
     }
@@ -290,7 +290,8 @@ fn sa09_strategy_with_target_qty_5_emits_target_5() {
 
     assert_eq!(out.targets.len(), 1, "SA-09: one target");
     assert_eq!(
-        out.targets[0].qty, 5,
+        out.targets[0].qty.to_whole_units_checked(),
+        Some(5),
         "SA-09: bullish direction(+1) × target_qty(5) = target(5)"
     );
 }

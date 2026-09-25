@@ -267,14 +267,8 @@ async fn m05_bar_consumed_exactly_once_for_multi_symbol() {
 #[test]
 fn m06_retain_targets_matching_symbol_is_noop_when_all_match() {
     let mut targets = vec![
-        TargetPosition {
-            symbol: "AAPL".to_string(),
-            qty: 10,
-        },
-        TargetPosition {
-            symbol: "aapl".to_string(),
-            qty: -5,
-        },
+        TargetPosition::whole("AAPL".to_string(), 10),
+        TargetPosition::whole("aapl".to_string(), -5),
     ];
 
     let dropped = AppState::retain_targets_matching_symbol(&mut targets, "AAPL");
@@ -294,14 +288,8 @@ fn m06_retain_targets_matching_symbol_is_noop_when_all_match() {
 #[test]
 fn m07_retain_targets_matching_symbol_drops_mismatched_targets() {
     let mut targets = vec![
-        TargetPosition {
-            symbol: "AAPL".to_string(),
-            qty: 10,
-        },
-        TargetPosition {
-            symbol: "MSFT".to_string(),
-            qty: -5,
-        },
+        TargetPosition::whole("AAPL".to_string(), 10),
+        TargetPosition::whole("MSFT".to_string(), -5),
     ];
 
     let dropped = AppState::retain_targets_matching_symbol(&mut targets, "AAPL");
@@ -312,7 +300,7 @@ fn m07_retain_targets_matching_symbol_drops_mismatched_targets() {
     );
     assert_eq!(targets.len(), 1, "M07: only the matching target remains");
     assert_eq!(targets[0].symbol, "AAPL");
-    assert_eq!(targets[0].qty, 10);
+    assert_eq!(targets[0].qty.to_whole_units_checked(), Some(10));
 }
 
 // ---------------------------------------------------------------------------

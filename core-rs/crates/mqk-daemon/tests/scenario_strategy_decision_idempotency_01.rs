@@ -144,7 +144,7 @@ const BAR_B_END_TS: i64 = 1_748_706_600; // a later, distinct completed bar
 
 #[test]
 fn d01_same_bar_replayed_produces_identical_decision_id() {
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
 
     // Models the 1-second loop re-evaluating the same still-current
     // completed bar across several ticks before the first decision has
@@ -171,7 +171,7 @@ fn d01_same_bar_replayed_produces_identical_decision_id() {
 
 #[test]
 fn d02_different_bar_produces_different_decision_id() {
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
 
     let bar_a = bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &flat());
     let bar_b = bar_result_to_decisions(&result, fixed_run_id(), BAR_B_END_TS, &flat());
@@ -195,8 +195,8 @@ fn d03_different_qty_at_same_bar_produces_different_decision_id() {
     // different derived delta from a moving current) still yields a
     // different decision_id; see C1 below for the complementary case (same
     // target, current moves, decision_id must NOT change).
-    let result_10 = live_result(vec![TargetPosition::new("NVDA", 10)]);
-    let result_20 = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result_10 = live_result(vec![TargetPosition::whole("NVDA", 10)]);
+    let result_20 = live_result(vec![TargetPosition::whole("NVDA", 20)]);
 
     let d_10 = bar_result_to_decisions(&result_10, fixed_run_id(), BAR_A_END_TS, &flat());
     let d_20 = bar_result_to_decisions(&result_20, fixed_run_id(), BAR_A_END_TS, &flat());
@@ -207,8 +207,8 @@ fn d03_different_qty_at_same_bar_produces_different_decision_id() {
 
 #[test]
 fn d04_different_symbol_at_same_bar_produces_different_decision_id() {
-    let result_nvda = live_result(vec![TargetPosition::new("NVDA", 20)]);
-    let result_amd = live_result(vec![TargetPosition::new("AMD", 20)]);
+    let result_nvda = live_result(vec![TargetPosition::whole("NVDA", 20)]);
+    let result_amd = live_result(vec![TargetPosition::whole("AMD", 20)]);
 
     let d_nvda = bar_result_to_decisions(&result_nvda, fixed_run_id(), BAR_A_END_TS, &flat());
     let d_amd = bar_result_to_decisions(&result_amd, fixed_run_id(), BAR_A_END_TS, &flat());
@@ -233,7 +233,7 @@ fn at(symbol: &str, qty: i64) -> BTreeMap<String, i64> {
 /// be unchanged even though the derived delta (20, then 10) differs.
 #[test]
 fn c1_same_bar_same_target_current_moves_decision_id_unchanged() {
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
 
     let before_fill = bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &flat());
     let after_partial_fill =
@@ -260,7 +260,7 @@ fn c1_same_bar_same_target_current_moves_decision_id_unchanged() {
 /// disambiguates across real bar boundaries.
 #[test]
 fn c7_different_bar_same_target_is_a_new_intent() {
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
 
     let bar_a = bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &flat());
     let bar_b = bar_result_to_decisions(&result, fixed_run_id(), BAR_B_END_TS, &flat());
@@ -277,8 +277,8 @@ fn c7_different_bar_same_target_is_a_new_intent() {
 #[test]
 fn c10_multi_symbol_one_symbols_current_never_affects_another() {
     let result = live_result(vec![
-        TargetPosition::new("NVDA", 20),
-        TargetPosition::new("AMD", 20),
+        TargetPosition::whole("NVDA", 20),
+        TargetPosition::whole("AMD", 20),
     ]);
 
     // NVDA has a partial fill reflected in current; AMD is untouched (flat).
@@ -361,7 +361,7 @@ fn neg_old_delta_anchored_seed_would_have_produced_two_different_ids() {
 
     // Confirm the NEW (target-anchored) production function actually
     // resolves this ambiguity, contrasting directly with the old formula.
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
     let new_before = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
     let new_after = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &at("NVDA", 10));
     assert_eq!(
@@ -391,7 +391,7 @@ fn bar_facts(bar_end_ts: i64) -> EvaluatedBarFacts {
 
 #[test]
 fn d07_decisions_from_bar_facts_some_matches_bar_result_to_decisions() {
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
     let facts = bar_facts(BAR_A_END_TS);
 
     let via_wrapper = decisions_from_bar_facts(&result, fixed_run_id(), Some(&facts), &flat());
@@ -423,7 +423,7 @@ fn d09_decisions_from_bar_facts_none_with_nonzero_target_fails_closed() {
     // signal = 0 before this seam is ever reached) -- but if it somehow
     // did, STRATEGY-DECISION-IDEMPOTENCY-01 requires refusing to submit any
     // decision rather than falling back to wall-clock-seeded identity.
-    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 20)]);
     let decisions = decisions_from_bar_facts(&result, fixed_run_id(), None, &flat());
     assert!(
         decisions.is_empty(),
@@ -598,7 +598,7 @@ async fn d05_same_bar_reevaluated_twice_submits_exactly_one_outbox_row() {
         let symbol = "NVDA";
         let (st, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
 
-        let result = live_result(vec![TargetPosition::new(symbol, 20)]);
+        let result = live_result(vec![TargetPosition::whole(symbol, 20)]);
 
         // Tick 1: the strategy is evaluated against BAR_A and a decision is
         // submitted, but has not yet resolved (no fill/cancel/reject arrived).
@@ -650,7 +650,7 @@ async fn d06_restart_recomputes_identical_decision_id_and_resubmit_is_a_noop() {
         let symbol = "AMD";
         let (st_before, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
 
-        let result = live_result(vec![TargetPosition::new(symbol, 15)]);
+        let result = live_result(vec![TargetPosition::whole(symbol, 15)]);
 
         // Pre-restart: compute and submit the decision for BAR_A.
         let before = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
@@ -723,7 +723,7 @@ async fn c2_partial_fill_reevaluation_creates_zero_additional_order() {
     mqk_db::run_isolated("c2_economic_idempotency", |pool| async move {
         let symbol = "NVDA";
         let (st, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
-        let result = live_result(vec![TargetPosition::new(symbol, 20)]);
+        let result = live_result(vec![TargetPosition::whole(symbol, 20)]);
 
         // First evaluation: current=0, target=20 -> delta=20, BUY 20 submitted.
         let first = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
@@ -801,7 +801,7 @@ async fn c4_restart_replay_with_partial_fill_creates_zero_additional_order() {
     mqk_db::run_isolated("c4_economic_idempotency", |pool| async move {
         let symbol = "AMD";
         let (st_before, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
-        let result = live_result(vec![TargetPosition::new(symbol, 15)]);
+        let result = live_result(vec![TargetPosition::whole(symbol, 15)]);
 
         let before = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
         let decision_id = before[0].decision_id.clone();
@@ -850,7 +850,7 @@ async fn c9_terminal_failed_attempt_on_same_bar_is_not_retried() {
     mqk_db::run_isolated("c9_economic_idempotency", |pool| async move {
         let symbol = "MSFT";
         let (st, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
-        let result = live_result(vec![TargetPosition::new(symbol, 8)]);
+        let result = live_result(vec![TargetPosition::whole(symbol, 8)]);
 
         let first = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
         let decision_id = first[0].decision_id.clone();

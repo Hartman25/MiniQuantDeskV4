@@ -73,7 +73,7 @@ impl Strategy for SingleSymbolBuyHoldSell {
         } else {
             0
         };
-        StrategyOutput::new(vec![TargetPosition::new(self.symbol, target)])
+        StrategyOutput::new(vec![TargetPosition::whole(self.symbol, target)])
     }
 }
 
@@ -170,7 +170,7 @@ impl Strategy for TwoSymbolBuyHoldSell {
         StrategyOutput::new(
             self.present_symbols
                 .iter()
-                .map(|s| TargetPosition::new(*s, qty_for_this_call))
+                .map(|s| TargetPosition::whole(*s, qty_for_this_call))
                 .collect(),
         )
     }
@@ -237,7 +237,7 @@ impl Strategy for AlwaysLong {
     }
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-        StrategyOutput::new(vec![TargetPosition::new("ES", self.qty)])
+        StrategyOutput::new(vec![TargetPosition::whole("ES", self.qty)])
     }
 }
 

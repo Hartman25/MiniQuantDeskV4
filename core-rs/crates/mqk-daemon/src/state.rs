@@ -3695,13 +3695,8 @@ operator_reconcile_or_repair_required"
         // (Dormant/Failed/spec-read error), since there is no strategy_id to
         // attribute the row to in that case.
         if let Some(ref bar_result) = result {
-            let signal_qty: i64 = bar_result
-                .intents
-                .output
-                .targets
-                .iter()
-                .map(|t| t.qty)
-                .sum();
+            let signal_qty: i64 =
+                crate::decision::sum_target_qty_whole_units(&bar_result.intents.output.targets);
             self.record_signal_evaluation(
                 SignalEvaluationAuthority::Legacy,
                 SignalEvaluationAttempt {
@@ -4653,13 +4648,8 @@ operator_reconcile_or_repair_required"
             // deliberately-corrupted host pool.
             check_selected_host_result_coherence(binding, &bar_result)?;
 
-            let signal_qty: i64 = bar_result
-                .intents
-                .output
-                .targets
-                .iter()
-                .map(|t| t.qty)
-                .sum();
+            let signal_qty: i64 =
+                crate::decision::sum_target_qty_whole_units(&bar_result.intents.output.targets);
             self.record_signal_evaluation(
                 selected_authority,
                 SignalEvaluationAttempt {
@@ -4735,12 +4725,26 @@ operator_reconcile_or_repair_required"
     pub fn clamp_targets_to_per_symbol_position_cap(
         targets: &mut [mqk_strategy::TargetPosition],
         cap: i64,
-    ) -> Vec<(String, i64, i64)> {
+    ) -> Vec<(String, mqk_schemas::QtyMicros, mqk_schemas::QtyMicros)> {
         let mut clamped = Vec::new();
+        // `cap` keeps its historical whole-unit meaning. A cap too large to
+        // represent as QtyMicros cannot be exceeded by any QtyMicros target.
+        let Some(cap_q) = mqk_schemas::QtyMicros::from_whole_units(cap) else {
+            return clamped;
+        };
+        let Some(neg_cap_q) = cap_q.checked_neg() else {
+            return clamped;
+        };
         for t in targets.iter_mut() {
-            if t.qty.abs() > cap {
+            // `checked_abs` is `None` only for i64::MIN, which exceeds any cap.
+            let exceeds = t.qty.checked_abs().map_or(true, |a| a > cap_q);
+            if exceeds {
                 let original_qty = t.qty;
-                t.qty = if t.qty < 0 { -cap } else { cap };
+                t.qty = if t.qty.is_negative() {
+                    neg_cap_q
+                } else {
+                    cap_q
+                };
                 clamped.push((t.symbol.clone(), original_qty, t.qty));
             }
         }
@@ -9081,10 +9085,10 @@ mod phase7b_selected_host_dispatch_tests {
             semantic_fingerprint: format!("test-fixture:{spec_name}:{timeframe_secs}"),
             intents: StrategyIntents {
                 mode: IntentMode::Live,
-                output: StrategyOutput::new(vec![TargetPosition {
-                    symbol: target_symbol.to_string(),
+                output: StrategyOutput::new(vec![TargetPosition::whole(
+                    target_symbol.to_string(),
                     qty,
-                }]),
+                )]),
             },
         }
     }

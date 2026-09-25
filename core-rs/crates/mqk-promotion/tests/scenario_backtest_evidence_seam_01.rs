@@ -63,9 +63,9 @@ impl Strategy for BuyHoldSell {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         if self.bar_idx < self.sell_at_idx {
-            StrategyOutput::new(vec![TargetPosition::new("ES", self.qty)])
+            StrategyOutput::new(vec![TargetPosition::whole("ES", self.qty)])
         } else {
-            StrategyOutput::new(vec![TargetPosition::new("ES", 0)])
+            StrategyOutput::new(vec![TargetPosition::whole("ES", 0)])
         }
     }
 }

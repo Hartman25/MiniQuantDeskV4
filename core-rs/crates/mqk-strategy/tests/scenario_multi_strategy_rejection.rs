@@ -9,10 +9,7 @@ impl Strategy for DummyA {
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         StrategyOutput {
-            targets: vec![TargetPosition {
-                symbol: "SPY".to_string(),
-                qty: 1,
-            }],
+            targets: vec![TargetPosition::whole("SPY".to_string(), 1)],
         }
     }
 }
@@ -25,10 +22,7 @@ impl Strategy for DummyB {
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         StrategyOutput {
-            targets: vec![TargetPosition {
-                symbol: "SPY".to_string(),
-                qty: 2,
-            }],
+            targets: vec![TargetPosition::whole("SPY".to_string(), 2)],
         }
     }
 }

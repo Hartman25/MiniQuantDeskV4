@@ -243,7 +243,7 @@ mod tests {
         }
 
         fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-            StrategyOutput::new(vec![TargetPosition::new("ES", 0)])
+            StrategyOutput::new(vec![TargetPosition::whole("ES", 0)])
         }
     }
 

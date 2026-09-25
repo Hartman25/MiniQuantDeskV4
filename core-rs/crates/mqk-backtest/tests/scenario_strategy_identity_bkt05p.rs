@@ -48,7 +48,7 @@ impl Strategy for NamedStrategy {
     }
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-        StrategyOutput::new(vec![TargetPosition::new("SPY", 1)])
+        StrategyOutput::new(vec![TargetPosition::whole("SPY", 1)])
     }
 }
 

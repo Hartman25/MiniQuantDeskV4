@@ -31,10 +31,7 @@ impl Strategy for BuyHoldExit {
             10
         };
 
-        StrategyOutput::new(vec![TargetPosition {
-            symbol: "TEST".to_string(),
-            qty: target_qty,
-        }])
+        StrategyOutput::new(vec![TargetPosition::whole("TEST".to_string(), target_qty)])
     }
 }
 
@@ -86,4 +83,47 @@ fn determinism_equity_curve_and_fills_are_stable() {
     assert_eq!(report.equity_curve, expected);
 
     assert_eq!(report.last_prices.get("TEST").copied(), Some(1_015_000));
+}
+
+struct FractionalTarget {
+    spec: StrategySpec,
+}
+
+impl Strategy for FractionalTarget {
+    fn spec(&self) -> StrategySpec {
+        self.spec.clone()
+    }
+
+    fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+        StrategyOutput::new(vec![TargetPosition::new(
+            "TEST".to_string(),
+            QtyMicros::new(1_500_000),
+        )])
+    }
+}
+
+/// A3-1: the equities-only backtest engine refuses (halts on) a fractional
+/// target instead of truncating it to a whole share; nothing is ever filled.
+#[test]
+fn a3_1_fractional_target_halts_backtest_and_never_fills() {
+    let bars = mqk_backtest::parse_csv_bars(BARS_CSV).expect("parse fixture csv");
+    let mut cfg = BacktestConfig::test_defaults();
+    cfg.timeframe_secs = 60;
+    cfg.initial_cash_micros = 100_000_000_000;
+    cfg.shadow_mode = false;
+    cfg.integrity_enabled = false;
+
+    let mut engine = BacktestEngine::new(cfg);
+    engine
+        .add_strategy(Box::new(FractionalTarget {
+            spec: StrategySpec::new("a3_1_fractional", 60),
+        }))
+        .unwrap();
+    let report = engine.run(&bars).expect("run backtest");
+    assert!(report.fills.is_empty(), "fractional intent must never fill");
+    assert!(report.halted, "fractional intent must halt the run");
+    assert!(report
+        .halt_reason
+        .as_deref()
+        .is_some_and(|r| r.contains("fractional_intent_qty_unsupported_in_backtest")));
 }

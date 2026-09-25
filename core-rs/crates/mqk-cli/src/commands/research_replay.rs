@@ -625,10 +625,14 @@ fn load_schedule_csv(path: &Path) -> Result<BTreeMap<i64, Vec<TargetPosition>>> 
                 )
             })?
             .timestamp();
-        schedule
-            .entry(end_ts)
-            .or_default()
-            .push(TargetPosition::new(symbol, qty));
+        schedule.entry(end_ts).or_default().push(
+            TargetPosition::from_whole_units(symbol, qty).with_context(|| {
+                format!(
+                    "schedule csv line {}: target_qty overflows QtyMicros",
+                    line_no + 2
+                )
+            })?,
+        );
     }
     Ok(schedule)
 }
@@ -1278,9 +1282,9 @@ mod tests {
             baseline_schedule.insert(
                 *ts,
                 vec![
-                    TargetPosition::new("AAA", 5),
-                    TargetPosition::new("BBB", 0),
-                    TargetPosition::new("CCC", 0),
+                    TargetPosition::whole("AAA", 5),
+                    TargetPosition::whole("BBB", 0),
+                    TargetPosition::whole("CCC", 0),
                 ],
             );
         }
@@ -1292,7 +1296,7 @@ mod tests {
                 let rows: Vec<TargetPosition> = symbols
                     .iter()
                     .filter(|s| **s != excluded)
-                    .map(|s| TargetPosition::new(*s, 5))
+                    .map(|s| TargetPosition::whole(*s, 5))
                     .collect();
                 sched.insert(*ts, rows);
             }

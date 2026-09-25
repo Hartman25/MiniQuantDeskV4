@@ -91,7 +91,7 @@ fn pos(symbol: &str, qty: i64) -> BTreeMap<String, i64> {
 #[test]
 fn b5_s01_sell_from_flat_is_blocked() {
     // target=-10, current=0 → delta=-10 → would sell 10 (short from flat)
-    let result = live_result(vec![TargetPosition::new("AAPL", -10)]);
+    let result = live_result(vec![TargetPosition::whole("AAPL", -10)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
 
     assert!(
@@ -117,7 +117,7 @@ fn b5_s01_sell_from_flat_is_blocked() {
 #[test]
 fn b5_s02_sell_exceeds_holdings_is_blocked() {
     // current=5 MSFT, target=-8 → delta=-13 → qty_to_sell=13 > current(5) → blocked
-    let result = live_result(vec![TargetPosition::new("MSFT", -8)]);
+    let result = live_result(vec![TargetPosition::whole("MSFT", -8)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("MSFT", 5));
 
@@ -141,7 +141,7 @@ fn b5_s02_sell_exceeds_holdings_is_blocked() {
 #[test]
 fn b5_s03_close_long_exactly_is_allowed() {
     // current=7 GOOG, target=0 → delta=-7 → sell 7; 7 <= 7 → guard passes
-    let result = live_result(vec![TargetPosition::new("GOOG", 0)]);
+    let result = live_result(vec![TargetPosition::whole("GOOG", 0)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("GOOG", 7));
 
@@ -166,7 +166,7 @@ fn b5_s03_close_long_exactly_is_allowed() {
 #[test]
 fn b5_s04_partial_reduce_long_is_allowed() {
     // current=10 NVDA, target=4 → delta=-6 → sell 6; 6 <= 10 → passes
-    let result = live_result(vec![TargetPosition::new("NVDA", 4)]);
+    let result = live_result(vec![TargetPosition::whole("NVDA", 4)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("NVDA", 10));
 
@@ -194,7 +194,7 @@ fn b5_s04_partial_reduce_long_is_allowed() {
 #[test]
 fn b5_s05_buy_from_flat_is_unaffected() {
     // current=0, target=+12 → delta=+12 → buy 12; guard does not apply (delta > 0)
-    let result = live_result(vec![TargetPosition::new("TSLA", 12)]);
+    let result = live_result(vec![TargetPosition::whole("TSLA", 12)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
 
     assert_eq!(decisions.len(), 1, "S05: buy from flat → one buy decision");
@@ -217,7 +217,7 @@ fn b5_s05_buy_from_flat_is_unaffected() {
 #[test]
 fn b5_s06_sell_exactly_at_holdings_boundary_is_allowed() {
     // current=3 AMD, target=0 → delta=-3 → qty_to_sell=3 == current(3) → guard: 3 > 3 is false → passes
-    let result = live_result(vec![TargetPosition::new("AMD", 0)]);
+    let result = live_result(vec![TargetPosition::whole("AMD", 0)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("AMD", 3));
 
@@ -247,9 +247,9 @@ fn b5_s07_mixed_bar_guard_is_selective() {
     positions.insert("AAPL".to_string(), 10i64);
 
     let result = live_result(vec![
-        TargetPosition::new("AAPL", 0), // close long: target=0, current=10 → sell 10 → VALID
-        TargetPosition::new("TSLA", -5), // short from flat: target=-5, current=0 → BLOCKED
-        TargetPosition::new("MSFT", 8), // buy from flat: target=+8, current=0 → VALID
+        TargetPosition::whole("AAPL", 0), // close long: target=0, current=10 → sell 10 → VALID
+        TargetPosition::whole("TSLA", -5), // short from flat: target=-5, current=0 → BLOCKED
+        TargetPosition::whole("MSFT", 8), // buy from flat: target=+8, current=0 → VALID
     ]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &positions);
 
@@ -293,7 +293,7 @@ fn b5_s07_mixed_bar_guard_is_selective() {
 fn b5_s08_deepen_existing_short_is_blocked() {
     // current=-5 AMZN (existing short), target=-10 → delta = -10 - (-5) = -5 → sell 5
     // guard: current(-5) <= 0 → blocked
-    let result = live_result(vec![TargetPosition::new("AMZN", -10)]);
+    let result = live_result(vec![TargetPosition::whole("AMZN", -10)]);
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("AMZN", -5));
 

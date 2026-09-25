@@ -163,7 +163,7 @@ fn duplicate_bar_cannot_ambiguously_price_a_pending_fill() {
     let dup_low = flat_bar("AAPL", 900, 100_000_000);
     let dup_high = flat_bar("AAPL", 900, 900_000_000);
 
-    let schedule = || vec![(1, vec![TargetPosition::new("AAPL", 10)])];
+    let schedule = || vec![(1, vec![TargetPosition::whole("AAPL", 10)])];
 
     let bars_low_first = [signal.clone(), dup_low.clone(), dup_high.clone()];
     let bars_high_first = [signal, dup_high, dup_low];
@@ -238,7 +238,7 @@ fn run_corporate_action_adversarial(spy_first: bool) -> mqk_backtest::BacktestRe
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             1,
-            vec![TargetPosition::new("AAPL", 10)],
+            vec![TargetPosition::whole("AAPL", 10)],
         )])))
         .unwrap();
     engine.run(&bars).unwrap()
@@ -351,7 +351,7 @@ fn run_integrity_adversarial(spy_first: bool) -> (mqk_backtest::BacktestReport, 
     engine
         .add_strategy(Box::new(TickScript::new(vec![(
             2,
-            vec![TargetPosition::new("AAPL", 10)],
+            vec![TargetPosition::whole("AAPL", 10)],
         )])))
         .unwrap();
     let report = engine.run(&bars).unwrap();

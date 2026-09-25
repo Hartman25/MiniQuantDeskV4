@@ -21,7 +21,7 @@ impl Strategy for BigBuyOnce {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         match self.bar_idx {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", 1000)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 1000)]),
             _ => StrategyOutput::new(vec![]),
         }
     }

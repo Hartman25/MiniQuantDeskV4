@@ -7,18 +7,23 @@
 
 use std::collections::BTreeMap;
 
+use mqk_schemas::QtyMicros;
+
 use crate::types::{ExecutionDecision, ExecutionIntent, Side, TargetPosition};
 
 /// Convert target positions into execution intents.
 ///
 /// `current_qty` is signed quantity per symbol.
 /// Targets are signed quantity (+long, -short).
+///
+/// All delta arithmetic is checked; an unrepresentable delta fails closed as
+/// `HaltAndDisarm` rather than wrapping or truncating.
 pub fn targets_to_order_intents(
     targets_in: &[TargetPosition],
-    current_qty: &BTreeMap<String, i64>,
+    current_qty: &BTreeMap<String, QtyMicros>,
 ) -> ExecutionDecision {
     // Build target map (symbol -> target qty).
-    let mut targets: BTreeMap<String, i64> = BTreeMap::new();
+    let mut targets: BTreeMap<String, QtyMicros> = BTreeMap::new();
     for t in targets_in {
         targets.insert(t.symbol.clone(), t.qty);
     }
@@ -35,23 +40,29 @@ pub fn targets_to_order_intents(
     let mut intents: Vec<ExecutionIntent> = Vec::new();
 
     for (sym, _) in all {
-        let cur = *current_qty.get(&sym).unwrap_or(&0);
-        let tgt = *targets.get(&sym).unwrap_or(&0);
-        let delta = tgt - cur;
+        let cur = current_qty.get(&sym).copied().unwrap_or(QtyMicros::ZERO);
+        let tgt = targets.get(&sym).copied().unwrap_or(QtyMicros::ZERO);
+        let Some(delta) = tgt.checked_sub(cur) else {
+            return overflow_halt(&sym, "delta subtraction");
+        };
 
-        if delta == 0 {
+        if delta.is_zero() {
             continue;
         }
 
-        let (side, qty): (Side, i64) = if delta > 0 {
+        let (side, qty): (Side, QtyMicros) = if delta.is_positive() {
             (Side::Buy, delta)
         } else {
-            (Side::Sell, -delta)
+            match delta.checked_neg() {
+                Some(q) => (Side::Sell, q),
+                None => return overflow_halt(&sym, "delta negation"),
+            }
         };
 
         // Deterministic client order id.
-        // Must be stable across re-runs for the same inputs.
-        // (Symbol has no ":" today in your system; if it ever does, this is still fine.)
+        // Must be stable across re-runs for the same inputs. `QtyMicros`
+        // Display renders whole quantities as bare integers (`10`), so
+        // whole-unit ids are byte-identical to the prior i64 form.
         let client_order_id = format!("tgt:{}:{:?}:{}", sym, side, qty);
 
         intents.push(ExecutionIntent {
@@ -69,5 +80,11 @@ pub fn targets_to_order_intents(
         ExecutionDecision::Noop
     } else {
         ExecutionDecision::PlaceOrders(intents)
+    }
+}
+
+fn overflow_halt(symbol: &str, what: &str) -> ExecutionDecision {
+    ExecutionDecision::HaltAndDisarm {
+        reason: format!("quantity overflow in target->delta conversion ({what}) for {symbol}"),
     }
 }

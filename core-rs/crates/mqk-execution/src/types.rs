@@ -12,8 +12,8 @@ pub struct StrategyOutput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetPosition {
     pub symbol: String,
-    /// Signed quantity. +long, -short.
-    pub qty: i64,
+    /// Signed actual asset quantity. +long, -short.
+    pub qty: QtyMicros,
 }
 
 impl StrategyOutput {
@@ -25,11 +25,25 @@ impl StrategyOutput {
 
 impl TargetPosition {
     #[inline]
-    pub fn new<S: Into<String>>(symbol: S, qty: i64) -> Self {
+    pub fn new<S: Into<String>>(symbol: S, qty: QtyMicros) -> Self {
         Self {
             symbol: symbol.into(),
             qty,
         }
+    }
+
+    /// Whole-unit constructor (target `1` == 1.0 share). `None` on overflow.
+    #[inline]
+    pub fn from_whole_units<S: Into<String>>(symbol: S, units: i64) -> Option<Self> {
+        QtyMicros::from_whole_units(units).map(|qty| Self::new(symbol, qty))
+    }
+
+    /// Whole-unit constructor for fixtures and pre-validated whole quantities.
+    /// Panics on `i64` overflow of the micros scale (fail closed).
+    #[inline]
+    pub fn whole<S: Into<String>>(symbol: S, units: i64) -> Self {
+        Self::from_whole_units(symbol, units)
+            .expect("whole-unit target quantity overflows QtyMicros")
     }
 }
 
@@ -74,8 +88,8 @@ pub struct ExecutionIntent {
     pub client_order_id: String,
     pub symbol: String,
     pub side: Side,
-    /// Positive quantity.
-    pub qty: i64,
+    /// Positive actual asset quantity.
+    pub qty: QtyMicros,
     /// Optional limit price in integer micros.
     pub limit_price_micros: Option<i64>,
     /// Optional stop price in integer micros.

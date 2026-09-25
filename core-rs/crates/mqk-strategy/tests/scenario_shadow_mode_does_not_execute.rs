@@ -9,10 +9,7 @@ impl Strategy for Dummy {
 
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         StrategyOutput {
-            targets: vec![TargetPosition {
-                symbol: "SPY".to_string(),
-                qty: 1,
-            }],
+            targets: vec![TargetPosition::whole("SPY".to_string(), 1)],
         }
     }
 }
@@ -40,5 +37,11 @@ fn scenario_shadow_mode_does_not_execute() {
     // Strategy still produced outputs (for parity checks/logging).
     assert_eq!(r.intents.output.targets.len(), 1);
     assert_eq!(r.intents.output.targets[0].symbol, "SPY");
-    assert_eq!(r.intents.output.targets[0].qty, 1);
+    assert_eq!(
+        r.intents.output.targets[0]
+            .qty
+            .to_whole_units_checked()
+            .unwrap(),
+        1
+    );
 }

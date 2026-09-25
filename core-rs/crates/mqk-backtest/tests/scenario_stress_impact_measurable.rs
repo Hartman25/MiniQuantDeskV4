@@ -21,8 +21,8 @@ impl Strategy for FlipOnce {
     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
         self.bar_idx += 1;
         match self.bar_idx {
-            1 => StrategyOutput::new(vec![TargetPosition::new("SPY", 100)]),
-            2 => StrategyOutput::new(vec![TargetPosition::new("SPY", 0)]),
+            1 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 100)]),
+            2 => StrategyOutput::new(vec![TargetPosition::whole("SPY", 0)]),
             _ => StrategyOutput::new(vec![]),
         }
     }

@@ -117,7 +117,7 @@ impl Strategy for BuyHoldSell {
         } else {
             0
         };
-        StrategyOutput::new(vec![TargetPosition::new("ES", target)])
+        StrategyOutput::new(vec![TargetPosition::whole("ES", target)])
     }
 }
 

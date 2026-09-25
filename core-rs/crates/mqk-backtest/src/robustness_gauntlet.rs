@@ -1588,8 +1588,8 @@ mod research_oos_replay_integration_tests {
             schedule.insert(
                 ts,
                 vec![
-                    TargetPosition::new("AAA", qty_aaa),
-                    TargetPosition::new("BBB", 0),
+                    TargetPosition::whole("AAA", qty_aaa),
+                    TargetPosition::whole("BBB", 0),
                 ],
             );
         }
@@ -2006,8 +2006,8 @@ mod research_oos_replay_integration_tests {
         schedule.insert(
             DAY,
             vec![
-                TargetPosition::new("AAA", 10),
-                TargetPosition::new("BBB", 0),
+                TargetPosition::whole("AAA", 10),
+                TargetPosition::whole("BBB", 0),
             ],
         );
         // Day 2 (2*DAY) and day 3 (3*DAY) have no entry at all.
@@ -2036,9 +2036,9 @@ mod research_oos_replay_integration_tests {
         schedule.insert(
             DAY,
             vec![
-                TargetPosition::new("AAA", 10),
-                TargetPosition::new("BBB", 5),
-                TargetPosition::new("CCC", 0),
+                TargetPosition::whole("AAA", 10),
+                TargetPosition::whole("BBB", 5),
+                TargetPosition::whole("CCC", 0),
             ],
         );
         // Day 2 (2*DAY) has no entry: three physical rows, two of them
@@ -2073,8 +2073,8 @@ mod research_oos_replay_integration_tests {
         schedule.insert(
             DAY,
             vec![
-                TargetPosition::new("AAA", 10),
-                TargetPosition::new("BBB", 5),
+                TargetPosition::whole("AAA", 10),
+                TargetPosition::whole("BBB", 5),
             ],
         );
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
@@ -2103,13 +2103,16 @@ mod research_oos_replay_integration_tests {
         schedule.insert(
             DAY,
             vec![
-                TargetPosition::new("AAA", 10),
-                TargetPosition::new("BBB", 0),
+                TargetPosition::whole("AAA", 10),
+                TargetPosition::whole("BBB", 0),
             ],
         );
         schedule.insert(
             2 * DAY,
-            vec![TargetPosition::new("AAA", 0), TargetPosition::new("BBB", 0)],
+            vec![
+                TargetPosition::whole("AAA", 0),
+                TargetPosition::whole("BBB", 0),
+            ],
         );
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
         let report =
@@ -2137,7 +2140,7 @@ mod research_oos_replay_integration_tests {
     fn a5_schedule_absent_timestamp_carries_position_forward() {
         let bars = single_symbol_bars(3);
         let mut schedule: BTreeMap<i64, Vec<TargetPosition>> = BTreeMap::new();
-        schedule.insert(DAY, vec![TargetPosition::new("AAA", 10)]);
+        schedule.insert(DAY, vec![TargetPosition::whole("AAA", 10)]);
         // 2*DAY and 3*DAY: no entry.
         let strategy = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
         let report =
@@ -2160,8 +2163,8 @@ mod research_oos_replay_integration_tests {
         schedule_a.insert(
             DAY,
             vec![
-                TargetPosition::new("AAA", 10),
-                TargetPosition::new("BBB", 0),
+                TargetPosition::whole("AAA", 10),
+                TargetPosition::whole("BBB", 0),
             ],
         );
         // day 2 absent for both.
@@ -2190,16 +2193,16 @@ mod research_oos_replay_integration_tests {
         schedule.insert(
             DAY,
             vec![
-                TargetPosition::new("AAA", 10),
-                TargetPosition::new("BBB", 0),
+                TargetPosition::whole("AAA", 10),
+                TargetPosition::whole("BBB", 0),
             ],
         );
         // day 2 absent; day 3 repeats the same complete target (no delta).
         schedule.insert(
             3 * DAY,
             vec![
-                TargetPosition::new("AAA", 10),
-                TargetPosition::new("BBB", 0),
+                TargetPosition::whole("AAA", 10),
+                TargetPosition::whole("BBB", 0),
             ],
         );
         let inner = ResearchOosReplayStrategy::new(semantic(), schedule, &bars);
@@ -2241,7 +2244,7 @@ mod research_oos_replay_integration_tests {
             fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
                 if !self.emitted {
                     self.emitted = true;
-                    StrategyOutput::new(vec![TargetPosition::new("AAA", 10)])
+                    StrategyOutput::new(vec![TargetPosition::whole("AAA", 10)])
                 } else {
                     StrategyOutput::new(Vec::new())
                 }
