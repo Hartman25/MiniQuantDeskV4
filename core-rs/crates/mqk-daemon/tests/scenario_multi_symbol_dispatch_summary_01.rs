@@ -71,9 +71,9 @@ fn target_state(
     PerSymbolTargetState {
         symbol: symbol.to_string(),
         strategy_id: strategy_id.to_string(),
-        current_qty,
-        target_qty,
-        delta: target_qty - current_qty,
+        current_qty: q(current_qty),
+        target_qty: q(target_qty),
+        delta: q(target_qty).checked_sub(q(current_qty)),
         no_order_reason: no_order_reason.to_string(),
         last_decision_id: None,
         last_decision_disposition: None,
@@ -190,9 +190,9 @@ async fn s06_row_fields_copy_qty_delta_and_no_order_reason() {
     let mut rows = request_summary(st).await.per_symbol;
     let row = rows.remove(0);
 
-    assert_eq!(row.current_qty, 3);
-    assert_eq!(row.target_qty, 8);
-    assert_eq!(row.delta, 5);
+    assert_eq!(row.current_qty, Some(3));
+    assert_eq!(row.target_qty, Some(8));
+    assert_eq!(row.delta, Some(5));
     assert_eq!(row.no_order_reason, "already_at_target");
 }
 
@@ -354,4 +354,8 @@ fn s14_patch_10_gui_and_oms_expansion_remains_not_started() {
     assert!(!api_types.contains("pub per_symbol_status"));
     assert!(!api_types.contains("pub per_symbol_exposure"));
     assert!(!routes_rs.contains("/api/v1/gui"));
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

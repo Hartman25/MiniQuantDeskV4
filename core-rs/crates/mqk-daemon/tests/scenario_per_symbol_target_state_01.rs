@@ -24,9 +24,9 @@ fn target_state(
     PerSymbolTargetState {
         symbol: symbol.to_string(),
         strategy_id: strategy_id.to_string(),
-        current_qty,
-        target_qty,
-        delta: target_qty - current_qty,
+        current_qty: q(current_qty),
+        target_qty: q(target_qty),
+        delta: q(target_qty).checked_sub(q(current_qty)),
         no_order_reason: no_order_reason.to_string(),
         last_decision_id: None,
         last_decision_disposition: None,
@@ -82,7 +82,7 @@ async fn t03_same_symbol_with_different_casing_whitespace_overwrites_normalized_
     let rows = st.per_symbol_target_states().await;
     assert_eq!(rows.len(), 1, "T03: normalized symbol key must overwrite");
     assert_eq!(rows[0].symbol, "AAPL");
-    assert_eq!(rows[0].current_qty, 10);
+    assert_eq!(rows[0].current_qty, q(10));
     assert_eq!(rows[0].no_order_reason, "already_at_target");
 }
 
@@ -169,9 +169,9 @@ async fn t06_target_state_stores_already_at_target_with_zero_delta() {
     .await;
 
     let row = st.per_symbol_target_state_for_symbol("aapl").await.unwrap();
-    assert_eq!(row.current_qty, 10);
-    assert_eq!(row.target_qty, 10);
-    assert_eq!(row.delta, 0);
+    assert_eq!(row.current_qty, q(10));
+    assert_eq!(row.target_qty, q(10));
+    assert_eq!(row.delta, Some(q(0)));
     assert_eq!(row.no_order_reason, "already_at_target");
 }
 
@@ -188,7 +188,7 @@ async fn t07_target_state_stores_b5_short_sale_guard_without_decision_outcome() 
     .await;
 
     let row = st.per_symbol_target_state_for_symbol("AAPL").await.unwrap();
-    assert_eq!(row.delta, -5);
+    assert_eq!(row.delta, Some(q(-5)));
     assert_eq!(row.no_order_reason, "b5_short_sale_guard");
     assert_eq!(row.last_decision_id, None);
     assert_eq!(row.last_decision_disposition, None);
@@ -207,7 +207,7 @@ async fn t08_target_state_stores_order_will_be_submitted_before_submission() {
     .await;
 
     let row = st.per_symbol_target_state_for_symbol("AAPL").await.unwrap();
-    assert_eq!(row.delta, 5);
+    assert_eq!(row.delta, Some(q(5)));
     assert_eq!(row.no_order_reason, "order_will_be_submitted");
     assert_eq!(row.last_decision_id, None);
     assert_eq!(row.last_decision_disposition, None);
@@ -269,7 +269,7 @@ async fn t11_max_new_orders_per_tick_reached_can_be_recorded_without_order_submi
     .await;
 
     let row = st.per_symbol_target_state_for_symbol("MSFT").await.unwrap();
-    assert_eq!(row.delta, 0);
+    assert_eq!(row.delta, Some(q(0)));
     assert_eq!(row.no_order_reason, "max_new_orders_per_tick_reached");
     assert_eq!(row.last_decision_id, None);
 }
@@ -288,7 +288,7 @@ async fn t12_symbol_mismatch_skipped_no_target_state_can_be_recorded_honestly() 
 
     let row = st.per_symbol_target_state_for_symbol("TSLA").await.unwrap();
     assert_eq!(row.current_qty, row.target_qty);
-    assert_eq!(row.delta, 0);
+    assert_eq!(row.delta, Some(q(0)));
     assert_eq!(row.no_order_reason, "symbol_mismatch_skipped");
 }
 
@@ -331,4 +331,8 @@ async fn t14_no_db_persistence_or_migration_is_involved() {
         1,
         "T14: in-memory target-state methods must work without DB persistence"
     );
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

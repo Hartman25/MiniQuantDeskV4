@@ -164,7 +164,7 @@ fn make_decision(
         timeframe_secs: 86400,
         strategy_semantic_fingerprint: String::new(),
         side: side.to_string(),
-        qty,
+        qty: mqk_execution::QtyMicros::from_whole_units(qty).unwrap(),
         order_type: "market".to_string(),
         time_in_force: "day".to_string(),
         limit_price: None,

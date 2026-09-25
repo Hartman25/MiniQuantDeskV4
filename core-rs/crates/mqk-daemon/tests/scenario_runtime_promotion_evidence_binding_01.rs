@@ -168,7 +168,7 @@ fn make_decision(
         timeframe_secs,
         strategy_semantic_fingerprint: strategy_semantic_fingerprint.to_string(),
         side: "buy".to_string(),
-        qty: 10,
+        qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         time_in_force: "day".to_string(),
         limit_price: None,
@@ -389,10 +389,10 @@ async fn internal_result_values_do_not_affect_config_identity_check() {
     let (st, _run_id) = state_with_arm_and_run(pool.clone()).await;
 
     let mut d1 = make_decision(&unique_id("dec"), &sid, SYMBOL, TIMEFRAME_SECS, &fp);
-    d1.qty = 1;
+    d1.qty = mqk_execution::QtyMicros::from_whole_units(1).unwrap();
     d1.side = "buy".to_string();
     let mut d2 = make_decision(&unique_id("dec"), &sid, SYMBOL, TIMEFRAME_SECS, &fp);
-    d2.qty = 999;
+    d2.qty = mqk_execution::QtyMicros::from_whole_units(999).unwrap();
     d2.side = "sell".to_string();
 
     let out1 = submit_internal_strategy_decision(&st, d1).await;

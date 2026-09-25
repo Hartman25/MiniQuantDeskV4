@@ -65,7 +65,7 @@ fn fixed_run_id() -> Uuid {
 
 const FIXED_NOW_MICROS: i64 = 1_700_000_000_000_000;
 
-fn flat() -> BTreeMap<String, i64> {
+fn flat() -> BTreeMap<String, mqk_execution::QtyMicros> {
     BTreeMap::new()
 }
 
@@ -462,7 +462,7 @@ fn i13_long_only_strategy_produces_long_open_and_buy_decision() {
         "I13: long-only target → one buy decision"
     );
     assert_eq!(decisions[0].side, "buy");
-    assert_eq!(decisions[0].qty, 5);
+    assert_eq!(decisions[0].qty, q(5));
 }
 
 // ---------------------------------------------------------------------------
@@ -556,4 +556,8 @@ fn i15_order_intent_to_short_entry_intent_mapping() {
         ShortEntryIntent::LongOpen,
         "I15: NoOp"
     );
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

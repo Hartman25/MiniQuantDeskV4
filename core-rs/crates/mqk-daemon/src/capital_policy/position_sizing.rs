@@ -335,7 +335,7 @@ pub fn evaluate_position_sizing_from_env(
 ///    - Otherwise → `NoSizingConstraint` (checked, not denied).
 pub fn evaluate_per_symbol_notional_cap(
     symbol: &str,
-    qty: i64,
+    qty: mqk_schemas::QtyMicros,
     limit_price_micros: Option<i64>,
     cap_usd: Option<f64>,
 ) -> PositionSizingOutcome {
@@ -356,7 +356,10 @@ pub fn evaluate_per_symbol_notional_cap(
     };
 
     let limit_price_usd = limit_price_micros as f64 / 1_000_000.0;
-    let implied_notional = qty as f64 * limit_price_usd;
+    // Whole quantities convert to the exact same f64 as the historical
+    // `qty as f64`; fractional quantities keep their exact decimal value.
+    let qty_units = qty.raw() as f64 / mqk_schemas::QTY_MICROS_SCALE as f64;
+    let implied_notional = qty_units * limit_price_usd;
 
     if implied_notional > cap_usd {
         return PositionSizingOutcome::SizingDeniedPerSymbolCap {
@@ -390,7 +393,7 @@ pub fn per_symbol_max_notional_usd_cap_from_env() -> Option<f64> {
 /// for cap #3's `per_symbol_max_notional_usd` in design doc §6.
 pub fn evaluate_per_symbol_notional_cap_from_env(
     symbol: &str,
-    qty: i64,
+    qty: mqk_schemas::QtyMicros,
     limit_price_micros: Option<i64>,
 ) -> PositionSizingOutcome {
     let cap_usd = per_symbol_max_notional_usd_cap_from_env();

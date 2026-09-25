@@ -66,13 +66,13 @@ fn fixed_run_id() -> Uuid {
 
 const FIXED_NOW_MICROS: i64 = 1_700_000_000_000_000;
 
-fn flat() -> BTreeMap<String, i64> {
+fn flat() -> BTreeMap<String, mqk_execution::QtyMicros> {
     BTreeMap::new()
 }
 
-fn pos(symbol: &str, qty: i64) -> BTreeMap<String, i64> {
+fn pos(symbol: &str, qty: i64) -> BTreeMap<String, mqk_execution::QtyMicros> {
     let mut m = BTreeMap::new();
-    m.insert(symbol.to_string(), qty);
+    m.insert(symbol.to_string(), q(qty));
     m
 }
 
@@ -152,7 +152,7 @@ fn b5_s03_close_long_exactly_is_allowed() {
     );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "S03: negative delta → sell");
-    assert_eq!(d.qty, 7, "S03: sell qty = current holdings (7)");
+    assert_eq!(d.qty, q(7), "S03: sell qty = current holdings (7)");
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +178,8 @@ fn b5_s04_partial_reduce_long_is_allowed() {
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "S04: negative delta → sell");
     assert_eq!(
-        d.qty, 6,
+        d.qty,
+        q(6),
         "S04: sell qty = delta = current(10) - target(4) = 6"
     );
 }
@@ -200,7 +201,7 @@ fn b5_s05_buy_from_flat_is_unaffected() {
     assert_eq!(decisions.len(), 1, "S05: buy from flat → one buy decision");
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "S05: positive delta → buy");
-    assert_eq!(d.qty, 12, "S05: qty = target (delta from flat)");
+    assert_eq!(d.qty, q(12), "S05: qty = target (delta from flat)");
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +229,7 @@ fn b5_s06_sell_exactly_at_holdings_boundary_is_allowed() {
     );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "S06: negative delta → sell");
-    assert_eq!(d.qty, 3, "S06: qty = current holdings (boundary)");
+    assert_eq!(d.qty, q(3), "S06: qty = current holdings (boundary)");
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +245,7 @@ fn b5_s06_sell_exactly_at_holdings_boundary_is_allowed() {
 fn b5_s07_mixed_bar_guard_is_selective() {
     // Position map: AAPL held 10, TSLA flat, MSFT flat.
     let mut positions = BTreeMap::new();
-    positions.insert("AAPL".to_string(), 10i64);
+    positions.insert("AAPL".to_string(), q(10));
 
     let result = live_result(vec![
         TargetPosition::whole("AAPL", 0), // close long: target=0, current=10 → sell 10 → VALID
@@ -275,7 +276,7 @@ fn b5_s07_mixed_bar_guard_is_selective() {
     // Confirm the AAPL sell is correct.
     let aapl = decisions.iter().find(|d| d.symbol == "AAPL").unwrap();
     assert_eq!(aapl.side, "sell", "S07: AAPL → sell to close long");
-    assert_eq!(aapl.qty, 10, "S07: AAPL sell qty = current holdings");
+    assert_eq!(aapl.qty, q(10), "S07: AAPL sell qty = current holdings");
 }
 
 // ---------------------------------------------------------------------------
@@ -306,4 +307,8 @@ fn b5_s08_deepen_existing_short_is_blocked() {
             .map(|d| (&d.symbol, &d.side, d.qty))
             .collect::<Vec<_>>()
     );
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

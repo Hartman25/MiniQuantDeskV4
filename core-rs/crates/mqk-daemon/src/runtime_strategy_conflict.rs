@@ -30,6 +30,7 @@
 //! in `paper_enforced` (or under any other economically-distinct input)
 //! never collide on the same `plan_id`.
 
+use mqk_schemas::QtyMicros;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -220,7 +221,7 @@ pub struct ConflictPolicyOutcome {
 
 fn candidate_inputs(
     decisions: &[PendingDecisionWithBarFacts],
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
 ) -> Vec<ConflictCandidateInput> {
     // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: one canonical symbol index
     // for the current-position lookup, built once, so a decision symbol's
@@ -229,7 +230,7 @@ fn candidate_inputs(
     // grouping, bar-symbol comparison, and evidence inside
     // `mqk_portfolio::conflict_policy` — one normalization, every call
     // site.
-    let canonical_positions: BTreeMap<String, i64> = current_positions
+    let canonical_positions: BTreeMap<String, QtyMicros> = current_positions
         .iter()
         .map(|(sym, qty)| (canonical_symbol(sym), *qty))
         .collect();
@@ -241,7 +242,7 @@ fn candidate_inputs(
             let current_qty = canonical_positions
                 .get(&canonical_symbol(&p.decision.symbol))
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or(QtyMicros::ZERO);
             let (bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts, close_micros) =
                 match &p.bar_facts {
                     Some(f) => (
@@ -259,8 +260,8 @@ fn candidate_inputs(
                 strategy_id: p.decision.strategy_id.clone(),
                 timeframe_secs: p.decision.timeframe_secs,
                 side: p.decision.side.clone(),
-                qty: crate::decision::whole_to_qty(p.decision.qty),
-                current_qty: crate::decision::whole_to_qty(current_qty),
+                qty: p.decision.qty,
+                current_qty,
                 order_type: p.decision.order_type.clone(),
                 time_in_force: p.decision.time_in_force.clone(),
                 limit_price: p.decision.limit_price,
@@ -288,7 +289,7 @@ fn candidate_inputs(
 pub fn apply_conflict_policy(
     ctx: &ConflictPolicyContext,
     decisions: Vec<PendingDecisionWithBarFacts>,
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
 ) -> ConflictPolicyOutcome {
     if ctx.mode == ConflictPolicyMode::Off {
         return ConflictPolicyOutcome {
@@ -393,12 +394,12 @@ fn plan_to_new_db_plan(
                 strategy_id: c.strategy_id.clone(),
                 timeframe_secs: c.timeframe_secs,
                 side: c.side.trim().to_ascii_lowercase(),
-                qty: crate::decision::qty_to_whole(c.qty),
-                current_qty: crate::decision::qty_to_whole(c.current_qty),
+                qty: c.qty,
+                current_qty: c.current_qty,
                 order_type: c.order_type.trim().to_ascii_lowercase(),
                 time_in_force: c.time_in_force.trim().to_ascii_lowercase(),
                 limit_price: c.limit_price,
-                proposed_target_qty: c.proposed_target_qty.map(crate::decision::qty_to_whole),
+                proposed_target_qty: c.proposed_target_qty,
                 bar_present,
                 bar_symbol: c.bar_symbol.clone(),
                 bar_strategy_id: c.bar_strategy_id.clone(),
@@ -514,7 +515,7 @@ pub async fn gather_and_resolve(
     now_micros: i64,
     market_date: String,
     decisions: Vec<PendingDecisionWithBarFacts>,
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
 ) -> ConflictPolicyOutcome {
     let resolution = crate::runtime_strategy_conflict_mode::resolve_conflict_policy_mode_from_env();
     let broker_kind = crate::state::BrokerKind::parse(state_arc.adapter_id());
@@ -554,6 +555,11 @@ pub async fn gather_and_resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-unit test quantity (`1` == one share == `QTY_MICROS_SCALE` raw).
+    fn q(units: i64) -> mqk_schemas::QtyMicros {
+        mqk_schemas::QtyMicros::from_whole_units(units).unwrap()
+    }
     use crate::decision::InternalStrategyDecision;
     use crate::state::EvaluatedBarFacts;
 
@@ -571,7 +577,7 @@ mod tests {
             timeframe_secs: 300,
             strategy_semantic_fingerprint: String::new(),
             side: side.to_string(),
-            qty,
+            qty: q(qty),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -657,7 +663,7 @@ mod tests {
     #[test]
     fn shadow_mode_returns_exact_original_vector_in_exact_original_order() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![
             bound_buy("AAPL", "s1", 10, 1_000),
             bound_buy("AAPL", "s2", 20, 2_000), // conflicting increase target
@@ -670,7 +676,7 @@ mod tests {
     #[test]
     fn paper_enforced_emits_at_most_one_decision_per_symbol() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![
             bound_buy("AAPL", "s1", 10, 1_000),
             bound_buy("AAPL", "s2", 10, 2_000), // equal target -> consensus
@@ -688,7 +694,7 @@ mod tests {
     #[test]
     fn paper_enforced_never_resurrects_a_refused_increase() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![
             bound_buy("AAPL", "s1", 10, 1_000),
             bound_buy("AAPL", "s2", 20, 2_000), // differing targets -> refused
@@ -704,7 +710,7 @@ mod tests {
     #[test]
     fn paper_enforced_preserves_a_selected_reduction_downstream() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 20i64);
+        current.insert("AAPL".to_string(), q(20));
         let decisions = vec![
             bound_buy("AAPL", "s1", 10, 1_000),
             bound_sell("AAPL", "s2", 5, 2_000),
@@ -718,8 +724,8 @@ mod tests {
     #[test]
     fn unrelated_symbol_unaffected_by_a_refused_conflict() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
-        current.insert("MSFT".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
+        current.insert("MSFT".to_string(), q(0));
         let decisions = vec![
             bound_buy("AAPL", "s1", 10, 1_000),
             bound_buy("AAPL", "s2", 20, 2_000), // refused
@@ -736,7 +742,7 @@ mod tests {
         // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: a sell with no bar
         // facts is now structurally invalid, end to end.
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 20i64);
+        current.insert("AAPL".to_string(), q(20));
         let decisions = vec![unbound_sell("AAPL", "s1", 5)];
         let out =
             apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
@@ -748,7 +754,7 @@ mod tests {
         // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: "aapl" must read the
         // exact same current quantity as "AAPL" -- never zero/flat.
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 20i64);
+        current.insert("AAPL".to_string(), q(20));
         let decisions = vec![bound_sell("aapl", "s1", 5, 1_000)];
         let out =
             apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
@@ -762,8 +768,8 @@ mod tests {
     #[test]
     fn cycle_id_is_deterministic_and_order_independent() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
-        current.insert("MSFT".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
+        current.insert("MSFT".to_string(), q(0));
         let forward = vec![
             bound_buy("AAPL", "s1", 10, 1_000),
             bound_buy("MSFT", "s1", 5, 2_000),
@@ -783,7 +789,7 @@ mod tests {
     #[test]
     fn same_economic_cycle_replayed_on_a_later_tick_yields_the_same_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let mut ctx1 = ctx(ConflictPolicyMode::Shadow);
         ctx1.now_micros = 1;
         let mut ctx2 = ctx(ConflictPolicyMode::Shadow);
@@ -801,7 +807,7 @@ mod tests {
     #[test]
     fn different_strategy_changes_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let d1 = vec![bound_buy("AAPL", "s1", 10, 1_000)];
         let d2 = vec![bound_buy("AAPL", "s2", 10, 1_000)];
         let out1 = apply_conflict_policy(&ctx(ConflictPolicyMode::Shadow), d1, &current);
@@ -815,7 +821,7 @@ mod tests {
     #[test]
     fn different_bar_changes_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let d1 = vec![bound_buy("AAPL", "s1", 10, 1_000)];
         let d2 = vec![bound_buy("AAPL", "s1", 10, 2_000)];
         let out1 = apply_conflict_policy(&ctx(ConflictPolicyMode::Shadow), d1, &current);
@@ -829,7 +835,7 @@ mod tests {
     #[test]
     fn different_target_changes_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let d1 = vec![bound_buy("AAPL", "s1", 10, 1_000)];
         let d2 = vec![bound_buy("AAPL", "s1", 11, 1_000)];
         let out1 = apply_conflict_policy(&ctx(ConflictPolicyMode::Shadow), d1, &current);
@@ -843,9 +849,9 @@ mod tests {
     #[test]
     fn different_current_position_changes_cycle_id() {
         let mut current1 = BTreeMap::new();
-        current1.insert("AAPL".to_string(), 0i64);
+        current1.insert("AAPL".to_string(), q(0));
         let mut current2 = BTreeMap::new();
-        current2.insert("AAPL".to_string(), 5i64);
+        current2.insert("AAPL".to_string(), q(5));
         let d1 = vec![bound_buy("AAPL", "s1", 10, 1_000)];
         let d2 = vec![bound_buy("AAPL", "s1", 10, 1_000)];
         let out1 = apply_conflict_policy(&ctx(ConflictPolicyMode::Shadow), d1, &current1);
@@ -859,8 +865,8 @@ mod tests {
     #[test]
     fn different_symbol_set_changes_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
-        current.insert("MSFT".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
+        current.insert("MSFT".to_string(), q(0));
         let d1 = vec![bound_buy("AAPL", "s1", 10, 1_000)];
         let d2 = vec![bound_buy("MSFT", "s1", 10, 1_000)];
         let out1 = apply_conflict_policy(&ctx(ConflictPolicyMode::Shadow), d1, &current);
@@ -881,8 +887,8 @@ mod tests {
             strategy_id: "s1".to_string(),
             timeframe_secs: 300,
             side: "buy".to_string(),
-            qty: crate::decision::whole_to_qty(10),
-            current_qty: crate::decision::whole_to_qty(0),
+            qty: q(10),
+            current_qty: q(0),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -920,8 +926,8 @@ mod tests {
             strategy_id: "s1".to_string(),
             timeframe_secs: 300,
             side: "buy".to_string(),
-            qty: crate::decision::whole_to_qty(10),
-            current_qty: crate::decision::whole_to_qty(0),
+            qty: q(10),
+            current_qty: q(0),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -1092,8 +1098,8 @@ mod tests {
             strategy_id: "s1".to_string(),
             timeframe_secs: 300,
             side: "buy".to_string(),
-            qty: crate::decision::whole_to_qty(5),
-            current_qty: crate::decision::whole_to_qty(0),
+            qty: q(5),
+            current_qty: q(0),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -1139,8 +1145,8 @@ mod tests {
             strategy_id: "s1".to_string(),
             timeframe_secs,
             side: "buy".to_string(),
-            qty: crate::decision::whole_to_qty(10),
-            current_qty: crate::decision::whole_to_qty(0),
+            qty: q(10),
+            current_qty: q(0),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -1208,7 +1214,7 @@ mod tests {
     #[test]
     fn r1b_both_real_strategy_proposals_reach_bundle6_and_resolve_deterministically() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 10i64);
+        current.insert("AAPL".to_string(), q(10));
         let decisions = vec![
             bound_buy("AAPL", "intraday_scalper", 5, 1_000),
             bound_sell("AAPL", "intraday_short_scalper", 3, 2_000),
@@ -1233,7 +1239,7 @@ mod tests {
     #[test]
     fn r1b_reversed_real_strategy_input_order_yields_same_result() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 10i64);
+        current.insert("AAPL".to_string(), q(10));
         let forward = vec![
             bound_buy("AAPL", "intraday_scalper", 5, 1_000),
             bound_sell("AAPL", "intraday_short_scalper", 3, 2_000),
@@ -1266,5 +1272,77 @@ mod tests {
             out_forward.decisions[0].decision.qty,
             out_reversed.decisions[0].decision.qty
         );
+    }
+
+    // -----------------------------------------------------------------
+    // CUTOVER-1D-A3-4: exact fractional quantity end to end
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a3_4_fractional_conflict_candidate_and_identity() {
+        let qm = mqk_schemas::QtyMicros::new;
+        let mk = |raw: i64| {
+            let mut p = bound_buy("BTC/USD", "s1", 1, 1_000);
+            p.decision.qty = qm(raw);
+            p
+        };
+        let mut current = BTreeMap::new();
+        current.insert("BTC/USD".to_string(), qm(250));
+
+        let out = apply_conflict_policy(&ctx(ConflictPolicyMode::Shadow), vec![mk(100)], &current);
+        let plan = out.plan.expect("plan");
+        let row = &plan.symbol_results[0].candidates[0];
+        assert_eq!(row.qty, qm(100));
+        assert_eq!(row.current_qty, qm(250));
+        assert_eq!(row.proposed_target_qty, Some(qm(350)));
+        assert_eq!(plan.symbol_results[0].selected_ordinal, Some(0));
+
+        // DB projection carries the exact QtyMicros (no whole-unit narrowing).
+        let db_plan = plan_to_new_db_plan(
+            &plan,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            run_id(),
+            chrono::Utc::now(),
+        )
+        .expect("db plan");
+        assert_eq!(db_plan.candidates[0].qty, qm(100));
+        assert_eq!(db_plan.candidates[0].current_qty, qm(250));
+        assert_eq!(db_plan.candidates[0].proposed_target_qty, Some(qm(350)));
+
+        // Cycle identity distinguishes fractional quantities...
+        let id = |raw: i64| {
+            let inputs = candidate_inputs(&[mk(raw)], &current);
+            compute_conflict_cycle_id(
+                run_id(),
+                "2026-07-26",
+                ConflictPolicyMode::Shadow,
+                ConflictPolicyMode::Shadow,
+                &inputs,
+            )
+        };
+        assert_eq!(id(100), id(100), "deterministic");
+        assert_ne!(
+            id(100),
+            id(101),
+            "divergent fractional qty changes identity"
+        );
+    }
+
+    #[test]
+    fn a3_4_whole_equity_conflict_identity_seed_is_byte_identical_to_the_i64_form() {
+        // The seed renders quantities via `Display`; a whole QtyMicros must
+        // render exactly like the historical i64 (`10`, `-5`, `0`).
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), q(3));
+        let inputs = candidate_inputs(&[bound_buy("AAPL", "s1", 10, 1_000)], &current);
+        let seed = candidate_identity_seed(&inputs[0]);
+        assert!(
+            seed.contains(&lp("10")) && seed.contains(&lp("3")),
+            "{seed}"
+        );
+        assert_eq!(inputs[0].qty.to_string(), "10");
+        assert_eq!(q(-5).to_string(), "-5");
+        assert_eq!(q(0).to_string(), "0");
     }
 }

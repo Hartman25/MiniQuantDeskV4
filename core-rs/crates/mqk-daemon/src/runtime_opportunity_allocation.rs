@@ -68,6 +68,7 @@
 //!   route enforces, with no local mirror and no fallback to an older
 //!   snapshot on failure.
 
+use mqk_schemas::QtyMicros;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
@@ -236,7 +237,7 @@ pub struct RuntimeOpportunityAllocationOutcome {
 /// only the first successful enqueue ever lands.
 fn rebuild_decision_with_qty(
     original: &InternalStrategyDecision,
-    new_qty: i64,
+    new_qty: QtyMicros,
 ) -> InternalStrategyDecision {
     InternalStrategyDecision {
         decision_id: original.decision_id.clone(),
@@ -252,21 +253,35 @@ fn rebuild_decision_with_qty(
     }
 }
 
+/// Granularity (raw micros) an allocation is floored to: the coarsest power
+/// of ten (`QTY_MICROS_SCALE` down to `1`) that divides both the candidate's
+/// current and target quantity. Whole-unit (Equity) candidates always floor to
+/// whole shares, unchanged; a fractional candidate is allocated in units no
+/// finer than its own. This never consults a venue increment or minimum.
+pub(crate) fn allocation_quantity_floor_micros(current: QtyMicros, target: QtyMicros) -> i64 {
+    let mut floor = mqk_schemas::QTY_MICROS_SCALE;
+    while floor > 1 && (current.raw() % floor != 0 || target.raw() % floor != 0) {
+        floor /= 10;
+    }
+    floor
+}
+
 fn refused_candidate_result(
     d: &InternalStrategyDecision,
-    current: i64,
+    current: QtyMicros,
     reason: &str,
     evaluation_price_micros: i64,
 ) -> AllocationCandidateResult {
+    let strategy_target_qty = current.checked_add(d.qty).unwrap_or(current);
     AllocationCandidateResult {
         symbol: d.symbol.clone(),
         strategy_id: d.strategy_id.clone(),
         input_score: 0.0,
         target_weight: 0.0,
-        current_qty: crate::decision::whole_to_qty(current),
-        strategy_target_qty: crate::decision::whole_to_qty(current.saturating_add(d.qty)),
-        allocation_target_qty: crate::decision::whole_to_qty(current),
-        final_target_qty: crate::decision::whole_to_qty(current),
+        current_qty: current,
+        strategy_target_qty,
+        allocation_target_qty: current,
+        final_target_qty: current,
         disposition: AllocationDisposition::RefusedFailClosed,
         reason_code: reason.to_string(),
         evaluation_price_micros,
@@ -276,7 +291,7 @@ fn refused_candidate_result(
 fn fail_closed_plan(
     context: AllocationCycleContext,
     buy_decisions: &[InternalStrategyDecision],
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
     reason: &str,
 ) -> AllocationCycleResult {
     // Reuse the pure cycle model's own fail-closed shape by feeding it
@@ -286,15 +301,19 @@ fn fail_closed_plan(
     let candidates: Vec<AllocationCandidateInput> = buy_decisions
         .iter()
         .map(|d| {
-            let current = current_positions.get(&d.symbol).copied().unwrap_or(0);
+            let current = current_positions
+                .get(&d.symbol)
+                .copied()
+                .unwrap_or(QtyMicros::ZERO);
+            let target = current.checked_add(d.qty).unwrap_or(current);
             AllocationCandidateInput {
                 symbol: d.symbol.clone(),
                 strategy_id: d.strategy_id.clone(),
                 score: 0.0,
                 evaluation_price_micros: 0,
-                current_qty: crate::decision::whole_to_qty(current),
-                strategy_target_qty: crate::decision::whole_to_qty(current.saturating_add(d.qty)),
-                quantity_floor_micros: mqk_schemas::QTY_MICROS_SCALE,
+                current_qty: current,
+                strategy_target_qty: target,
+                quantity_floor_micros: allocation_quantity_floor_micros(current, target),
             }
         })
         .collect();
@@ -317,7 +336,7 @@ fn fail_closed_plan(
 pub fn apply_runtime_opportunity_allocation(
     ctx: &RuntimeOpportunityAllocationContext,
     decisions: Vec<PendingDecisionWithBarFacts>,
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
 ) -> RuntimeOpportunityAllocationOutcome {
     if ctx.mode == RuntimeOpportunityAllocationMode::Off {
         return RuntimeOpportunityAllocationOutcome {
@@ -460,7 +479,10 @@ pub fn apply_runtime_opportunity_allocation(
     let mut candidates: Vec<AllocationCandidateInput> = Vec::new();
     let mut refused_individually: Vec<AllocationCandidateResult> = Vec::new();
     for d in &buy_decisions {
-        let current = current_positions.get(&d.symbol).copied().unwrap_or(0);
+        let current = current_positions
+            .get(&d.symbol)
+            .copied()
+            .unwrap_or(QtyMicros::ZERO);
         let Some(close_micros) = close_micros_by_symbol.get(&d.symbol).copied() else {
             // Phase A fail-closed rule: missing/mismatched bar facts refuse
             // only this candidate -- sibling candidates and every sell/reduce
@@ -478,15 +500,23 @@ pub fn apply_runtime_opportunity_allocation(
             .iter()
             .find(|c| c.symbol == d.symbol)
         {
-            Some(oc) => candidates.push(AllocationCandidateInput {
-                symbol: d.symbol.clone(),
-                strategy_id: d.strategy_id.clone(),
-                score: oc.score,
-                evaluation_price_micros: close_micros,
-                current_qty: crate::decision::whole_to_qty(current),
-                strategy_target_qty: crate::decision::whole_to_qty(current.saturating_add(d.qty)),
-                quantity_floor_micros: mqk_schemas::QTY_MICROS_SCALE,
-            }),
+            Some(oc) => match current.checked_add(d.qty) {
+                Some(target) => candidates.push(AllocationCandidateInput {
+                    symbol: d.symbol.clone(),
+                    strategy_id: d.strategy_id.clone(),
+                    score: oc.score,
+                    evaluation_price_micros: close_micros,
+                    current_qty: current,
+                    strategy_target_qty: target,
+                    quantity_floor_micros: allocation_quantity_floor_micros(current, target),
+                }),
+                None => refused_individually.push(refused_candidate_result(
+                    d,
+                    current,
+                    mqk_portfolio::cycle::REASON_QUANTITY_ARITHMETIC_OVERFLOW,
+                    close_micros,
+                )),
+            },
             None => refused_individually.push(refused_candidate_result(
                 d,
                 current,
@@ -521,11 +551,8 @@ pub fn apply_runtime_opportunity_allocation(
                 };
                 // `buy_delta` is `None` only on checked-subtraction overflow:
                 // treated as no trade (fail closed).
-                let delta = result
-                    .buy_delta()
-                    .map(crate::decision::qty_to_whole)
-                    .unwrap_or(0);
-                if delta > 0 {
+                let delta = result.buy_delta().unwrap_or(QtyMicros::ZERO);
+                if delta.is_positive() {
                     // Blocker 1: only `decision` (qty/decision_id) is
                     // rebuilt — `bar_facts` and `dynamic_selection_provenance`
                     // are copied from the original envelope unchanged.
@@ -591,10 +618,10 @@ fn plan_to_new_db_plan(
             strategy_id: c.strategy_id.clone(),
             input_score_micros: mqk_db::scale_to_micros(c.input_score),
             target_weight_micros: mqk_db::scale_to_micros(c.target_weight),
-            current_qty: crate::decision::qty_to_whole(c.current_qty),
-            strategy_target_qty: crate::decision::qty_to_whole(c.strategy_target_qty),
-            allocation_target_qty: crate::decision::qty_to_whole(c.allocation_target_qty),
-            final_target_qty: crate::decision::qty_to_whole(c.final_target_qty),
+            current_qty: c.current_qty,
+            strategy_target_qty: c.strategy_target_qty,
+            allocation_target_qty: c.allocation_target_qty,
+            final_target_qty: c.final_target_qty,
             disposition: disposition_str(c.disposition).to_string(),
             reason_code: c.reason_code.clone(),
             evaluation_price_micros: c.evaluation_price_micros,
@@ -732,7 +759,7 @@ pub async fn gather_and_apply(
     timeframe: String,
     per_candidate_timeframe_label: Option<BTreeMap<String, String>>,
     decisions: Vec<PendingDecisionWithBarFacts>,
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
 ) -> RuntimeOpportunityAllocationOutcome {
     let resolution =
         crate::runtime_opportunity_mode::resolve_runtime_opportunity_allocation_mode_from_env();
@@ -801,6 +828,11 @@ pub async fn gather_and_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-unit test quantity (`1` == one share == `QTY_MICROS_SCALE` raw).
+    fn q(units: i64) -> mqk_schemas::QtyMicros {
+        mqk_schemas::QtyMicros::from_whole_units(units).unwrap()
+    }
     use crate::runtime_opportunity_artifact::LoadedRuntimeOpportunityCandidate;
 
     fn run_id() -> Uuid {
@@ -817,7 +849,7 @@ mod tests {
             timeframe_secs: 300,
             strategy_semantic_fingerprint: String::new(),
             side: "buy".to_string(),
-            qty,
+            qty: q(qty),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -832,7 +864,7 @@ mod tests {
             timeframe_secs: 300,
             strategy_semantic_fingerprint: String::new(),
             side: "sell".to_string(),
-            qty,
+            qty: q(qty),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -944,7 +976,7 @@ mod tests {
         );
         assert!(out.plan.is_none());
         assert_eq!(out.decisions.len(), 2);
-        assert_eq!(out.decisions[0].decision.qty, 10);
+        assert_eq!(out.decisions[0].decision.qty, q(10));
     }
 
     #[test]
@@ -966,7 +998,7 @@ mod tests {
             RuntimeOpportunityAllocationMode::PaperEnforced,
         ] {
             let mut current = BTreeMap::new();
-            current.insert("AAPL".to_string(), 0i64);
+            current.insert("AAPL".to_string(), q(0));
             let decisions = vec![
                 bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000),
                 unbound(sell("TLT", "intraday_scalper", 3)),
@@ -975,7 +1007,7 @@ mod tests {
             assert!(
                 out.decisions.iter().any(|d| d.decision.symbol == "TLT"
                     && d.decision.side == "sell"
-                    && d.decision.qty == 3),
+                    && d.decision.qty == q(3)),
                 "sell must pass through unchanged in {mode:?}"
             );
         }
@@ -984,7 +1016,7 @@ mod tests {
     #[test]
     fn shadow_mode_produces_plan_but_leaves_buy_qty_unchanged() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![bound_buy(
             "AAPL",
             "intraday_scalper",
@@ -1000,7 +1032,8 @@ mod tests {
         assert!(out.plan.is_some());
         assert_eq!(out.decisions.len(), 1);
         assert_eq!(
-            out.decisions[0].decision.qty, 10,
+            out.decisions[0].decision.qty,
+            q(10),
             "shadow must not alter submitted qty"
         );
     }
@@ -1008,7 +1041,7 @@ mod tests {
     #[test]
     fn paper_enforced_clamps_buy_to_allocator_output() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         // Expensive price -> allocator's 20% single-position cap on $100k
         // equity ($20,000) funds far fewer shares than the strategy's
         // target of 10,000.
@@ -1026,11 +1059,11 @@ mod tests {
         );
         assert_eq!(out.decisions.len(), 1);
         assert!(
-            out.decisions[0].decision.qty < 10_000,
+            out.decisions[0].decision.qty < q(10_000),
             "expected clamp, got qty={}",
             out.decisions[0].decision.qty
         );
-        assert!(out.decisions[0].decision.qty > 0);
+        assert!(out.decisions[0].decision.qty.is_positive());
     }
 
     // -----------------------------------------------------------------
@@ -1044,7 +1077,7 @@ mod tests {
     #[test]
     fn c6_paper_enforced_clamp_preserves_original_decision_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let original = bound_buy("AAPL", "intraday_scalper", 10_000, 1_000, 10_000_000_000);
         let original_decision_id = original.decision.decision_id.clone();
         let out = apply_runtime_opportunity_allocation(
@@ -1054,7 +1087,7 @@ mod tests {
         );
         assert_eq!(out.decisions.len(), 1);
         assert!(
-            out.decisions[0].decision.qty < 10_000,
+            out.decisions[0].decision.qty < q(10_000),
             "precondition: this must actually be a clamp, not a pass-through"
         );
         assert_eq!(
@@ -1076,7 +1109,7 @@ mod tests {
     #[test]
     fn c5_same_cycle_two_independent_ticks_yield_identical_rebuilt_decision_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let tick1 = bound_buy("AAPL", "intraday_scalper", 10_000, 1_000, 10_000_000_000);
         let tick2 = bound_buy("AAPL", "intraday_scalper", 10_000, 1_000, 10_000_000_000);
         let ctx_tick1 = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
@@ -1133,7 +1166,7 @@ mod tests {
     #[test]
     fn shadow_mode_preserves_provenance_byte_for_byte() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let p = provenance(
             run_id(),
             Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-plan-id"),
@@ -1159,7 +1192,7 @@ mod tests {
     #[test]
     fn paper_enforced_clamp_preserves_provenance_unchanged() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let p = provenance(
             run_id(),
             Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-plan-id"),
@@ -1181,7 +1214,10 @@ mod tests {
             &current,
         );
         assert_eq!(out.decisions.len(), 1);
-        assert!(out.decisions[0].decision.qty < 10_000, "expected a clamp");
+        assert!(
+            out.decisions[0].decision.qty < q(10_000),
+            "expected a clamp"
+        );
         assert_eq!(
             out.decisions[0].dynamic_selection_provenance,
             Some(p),
@@ -1192,7 +1228,7 @@ mod tests {
     #[test]
     fn off_mode_preserves_provenance_untouched() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let p = provenance(
             run_id(),
             Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-plan-id"),
@@ -1217,8 +1253,8 @@ mod tests {
         let mut ctx = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
         ctx.runtime_ceiling = 1;
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
-        current.insert("MSFT".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
+        current.insert("MSFT".to_string(), q(0));
         let decisions = vec![
             bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000),
             bound_buy("MSFT", "intraday_scalper", 10, 1_000, 100_000_000),
@@ -1267,7 +1303,7 @@ mod tests {
     #[test]
     fn symbol_not_in_opportunity_set_is_refused_not_fabricated() {
         let mut current = BTreeMap::new();
-        current.insert("ZZZZ".to_string(), 0i64);
+        current.insert("ZZZZ".to_string(), q(0));
         let decisions = vec![bound_buy(
             "ZZZZ",
             "intraday_scalper",
@@ -1292,8 +1328,8 @@ mod tests {
         // both under one cycle_id (proving a single compute_allocation_cycle
         // call handled the whole batch, not one call per symbol).
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
-        current.insert("MSFT".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
+        current.insert("MSFT".to_string(), q(0));
         let decisions = vec![
             bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000),
             bound_buy("MSFT", "intraday_scalper", 10, 1_000, 100_000_000),
@@ -1312,7 +1348,7 @@ mod tests {
     #[test]
     fn buy_uses_exact_close_carried_from_bar_facts_not_a_different_price() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         // A deliberately distinctive price so we can prove it (and only it)
         // reached the allocator.
         let decisions = vec![bound_buy(
@@ -1335,8 +1371,8 @@ mod tests {
     #[test]
     fn missing_bar_facts_refuses_only_that_buy_not_siblings() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
-        current.insert("MSFT".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
+        current.insert("MSFT".to_string(), q(0));
         let decisions = vec![
             unbound(buy("AAPL", "intraday_scalper", 10)), // no bar facts at all
             bound_buy("MSFT", "intraday_scalper", 10, 1_000, 100_000_000),
@@ -1358,7 +1394,7 @@ mod tests {
     #[test]
     fn mismatched_symbol_in_bar_facts_is_refused() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let mut pending = bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000);
         // Corrupt the bound facts to name a different symbol than the
         // decision they're paired with.
@@ -1377,7 +1413,7 @@ mod tests {
     #[test]
     fn mismatched_strategy_id_in_bar_facts_is_refused() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let mut pending = bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000);
         pending.bar_facts.as_mut().unwrap().strategy_id = "other_strategy".to_string();
         let out = apply_runtime_opportunity_allocation(
@@ -1391,7 +1427,7 @@ mod tests {
     #[test]
     fn mismatched_timeframe_in_bar_facts_is_refused() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let mut pending = bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000);
         pending.bar_facts.as_mut().unwrap().timeframe = "1h".to_string();
         let out = apply_runtime_opportunity_allocation(
@@ -1405,7 +1441,7 @@ mod tests {
     #[test]
     fn sell_reduce_unaffected_by_missing_bar_facts() {
         let mut current = BTreeMap::new();
-        current.insert("TLT".to_string(), 10i64);
+        current.insert("TLT".to_string(), q(10));
         let decisions = vec![unbound(sell("TLT", "intraday_scalper", 3))];
         let out = apply_runtime_opportunity_allocation(
             &base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced),
@@ -1457,7 +1493,7 @@ mod tests {
         // `base_ctx()` calls (simulating two separate ticks) to prove it end
         // to end.
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let ctx1 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         let ctx2 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         let decisions1 = vec![bound_buy(
@@ -1485,7 +1521,7 @@ mod tests {
     #[test]
     fn different_bar_changes_the_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions1 = vec![bound_buy(
             "AAPL",
             "intraday_scalper",
@@ -1519,7 +1555,7 @@ mod tests {
     #[test]
     fn different_artifact_changes_the_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let ctx1 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         let mut ctx2 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         ctx2.opportunity_set.as_mut().unwrap().artifact_id = "artifact-2".to_string();
@@ -1548,7 +1584,7 @@ mod tests {
     #[test]
     fn different_strategy_assignment_changes_the_cycle_id() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let mut ctx = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         ctx.opportunity_set = Some(opportunity_set(vec![
             ("AAPL", "strategy_a", 0.9),
@@ -1570,7 +1606,7 @@ mod tests {
         // to the exact same (symbol, strategy_id, bar_end_ts) tuple -- an
         // anomaly the cycle must refuse wholesale rather than pick one.
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![
             bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000),
             bound_buy("AAPL", "intraday_scalper", 5, 1_000, 100_000_000),
@@ -1595,7 +1631,7 @@ mod tests {
         // `ON CONFLICT (plan_id) DO NOTHING` makes the second insert a
         // genuine no-op for the same economic cycle.
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let ctx_tick1 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         let ctx_tick2 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         let d1 = vec![bound_buy(
@@ -1647,7 +1683,7 @@ mod tests {
     #[test]
     fn plan_to_new_db_plan_converts_valid_plan() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![bound_buy(
             "AAPL",
             "intraday_scalper",
@@ -1721,7 +1757,7 @@ mod tests {
     #[test]
     fn none_per_candidate_map_preserves_original_single_timeframe_admission() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![PendingDecisionWithBarFacts {
             decision: buy("AAPL", "intraday_scalper", 10),
             // facts.timeframe ("1H") differs from ctx.timeframe ("5m") --
@@ -1759,8 +1795,8 @@ mod tests {
     #[test]
     fn mixed_timeframe_batch_admits_each_candidate_against_its_own_timeframe() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
-        current.insert("MSFT".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
+        current.insert("MSFT".to_string(), q(0));
         let decisions = vec![
             PendingDecisionWithBarFacts {
                 decision: buy("AAPL", "intraday_scalper", 10),
@@ -1814,7 +1850,7 @@ mod tests {
     #[test]
     fn mixed_timeframe_map_still_refuses_a_genuinely_wrong_candidate_timeframe() {
         let mut current = BTreeMap::new();
-        current.insert("AAPL".to_string(), 0i64);
+        current.insert("AAPL".to_string(), q(0));
         let decisions = vec![PendingDecisionWithBarFacts {
             decision: buy("AAPL", "intraday_scalper", 10),
             // facts claim "1H" but the binding's own expected label is "5m".
@@ -1834,5 +1870,77 @@ mod tests {
 
         let out = apply_runtime_opportunity_allocation(&ctx, decisions, &current);
         assert!(out.decisions.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // CUTOVER-1D-A3-4: exact fractional quantity end to end
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a3_4_allocation_floor_is_whole_for_whole_and_no_finer_than_the_candidate() {
+        let m = mqk_schemas::QtyMicros::new;
+        let scale = mqk_schemas::QTY_MICROS_SCALE;
+        assert_eq!(allocation_quantity_floor_micros(q(0), q(10)), scale);
+        assert_eq!(allocation_quantity_floor_micros(q(3), q(3 + 7)), scale);
+        assert_eq!(allocation_quantity_floor_micros(m(0), m(100)), 100);
+        assert_eq!(allocation_quantity_floor_micros(m(250), m(350)), 10);
+        assert_eq!(allocation_quantity_floor_micros(m(0), m(1)), 1);
+        // Coarsest power of ten (never a venue increment): 0.5 / 1.5 => 0.1.
+        assert_eq!(
+            allocation_quantity_floor_micros(m(500_000), m(1_500_000)),
+            100_000
+        );
+    }
+
+    #[test]
+    fn a3_4_fractional_buy_survives_allocation_plan_and_db_projection_exactly() {
+        let mut d = buy("BTC/USD", "intraday_scalper", 1);
+        d.qty = mqk_schemas::QtyMicros::new(100); // 0.0001
+        let pending = PendingDecisionWithBarFacts {
+            decision: d,
+            bar_facts: Some(facts("BTC/USD", "intraday_scalper", 1_000, 60_000_000_000)),
+            dynamic_selection_provenance: None,
+        };
+        let mut ctx = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
+        ctx.opportunity_set = Some(opportunity_set(vec![("BTC/USD", "intraday_scalper", 0.9)]));
+        let out = apply_runtime_opportunity_allocation(&ctx, vec![pending], &BTreeMap::new());
+
+        // Enforced decision carries the exact fractional quantity.
+        assert_eq!(out.decisions.len(), 1);
+        assert_eq!(
+            out.decisions[0].decision.qty,
+            mqk_schemas::QtyMicros::new(100)
+        );
+        let plan = out.plan.expect("plan");
+        let c = &plan.candidates[0];
+        assert_eq!(c.strategy_target_qty, mqk_schemas::QtyMicros::new(100));
+        assert_eq!(c.final_target_qty, mqk_schemas::QtyMicros::new(100));
+        assert_eq!(c.disposition, AllocationDisposition::Allowed);
+
+        // Durable evidence type carries the identical QtyMicros (no whole*1e6).
+        let db_plan =
+            plan_to_new_db_plan(&plan, RuntimeOpportunityAllocationMode::PaperEnforced).unwrap();
+        assert_eq!(db_plan.candidates[0].strategy_target_qty.raw(), 100);
+        assert_eq!(db_plan.candidates[0].final_target_qty.raw(), 100);
+    }
+
+    #[test]
+    fn a3_4_fractional_current_position_is_used_exactly_for_the_allocation_target() {
+        // current 0.00025 BTC, decision buys 0.0001 -> target 0.00035 exactly.
+        let mut d = buy("BTC/USD", "intraday_scalper", 1);
+        d.qty = mqk_schemas::QtyMicros::new(100);
+        let pending = PendingDecisionWithBarFacts {
+            decision: d,
+            bar_facts: Some(facts("BTC/USD", "intraday_scalper", 1_000, 60_000_000_000)),
+            dynamic_selection_provenance: None,
+        };
+        let mut ctx = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
+        ctx.opportunity_set = Some(opportunity_set(vec![("BTC/USD", "intraday_scalper", 0.9)]));
+        let mut current = BTreeMap::new();
+        current.insert("BTC/USD".to_string(), mqk_schemas::QtyMicros::new(250));
+        let out = apply_runtime_opportunity_allocation(&ctx, vec![pending], &current);
+        let c = &out.plan.unwrap().candidates[0].clone();
+        assert_eq!(c.current_qty, mqk_schemas::QtyMicros::new(250));
+        assert_eq!(c.strategy_target_qty, mqk_schemas::QtyMicros::new(350));
     }
 }

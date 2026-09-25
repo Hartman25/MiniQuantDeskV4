@@ -430,13 +430,13 @@ pub fn validate_plan_with_candidates(
                 c.ordinal, c.side
             ));
         }
-        if c.qty <= 0 {
+        if !c.qty.is_positive() {
             result.blockers.push(format!(
                 "candidate ordinal {} has non-positive qty",
                 c.ordinal
             ));
         }
-        if c.current_qty < 0 {
+        if c.current_qty.is_negative() {
             result.blockers.push(format!(
                 "candidate ordinal {} has negative current_qty",
                 c.ordinal
@@ -449,7 +449,7 @@ pub fn validate_plan_with_candidates(
             ));
         }
         if let Some(target) = c.proposed_target_qty {
-            if target < 0 {
+            if target.is_negative() {
                 result.blockers.push(format!(
                     "candidate ordinal {} has a negative proposed_target_qty (oversell)",
                     c.ordinal
@@ -638,8 +638,8 @@ pub fn validate_plan_with_candidates(
                         strategy_id: c.strategy_id.clone(),
                         timeframe_secs: c.timeframe_secs,
                         side: c.side.clone(),
-                        qty: crate::decision::whole_to_qty(c.qty),
-                        current_qty: crate::decision::whole_to_qty(c.current_qty),
+                        qty: c.qty,
+                        current_qty: c.current_qty,
                         order_type: c.order_type.clone().unwrap_or_default(),
                         time_in_force: c.time_in_force.clone().unwrap_or_default(),
                         limit_price: c.limit_price,
@@ -687,10 +687,7 @@ pub fn validate_plan_with_candidates(
                             if expected.selected != c.selected
                                 || expected_disposition != c.disposition
                                 || expected.reason_code != c.reason_code
-                                || expected
-                                    .proposed_target_qty
-                                    .map(crate::decision::qty_to_whole)
-                                    != c.proposed_target_qty
+                                || expected.proposed_target_qty != c.proposed_target_qty
                             {
                                 result.blockers.push(format!(
                                     "candidate ordinal {} recomputed policy outcome does not \
@@ -726,6 +723,11 @@ pub fn validate_plan_with_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-unit test quantity (`1` == one share == `QTY_MICROS_SCALE` raw).
+    fn q(units: i64) -> mqk_schemas::QtyMicros {
+        mqk_schemas::QtyMicros::from_whole_units(units).unwrap()
+    }
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
 
@@ -752,8 +754,8 @@ mod tests {
             strategy_id: strategy_id.to_string(),
             timeframe_secs: 300,
             side: "buy".to_string(),
-            qty: crate::decision::whole_to_qty(qty),
-            current_qty: crate::decision::whole_to_qty(current_qty),
+            qty: q(qty),
+            current_qty: q(current_qty),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,
@@ -826,12 +828,12 @@ mod tests {
                     strategy_id: c.strategy_id.clone(),
                     timeframe_secs: c.timeframe_secs,
                     side: c.side.clone(),
-                    qty: crate::decision::qty_to_whole(c.qty),
-                    current_qty: crate::decision::qty_to_whole(c.current_qty),
+                    qty: c.qty,
+                    current_qty: c.current_qty,
                     order_type: Some(c.order_type.clone()),
                     time_in_force: Some(c.time_in_force.clone()),
                     limit_price: c.limit_price,
-                    proposed_target_qty: c.proposed_target_qty.map(crate::decision::qty_to_whole),
+                    proposed_target_qty: c.proposed_target_qty,
                     bar_present: Some(bar_present),
                     bar_symbol: c.bar_symbol.clone(),
                     bar_strategy_id: c.bar_strategy_id.clone(),
@@ -1077,7 +1079,7 @@ mod tests {
     #[test]
     fn negative_proposed_target_is_invalid() {
         let (p, mut c) = consistent_evidence(vec![single_well_formed_candidate()]);
-        c[0].proposed_target_qty = Some(-5);
+        c[0].proposed_target_qty = Some(q(-5));
         let v = validate_plan_with_candidates(&p, &c);
         assert!(!v.valid);
     }
@@ -1085,7 +1087,7 @@ mod tests {
     #[test]
     fn proposed_target_not_matching_qty_current_side_is_invalid() {
         let (p, mut c) = consistent_evidence(vec![single_well_formed_candidate()]);
-        c[0].proposed_target_qty = Some(999);
+        c[0].proposed_target_qty = Some(q(999));
         let v = validate_plan_with_candidates(&p, &c);
         assert!(!v.valid);
     }

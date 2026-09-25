@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::Context;
 use chrono::Utc;
 use mqk_reconcile::SnapshotWatermark;
+use mqk_schemas::QtyMicros;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -1269,39 +1270,13 @@ pub(super) fn spawn_execution_loop(
                         // settled above.  Symbols absent from the map are flat (qty=0).
                         // Q2: one shared snapshot read covers every symbol dispatched
                         // this tick — no torn-snapshot race across symbols.
-                        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty`
-                        // is `QtyMicros`, but the shared native-strategy dispatch
-                        // seam (`mqk_execution::targets_to_order_intents`, the
-                        // exact function `mqk-backtest` also calls -- see its
-                        // "Backtest/Live Semantics Alignment" proof) is
-                        // whole-unit `i64` only; widening it to fractional
-                        // Crypto quantities is Phase 5/6 (crypto autonomy)
-                        // scope, not this cutover. Crypto execution is not
-                        // wired yet (Alpaca `supports_asset_class(Crypto) ==
-                        // false`), so a fractional position cannot occur in
-                        // production today; if it ever does before that
-                        // widening lands, excluding the symbol here (loudly)
-                        // is safer than reporting a false qty=0 that could
-                        // cause the strategy to double an existing position.
-                        let current_positions: Option<BTreeMap<String, i64>> = {
+                        // `PositionSnapshot.net_qty` is `QtyMicros`; the position book
+                        // carries it exactly (a fractional position is retained, never
+                        // dropped or reported as flat).
+                        let current_positions: Option<BTreeMap<String, QtyMicros>> = {
                             let snap = snapshot_cache.read().await;
-                            snap.as_ref().map(|s| {
-                                s.portfolio
-                                    .positions
-                                    .iter()
-                                    .filter_map(|p| match p.net_qty.to_whole_units_checked() {
-                                        Some(whole) => Some((p.symbol.clone(), whole)),
-                                        None => {
-                                            tracing::error!(
-                                                symbol = %p.symbol,
-                                                net_qty = %p.net_qty,
-                                                "b1c_native_strategy_position_book_excludes_fractional_qty"
-                                            );
-                                            None
-                                        }
-                                    })
-                                    .collect()
-                            })
+                            snap.as_ref()
+                                .map(|s| crate::decision::position_book_from_snapshot(&s.portfolio.positions))
                         };
                         let Some(current_positions) = current_positions else {
                             tracing::warn!(
@@ -1371,7 +1346,7 @@ pub(super) fn spawn_execution_loop(
                                     let current = current_positions
                                         .get(&assignment.symbol)
                                         .copied()
-                                        .unwrap_or(0);
+                                        .unwrap_or(QtyMicros::ZERO);
                                     state_arc
                                         .record_per_symbol_target_state(
                                             build_per_symbol_target_state(
@@ -1452,14 +1427,20 @@ pub(super) fn spawn_execution_loop(
                             // AUTON-NO-TRADE-01: record signal qty before decisions are
                             // derived. This is the raw strategy output — zero means the
                             // strategy returned hold/flat for all targets this tick.
-                            let raw_signal_qty: i64 = crate::decision::sum_target_qty_whole_units(
-                                &bar_result.intents.output.targets,
-                            );
-                            state_arc.record_bar_tick_outcome(raw_signal_qty);
+                            let raw_signal_total =
+                                crate::decision::sum_target_qty(&bar_result.intents.output.targets);
+                            state_arc.record_bar_tick_outcome(crate::decision::public_signal_qty(
+                                raw_signal_total,
+                            ));
+                            let raw_signal_qty = raw_signal_total
+                                .map_or_else(|| "overflow".to_string(), |q| q.to_string());
 
                             if bar_result.intents.output.targets.is_empty() && dropped == 0 {
                                 let current =
-                                    current_positions.get(&assignment.symbol).copied().unwrap_or(0);
+                                    current_positions
+                                        .get(&assignment.symbol)
+                                        .copied()
+                                        .unwrap_or(QtyMicros::ZERO);
                                 state_arc
                                     .record_per_symbol_target_state(build_per_symbol_target_state(
                                         assignment.symbol.clone(),
@@ -1478,15 +1459,27 @@ pub(super) fn spawn_execution_loop(
                             // per (run, symbol) when B5 short-sale guard blocks a sell.
                             for t in &bar_result.intents.output.targets {
                                 let symbol = t.symbol.clone();
-                                let Some(target_qty) = crate::decision::target_qty_whole_units(t)
-                                else {
+                                let target_qty = t.qty;
+                                let current = current_positions
+                                    .get(&symbol)
+                                    .copied()
+                                    .unwrap_or(QtyMicros::ZERO);
+                                let Some(delta) = target_qty.checked_sub(current) else {
+                                    tracing::error!(
+                                        run_id = %run_id,
+                                        symbol = %symbol,
+                                        "b1c_position_delta_overflow: diagnostic skipped"
+                                    );
                                     continue;
                                 };
-                                let current = current_positions.get(&symbol).copied().unwrap_or(0);
-                                let delta = target_qty - current;
-                                let no_order_reason = if delta == 0 {
+                                let sell_exceeds_long = delta
+                                    .checked_neg()
+                                    .map_or(true, |qty_to_sell| qty_to_sell > current);
+                                let no_order_reason = if delta.is_zero() {
                                     "already_at_target"
-                                } else if delta < 0 && (current <= 0 || (-delta) > current) {
+                                } else if delta.is_negative()
+                                    && (!current.is_positive() || sell_exceeds_long)
+                                {
                                     "b5_short_sale_guard"
                                 } else {
                                     "order_will_be_submitted"
@@ -1494,9 +1487,9 @@ pub(super) fn spawn_execution_loop(
                                 tracing::info!(
                                     run_id = %run_id,
                                     symbol = %t.symbol,
-                                    strategy_target_qty = target_qty,
-                                    current_position_qty = current,
-                                    computed_delta_qty = delta,
+                                    strategy_target_qty = %target_qty,
+                                    current_position_qty = %current,
+                                    computed_delta_qty = %delta,
                                     no_order_reason,
                                     "b1c_position_delta_diagnostic"
                                 );
@@ -1517,7 +1510,7 @@ pub(super) fn spawn_execution_loop(
                                         state_arc.deployment_mode().as_api_label().to_string(),
                                     );
                                     let run_id_short = format!("{:.8}", run_id.to_string());
-                                    let qty_to_sell = -delta;
+                                    let qty_to_sell = delta.checked_neg().unwrap_or(QtyMicros::ZERO);
                                     let ts = chrono::Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
                                     tokio::spawn(async move {
                                         notifier
@@ -1526,7 +1519,7 @@ pub(super) fn spawn_execution_loop(
                                                 run_id: Some(run_id_short.clone()),
                                                 symbol: Some(symbol.clone()),
                                                 side: Some("sell".to_string()),
-                                                qty: Some(qty_to_sell),
+                                                qty: qty_to_sell.to_whole_units_checked(),
                                                 price_micros: None,
                                                 order_id: None,
                                                 detail: Some(format!(
@@ -1587,14 +1580,28 @@ pub(super) fn spawn_execution_loop(
                                             let dry_run_current = current_positions
                                                 .get(&assignment.symbol)
                                                 .copied()
-                                                .unwrap_or(0);
-                                            let dry_run_diags = evaluate_dry_run_strategies(
-                                                &dry_run_strategy_ids,
-                                                &assignment.symbol,
-                                                0,
-                                                &window,
-                                                dry_run_current,
-                                            );
+                                                .unwrap_or(QtyMicros::ZERO);
+                                            // Dry-run diagnostics are whole-unit: a fractional
+                                            // position is skipped loudly, never truncated.
+                                            let dry_run_diags = match dry_run_current
+                                                .to_whole_units_checked()
+                                            {
+                                                Some(whole_current) => evaluate_dry_run_strategies(
+                                                    &dry_run_strategy_ids,
+                                                    &assignment.symbol,
+                                                    0,
+                                                    &window,
+                                                    whole_current,
+                                                ),
+                                                None => {
+                                                    tracing::warn!(
+                                                        run_id = %run_id,
+                                                        symbol = %assignment.symbol,
+                                                        "dry_run_skipped_fractional_position"
+                                                    );
+                                                    Vec::new()
+                                                }
+                                            };
                                             for diag in &dry_run_diags {
                                                 tracing::info!(
                                                     run_id = %run_id,
@@ -1973,7 +1980,7 @@ pub(super) fn spawn_execution_loop(
                                 let current = current_positions
                                     .get(&decision.symbol)
                                     .copied()
-                                    .unwrap_or(0);
+                                    .unwrap_or(QtyMicros::ZERO);
                                 state_arc
                                     .record_per_symbol_target_state(build_per_symbol_target_state(
                                         decision.symbol.clone(),
@@ -2022,15 +2029,16 @@ pub(super) fn spawn_execution_loop(
                                     let current = current_positions
                                         .get(&decision_symbol)
                                         .copied()
-                                        .unwrap_or(0);
+                                        .unwrap_or(QtyMicros::ZERO);
                                     let target = match decision_side
                                         .trim()
                                         .to_ascii_lowercase()
                                         .as_str()
                                     {
-                                        "sell" => current - decision_qty,
-                                        _ => current + decision_qty,
-                                    };
+                                        "sell" => current.checked_sub(decision_qty),
+                                        _ => current.checked_add(decision_qty),
+                                    }
+                                    .unwrap_or(current);
                                     build_per_symbol_target_state(
                                         decision_symbol.clone(),
                                         sid.clone(),
@@ -2100,8 +2108,8 @@ pub(super) fn spawn_execution_loop(
 fn build_per_symbol_target_state(
     symbol: String,
     strategy_id: String,
-    current_qty: i64,
-    target_qty: i64,
+    current_qty: QtyMicros,
+    target_qty: QtyMicros,
     no_order_reason: &str,
 ) -> PerSymbolTargetState {
     PerSymbolTargetState {
@@ -2109,7 +2117,7 @@ fn build_per_symbol_target_state(
         strategy_id,
         current_qty,
         target_qty,
-        delta: target_qty - current_qty,
+        delta: target_qty.checked_sub(current_qty),
         no_order_reason: no_order_reason.to_string(),
         last_decision_id: None,
         last_decision_disposition: None,
@@ -2470,7 +2478,7 @@ mod phase7b_provenance_tests {
             timeframe_secs,
             strategy_semantic_fingerprint: String::new(),
             side: "buy".to_string(),
-            qty: 10,
+            qty: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,

@@ -333,7 +333,7 @@ async fn c2_08_alert_dedup_per_symbol_first_claim_only() {
 /// the default per design doc §6.
 #[test]
 fn c3_01_cap_disabled_returns_no_sizing_constraint() {
-    let outcome = evaluate_per_symbol_notional_cap("AAPL", 999_999, Some(100_000_000), None);
+    let outcome = evaluate_per_symbol_notional_cap("AAPL", q(999_999), Some(100_000_000), None);
     assert_eq!(outcome, PositionSizingOutcome::NoSizingConstraint);
     assert!(outcome.is_signal_safe());
 }
@@ -344,7 +344,7 @@ fn c3_01_cap_disabled_returns_no_sizing_constraint() {
 fn c3_02_non_positive_cap_treated_as_disabled() {
     for bad_cap in [0.0, -100.0] {
         let outcome =
-            evaluate_per_symbol_notional_cap("AAPL", 999_999, Some(100_000_000), Some(bad_cap));
+            evaluate_per_symbol_notional_cap("AAPL", q(999_999), Some(100_000_000), Some(bad_cap));
         assert_eq!(
             outcome,
             PositionSizingOutcome::NoSizingConstraint,
@@ -358,7 +358,7 @@ fn c3_02_non_positive_cap_treated_as_disabled() {
 /// `evaluate_position_sizing`'s market-order gap).
 #[test]
 fn c3_03_market_order_with_active_cap_is_unverifiable() {
-    let outcome = evaluate_per_symbol_notional_cap("AAPL", 100, None, Some(1000.0));
+    let outcome = evaluate_per_symbol_notional_cap("AAPL", q(100), None, Some(1000.0));
     match &outcome {
         PositionSizingOutcome::SizingUnverifiable { reason } => {
             assert!(
@@ -384,7 +384,7 @@ fn c3_03_market_order_with_active_cap_is_unverifiable() {
 #[test]
 fn c3_04_limit_order_under_cap_returns_no_sizing_constraint() {
     // qty=5 x $100 = $500 < $1000 cap.
-    let outcome = evaluate_per_symbol_notional_cap("AAPL", 5, Some(100_000_000), Some(1000.0));
+    let outcome = evaluate_per_symbol_notional_cap("AAPL", q(5), Some(100_000_000), Some(1000.0));
     assert_eq!(outcome, PositionSizingOutcome::NoSizingConstraint);
     assert!(outcome.is_signal_safe());
 }
@@ -394,7 +394,7 @@ fn c3_04_limit_order_under_cap_returns_no_sizing_constraint() {
 #[test]
 fn c3_05_limit_order_over_cap_returns_denied_per_symbol_cap() {
     // qty=15 x $100 = $1500 > $1000 cap.
-    let outcome = evaluate_per_symbol_notional_cap("AAPL", 15, Some(100_000_000), Some(1000.0));
+    let outcome = evaluate_per_symbol_notional_cap("AAPL", q(15), Some(100_000_000), Some(1000.0));
     assert_eq!(
         outcome,
         PositionSizingOutcome::SizingDeniedPerSymbolCap {
@@ -430,7 +430,7 @@ async fn c3_06_gate_1g_rejects_limit_order_over_per_symbol_notional_cap() {
         timeframe_secs: 86400,
         strategy_semantic_fingerprint: String::new(),
         side: "buy".to_string(),
-        qty: 15, // x $100 = $1500 > $1000 cap
+        qty: mqk_execution::QtyMicros::from_whole_units(15).unwrap(), // x $100 = $1500 > $1000 cap
         order_type: "limit".to_string(),
         time_in_force: "day".to_string(),
         limit_price: Some(100_000_000), // $100.00

@@ -56,7 +56,7 @@ fn make_decision_for_symbol(
         timeframe_secs: 86400,
         strategy_semantic_fingerprint: test_fingerprint(),
         side: "buy".to_string(),
-        qty: 10,
+        qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         time_in_force: "day".to_string(),
         limit_price: None,

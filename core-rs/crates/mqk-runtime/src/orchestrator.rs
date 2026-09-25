@@ -86,6 +86,9 @@ use outbox::*;
 // (`recover_oms_and_portfolio`) can share the exact live effective-fill
 // semantic instead of re-deriving an approximation of it.
 pub use apply::effective_portfolio_fill;
+// Pure `order_json` -> `BrokerSubmitRequest` decoder (no broker call), exposed so
+// writers can prove exact quantity agreement with the runtime reader.
+pub use outbox::build_validated_submit_request;
 // ---------------------------------------------------------------------------
 // ExecutionOrchestrator
 // ---------------------------------------------------------------------------

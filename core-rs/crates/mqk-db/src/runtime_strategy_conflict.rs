@@ -69,10 +69,15 @@
 //! declaring its own, so the SQL fetch bound and the validator's bound can
 //! never silently drift apart.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use mqk_schemas::QtyMicros;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::runtime_qty_evidence::{
+    decode_optional_quantity, decode_required_quantity, RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1,
+};
 
 /// UTF8-AND-BOUNDED-READ-CLOSURE: the single shared candidate-read bound
 /// authority. Consumed by both [`fetch_runtime_strategy_conflict_plan_for_read`]
@@ -86,113 +91,6 @@ use uuid::Uuid;
 /// pathological/corrupted row.
 pub const RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND: usize = 64;
 
-/// CUTOVER-1D-A2: durable quantity evidence encoding written by all new
-/// Bundle 6 candidate rows. Historical rows remain `NULL` and use the
-/// pre-0076 whole-unit columns.
-const RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1: &str = "qty_micros_v1";
-const RUNTIME_QTY_MICROS_SCALE: i64 = 1_000_000;
-
-fn whole_qty_to_micros(field: &str, value: i64) -> Result<i64> {
-    value.checked_mul(RUNTIME_QTY_MICROS_SCALE).ok_or_else(|| {
-        anyhow!(
-            "CUTOVER-1D-A2: {} whole-unit quantity {} overflows QtyMicros",
-            field,
-            value
-        )
-    })
-}
-
-fn micros_to_whole_qty(field: &str, value: i64) -> Result<i64> {
-    if value % RUNTIME_QTY_MICROS_SCALE != 0 {
-        return Err(anyhow!(
-            "CUTOVER-1D-A2: {} contains fractional QtyMicros value {}; the current public record seam is still whole-unit and must fail closed",
-            field,
-            value
-        ));
-    }
-    Ok(value / RUNTIME_QTY_MICROS_SCALE)
-}
-
-fn decode_required_quantity(
-    row: &sqlx::postgres::PgRow,
-    quantity_schema_version: Option<&str>,
-    legacy_field: &str,
-    micros_field: &str,
-) -> Result<i64> {
-    use sqlx::Row;
-
-    let legacy: Option<i64> = row
-        .try_get(legacy_field)
-        .with_context(|| format!("CUTOVER-1D-A2: read legacy quantity field {legacy_field}"))?;
-    let micros: Option<i64> = row
-        .try_get(micros_field)
-        .with_context(|| format!("CUTOVER-1D-A2: read QtyMicros field {micros_field}"))?;
-
-    match quantity_schema_version {
-        None => match (legacy, micros) {
-            (Some(value), None) => Ok(value),
-            _ => Err(anyhow!(
-                "CUTOVER-1D-A2: historical quantity row has mixed/missing authority for {}/{}",
-                legacy_field,
-                micros_field
-            )),
-        },
-        Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1) => match (legacy, micros) {
-            (None, Some(value)) => micros_to_whole_qty(micros_field, value),
-            _ => Err(anyhow!(
-                "CUTOVER-1D-A2: qty_micros_v1 row has mixed/missing authority for {}/{}",
-                legacy_field,
-                micros_field
-            )),
-        },
-        Some(other) => Err(anyhow!(
-            "CUTOVER-1D-A2: unsupported quantity_schema_version '{other}'"
-        )),
-    }
-}
-
-fn decode_optional_quantity(
-    row: &sqlx::postgres::PgRow,
-    quantity_schema_version: Option<&str>,
-    legacy_field: &str,
-    micros_field: &str,
-) -> Result<Option<i64>> {
-    use sqlx::Row;
-
-    let legacy: Option<i64> = row
-        .try_get(legacy_field)
-        .with_context(|| format!("CUTOVER-1D-A2: read legacy quantity field {legacy_field}"))?;
-    let micros: Option<i64> = row
-        .try_get(micros_field)
-        .with_context(|| format!("CUTOVER-1D-A2: read QtyMicros field {micros_field}"))?;
-
-    match quantity_schema_version {
-        None => {
-            if micros.is_some() {
-                return Err(anyhow!(
-                    "CUTOVER-1D-A2: historical quantity row carries unexpected QtyMicros authority in {}",
-                    micros_field
-                ));
-            }
-            Ok(legacy)
-        }
-        Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1) => {
-            if legacy.is_some() {
-                return Err(anyhow!(
-                    "CUTOVER-1D-A2: qty_micros_v1 row carries unexpected legacy quantity authority in {}",
-                    legacy_field
-                ));
-            }
-            micros
-                .map(|value| micros_to_whole_qty(micros_field, value))
-                .transpose()
-        }
-        Some(other) => Err(anyhow!(
-            "CUTOVER-1D-A2: unsupported quantity_schema_version '{other}'"
-        )),
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct NewRuntimeStrategyConflictCandidate {
     pub ordinal: i32,
@@ -201,14 +99,14 @@ pub struct NewRuntimeStrategyConflictCandidate {
     pub timeframe_secs: i64,
     /// `"buy"` or `"sell"`.
     pub side: String,
-    pub qty: i64,
-    pub current_qty: i64,
+    pub qty: QtyMicros,
+    pub current_qty: QtyMicros,
     /// Order semantics -- part of the cycle's economic identity
     /// (`compute_conflict_cycle_id`), persisted here as durable evidence.
     pub order_type: String,
     pub time_in_force: String,
     pub limit_price: Option<i64>,
-    pub proposed_target_qty: Option<i64>,
+    pub proposed_target_qty: Option<QtyMicros>,
     /// `true` only when every bar-identity field below is present. An
     /// explicit tri-state field distinct from any individual bar column
     /// being null, so "bar facts entirely absent" and "bar facts present"
@@ -278,13 +176,13 @@ pub struct RuntimeStrategyConflictCandidateRecord {
     pub strategy_id: String,
     pub timeframe_secs: i64,
     pub side: String,
-    pub qty: i64,
-    pub current_qty: i64,
+    pub qty: QtyMicros,
+    pub current_qty: QtyMicros,
     /// `None` on a 0056-era row.
     pub order_type: Option<String>,
     pub time_in_force: Option<String>,
     pub limit_price: Option<i64>,
-    pub proposed_target_qty: Option<i64>,
+    pub proposed_target_qty: Option<QtyMicros>,
     /// `None` on a 0056-era row -- legacy/unknown, distinct from `Some(false)`.
     pub bar_present: Option<bool>,
     pub bar_symbol: Option<String>,
@@ -351,12 +249,12 @@ struct CandidateSnapshot {
     strategy_id: String,
     timeframe_secs: i64,
     side: String,
-    qty: i64,
-    current_qty: i64,
+    qty: QtyMicros,
+    current_qty: QtyMicros,
     order_type: Option<String>,
     time_in_force: Option<String>,
     limit_price: Option<i64>,
-    proposed_target_qty: Option<i64>,
+    proposed_target_qty: Option<QtyMicros>,
     bar_present: Option<bool>,
     bar_symbol: Option<String>,
     bar_strategy_id: Option<String>,
@@ -571,13 +469,6 @@ pub async fn insert_runtime_strategy_conflict_plan(
     .context("insert_runtime_strategy_conflict_plan: insert plan row failed")?;
 
     for c in &plan.candidates {
-        let qty_micros = whole_qty_to_micros("qty", c.qty)?;
-        let current_qty_micros = whole_qty_to_micros("current_qty", c.current_qty)?;
-        let proposed_target_qty_micros = c
-            .proposed_target_qty
-            .map(|value| whole_qty_to_micros("proposed_target_qty", value))
-            .transpose()?;
-
         sqlx::query(
             r#"
             insert into sys_runtime_strategy_conflict_candidates
@@ -597,12 +488,12 @@ pub async fn insert_runtime_strategy_conflict_plan(
         .bind(c.timeframe_secs)
         .bind(&c.side)
         .bind(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1)
-        .bind(qty_micros)
-        .bind(current_qty_micros)
+        .bind(c.qty.raw())
+        .bind(c.current_qty.raw())
         .bind(&c.order_type)
         .bind(&c.time_in_force)
         .bind(c.limit_price)
-        .bind(proposed_target_qty_micros)
+        .bind(c.proposed_target_qty.map(QtyMicros::raw))
         .bind(c.bar_present)
         .bind(&c.bar_symbol)
         .bind(&c.bar_strategy_id)
@@ -847,12 +738,14 @@ pub async fn fetch_recent_runtime_strategy_conflict_plans(
     Ok(rows.iter().map(plan_row_to_record).collect())
 }
 
-
 #[cfg(test)]
-mod cutover_1d_a2_tests {
+mod cutover_1d_a3_tests {
     use super::*;
     use chrono::TimeZone;
     use sqlx::Row;
+
+    const FIXTURE_RUN: &[u8] = b"cutover-1d-a3-conflict-run-v1";
+    const FIXTURE_PLAN: &[u8] = b"cutover-1d-a3-conflict-plan-v1";
 
     async fn cleanup_fixture(pool: &PgPool, run_id: Uuid) {
         let _ = sqlx::query(
@@ -872,61 +765,41 @@ mod cutover_1d_a2_tests {
             .await;
     }
 
-    #[test]
-    fn cutover_1d_a2_conflict_checked_scaling_and_fractional_refusal() {
-        assert_eq!(whole_qty_to_micros("qty", 2).unwrap(), 2_000_000);
-        assert_eq!(whole_qty_to_micros("qty", -3).unwrap(), -3_000_000);
-        assert!(whole_qty_to_micros("qty", i64::MAX).is_err());
-        assert_eq!(
-            micros_to_whole_qty("qty_micros", 4_000_000).unwrap(),
-            4
-        );
-        let err = micros_to_whole_qty("qty_micros", 500_000).unwrap_err();
-        assert!(
-            err.to_string().contains("fractional QtyMicros"),
-            "{err}"
-        );
+    fn candidate(
+        qty_raw: i64,
+        current_raw: i64,
+        proposed_raw: i64,
+    ) -> NewRuntimeStrategyConflictCandidate {
+        NewRuntimeStrategyConflictCandidate {
+            ordinal: 0,
+            symbol: "BTC/USD".to_string(),
+            strategy_id: "fixture".to_string(),
+            timeframe_secs: 300,
+            side: "buy".to_string(),
+            qty: QtyMicros::new(qty_raw),
+            current_qty: QtyMicros::new(current_raw),
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
+            proposed_target_qty: Some(QtyMicros::new(proposed_raw)),
+            bar_present: true,
+            bar_symbol: Some("BTC/USD".to_string()),
+            bar_strategy_id: Some("fixture".to_string()),
+            bar_timeframe: Some("5m".to_string()),
+            bar_end_ts: Some(1_000),
+            close_micros: Some(100_000_000),
+            selected: true,
+            disposition: "selected".to_string(),
+            reason_code: "fixture".to_string(),
+        }
     }
 
-    #[tokio::test]
-    #[ignore = "requires MQK_DATABASE_URL; CUTOVER-1D-A2 durable writer/read proof"]
-    async fn cutover_1d_a2_conflict_writer_uses_qty_micros_v1_and_fractional_read_fails_closed() {
-        if std::env::var(crate::ENV_DB_URL).is_err() {
-            eprintln!("skipped: requires MQK_DATABASE_URL");
-            return;
-        }
-        let pool = crate::testkit_db_pool()
-            .await
-            .expect("CUTOVER-1D-A2 conflict test DB");
-
-        let run_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_DNS,
-            b"cutover-1d-a2-conflict-writer-v1",
-        );
-        let plan_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_DNS,
-            b"cutover-1d-a2-conflict-plan-v1",
-        );
-
-        cleanup_fixture(&pool, run_id).await;
-
-        crate::insert_run(
-            &pool,
-            &crate::NewRun {
-                run_id,
-                engine_id: "cutover-1d-a2-conflict".to_string(),
-                mode: "PAPER".to_string(),
-                started_at_utc: Utc.with_ymd_and_hms(2099, 9, 22, 12, 0, 0).unwrap(),
-                git_hash: "cutover-1d-a2".to_string(),
-                config_hash: "cutover-1d-a2".to_string(),
-                config_json: serde_json::json!({}),
-                host_fingerprint: "cutover-1d-a2".to_string(),
-            },
-        )
-        .await
-        .expect("fixture run insert");
-
-        let plan = NewRuntimeStrategyConflictPlan {
+    fn plan(
+        run_id: Uuid,
+        plan_id: Uuid,
+        c: NewRuntimeStrategyConflictCandidate,
+    ) -> NewRuntimeStrategyConflictPlan {
+        NewRuntimeStrategyConflictPlan {
             plan_id,
             cycle_id: plan_id,
             run_id,
@@ -941,37 +814,50 @@ mod cutover_1d_a2_tests {
             truth_state: "computed".to_string(),
             blockers: vec![],
             created_at_utc: Utc.with_ymd_and_hms(2099, 9, 22, 12, 1, 0).unwrap(),
-            candidates: vec![NewRuntimeStrategyConflictCandidate {
-                ordinal: 0,
-                symbol: "AAPL".to_string(),
-                strategy_id: "fixture".to_string(),
-                timeframe_secs: 300,
-                side: "buy".to_string(),
-                qty: 2,
-                current_qty: 1,
-                order_type: "market".to_string(),
-                time_in_force: "day".to_string(),
-                limit_price: None,
-                proposed_target_qty: Some(3),
-                bar_present: true,
-                bar_symbol: Some("AAPL".to_string()),
-                bar_strategy_id: Some("fixture".to_string()),
-                bar_timeframe: Some("5m".to_string()),
-                bar_end_ts: Some(1_000),
-                close_micros: Some(100_000_000),
-                selected: true,
-                disposition: "selected".to_string(),
-                reason_code: "fixture".to_string(),
-            }],
-        };
+            candidates: vec![c],
+        }
+    }
 
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; CUTOVER-1D-A3 durable QtyMicros proof"]
+    async fn cutover_1d_a3_conflict_evidence_is_natively_qty_micros() {
+        if std::env::var(crate::ENV_DB_URL).is_err() {
+            eprintln!("skipped: requires MQK_DATABASE_URL");
+            return;
+        }
+        let pool = crate::testkit_db_pool()
+            .await
+            .expect("CUTOVER-1D-A3 conflict test DB");
+        let run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, FIXTURE_RUN);
+        let plan_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, FIXTURE_PLAN);
+        cleanup_fixture(&pool, run_id).await;
+        crate::insert_run(
+            &pool,
+            &crate::NewRun {
+                run_id,
+                engine_id: "cutover-1d-a3-conflict".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc.with_ymd_and_hms(2099, 9, 22, 12, 0, 0).unwrap(),
+                git_hash: "cutover-1d-a3".to_string(),
+                config_hash: "cutover-1d-a3".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "cutover-1d-a3".to_string(),
+            },
+        )
+        .await
+        .expect("fixture run insert");
+
+        // 0.0001 / 0.00025 / 0.00035: raw micros are bound verbatim, never
+        // whole * 1e6.
         assert_eq!(
-            insert_runtime_strategy_conflict_plan(&pool, plan)
-                .await
-                .expect("insert QtyMicros-v1 conflict evidence"),
+            insert_runtime_strategy_conflict_plan(
+                &pool,
+                plan(run_id, plan_id, candidate(100, 250, 350))
+            )
+            .await
+            .expect("insert fractional QtyMicros-v1 conflict evidence"),
             InsertRuntimeStrategyConflictPlanOutcome::Inserted
         );
-
         let row = sqlx::query(
             "select quantity_schema_version, qty, current_qty, proposed_target_qty, \
              qty_micros, current_qty_micros, proposed_target_qty_micros \
@@ -981,7 +867,6 @@ mod cutover_1d_a2_tests {
         .fetch_one(&pool)
         .await
         .expect("raw conflict evidence row");
-
         assert_eq!(
             row.get::<String, _>("quantity_schema_version"),
             RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1
@@ -989,41 +874,113 @@ mod cutover_1d_a2_tests {
         assert_eq!(row.get::<Option<i64>, _>("qty"), None);
         assert_eq!(row.get::<Option<i64>, _>("current_qty"), None);
         assert_eq!(row.get::<Option<i64>, _>("proposed_target_qty"), None);
-        assert_eq!(row.get::<Option<i64>, _>("qty_micros"), Some(2_000_000));
-        assert_eq!(
-            row.get::<Option<i64>, _>("current_qty_micros"),
-            Some(1_000_000)
-        );
+        assert_eq!(row.get::<Option<i64>, _>("qty_micros"), Some(100));
+        assert_eq!(row.get::<Option<i64>, _>("current_qty_micros"), Some(250));
         assert_eq!(
             row.get::<Option<i64>, _>("proposed_target_qty_micros"),
-            Some(3_000_000)
+            Some(350)
         );
 
+        // Exact fractional read.
         let (_, records) = fetch_runtime_strategy_conflict_plan(&pool, plan_id)
             .await
-            .expect("fetch QtyMicros-v1 conflict evidence")
+            .expect("fetch")
             .expect("plan exists");
-        assert_eq!(records[0].qty, 2);
-        assert_eq!(records[0].current_qty, 1);
-        assert_eq!(records[0].proposed_target_qty, Some(3));
+        assert_eq!(records[0].qty, QtyMicros::new(100));
+        assert_eq!(records[0].current_qty, QtyMicros::new(250));
+        assert_eq!(records[0].proposed_target_qty, Some(QtyMicros::new(350)));
 
+        // Idempotent replay of the identical fractional payload.
+        assert_eq!(
+            insert_runtime_strategy_conflict_plan(
+                &pool,
+                plan(run_id, plan_id, candidate(100, 250, 350))
+            )
+            .await
+            .expect("replay"),
+            InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists
+        );
+        // Divergent fractional qty (100 -> 101 micros) collides.
+        let outcome = insert_runtime_strategy_conflict_plan(
+            &pool,
+            plan(run_id, plan_id, candidate(101, 250, 351)),
+        )
+        .await
+        .expect("divergent replay");
+        assert!(
+            matches!(
+                outcome,
+                InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision { .. }
+            ),
+            "{outcome:?}"
+        );
+
+        // Historical NULL-schema row decodes through the checked whole-unit
+        // conversion (2 whole units == 2_000_000 micros), never reinterpreted.
         sqlx::query(
-            "update sys_runtime_strategy_conflict_candidates \
-             set qty_micros = 500000 where plan_id = $1",
+            "insert into sys_runtime_strategy_conflict_candidates \
+             (plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty, current_qty, \
+              proposed_target_qty, selected, disposition, reason_code) \
+             values ($1, 1, 'AAPL', 'fixture', 300, 'buy', 2, 1, 3, false, 'not_selected', 'fixture')",
         )
         .bind(plan_id)
         .execute(&pool)
         .await
-        .expect("inject valid fractional durable QtyMicros evidence");
-
-        let err = fetch_runtime_strategy_conflict_plan(&pool, plan_id)
+        .expect("insert historical whole-unit candidate row");
+        let (_, records) = fetch_runtime_strategy_conflict_plan(&pool, plan_id)
             .await
-            .expect_err("whole-unit record seam must reject fractional durable evidence");
-        assert!(
-            format!("{err:#}").contains("fractional QtyMicros"),
-            "{err:#}"
-        );
+            .expect("fetch mixed-epoch plan")
+            .expect("plan exists");
+        let hist = records.iter().find(|r| r.ordinal == 1).unwrap();
+        assert_eq!(hist.qty, QtyMicros::new(2_000_000));
+        assert_eq!(hist.current_qty, QtyMicros::new(1_000_000));
+        assert_eq!(hist.proposed_target_qty, Some(QtyMicros::new(3_000_000)));
 
         cleanup_fixture(&pool, run_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; CUTOVER-1D-A3 decode refusal proof"]
+    async fn cutover_1d_a3_mixed_or_unknown_quantity_encoding_refuses() {
+        if std::env::var(crate::ENV_DB_URL).is_err() {
+            eprintln!("skipped: requires MQK_DATABASE_URL");
+            return;
+        }
+        let pool = crate::testkit_db_pool().await.expect("test DB");
+        // Rows synthesized from literals: the table CHECK forbids these
+        // shapes at rest, so the decoder is proven directly.
+        let decode = |schema: Option<&'static str>, legacy: Option<i64>, micros: Option<i64>| {
+            let pool = pool.clone();
+            async move {
+                let row = sqlx::query("select $1::bigint as qty, $2::bigint as qty_micros")
+                    .bind(legacy)
+                    .bind(micros)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                decode_required_quantity(&row, schema, "qty", "qty_micros")
+            }
+        };
+        // Well-formed shapes.
+        assert_eq!(
+            decode(None, Some(2), None).await.unwrap(),
+            QtyMicros::new(2_000_000)
+        );
+        assert_eq!(
+            decode(Some("qty_micros_v1"), None, Some(100))
+                .await
+                .unwrap(),
+            QtyMicros::new(100)
+        );
+        // Mixed / missing authority / unknown encoding refuse.
+        assert!(decode(None, Some(2), Some(2_000_000)).await.is_err());
+        assert!(decode(None, None, None).await.is_err());
+        assert!(decode(Some("qty_micros_v1"), Some(2), Some(2_000_000))
+            .await
+            .is_err());
+        assert!(decode(Some("qty_micros_v1"), None, None).await.is_err());
+        assert!(decode(Some("qty_micros_v2"), None, Some(1)).await.is_err());
+        // Historical value that cannot be scaled refuses.
+        assert!(decode(None, Some(i64::MAX), None).await.is_err());
     }
 }

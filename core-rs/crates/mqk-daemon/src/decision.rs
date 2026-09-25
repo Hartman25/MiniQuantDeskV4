@@ -31,47 +31,55 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use mqk_schemas::{QtyMicros, QTY_MICROS_SCALE};
 use uuid::Uuid;
 
 use crate::state::AppState;
 
-/// Whole-unit projection of a strategy target quantity for the daemon's
-/// whole-unit runtime seams (decision/conflict/allocation still `i64`).
-/// A fractional target is excluded loudly, never truncated.
-pub(crate) fn target_qty_whole_units(t: &mqk_strategy::TargetPosition) -> Option<i64> {
-    let whole = t.qty.to_whole_units_checked();
-    if whole.is_none() {
-        tracing::error!(
-            symbol = %t.symbol,
-            target_qty = %t.qty,
-            "fractional_target_qty_unsupported_by_whole_unit_runtime_seam"
-        );
-    }
-    whole
+/// Runtime position book from the execution snapshot: every position is
+/// carried exactly as `QtyMicros` -- a fractional position is retained, never
+/// dropped or reported as flat.
+pub fn position_book_from_snapshot(
+    positions: &[mqk_runtime::observability::PositionSnapshot],
+) -> BTreeMap<String, QtyMicros> {
+    positions
+        .iter()
+        .map(|p| (p.symbol.clone(), p.net_qty))
+        .collect()
 }
 
-/// Transitional whole-unit -> `QtyMicros` bridge for the daemon's `i64`
-/// decision seam. An unrepresentable value maps to `i64::MAX` raw, which every
-/// downstream checked add refuses (fail closed).
-pub(crate) fn whole_to_qty(units: i64) -> mqk_schemas::QtyMicros {
-    mqk_schemas::QtyMicros::from_whole_units(units).unwrap_or(mqk_schemas::QtyMicros::new(i64::MAX))
-}
-
-/// Inverse bridge. Whole inputs only ever produce whole quantities on this
-/// seam; the sole non-whole value is the `whole_to_qty` overflow sentinel
-/// (already refused upstream), which maps back to `i64::MAX`.
-pub(crate) fn qty_to_whole(q: mqk_schemas::QtyMicros) -> i64 {
-    q.to_whole_units_checked().unwrap_or(i64::MAX)
-}
-
-/// Sum of whole-unit target quantities (fractional targets excluded loudly).
-pub(crate) fn sum_target_qty_whole_units<'a>(
+/// Checked sum of strategy target quantities. `None` on overflow.
+pub(crate) fn sum_target_qty<'a>(
     targets: impl IntoIterator<Item = &'a mqk_strategy::TargetPosition>,
-) -> i64 {
+) -> Option<QtyMicros> {
     targets
         .into_iter()
-        .filter_map(target_qty_whole_units)
-        .fold(0i64, |a, q| a.saturating_add(q))
+        .try_fold(QtyMicros::ZERO, |acc, t| acc.checked_add(t.qty))
+}
+
+/// Public whole-unit projection of a signal total. Fractional or overflowed
+/// totals have no exact whole-unit value and project to `None` (unavailable),
+/// never a rounded or reinterpreted integer.
+pub(crate) fn public_signal_qty(total: Option<QtyMicros>) -> Option<i64> {
+    total.and_then(QtyMicros::to_whole_units_checked)
+}
+
+/// A signal exists unless the total is provably zero (an overflowed total is
+/// not provably zero).
+pub(crate) fn signal_generated(total: Option<QtyMicros>) -> bool {
+    total.map_or(true, |t| !t.is_zero())
+}
+
+/// `order_json["qty"]` encoding understood by the runtime decoder
+/// (`mqk_runtime::orchestrator::outbox::parse_signed_qty_micros_field`): a
+/// whole quantity is a JSON integer (byte-identical to the historical Equity
+/// shape); a fractional quantity is a canonical decimal string. Never a
+/// floating-point JSON number.
+pub fn order_json_qty_value(qty: QtyMicros) -> serde_json::Value {
+    match qty.to_whole_units_checked() {
+        Some(units) => serde_json::json!(units),
+        None => serde_json::Value::String(qty.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,8 +120,8 @@ pub struct InternalStrategyDecision {
     pub strategy_semantic_fingerprint: String,
     /// Order side: "buy" or "sell" (case-insensitive; normalised internally).
     pub side: String,
-    /// Share quantity.  Must be positive.
-    pub qty: i64,
+    /// Actual asset quantity (`1` share == `QTY_MICROS_SCALE` raw).  Must be positive.
+    pub qty: QtyMicros,
     /// Order type: "market" or "limit".
     pub order_type: String,
     /// Time-in-force: "day", "gtc", "ioc", "fok".
@@ -209,9 +217,9 @@ fn validate_fields(d: &InternalStrategyDecision) -> Result<(), Vec<String>> {
         blockers.push("side must be one of: buy, sell".to_string());
     }
 
-    if d.qty <= 0 {
+    if !d.qty.is_positive() {
         blockers.push("qty must be positive".to_string());
-    } else if d.qty > i32::MAX as i64 {
+    } else if d.qty.raw() > (i32::MAX as i64) * QTY_MICROS_SCALE {
         blockers.push("qty is out of range for broker request".to_string());
     }
 
@@ -579,7 +587,7 @@ fn build_order_json(
     let mut order = serde_json::json!({
         "symbol":         d.symbol.trim(),
         "side":           d.side.trim().to_ascii_lowercase(),
-        "qty":            d.qty,
+        "qty":            order_json_qty_value(d.qty),
         "order_type":     d.order_type.trim().to_ascii_lowercase(),
         "time_in_force":  d.time_in_force.trim().to_ascii_lowercase(),
         "limit_price":    d.limit_price,
@@ -720,7 +728,7 @@ pub fn bar_result_to_decisions(
     result: &mqk_strategy::StrategyBarResult,
     run_id: Uuid,
     bar_end_ts: i64,
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
 ) -> Vec<InternalStrategyDecision> {
     if !result.intents.should_execute() {
         return vec![];
@@ -735,10 +743,20 @@ pub fn bar_result_to_decisions(
             // Delta-to-target: TargetPosition.qty is a target portfolio state,
             // not an incremental order size.  Symbols absent from the map are
             // treated as flat (current = 0).
-            let target_qty = target_qty_whole_units(t)?;
-            let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
-            let delta = target_qty - current;
-            if delta == 0 {
+            let current = current_positions
+                .get(&t.symbol)
+                .copied()
+                .unwrap_or(QtyMicros::ZERO);
+            let Some(delta) = t.qty.checked_sub(current) else {
+                tracing::error!(
+                    symbol = %t.symbol,
+                    target_qty = %t.qty,
+                    current_qty = %current,
+                    "target_minus_current_overflow: refusing decision"
+                );
+                return None;
+            };
+            if delta.is_zero() {
                 return None; // already at target; no order needed
             }
             // SHORT-SIDE-INTENT-MODEL-01: classify intent explicitly so the
@@ -746,7 +764,9 @@ pub fn bar_result_to_decisions(
             // Short-open and sell-beyond-long are blocked fail-closed (B5 backstop).
             // Call evaluate_short_entry_policy directly for policy diagnostics; see
             // scenario_short_side_intent_model_01 for integrated proof tests.
-            let intent = crate::capital_policy::classify_order_intent(current, delta);
+            // Classification is scale-invariant (pure comparisons between
+            // same-unit values), so raw micros classify exactly like units.
+            let intent = crate::capital_policy::classify_order_intent(current.raw(), delta.raw());
             let (side, qty) = match intent {
                 crate::capital_policy::OrderIntent::LongOpen
                 | crate::capital_policy::OrderIntent::BuyToCover
@@ -755,7 +775,9 @@ pub fn bar_result_to_decisions(
                     ("buy".to_string(), delta)
                 }
                 crate::capital_policy::OrderIntent::SellToClose
-                | crate::capital_policy::OrderIntent::SellToFlat => ("sell".to_string(), -delta),
+                | crate::capital_policy::OrderIntent::SellToFlat => {
+                    ("sell".to_string(), delta.checked_neg()?)
+                }
                 crate::capital_policy::OrderIntent::ShortOpen
                 | crate::capital_policy::OrderIntent::SellBeyondLongToShort
                 | crate::capital_policy::OrderIntent::NoOp => return None,
@@ -769,7 +791,7 @@ pub fn bar_result_to_decisions(
                     "mqk.strategy-decision.v3|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{target_qty}|{bar_end_ts}",
                     symbol = t.symbol,
                     timeframe_secs = result.spec.timeframe_secs,
-                    target_qty = target_qty,
+                    target_qty = t.qty,
                 )
                 .as_bytes(),
             )
@@ -809,7 +831,7 @@ pub fn decisions_from_bar_facts(
     result: &mqk_strategy::StrategyBarResult,
     run_id: Uuid,
     bar_facts: Option<&crate::state::EvaluatedBarFacts>,
-    current_positions: &BTreeMap<String, i64>,
+    current_positions: &BTreeMap<String, QtyMicros>,
 ) -> Vec<InternalStrategyDecision> {
     match bar_facts {
         Some(facts) => bar_result_to_decisions(result, run_id, facts.bar_end_ts, current_positions),
@@ -1407,6 +1429,11 @@ pub async fn submit_internal_strategy_decision(
 #[cfg(test)]
 mod m6_trading_registry_snapshot_writer_tests {
     use super::*;
+
+    /// Whole-unit test quantity (`1` == one share == `QTY_MICROS_SCALE` raw).
+    fn q(units: i64) -> mqk_schemas::QtyMicros {
+        mqk_schemas::QtyMicros::from_whole_units(units).unwrap()
+    }
     use std::collections::BTreeMap;
 
     use mqk_md::instrument_registry_v2::{
@@ -1474,7 +1501,7 @@ mod m6_trading_registry_snapshot_writer_tests {
             strategy_semantic_fingerprint:
                 "test-fingerprint".to_string(),
             side: "buy".to_string(),
-            qty: 1,
+            qty: q(1),
             order_type: "market".to_string(),
             time_in_force: "gtc".to_string(),
             limit_price: None,
@@ -1688,4 +1715,155 @@ mod m6_trading_registry_snapshot_writer_tests {
         ));
     }
 
+    // -----------------------------------------------------------------
+    // CUTOVER-1D-A3-4: writer -> order_json -> runtime decoder agreement
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a3_4_order_json_qty_writer_and_runtime_reader_agree_on_fractional_qty() {
+        let registry = btc_registry();
+        let context = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTC/USD",
+            false,
+        )
+        .expect("valid BTC/USD Paper registry row must resolve");
+
+        let cases: [(i64, serde_json::Value); 4] = [
+            (100, serde_json::json!("0.0001")),
+            (123_400, serde_json::json!("0.1234")),
+            (1_500_000, serde_json::json!("1.5")),
+            (2_000_000, serde_json::json!(2)), // whole => historical integer shape
+        ];
+        for (raw, expected_json) in cases {
+            let mut d = decision();
+            d.qty = mqk_schemas::QtyMicros::new(raw);
+            let order = build_order_json(&d, &context);
+            assert_eq!(order["qty"], expected_json, "writer shape for raw={raw}");
+            assert!(!order["qty"].is_f64(), "never a floating-point JSON number");
+            let req = mqk_runtime::orchestrator::build_validated_submit_request("oid", &order)
+                .expect("runtime decoder must accept the writer's payload");
+            assert_eq!(
+                req.quantity, d.qty,
+                "runtime reads exactly what was written"
+            );
+        }
+
+        // An exact but off-increment fractional quantity is written exactly
+        // and then REFUSED by the runtime's registry-economics gate (never
+        // rounded to an increment).
+        let mut off = decision();
+        off.qty = mqk_schemas::QtyMicros::new(123_456);
+        let order = build_order_json(&off, &context);
+        assert_eq!(order["qty"], serde_json::json!("0.123456"));
+        assert!(mqk_runtime::orchestrator::build_validated_submit_request("oid", &order).is_err());
+    }
+
+    #[test]
+    fn a3_4_equity_order_json_qty_stays_a_whole_integer() {
+        let ctx = DurableOrderInstrumentContext::legacy_equity();
+        let mut d = decision();
+        d.symbol = "AAPL".to_string();
+        d.qty = q(10);
+        let order = build_order_json(&d, &ctx);
+        assert_eq!(order["qty"], serde_json::json!(10));
+        assert_eq!(
+            order["qty"].to_string(),
+            "10",
+            "byte-identical to the i64 form"
+        );
+    }
+
+    #[test]
+    fn a3_4_position_book_retains_fractional_positions() {
+        let positions = vec![
+            mqk_runtime::observability::PositionSnapshot {
+                symbol: "BTC/USD".to_string(),
+                net_qty: mqk_schemas::QtyMicros::new(500_000),
+            },
+            mqk_runtime::observability::PositionSnapshot {
+                symbol: "AAPL".to_string(),
+                net_qty: q(7),
+            },
+        ];
+        let book = position_book_from_snapshot(&positions);
+        assert_eq!(book.len(), 2, "no position may be dropped");
+        assert_eq!(book["BTC/USD"], mqk_schemas::QtyMicros::new(500_000));
+        assert_eq!(book["AAPL"], q(7));
+    }
+
+    #[test]
+    fn a3_4_fractional_target_and_current_delta_is_exact_and_checked() {
+        let result = mqk_strategy::StrategyBarResult {
+            spec: mqk_strategy::StrategySpec::new("intraday_scalper", 300),
+            semantic_fingerprint: "fp".to_string(),
+            intents: mqk_strategy::StrategyIntents {
+                mode: mqk_strategy::IntentMode::Live,
+                output: mqk_strategy::StrategyOutput {
+                    targets: vec![mqk_strategy::TargetPosition::new(
+                        "BTC/USD",
+                        mqk_schemas::QtyMicros::new(350),
+                    )],
+                },
+            },
+        };
+        let mut book = BTreeMap::new();
+        book.insert("BTC/USD".to_string(), mqk_schemas::QtyMicros::new(250));
+        let ds = bar_result_to_decisions(&result, Uuid::nil(), 1_000, &book);
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].side, "buy");
+        assert_eq!(ds[0].qty, mqk_schemas::QtyMicros::new(100));
+
+        // Overflowing target - current refuses (no decision), never wraps.
+        book.insert("BTC/USD".to_string(), mqk_schemas::QtyMicros::new(-1));
+        let mut big = result.clone();
+        big.intents.output.targets[0].qty = mqk_schemas::QtyMicros::new(i64::MAX);
+        assert!(bar_result_to_decisions(&big, Uuid::nil(), 1_000, &book).is_empty());
+    }
+
+    #[test]
+    fn a3_4_crypto_sizing_is_validated_against_registry_economics_without_choosing_it() {
+        use mqk_strategy::{SizingError, TargetSizing};
+        let registry = btc_registry();
+        let context = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTC/USD",
+            false,
+        )
+        .unwrap();
+        let econ = context.economics_snapshot.as_ref().expect("economics");
+        let inc = econ["quantity_increment_micros"].as_i64().unwrap();
+        let min = econ["min_trade_qty_micros"].as_i64().unwrap();
+
+        let ok = TargetSizing::resolve(
+            mqk_execution::AssetClass::Crypto,
+            Some("0.0001"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(ok.validate_against(inc, min).is_ok());
+        let bad = TargetSizing::resolve(
+            mqk_execution::AssetClass::Crypto,
+            Some("0.00015"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            bad.validate_against(inc, min).is_err(),
+            "off-increment refused, not rounded"
+        );
+        assert_eq!(
+            TargetSizing::resolve(mqk_execution::AssetClass::Crypto, None, None, None),
+            Err(SizingError::MissingExplicitSize {
+                asset_class: mqk_execution::AssetClass::Crypto
+            }),
+            "no default 1 BTC"
+        );
+    }
 }

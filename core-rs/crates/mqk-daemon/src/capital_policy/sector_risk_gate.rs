@@ -119,7 +119,7 @@ pub(crate) async fn evaluate_sector_risk_gate(
     state: &AppState,
     candidate_symbol: &str,
     side: &str,
-    qty: i64,
+    qty: mqk_portfolio::QtyMicros,
 ) -> SectorRiskGateResult {
     let sector_limits_bps = match super::sector_risk::sector_exposure_limits_bps_from_env() {
         Ok(limits) => limits,
@@ -198,20 +198,19 @@ pub(crate) async fn evaluate_sector_risk_gate(
         );
     };
 
-    let delta: i64 = if side.trim().eq_ignore_ascii_case("buy") {
-        qty
+    let delta_micros = if side.trim().eq_ignore_ascii_case("buy") {
+        Some(qty)
     } else {
-        -qty
+        qty.checked_neg()
     };
-    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `evaluate_sector_risk` takes
-    // `QtyMicros`. Both callers of this function (internal Gate 1h,
-    // external strategy-signal route) validate `qty` as whole-unit `i64`
-    // before this point -- this gate does not yet accept fractional Crypto
-    // quantities (that widening belongs to the crypto-risk phase, not this
-    // portfolio-quantity cutover), so the conversion cannot legitimately
-    // fail.
-    let delta_micros = mqk_portfolio::QtyMicros::from_whole_units(delta)
-        .expect("sector risk gate qty is validated whole-unit i64 by both callers");
+    let Some(delta_micros) = delta_micros else {
+        return SectorRiskGateResult::fail_closed(
+            "unavailable",
+            "sector risk gate: order quantity cannot be negated without overflow".to_string(),
+            None,
+            None,
+        );
+    };
 
     let cash_micros = snapshot.portfolio.cash_micros;
     let current_positions: Vec<mqk_portfolio::PositionWeightInput> = snapshot

@@ -886,7 +886,7 @@ async fn lo02_sr11_active_suppression_survives_restart_and_blocks_decision_seam(
             timeframe_secs: 86400,
             strategy_semantic_fingerprint: sr11_test_fingerprint(),
             side: "buy".to_string(),
-            qty: 1,
+            qty: mqk_execution::QtyMicros::from_whole_units(1).unwrap(),
             order_type: "market".to_string(),
             time_in_force: "day".to_string(),
             limit_price: None,

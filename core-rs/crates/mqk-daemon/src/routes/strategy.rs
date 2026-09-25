@@ -152,9 +152,14 @@ pub(crate) async fn build_dispatch_summary_response(
             bar_staleness_secs: None,
             symbol: row.symbol,
             strategy_id: row.strategy_id,
-            current_qty: row.current_qty,
-            target_qty: row.target_qty,
-            delta: row.delta,
+            current_qty: row.current_qty.to_whole_units_checked(),
+            target_qty: row.target_qty.to_whole_units_checked(),
+            delta: row
+                .delta
+                .and_then(mqk_schemas::QtyMicros::to_whole_units_checked),
+            current_qty_micros: row.current_qty.raw(),
+            target_qty_micros: row.target_qty.raw(),
+            delta_micros: row.delta.map(mqk_schemas::QtyMicros::raw),
             no_order_reason: row.no_order_reason,
             last_decision_id: row.last_decision_id,
             last_decision_disposition: row.last_decision_disposition,
@@ -649,8 +654,16 @@ pub(crate) async fn strategy_signal(
     // that was never actually computed.
     {
         use crate::capital_policy::sector_risk_gate::evaluate_sector_risk_gate;
-        let result =
-            evaluate_sector_risk_gate(&st, &validated.symbol, &validated.side, validated.qty).await;
+        let result = evaluate_sector_risk_gate(
+            &st,
+            &validated.symbol,
+            &validated.side,
+            // `validated.qty` is range-checked whole-unit i64 (<= i32::MAX)
+            // by this route's own validation, so the conversion is exact.
+            mqk_portfolio::QtyMicros::from_whole_units(validated.qty)
+                .expect("external signal qty is validated whole-unit i64"),
+        )
+        .await;
 
         if !result.allowed {
             let status = if result.reason_code == "sector_limit_exceeded" {

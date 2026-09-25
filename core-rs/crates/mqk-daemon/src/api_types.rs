@@ -1853,9 +1853,17 @@ pub struct MultiSymbolDispatchSummaryResponse {
 pub struct PerSymbolDispatchRow {
     pub symbol: String,
     pub strategy_id: String,
-    pub current_qty: i64,
-    pub target_qty: i64,
-    pub delta: i64,
+    /// Whole-unit projection (historical meaning: shares). `null` when the
+    /// value is fractional or unrepresentable -- never rounded; the exact
+    /// value is always in the `*_micros` sibling.
+    pub current_qty: Option<i64>,
+    pub target_qty: Option<i64>,
+    pub delta: Option<i64>,
+    /// Exact quantity, raw `QtyMicros` (1.0 unit == 1_000_000).
+    pub current_qty_micros: i64,
+    pub target_qty_micros: i64,
+    /// `null` only if `target - current` overflowed.
+    pub delta_micros: Option<i64>,
     pub no_order_reason: String,
     pub last_decision_id: Option<String>,
     pub last_decision_disposition: Option<String>,

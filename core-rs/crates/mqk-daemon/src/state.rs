@@ -289,9 +289,11 @@ const ALPACA_SECRET_LIVE_ENV: &str = "ALPACA_API_SECRET_LIVE";
 pub struct PerSymbolTargetState {
     pub symbol: String,
     pub strategy_id: String,
-    pub current_qty: i64,
-    pub target_qty: i64,
-    pub delta: i64,
+    pub current_qty: mqk_schemas::QtyMicros,
+    pub target_qty: mqk_schemas::QtyMicros,
+    /// `target_qty - current_qty`; `None` only if the checked subtraction
+    /// overflows.
+    pub delta: Option<mqk_schemas::QtyMicros>,
     pub no_order_reason: String,
     pub last_decision_id: Option<String>,
     pub last_decision_disposition: Option<String>,
@@ -3228,8 +3230,13 @@ operator_reconcile_or_repair_required"
     /// Called from the execution loop after `tick_strategy_dispatch` returns
     /// a bar result.  `signal_qty` is the sum of all target quantities the
     /// strategy returned; zero means "no trade signal this tick".
-    pub(crate) fn record_bar_tick_outcome(&self, signal_qty: i64) {
-        self.last_bar_signal_qty.store(signal_qty, Ordering::SeqCst);
+    ///
+    /// `signal_qty` is the whole-unit public projection: `None` when the
+    /// total is fractional/overflowed (no exact whole-unit value), stored as
+    /// the "unavailable" sentinel — never a rounded integer.
+    pub(crate) fn record_bar_tick_outcome(&self, signal_qty: Option<i64>) {
+        self.last_bar_signal_qty
+            .store(signal_qty.unwrap_or(i64::MIN), Ordering::SeqCst);
         self.bar_tick_dispatch_count.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -3695,8 +3702,8 @@ operator_reconcile_or_repair_required"
         // (Dormant/Failed/spec-read error), since there is no strategy_id to
         // attribute the row to in that case.
         if let Some(ref bar_result) = result {
-            let signal_qty: i64 =
-                crate::decision::sum_target_qty_whole_units(&bar_result.intents.output.targets);
+            let signal_total = crate::decision::sum_target_qty(&bar_result.intents.output.targets);
+            let signal_qty: Option<i64> = crate::decision::public_signal_qty(signal_total);
             self.record_signal_evaluation(
                 SignalEvaluationAuthority::Legacy,
                 SignalEvaluationAttempt {
@@ -3706,8 +3713,8 @@ operator_reconcile_or_repair_required"
                     bar_context_source: "db_loaded",
                     bars_loaded: bars_loaded as i64,
                     latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
-                    signal_generated: signal_qty != 0,
-                    signal_qty: Some(signal_qty),
+                    signal_generated: crate::decision::signal_generated(signal_total),
+                    signal_qty,
                     reason_code: diagnostic_decision,
                     reason: diagnostic_reason,
                     decision_stage: "strategy_evaluated",
@@ -4648,8 +4655,8 @@ operator_reconcile_or_repair_required"
             // deliberately-corrupted host pool.
             check_selected_host_result_coherence(binding, &bar_result)?;
 
-            let signal_qty: i64 =
-                crate::decision::sum_target_qty_whole_units(&bar_result.intents.output.targets);
+            let signal_total = crate::decision::sum_target_qty(&bar_result.intents.output.targets);
+            let signal_qty: Option<i64> = crate::decision::public_signal_qty(signal_total);
             self.record_signal_evaluation(
                 selected_authority,
                 SignalEvaluationAttempt {
@@ -4659,8 +4666,8 @@ operator_reconcile_or_repair_required"
                     bar_context_source: "db_loaded",
                     bars_loaded: bars_loaded as i64,
                     latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
-                    signal_generated: signal_qty != 0,
-                    signal_qty: Some(signal_qty),
+                    signal_generated: crate::decision::signal_generated(signal_total),
+                    signal_qty,
                     reason_code: diagnostic_decision,
                     reason: diagnostic_reason,
                     decision_stage: "strategy_evaluated",
@@ -8507,9 +8514,9 @@ mod ownership_state_machine_tests {
             .record_per_symbol_target_state(PerSymbolTargetState {
                 symbol: "AAPL".to_string(),
                 strategy_id: "sentinel-strategy".to_string(),
-                current_qty: 1,
-                target_qty: 2,
-                delta: 1,
+                current_qty: mqk_schemas::QtyMicros::new(1_000_000),
+                target_qty: mqk_schemas::QtyMicros::new(2_000_000),
+                delta: Some(mqk_schemas::QtyMicros::new(1_000_000)),
                 no_order_reason: String::new(),
                 last_decision_id: None,
                 last_decision_disposition: None,
@@ -8740,9 +8747,9 @@ mod ownership_state_machine_tests {
             .record_per_symbol_target_state(PerSymbolTargetState {
                 symbol: "MSFT".to_string(),
                 strategy_id: "s".to_string(),
-                current_qty: 0,
-                target_qty: 1,
-                delta: 1,
+                current_qty: mqk_schemas::QtyMicros::ZERO,
+                target_qty: mqk_schemas::QtyMicros::new(1_000_000),
+                delta: Some(mqk_schemas::QtyMicros::new(1_000_000)),
                 no_order_reason: String::new(),
                 last_decision_id: None,
                 last_decision_disposition: None,

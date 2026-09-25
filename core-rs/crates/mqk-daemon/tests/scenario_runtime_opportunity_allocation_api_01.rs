@@ -160,10 +160,10 @@ async fn seed_plan(pool: &sqlx::PgPool, run_id: Uuid, plan_id: Uuid) {
                 strategy_id: "intraday_scalper".to_string(),
                 input_score_micros: 900_000,
                 target_weight_micros: 200_000,
-                current_qty: 0,
-                strategy_target_qty: 10,
-                allocation_target_qty: 10,
-                final_target_qty: 10,
+                current_qty: q(0),
+                strategy_target_qty: q(10),
+                allocation_target_qty: q(10),
+                final_target_qty: q(10),
                 disposition: "allowed".to_string(),
                 reason_code: "allocator_full_target_granted".to_string(),
                 evaluation_price_micros: 100_000_000,
@@ -437,4 +437,8 @@ async fn repeated_gets_perform_zero_writes() {
     );
 
     cleanup(&pool, run_id).await;
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

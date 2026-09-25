@@ -150,14 +150,14 @@ fn fixed_run_id() -> Uuid {
 const FIXED_NOW_MICROS: i64 = 1_700_000_000_000_000;
 
 /// Empty position map — all symbols treated as flat (current qty = 0).
-fn flat() -> BTreeMap<String, i64> {
+fn flat() -> BTreeMap<String, mqk_execution::QtyMicros> {
     BTreeMap::new()
 }
 
 /// Position map with one symbol at a given signed qty.
-fn pos(symbol: &str, qty: i64) -> BTreeMap<String, i64> {
+fn pos(symbol: &str, qty: i64) -> BTreeMap<String, mqk_execution::QtyMicros> {
     let mut m = BTreeMap::new();
-    m.insert(symbol.to_string(), qty);
+    m.insert(symbol.to_string(), q(qty));
     m
 }
 
@@ -236,7 +236,7 @@ fn b1c_c03_live_buy_target_correct_fields() {
     );
     assert_eq!(d.symbol, "AAPL", "C03: symbol from target");
     assert_eq!(d.side, "buy", "C03: positive qty → buy");
-    assert_eq!(d.qty, 15, "C03: qty unchanged for buy");
+    assert_eq!(d.qty, q(15), "C03: qty unchanged for buy");
     assert_eq!(
         d.order_type, "market",
         "C03: target positions → market order"
@@ -279,7 +279,7 @@ fn b1c_c04_live_sell_target_correct_fields() {
 
     assert_eq!(d.symbol, "TSLA", "C04: symbol from target");
     assert_eq!(d.side, "sell", "C04: negative delta → sell");
-    assert_eq!(d.qty, 8, "C04: qty = current holdings (close long)");
+    assert_eq!(d.qty, q(8), "C04: qty = current holdings (close long)");
     assert_eq!(
         d.order_type, "market",
         "C04: target positions → market order"
@@ -418,7 +418,7 @@ fn b1c_c08_multi_target_produces_one_decision_each() {
     // MSFT: partial reduce long (target=0, current=5) → sell 5 (B5 guard: 5 <= 5, passes)
     // GOOG: buy from flat (target=+1, current=0) → buy 1
     let mut positions = BTreeMap::new();
-    positions.insert("MSFT".to_string(), 5i64);
+    positions.insert("MSFT".to_string(), q(5));
 
     let result = live_result(vec![
         TargetPosition::whole("AAPL", 5),
@@ -466,7 +466,7 @@ fn b1c_c09_delta_buy_from_partial_position() {
     assert_eq!(decisions.len(), 1, "C09: one target → one decision");
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "C09: positive delta → buy");
-    assert_eq!(d.qty, 5, "C09: qty = delta = target(15) - current(10)");
+    assert_eq!(d.qty, q(5), "C09: qty = delta = target(15) - current(10)");
 }
 
 /// C10: Already at target — target=+10, current=+10 → no decision (delta=0).
@@ -506,7 +506,7 @@ fn b1c_c11_close_long_position() {
     );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "C11: delta=-10 → sell");
-    assert_eq!(d.qty, 10, "C11: sell qty = current holdings");
+    assert_eq!(d.qty, q(10), "C11: sell qty = current holdings");
 }
 
 /// C12: Short cover + go long — target=+5, current=-3 → buy 8.
@@ -525,7 +525,7 @@ fn b1c_c12_short_cover_and_go_long() {
     );
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "C12: delta=+8 → buy");
-    assert_eq!(d.qty, 8, "C12: qty = target(+5) - current(-3) = 8");
+    assert_eq!(d.qty, q(8), "C12: qty = target(+5) - current(-3) = 8");
 }
 
 /// C13: Cover short — target=0, current=-7 → buy 7.
@@ -545,7 +545,7 @@ fn b1c_c13_close_short_position() {
     );
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "C13: delta=+7 → buy to close short");
-    assert_eq!(d.qty, 7, "C13: qty = abs(delta) = 7");
+    assert_eq!(d.qty, q(7), "C13: qty = abs(delta) = 7");
 }
 
 // ---------------------------------------------------------------------------
@@ -691,4 +691,8 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
         );
     })
     .await;
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

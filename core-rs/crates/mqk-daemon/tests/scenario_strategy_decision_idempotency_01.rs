@@ -131,7 +131,7 @@ fn fixed_run_id() -> Uuid {
     Uuid::parse_str("00000000-0000-0000-0000-0000000000d6").unwrap()
 }
 
-fn flat() -> BTreeMap<String, i64> {
+fn flat() -> BTreeMap<String, mqk_execution::QtyMicros> {
     BTreeMap::new()
 }
 
@@ -221,9 +221,9 @@ fn d04_different_symbol_at_same_bar_produces_different_decision_id() {
 // C2/C4 (DB-backed) — see module header for the full defect/fix narrative.
 // ---------------------------------------------------------------------------
 
-fn at(symbol: &str, qty: i64) -> BTreeMap<String, i64> {
+fn at(symbol: &str, qty: i64) -> BTreeMap<String, mqk_execution::QtyMicros> {
     let mut m = BTreeMap::new();
-    m.insert(symbol.to_string(), qty);
+    m.insert(symbol.to_string(), q(qty));
     m
 }
 
@@ -248,9 +248,10 @@ fn c1_same_bar_same_target_current_moves_decision_id_unchanged() {
     );
     // The derived delta legitimately differs (this is what Bundle 5/outbox
     // payload building uses `qty` for) -- only the identity is stable.
-    assert_eq!(before_fill[0].qty, 20, "precondition: first delta is 20");
+    assert_eq!(before_fill[0].qty, q(20), "precondition: first delta is 20");
     assert_eq!(
-        after_partial_fill[0].qty, 10,
+        after_partial_fill[0].qty,
+        q(10),
         "precondition: second delta is 10 (target 20 - current 10)"
     );
 }
@@ -283,7 +284,7 @@ fn c10_multi_symbol_one_symbols_current_never_affects_another() {
 
     // NVDA has a partial fill reflected in current; AMD is untouched (flat).
     let mut current_with_nvda_partial = BTreeMap::new();
-    current_with_nvda_partial.insert("NVDA".to_string(), 10i64);
+    current_with_nvda_partial.insert("NVDA".to_string(), q(10));
 
     let baseline = bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &flat());
     let with_nvda_fill = bar_result_to_decisions(
@@ -727,7 +728,7 @@ async fn c2_partial_fill_reevaluation_creates_zero_additional_order() {
 
         // First evaluation: current=0, target=20 -> delta=20, BUY 20 submitted.
         let first = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
-        assert_eq!(first[0].qty, 20, "precondition: first delta is 20");
+        assert_eq!(first[0].qty, q(20), "precondition: first delta is 20");
         let decision_id = first[0].decision_id.clone();
         let outcome_first =
             submit_internal_strategy_decision(&st, first.into_iter().next().unwrap()).await;
@@ -750,7 +751,8 @@ async fn c2_partial_fill_reevaluation_creates_zero_additional_order() {
         let second =
             bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &current_after_partial_fill);
         assert_eq!(
-            second[0].qty, 10,
+            second[0].qty,
+            q(10),
             "precondition: second delta reflects the partial fill (20-10=10)"
         );
         assert_eq!(
@@ -898,4 +900,8 @@ async fn c9_terminal_failed_attempt_on_same_bar_is_not_retried() {
         );
     })
     .await;
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

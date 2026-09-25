@@ -254,14 +254,27 @@ pub fn evaluate_dry_run_strategy(
         }
     };
 
-    let target_qty: i64 = crate::decision::sum_target_qty_whole_units(
+    // Dry-run diagnostics are whole-unit: a fractional or overflowed target
+    // has no exact whole-unit value, so the strategy is reported unavailable
+    // rather than truncated.
+    let Some(target_qty) = crate::decision::sum_target_qty(
         bar_result
             .intents
             .output
             .targets
             .iter()
             .filter(|t| t.symbol.trim().eq_ignore_ascii_case(symbol)),
-    );
+    )
+    .and_then(mqk_schemas::QtyMicros::to_whole_units_checked) else {
+        return unavailable(
+            strategy_id,
+            symbol,
+            current_qty,
+            "dry-run target quantity is fractional or overflowed; whole-unit dry-run \
+             diagnostics cannot represent it"
+                .to_string(),
+        );
+    };
 
     let delta_qty = target_qty - current_qty;
     let intent = classify_order_intent(current_qty, delta_qty);

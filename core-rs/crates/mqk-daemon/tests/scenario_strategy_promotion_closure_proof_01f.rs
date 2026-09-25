@@ -605,7 +605,7 @@ fn make_decision(decision_id: &str, strategy_id: &str, symbol: &str) -> Internal
             )
             .unwrap_or_default(),
         side: "buy".to_string(),
-        qty: 10,
+        qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         time_in_force: "day".to_string(),
         limit_price: None,

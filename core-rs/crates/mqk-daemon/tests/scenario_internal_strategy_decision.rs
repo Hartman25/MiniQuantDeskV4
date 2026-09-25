@@ -50,7 +50,7 @@ fn make_decision(decision_id: &str, strategy_id: &str) -> InternalStrategyDecisi
         timeframe_secs: 86400,
         strategy_semantic_fingerprint: test_fingerprint(),
         side: "buy".to_string(),
-        qty: 10,
+        qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
         order_type: "market".to_string(),
         time_in_force: "day".to_string(),
         limit_price: None,
@@ -294,7 +294,7 @@ async fn decision_zero_qty_rejected() {
     ));
 
     let mut d = make_decision("dec-003", "strat-a");
-    d.qty = 0;
+    d.qty = mqk_execution::QtyMicros::from_whole_units(0).unwrap();
     let out = submit_internal_strategy_decision(&st, d).await;
 
     assert!(!out.accepted);
@@ -314,7 +314,7 @@ async fn decision_negative_qty_rejected() {
     ));
 
     let mut d = make_decision("dec-004", "strat-a");
-    d.qty = -5;
+    d.qty = mqk_execution::QtyMicros::from_whole_units(-5).unwrap();
     let out = submit_internal_strategy_decision(&st, d).await;
 
     assert!(!out.accepted);

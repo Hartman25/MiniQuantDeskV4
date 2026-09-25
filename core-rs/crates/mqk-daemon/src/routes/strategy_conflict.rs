@@ -98,9 +98,17 @@ pub(crate) struct ConflictPlanCandidateRow {
     pub strategy_id: String,
     pub timeframe_secs: i64,
     pub side: String,
-    pub qty: i64,
-    pub current_qty: i64,
+    /// Whole-unit projections (historical meaning: shares). `null` when the
+    /// value is fractional -- never rounded; the exact value is always in
+    /// the matching `*_micros` field (raw `QtyMicros`, 1.0 unit == 1_000_000).
+    pub qty: Option<i64>,
+    pub current_qty: Option<i64>,
+    /// `null` when absent OR fractional; `proposed_target_qty_micros`
+    /// disambiguates.
     pub proposed_target_qty: Option<i64>,
+    pub qty_micros: i64,
+    pub current_qty_micros: i64,
+    pub proposed_target_qty_micros: Option<i64>,
     /// `None` on a pre-0057 legacy row.
     pub order_type: Option<String>,
     /// `None` on a pre-0057 legacy row.
@@ -209,9 +217,14 @@ fn candidate_row_from_record(
         strategy_id: rec.strategy_id.clone(),
         timeframe_secs: rec.timeframe_secs,
         side: rec.side.clone(),
-        qty: rec.qty,
-        current_qty: rec.current_qty,
-        proposed_target_qty: rec.proposed_target_qty,
+        qty: rec.qty.to_whole_units_checked(),
+        current_qty: rec.current_qty.to_whole_units_checked(),
+        proposed_target_qty: rec
+            .proposed_target_qty
+            .and_then(mqk_schemas::QtyMicros::to_whole_units_checked),
+        qty_micros: rec.qty.raw(),
+        current_qty_micros: rec.current_qty.raw(),
+        proposed_target_qty_micros: rec.proposed_target_qty.map(mqk_schemas::QtyMicros::raw),
         order_type: rec.order_type.clone(),
         time_in_force: rec.time_in_force.clone(),
         limit_price: rec.limit_price,

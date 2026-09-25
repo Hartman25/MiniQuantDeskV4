@@ -59,13 +59,13 @@ fn fixed_run_id() -> Uuid {
 
 const FIXED_NOW_MICROS: i64 = 1_748_000_000_000_000;
 
-fn flat() -> BTreeMap<String, i64> {
+fn flat() -> BTreeMap<String, mqk_execution::QtyMicros> {
     BTreeMap::new()
 }
 
-fn pos(symbol: &str, qty: i64) -> BTreeMap<String, i64> {
+fn pos(symbol: &str, qty: i64) -> BTreeMap<String, mqk_execution::QtyMicros> {
     let mut m = BTreeMap::new();
-    m.insert(symbol.to_string(), qty);
+    m.insert(symbol.to_string(), q(qty));
     m
 }
 
@@ -85,7 +85,7 @@ fn sa01_first_signal_flat_target1_buys_1() {
     assert_eq!(decisions.len(), 1, "SA-01: one target → one decision");
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "SA-01: positive delta → buy");
-    assert_eq!(d.qty, 1, "SA-01: qty = delta = target(1) - current(0)");
+    assert_eq!(d.qty, q(1), "SA-01: qty = delta = target(1) - current(0)");
     assert_eq!(d.order_type, "market", "SA-01: market order");
 }
 
@@ -131,7 +131,7 @@ fn sa03_target_qty_5_flat_buys_5() {
     assert_eq!(decisions.len(), 1, "SA-03: one target → one decision");
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "SA-03: positive delta → buy");
-    assert_eq!(d.qty, 5, "SA-03: qty = delta = target(5) - current(0)");
+    assert_eq!(d.qty, q(5), "SA-03: qty = delta = target(5) - current(0)");
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ fn sa04_target_qty_5_partial_position_buys_delta() {
     assert_eq!(decisions.len(), 1, "SA-04: one target → one decision");
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "SA-04: positive delta → buy");
-    assert_eq!(d.qty, 3, "SA-04: qty = delta = target(5) - current(2)");
+    assert_eq!(d.qty, q(3), "SA-04: qty = delta = target(5) - current(2)");
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ fn sa06_flat_exit_target_0_current_1_sells_1() {
     );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "SA-06: negative delta → sell");
-    assert_eq!(d.qty, 1, "SA-06: sell qty = current holdings = 1");
+    assert_eq!(d.qty, q(1), "SA-06: sell qty = current holdings = 1");
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ fn sa07_flat_exit_target_0_current_5_sells_5() {
     );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "SA-07: sell to close long");
-    assert_eq!(d.qty, 5, "SA-07: sell qty = current position");
+    assert_eq!(d.qty, q(5), "SA-07: sell qty = current position");
 }
 
 // ---------------------------------------------------------------------------
@@ -311,4 +311,8 @@ fn sa10_target_qty_from_env_default_is_1() {
     std::env::remove_var("MQK_STRATEGY_TARGET_QTY");
     let qty = target_qty_from_env();
     assert_eq!(qty, 1, "SA-10: absent MQK_STRATEGY_TARGET_QTY → default 1");
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

@@ -80,7 +80,7 @@ fn bearish_window() -> RecentBarsWindow {
     )
 }
 
-fn flat() -> BTreeMap<String, i64> {
+fn flat() -> BTreeMap<String, mqk_execution::QtyMicros> {
     BTreeMap::new()
 }
 
@@ -131,7 +131,7 @@ fn dr01_no_dry_run_ids_configured_is_a_pure_noop() {
         "DR01: primary long decision path unchanged (one buy decision)"
     );
     assert_eq!(decisions[0].side, "buy", "DR01: buy from flat to target=1");
-    assert_eq!(decisions[0].qty, 1, "DR01: qty=1");
+    assert_eq!(decisions[0].qty, q(1), "DR01: qty=1");
 }
 
 // ---------------------------------------------------------------------------
@@ -195,12 +195,12 @@ fn dr03_primary_long_strategy_result_remains_eligible_for_existing_path() {
         },
     };
     let mut current = BTreeMap::new();
-    current.insert("AAPL".to_string(), 1i64);
+    current.insert("AAPL".to_string(), q(1));
 
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &current);
     assert_eq!(decisions.len(), 1, "DR03: one decision produced");
     assert_eq!(decisions[0].side, "buy", "DR03: buy to extend long 1 -> 3");
-    assert_eq!(decisions[0].qty, 2, "DR03: delta = 3 - 1 = 2");
+    assert_eq!(decisions[0].qty, q(2), "DR03: delta = 3 - 1 = 2");
     assert_eq!(decisions[0].strategy_id, "intraday_scalper");
 }
 
@@ -354,4 +354,8 @@ fn dr09_live_shorting_remains_blocked_regardless_of_config() {
         },
         "DR09: live mode is blocked unconditionally, even with a fully permissive config"
     );
+}
+
+fn q(units: i64) -> mqk_execution::QtyMicros {
+    mqk_execution::QtyMicros::from_whole_units(units).unwrap()
 }

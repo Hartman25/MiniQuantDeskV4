@@ -1908,6 +1908,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "csv",
+ "mqk-schemas",
  "serde",
  "serde_json",
  "sqlx",

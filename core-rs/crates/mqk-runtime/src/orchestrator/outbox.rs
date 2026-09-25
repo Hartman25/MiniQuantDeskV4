@@ -65,7 +65,7 @@ pub(super) fn build_claimed_outbox_request(
 // ---------------------------------------------------------------------------
 
 /// Build a `BrokerSubmitRequest` from a claimed outbox row.
-pub(super) fn build_validated_submit_request(
+pub fn build_validated_submit_request(
     order_id: &str,
     order_json: &serde_json::Value,
 ) -> anyhow::Result<BrokerSubmitRequest> {
