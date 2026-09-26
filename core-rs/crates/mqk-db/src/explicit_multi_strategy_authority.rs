@@ -722,6 +722,7 @@ pub async fn fetch_explicit_multi_strategy_authority(
 #[cfg(test)]
 mod pure_tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn binding(
         symbol: &str,
@@ -783,7 +784,7 @@ mod pure_tests {
             market_date: "2026-09-18".to_string(),
             approved_for_live: false,
             writer_version: "test-writer-v1".to_string(),
-            created_at_utc: Utc::now(),
+            created_at_utc: Utc.with_ymd_and_hms(2026, 9, 18, 0, 0, 0).unwrap(),
             bindings,
         }
     }
