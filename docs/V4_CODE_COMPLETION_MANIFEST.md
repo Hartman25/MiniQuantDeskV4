@@ -1110,3 +1110,30 @@ M2 overall (C4/C5/C6, i.e. R2B/R2C and the integrated M2 finish-line proof)
 remains open. M1 operational status, `intraday_scalper` promotion
 rejection, and alpha-discovery deferral are unchanged. No Paper/Live/
 runtime state modified; no push; no M3.
+
+## M5-M8 Deterministic Code-Completion Controller (`V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`, 2026-09-26)
+
+Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G3 (commits, proofs, dispositions). Baseline `8e029b86`; nine local commits, not pushed; full `cargo test --workspace` NOT RUN (resource bounded).
+
+Requirement census, classified with the manifest vocabulary (`CLOSED_PROVEN`, `CODE_PRESENT_NEEDS_PROOF`, `OPEN_DETERMINISTIC`, `OPERATOR_VALIDATION_REQUIRED`, `DEFERRED_BY_CONTRACT`, `BLOCKED_HARD_STOP`, `POST_V4`):
+
+```text
+M5 asset-neutral quantity through reconcile / accounting / durable snapshot / P&L   CLOSED_PROVEN for the seams audited (RC-M5-A..E: 5da4d665 22321489 69b76346 2b6bc5cb 605906c6)
+M5 broker capability authority (gateway per-adapter capability check)                CLOSED_PROVEN (pre-existing, re-read; Alpaca advertises Equity only)
+M5 session/calendar authority per instrument                                          BLOCKED_HARD_STOP (design, ledger G3-01)
+M5 backtest/promotion fractional quantity domain                                      BLOCKED_HARD_STOP (frozen V1 contract, ledger G3-02)
+M5 production-grade asset contract "proven by later assets"                           OPEN (needs M7/M8 requirements)
+
+M6 crypto admission economics/sizing/24x7 registry profile                            CODE_PRESENT (pre-existing; B1 Paper-only cutover)
+M6 Alpaca crypto wire (position symbol, TIF, REST fractional fills)                   CLOSED_PROVEN (4f4f6d25, 1f131803)
+M6 Alpaca `supports_asset_class(Crypto)` advertisement                                OPERATOR decision (deliberately still false)
+M6 real Alpaca crypto Paper lifecycle                                                 OPERATOR_VALIDATION_REQUIRED (never run)
+M6 24/7 concurrent operation / autonomous daily ops                                   BLOCKED_HARD_STOP (G3-01)
+
+M7 futures/FX identity + expiry + whole-contract model validation                     CLOSED_PROVEN (df680b65, a8394d92)
+M7 IBKR adapter, contract roll, FX financing/session                                  BLOCKED_HARD_STOP (no design, no dependency; frozen matrix names IBKR)
+M8 options permission classifier (frozen set)                                         CODE_PRESENT + proven against malformed expiry / fractional contracts (a8394d92); zero production callers
+M8 options execution, exercise/assignment/expiration lifecycle, mleg spreads          BLOCKED_HARD_STOP (contract decision: broker-truth non-fill events)
+```
+
+Overall status: **M5-M8 deterministic code-completion is NOT complete.** Ordinary deterministic defects found in the audited seams are fixed and proven; the remaining items above are either operator-gated, design-gated hard stops, or optional V2 read surfaces (ledger G3-03/04). No milestone is claimed `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`.

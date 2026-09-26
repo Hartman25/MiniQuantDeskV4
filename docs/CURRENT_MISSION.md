@@ -6,6 +6,18 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -9. M5-M8 Deterministic Code-Completion Controller (2026-09-26, `V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`)
+
+Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G3 and the section of the same name at the end of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Baseline `8e029b86` (main = origin/main); nine local commits, NOT pushed.
+
+Current truth for M5-M8, superseding the §-8 census where they differ (that census predates the QtyMicros runtime cutover):
+
+- Fractional quantity now survives reconcile drift explanation, paper accounting, the durable Paper snapshot (migration 0078), broker P&L, and fails closed (409, no panic) on four V1 read/repair seams. Alpaca crypto wire correctness (position symbol, TIF, REST fractional fills) and admission TIF are fixed. Contract-identity validators (expiry, whole contracts, pair legs) are fixed in registry-v2, the intent/spec models and the options permission classifier.
+- Alpaca still does NOT advertise crypto capability (operator decision); M7 (IBKR) and M8 (options execution/lifecycle) are BLOCKED_HARD_STOP for design/dependency reasons; per-instrument session handling in the autonomous controller and the fractional backtest domain are BLOCKED_HARD_STOP (design / frozen contract).
+- Not run: full `cargo test --workspace` (resource bounded), any Paper/Live/provider session, GitHub CI.
+
+---
+
 ## -8. V4 Bulk Code Completion Wave B — M5-M8 Multi-Asset: Frozen Matrix + Bounded Census + First Code (2026-09-19, `V4-BULK-CODE-COMPLETION-STAGE-B-M2-01`)
 
 ### Frozen V4 asset matrix (operator-approved, recorded here as durable truth)
