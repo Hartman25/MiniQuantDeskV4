@@ -49,14 +49,22 @@ DYNAMIC_SELECTION_RS="core-rs/crates/mqk-portfolio/src/dynamic_selection.rs"
 # Each prints "PASS"/"FAIL:<reason>" to stdout and never exits the process.
 # ---------------------------------------------------------------------------
 
+# Call-site lines only ("<line>:<text>"): a `//` comment that merely names a
+# function (e.g. the STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02 note in
+# loop_runner.rs) is not a call and must neither be counted nor be taken as the
+# position of the call for the ordering checks.
+call_site_lines() {
+  grep -n "$1" "$2" | grep -vE '^[0-9]+:[[:space:]]*//' || true
+}
+
 check_ordering() {
   local loop_runner="$1"
   [[ -f "$loop_runner" ]] || { echo "FAIL:missing $loop_runner"; return; }
   local conflict_line allocation_line cap6_line submit_line
-  conflict_line="$(grep -n 'runtime_strategy_conflict::gather_and_resolve' "$loop_runner" | head -1 | cut -d: -f1 || true)"
-  allocation_line="$(grep -n 'runtime_opportunity_allocation::gather_and_apply' "$loop_runner" | head -1 | cut -d: -f1 || true)"
-  cap6_line="$(grep -n 'AppState::max_new_orders_per_tick_reason' "$loop_runner" | head -1 | cut -d: -f1 || true)"
-  submit_line="$(grep -n 'crate::decision::submit_internal_strategy_decision' "$loop_runner" | head -1 | cut -d: -f1 || true)"
+  conflict_line="$(call_site_lines 'runtime_strategy_conflict::gather_and_resolve' "$loop_runner" | head -1 | cut -d: -f1)"
+  allocation_line="$(call_site_lines 'runtime_opportunity_allocation::gather_and_apply' "$loop_runner" | head -1 | cut -d: -f1)"
+  cap6_line="$(call_site_lines 'AppState::max_new_orders_per_tick_reason' "$loop_runner" | head -1 | cut -d: -f1)"
+  submit_line="$(call_site_lines 'crate::decision::submit_internal_strategy_decision' "$loop_runner" | head -1 | cut -d: -f1)"
   if [[ -z "$conflict_line" || -z "$allocation_line" || -z "$cap6_line" || -z "$submit_line" ]]; then
     echo "FAIL:one or more required call sites missing"
     return
@@ -179,7 +187,7 @@ check_bundle6_runs_exactly_once() {
   local f="$1"
   [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
   local hits
-  hits="$(grep -c 'runtime_strategy_conflict::gather_and_resolve' "$f" || true)"
+  hits="$(call_site_lines 'runtime_strategy_conflict::gather_and_resolve' "$f" | wc -l | tr -d '[:space:]')"
   if [[ "$hits" -ne 1 ]]; then
     echo "FAIL:runtime_strategy_conflict::gather_and_resolve call count is $hits, expected exactly 1"
     return
@@ -201,7 +209,7 @@ check_bundle7_dispatch_feeds_bundle6_when_wired() {
     echo "PASS"
     return
   fi
-  conflict_line="$(grep -n 'runtime_strategy_conflict::gather_and_resolve' "$f" | head -1 | cut -d: -f1 || true)"
+  conflict_line="$(call_site_lines 'runtime_strategy_conflict::gather_and_resolve' "$f" | head -1 | cut -d: -f1)"
   if [[ -z "$conflict_line" ]]; then
     echo "FAIL:dynamic-selection call site present but Bundle 6 conflict-resolution call site is missing"
     return
@@ -709,12 +717,22 @@ check_status_over_limit_is_invalid_evidence() {
 }
 
 # Defect 2: detail must never project partial candidate data for an
-# over-limit plan.
+# over-limit plan. Two coupled facts (the V1/V2 detail routes share one
+# `conflict_plan_detail` seam): the over-limit branch answers ONLY through the
+# shared `respond(...)` closure with InvalidEvidence, and that closure itself
+# carries no plan and no candidates.
 check_detail_over_limit_no_partial_candidates() {
   local f="$1"
   [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
-  if ! grep -A10 'over-limit plan -- invalid_evidence, no partial' "$f" | grep -q 'candidates: vec!\[\],'; then
+  local branch closure
+  branch="$(grep -A8 'over-limit plan -- invalid_evidence, no partial' "$f")"
+  closure="$(grep -A8 'let respond = |truth_state' "$f")"
+  if ! echo "$branch" | grep -q 'respond('      || ! echo "$branch" | grep -q 'ConflictTruthState::InvalidEvidence'      || echo "$branch" | grep -q 'ConflictPlanDetailResponse'; then
     echo "FAIL:detail route projects partial/non-empty candidate data for an over-limit plan"
+    return
+  fi
+  if ! echo "$closure" | grep -q 'plan: None,' || ! echo "$closure" | grep -q 'candidates: vec!\[\],'; then
+    echo "FAIL:detail route respond() closure carries a plan or candidate data"
     return
   fi
   echo "PASS"
@@ -1129,6 +1147,28 @@ run_self_test() {
   sed -i 's/crate::decision::submit_internal_strategy_decision/MUTATED_submit_internal_strategy_decision/' "$scratch/loop_runner_mut_b.rs"
   assert_now_fails "MUT-B canonical submission call renamed/removed" "$(check_ordering "$scratch/loop_runner_mut_b.rs")"
 
+  # MUT-B2: a SECOND real conflict-resolution call site (double-applying
+  # Bundle 6 to one decision batch) must fail the exactly-once check.
+  cp "$LOOP_RUNNER" "$scratch/loop_runner_mut_b2.rs"
+  printf '%s
+' 'let _dup = crate::runtime_strategy_conflict::gather_and_resolve(' >> "$scratch/loop_runner_mut_b2.rs"
+  assert_now_fails "MUT-B2 second conflict-resolution call site" "$(check_bundle6_runs_exactly_once "$scratch/loop_runner_mut_b2.rs")"
+
+  # POS-B3 (positive control): an extra COMMENT that merely names the
+  # function is not a call site -- the exactly-once check must still PASS,
+  # and must keep passing on the real tree.
+  cp "$LOOP_RUNNER" "$scratch/loop_runner_pos_b3.rs"
+  printf '%s
+' '// see runtime_strategy_conflict::gather_and_resolve for the resolution contract' >> "$scratch/loop_runner_pos_b3.rs"
+  local pos_b3
+  pos_b3="$(check_bundle6_runs_exactly_once "$scratch/loop_runner_pos_b3.rs")"
+  if [[ "$pos_b3" == PASS ]]; then
+    echo "[msc-guard-selftest] OK: comment-only mention is not counted as a call site"
+  else
+    echo "[msc-guard-selftest] FAIL: comment-only mention was counted as a call site (${pos_b3})" >&2
+    failures=$((failures + 1))
+  fi
+
   # MUT-C: default mode becomes enforced (Off -> PaperEnforced on the
   # absent/blank branch).
   cp "$CONFLICT_MODE" "$scratch/mode_mut_c.rs"
@@ -1392,21 +1432,42 @@ open(path, "w", encoding="utf-8").write(text)
 PY
   assert_now_fails "MUT-GG status over-limit plan no longer maps to invalid_evidence" "$(check_status_over_limit_is_invalid_evidence "$scratch/route_mut_gg.rs")"
 
-  # MUT-HH: detail projects candidate data for an over-limit plan.
+  # MUT-HH: detail projects candidate data for an over-limit plan -- both the
+  # shared respond() closure carrying candidates, and the over-limit branch
+  # bypassing respond() to build its own response, must be caught.
   cp "$CONFLICT_ROUTE" "$scratch/route_mut_hh.rs"
   python - "$scratch/route_mut_hh.rs" <<'PY'
 import sys
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-anchor = "over-limit plan -- invalid_evidence, no partial"
+anchor = "let respond = |truth_state"
 idx = text.find(anchor)
-end = text.find("into_response()", idx) + len("into_response()")
+assert idx >= 0
+end = text.find("};", idx) + 2
 block = text[idx:end]
 mutated = block.replace("candidates: vec![],", "candidates: some_partial_candidates(),", 1)
+assert mutated != block
 text = text[:idx] + mutated + text[end:]
 open(path, "w", encoding="utf-8").write(text)
 PY
-  assert_now_fails "MUT-HH detail route projects candidate data for an over-limit plan" "$(check_detail_over_limit_no_partial_candidates "$scratch/route_mut_hh.rs")"
+  assert_now_fails "MUT-HH respond() closure carries candidate data" "$(check_detail_over_limit_no_partial_candidates "$scratch/route_mut_hh.rs")"
+
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_hh2.rs"
+  python - "$scratch/route_mut_hh2.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "over-limit plan -- invalid_evidence, no partial"
+idx = text.find(anchor)
+assert idx >= 0
+end = text.find("))", idx) + 2
+block = text[idx:end]
+mutated = block.replace("Ok(respond(", "Ok(ConflictPlanDetailResponse::partial(", 1)
+assert mutated != block
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-HH2 over-limit branch bypasses respond()" "$(check_detail_over_limit_no_partial_candidates "$scratch/route_mut_hh2.rs")"
 
   # MUT-II: list stops counting a successfully-read over-limit plan as malformed.
   cp "$CONFLICT_ROUTE" "$scratch/route_mut_ii.rs"
@@ -1449,7 +1510,14 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 anchor = "runtime_strategy_conflict::gather_and_resolve"
 idx = text.find(anchor)
-line_start = text.rfind("\n", 0, idx) + 1
+# Duplicate the first real CALL line: a `//` comment naming the function is
+# not a call site (see call_site_lines).
+while idx != -1:
+    line_start = text.rfind("\n", 0, idx) + 1
+    if not text[line_start:idx].lstrip().startswith("//"):
+        break
+    idx = text.find(anchor, idx + 1)
+assert idx != -1
 line_end = text.find("\n", idx)
 line = text[line_start:line_end]
 text = text[:line_end] + "\n" + line + " // MUT-LL duplicate" + text[line_end:]
