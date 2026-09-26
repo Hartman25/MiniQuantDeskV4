@@ -1547,6 +1547,36 @@ mod tests {
             "R2.1: strategy_name == Research strategy_id"
         );
 
+        // Order/fill idempotency on the real replay path: no logical order
+        // identity is admitted twice or filled twice, and every fill belongs
+        // to exactly one `Filled` order.
+        {
+            use std::collections::HashSet;
+            let fills = report.fills.len();
+            assert!(fills > 0, "the replay must actually trade");
+            let fill_orders: HashSet<_> = report.fills.iter().map(|f| f.order_id).collect();
+            let fill_ids: HashSet<_> = report.fills.iter().map(|f| f.fill_id).collect();
+            assert_eq!(
+                fill_orders.len(),
+                fills,
+                "an order_id was filled more than once"
+            );
+            assert_eq!(fill_ids.len(), fills, "a fill_id repeated");
+            let order_ids: HashSet<_> = report.orders.iter().map(|o| o.order_id).collect();
+            assert_eq!(
+                order_ids.len(),
+                report.orders.len(),
+                "an order_id was recorded more than once"
+            );
+            let filled: HashSet<_> = report
+                .orders
+                .iter()
+                .filter(|o| o.status == mqk_backtest::OrderStatus::Filled)
+                .map(|o| o.order_id)
+                .collect();
+            assert_eq!(filled, fill_orders, "Filled orders and fills disagree");
+        }
+
         let gauntlet = mqk_artifacts::load_canonical_robustness_gauntlet(&summary.run_dir)
             .expect("load_canonical_robustness_gauntlet failed");
         assert_eq!(
