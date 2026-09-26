@@ -30,9 +30,10 @@ use uuid::Uuid;
 
 use mqk_db::FixedClock;
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
-    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerGateway,
+    BrokerInvokeToken, BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse,
+    BrokerSubmitRequest, BrokerSubmitResponse, IntegrityGate, QtyMicros, ReconcileGate, RiskGate,
+    Side,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -274,6 +275,59 @@ fn make_orchestrator(
 }
 
 // ---------------------------------------------------------------------------
+// Fixture: current-epoch broker-event JSON
+// ---------------------------------------------------------------------------
+
+enum FillKind {
+    Partial,
+    Final,
+}
+
+/// `message_json` for a broker fill, built through the production
+/// `BrokerEvent` type so quantities are `QtyMicros` on the wire. The inbox
+/// writer stamps the current schema version; a hand-written `"delta_qty": 1`
+/// there would decode as 0.000001 units, not 1 share.
+fn broker_fill_json(
+    kind: FillKind,
+    broker_message_id: &str,
+    internal_order_id: &str,
+    whole_qty: i64,
+    price_micros: i64,
+) -> serde_json::Value {
+    let broker_message_id = broker_message_id.to_string();
+    let broker_order_id = Some(format!("null-{internal_order_id}"));
+    let internal_order_id = internal_order_id.to_string();
+    let symbol = "AAPL".to_string();
+    let delta_qty = QtyMicros::from_whole_units(whole_qty).expect("whole-unit qty");
+    let event = match kind {
+        FillKind::Partial => BrokerEvent::PartialFill {
+            broker_message_id,
+            broker_fill_id: None,
+            internal_order_id,
+            broker_order_id,
+            symbol,
+            side: Side::Buy,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+            cum_qty_after: None,
+        },
+        FillKind::Final => BrokerEvent::Fill {
+            broker_message_id,
+            broker_fill_id: None,
+            internal_order_id,
+            broker_order_id,
+            symbol,
+            side: Side::Buy,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+        },
+    };
+    serde_json::to_value(event).expect("serialize BrokerEvent")
+}
+
+// ---------------------------------------------------------------------------
 // FQB-01: limit-order fill → telemetry row with reference price and slippage
 // ---------------------------------------------------------------------------
 
@@ -319,17 +373,13 @@ async fn fqb01_limit_fill_writes_telemetry_with_slippage() -> anyhow::Result<()>
 
     // Seed unapplied inbox Fill event.
     // delta_qty == total_qty (1 == 1) → OMS Fill transition → BrokerEvent::Fill.
-    let fill_json = json!({
-        "type":              "fill",
-        "broker_message_id": "fqb01-msg-001",
-        "internal_order_id": "fqb01-ord-001",
-        "broker_order_id":   "null-fqb01-ord-001",
-        "symbol":            "AAPL",
-        "side":              "Buy",
-        "delta_qty":         1_i64,
-        "price_micros":      10_050_000_i64,
-        "fee_micros":        0_i64
-    });
+    let fill_json = broker_fill_json(
+        FillKind::Final,
+        "fqb01-msg-001",
+        "fqb01-ord-001",
+        1,
+        10_050_000,
+    );
     let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "fqb01-msg-001", fill_json).await?;
     assert!(inserted, "FQB-01: inbox Fill row must be inserted");
 
@@ -427,17 +477,13 @@ async fn fqb02_market_fill_writes_telemetry_null_slippage() -> anyhow::Result<()
     )
     .await?;
 
-    let fill_json = json!({
-        "type":              "fill",
-        "broker_message_id": "fqb02-msg-001",
-        "internal_order_id": "fqb02-ord-001",
-        "broker_order_id":   "null-fqb02-ord-001",
-        "symbol":            "AAPL",
-        "side":              "Buy",
-        "delta_qty":         1_i64,
-        "price_micros":      10_050_000_i64,
-        "fee_micros":        0_i64
-    });
+    let fill_json = broker_fill_json(
+        FillKind::Final,
+        "fqb02-msg-001",
+        "fqb02-ord-001",
+        1,
+        10_050_000,
+    );
     let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "fqb02-msg-001", fill_json).await?;
     assert!(inserted, "FQB-02: inbox Fill row must be inserted");
 
@@ -585,32 +631,24 @@ async fn fqb04_partial_fill_then_fill_writes_two_rows() -> anyhow::Result<()> {
     .await?;
 
     // PartialFill: 6 of 10 shares → OmsOrder(PartiallyFilled, filled_qty=6).
-    let pfill_json = json!({
-        "type":              "partial_fill",
-        "broker_message_id": "fqb04-msg-pfill",
-        "internal_order_id": "fqb04-ord-001",
-        "broker_order_id":   "null-fqb04-ord-001",
-        "symbol":            "AAPL",
-        "side":              "Buy",
-        "delta_qty":         6_i64,
-        "price_micros":      9_990_000_i64,
-        "fee_micros":        0_i64
-    });
+    let pfill_json = broker_fill_json(
+        FillKind::Partial,
+        "fqb04-msg-pfill",
+        "fqb04-ord-001",
+        6,
+        9_990_000,
+    );
     let ins1 = mqk_db::inbox_insert_deduped(&pool, run_id, "fqb04-msg-pfill", pfill_json).await?;
     assert!(ins1, "FQB-04: PartialFill inbox row must be inserted");
 
     // Final Fill: remaining 4 of 10 → filled_qty(6) + delta_qty(4) = 10 == total_qty.
-    let fill_json = json!({
-        "type":              "fill",
-        "broker_message_id": "fqb04-msg-fill",
-        "internal_order_id": "fqb04-ord-001",
-        "broker_order_id":   "null-fqb04-ord-001",
-        "symbol":            "AAPL",
-        "side":              "Buy",
-        "delta_qty":         4_i64,
-        "price_micros":      10_050_000_i64,
-        "fee_micros":        0_i64
-    });
+    let fill_json = broker_fill_json(
+        FillKind::Final,
+        "fqb04-msg-fill",
+        "fqb04-ord-001",
+        4,
+        10_050_000,
+    );
     let ins2 = mqk_db::inbox_insert_deduped(&pool, run_id, "fqb04-msg-fill", fill_json).await?;
     assert!(ins2, "FQB-04: Fill inbox row must be inserted");
 

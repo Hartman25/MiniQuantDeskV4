@@ -48,9 +48,10 @@ use uuid::Uuid;
 use mqk_db::FixedClock;
 use mqk_execution::oms::state_machine::OmsOrder;
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
-    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, IntegrityGate, QtyMicros, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerGateway,
+    BrokerInvokeToken, BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse,
+    BrokerSubmitRequest, BrokerSubmitResponse, IntegrityGate, QtyMicros, ReconcileGate, RiskGate,
+    Side,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -419,18 +420,21 @@ async fn d08_phase3_still_applies_late_fill_during_drain() -> Result<()> {
     // BrokerEvent::Fill shape required -- Phase 3 deserializes message_json
     // back into BrokerEvent.
     let fill_msg_id = "alpaca:d08-broker-order:fill:2026-08-08T14:00:00.000000Z";
-    let fill_payload = json!({
-        "type":               "fill",
-        "broker_message_id":  fill_msg_id,
-        "broker_fill_id":     serde_json::Value::Null,
-        "internal_order_id":  idem,
-        "broker_order_id":    broker_order_id,
-        "symbol":             "SPY",
-        "side":               "Buy",
-        "delta_qty":          1_i64,
-        "price_micros":       500_000_000_i64,
-        "fee_micros":         0_i64
-    });
+    // Built through `BrokerEvent` so `delta_qty` is a real 1-share `QtyMicros`
+    // on the wire (the inbox writer stamps the current schema version; a
+    // hand-written `"delta_qty": 1` would decode as 0.000001 shares).
+    let fill_payload = serde_json::to_value(BrokerEvent::Fill {
+        broker_message_id: fill_msg_id.to_string(),
+        broker_fill_id: None,
+        internal_order_id: idem.to_string(),
+        broker_order_id: Some(broker_order_id.to_string()),
+        symbol: "SPY".to_string(),
+        side: Side::Buy,
+        delta_qty: QtyMicros::from_whole_units(1).unwrap(),
+        price_micros: 500_000_000,
+        fee_micros: 0,
+    })
+    .expect("serialize BrokerEvent::Fill");
     let inserted = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,

@@ -36,9 +36,9 @@ use uuid::Uuid;
 
 use mqk_db::FixedClock;
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
-    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerGateway,
+    BrokerInvokeToken, BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse,
+    BrokerSubmitRequest, BrokerSubmitResponse, IntegrityGate, QtyMicros, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -49,6 +49,7 @@ use mqk_runtime::orchestrator::ExecutionOrchestrator;
 
 const LC01_RUN_ID: &str = "ec020b01-0000-0000-0000-000000000000";
 const LC02_RUN_ID: &str = "ec020b02-0000-0000-0000-000000000000";
+const LC02B_RUN_ID: &str = "ec020b12-0000-0000-0000-000000000000";
 const LC03_RUN_ID: &str = "ec020b03-0000-0000-0000-000000000000";
 const LC04_RUN_ID: &str = "ec020b04-0000-0000-0000-000000000000";
 
@@ -396,13 +397,15 @@ async fn lc02_replace_ack_writes_lifecycle_row_with_new_qty() -> anyhow::Result<
 
     seed_running_run(&pool, run_id, "lc02").await?;
 
-    let replace_json = json!({
-        "type":              "replace_ack",
-        "broker_message_id": "lc02-msg-001",
-        "internal_order_id": "lc02-ord-unknown",
-        "broker_order_id":   null,
-        "new_total_qty":     75_i64
-    });
+    // Built through `BrokerEvent` so `new_total_qty` is a real 75-share
+    // `QtyMicros` on the wire (a hand-written `75` would decode as 75 micros).
+    let replace_json = serde_json::to_value(BrokerEvent::ReplaceAck {
+        broker_message_id: "lc02-msg-001".to_string(),
+        internal_order_id: "lc02-ord-unknown".to_string(),
+        broker_order_id: None,
+        new_total_qty: QtyMicros::from_whole_units(75).unwrap(),
+    })
+    .expect("serialize BrokerEvent::ReplaceAck");
     let inserted =
         mqk_db::inbox_insert_deduped(&pool, run_id, "lc02-msg-001", replace_json).await?;
     assert!(inserted, "LC-02: ReplaceAck inbox row must be inserted");
@@ -441,6 +444,48 @@ async fn lc02_replace_ack_writes_lifecycle_row_with_new_qty() -> anyhow::Result<
     clear_arm_state(&pool).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// LC-02b: fractional ReplaceAck never fabricates a whole-unit audit value
+// ---------------------------------------------------------------------------
+
+/// The diagnostic `new_total_qty` lifecycle column is whole-unit. A genuinely
+/// fractional post-replace quantity (75.5) must be recorded as `None`, never
+/// truncated/rounded to 75 or 76. Runs in its own disposable database.
+#[tokio::test]
+async fn lc02b_fractional_replace_ack_records_no_whole_unit_qty() {
+    mqk_db::run_isolated("lc02b_fractional_replace_ack", |pool| async move {
+        let run_id: Uuid = LC02B_RUN_ID.parse().unwrap();
+        seed_running_run(&pool, run_id, "lc02b").await.unwrap();
+
+        let replace_json = serde_json::to_value(BrokerEvent::ReplaceAck {
+            broker_message_id: "lc02b-msg-001".to_string(),
+            internal_order_id: "lc02b-ord-unknown".to_string(),
+            broker_order_id: None,
+            new_total_qty: QtyMicros::new(75_500_000),
+        })
+        .expect("serialize BrokerEvent::ReplaceAck");
+        let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "lc02b-msg-001", replace_json)
+            .await
+            .unwrap();
+        assert!(inserted, "LC-02b: ReplaceAck inbox row must be inserted");
+
+        let mut orch = make_orchestrator(pool.clone(), run_id);
+        orch.tick()
+            .await
+            .expect("LC-02b: tick() must succeed for ReplaceAck of unknown order");
+
+        let rows = mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "LC-02b: expected 1 lifecycle row");
+        assert_eq!(
+            rows[0].new_total_qty, None,
+            "LC-02b: fractional 75.5 must not be fabricated into a whole-unit value"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
