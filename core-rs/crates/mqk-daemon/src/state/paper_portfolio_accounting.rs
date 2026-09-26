@@ -90,6 +90,40 @@ fn normalize_broker_positions(
     (qty_by_symbol, blockers)
 }
 
+/// Bidirectional comparison of nonzero broker positions (whole units, from
+/// the durable snapshot path) against the nonzero fill-replay positions
+/// (exact `QtyMicros`). Returns unsorted bounded reason codes.
+fn position_comparison_blockers(
+    broker_qty_by_symbol: &BTreeMap<String, i64>,
+    replay_qty_by_symbol: &BTreeMap<String, mqk_schemas::QtyMicros>,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    let all_symbols: std::collections::BTreeSet<&String> = broker_qty_by_symbol
+        .keys()
+        .chain(replay_qty_by_symbol.keys())
+        .collect();
+    for symbol in all_symbols {
+        match (
+            broker_qty_by_symbol.get(symbol),
+            replay_qty_by_symbol.get(symbol),
+        ) {
+            (Some(_), None) => {
+                blockers.push(format!("broker_position_missing_fill_history:{symbol}"));
+            }
+            (None, Some(_)) => {
+                blockers.push(format!("fill_history_position_missing_at_broker:{symbol}"));
+            }
+            (Some(broker_qty), Some(replay_qty))
+                if mqk_schemas::QtyMicros::from_whole_units(*broker_qty) != Some(*replay_qty) =>
+            {
+                blockers.push(format!("position_quantity_mismatch:{symbol}"));
+            }
+            _ => {}
+        }
+    }
+    blockers
+}
+
 /// Replays `run_id`'s durable fill history and cross-checks it, in both
 /// directions, against `broker_positions` (the authoritative, currently-known
 /// broker position truth for this run — callers should pass the same
@@ -129,48 +163,23 @@ pub(crate) async fn replay_paper_portfolio_accounting(
 
     let (broker_qty_by_symbol, mut blockers) = normalize_broker_positions(broker_positions);
 
-    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionState::qty_signed()` is
-    // `QtyMicros`; this broker/replay accounting comparison is whole-unit
-    // `i64` on both sides (the broker side is already parsed whole-unit by
-    // `parse_signed_qty` above), and Crypto execution is not wired yet, so
-    // a fractional replay position cannot occur in production today.
-    let replay_qty_by_symbol: BTreeMap<String, i64> = portfolio
+    // The broker side is whole-unit (`parse_signed_qty`, bound to the durable
+    // whole-unit snapshot column); the replay side is the exact `QtyMicros`
+    // position. A fractional replay position is compared exactly and can only
+    // surface as a blocker -- it is never truncated and never panics.
+    let replay_qty_by_symbol: BTreeMap<String, mqk_schemas::QtyMicros> = portfolio
         .positions
         .iter()
         .filter_map(|(symbol, pos)| {
             let net = pos.qty_signed();
-            if net.is_zero() {
-                None
-            } else {
-                let whole = net.to_whole_units_checked().expect(
-                    "fractional replay position unsupported by paper accounting reconciliation",
-                );
-                Some((symbol.clone(), whole))
-            }
+            (!net.is_zero()).then(|| (symbol.clone(), net))
         })
         .collect();
 
-    let all_symbols: std::collections::BTreeSet<&String> = broker_qty_by_symbol
-        .keys()
-        .chain(replay_qty_by_symbol.keys())
-        .collect();
-    for symbol in all_symbols {
-        match (
-            broker_qty_by_symbol.get(symbol),
-            replay_qty_by_symbol.get(symbol),
-        ) {
-            (Some(_), None) => {
-                blockers.push(format!("broker_position_missing_fill_history:{symbol}"));
-            }
-            (None, Some(_)) => {
-                blockers.push(format!("fill_history_position_missing_at_broker:{symbol}"));
-            }
-            (Some(broker_qty), Some(replay_qty)) if broker_qty != replay_qty => {
-                blockers.push(format!("position_quantity_mismatch:{symbol}"));
-            }
-            _ => {}
-        }
-    }
+    blockers.extend(position_comparison_blockers(
+        &broker_qty_by_symbol,
+        &replay_qty_by_symbol,
+    ));
     blockers.sort();
     blockers.dedup();
 
@@ -375,6 +384,73 @@ mod normalize_broker_positions_tests {
 }
 
 // ---------------------------------------------------------------------------
+// RC-M5-B: replay-vs-broker position comparison is exact `QtyMicros` and
+// never panics on a fractional replay position.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod replay_position_comparison_tests {
+    use super::position_comparison_blockers;
+    use mqk_schemas::QtyMicros;
+    use std::collections::BTreeMap;
+
+    fn broker(rows: &[(&str, i64)]) -> BTreeMap<String, i64> {
+        rows.iter().map(|(s, q)| (s.to_string(), *q)).collect()
+    }
+
+    fn replay(rows: &[(&str, &str)]) -> BTreeMap<String, QtyMicros> {
+        rows.iter()
+            .map(|(s, q)| (s.to_string(), q.parse().expect("test qty")))
+            .collect()
+    }
+
+    #[test]
+    fn matching_whole_unit_positions_produce_no_blockers() {
+        assert!(
+            position_comparison_blockers(&broker(&[("AAPL", 10)]), &replay(&[("AAPL", "10")]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn whole_unit_mismatch_is_a_quantity_mismatch() {
+        assert_eq!(
+            position_comparison_blockers(&broker(&[("AAPL", 11)]), &replay(&[("AAPL", "10")])),
+            vec!["position_quantity_mismatch:AAPL".to_string()]
+        );
+    }
+
+    #[test]
+    fn fractional_replay_position_absent_at_broker_is_a_blocker_not_a_panic() {
+        // Local crypto fills applied, broker snapshot still flat (settle window).
+        assert_eq!(
+            position_comparison_blockers(&broker(&[]), &replay(&[("BTC/USD", "0.5")])),
+            vec!["fill_history_position_missing_at_broker:BTC/USD".to_string()]
+        );
+    }
+
+    #[test]
+    fn fractional_replay_position_is_never_truncated_to_a_whole_broker_quantity() {
+        let blockers = position_comparison_blockers(
+            &broker(&[("BTC/USD", 1)]),
+            &replay(&[("BTC/USD", "1.5")]),
+        );
+        assert_eq!(
+            blockers,
+            vec!["position_quantity_mismatch:BTC/USD".to_string()]
+        );
+    }
+
+    #[test]
+    fn broker_position_without_fill_history_is_a_blocker() {
+        assert_eq!(
+            position_comparison_blockers(&broker(&[("AAPL", 3)]), &replay(&[])),
+            vec!["broker_position_missing_fill_history:AAPL".to_string()]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect #3): FC-3C.
 //
 // `replay_paper_portfolio_accounting` already sources its economic truth
@@ -554,6 +630,67 @@ mod fc3c_canonical_replay_parity_tests {
                 direct.cash_micros, expected_cash,
                 "FC-3C: cash must reflect the effective 1-share terminal fill, not the raw \
                  2-share delta"
+            );
+        })
+        .await;
+    }
+
+    /// RC-M5-B: a durable fractional (Crypto) fill leaves a fractional replay
+    /// position. With the broker snapshot not (yet) showing it, the replay
+    /// must report a bounded blocker and an `incomplete` epoch -- it must not
+    /// panic, and it must not truncate the position to a whole quantity.
+    #[tokio::test]
+    async fn rcm5b_fractional_replay_position_is_a_blocker_not_a_panic() {
+        mqk_db::run_isolated("rcm5b_fractional_replay", |pool| async move {
+            let run_id = fixed_run_id("rcm5b_fractional_replay");
+            let order_id = "order-rcm5b";
+            fixture_run(&pool, run_id).await;
+            mqk_db::outbox_enqueue(
+                &pool,
+                run_id,
+                order_id,
+                serde_json::json!({
+                    "symbol": "BTC/USD", "qty": "0.5", "side": "buy", "asset_class": "crypto"
+                }),
+            )
+            .await
+            .expect("outbox_enqueue should succeed");
+            sqlx::query("update oms_outbox set status = 'SENT' where idempotency_key = $1")
+                .bind(order_id)
+                .execute(&pool)
+                .await
+                .expect("mark outbox SENT should succeed");
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let fill = BrokerEvent::Fill {
+                broker_message_id: format!("alpaca:{order_id}:fill:term"),
+                broker_fill_id: None,
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+                symbol: "BTC/USD".to_string(),
+                side: Side::Buy,
+                delta_qty: "0.5".parse().unwrap(),
+                price_micros: 60_000_000_000,
+                fee_micros: 0,
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "alpaca:order-rcm5b:fill:term",
+                order_id,
+                "fill",
+                &fill,
+                at,
+            )
+            .await;
+
+            let replay = replay_paper_portfolio_accounting(&pool, run_id, &[])
+                .await
+                .expect("a fractional replay position must not error or panic");
+            assert_eq!(replay.accounting_epoch, "incomplete");
+            assert_eq!(
+                replay.accounting_epoch_reason.as_deref(),
+                Some("fill_history_position_missing_at_broker:BTC/USD")
             );
         })
         .await;
