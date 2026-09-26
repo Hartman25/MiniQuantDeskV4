@@ -126,18 +126,29 @@ pub(crate) async fn compute_broker_positions_pnl(
     // A flat position never needs a mark, so it is resolved before the DB
     // check — a missing DB pool must not turn a flat position's known-zero
     // P&L into a false "unavailable" (matches the `live-weights` precedent).
-    let mut non_flat: Vec<&mqk_schemas::BrokerPosition> = Vec::with_capacity(positions.len());
+    //
+    // The quantity is parsed exactly once, as `QtyMicros`: only an exact zero
+    // is flat. A fractional quantity is a real position, and an unparseable
+    // quantity is unavailable truth -- neither may be reported as flat.
+    let mut non_flat: Vec<(&mqk_schemas::BrokerPosition, mqk_portfolio::QtyMicros)> =
+        Vec::with_capacity(positions.len());
     for p in positions {
-        let qty = p.qty.parse::<i64>().unwrap_or(0);
-        if qty == 0 {
-            results.insert(p.symbol.clone(), PositionPnlResult::flat());
-        } else {
-            non_flat.push(p);
+        match p.qty.trim().parse::<mqk_portfolio::QtyMicros>() {
+            Ok(qty) if qty.is_zero() => {
+                results.insert(p.symbol.clone(), PositionPnlResult::flat());
+            }
+            Ok(qty) => non_flat.push((p, qty)),
+            Err(_) => {
+                results.insert(
+                    p.symbol.clone(),
+                    PositionPnlResult::unavailable("mark_unavailable", "position_qty_unparseable"),
+                );
+            }
         }
     }
 
     let Some(pool) = st.db.as_ref() else {
-        for p in &non_flat {
+        for (p, _) in &non_flat {
             results.insert(
                 p.symbol.clone(),
                 PositionPnlResult::unavailable("db_unavailable", "no_db_pool_configured"),
@@ -146,16 +157,7 @@ pub(crate) async fn compute_broker_positions_pnl(
         return results;
     };
 
-    for p in non_flat {
-        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: parse as `QtyMicros` (its
-        // `FromStr` accepts both plain integers and decimal strings) rather
-        // than lossy-parsing as `i64` first -- the prior `i64`-only parse
-        // would have silently treated any genuinely fractional
-        // broker-reported qty as flat (0).
-        let qty = p
-            .qty
-            .parse::<mqk_portfolio::QtyMicros>()
-            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+    for (p, qty) in non_flat {
         let Some(avg_price_micros) = parse_decimal_micros(&p.avg_price) else {
             results.insert(
                 p.symbol.clone(),
@@ -1837,5 +1839,83 @@ pub(crate) async fn portfolio_account_equity_baseline_status(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod broker_position_pnl_qty_tests {
+    use super::*;
+
+    fn position(symbol: &str, qty: &str) -> mqk_schemas::BrokerPosition {
+        mqk_schemas::BrokerPosition {
+            symbol: symbol.to_string(),
+            qty: qty.to_string(),
+            avg_price: "60000".to_string(),
+        }
+    }
+
+    async fn state_of(
+        positions: &[mqk_schemas::BrokerPosition],
+    ) -> BTreeMap<String, (String, Option<String>)> {
+        let st = AppState::new(); // no DB pool: a non-flat position cannot get a mark
+        compute_broker_positions_pnl(&st, positions, "1D")
+            .await
+            .into_iter()
+            .map(|(k, v)| (k, (v.pnl_truth_state, v.pnl_unavailable_reason)))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_flat_position_is_flat() {
+        let s = state_of(&[
+            position("AAPL", "0"),
+            position("MSFT", "0.0"),
+            position("NVDA", "-0"),
+        ])
+        .await;
+        for sym in ["AAPL", "MSFT", "NVDA"] {
+            assert_eq!(s[sym].0, "flat", "{sym}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fractional_position_is_never_reported_flat() {
+        let s = state_of(&[
+            position("BTC/USD", "0.5"),
+            position("ETH/USD", "-0.000001"),
+            position("SOL/USD", "1.0"),
+        ])
+        .await;
+        for sym in ["BTC/USD", "ETH/USD", "SOL/USD"] {
+            assert_eq!(
+                s[sym].0, "db_unavailable",
+                "{sym}: a non-flat position without a mark source must not be flat"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_quantity_is_unavailable_not_flat() {
+        let s = state_of(&[
+            position("AAPL", "not-a-number"),
+            position("MSFT", ""),
+            position("NVDA", "0.1234567"),
+        ])
+        .await;
+        for sym in ["AAPL", "MSFT", "NVDA"] {
+            assert_eq!(s[sym].0, "mark_unavailable", "{sym}");
+            assert_eq!(
+                s[sym].1.as_deref(),
+                Some("position_qty_unparseable"),
+                "{sym}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_whole_unit_position_is_unchanged() {
+        let s = state_of(&[position("AAPL", "10"), position("TSLA", "-3")]).await;
+        assert_eq!(s["AAPL"].0, "db_unavailable");
+        assert_eq!(s["TSLA"].0, "db_unavailable");
     }
 }
