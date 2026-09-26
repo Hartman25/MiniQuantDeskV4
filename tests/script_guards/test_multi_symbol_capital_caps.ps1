@@ -142,9 +142,9 @@ if (Test-Path $StateRs) {
     }
 
     # G04 -- pure clamp helper, sign-preserving, |qty| > cap only
-    if ($StateContent -match 'pub fn clamp_targets_to_per_symbol_position_cap\(\s*targets:\s*&mut \[mqk_strategy::TargetPosition\],\s*cap:\s*i64,?\s*\)\s*->\s*Vec<\(String,\s*i64,\s*i64\)>' -and
-        $StateContent -match 't\.qty\.abs\(\)\s*>\s*cap' -and
-        $StateContent -match 'if t\.qty < 0 \{ -cap \} else \{ cap \}') {
+    if ($StateContent -match 'pub fn clamp_targets_to_per_symbol_position_cap\(\s*targets:\s*&mut \[mqk_strategy::TargetPosition\],\s*cap:\s*i64,?\s*\)\s*->\s*Vec<\(String,\s*mqk_schemas::QtyMicros,\s*mqk_schemas::QtyMicros\)>' -and
+        $StateContent -match 't\.qty\.checked_abs\(\)\.is_none_or\(\|a\| a > cap_q\)' -and
+        $StateContent -match 'if t\.qty\.is_negative\(\)\s*\{\s*neg_cap_q\s*\}\s*else\s*\{\s*cap_q\s*\}') {
         Assert-Pass "G04: clamp_targets_to_per_symbol_position_cap defined, sign-preserving, |qty| > cap only"
     } else {
         Assert-Fail "G04: clamp_targets_to_per_symbol_position_cap NOT found with the expected sign-preserving clamp logic"

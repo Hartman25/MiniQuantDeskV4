@@ -40,9 +40,9 @@ if (Test-Path $StateRs) {
     $RequiredFields = @(
         'pub symbol: String',
         'pub strategy_id: String',
-        'pub current_qty: i64',
-        'pub target_qty: i64',
-        'pub delta: i64',
+        'pub current_qty: mqk_schemas::QtyMicros',
+        'pub target_qty: mqk_schemas::QtyMicros',
+        'pub delta: Option<mqk_schemas::QtyMicros>',
         'pub no_order_reason: String',
         'pub last_decision_id: Option<String>',
         'pub last_decision_disposition: Option<String>',

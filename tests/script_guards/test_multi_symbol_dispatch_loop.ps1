@@ -180,7 +180,7 @@ if (Test-Path $LoopRunner) {
     # facts paired with each symbol's dispatch result) to the same loop --
     # the current_positions-once-before-the-loop structure itself is
     # unchanged.
-    if ($LoopContent -match 'let current_positions: Option<BTreeMap<String, i64>> = \{' -and
+    if ($LoopContent -match 'let current_positions: Option<BTreeMap<String, QtyMicros>> = \{' -and
         $LoopContent -match 'for \(assignment, mut bar_result, bar_facts\) in dispatch_results \{') {
         Assert-Pass "G09: current_positions snapshot is read once per tick, before the per-symbol loop (design doc §5 Q2)"
     } else {
