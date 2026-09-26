@@ -65,6 +65,7 @@ fn n2_position_avg_price_maps_from_avg_entry_price() {
         symbol: "AAPL".to_string(),
         qty: "100".to_string(),
         avg_entry_price: "175.42".to_string(),
+        asset_class: None,
     };
     let pos = normalize_position(&raw);
     assert_eq!(pos.symbol, "AAPL");
@@ -78,6 +79,7 @@ fn n2_position_symbol_and_qty_passed_through() {
         symbol: "TSLA".to_string(),
         qty: "-50".to_string(), // short position
         avg_entry_price: "210.00".to_string(),
+        asset_class: None,
     };
     let pos = normalize_position(&raw);
     assert_eq!(pos.symbol, "TSLA");
@@ -283,6 +285,7 @@ fn n5_snapshot_positions_and_orders_forwarded() {
         symbol: "NVDA".to_string(),
         qty: "10".to_string(),
         avg_entry_price: "800.00".to_string(),
+        asset_class: None,
     });
     let ord = normalize_open_order(&make_order_raw(Some("150.00"), None)).unwrap();
 
@@ -312,6 +315,7 @@ fn n6_same_input_produces_identical_snapshots() {
             symbol: "GOOG".to_string(),
             qty: "5".to_string(),
             avg_entry_price: "140.00".to_string(),
+            asset_class: None,
         });
         build_snapshot(now, account, vec![pos], vec![])
     };

@@ -49,13 +49,42 @@ pub fn normalize_account(raw: &AlpacaAccountRaw) -> BrokerAccount {
     }
 }
 
+/// Quote assets Alpaca lists crypto pairs against. Longest first so a
+/// `...USDT` suffix is never read as `...USD` plus a stray `T`.
+const ALPACA_CRYPTO_QUOTE_ASSETS: [&str; 4] = ["USDT", "USDC", "USD", "BTC"];
+
+/// Canonical (order-side) symbol for an Alpaca position.
+///
+/// Alpaca lists a crypto position under the consolidated asset symbol
+/// (`BTCUSD`) while orders, fills and this system's canonical identity use the
+/// pair form (`BTC/USD`). Only a position the broker itself labels `crypto`,
+/// whose symbol has no `/` and ends in a known quote asset behind a nonempty
+/// alphanumeric base, is rewritten; every other symbol is returned unchanged
+/// so an unrecognized shape surfaces as reconcile drift instead of a guess.
+pub fn canonical_alpaca_position_symbol(symbol: &str, asset_class: Option<&str>) -> String {
+    let is_crypto = asset_class.is_some_and(|c| c.trim().eq_ignore_ascii_case("crypto"));
+    let trimmed = symbol.trim();
+    if !is_crypto || trimmed.contains('/') {
+        return symbol.to_string();
+    }
+    for quote in ALPACA_CRYPTO_QUOTE_ASSETS {
+        if let Some(base) = trimmed.strip_suffix(quote) {
+            if !base.is_empty() && base.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return format!("{base}/{quote}");
+            }
+        }
+    }
+    symbol.to_string()
+}
+
 /// Normalize an [`AlpacaPositionRaw`] wire response into a canonical
 /// [`BrokerPosition`].
 ///
-/// `avg_price` maps from Alpaca's `avg_entry_price` field.
+/// `avg_price` maps from Alpaca's `avg_entry_price` field. The symbol is the
+/// canonical order-side symbol ([`canonical_alpaca_position_symbol`]).
 pub fn normalize_position(raw: &AlpacaPositionRaw) -> BrokerPosition {
     BrokerPosition {
-        symbol: raw.symbol.clone(),
+        symbol: canonical_alpaca_position_symbol(&raw.symbol, raw.asset_class.as_deref()),
         qty: raw.qty.clone(),
         avg_price: raw.avg_entry_price.clone(),
     }

@@ -79,7 +79,10 @@ use mqk_execution::{
     BrokerSubmitResponse, QtyMicros, Side,
 };
 use mqk_schemas::BrokerSnapshot;
-pub use snapshot::{build_snapshot, normalize_account, normalize_open_order, normalize_position};
+pub use snapshot::{
+    build_snapshot, canonical_alpaca_position_symbol, normalize_account, normalize_open_order,
+    normalize_position,
+};
 /// Number of FILL activities requested per page from Alpaca REST.
 ///
 /// Alpaca's API maximum is 100; 50 is a conservative default that leaves room
@@ -148,6 +151,25 @@ pub fn validate_alpaca_crypto_order_qty(symbol: &str, qty: QtyMicros) -> Result<
         });
     }
     Ok(())
+}
+/// Time-in-force values Alpaca accepts for crypto orders (docs: "the
+/// supported `time_in_force` values are `gtc`, and `ioc`").
+pub const ALPACA_CRYPTO_SUPPORTED_TIME_IN_FORCE: [&str; 2] = ["gtc", "ioc"];
+/// Refuse a crypto order (or replace) whose time-in-force Alpaca does not
+/// support before any HTTP call, instead of consuming a submit attempt on a
+/// guaranteed broker rejection. There is no equity-style `day` for crypto.
+pub fn validate_alpaca_crypto_order_tif(time_in_force: &str) -> Result<(), BrokerError> {
+    let tif = time_in_force.trim().to_ascii_lowercase();
+    if ALPACA_CRYPTO_SUPPORTED_TIME_IN_FORCE.contains(&tif.as_str()) {
+        return Ok(());
+    }
+    Err(BrokerError::Reject {
+        code: "crypto_time_in_force_unsupported".to_string(),
+        detail: format!(
+            "validate_alpaca_crypto_order_tif: crypto orders support only \
+             {ALPACA_CRYPTO_SUPPORTED_TIME_IN_FORCE:?}; got time_in_force={time_in_force:?}"
+        ),
+    })
 }
 // ---------------------------------------------------------------------------
 // Configuration
@@ -663,6 +685,7 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
     ) -> Result<BrokerSubmitResponse, BrokerError> {
         if req.asset_class == AssetClass::Crypto {
             validate_alpaca_crypto_order_qty(&req.symbol, req.quantity)?;
+            validate_alpaca_crypto_order_tif(&req.time_in_force)?;
         }
         let body = build_submit_body(&req);
         let url = format!("{}/v2/orders", self.cfg.base_url);
@@ -783,6 +806,9 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 detail: format!("replace: filled_qty={whole} overflows QtyMicros range"),
             })?
         };
+        if is_alpaca_crypto_symbol(&order.symbol) {
+            validate_alpaca_crypto_order_tif(&req.time_in_force)?;
+        }
         // Step 2: build replace body with Alpaca total-qty semantics.
         let body = build_replace_body_for_symbol(
             req.quantity,
@@ -962,6 +988,19 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 // that never appears on the real wire. See
                 // `classify_fill_subtype` for the full classification and its
                 // fail-closed handling of missing/unknown subtypes.
+                let unparseable_cum_qty = || BrokerError::Transient {
+                    detail: format!(
+                        "fetch_events: FILL/partial_fill activity id={:?} for \
+                         order_id={:?} is missing a parseable broker-native \
+                         cum_qty; refusing to guess cross-lane economic \
+                         identity for an ambiguous fill",
+                        activity.id, activity.order_id
+                    ),
+                };
+                // Exact and syntactically valid before any network call. A
+                // fractional value is only legitimate for a crypto-pair order;
+                // that is decided below from the order's authoritative symbol,
+                // so Equity keeps its whole-share guard.
                 let partial_fill_cum_qty =
                     if classify_fill_subtype(activity).map_err(|e| BrokerError::Transient {
                         detail: format!("fetch_events: {e}"),
@@ -970,26 +1009,16 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                         let parsed = activity
                             .cum_qty
                             .as_deref()
-                            .and_then(|s| parse_broker_qty(s).ok());
-                        match parsed {
-                            Some(v) => Some(v),
-                            None => {
-                                return Err(BrokerError::Transient {
-                                    detail: format!(
-                                        "fetch_events: FILL/partial_fill activity id={:?} for \
-                                     order_id={:?} is missing a parseable broker-native \
-                                     cum_qty; refusing to guess cross-lane economic \
-                                     identity for an ambiguous fill",
-                                        activity.id, activity.order_id
-                                    ),
-                                });
-                            }
-                        }
+                            .and_then(|s| normalize::parse_alpaca_qty_micros(s).ok());
+                        Some(parsed.ok_or_else(unparseable_cum_qty)?)
                     } else {
                         None
                     };
                 let mut order = self.fetch_order(&activity.order_id)?;
                 if let Some(v) = partial_fill_cum_qty {
+                    if !v.is_whole() && !is_alpaca_crypto_symbol(&order.symbol) {
+                        return Err(unparseable_cum_qty());
+                    }
                     order.filled_qty = v.to_string();
                 }
                 let trade_update = activity_to_trade_update(activity, &order).map_err(|e| {
@@ -1266,6 +1295,69 @@ mod crypto_replace_fractional_filled_qty_tests {
             matches!(err, BrokerError::Transient { .. }),
             "an anomalous fractional filled_qty for an Equity symbol must still fail closed: {err:?}"
         );
+    }
+
+    /// RC-M6-A: a crypto replace with a time-in-force Alpaca does not support
+    /// is refused before the PATCH; the equity replace above keeps `day`.
+    #[test]
+    fn replace_order_refuses_unsupported_crypto_time_in_force_before_patch() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/v2/orders/btc-order-2");
+            then.status(200).json_body(serde_json::json!({
+                "id": "btc-order-2",
+                "client_order_id": "internal-3",
+                "symbol": "BTC/USD",
+                "side": "buy",
+                "qty": "0.0001",
+                "filled_qty": "0"
+            }));
+        });
+        let patch_mock = server.mock(|when, then| {
+            when.method(PATCH).path("/v2/orders/btc-order-2");
+            then.status(200).json_body(serde_json::json!({"id": "x"}));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url());
+        let token = BrokerInvokeToken::for_test();
+        let req = BrokerReplaceRequest {
+            broker_order_id: "btc-order-2".to_string(),
+            quantity: "0.0002".parse().unwrap(),
+            limit_price: None,
+            time_in_force: "day".to_string(),
+        };
+        let err = adapter.replace_order(req, &token).unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "crypto_time_in_force_unsupported"
+        ));
+        patch_mock.assert_hits(0);
+    }
+}
+
+#[cfg(test)]
+mod crypto_time_in_force_validation_tests {
+    use super::*;
+
+    #[test]
+    fn gtc_and_ioc_are_accepted_case_insensitively() {
+        for tif in ["gtc", "ioc", "GTC", " Ioc "] {
+            assert!(validate_alpaca_crypto_order_tif(tif).is_ok(), "{tif:?}");
+        }
+    }
+
+    #[test]
+    fn every_other_time_in_force_is_refused() {
+        for tif in ["day", "fok", "opg", "cls", "gtd", ""] {
+            let err = validate_alpaca_crypto_order_tif(tif).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    BrokerError::Reject { ref code, .. } if code == "crypto_time_in_force_unsupported"
+                ),
+                "{tif:?}: {err:?}"
+            );
+        }
     }
 }
 

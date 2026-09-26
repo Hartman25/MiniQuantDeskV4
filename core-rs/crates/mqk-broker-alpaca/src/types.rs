@@ -402,6 +402,10 @@ pub struct AlpacaPositionRaw {
     pub qty: String,
     /// Average entry price as a decimal string.
     pub avg_entry_price: String,
+    /// Alpaca's asset class for the position (`"us_equity"`, `"crypto"`, ...).
+    /// Absent means unknown: symbol canonicalization never guesses without it.
+    #[serde(default)]
+    pub asset_class: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
