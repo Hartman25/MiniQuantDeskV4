@@ -55,3 +55,7 @@ required-features = ["testkit"]
 [[test]]
 name = "scenario_registry_v2_routing_guard_parity_01c"
 required-features = ["testkit"]
+
+[[test]]
+name = "scenario_broker_asset_capability_authority_m5_01"
+required-features = ["testkit"]
