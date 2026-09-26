@@ -144,7 +144,10 @@ if ($authorityContent -match "pub\(crate\) enum RuntimeStrategyDispatchAuthority
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "-- Check 2: exactly one production call site of build_dynamic_paper_enforced_dispatch_authority --"
-$lifecycleTestModIdx = $lifecycleContent.IndexOf("#[cfg(test)]")
+# lifecycle.rs carries several small `#[cfg(test)]` modules near its top, so the
+# FIRST `#[cfg(test)]` marker is not the start of the big fixture module; slice at
+# the named module that builds authorities directly for cleanup/restart proofs.
+$lifecycleTestModIdx = $lifecycleContent.IndexOf("mod real_production_effects_matrix_tests")
 $lifecycleProductionContent = if ($lifecycleTestModIdx -ge 0) { $lifecycleContent.Substring(0, $lifecycleTestModIdx) } else { $lifecycleContent }
 $builderCallCount = Get-MatchCount $lifecycleProductionContent "build_dynamic_paper_enforced_dispatch_authority("
 if ($builderCallCount -eq 1) {
