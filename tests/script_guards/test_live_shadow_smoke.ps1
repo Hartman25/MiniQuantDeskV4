@@ -652,6 +652,11 @@ if ((Test-Path $Target) -and (Test-Path $Launcher)) {
         # $RepoRoot computed at the top of this file. Restore it before use.
         $RepoRoot = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path.TrimEnd('\')
 
+        # New-LauncherLog creates its smoke_logs\launcher\<mode> directory, so
+        # the path seams below run against a disposable root, never the primary
+        # repo (which may have no smoke_logs\ at all, e.g. a clean CI checkout).
+        $pathSeamRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_lsguard_paths_" + [guid]::NewGuid().ToString('N'))
+
         # LS-EV-11/12: the seams stamp paths via Get-Date at second
         # resolution. Freeze that clock (a scope-local Get-Date shadows the
         # cmdlet for the seams' own calls) so both calls are guaranteed to
@@ -668,8 +673,8 @@ if ((Test-Path $Target) -and (Test-Path $Launcher)) {
 
             # LS-EV-11: two real New-LauncherLog calls must never resolve to
             # the same launcher JSON path.
-            $lp1 = New-LauncherLog -RepoRoot $RepoRoot -ModeLabel 'live-shadow'
-            $lp2 = New-LauncherLog -RepoRoot $RepoRoot -ModeLabel 'live-shadow'
+            $lp1 = New-LauncherLog -RepoRoot $pathSeamRoot -ModeLabel 'live-shadow'
+            $lp2 = New-LauncherLog -RepoRoot $pathSeamRoot -ModeLabel 'live-shadow'
             if (-not ($lp1 -like "*launch_${frozenStamp}*" -and $lp2 -like "*launch_${frozenStamp}*")) {
                 Fail 'LS-EV-11' "Frozen timestamp bucket not applied (test setup invalid): $lp1 | $lp2"
             } elseif ($lp1 -ne $lp2) {
@@ -682,7 +687,7 @@ if ((Test-Path $Target) -and (Test-Path $Launcher)) {
             # never collide with each other or with themselves (stdout !=
             # stderr). The helper takes no InvocationId -- uniqueness is
             # independent of it by construction.
-            $bootstrapDir = Join-Path $RepoRoot 'exports\launcher'
+            $bootstrapDir = Join-Path $pathSeamRoot 'exports\launcher'
             $bp1 = New-LiveShadowBootstrapLogPaths -BootstrapLogDir $bootstrapDir
             $bp2 = New-LiveShadowBootstrapLogPaths -BootstrapLogDir $bootstrapDir
             $bpAll = @($bp1.StdoutLogPath, $bp1.StderrLogPath, $bp2.StdoutLogPath, $bp2.StderrLogPath)
@@ -703,8 +708,8 @@ if ((Test-Path $Target) -and (Test-Path $Launcher)) {
         # bucket), and two different ids must resolve to different paths.
         $ev13Id1 = [guid]::NewGuid().ToString()
         $ev13Id2 = [guid]::NewGuid().ToString()
-        $ep1 = Get-LiveShadowEvidenceDirPath -RepoRoot $RepoRoot -InvocationId $ev13Id1
-        $ep2 = Get-LiveShadowEvidenceDirPath -RepoRoot $RepoRoot -InvocationId $ev13Id2
+        $ep1 = Get-LiveShadowEvidenceDirPath -RepoRoot $pathSeamRoot -InvocationId $ev13Id1
+        $ep2 = Get-LiveShadowEvidenceDirPath -RepoRoot $pathSeamRoot -InvocationId $ev13Id2
         if ((Split-Path -Leaf $ep1) -like "evidence_*_${ev13Id1}" -and (Split-Path -Leaf $ep2) -like "evidence_*_${ev13Id2}" -and $ep1 -ne $ep2) {
             Pass 'LS-EV-13' "Get-LiveShadowEvidenceDirPath binds the wrapper invocation id into the directory name (distinct ids can never share an evidence directory)"
         } else {
@@ -714,6 +719,8 @@ if ((Test-Path $Target) -and (Test-Path $Launcher)) {
         Fail 'LS-EV-11' "Real path-construction harness threw: $($_.Exception.Message)"
         Fail 'LS-EV-12' "skipped -- harness error"
         Fail 'LS-EV-13' "skipped -- harness error"
+    } finally {
+        if (Test-Path variable:pathSeamRoot) { Remove-LsGuardLauncherRoot -Root $pathSeamRoot }
     }
 } else {
     Fail 'LS-EV-11' "skipped -- target or launcher file missing"
