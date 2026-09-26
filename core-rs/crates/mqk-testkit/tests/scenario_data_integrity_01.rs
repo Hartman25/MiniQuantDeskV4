@@ -36,13 +36,19 @@ fn empty_portfolio() -> PortfolioState {
 
 fn local_with_pos(symbol: &str, qty: i64) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
+    s.positions.insert(
+        symbol.to_string(),
+        QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
 fn broker_with_pos(symbol: &str, qty: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty();
-    s.positions.insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
+    s.positions.insert(
+        symbol.to_string(),
+        QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
@@ -66,18 +72,42 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
     let events: &[(&str, OmsEvent, Fill)] = &[
         (
             "fill-pf-1",
-            OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() },
-            Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 500 * MICROS_SCALE, 0),
+            OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+            },
+            Fill::new(
+                "SPY",
+                Side::Buy,
+                QtyMicros::from_whole_units(30).unwrap(),
+                500 * MICROS_SCALE,
+                0,
+            ),
         ),
         (
             "fill-pf-2",
-            OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() },
-            Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(40).unwrap(), 501 * MICROS_SCALE, 0),
+            OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Fill::new(
+                "SPY",
+                Side::Buy,
+                QtyMicros::from_whole_units(40).unwrap(),
+                501 * MICROS_SCALE,
+                0,
+            ),
         ),
         (
             "fill-final",
-            OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() },
-            Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 502 * MICROS_SCALE, 0),
+            OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+            },
+            Fill::new(
+                "SPY",
+                Side::Buy,
+                QtyMicros::from_whole_units(30).unwrap(),
+                502 * MICROS_SCALE,
+                0,
+            ),
         ),
     ];
 
@@ -101,7 +131,11 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
         .get("SPY")
         .map(|p| p.qty_signed())
         .unwrap_or(QtyMicros::ZERO);
-    assert_eq!(spy_qty, QtyMicros::from_whole_units(100).unwrap(), "single-pass: SPY must be 100");
+    assert_eq!(
+        spy_qty,
+        QtyMicros::from_whole_units(100).unwrap(),
+        "single-pass: SPY must be 100"
+    );
 
     // 10 restart cycles: replay all events with the same seen set.
     // All inserts must return false (already in inbox) → zero new OMS/portfolio effects.
@@ -125,7 +159,8 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
             "cycle {cycle}: OMS state must remain Filled"
         );
         assert_eq!(
-            order.filled_qty, QtyMicros::from_whole_units(100).unwrap(),
+            order.filled_qty,
+            QtyMicros::from_whole_units(100).unwrap(),
             "cycle {cycle}: filled_qty must remain 100 after restart replay"
         );
         let qty = portfolio
@@ -134,7 +169,8 @@ fn replay_after_restart_does_not_duplicate_durable_effects() {
             .map(|p| p.qty_signed())
             .unwrap_or(QtyMicros::ZERO);
         assert_eq!(
-            qty, QtyMicros::from_whole_units(100).unwrap(),
+            qty,
+            QtyMicros::from_whole_units(100).unwrap(),
             "cycle {cycle}: portfolio SPY qty must remain 100 after restart replay"
         );
     }
@@ -159,31 +195,64 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
 
     if inbox_insert_sim(&mut seen, "pf-1") {
         order
-            .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("pf-1"))
+            .apply(
+                &OmsEvent::PartialFill {
+                    delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+                },
+                Some("pf-1"),
+            )
             .unwrap();
         apply_entry(
             &mut portfolio,
-            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 400 * MICROS_SCALE, 0)),
+            LedgerEntry::Fill(Fill::new(
+                "QQQ",
+                Side::Buy,
+                QtyMicros::from_whole_units(30).unwrap(),
+                400 * MICROS_SCALE,
+                0,
+            )),
         );
     }
 
     if inbox_insert_sim(&mut seen, "pf-2") {
         order
-            .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("pf-2"))
+            .apply(
+                &OmsEvent::PartialFill {
+                    delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+                },
+                Some("pf-2"),
+            )
             .unwrap();
         apply_entry(
             &mut portfolio,
-            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(40).unwrap(), 401 * MICROS_SCALE, 0)),
+            LedgerEntry::Fill(Fill::new(
+                "QQQ",
+                Side::Buy,
+                QtyMicros::from_whole_units(40).unwrap(),
+                401 * MICROS_SCALE,
+                0,
+            )),
         );
     }
 
     if inbox_insert_sim(&mut seen, "fill-final") {
         order
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("fill-final"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+                },
+                Some("fill-final"),
+            )
             .unwrap();
         apply_entry(
             &mut portfolio,
-            LedgerEntry::Fill(Fill::new("QQQ", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 402 * MICROS_SCALE, 0)),
+            LedgerEntry::Fill(Fill::new(
+                "QQQ",
+                Side::Buy,
+                QtyMicros::from_whole_units(30).unwrap(),
+                402 * MICROS_SCALE,
+                0,
+            )),
         );
     }
 
@@ -224,7 +293,12 @@ fn duplicate_and_late_event_sequences_preserve_single_truth() {
     if inbox_insert_sim(&mut seen, "fill-late") {
         // OMS is already Filled — do_transition silently ignores this (no Err).
         order
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("fill-late"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+                },
+                Some("fill-late"),
+            )
             .unwrap();
         // State and filled_qty must be unchanged.
         assert_eq!(
@@ -308,8 +382,12 @@ fn reconcile_detects_long_horizon_divergence_without_silent_acceptance() {
 
     // Multi-symbol: a broker position unknown to local also halts.
     let mut dirty_unknown = BrokerSnapshot::empty();
-    dirty_unknown.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
-    dirty_unknown.positions.insert("QQQ".to_string(), QtyMicros::from_whole_units(5).unwrap());
+    dirty_unknown
+        .positions
+        .insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
+    dirty_unknown
+        .positions
+        .insert("QQQ".to_string(), QtyMicros::from_whole_units(5).unwrap());
     assert!(
         reconcile_tick(&local, &dirty_unknown).requires_halt_and_disarm(),
         "broker position unknown to local must prescribe HaltAndDisarm"
@@ -403,19 +481,43 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
     let events: &[(&str, Fill)] = &[
         (
             "ev-1",
-            Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150 * MICROS_SCALE, 0),
+            Fill::new(
+                "AAPL",
+                Side::Buy,
+                QtyMicros::from_whole_units(10).unwrap(),
+                150 * MICROS_SCALE,
+                0,
+            ),
         ),
         (
             "ev-2",
-            Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(20).unwrap(), 151 * MICROS_SCALE, 0),
+            Fill::new(
+                "AAPL",
+                Side::Buy,
+                QtyMicros::from_whole_units(20).unwrap(),
+                151 * MICROS_SCALE,
+                0,
+            ),
         ),
         (
             "ev-3",
-            Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(30).unwrap(), 152 * MICROS_SCALE, 0),
+            Fill::new(
+                "AAPL",
+                Side::Buy,
+                QtyMicros::from_whole_units(30).unwrap(),
+                152 * MICROS_SCALE,
+                0,
+            ),
         ),
         (
             "ev-4",
-            Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(5).unwrap(), 300 * MICROS_SCALE, 0),
+            Fill::new(
+                "MSFT",
+                Side::Buy,
+                QtyMicros::from_whole_units(5).unwrap(),
+                300 * MICROS_SCALE,
+                0,
+            ),
         ),
     ];
 
@@ -431,8 +533,16 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
         .get("MSFT")
         .map(|p| p.qty_signed())
         .unwrap_or(QtyMicros::ZERO);
-    assert_eq!(clean_aapl, QtyMicros::from_whole_units(60).unwrap(), "clean run: AAPL must be 60");
-    assert_eq!(clean_msft, QtyMicros::from_whole_units(5).unwrap(), "clean run: MSFT must be 5");
+    assert_eq!(
+        clean_aapl,
+        QtyMicros::from_whole_units(60).unwrap(),
+        "clean run: AAPL must be 60"
+    );
+    assert_eq!(
+        clean_msft,
+        QtyMicros::from_whole_units(5).unwrap(),
+        "clean run: MSFT must be 5"
+    );
     assert_eq!(clean_applied, 4, "clean run: all 4 events must be applied");
     assert_eq!(clean_unapplied, 0, "clean run: no unapplied events");
 
@@ -484,11 +594,13 @@ fn durable_inbox_lifecycle_and_portfolio_effects_remain_aligned() {
     // Alignment invariant: after recovery, portfolio reflects exactly all
     // events in the inbox — no more, no less, regardless of crash timing.
     assert_eq!(
-        crash_b_aapl, QtyMicros::from_whole_units(60).unwrap(),
+        crash_b_aapl,
+        QtyMicros::from_whole_units(60).unwrap(),
         "alignment: AAPL qty must be exactly 60 after crash-B recovery"
     );
     assert_eq!(
-        crash_c_aapl, QtyMicros::from_whole_units(60).unwrap(),
+        crash_c_aapl,
+        QtyMicros::from_whole_units(60).unwrap(),
         "alignment: AAPL qty must be exactly 60 after crash-C recovery"
     );
 }

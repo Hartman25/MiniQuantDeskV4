@@ -81,8 +81,20 @@ fn make_equity_curve(
 /// Helper: build fills with one profitable round-trip.
 fn make_profitable_fills() -> Vec<BacktestFill> {
     vec![
-        bf(Fill::new("SYM", Side::Buy, QtyMicros::from_whole_units(100).unwrap(), 10_000_000, 0)),
-        bf(Fill::new("SYM", Side::Sell, QtyMicros::from_whole_units(100).unwrap(), 15_000_000, 0)),
+        bf(Fill::new(
+            "SYM",
+            Side::Buy,
+            QtyMicros::from_whole_units(100).unwrap(),
+            10_000_000,
+            0,
+        )),
+        bf(Fill::new(
+            "SYM",
+            Side::Sell,
+            QtyMicros::from_whole_units(100).unwrap(),
+            15_000_000,
+            0,
+        )),
     ]
 }
 

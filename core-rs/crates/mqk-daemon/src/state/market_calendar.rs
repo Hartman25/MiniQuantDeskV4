@@ -1274,10 +1274,13 @@ pub fn resolve_market_session_schedule(
     // bound of. `previous_trading_date` is always literally "yesterday"
     // since [`Crypto24x7Provider`] reports every day as a trading day.
     if truth.source == "crypto_24_7" {
-        let market_date = (now_utc.year() as i64, now_utc.month() as i64, now_utc.day() as i64);
+        let market_date = (
+            now_utc.year() as i64,
+            now_utc.month() as i64,
+            now_utc.day() as i64,
+        );
         let day_start_ts = midnight_utc_ts_for_date(market_date);
-        let session_open_utc =
-            DateTime::<Utc>::from_timestamp(day_start_ts, 0).unwrap_or(now_utc);
+        let session_open_utc = DateTime::<Utc>::from_timestamp(day_start_ts, 0).unwrap_or(now_utc);
         let session_close_utc =
             DateTime::<Utc>::from_timestamp(day_start_ts + 86_400, 0).unwrap_or(now_utc);
         let previous_ts = day_start_ts - 1;

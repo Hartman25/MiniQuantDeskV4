@@ -193,7 +193,10 @@ fn backtest_applies_same_delta_rule_as_direct_call() {
     // Tick 3: no intent (already at 5)
     assert_eq!(report.fills.len(), 2, "expected BUY then SELL");
     assert_eq!(report.fills[0].side, mqk_portfolio::Side::Buy);
-    assert_eq!(report.fills[0].qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        report.fills[0].qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
     assert_eq!(report.fills[1].side, mqk_portfolio::Side::Sell);
     assert_eq!(report.fills[1].qty, QtyMicros::from_whole_units(5).unwrap());
 }

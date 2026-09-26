@@ -291,9 +291,9 @@ fn attribute_buy(
                 .expect("remaining_abs magnitude must be representable as its own negation");
             i += 1;
         }
-        qty = qty
-            .checked_sub(coverable)
-            .expect("coverable is bounded by qty (via .min()), so this subtraction cannot underflow");
+        qty = qty.checked_sub(coverable).expect(
+            "coverable is bounded by qty (via .min()), so this subtraction cannot underflow",
+        );
     }
 
     if qty.is_positive() {
@@ -363,9 +363,9 @@ fn attribute_sell(
             lots[i].qty_signed = remaining_abs;
             i += 1;
         }
-        qty = qty
-            .checked_sub(sellable)
-            .expect("sellable is bounded by qty (via .min()), so this subtraction cannot underflow");
+        qty = qty.checked_sub(sellable).expect(
+            "sellable is bounded by qty (via .min()), so this subtraction cannot underflow",
+        );
     }
 
     if qty.is_positive() {

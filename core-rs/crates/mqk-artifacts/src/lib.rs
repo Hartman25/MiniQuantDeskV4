@@ -1753,7 +1753,13 @@ mod tests {
                 order_id,
                 signal_ts: 1_000,
                 fill_ts: 1_000,
-                inner: Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150_000_000, 5_000),
+                inner: Fill::new(
+                    "SPY",
+                    Side::Buy,
+                    QtyMicros::from_whole_units(10).unwrap(),
+                    150_000_000,
+                    5_000,
+                ),
             }],
             last_prices: {
                 let mut m = BTreeMap::new();
@@ -2026,7 +2032,13 @@ mod tests {
                 order_id,
                 signal_ts: 1_000,
                 fill_ts: 1_000,
-                inner: Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150_000_000, 5_000),
+                inner: Fill::new(
+                    "SPY",
+                    Side::Buy,
+                    QtyMicros::from_whole_units(10).unwrap(),
+                    150_000_000,
+                    5_000,
+                ),
             }],
             last_prices: {
                 let mut m = BTreeMap::new();

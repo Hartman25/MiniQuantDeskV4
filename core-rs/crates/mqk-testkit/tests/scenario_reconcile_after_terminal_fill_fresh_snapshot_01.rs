@@ -304,8 +304,10 @@ fn make_orchestrator(
 /// Build a BrokerSnapshot with a specific AAPL position and a recent timestamp.
 fn broker_snapshot_with_aapl(qty: i64) -> BrokerSnapshot {
     let mut snap = BrokerSnapshot::empty_at(Utc::now().timestamp_millis() + 1);
-    snap.positions
-        .insert("AAPL".to_string(), QtyMicros::from_whole_units(qty).unwrap());
+    snap.positions.insert(
+        "AAPL".to_string(),
+        QtyMicros::from_whole_units(qty).unwrap(),
+    );
     snap
 }
 
@@ -339,9 +341,13 @@ async fn rfs01_fresh_clean_snapshot_prevents_halt_after_grace_expiry() -> Result
     // Local: AAPL=7 (after buy +1 from baseline 6).
     // Broker (stale): AAPL=6 (pre-fill position, not yet refreshed).
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut stale_broker = BrokerSnapshot::empty_at(2_000_000_000);
-    stale_broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    stale_broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     // Clock at T+181s so the fill appears 181s old (outside grace window).
     let clock = FixedClock::new(Utc::now() + Duration::seconds(181));
@@ -392,9 +398,13 @@ async fn rfs02_fresh_dirty_snapshot_still_halts_after_grace_expiry() -> Result<(
     seed_running_run(&pool, run_id, "rfs02").await?;
 
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut stale_broker = BrokerSnapshot::empty_at(2_000_000_000);
-    stale_broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    stale_broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     let clock = FixedClock::new(Utc::now() + Duration::seconds(181));
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, stale_broker);
@@ -445,9 +455,13 @@ async fn rfs03_refresher_failure_halts_fail_closed() -> Result<()> {
     seed_running_run(&pool, run_id, "rfs03").await?;
 
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut stale_broker = BrokerSnapshot::empty_at(2_000_000_000);
-    stale_broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    stale_broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     let clock = FixedClock::new(Utc::now() + Duration::seconds(181));
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, stale_broker);
@@ -498,9 +512,13 @@ async fn rfs04_no_refresher_configured_halts_fail_closed() -> Result<()> {
     seed_running_run(&pool, run_id, "rfs04").await?;
 
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut stale_broker = BrokerSnapshot::empty_at(2_000_000_000);
-    stale_broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    stale_broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     let clock = FixedClock::new(Utc::now() + Duration::seconds(181));
     // No set_terminal_fill_expiry_refresher call — refresher stays None.
@@ -551,9 +569,13 @@ async fn rfs05_genuine_drift_halts_without_refresh() -> Result<()> {
 
     // Local=7, broker=8: broker ahead of local (unexpected external activity).
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut dirty_broker = BrokerSnapshot::empty_at(2_000_000_000);
-    dirty_broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(8).unwrap());
+    dirty_broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(8).unwrap());
 
     let clock = FixedClock::new(Utc::now() + Duration::seconds(181));
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, dirty_broker);
@@ -612,9 +634,13 @@ async fn rfs06_grace_active_still_defers_reconcile_drift() -> Result<()> {
 
     // Local=7 (post-fill), broker=6 (stale pre-fill).
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut stale_broker = BrokerSnapshot::empty_at(2_000_000_000);
-    stale_broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    stale_broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     // Clock at current time — fill applied now is within the 180s grace window.
     let clock = FixedClock::new(Utc::now());

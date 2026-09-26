@@ -656,7 +656,13 @@ mod tests {
 
         for (is_buy, qty, price, fee) in fills {
             let side = if is_buy { Side::Buy } else { Side::Sell };
-            let fill = Fill::new("AAPL", side, QtyMicros::from_whole_units(qty).unwrap(), price, fee);
+            let fill = Fill::new(
+                "AAPL",
+                side,
+                QtyMicros::from_whole_units(qty).unwrap(),
+                price,
+                fee,
+            );
             pf_apply_fill(&mut pf, &fill);
             ledger.apply_fill("AAPL", is_buy, qty, price, fee);
         }

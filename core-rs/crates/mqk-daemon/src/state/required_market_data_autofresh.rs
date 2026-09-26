@@ -1344,9 +1344,16 @@ pub async fn run_required_universe_cycle(
                 } else {
                     calendar_provider
                 };
-                let effective_schedule = if is_crypto { &crypto_schedule } else { &schedule };
-                let effective_past_close_grace =
-                    if is_crypto { crypto_past_close_grace } else { past_close_grace };
+                let effective_schedule = if is_crypto {
+                    &crypto_schedule
+                } else {
+                    &schedule
+                };
+                let effective_past_close_grace = if is_crypto {
+                    crypto_past_close_grace
+                } else {
+                    past_close_grace
+                };
 
                 // Equity-only gate: a crypto instrument is never blocked by
                 // NYSE being closed (`effective_schedule.is_trading_day` is

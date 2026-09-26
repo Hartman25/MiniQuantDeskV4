@@ -56,7 +56,10 @@ fn fp01_market_buy_qty_uses_format_alpaca_qty() {
     let req = submit_req("fp01", "AAPL", Side::Buy, 100, "market", None);
     let body = build_submit_body(&req);
     // format_alpaca_qty(100) must equal the body qty field.
-    assert_eq!(body.qty, format_alpaca_qty(QtyMicros::from_whole_units(100).unwrap()));
+    assert_eq!(
+        body.qty,
+        format_alpaca_qty(QtyMicros::from_whole_units(100).unwrap())
+    );
     assert_eq!(body.qty, "100");
 }
 
@@ -134,7 +137,10 @@ fn fp04_fractional_qty_formats_as_trimmed_decimal_via_build_submit_body() {
         asset_class: AssetClass::Crypto,
     };
     let body = build_submit_body(&req);
-    assert_eq!(body.qty, "0.5", "0.5 BTC must format as trimmed decimal '0.5'");
+    assert_eq!(
+        body.qty, "0.5",
+        "0.5 BTC must format as trimmed decimal '0.5'"
+    );
 
     // A whole-unit value still formats without a decimal point.
     let s = format_alpaca_qty(QtyMicros::from_whole_units(1).unwrap());
@@ -216,7 +222,10 @@ fn fp08_replace_body_qty_uses_format_alpaca_qty() {
         "day",
     )
     .expect("replace body must build");
-    assert_eq!(body.qty, format_alpaca_qty(QtyMicros::from_whole_units(100).unwrap()));
+    assert_eq!(
+        body.qty,
+        format_alpaca_qty(QtyMicros::from_whole_units(100).unwrap())
+    );
     assert_eq!(body.qty, "100");
 }
 
@@ -346,7 +355,6 @@ fn fp14_common_equity_prices_format_without_drift() {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // FP15 ? Crypto whole-dollar limit price bypasses Equity f64/2dp formatting
 // ---------------------------------------------------------------------------
@@ -366,10 +374,7 @@ fn fp15_crypto_whole_dollar_limit_price_is_exact() {
 
     let body = build_submit_body(&req);
 
-    assert_eq!(
-        body.limit_price.as_deref(),
-        Some("60000")
-    );
+    assert_eq!(body.limit_price.as_deref(), Some("60000"));
 }
 
 // ---------------------------------------------------------------------------

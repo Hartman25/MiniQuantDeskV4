@@ -95,7 +95,11 @@ fn sp02_baseline_aapl_one_seeds_portfolio_qty_one() {
         aapl.is_some(),
         "SP02: AAPL position must be present after seeding"
     );
-    assert_eq!(aapl.unwrap().net_qty, qty(1), "SP02: AAPL net_qty must be 1");
+    assert_eq!(
+        aapl.unwrap().net_qty,
+        qty(1),
+        "SP02: AAPL net_qty must be 1"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -211,8 +215,16 @@ fn sp06_multi_symbol_baseline_seeds_all_positions() {
         .map(|p| p.net_qty)
         .unwrap_or(QtyMicros::ZERO);
 
-    assert_eq!(aapl, qty(2), "SP06: AAPL must be 2 from multi-symbol baseline");
-    assert_eq!(nvda, qty(3), "SP06: NVDA must be 3 from multi-symbol baseline");
+    assert_eq!(
+        aapl,
+        qty(2),
+        "SP06: AAPL must be 2 from multi-symbol baseline"
+    );
+    assert_eq!(
+        nvda,
+        qty(3),
+        "SP06: NVDA must be 3 from multi-symbol baseline"
+    );
     assert_eq!(
         snap.positions.len(),
         2,

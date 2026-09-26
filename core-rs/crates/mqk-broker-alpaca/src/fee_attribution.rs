@@ -112,14 +112,14 @@ fn parses_to_nonzero(raw: &str) -> bool {
 pub fn normalize_fee_activity(
     raw: &AlpacaFeeActivity,
 ) -> Result<FeeAttributionRecord, FeeNormalizeError> {
-    let net_amount: f64 = raw
-        .net_amount
-        .trim()
-        .parse()
-        .map_err(|_| FeeNormalizeError::InvalidNetAmount {
-            activity_id: raw.id.clone(),
-            raw: raw.net_amount.clone(),
-        })?;
+    let net_amount: f64 =
+        raw.net_amount
+            .trim()
+            .parse()
+            .map_err(|_| FeeNormalizeError::InvalidNetAmount {
+                activity_id: raw.id.clone(),
+                raw: raw.net_amount.clone(),
+            })?;
     if !net_amount.is_finite() {
         return Err(FeeNormalizeError::InvalidNetAmount {
             activity_id: raw.id.clone(),
@@ -143,11 +143,7 @@ pub fn normalize_fee_activity(
 
     // net_amount == 0: either a genuinely free activity, or the fee was
     // charged in the asset itself (qty nonzero) rather than fiat.
-    let asset_denominated = raw
-        .qty
-        .as_deref()
-        .map(parses_to_nonzero)
-        .unwrap_or(false);
+    let asset_denominated = raw.qty.as_deref().map(parses_to_nonzero).unwrap_or(false);
 
     if asset_denominated {
         return Ok(FeeAttributionRecord::AssetDenominatedFeeUnsupported {
@@ -236,7 +232,10 @@ mod tests {
         // asset-denominated fee.
         let a = activity("0", Some("0"));
         let record = normalize_fee_activity(&a).unwrap();
-        assert!(matches!(record, FeeAttributionRecord::ConfirmedZeroFee { .. }));
+        assert!(matches!(
+            record,
+            FeeAttributionRecord::ConfirmedZeroFee { .. }
+        ));
     }
 
     #[test]

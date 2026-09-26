@@ -31,15 +31,19 @@ fn broker_empty() -> BrokerSnapshot {
 
 fn local_with_pos(symbol: &str, qty: i64) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions
-        .insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
+    s.positions.insert(
+        symbol.to_string(),
+        QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
 fn broker_with_pos(symbol: &str, qty: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty();
-    s.positions
-        .insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
+    s.positions.insert(
+        symbol.to_string(),
+        QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
@@ -235,14 +239,26 @@ fn resolving_drift_returns_continue_on_next_tick() {
 #[test]
 fn one_symbol_mismatch_in_multi_symbol_portfolio_prescribes_halt() {
     let mut local = local_empty();
-    local.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(50).unwrap());
-    local.positions.insert("MSFT".to_string(), QtyMicros::from_whole_units(20).unwrap());
+    local
+        .positions
+        .insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(50).unwrap());
+    local
+        .positions
+        .insert("MSFT".to_string(), QtyMicros::from_whole_units(20).unwrap());
 
     let mut broker = broker_empty();
-    broker.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap()); // match
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(50).unwrap()); // match
-    broker.positions.insert("MSFT".to_string(), QtyMicros::from_whole_units(99).unwrap()); // MISMATCH
+    broker
+        .positions
+        .insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap()); // match
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(50).unwrap()); // match
+    broker
+        .positions
+        .insert("MSFT".to_string(), QtyMicros::from_whole_units(99).unwrap()); // MISMATCH
 
     let action = reconcile_tick(&local, &broker);
     assert!(

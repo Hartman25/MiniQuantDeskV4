@@ -217,8 +217,13 @@ fn l5_build_replace_body_total_qty_semantics() {
 #[test]
 fn l5_build_replace_body_zero_filled() {
     // No fills yet; new open leaves = 50 → total = 50.
-    let body = build_replace_body(QtyMicros::from_whole_units(50).unwrap(), QtyMicros::ZERO, None, "day")
-        .expect("replace body must build");
+    let body = build_replace_body(
+        QtyMicros::from_whole_units(50).unwrap(),
+        QtyMicros::ZERO,
+        None,
+        "day",
+    )
+    .expect("replace body must build");
     assert_eq!(body.qty, "50");
 }
 #[test]
@@ -254,8 +259,13 @@ fn l6_build_replace_body_limit_price_at_wire_boundary() {
 }
 #[test]
 fn l6_build_replace_body_no_limit_price_for_market() {
-    let body = build_replace_body(QtyMicros::from_whole_units(100).unwrap(), QtyMicros::ZERO, None, "day")
-        .expect("replace body must build");
+    let body = build_replace_body(
+        QtyMicros::from_whole_units(100).unwrap(),
+        QtyMicros::ZERO,
+        None,
+        "day",
+    )
+    .expect("replace body must build");
     assert!(body.limit_price.is_none());
 }
 // ---------------------------------------------------------------------------

@@ -1397,7 +1397,10 @@ async fn crypto_only_universe_is_evaluated_on_a_closed_nyse_day() {
         "a crypto-only universe must not be reported not_applicable merely because NYSE is closed"
     );
     assert_eq!(result.report.requirements.len(), 1);
-    assert_ne!(result.report.requirements[0].freshness_state, "market_closed");
+    assert_ne!(
+        result.report.requirements[0].freshness_state,
+        "market_closed"
+    );
 
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");

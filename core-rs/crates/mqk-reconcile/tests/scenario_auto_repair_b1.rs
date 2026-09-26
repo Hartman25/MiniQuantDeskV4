@@ -303,8 +303,12 @@ fn s10_repair_plan_captures_every_diff_in_order() {
         order("unknown-open", OrderStatus::New, 20, 0),
     );
     // Position mismatch (halt-required).
-    local.positions.insert("TSLA".to_string(), QtyMicros::from_whole_units(50).unwrap());
-    broker.positions.insert("TSLA".to_string(), QtyMicros::from_whole_units(30).unwrap());
+    local
+        .positions
+        .insert("TSLA".to_string(), QtyMicros::from_whole_units(50).unwrap());
+    broker
+        .positions
+        .insert("TSLA".to_string(), QtyMicros::from_whole_units(30).unwrap());
 
     let report = reconcile(&local, &broker);
     let plan = build_repair_plan(&report);

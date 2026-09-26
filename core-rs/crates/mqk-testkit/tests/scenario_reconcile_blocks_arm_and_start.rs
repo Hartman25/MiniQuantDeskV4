@@ -30,15 +30,19 @@ fn broker_empty() -> BrokerSnapshot {
 
 fn local_with_position(symbol: &str, qty: i64) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions
-        .insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
+    s.positions.insert(
+        symbol.to_string(),
+        QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
 fn broker_with_position(symbol: &str, qty: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty();
-    s.positions
-        .insert(symbol.to_string(), QtyMicros::from_whole_units(qty).unwrap());
+    s.positions.insert(
+        symbol.to_string(),
+        QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 

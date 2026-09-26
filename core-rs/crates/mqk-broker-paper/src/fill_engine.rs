@@ -172,8 +172,15 @@ mod tests {
         else {
             panic!("expected Fill");
         };
-        assert_eq!(*delta_qty, QtyMicros::from_whole_units(50).unwrap(), "buy fill delta_qty must equal abs fill qty");
-        assert!(delta_qty.is_positive(), "buy fill delta_qty must be positive");
+        assert_eq!(
+            *delta_qty,
+            QtyMicros::from_whole_units(50).unwrap(),
+            "buy fill delta_qty must equal abs fill qty"
+        );
+        assert!(
+            delta_qty.is_positive(),
+            "buy fill delta_qty must be positive"
+        );
         assert!(matches!(side, Side::Buy), "buy fill must carry side=Buy");
     }
 
@@ -194,7 +201,8 @@ mod tests {
             panic!("expected Fill");
         };
         assert_eq!(
-            *delta_qty, QtyMicros::from_whole_units(50).unwrap(),
+            *delta_qty,
+            QtyMicros::from_whole_units(50).unwrap(),
             "sell fill delta_qty must equal abs fill qty"
         );
         assert!(
@@ -227,8 +235,15 @@ mod tests {
         else {
             panic!("expected Fill");
         };
-        assert_eq!(*delta_qty, QtyMicros::from_whole_units(70).unwrap(), "fill must equal remaining_qty");
-        assert!(delta_qty.is_positive(), "partial sell delta_qty must be positive");
+        assert_eq!(
+            *delta_qty,
+            QtyMicros::from_whole_units(70).unwrap(),
+            "fill must equal remaining_qty"
+        );
+        assert!(
+            delta_qty.is_positive(),
+            "partial sell delta_qty must be positive"
+        );
         assert!(matches!(side, Side::Sell));
     }
 
@@ -250,7 +265,10 @@ mod tests {
             panic!("expected Fill");
         };
         assert_eq!(*delta_qty, QtyMicros::from_whole_units(200).unwrap());
-        assert!(delta_qty.is_positive(), "short sell delta_qty must be positive");
+        assert!(
+            delta_qty.is_positive(),
+            "short sell delta_qty must be positive"
+        );
         assert!(
             matches!(side, Side::Sell),
             "short sell must carry side=Sell"
@@ -274,7 +292,10 @@ mod tests {
             panic!("expected Fill");
         };
         assert_eq!(*delta_qty, QtyMicros::from_whole_units(200).unwrap());
-        assert!(delta_qty.is_positive(), "cover fill delta_qty must be positive");
+        assert!(
+            delta_qty.is_positive(),
+            "cover fill delta_qty must be positive"
+        );
         assert!(matches!(side, Side::Buy), "cover fill must carry side=Buy");
     }
 

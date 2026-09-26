@@ -335,8 +335,8 @@ pub fn alpaca_event_ts_ms_from_message_id(broker_message_id: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use crate::types::AlpacaOrder;
+    use std::str::FromStr;
     fn order(id: &str, client_id: &str, symbol: &str, side: &str, qty: &str) -> AlpacaOrder {
         AlpacaOrder {
             id: id.to_string(),

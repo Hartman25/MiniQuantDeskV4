@@ -105,9 +105,11 @@ pub fn quantity_unit_epoch(message_json: &Value) -> Result<QuantityUnitEpoch> {
 /// — must route through this function rather than reading `raw` directly.
 pub fn decode_quantity_micros(raw: i64, epoch: QuantityUnitEpoch) -> Result<i64> {
     match epoch {
-        QuantityUnitEpoch::LegacyWholeUnits => raw.checked_mul(LEGACY_TO_MICROS_SCALE).ok_or_else(
-            || anyhow!("legacy whole-unit quantity {raw} overflows i64 at micros scale"),
-        ),
+        QuantityUnitEpoch::LegacyWholeUnits => {
+            raw.checked_mul(LEGACY_TO_MICROS_SCALE).ok_or_else(|| {
+                anyhow!("legacy whole-unit quantity {raw} overflows i64 at micros scale")
+            })
+        }
         QuantityUnitEpoch::QtyMicros => Ok(raw),
     }
 }
@@ -1076,6 +1078,9 @@ mod quantity_unit_epoch_tests {
         let epoch_later = quantity_unit_epoch(&old_row).unwrap();
         let decoded_later = decode_quantity_micros(raw, epoch_later).unwrap();
         assert_eq!(decoded_now, decoded_later);
-        assert_eq!(decoded_now, 3_000_000, "3 legacy shares == 3.0 units in micros");
+        assert_eq!(
+            decoded_now, 3_000_000,
+            "3 legacy shares == 3.0 units in micros"
+        );
     }
 }

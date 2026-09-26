@@ -906,15 +906,23 @@ fn p09_two_partials_plus_terminal_fill_same_page_all_independent() {
         .expect("P09: two partials plus terminal fill must succeed");
 
     assert_eq!(events.len(), 3);
-    assert_eq!(events[0].cum_qty_after(), Some(QtyMicros::from_whole_units(5).unwrap()));
-    assert_eq!(events[1].cum_qty_after(), Some(QtyMicros::from_whole_units(10).unwrap()));
+    assert_eq!(
+        events[0].cum_qty_after(),
+        Some(QtyMicros::from_whole_units(5).unwrap())
+    );
+    assert_eq!(
+        events[1].cum_qty_after(),
+        Some(QtyMicros::from_whole_units(10).unwrap())
+    );
     assert_eq!(
         events[2].cum_qty_after(),
         None,
         "P09: Fill events never carry cum_qty_after"
     );
     match &events[2] {
-        mqk_execution::BrokerEvent::Fill { delta_qty, .. } => assert_eq!(*delta_qty, QtyMicros::from_whole_units(10).unwrap()),
+        mqk_execution::BrokerEvent::Fill { delta_qty, .. } => {
+            assert_eq!(*delta_qty, QtyMicros::from_whole_units(10).unwrap())
+        }
         other => panic!("expected Fill, got {other:?}"),
     }
 }
@@ -1214,14 +1222,23 @@ fn a04_1_pre_bracket_race_no_longer_double_applies_same_physical_fill() {
         .expect("A04-1: fetch_events must succeed");
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].cum_qty_after(), Some(QtyMicros::from_whole_units(10).unwrap()));
+    assert_eq!(
+        events[0].cum_qty_after(),
+        Some(QtyMicros::from_whole_units(10).unwrap())
+    );
 
     // Simulate the WS lane having already applied this exact physical fill
     // under a different transport event_id.
-    let mut order = OmsOrder::new("order-a04-1", "AAPL", QtyMicros::from_whole_units(20).unwrap());
+    let mut order = OmsOrder::new(
+        "order-a04-1",
+        "AAPL",
+        QtyMicros::from_whole_units(20).unwrap(),
+    );
     order
         .apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("ws-msg-a04-1"),
             Some(QtyMicros::from_whole_units(10).unwrap()),
         )
@@ -1245,7 +1262,8 @@ fn a04_1_pre_bracket_race_no_longer_double_applies_same_physical_fill() {
         .unwrap();
 
     assert_eq!(
-        order.filled_qty, QtyMicros::from_whole_units(10).unwrap(),
+        order.filled_qty,
+        QtyMicros::from_whole_units(10).unwrap(),
         "A04-1: the REST redelivery of the same physical fill must be recognized \
          as a duplicate; final economics must show exactly one 10-share application, \
          never 20"
@@ -1334,7 +1352,9 @@ fn a04_2_cross_page_contamination_no_longer_shifts_page1_identity() {
     );
     order
         .apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(1).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(1).unwrap(),
+            },
             Some("ws-msg-a04-2"),
             Some(QtyMicros::from_whole_units(1).unwrap()),
         )
@@ -1358,7 +1378,8 @@ fn a04_2_cross_page_contamination_no_longer_shifts_page1_identity() {
         .unwrap();
 
     assert_eq!(
-        order.filled_qty, QtyMicros::from_whole_units(1).unwrap(),
+        order.filled_qty,
+        QtyMicros::from_whole_units(1).unwrap(),
         "A04-2: the REST redelivery of the order's first physical fill must be \
          recognized as a duplicate; final economics must show exactly one \
          1-share application, never 2"

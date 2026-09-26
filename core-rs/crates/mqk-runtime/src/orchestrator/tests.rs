@@ -81,7 +81,13 @@ fn invariant_check_detects_cash_corruption() {
 fn invariant_check_passes_after_apply_entry() {
     use mqk_portfolio::{Fill, LedgerEntry, Side};
     let mut pf = PortfolioState::new(1_000_000_000_i64);
-    let fill = Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 150_000_000, 0);
+    let fill = Fill::new(
+        "AAPL",
+        Side::Buy,
+        QtyMicros::from_whole_units(10).unwrap(),
+        150_000_000,
+        0,
+    );
     apply_entry(&mut pf, LedgerEntry::Fill(fill));
     // After apply_entry (which appends to ledger), invariant must hold.
     check_capital_invariants(&pf).unwrap();
@@ -159,7 +165,10 @@ fn broker_event_to_fill_marks_crypto_fee_as_pending_attribution() {
         fee_micros: 0,
     };
     let fill = broker_event_to_fill(&ev).unwrap().unwrap();
-    assert_eq!(fill.fee_micros, 0, "a crypto fill carries no synchronous fee");
+    assert_eq!(
+        fill.fee_micros, 0,
+        "a crypto fill carries no synchronous fee"
+    );
     assert_eq!(
         fill.fee_attribution,
         mqk_portfolio::FeeAttributionStatus::PendingAttribution,
@@ -222,7 +231,8 @@ fn order_json_qty_normalizes_negative_sell_quantity_for_oms_registration() {
     assert!(matches!(order_json_side(&json), mqk_execution::Side::Sell));
     let order = OmsOrder::new("ord-sell", "SPY", QtyMicros::from_whole_units(qty).unwrap());
     assert_eq!(
-        order.total_qty, QtyMicros::from_whole_units(100).unwrap(),
+        order.total_qty,
+        QtyMicros::from_whole_units(100).unwrap(),
         "negative signed sell quantity must not leak into OmsOrder::new"
     );
 }
@@ -249,7 +259,10 @@ fn explicit_side_overrides_legacy_sign_in_submit_request_building() {
     };
     let req = build_submit_request(&row).expect("submit request must build");
     assert!(matches!(req.side, mqk_execution::Side::Buy));
-    assert_eq!(req.quantity, mqk_execution::QtyMicros::from_whole_units(100).unwrap());
+    assert_eq!(
+        req.quantity,
+        mqk_execution::QtyMicros::from_whole_units(100).unwrap()
+    );
 }
 #[test]
 fn broker_event_to_fill_rejects_zero_qty() {
@@ -819,7 +832,10 @@ fn reject_unknown_order_does_not_remove_broker_map() {
 #[test]
 fn reject_first_time_on_owned_order_sets_terminal_apply_succeeded() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-r1".to_string(), OmsOrder::new("ord-r1", "SPY", QtyMicros::from_whole_units(10).unwrap()));
+    oms.insert(
+        "ord-r1".to_string(),
+        OmsOrder::new("ord-r1", "SPY", QtyMicros::from_whole_units(10).unwrap()),
+    );
 
     let outcome = apply_broker_event_step(
         &mut oms,
@@ -843,7 +859,10 @@ fn reject_first_time_on_owned_order_sets_terminal_apply_succeeded() {
 #[test]
 fn duplicate_reject_replay_does_not_re_trigger_terminal_apply_succeeded() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-r2".to_string(), OmsOrder::new("ord-r2", "SPY", QtyMicros::from_whole_units(10).unwrap()));
+    oms.insert(
+        "ord-r2".to_string(),
+        OmsOrder::new("ord-r2", "SPY", QtyMicros::from_whole_units(10).unwrap()),
+    );
 
     // First application: genuine reject, sets the flag once.
     let first = apply_broker_event_step(
@@ -883,7 +902,10 @@ fn cancel_reject_and_replace_reject_never_set_terminal_apply_succeeded() {
     // already excludes this variant before terminal_apply_succeeded is even
     // consulted.
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-cr".to_string(), OmsOrder::new("ord-cr", "SPY", QtyMicros::from_whole_units(10).unwrap()));
+    oms.insert(
+        "ord-cr".to_string(),
+        OmsOrder::new("ord-cr", "SPY", QtyMicros::from_whole_units(10).unwrap()),
+    );
     oms.get_mut("ord-cr")
         .unwrap()
         .apply(&OmsEvent::CancelRequest, Some("cancel-req-1"))
@@ -904,7 +926,10 @@ fn cancel_reject_and_replace_reject_never_set_terminal_apply_succeeded() {
 
     // ReplaceReject: ReplacePending -> Open (non-terminal), same story.
     let mut oms2: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms2.insert("ord-rr".to_string(), OmsOrder::new("ord-rr", "SPY", QtyMicros::from_whole_units(10).unwrap()));
+    oms2.insert(
+        "ord-rr".to_string(),
+        OmsOrder::new("ord-rr", "SPY", QtyMicros::from_whole_units(10).unwrap()),
+    );
     oms2.get_mut("ord-rr")
         .unwrap()
         .apply(&OmsEvent::ReplaceRequest, Some("replace-req-1"))
@@ -931,7 +956,11 @@ fn non_terminal_events_do_not_remove_broker_map() {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
         oms.insert(
             "ord-non-terminal".to_string(),
-            OmsOrder::new("ord-non-terminal", "SPY", QtyMicros::from_whole_units(120).unwrap()),
+            OmsOrder::new(
+                "ord-non-terminal",
+                "SPY",
+                QtyMicros::from_whole_units(120).unwrap(),
+            ),
         );
         let mut order_map = BrokerOrderMap::new();
         order_map.register("ord-non-terminal", "broker-non-terminal");
@@ -959,7 +988,11 @@ fn non_terminal_events_do_not_remove_broker_map() {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
         oms.insert(
             "ord-non-terminal".to_string(),
-            OmsOrder::new("ord-non-terminal", "SPY", QtyMicros::from_whole_units(120).unwrap()),
+            OmsOrder::new(
+                "ord-non-terminal",
+                "SPY",
+                QtyMicros::from_whole_units(120).unwrap(),
+            ),
         );
         let mut order_map = BrokerOrderMap::new();
         order_map.register("ord-non-terminal", "broker-non-terminal");
@@ -985,7 +1018,11 @@ fn non_terminal_events_do_not_remove_broker_map() {
     // CancelReject is only legal from CancelPending.
     {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-        let mut order = OmsOrder::new("ord-non-terminal", "SPY", QtyMicros::from_whole_units(120).unwrap());
+        let mut order = OmsOrder::new(
+            "ord-non-terminal",
+            "SPY",
+            QtyMicros::from_whole_units(120).unwrap(),
+        );
         order
             .apply(&OmsEvent::CancelRequest, Some("cancel-request-msg"))
             .expect("seed cancel-pending state");
@@ -1015,7 +1052,11 @@ fn non_terminal_events_do_not_remove_broker_map() {
     // ReplaceAck is only legal from ReplacePending.
     {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-        let mut order = OmsOrder::new("ord-non-terminal", "SPY", QtyMicros::from_whole_units(120).unwrap());
+        let mut order = OmsOrder::new(
+            "ord-non-terminal",
+            "SPY",
+            QtyMicros::from_whole_units(120).unwrap(),
+        );
         order
             .apply(&OmsEvent::ReplaceRequest, Some("replace-request-msg"))
             .expect("seed replace-pending state");
@@ -1045,7 +1086,11 @@ fn non_terminal_events_do_not_remove_broker_map() {
     // ReplaceReject is only legal from ReplacePending.
     {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-        let mut order = OmsOrder::new("ord-non-terminal", "SPY", QtyMicros::from_whole_units(120).unwrap());
+        let mut order = OmsOrder::new(
+            "ord-non-terminal",
+            "SPY",
+            QtyMicros::from_whole_units(120).unwrap(),
+        );
         order
             .apply(&OmsEvent::ReplaceRequest, Some("replace-request-msg"))
             .expect("seed replace-pending state");
@@ -1075,9 +1120,18 @@ fn non_terminal_events_do_not_remove_broker_map() {
 #[test]
 fn replayed_terminal_noop_does_not_incorrectly_remove_mapping_or_break_idempotence() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    let mut terminal = OmsOrder::new("ord-replay", "SPY", QtyMicros::from_whole_units(100).unwrap());
+    let mut terminal = OmsOrder::new(
+        "ord-replay",
+        "SPY",
+        QtyMicros::from_whole_units(100).unwrap(),
+    );
     terminal
-        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("fill-msg"))
+        .apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("fill-msg"),
+        )
         .expect("seed terminal fill state");
     oms.insert("ord-replay".to_string(), terminal);
     let mut order_map = BrokerOrderMap::new();
@@ -1106,7 +1160,11 @@ fn replayed_terminal_noop_does_not_incorrectly_remove_mapping_or_break_idempoten
 #[test]
 fn terminal_cleanup_occurs_before_mark_applied_or_is_otherwise_proven_durably_safe() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    let mut order = OmsOrder::new("ord-cancel-pending", "SPY", QtyMicros::from_whole_units(100).unwrap());
+    let mut order = OmsOrder::new(
+        "ord-cancel-pending",
+        "SPY",
+        QtyMicros::from_whole_units(100).unwrap(),
+    );
     order
         .apply(&OmsEvent::CancelRequest, Some("cancel-request"))
         .expect("seed cancel pending state");
@@ -1170,7 +1228,10 @@ fn unknown_order_partial_fill_is_rejected() {
 #[test]
 fn known_order_fill_succeeds_and_returns_fill() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-1".to_string(), OmsOrder::new("ord-1", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-1".to_string(),
+        OmsOrder::new("ord-1", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
     let ev = make_fill_event("ord-1", "fill-msg-2", 100);
     let result = apply_fill_step(&mut oms, "ord-1", &ev, "fill-msg-2");
     let fill = result
@@ -1178,7 +1239,10 @@ fn known_order_fill_succeeds_and_returns_fill() {
         .expect("expected Some(fill) for known order fill");
     assert_eq!(fill.qty, QtyMicros::from_whole_units(100).unwrap());
     // OMS state must have advanced.
-    assert_eq!(oms["ord-1"].filled_qty, QtyMicros::from_whole_units(100).unwrap());
+    assert_eq!(
+        oms["ord-1"].filled_qty,
+        QtyMicros::from_whole_units(100).unwrap()
+    );
 }
 /// Section C - T4.
 /// An OMS-level undercomplete terminal fill (proposed < total_qty) must
@@ -1194,7 +1258,12 @@ fn oms_undercomplete_fill_rejection_blocks_portfolio_fill() {
     let mut order = OmsOrder::new("ord-2", "SPY", QtyMicros::from_whole_units(100).unwrap());
     // Pre-fill 60.
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("pf-setup"))
+        .apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("pf-setup"),
+        )
         .unwrap();
     oms.insert("ord-2".to_string(), order);
     // Fill(30) when filled=60, total=100 → 60+30=90 < 100 → undercomplete, TransitionError.
@@ -1206,7 +1275,10 @@ fn oms_undercomplete_fill_rejection_blocks_portfolio_fill() {
         "expected OMS transition error for undercomplete terminal fill, got: {err}"
     );
     // filled_qty must NOT have advanced on rejection.
-    assert_eq!(oms["ord-2"].filled_qty, QtyMicros::from_whole_units(60).unwrap());
+    assert_eq!(
+        oms["ord-2"].filled_qty,
+        QtyMicros::from_whole_units(60).unwrap()
+    );
 }
 
 /// Section C - T4b (ALPACA-PAPER-TERMINAL-FILL-REGRESSION).
@@ -1225,7 +1297,12 @@ fn alpaca_paper_terminal_fill_cumulative_qty_uses_effective_delta() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
     let mut order = OmsOrder::new("ord-alpaca", "SPY", QtyMicros::from_whole_units(3).unwrap());
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(2).unwrap() }, Some("pf-1"))
+        .apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(2).unwrap(),
+            },
+            Some("pf-1"),
+        )
         .unwrap();
     oms.insert("ord-alpaca".to_string(), order);
 
@@ -1241,13 +1318,17 @@ fn alpaca_paper_terminal_fill_cumulative_qty_uses_effective_delta() {
 
     // Portfolio fill must use effective delta (1), not broker delta (2).
     assert_eq!(
-        fill.qty, QtyMicros::from_whole_units(1).unwrap(),
+        fill.qty,
+        QtyMicros::from_whole_units(1).unwrap(),
         "portfolio fill must use effective delta (total_qty - prior_filled = 1), \
          not broker-reported delta_qty (2)"
     );
 
     // OMS state must be Filled at total_qty=3.
-    assert_eq!(oms["ord-alpaca"].filled_qty, QtyMicros::from_whole_units(3).unwrap());
+    assert_eq!(
+        oms["ord-alpaca"].filled_qty,
+        QtyMicros::from_whole_units(3).unwrap()
+    );
     assert_eq!(
         oms["ord-alpaca"].state,
         mqk_execution::oms::state_machine::OrderState::Filled
@@ -1260,14 +1341,20 @@ fn alpaca_paper_terminal_fill_cumulative_qty_uses_effective_delta() {
 #[test]
 fn duplicate_fill_replay_does_not_double_apply_portfolio() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-3".to_string(), OmsOrder::new("ord-3", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-3".to_string(),
+        OmsOrder::new("ord-3", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
     let ev = make_partial_fill_event("ord-3", "pf-msg-dup", 60);
     // First application: fill goes through.
     let first = apply_fill_step(&mut oms, "ord-3", &ev, "pf-msg-dup")
         .unwrap()
         .expect("first application must return Some(fill)");
     assert_eq!(first.qty, QtyMicros::from_whole_units(60).unwrap());
-    assert_eq!(oms["ord-3"].filled_qty, QtyMicros::from_whole_units(60).unwrap());
+    assert_eq!(
+        oms["ord-3"].filled_qty,
+        QtyMicros::from_whole_units(60).unwrap()
+    );
     // Second application with the same msg_id: OMS dedup → no state change.
     let second = apply_fill_step(&mut oms, "ord-3", &ev, "pf-msg-dup").unwrap();
     assert!(
@@ -1275,13 +1362,19 @@ fn duplicate_fill_replay_does_not_double_apply_portfolio() {
         "duplicate fill replay must return None to prevent double portfolio mutation"
     );
     // filled_qty must not have advanced.
-    assert_eq!(oms["ord-3"].filled_qty, QtyMicros::from_whole_units(60).unwrap());
+    assert_eq!(
+        oms["ord-3"].filled_qty,
+        QtyMicros::from_whole_units(60).unwrap()
+    );
 }
 
 #[test]
 fn duplicate_economic_fill_id_across_messages_is_deduped() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-3b".to_string(), OmsOrder::new("ord-3b", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-3b".to_string(),
+        OmsOrder::new("ord-3b", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let mut ev1 = make_partial_fill_event("ord-3b", "transport-msg-1", 60);
     let mut ev2 = make_partial_fill_event("ord-3b", "transport-msg-2", 60);
@@ -1296,14 +1389,20 @@ fn duplicate_economic_fill_id_across_messages_is_deduped() {
         .unwrap()
         .expect("first apply should mutate portfolio");
     assert_eq!(first.qty, QtyMicros::from_whole_units(60).unwrap());
-    assert_eq!(oms["ord-3b"].filled_qty, QtyMicros::from_whole_units(60).unwrap());
+    assert_eq!(
+        oms["ord-3b"].filled_qty,
+        QtyMicros::from_whole_units(60).unwrap()
+    );
 
     let second = apply_fill_step(&mut oms, "ord-3b", &ev2, "transport-msg-2").unwrap();
     assert!(
         second.is_none(),
         "same broker_fill_id should dedupe even when broker_message_id changes"
     );
-    assert_eq!(oms["ord-3b"].filled_qty, QtyMicros::from_whole_units(60).unwrap());
+    assert_eq!(
+        oms["ord-3b"].filled_qty,
+        QtyMicros::from_whole_units(60).unwrap()
+    );
 }
 /// Section C - T6.
 /// A non-fill event (Ack) for an order not present in oms_orders must
@@ -1341,15 +1440,29 @@ fn unknown_order_non_fill_is_silently_skipped() {
 #[test]
 fn alpaca_paper_two_partials_then_cumulative_terminal_fill_uses_effective_delta() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    let mut order = OmsOrder::new("ord-multi-partial", "AAPL", QtyMicros::from_whole_units(3).unwrap());
+    let mut order = OmsOrder::new(
+        "ord-multi-partial",
+        "AAPL",
+        QtyMicros::from_whole_units(3).unwrap(),
+    );
     // First partial fill: 1 of 3 shares.
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(1).unwrap() }, Some("pf-1"))
+        .apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(1).unwrap(),
+            },
+            Some("pf-1"),
+        )
         .unwrap();
     assert_eq!(order.filled_qty, QtyMicros::from_whole_units(1).unwrap());
     // Second partial fill: another 1 of 3 shares.
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(1).unwrap() }, Some("pf-2"))
+        .apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(1).unwrap(),
+            },
+            Some("pf-2"),
+        )
         .unwrap();
     assert_eq!(order.filled_qty, QtyMicros::from_whole_units(2).unwrap());
     oms.insert("ord-multi-partial".to_string(), order);
@@ -1366,14 +1479,16 @@ fn alpaca_paper_two_partials_then_cumulative_terminal_fill_uses_effective_delta(
 
     // Portfolio fill must use effective delta (1 = total - prior_filled), not broker delta (2).
     assert_eq!(
-        fill.qty, QtyMicros::from_whole_units(1).unwrap(),
+        fill.qty,
+        QtyMicros::from_whole_units(1).unwrap(),
         "T4c: portfolio fill must use effective_delta=1 (total_qty - prior_filled = 3 - 2), \
          not broker-reported delta_qty=2"
     );
 
     // OMS state must be Filled at total_qty=3.
     assert_eq!(
-        oms["ord-multi-partial"].filled_qty, QtyMicros::from_whole_units(3).unwrap(),
+        oms["ord-multi-partial"].filled_qty,
+        QtyMicros::from_whole_units(3).unwrap(),
         "T4c: OMS filled_qty must be capped at total_qty=3"
     );
     assert_eq!(
@@ -1404,14 +1519,20 @@ fn alpaca_paper_two_partials_then_cumulative_terminal_fill_uses_effective_delta(
 #[test]
 fn a1_ws_then_rest_same_physical_partial_fill_applies_once() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a1".to_string(), OmsOrder::new("ord-a1", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a1".to_string(),
+        OmsOrder::new("ord-a1", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let ws_ev = make_partial_fill_event_with_watermark("ord-a1", "ws-msg-1", None, 10, Some(10));
     let first = apply_fill_step(&mut oms, "ord-a1", &ws_ev, "ws-msg-1")
         .unwrap()
         .expect("A1: WS delivery must apply");
     assert_eq!(first.qty, QtyMicros::from_whole_units(10).unwrap());
-    assert_eq!(oms["ord-a1"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a1"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 
     let rest_ev = make_partial_fill_event_with_watermark(
         "ord-a1",
@@ -1426,7 +1547,8 @@ fn a1_ws_then_rest_same_physical_partial_fill_applies_once() {
         "A1: REST redelivery of the same physical fill must not double-apply"
     );
     assert_eq!(
-        oms["ord-a1"].filled_qty, QtyMicros::from_whole_units(10).unwrap(),
+        oms["ord-a1"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap(),
         "A1: filled_qty must remain 10"
     );
 }
@@ -1435,7 +1557,10 @@ fn a1_ws_then_rest_same_physical_partial_fill_applies_once() {
 #[test]
 fn a2_rest_then_ws_same_physical_partial_fill_applies_once() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a2".to_string(), OmsOrder::new("ord-a2", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a2".to_string(),
+        OmsOrder::new("ord-a2", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let rest_ev = make_partial_fill_event_with_watermark(
         "ord-a2",
@@ -1455,7 +1580,10 @@ fn a2_rest_then_ws_same_physical_partial_fill_applies_once() {
         second.is_none(),
         "A2: WS redelivery of the same physical fill must not double-apply"
     );
-    assert_eq!(oms["ord-a2"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a2"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 }
 
 /// A3: same-lane retry of one transport message (identical msg_id) applies
@@ -1463,7 +1591,10 @@ fn a2_rest_then_ws_same_physical_partial_fill_applies_once() {
 #[test]
 fn a3_same_lane_retry_applies_once() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a3".to_string(), OmsOrder::new("ord-a3", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a3".to_string(),
+        OmsOrder::new("ord-a3", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let ev = make_partial_fill_event_with_watermark(
         "ord-a3",
@@ -1481,7 +1612,10 @@ fn a3_same_lane_retry_applies_once() {
     // a transport-level resend of the same message).
     let retry = apply_fill_step(&mut oms, "ord-a3", &ev, "rest-activity-xyz").unwrap();
     assert!(retry.is_none(), "A3: same-lane retry must not double-apply");
-    assert_eq!(oms["ord-a3"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a3"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 }
 
 /// A4 (MANDATORY): two legitimate partial fills — same order, same qty,
@@ -1491,7 +1625,10 @@ fn a3_same_lane_retry_applies_once() {
 #[test]
 fn a4_two_legitimate_same_size_fills_less_than_3s_apart_both_apply() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a4".to_string(), OmsOrder::new("ord-a4", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a4".to_string(),
+        OmsOrder::new("ord-a4", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let ev1 = make_partial_fill_event_with_watermark("ord-a4", "ws-msg-1", None, 10, Some(10));
     let first = apply_fill_step(&mut oms, "ord-a4", &ev1, "ws-msg-1")
@@ -1509,7 +1646,8 @@ fn a4_two_legitimate_same_size_fills_less_than_3s_apart_both_apply() {
     assert_eq!(second.qty, QtyMicros::from_whole_units(10).unwrap());
 
     assert_eq!(
-        oms["ord-a4"].filled_qty, QtyMicros::from_whole_units(20).unwrap(),
+        oms["ord-a4"].filled_qty,
+        QtyMicros::from_whole_units(20).unwrap(),
         "A4: both legitimate 10-share fills must be reflected (10+10=20)"
     );
 }
@@ -1518,7 +1656,10 @@ fn a4_two_legitimate_same_size_fills_less_than_3s_apart_both_apply() {
 #[test]
 fn a5_two_distinct_qty_fills_both_apply() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a5".to_string(), OmsOrder::new("ord-a5", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a5".to_string(),
+        OmsOrder::new("ord-a5", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let ev1 = make_partial_fill_event_with_watermark("ord-a5", "ws-msg-1", None, 7, Some(7));
     apply_fill_step(&mut oms, "ord-a5", &ev1, "ws-msg-1")
@@ -1529,7 +1670,10 @@ fn a5_two_distinct_qty_fills_both_apply() {
         .unwrap()
         .expect("A5: second fill must apply");
 
-    assert_eq!(oms["ord-a5"].filled_qty, QtyMicros::from_whole_units(20).unwrap());
+    assert_eq!(
+        oms["ord-a5"].filled_qty,
+        QtyMicros::from_whole_units(20).unwrap()
+    );
 }
 
 /// A6: same price, extremely close broker timestamps are irrelevant to this
@@ -1538,7 +1682,10 @@ fn a5_two_distinct_qty_fills_both_apply() {
 #[test]
 fn a6_same_price_extremely_close_timestamps_still_distinct() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a6".to_string(), OmsOrder::new("ord-a6", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a6".to_string(),
+        OmsOrder::new("ord-a6", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     // Both events use the helper's fixed price_micros; qty differs only to
     // make the assertion legible, but the mechanism doesn't depend on that —
@@ -1550,7 +1697,10 @@ fn a6_same_price_extremely_close_timestamps_still_distinct() {
         .unwrap()
         .expect("A6: second execution at the same price must still apply");
     assert_eq!(second.qty, QtyMicros::from_whole_units(5).unwrap());
-    assert_eq!(oms["ord-a6"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a6"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 }
 
 /// A8: partial-fill dedup followed by a terminal fill produces the exact
@@ -1559,12 +1709,18 @@ fn a6_same_price_extremely_close_timestamps_still_distinct() {
 #[test]
 fn a8_partial_dedup_then_terminal_fill_yields_correct_final_qty() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a8".to_string(), OmsOrder::new("ord-a8", "SPY", QtyMicros::from_whole_units(30).unwrap()));
+    oms.insert(
+        "ord-a8".to_string(),
+        OmsOrder::new("ord-a8", "SPY", QtyMicros::from_whole_units(30).unwrap()),
+    );
 
     // WS partial: 10 shares, cum_qty_after=10.
     let ws_ev = make_partial_fill_event_with_watermark("ord-a8", "ws-msg-1", None, 10, Some(10));
     apply_fill_step(&mut oms, "ord-a8", &ws_ev, "ws-msg-1").unwrap();
-    assert_eq!(oms["ord-a8"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a8"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 
     // REST duplicate of the same partial fill — must no-op.
     let rest_dup = make_partial_fill_event_with_watermark(
@@ -1576,7 +1732,10 @@ fn a8_partial_dedup_then_terminal_fill_yields_correct_final_qty() {
     );
     let dup_result = apply_fill_step(&mut oms, "ord-a8", &rest_dup, "rest-activity-1").unwrap();
     assert!(dup_result.is_none(), "A8: cross-lane duplicate must no-op");
-    assert_eq!(oms["ord-a8"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a8"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 
     // Terminal fill completing the remaining 20 shares.
     let fill_ev = make_fill_event("ord-a8", "fill-terminal", 20);
@@ -1585,7 +1744,8 @@ fn a8_partial_dedup_then_terminal_fill_yields_correct_final_qty() {
         .expect("A8: terminal fill must apply");
     assert_eq!(terminal.qty, QtyMicros::from_whole_units(20).unwrap());
     assert_eq!(
-        oms["ord-a8"].filled_qty, QtyMicros::from_whole_units(30).unwrap(),
+        oms["ord-a8"].filled_qty,
+        QtyMicros::from_whole_units(30).unwrap(),
         "A8: final cumulative quantity must be exactly 30 (10 real partial + 20 terminal), \
          not 40 (which a double-applied partial would produce)"
     );
@@ -1675,7 +1835,10 @@ fn a9_restart_replay_does_not_double_apply_cross_lane_duplicate() {
 
     // Fresh OMS map, as after a process restart.
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a9".to_string(), OmsOrder::new("ord-a9", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a9".to_string(),
+        OmsOrder::new("ord-a9", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let mut applied_fills = 0usize;
     for (_inbox_id, msg_id, event, _received_at) in &queue {
@@ -1691,7 +1854,10 @@ fn a9_restart_replay_does_not_double_apply_cross_lane_duplicate() {
         applied_fills, 1,
         "A9: replaying both durable rows after a simulated restart must apply exactly once"
     );
-    assert_eq!(oms["ord-a9"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a9"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
 }
 
 /// A11: no legitimate partial-fill economic effect can be suppressed solely
@@ -1702,14 +1868,20 @@ fn a9_restart_replay_does_not_double_apply_cross_lane_duplicate() {
 #[test]
 fn a11_no_suppression_from_qty_price_proximity_alone() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a11".to_string(), OmsOrder::new("ord-a11", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-a11".to_string(),
+        OmsOrder::new("ord-a11", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
 
     let ev1 = make_partial_fill_event_with_watermark("ord-a11", "m1", None, 25, Some(25));
     let ev2 = make_partial_fill_event_with_watermark("ord-a11", "m2", None, 25, Some(50));
     let r1 = apply_fill_step(&mut oms, "ord-a11", &ev1, "m1").unwrap();
     let r2 = apply_fill_step(&mut oms, "ord-a11", &ev2, "m2").unwrap();
     assert!(r1.is_some() && r2.is_some(), "A11: both must apply");
-    assert_eq!(oms["ord-a11"].filled_qty, QtyMicros::from_whole_units(50).unwrap());
+    assert_eq!(
+        oms["ord-a11"].filled_qty,
+        QtyMicros::from_whole_units(50).unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1758,7 +1930,11 @@ fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
     oms.insert(
         "ord-a03-neg".to_string(),
-        OmsOrder::new("ord-a03-neg", "SPY", QtyMicros::from_whole_units(20).unwrap()),
+        OmsOrder::new(
+            "ord-a03-neg",
+            "SPY",
+            QtyMicros::from_whole_units(20).unwrap(),
+        ),
     );
 
     // Same wrong watermark -02's page-sum bug would have produced
@@ -1785,7 +1961,8 @@ fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
     .unwrap()
     .expect("A03-1-NEG: partial fill applies");
     assert_eq!(
-        first.qty, QtyMicros::from_whole_units(10).unwrap(),
+        first.qty,
+        QtyMicros::from_whole_units(10).unwrap(),
         "A03-1-NEG: applied quantity is always the event's own 10 shares, \
          never a value derived from the (wrong) cum_qty_after=20"
     );
@@ -1794,7 +1971,10 @@ fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
         "A03-1-NEG: the 10 shares keep the partial fill's own $100 -- never \
          stretched across a quantity that didn't come from this event"
     );
-    assert_eq!(oms["ord-a03-neg"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a03-neg"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
     assert_eq!(
         oms["ord-a03-neg"].state,
         mqk_execution::oms::state_machine::OrderState::PartiallyFilled
@@ -1819,7 +1999,10 @@ fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
         .expect("A03-1-NEG: the real $102 terminal fill must apply, not be swallowed");
     assert_eq!(second.qty, QtyMicros::from_whole_units(10).unwrap());
     assert_eq!(second.price_micros, 102_000_000);
-    assert_eq!(oms["ord-a03-neg"].filled_qty, QtyMicros::from_whole_units(20).unwrap());
+    assert_eq!(
+        oms["ord-a03-neg"].filled_qty,
+        QtyMicros::from_whole_units(20).unwrap()
+    );
 }
 
 /// A03-1 (MANDATORY, mission's "MOST IMPORTANT ECONOMIC PROOF"): with the
@@ -1829,7 +2012,10 @@ fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
 #[test]
 fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a03".to_string(), OmsOrder::new("ord-a03", "SPY", QtyMicros::from_whole_units(20).unwrap()));
+    oms.insert(
+        "ord-a03".to_string(),
+        OmsOrder::new("ord-a03", "SPY", QtyMicros::from_whole_units(20).unwrap()),
+    );
 
     let partial = BrokerEvent::PartialFill {
         broker_message_id: "rest-act-1".to_string(),
@@ -1846,9 +2032,16 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
     let first = apply_fill_step(&mut oms, "ord-a03", &partial, "rest-act-1")
         .unwrap()
         .expect("A03-1: partial fill applies");
-    assert_eq!(first.qty, QtyMicros::from_whole_units(10).unwrap(), "A03-1: partial fill's own 10 shares, not 20");
+    assert_eq!(
+        first.qty,
+        QtyMicros::from_whole_units(10).unwrap(),
+        "A03-1: partial fill's own 10 shares, not 20"
+    );
     assert_eq!(first.price_micros, 100_000_000);
-    assert_eq!(oms["ord-a03"].filled_qty, QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        oms["ord-a03"].filled_qty,
+        QtyMicros::from_whole_units(10).unwrap()
+    );
     assert_eq!(
         oms["ord-a03"].state,
         mqk_execution::oms::state_machine::OrderState::PartiallyFilled
@@ -1872,7 +2065,8 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
         .unwrap()
         .expect("A03-1: terminal fill must apply -- it must NOT be swallowed");
     assert_eq!(
-        second.qty, QtyMicros::from_whole_units(10).unwrap(),
+        second.qty,
+        QtyMicros::from_whole_units(10).unwrap(),
         "A03-1: terminal fill's own 10 shares, distinct from the partial fill"
     );
     assert_eq!(
@@ -1881,7 +2075,8 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
          or overwritten by the partial fill's $100"
     );
     assert_eq!(
-        oms["ord-a03"].filled_qty, QtyMicros::from_whole_units(20).unwrap(),
+        oms["ord-a03"].filled_qty,
+        QtyMicros::from_whole_units(20).unwrap(),
         "A03-1: final cumulative is 20 (10+10), reached via two distinct fills"
     );
     assert_eq!(
@@ -1891,7 +2086,8 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
 
     // Economic truth is 10@$100 + 10@$102 -- never collapsed into 20@$100.
     assert!(
-        !(first.qty == QtyMicros::from_whole_units(20).unwrap() && first.price_micros == 100_000_000),
+        !(first.qty == QtyMicros::from_whole_units(20).unwrap()
+            && first.price_micros == 100_000_000),
         "A03-1: must never observe the defect-A failure mode (20 shares at \
          the partial fill's price)"
     );
@@ -1913,9 +2109,18 @@ fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
 #[test]
 fn optr_label_01_oms_transition_error_not_labeled_unknown_fill() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    let mut order = OmsOrder::new("ord-overflow-optr", "SPY", QtyMicros::from_whole_units(100).unwrap());
+    let mut order = OmsOrder::new(
+        "ord-overflow-optr",
+        "SPY",
+        QtyMicros::from_whole_units(100).unwrap(),
+    );
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("pf-setup"))
+        .apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("pf-setup"),
+        )
         .unwrap();
     oms.insert("ord-overflow-optr".to_string(), order);
 
@@ -2073,7 +2278,10 @@ fn legacy_payload_without_side_uses_signed_quantity_compatibility_rule() {
         .expect("legacy signed-quantity payload must build");
 
     assert!(matches!(req.side, mqk_execution::Side::Sell));
-    assert_eq!(req.quantity, mqk_execution::QtyMicros::from_whole_units(25).unwrap());
+    assert_eq!(
+        req.quantity,
+        mqk_execution::QtyMicros::from_whole_units(25).unwrap()
+    );
     assert_eq!(req.order_type, "market");
     assert_eq!(req.time_in_force, "day");
 }
@@ -2085,7 +2293,10 @@ fn legacy_payload_without_order_type_or_tif_uses_repo_backed_defaults() {
             .expect("legacy minimal payload must build with repo-backed defaults");
 
     assert!(matches!(req.side, mqk_execution::Side::Buy));
-    assert_eq!(req.quantity, mqk_execution::QtyMicros::from_whole_units(10).unwrap());
+    assert_eq!(
+        req.quantity,
+        mqk_execution::QtyMicros::from_whole_units(10).unwrap()
+    );
     assert_eq!(req.order_type, "market");
     assert_eq!(req.time_in_force, "day");
     assert_eq!(req.limit_price, None);
@@ -2197,7 +2408,11 @@ fn applied_fill_absent_from_recovery_queue_leaves_portfolio_clean() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
     oms.insert(
         "ord-pre-crash".to_string(),
-        OmsOrder::new("ord-pre-crash", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+        OmsOrder::new(
+            "ord-pre-crash",
+            "SPY",
+            QtyMicros::from_whole_units(100).unwrap(),
+        ),
     );
     let apply_queue: Vec<(String, BrokerEvent)> = vec![]; // applied fill filtered by DB
     let mut portfolio = PortfolioState::new(initial_cash);
@@ -2213,7 +2428,8 @@ fn applied_fill_absent_from_recovery_queue_leaves_portfolio_clean() {
         "applied fill absent from recovery queue must not re-mutate portfolio cash after restart"
     );
     assert_eq!(
-        oms["ord-pre-crash"].filled_qty, QtyMicros::from_whole_units(0).unwrap(),
+        oms["ord-pre-crash"].filled_qty,
+        QtyMicros::from_whole_units(0).unwrap(),
         "fresh OmsOrder must not advance filled_qty when recovery queue is empty"
     );
 }
@@ -2231,7 +2447,10 @@ fn applied_fill_absent_from_recovery_queue_leaves_portfolio_clean() {
 fn unapplied_fill_in_recovery_queue_applies_exactly_once_with_fresh_oms() {
     let initial_cash = 1_000_000_000_000_i64;
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-w6".to_string(), OmsOrder::new("ord-w6", "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-w6".to_string(),
+        OmsOrder::new("ord-w6", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
     let ev = make_fill_event("ord-w6", "crash-window-fill", 100);
     // First recovery apply: fresh applied_event_ids, fill is in queue.
     let fill_opt = apply_fill_step(&mut oms, "ord-w6", &ev, "crash-window-fill").unwrap();
@@ -2243,7 +2462,10 @@ fn unapplied_fill_in_recovery_queue_applies_exactly_once_with_fresh_oms() {
         portfolio.cash_micros, initial_cash,
         "unapplied fill must apply once and mutate portfolio on crash-window recovery"
     );
-    assert_eq!(oms["ord-w6"].filled_qty, QtyMicros::from_whole_units(100).unwrap());
+    assert_eq!(
+        oms["ord-w6"].filled_qty,
+        QtyMicros::from_whole_units(100).unwrap()
+    );
     // Second delivery of same msg_id within recovery session:
     // OMS applied_event_ids now contains "crash-window-fill" → Ok(None).
     let cash_before_second = portfolio.cash_micros;
@@ -2274,7 +2496,11 @@ fn durable_applied_gate_is_queue_membership_not_oms_memory() {
     // total_qty=100; F1=40 was applied, F2=60 is unapplied.
     oms.insert(
         "ord-split".to_string(),
-        OmsOrder::new("ord-split", "SPY", QtyMicros::from_whole_units(100).unwrap()),
+        OmsOrder::new(
+            "ord-split",
+            "SPY",
+            QtyMicros::from_whole_units(100).unwrap(),
+        ),
     );
     // Only F2 is in the recovery queue; F1 was filtered by the DB.
     let apply_queue: Vec<(String, BrokerEvent)> = vec![(
@@ -2291,7 +2517,8 @@ fn durable_applied_gate_is_queue_membership_not_oms_memory() {
     }
     // OMS shows only F2's contribution (60), not F1+F2 (100).
     assert_eq!(
-        oms["ord-split"].filled_qty, QtyMicros::from_whole_units(60).unwrap(),
+        oms["ord-split"].filled_qty,
+        QtyMicros::from_whole_units(60).unwrap(),
         "OMS filled_qty must reflect only F2 (unapplied); F1 (applied, absent) must not advance it"
     );
     // Portfolio cash changed: F2 was applied (cash ≠ initial).
@@ -2316,8 +2543,14 @@ fn empty_oms_applied_event_ids_does_not_bypass_restart_replay_protection() {
     let initial_cash = 1_000_000_000_i64;
     // Multiple orders with fresh applied_event_ids (restart).
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
-    oms.insert("ord-a".to_string(), OmsOrder::new("ord-a", "AAPL", QtyMicros::from_whole_units(50).unwrap()));
-    oms.insert("ord-b".to_string(), OmsOrder::new("ord-b", "MSFT", QtyMicros::from_whole_units(80).unwrap()));
+    oms.insert(
+        "ord-a".to_string(),
+        OmsOrder::new("ord-a", "AAPL", QtyMicros::from_whole_units(50).unwrap()),
+    );
+    oms.insert(
+        "ord-b".to_string(),
+        OmsOrder::new("ord-b", "MSFT", QtyMicros::from_whole_units(80).unwrap()),
+    );
     // All fills were applied before crash → not in recovery queue.
     // The empty OmsOrder applied_event_ids cannot cause them to be re-applied
     // because they never reach apply_fill_step.

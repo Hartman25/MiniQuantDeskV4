@@ -1975,20 +1975,21 @@ pub(crate) async fn ops_action(
                     .collect::<Vec<_>>();
             let mut malformed_positions = Vec::new();
             let mut duplicate_positions = Vec::new();
-            let positions_to_flatten: Vec<(String, mqk_execution::QtyMicros)> = raw_positions_to_flatten
-                .into_iter()
-                .filter_map(|(raw_symbol, normalized, net_qty)| {
-                    if normalized.is_empty() {
-                        malformed_positions.push(raw_symbol);
-                        return None;
-                    }
-                    if !seen_position_symbols.insert(normalized.clone()) {
-                        duplicate_positions.push(normalized);
-                        return None;
-                    }
-                    Some((raw_symbol, net_qty))
-                })
-                .collect();
+            let positions_to_flatten: Vec<(String, mqk_execution::QtyMicros)> =
+                raw_positions_to_flatten
+                    .into_iter()
+                    .filter_map(|(raw_symbol, normalized, net_qty)| {
+                        if normalized.is_empty() {
+                            malformed_positions.push(raw_symbol);
+                            return None;
+                        }
+                        if !seen_position_symbols.insert(normalized.clone()) {
+                            duplicate_positions.push(normalized);
+                            return None;
+                        }
+                        Some((raw_symbol, net_qty))
+                    })
+                    .collect();
             if !malformed_positions.is_empty() || !duplicate_positions.is_empty() {
                 let mut blockers = Vec::new();
                 if !malformed_positions.is_empty() {

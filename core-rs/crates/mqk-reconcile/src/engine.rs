@@ -256,9 +256,10 @@ mod section_e_tests {
     fn unknown_broker_position_triggers_halt() {
         let local = LocalSnapshot::empty(); // no positions
         let mut broker = BrokerSnapshot::empty();
-        broker
-            .positions
-            .insert("AAPL".to_string(), QtyMicros::from_whole_units(200).unwrap());
+        broker.positions.insert(
+            "AAPL".to_string(),
+            QtyMicros::from_whole_units(200).unwrap(),
+        );
 
         let r = reconcile(&local, &broker);
 
@@ -331,9 +332,10 @@ mod section_e_tests {
     #[test]
     fn position_qty_mismatch_both_sides_known_triggers_halt() {
         let mut local = LocalSnapshot::empty();
-        local
-            .positions
-            .insert("TSLA".to_string(), QtyMicros::from_whole_units(100).unwrap());
+        local.positions.insert(
+            "TSLA".to_string(),
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
         let mut broker = BrokerSnapshot::empty();
         broker
             .positions

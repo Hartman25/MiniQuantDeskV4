@@ -269,7 +269,8 @@ async fn release_asb_runtime_leadership(
 /// broker snapshot but not yet applied to the local portfolio.
 fn dirty_local() -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
+    s.positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
     s
 }
 

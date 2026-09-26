@@ -774,9 +774,10 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 }
             })?
         } else {
-            let whole = parse_broker_qty(&order.filled_qty).map_err(|raw| BrokerError::Transient {
-                detail: format!("replace: non-parseable filled_qty from broker: {raw:?}"),
-            })?;
+            let whole =
+                parse_broker_qty(&order.filled_qty).map_err(|raw| BrokerError::Transient {
+                    detail: format!("replace: non-parseable filled_qty from broker: {raw:?}"),
+                })?;
             QtyMicros::from_whole_units(whole).ok_or_else(|| BrokerError::Reject {
                 code: "replace_filled_qty_overflow".to_string(),
                 detail: format!("replace: filled_qty={whole} overflows QtyMicros range"),
@@ -1387,14 +1388,15 @@ pub fn build_replace_body(
     limit_price: Option<i64>,
     time_in_force: &str,
 ) -> Result<AlpacaReplaceBody, BrokerError> {
-    let new_total_qty = filled_qty
-        .checked_add(new_leaves_qty)
-        .ok_or_else(|| BrokerError::Reject {
-            code: "replace_quantity_overflow".to_string(),
-            detail: format!(
-                "replace: filled_qty={filled_qty} + new_leaves_qty={new_leaves_qty} overflows"
-            ),
-        })?;
+    let new_total_qty =
+        filled_qty
+            .checked_add(new_leaves_qty)
+            .ok_or_else(|| BrokerError::Reject {
+                code: "replace_quantity_overflow".to_string(),
+                detail: format!(
+                    "replace: filled_qty={filled_qty} + new_leaves_qty={new_leaves_qty} overflows"
+                ),
+            })?;
     Ok(AlpacaReplaceBody {
         qty: format_alpaca_qty(new_total_qty),
         limit_price: limit_price.map(format_alpaca_price),
@@ -1417,12 +1419,7 @@ fn build_replace_body_for_symbol(
     time_in_force: &str,
     symbol: &str,
 ) -> Result<AlpacaReplaceBody, BrokerError> {
-    let mut body = build_replace_body(
-        new_leaves_qty,
-        filled_qty,
-        None,
-        time_in_force,
-    )?;
+    let mut body = build_replace_body(new_leaves_qty, filled_qty, None, time_in_force)?;
 
     body.limit_price = limit_price.map(|price_micros| {
         if is_alpaca_crypto_symbol(symbol) {
@@ -1676,7 +1673,6 @@ pub fn format_alpaca_crypto_price(micros: i64) -> String {
 
     rendered
 }
-
 
 /// Convert integer micros to a decimal price string for the Alpaca broker wire.
 ///

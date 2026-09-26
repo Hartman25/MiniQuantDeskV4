@@ -64,12 +64,12 @@ pub use reconcile_guard::ReconcileFreshnessGuard;
 // Re-export the broker-facing contract types that downstream crates use.
 pub use id_map::BrokerOrderMap;
 
+pub use mqk_schemas::QTY_MICROS_SCALE;
 pub use order_router::{
     decode_broker_event, AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerEvent,
     BrokerEventIdentity, BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, QtyMicros,
 };
-pub use mqk_schemas::QTY_MICROS_SCALE;
 
 pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,

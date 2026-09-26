@@ -708,8 +708,14 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
 
-        assert_eq!(body["committed_authority_kind"], "explicit_watchlist_v3_multi_strategy");
-        assert_eq!(body["committed_explicit_authority_id"], authority_id.to_string());
+        assert_eq!(
+            body["committed_authority_kind"],
+            "explicit_watchlist_v3_multi_strategy"
+        );
+        assert_eq!(
+            body["committed_explicit_authority_id"],
+            authority_id.to_string()
+        );
         assert_eq!(body["evidence_validation_state"], "valid");
         assert!(
             body["committed_plan_id"].is_null(),

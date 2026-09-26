@@ -54,8 +54,20 @@ fn good_equity_curve() -> Vec<(i64, i64)> {
 /// Profitable round-trip fills that yield a high profit factor.
 fn good_fills() -> Vec<BacktestFill> {
     vec![
-        bf(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(100).unwrap(), 10_000_000, 0)),
-        bf(Fill::new("SPY", Side::Sell, QtyMicros::from_whole_units(100).unwrap(), 12_000_000, 0)),
+        bf(Fill::new(
+            "SPY",
+            Side::Buy,
+            QtyMicros::from_whole_units(100).unwrap(),
+            10_000_000,
+            0,
+        )),
+        bf(Fill::new(
+            "SPY",
+            Side::Sell,
+            QtyMicros::from_whole_units(100).unwrap(),
+            12_000_000,
+            0,
+        )),
     ]
 }
 
@@ -334,9 +346,27 @@ fn stress_suite_blank_protocol_blocks_promotion() {
 #[test]
 fn partial_fills_profit_factor_computed_correctly() {
     let fills = vec![
-        bf(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(100).unwrap(), 10_000_000, 0)),
-        bf(Fill::new("SPY", Side::Sell, QtyMicros::from_whole_units(60).unwrap(), 12_000_000, 0)), // partial close at profit
-        bf(Fill::new("SPY", Side::Sell, QtyMicros::from_whole_units(40).unwrap(), 8_000_000, 0)),  // remaining at loss
+        bf(Fill::new(
+            "SPY",
+            Side::Buy,
+            QtyMicros::from_whole_units(100).unwrap(),
+            10_000_000,
+            0,
+        )),
+        bf(Fill::new(
+            "SPY",
+            Side::Sell,
+            QtyMicros::from_whole_units(60).unwrap(),
+            12_000_000,
+            0,
+        )), // partial close at profit
+        bf(Fill::new(
+            "SPY",
+            Side::Sell,
+            QtyMicros::from_whole_units(40).unwrap(),
+            8_000_000,
+            0,
+        )), // remaining at loss
     ];
 
     let day = 86_400i64;
@@ -406,8 +436,20 @@ fn partial_fills_profit_factor_computed_correctly() {
 #[test]
 fn cancel_after_partial_fill_no_phantom_pnl() {
     let fills = vec![
-        bf(Fill::new("SPY", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), 10_000_000, 0)), // only 10 of 100 executed
-        bf(Fill::new("SPY", Side::Sell, QtyMicros::from_whole_units(10).unwrap(), 11_000_000, 0)), // close position
+        bf(Fill::new(
+            "SPY",
+            Side::Buy,
+            QtyMicros::from_whole_units(10).unwrap(),
+            10_000_000,
+            0,
+        )), // only 10 of 100 executed
+        bf(Fill::new(
+            "SPY",
+            Side::Sell,
+            QtyMicros::from_whole_units(10).unwrap(),
+            11_000_000,
+            0,
+        )), // close position
     ];
 
     let day = 86_400i64;

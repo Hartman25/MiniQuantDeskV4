@@ -39,7 +39,12 @@ fn cancel_reject_on_open_order_restores_open() {
 
     // Order is still fully alive and can be filled.
     order
-        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("ev-fill"))
+        .apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("ev-fill"),
+        )
         .unwrap();
     assert_eq!(order.state, OrderState::Filled);
     assert_eq!(order.filled_qty, QtyMicros::from_whole_units(100).unwrap());
@@ -55,7 +60,12 @@ fn cancel_reject_after_partial_fill_restores_partially_filled() {
 
     // Partial fill first.
     order
-        .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("ev-pf"))
+        .apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+            },
+            Some("ev-pf"),
+        )
         .unwrap();
     assert_eq!(order.state, OrderState::PartiallyFilled);
     assert_eq!(order.filled_qty, QtyMicros::from_whole_units(30).unwrap());
@@ -76,13 +86,19 @@ fn cancel_reject_after_partial_fill_restores_partially_filled() {
         "cancel-reject must restore PartiallyFilled when partial fills exist"
     );
     assert_eq!(
-        order.filled_qty, QtyMicros::from_whole_units(30).unwrap(),
+        order.filled_qty,
+        QtyMicros::from_whole_units(30).unwrap(),
         "filled_qty must be unchanged after cancel-reject"
     );
 
     // Remaining fill completes the order.
     order
-        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(70).unwrap() }, Some("ev-fill"))
+        .apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(70).unwrap(),
+            },
+            Some("ev-fill"),
+        )
         .unwrap();
     assert_eq!(order.state, OrderState::Filled);
     assert_eq!(order.filled_qty, QtyMicros::from_whole_units(100).unwrap());
@@ -117,7 +133,12 @@ fn cancel_on_filled_order_is_illegal_transition() {
     let mut order = OmsOrder::new("ord-4", "MSFT", QtyMicros::from_whole_units(50).unwrap());
 
     order
-        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("ev-fill"))
+        .apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(50).unwrap(),
+            },
+            Some("ev-fill"),
+        )
         .unwrap();
     assert_eq!(order.state, OrderState::Filled);
 
@@ -153,7 +174,12 @@ fn fill_during_cancel_pending_still_fills_order() {
 
     // Fill arrives before cancel is processed.
     order
-        .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("ev-fill"))
+        .apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+            },
+            Some("ev-fill"),
+        )
         .unwrap();
     assert_eq!(
         order.state,

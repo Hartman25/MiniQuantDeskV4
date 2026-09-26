@@ -1427,7 +1427,13 @@ impl BacktestEngine {
             let fill_id = BacktestFill::make_fill_id(&order_id);
             // BKT-03P: apply commission to flatten fills too
             let fee = self.config.commission.compute_fee(abs_qty, mark);
-            let inner = Fill::new(sym.clone(), pf_side, whole_qty_to_micros(abs_qty), mark, fee);
+            let inner = Fill::new(
+                sym.clone(),
+                pf_side,
+                whole_qty_to_micros(abs_qty),
+                mark,
+                fee,
+            );
             apply_fill(&mut self.portfolio, &inner);
             // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel multiplier-aware
             // shadow ledger update, mirroring the intent-fill call site.

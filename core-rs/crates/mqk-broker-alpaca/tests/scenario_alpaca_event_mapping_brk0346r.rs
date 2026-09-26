@@ -339,7 +339,8 @@ fn brk05r_p1_replaced_produces_replace_ack_with_new_total_qty() {
             assert_eq!(internal_order_id, CLIENT_ID);
             assert_eq!(broker_order_id.as_deref(), Some(BROKER_ID));
             assert_eq!(
-                *new_total_qty, QtyMicros::from_whole_units(200).unwrap(),
+                *new_total_qty,
+                QtyMicros::from_whole_units(200).unwrap(),
                 "P1: new_total_qty comes from order.qty"
             );
         }

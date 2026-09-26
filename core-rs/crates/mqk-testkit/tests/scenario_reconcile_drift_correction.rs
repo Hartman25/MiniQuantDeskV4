@@ -52,10 +52,14 @@ fn make_order(
 #[test]
 fn position_drift_then_correction_returns_to_continue() {
     let mut local = local_empty();
-    local.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
+    local
+        .positions
+        .insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
 
     let mut broker_dirty = broker_empty();
-    broker_dirty.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(50).unwrap());
+    broker_dirty
+        .positions
+        .insert("SPY".to_string(), QtyMicros::from_whole_units(50).unwrap());
 
     let dirty = reconcile_tick(&local, &broker_dirty);
     assert!(
@@ -64,7 +68,9 @@ fn position_drift_then_correction_returns_to_continue() {
     );
 
     let mut broker_clean = broker_empty();
-    broker_clean.positions.insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
+    broker_clean
+        .positions
+        .insert("SPY".to_string(), QtyMicros::from_whole_units(100).unwrap());
 
     let clean = reconcile_tick(&local, &broker_clean);
     assert_eq!(

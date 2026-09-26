@@ -502,7 +502,10 @@ pub(super) fn is_submit_risk_reducing(
     match side {
         Side::Buy => {
             current_qty.is_negative()
-                && quantity <= current_qty.checked_abs().unwrap_or(mqk_portfolio::QtyMicros::ZERO)
+                && quantity
+                    <= current_qty
+                        .checked_abs()
+                        .unwrap_or(mqk_portfolio::QtyMicros::ZERO)
         }
         Side::Sell => current_qty.is_positive() && quantity <= current_qty,
     }

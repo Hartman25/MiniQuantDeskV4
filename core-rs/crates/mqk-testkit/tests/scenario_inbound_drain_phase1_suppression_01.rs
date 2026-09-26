@@ -50,7 +50,7 @@ use mqk_execution::oms::state_machine::OmsOrder;
 use mqk_execution::{
     BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
     BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, QtyMicros, IntegrityGate, ReconcileGate, RiskGate,
+    BrokerSubmitResponse, IntegrityGate, QtyMicros, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;

@@ -252,7 +252,10 @@ fn vertical_spread_width_bound_micros(
 /// 1e-6 scale, so `qty.raw() * multiplier` is directly the raw share-micros
 /// value, no rescaling needed). `None` on overflow.
 fn covered_call_required_coverage_raw(short_call: &ProposedOptionLeg) -> Option<i64> {
-    short_call.qty.raw().checked_mul(short_call.multiplier as i64)
+    short_call
+        .qty
+        .raw()
+        .checked_mul(short_call.multiplier as i64)
 }
 
 /// IR-B1-02: the conservative cash exercise obligation of a single
@@ -326,7 +329,9 @@ fn classify_single_leg(
             let required_micros = cash_secured_put_required_obligation_micros(leg)
                 .ok_or(OptionStrategyRefusal::CashSecuredPutObligationOverflow)?;
             match proposed.cash_secured_collateral_micros {
-                Some(collateral_cash_micros) if (collateral_cash_micros as i128) >= required_micros => {
+                Some(collateral_cash_micros)
+                    if (collateral_cash_micros as i128) >= required_micros =>
+                {
                     Ok(OptionStrategyStructure::CashSecuredPut {
                         short_put: leg.clone(),
                         collateral_cash_micros,
@@ -364,7 +369,8 @@ fn classify_two_legs(
         _ => unreachable!("opposite-direction check above already excludes same-side pairs"),
     };
 
-    let spread_width_exercise_bound_micros = vertical_spread_width_bound_micros(long_leg, short_leg)?;
+    let spread_width_exercise_bound_micros =
+        vertical_spread_width_bound_micros(long_leg, short_leg)?;
 
     match long_leg.right {
         OptionRight::Call => Ok(OptionStrategyStructure::CallVerticalSpread {

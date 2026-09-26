@@ -395,7 +395,10 @@ mod tests {
         let snap = broker.snapshot();
         let ord = snap.orders.get("ord-sell").expect("order must exist");
         assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
-        assert_eq!(ord.qty, mqk_reconcile::QtyMicros::from_whole_units(100).unwrap());
+        assert_eq!(
+            ord.qty,
+            mqk_reconcile::QtyMicros::from_whole_units(100).unwrap()
+        );
     }
 
     #[test]
@@ -434,7 +437,10 @@ mod tests {
         let snap = broker.snapshot();
         let ord = snap.orders.get("ord-1").expect("order must exist");
         assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
-        assert_eq!(ord.qty, mqk_reconcile::QtyMicros::from_whole_units(75).unwrap());
+        assert_eq!(
+            ord.qty,
+            mqk_reconcile::QtyMicros::from_whole_units(75).unwrap()
+        );
     }
 
     #[test]
@@ -473,11 +479,13 @@ mod tests {
         let ord = snap.orders.get("ord-pf").expect("order must exist");
         assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
         assert_eq!(
-            ord.qty, mqk_reconcile::QtyMicros::from_whole_units(65).unwrap(),
+            ord.qty,
+            mqk_reconcile::QtyMicros::from_whole_units(65).unwrap(),
             "qty must equal preserved filled + new remaining"
         );
         assert_eq!(
-            ord.filled_qty, mqk_reconcile::QtyMicros::from_whole_units(40).unwrap(),
+            ord.filled_qty,
+            mqk_reconcile::QtyMicros::from_whole_units(40).unwrap(),
             "replace must preserve already-filled quantity"
         );
         assert!(matches!(ord.status, OrderStatus::PartiallyFilled));

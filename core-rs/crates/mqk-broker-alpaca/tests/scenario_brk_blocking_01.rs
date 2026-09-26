@@ -24,8 +24,7 @@ use mqk_broker_alpaca::{
     encode_fetch_cursor, types::AlpacaFetchCursor, AlpacaBrokerAdapter, AlpacaConfig,
 };
 use mqk_execution::{
-    AssetClass, BrokerAdapter, BrokerError, BrokerInvokeToken, BrokerSubmitRequest, QtyMicros,
-    Side,
+    AssetClass, BrokerAdapter, BrokerError, BrokerInvokeToken, BrokerSubmitRequest, QtyMicros, Side,
 };
 
 fn unreachable_adapter() -> AlpacaBrokerAdapter {

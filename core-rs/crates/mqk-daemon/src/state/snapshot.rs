@@ -1106,12 +1106,26 @@ mod reconcile_status_map_tests {
         let mut local = LocalSnapshot::empty();
         local.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, QtyMicros::from_whole_units(1).unwrap(), QtyMicros::from_whole_units(0).unwrap(), local_status),
+            OrderSnapshot::new(
+                "ord-1",
+                "AAPL",
+                Side::Buy,
+                QtyMicros::from_whole_units(1).unwrap(),
+                QtyMicros::from_whole_units(0).unwrap(),
+                local_status,
+            ),
         );
         let mut broker = BrokerSnapshot::empty_at(1_000);
         broker.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, QtyMicros::from_whole_units(1).unwrap(), QtyMicros::from_whole_units(0).unwrap(), broker_status),
+            OrderSnapshot::new(
+                "ord-1",
+                "AAPL",
+                Side::Buy,
+                QtyMicros::from_whole_units(1).unwrap(),
+                QtyMicros::from_whole_units(0).unwrap(),
+                broker_status,
+            ),
         );
         (local, broker)
     }
@@ -1289,7 +1303,10 @@ mod position_seed_tests {
     fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
         let mut s = LocalSnapshot::empty();
         for &(sym, qty) in positions {
-            s.positions.insert(sym.to_string(), mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap());
+            s.positions.insert(
+                sym.to_string(),
+                mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap(),
+            );
         }
         s
     }
@@ -1321,7 +1338,11 @@ mod position_seed_tests {
             .get("AAPL")
             .map(|p| p.qty_signed())
             .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
-        assert_eq!(current, qty(1), "AAPL qty must be 1 after seeding from baseline");
+        assert_eq!(
+            current,
+            qty(1),
+            "AAPL qty must be 1 after seeding from baseline"
+        );
     }
 
     // P03: target=0 minus seeded AAPL qty=1 → delta=-1 (sell signal)
@@ -1471,7 +1492,10 @@ mod baseline_double_count_fix_tests {
     fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
         let mut s = LocalSnapshot::empty();
         for &(sym, qty) in positions {
-            s.positions.insert(sym.to_string(), mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap());
+            s.positions.insert(
+                sym.to_string(),
+                mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap(),
+            );
         }
         s
     }
@@ -1646,7 +1670,10 @@ mod baseline_ledger_parity_tests {
     fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
         let mut s = LocalSnapshot::empty();
         for &(sym, qty) in positions {
-            s.positions.insert(sym.to_string(), mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap());
+            s.positions.insert(
+                sym.to_string(),
+                mqk_portfolio::QtyMicros::from_whole_units(qty).unwrap(),
+            );
         }
         s
     }
@@ -1736,7 +1763,11 @@ mod baseline_ledger_parity_tests {
             .get("AAPL")
             .map(|p| p.qty_signed())
             .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
-        assert_eq!(current, qty(-3), "AAPL short position qty must be -3 after seeding");
+        assert_eq!(
+            current,
+            qty(-3),
+            "AAPL short position qty must be -3 after seeding"
+        );
         assert!(!pf.ledger.is_empty(), "seeding must append a ledger entry");
         assert_capital_invariants_hold(&pf);
     }
@@ -2025,7 +2056,8 @@ mod fill_economic_authority_closure_tests {
                 .map(|p| p.qty_signed())
                 .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                qty,
+                mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
                 "cross-lane WS-then-REST duplicate of one physical 10@$100 execution \
                  must replay to qty=10, not 20"
             );
@@ -2081,7 +2113,8 @@ mod fill_economic_authority_closure_tests {
                 .map(|p| p.qty_signed())
                 .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                qty,
+                mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
                 "cross-lane REST-then-WS duplicate of one physical 10@$100 execution \
                  must replay to qty=10, not 20 — order of raw observation must not matter"
             );
@@ -2154,7 +2187,8 @@ mod fill_economic_authority_closure_tests {
                 .map(|p| p.qty_signed())
                 .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(),
+                qty,
+                mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(),
                 "late duplicate of an earlier partial arriving after a newer partial \
                  must no-op; final qty must be A+B=20, never 30"
             );
@@ -2220,7 +2254,11 @@ mod fill_economic_authority_closure_tests {
                 .get("AAPL")
                 .map(|p| p.qty_signed())
                 .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
-            assert_eq!(qty, mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(), "10@$100 + 10@$102 must total 20 shares exactly");
+            assert_eq!(
+                qty,
+                mqk_portfolio::QtyMicros::from_whole_units(20).unwrap(),
+                "10@$100 + 10@$102 must total 20 shares exactly"
+            );
             let expected_cash = 100_000_000_000 - (10 * 100_000_000 + 10 * 102_000_000);
             assert_eq!(
                 portfolio.cash_micros, expected_cash,
@@ -2411,7 +2449,8 @@ mod fill_economic_authority_closure_tests {
                 .map(|p| p.qty_signed())
                 .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
             assert_eq!(
-                qty, mqk_portfolio::QtyMicros::from_whole_units(3).unwrap(),
+                qty,
+                mqk_portfolio::QtyMicros::from_whole_units(3).unwrap(),
                 "FC-1: 2@$100 + true-remainder 1@$102 must total qty=3, not qty=4 from the \
                  raw terminal delta_qty=2"
             );
@@ -2423,7 +2462,16 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&portfolio),
-                vec![(mqk_portfolio::QtyMicros::from_whole_units(2).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(1).unwrap(), 102_000_000)],
+                vec![
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(2).unwrap(),
+                        100_000_000
+                    ),
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(1).unwrap(),
+                        102_000_000
+                    )
+                ],
                 "FC-1: ledger fill quantities/prices must be exactly [2@$100, 1@$102]"
             );
             assert!(
@@ -2565,14 +2613,19 @@ mod fill_economic_authority_closure_tests {
             );
 
             // ---- Side A: live apply semantics.
-            let mut live_order =
-                OmsOrder::new(order_id, "AAPL", mqk_execution::QtyMicros::from_whole_units(3).unwrap());
+            let mut live_order = OmsOrder::new(
+                order_id,
+                "AAPL",
+                mqk_execution::QtyMicros::from_whole_units(3).unwrap(),
+            );
             let mut live_fills: Vec<(mqk_portfolio::QtyMicros, i64)> = Vec::new();
 
             let pre1 = live_order.filled_qty;
             live_order
                 .apply_with_watermark(
-                    &OmsEvent::PartialFill { delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap() },
+                    &OmsEvent::PartialFill {
+                        delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
+                    },
                     Some("live-partial"),
                     Some(mqk_execution::QtyMicros::from_whole_units(2).unwrap()),
                 )
@@ -2586,7 +2639,9 @@ mod fill_economic_authority_closure_tests {
             let pre2 = live_order.filled_qty;
             live_order
                 .apply_with_watermark(
-                    &OmsEvent::Fill { delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap() },
+                    &OmsEvent::Fill {
+                        delta_qty: mqk_execution::QtyMicros::from_whole_units(2).unwrap(),
+                    },
                     Some("live-terminal"),
                     None,
                 )
@@ -2598,12 +2653,22 @@ mod fill_economic_authority_closure_tests {
             }
 
             assert_eq!(
-                live_order.filled_qty, mqk_execution::QtyMicros::from_whole_units(3).unwrap(),
+                live_order.filled_qty,
+                mqk_execution::QtyMicros::from_whole_units(3).unwrap(),
                 "Section 8 LIVE: OMS final filled_qty must be 3"
             );
             assert_eq!(
                 live_fills,
-                vec![(mqk_portfolio::QtyMicros::from_whole_units(2).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(1).unwrap(), 102_000_000)],
+                vec![
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(2).unwrap(),
+                        100_000_000
+                    ),
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(1).unwrap(),
+                        102_000_000
+                    )
+                ],
                 "Section 8 LIVE: effective fills must be [2@$100, 1@$102]"
             );
 
@@ -2650,7 +2715,8 @@ mod fill_economic_authority_closure_tests {
             let durable_fills = ledger_fills(&portfolio);
 
             assert_eq!(
-                durable_qty, mqk_portfolio::QtyMicros::from_whole_units(3).unwrap(),
+                durable_qty,
+                mqk_portfolio::QtyMicros::from_whole_units(3).unwrap(),
                 "Section 8 DURABLE: portfolio qty must be 3, matching LIVE"
             );
             assert_eq!(
@@ -2725,7 +2791,10 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
+                vec![(
+                    mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                    100_000_000
+                )],
                 "D01: ledger must have exactly one fill entry"
             );
         })
@@ -2788,7 +2857,10 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
+                vec![(
+                    mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                    100_000_000
+                )],
                 "D02: ledger must have exactly one fill entry"
             );
         })
@@ -2864,7 +2936,16 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 101_000_000)],
+                vec![
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                        100_000_000
+                    ),
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                        101_000_000
+                    )
+                ],
                 "D03: ledger must have exactly the two legitimate fills"
             );
         })
@@ -2928,7 +3009,16 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000), (mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
+                vec![
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                        100_000_000
+                    ),
+                    (
+                        mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                        100_000_000
+                    )
+                ],
                 "D04: ledger must have TWO separate fill entries, not one"
             );
         })
@@ -3008,7 +3098,10 @@ mod fill_economic_authority_closure_tests {
             );
             assert_eq!(
                 ledger_fills(&pf),
-                vec![(mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(), 100_000_000)],
+                vec![(
+                    mqk_portfolio::QtyMicros::from_whole_units(10).unwrap(),
+                    100_000_000
+                )],
                 "D05: ledger must have exactly one fill entry"
             );
         })
@@ -3407,7 +3500,14 @@ mod f1_filled_qty_wiring_tests {
         let mut local = LocalSnapshot::empty();
         local.orders.insert(
             "ord-1".to_string(),
-            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, QtyMicros::from_whole_units(10).unwrap(), QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
+            OrderSnapshot::new(
+                "ord-1",
+                "AAPL",
+                Side::Buy,
+                QtyMicros::from_whole_units(10).unwrap(),
+                QtyMicros::from_whole_units(0).unwrap(),
+                OrderStatus::Accepted,
+            ),
         );
         let schema_snap = schema_snapshot(schema_order("10", "0", "accepted"));
         let broker = reconcile_broker_snapshot_from_schema(&schema_snap)

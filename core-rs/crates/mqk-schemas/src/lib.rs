@@ -373,7 +373,9 @@ impl std::str::FromStr for QtyMicros {
             if magnitude == i64::MIN.unsigned_abs() {
                 Ok(QtyMicros(i64::MIN))
             } else {
-                i64::try_from(magnitude).map(|v| QtyMicros(-v)).map_err(|_| err())
+                i64::try_from(magnitude)
+                    .map(|v| QtyMicros(-v))
+                    .map_err(|_| err())
             }
         } else {
             i64::try_from(magnitude).map(QtyMicros).map_err(|_| err())
@@ -537,8 +539,9 @@ mod qty_micros_tests {
         ] {
             let v = QtyMicros::new(raw);
             let rendered = v.to_string();
-            let parsed = QtyMicros::from_str(&rendered)
-                .unwrap_or_else(|e| panic!("failed to parse own Display output {rendered:?} for raw={raw}: {e}"));
+            let parsed = QtyMicros::from_str(&rendered).unwrap_or_else(|e| {
+                panic!("failed to parse own Display output {rendered:?} for raw={raw}: {e}")
+            });
             assert_eq!(
                 parsed.raw(),
                 raw,

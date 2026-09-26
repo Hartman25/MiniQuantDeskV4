@@ -56,7 +56,10 @@ fn b4_1_empty_oms_yields_no_active_orders() {
 #[test]
 fn b4_2_order_snapshot_includes_broker_id() {
     let mut oms = BTreeMap::new();
-    oms.insert("ord-1".to_string(), OmsOrder::new("ord-1", "AAPL", QtyMicros::from_whole_units(100).unwrap()));
+    oms.insert(
+        "ord-1".to_string(),
+        OmsOrder::new("ord-1", "AAPL", QtyMicros::from_whole_units(100).unwrap()),
+    );
     let mut map = BrokerOrderMap::new();
     map.register("ord-1", "broker-abc");
 
@@ -78,7 +81,10 @@ fn b4_2_order_snapshot_includes_broker_id() {
 #[test]
 fn b4_3_order_snapshot_no_broker_id_when_unregistered() {
     let mut oms = BTreeMap::new();
-    oms.insert("ord-2".to_string(), OmsOrder::new("ord-2", "MSFT", QtyMicros::from_whole_units(50).unwrap()));
+    oms.insert(
+        "ord-2".to_string(),
+        OmsOrder::new("ord-2", "MSFT", QtyMicros::from_whole_units(50).unwrap()),
+    );
     let map = BrokerOrderMap::new(); // empty — submit not yet confirmed
 
     let snaps = build_order_snapshots(&oms, &map);
@@ -137,14 +143,18 @@ fn b4_6_portfolio_snapshot_positions() {
 
     // Long 10 AAPL @ 150 USD each.
     let mut pos = PositionState::new("AAPL");
-    pos.lots
-        .push(Lot::long(QtyMicros::from_whole_units(10).unwrap(), 150_000_000));
+    pos.lots.push(Lot::long(
+        QtyMicros::from_whole_units(10).unwrap(),
+        150_000_000,
+    ));
     p.positions.insert("AAPL".to_string(), pos);
 
     // Short 5 MSFT @ 300 USD each.
     let mut pos2 = PositionState::new("MSFT");
-    pos2.lots
-        .push(Lot::short(QtyMicros::from_whole_units(5).unwrap(), 300_000_000));
+    pos2.lots.push(Lot::short(
+        QtyMicros::from_whole_units(5).unwrap(),
+        300_000_000,
+    ));
     p.positions.insert("MSFT".to_string(), pos2);
 
     let snap = build_portfolio_snapshot(&p);

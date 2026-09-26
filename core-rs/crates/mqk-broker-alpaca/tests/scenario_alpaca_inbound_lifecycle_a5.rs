@@ -209,7 +209,11 @@ fn il4_replace_ack_new_total_qty_and_id_fields_exact() {
             );
             assert_eq!(internal_order_id, CLIENT_ID);
             assert_eq!(broker_order_id, Some(BROKER_ID.to_string()));
-            assert_eq!(new_total_qty, QtyMicros::from_whole_units(120).unwrap(), "new_total_qty must equal order.qty");
+            assert_eq!(
+                new_total_qty,
+                QtyMicros::from_whole_units(120).unwrap(),
+                "new_total_qty must equal order.qty"
+            );
         }
         other => panic!("expected ReplaceAck, got {other:?}"),
     }
@@ -410,7 +414,8 @@ fn il10_replace_lifecycle_new_then_replace_ack() {
             broker_message_id,
         } => {
             assert_eq!(
-                new_total_qty, QtyMicros::from_whole_units(80).unwrap(),
+                new_total_qty,
+                QtyMicros::from_whole_units(80).unwrap(),
                 "new_total_qty must reflect the amended order.qty"
             );
             assert_eq!(broker_order_id, Some(BROKER_ID.to_string()));

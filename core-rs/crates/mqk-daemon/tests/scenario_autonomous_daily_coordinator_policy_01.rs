@@ -85,7 +85,12 @@ fn clear_env() {
 /// and returns its path. Mirrors `lifecycle.rs`'s own
 /// `explicit_multi_strategy_start_snapshot_tests::write_watchlist_v3` helper
 /// so both proof sites build the identical artifact shape.
-fn write_watchlist_v3(tag: &str, symbol: &str, strategy_ids: &[&str], approved: bool) -> std::path::PathBuf {
+fn write_watchlist_v3(
+    tag: &str,
+    symbol: &str,
+    strategy_ids: &[&str],
+    approved: bool,
+) -> std::path::PathBuf {
     let assignments_list = strategy_ids
         .iter()
         .map(|s| format!("{s:?}"))
@@ -457,9 +462,8 @@ async fn a13_approved_v3_fleet_without_paper_enforced_mode_does_not_bypass_dorma
     let _ = std::fs::remove_file(&watchlist_path);
     clear_env();
 
-    let err = err.expect_err(
-        "an approved v3 artifact must not bypass dormancy outside paper_enforced mode",
-    );
+    let err = err
+        .expect_err("an approved v3 artifact must not bypass dormancy outside paper_enforced mode");
     assert_eq!(
         err.fault_class(),
         "runtime.start_refused.strategy_bootstrap_dormant"

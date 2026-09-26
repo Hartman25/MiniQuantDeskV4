@@ -127,9 +127,10 @@ fn source_kind_and_identity(source: &MultiSymbolConfigSource) -> (String, String
         // contract; `MULTI-STRATEGY-RUNTIME-DISPATCH-01`). Fail-closed
         // labeling rather than a silent misattribution if that invariant is
         // ever violated.
-        MultiSymbolConfigSource::WatchlistArtifactV3 { path } => {
-            ("watchlist_v3_unexpected_in_bundle7".to_string(), path.clone())
-        }
+        MultiSymbolConfigSource::WatchlistArtifactV3 { path } => (
+            "watchlist_v3_unexpected_in_bundle7".to_string(),
+            path.clone(),
+        ),
     }
 }
 

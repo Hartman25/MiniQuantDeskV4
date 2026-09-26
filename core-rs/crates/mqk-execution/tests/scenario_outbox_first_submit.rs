@@ -184,6 +184,12 @@ fn cancel_still_uses_broker_order_map_after_eb3() {
 fn replace_still_uses_broker_order_map_after_eb3() {
     let map = registered_map("ord-1", "b-ord-1");
     assert!(all_clear()
-        .replace("ord-1", &map, mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
+        .replace(
+            "ord-1",
+            &map,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
+            None,
+            "day".to_string()
+        )
         .is_ok());
 }

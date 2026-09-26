@@ -586,11 +586,13 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
             }
         }
 
-        return Ok(AutonomousCompletedBarProductionTickOutcome::MultiBindingDriverOutcome {
-            operation_id: operation.operation_id,
-            mode,
-            outcome: multi_outcome,
-        });
+        return Ok(
+            AutonomousCompletedBarProductionTickOutcome::MultiBindingDriverOutcome {
+                operation_id: operation.operation_id,
+                mode,
+                outcome: multi_outcome,
+            },
+        );
     }
 
     let driver_outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
@@ -710,9 +712,9 @@ fn production_outcome_mode(
 ) -> Option<AutonomousCompletedBarDriverMode> {
     match outcome {
         AutonomousCompletedBarProductionTickOutcome::DriverOutcome { mode, .. }
-        | AutonomousCompletedBarProductionTickOutcome::MultiBindingDriverOutcome {
-            mode, ..
-        } => Some(*mode),
+        | AutonomousCompletedBarProductionTickOutcome::MultiBindingDriverOutcome { mode, .. } => {
+            Some(*mode)
+        }
         _ => None,
     }
 }

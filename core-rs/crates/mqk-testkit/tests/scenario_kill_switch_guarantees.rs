@@ -246,7 +246,13 @@ fn i1_i2_disarmed_gateway_blocks_all_trading_operations() {
 
     // I2 — replace is blocked.
     let replace_err = gw
-        .replace("ord-i-001", &map, mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
+        .replace(
+            "ord-i-001",
+            &map,
+            mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
+            None,
+            "day".to_string(),
+        )
         .unwrap_err()
         .downcast::<GateRefusal>()
         .expect("I2: replace error must be GateRefusal");
@@ -287,7 +293,13 @@ fn i5_rearm_restores_all_trading_operations() {
     );
     assert!(
         disarmed
-            .replace("ord-i-001", &empty_map(), mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
+            .replace(
+                "ord-i-001",
+                &empty_map(),
+                mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
+                None,
+                "day".to_string()
+            )
             .is_err(),
         "I5: replace must be blocked before re-arm"
     );
@@ -305,7 +317,13 @@ fn i5_rearm_restores_all_trading_operations() {
     );
     assert!(
         armed
-            .replace("ord-i-001", &m, mqk_execution::QtyMicros::from_whole_units(20).unwrap(), None, "day".to_string())
+            .replace(
+                "ord-i-001",
+                &m,
+                mqk_execution::QtyMicros::from_whole_units(20).unwrap(),
+                None,
+                "day".to_string()
+            )
             .is_ok(),
         "I5: replace must succeed after explicit re-arm"
     );

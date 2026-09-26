@@ -90,7 +90,10 @@ fn per_share_commission_matches_expected() {
     assert_eq!(report.fills.len(), 1);
 
     let fill = &report.fills[0];
-    let expected_fee = model.compute_fee(fill.qty.to_whole_units_checked().unwrap(), fill.price_micros);
+    let expected_fee = model.compute_fee(
+        fill.qty.to_whole_units_checked().unwrap(),
+        fill.price_micros,
+    );
     assert_eq!(
         fill.fee_micros, expected_fee,
         "per-share fee must match compute_fee({}, {})",
@@ -118,7 +121,10 @@ fn bps_commission_matches_expected() {
     assert_eq!(report.fills.len(), 1);
 
     let fill = &report.fills[0];
-    let expected_fee = model.compute_fee(fill.qty.to_whole_units_checked().unwrap(), fill.price_micros);
+    let expected_fee = model.compute_fee(
+        fill.qty.to_whole_units_checked().unwrap(),
+        fill.price_micros,
+    );
     assert_eq!(
         fill.fee_micros, expected_fee,
         "bps fee must match compute_fee"
@@ -141,7 +147,10 @@ fn combined_commission_is_additive() {
     assert_eq!(report.fills.len(), 1);
 
     let fill = &report.fills[0];
-    let expected_fee = model.compute_fee(fill.qty.to_whole_units_checked().unwrap(), fill.price_micros);
+    let expected_fee = model.compute_fee(
+        fill.qty.to_whole_units_checked().unwrap(),
+        fill.price_micros,
+    );
     assert_eq!(fill.fee_micros, expected_fee);
     // 50_000 (per-share) + 100_000 (bps) = 150_000
     assert_eq!(fill.fee_micros, 150_000);

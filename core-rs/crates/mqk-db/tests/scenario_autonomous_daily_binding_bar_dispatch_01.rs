@@ -227,8 +227,8 @@ async fn same_symbol_two_strategies_claim_independently_never_collide() -> anyho
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn replay_after_completion_is_already_completed_never_a_second_dispatch(
-) -> anyhow::Result<()> {
+async fn replay_after_completion_is_already_completed_never_a_second_dispatch() -> anyhow::Result<()>
+{
     let pool = test_pool().await?;
     let adapter_id = format!("binding-bar-replay-{}", unique_suffix());
     let t0 = Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap();

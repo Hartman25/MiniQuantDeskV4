@@ -64,7 +64,8 @@ fn proof_d_fractional_duplicate_fill_oms_and_portfolio_apply_once() {
     // mutation -- proven here by checking the guard condition directly and
     // then confirming we correctly do NOT re-apply).
     let pre_filled_dup = order.filled_qty;
-    let dup_result = order.apply_with_watermark(&OmsEvent::Fill { delta_qty: btc_qty }, Some("econ-1"), None);
+    let dup_result =
+        order.apply_with_watermark(&OmsEvent::Fill { delta_qty: btc_qty }, Some("econ-1"), None);
     let oms_advanced = dup_result.is_ok() && order.filled_qty != pre_filled_dup;
     assert!(
         !oms_advanced,
@@ -123,11 +124,7 @@ fn proof_d_distinct_fractional_fills_both_apply() {
     );
 
     order
-        .apply_with_watermark(
-            &OmsEvent::Fill { delta_qty: btc_qty },
-            Some("econ-b"),
-            None,
-        )
+        .apply_with_watermark(&OmsEvent::Fill { delta_qty: btc_qty }, Some("econ-b"), None)
         .expect("second, distinct fill must apply");
     apply_entry(
         &mut pf,

@@ -347,7 +347,11 @@ fn c5_decimal_qty_string_rounds_correctly() {
     let ev = normalize_trade_update(&u).unwrap();
     match ev {
         BrokerEvent::PartialFill { delta_qty, .. } => {
-            assert_eq!(delta_qty, QtyMicros::from_whole_units(40).unwrap(), "decimal qty string must parse to 40");
+            assert_eq!(
+                delta_qty,
+                QtyMicros::from_whole_units(40).unwrap(),
+                "decimal qty string must parse to 40"
+            );
         }
         other => panic!("expected PartialFill, got {other:?}"),
     }
@@ -366,7 +370,11 @@ fn c6_replace_ack_new_total_qty_from_order_qty() {
     let ev = normalize_trade_update(&u).unwrap();
     match ev {
         BrokerEvent::ReplaceAck { new_total_qty, .. } => {
-            assert_eq!(new_total_qty, QtyMicros::from_whole_units(100).unwrap(), "new_total_qty must come from order.qty");
+            assert_eq!(
+                new_total_qty,
+                QtyMicros::from_whole_units(100).unwrap(),
+                "new_total_qty must come from order.qty"
+            );
         }
         other => panic!("expected ReplaceAck, got {other:?}"),
     }

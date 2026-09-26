@@ -1227,7 +1227,10 @@ mod tests {
             "exactly one authorized survivor for AAPL"
         );
         assert_eq!(out.decisions[0].decision.side, "sell");
-        assert_eq!(out.decisions[0].decision.strategy_id, "intraday_short_scalper");
+        assert_eq!(
+            out.decisions[0].decision.strategy_id,
+            "intraday_short_scalper"
+        );
         assert!(
             out.plan.is_some(),
             "paper_enforced must produce durable conflict-resolution evidence"
@@ -1247,16 +1250,10 @@ mod tests {
         let mut reversed = forward.clone();
         reversed.reverse();
 
-        let out_forward = apply_conflict_policy(
-            &ctx(ConflictPolicyMode::PaperEnforced),
-            forward,
-            &current,
-        );
-        let out_reversed = apply_conflict_policy(
-            &ctx(ConflictPolicyMode::PaperEnforced),
-            reversed,
-            &current,
-        );
+        let out_forward =
+            apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), forward, &current);
+        let out_reversed =
+            apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), reversed, &current);
 
         assert_eq!(out_forward.decisions.len(), out_reversed.decisions.len());
         assert_eq!(

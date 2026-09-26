@@ -10,7 +10,8 @@ use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerGateway,
     BrokerInvokeToken, BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse,
-    BrokerSubmitRequest, BrokerSubmitResponse, QtyMicros, IntegrityGate, ReconcileGate, RiskGate, Side,
+    BrokerSubmitRequest, BrokerSubmitResponse, IntegrityGate, QtyMicros, ReconcileGate, RiskGate,
+    Side,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -480,7 +481,11 @@ async fn duplicate_fills_different_envelopes_do_not_double_mutate_portfolio() ->
     let mut oms = BTreeMap::new();
     oms.insert(
         "ord-dup-fill".to_string(),
-        OmsOrder::new("ord-dup-fill", "SPY", QtyMicros::from_whole_units(10).unwrap()),
+        OmsOrder::new(
+            "ord-dup-fill",
+            "SPY",
+            QtyMicros::from_whole_units(10).unwrap(),
+        ),
     );
 
     let broker = HostileBroker::new(
@@ -591,7 +596,11 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
     seed_running_run(&pool, run_id, ENGINE_REPLACE_FILL_RACE_ID).await?;
 
     let mut oms = BTreeMap::new();
-    let mut ord = OmsOrder::new("ord-replace-race", "SPY", QtyMicros::from_whole_units(10).unwrap());
+    let mut ord = OmsOrder::new(
+        "ord-replace-race",
+        "SPY",
+        QtyMicros::from_whole_units(10).unwrap(),
+    );
     ord.apply(&OmsEvent::ReplaceRequest, Some("pre-replace-request"))
         .expect("replace request must put order into ReplacePending");
     oms.insert("ord-replace-race".to_string(), ord);
@@ -699,7 +708,11 @@ async fn replay_after_cursor_loss_is_deduped_and_state_safe() -> Result<()> {
     let mut oms = BTreeMap::new();
     oms.insert(
         "ord-replay".to_string(),
-        OmsOrder::new("ord-replay", "SPY", QtyMicros::from_whole_units(10).unwrap()),
+        OmsOrder::new(
+            "ord-replay",
+            "SPY",
+            QtyMicros::from_whole_units(10).unwrap(),
+        ),
     );
 
     let broker1 = HostileBroker::new(HostileScenario::ReplayAfterCursorLoss, SubmitMode::Accept);

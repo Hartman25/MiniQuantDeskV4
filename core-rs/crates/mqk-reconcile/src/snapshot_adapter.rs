@@ -257,7 +257,10 @@ fn normalize_order(raw: RawBrokerOrder) -> Result<OrderSnapshot, SnapshotAdapter
 }
 
 /// Normalize a raw broker position's whole-unit `qty_signed` to `QtyMicros`.
-fn normalize_position_qty(symbol: &str, qty_signed: i64) -> Result<QtyMicros, SnapshotAdapterError> {
+fn normalize_position_qty(
+    symbol: &str,
+    qty_signed: i64,
+) -> Result<QtyMicros, SnapshotAdapterError> {
     QtyMicros::from_whole_units(qty_signed).ok_or_else(|| {
         SnapshotAdapterError::PositionQtyOutOfRange {
             symbol: symbol.to_string(),
@@ -534,8 +537,14 @@ mod tests {
             fetched_at_ms: 0,
         };
         let snap = normalize(raw).unwrap();
-        assert_eq!(snap.positions["AAPL"], QtyMicros::from_whole_units(100).unwrap());
-        assert_eq!(snap.positions["TSLA"], QtyMicros::from_whole_units(-50).unwrap());
+        assert_eq!(
+            snap.positions["AAPL"],
+            QtyMicros::from_whole_units(100).unwrap()
+        );
+        assert_eq!(
+            snap.positions["TSLA"],
+            QtyMicros::from_whole_units(-50).unwrap()
+        );
     }
 
     #[test]
@@ -594,7 +603,10 @@ mod tests {
         assert_eq!(ord.qty, QtyMicros::from_whole_units(200).unwrap());
         assert_eq!(ord.filled_qty, QtyMicros::from_whole_units(200).unwrap());
         assert_eq!(ord.status, OrderStatus::Filled);
-        assert_eq!(snap.positions["MSFT"], QtyMicros::from_whole_units(200).unwrap());
+        assert_eq!(
+            snap.positions["MSFT"],
+            QtyMicros::from_whole_units(200).unwrap()
+        );
     }
 
     #[test]

@@ -599,7 +599,11 @@ mod tests {
     use super::*;
 
     fn open_order() -> OmsOrder {
-        OmsOrder::new("ord-test", "AAPL", QtyMicros::from_whole_units(100).unwrap())
+        OmsOrder::new(
+            "ord-test",
+            "AAPL",
+            QtyMicros::from_whole_units(100).unwrap(),
+        )
     }
 
     #[test]
@@ -621,12 +625,22 @@ mod tests {
     #[test]
     fn partial_then_full_fill() {
         let mut o = open_order();
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::PartiallyFilled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(60).unwrap());
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f2"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap());
         assert!(o.state.is_terminal());
@@ -647,8 +661,13 @@ mod tests {
         o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
         assert_eq!(o.state, OrderState::ReplacePending);
         // P1-03: ReplaceAck carries new_total_qty. Order has no fills so new total = 100.
-        o.apply(&OmsEvent::ReplaceAck { new_total_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("r2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::ReplaceAck {
+                new_total_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("r2"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Open);
         assert_eq!(o.total_qty, QtyMicros::from_whole_units(100).unwrap());
     }
@@ -656,8 +675,13 @@ mod tests {
     #[test]
     fn illegal_transition_returns_error() {
         let mut o = open_order();
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         // CancelRequest on a Filled order is illegal.
         let err = o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap_err();
         assert_eq!(err.from, OrderState::Filled);
@@ -668,24 +692,48 @@ mod tests {
     #[test]
     fn idempotent_replay_does_not_double_apply() {
         let mut o = open_order();
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(50).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(50).unwrap());
         // Same event_id → silently skipped.
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("f1"))
-            .unwrap();
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(50).unwrap(), "replayed event must not double-apply");
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(50).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(50).unwrap(),
+            "replayed event must not double-apply"
+        );
     }
 
     #[test]
     fn late_fill_on_filled_order_is_noop() {
         let mut o = open_order();
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         // Different event_id but state is Filled → no-op.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f-late"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("f-late"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap());
         assert_eq!(o.state, OrderState::Filled);
     }
@@ -695,8 +743,13 @@ mod tests {
         let mut o = open_order();
         o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
         // Fill arrives before cancel is processed.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
     }
 
@@ -709,13 +762,23 @@ mod tests {
     #[test]
     fn partial_fill_overflow_is_rejected() {
         let mut o = open_order(); // total_qty = 100
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(60).unwrap());
 
         // 60 + 60 = 120 > 100 — must be rejected.
         let err = o
-            .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("f2"))
+            .apply(
+                &OmsEvent::PartialFill {
+                    delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+                },
+                Some("f2"),
+            )
             .unwrap_err();
         assert_eq!(
             err.from,
@@ -729,7 +792,8 @@ mod tests {
             "state must not change on rejected PartialFill"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(60).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(60).unwrap(),
             "filled_qty must not be mutated on rejected PartialFill"
         );
     }
@@ -740,7 +804,12 @@ mod tests {
         let mut o = open_order(); // total_qty = 100
                                   // 0 + 101 = 101 != 100 — overflow.
         let err = o
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(101).unwrap() }, Some("f1"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(101).unwrap(),
+                },
+                Some("f1"),
+            )
             .unwrap_err();
         assert_eq!(
             err.from,
@@ -753,7 +822,8 @@ mod tests {
             "state must not change on rejected Fill"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(0).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(0).unwrap(),
             "filled_qty must not be mutated on rejected Fill"
         );
     }
@@ -763,13 +833,23 @@ mod tests {
     #[test]
     fn undercomplete_fill_is_rejected() {
         let mut o = open_order(); // total_qty = 100
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(60).unwrap());
 
         // 60 + 30 = 90 != 100 — under-complete.
         let err = o
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("f2"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+                },
+                Some("f2"),
+            )
             .unwrap_err();
         assert_eq!(err.from, OrderState::PartiallyFilled);
         assert_eq!(
@@ -778,7 +858,8 @@ mod tests {
             "state must not change on under-complete Fill"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(60).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(60).unwrap(),
             "filled_qty must not be mutated on under-complete Fill"
         );
     }
@@ -787,13 +868,23 @@ mod tests {
     #[test]
     fn valid_partial_then_exact_fill_completes() {
         let mut o = open_order(); // total_qty = 100
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(60).unwrap());
         assert_eq!(o.state, OrderState::PartiallyFilled);
 
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f2"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap());
         assert!(o.state.is_terminal());
@@ -807,7 +898,12 @@ mod tests {
         let mut o = open_order(); // total_qty = 100
                                   // Overflow — rejected.
         let _err = o
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(999).unwrap() }, Some("f-probe"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(999).unwrap(),
+                },
+                Some("f-probe"),
+            )
             .unwrap_err();
         assert_eq!(o.state, OrderState::Open);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(0).unwrap());
@@ -815,8 +911,13 @@ mod tests {
         // Re-use "f-probe" with a valid fill. If the event_id was recorded on
         // rejection, this call would be silently skipped and the order would
         // stay Open. It must NOT be skipped.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f-probe"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("f-probe"),
+        )
+        .unwrap();
         assert_eq!(
             o.state,
             OrderState::Filled,
@@ -831,16 +932,27 @@ mod tests {
     #[test]
     fn late_fill_on_filled_order_is_noop_regardless_of_qty() {
         let mut o = open_order(); // total_qty = 100
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap());
 
         // Late fill with a new event_id — state guard makes it a no-op.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(999).unwrap() }, Some("f-late"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(999).unwrap(),
+            },
+            Some("f-late"),
+        )
+        .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(100).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(100).unwrap(),
             "late fill on Filled order must be a no-op regardless of qty"
         );
         assert_eq!(o.state, OrderState::Filled);
@@ -856,16 +968,27 @@ mod tests {
     #[test]
     fn duplicate_partial_fill_is_noop() {
         let mut o = open_order(); // total_qty = 100
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("E1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("E1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(60).unwrap());
         assert_eq!(o.state, OrderState::PartiallyFilled);
 
         // Duplicate — same event_id "E1", same delta.
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("E1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("E1"),
+        )
+        .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(60).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(60).unwrap(),
             "duplicate PartialFill must not increase filled_qty"
         );
         assert_eq!(
@@ -882,18 +1005,34 @@ mod tests {
     #[test]
     fn duplicate_final_fill_is_noop() {
         let mut o = open_order(); // total_qty = 100
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("E1"))
-            .unwrap();
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("E2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("E1"),
+        )
+        .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("E2"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap());
 
         // Duplicate Fill(E2) on now-Filled order — must be a no-op.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("E2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("E2"),
+        )
+        .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(100).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(100).unwrap(),
             "duplicate Fill must not increase filled_qty"
         );
         assert_eq!(
@@ -909,11 +1048,17 @@ mod tests {
     fn duplicate_storm_fifty_repeats_accumulates_once() {
         let mut o = open_order(); // total_qty = 100
         for _ in 0..50 {
-            o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(50).unwrap() }, Some("E1"))
-                .unwrap();
+            o.apply(
+                &OmsEvent::PartialFill {
+                    delta_qty: QtyMicros::from_whole_units(50).unwrap(),
+                },
+                Some("E1"),
+            )
+            .unwrap();
         }
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(50).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(50).unwrap(),
             "50 duplicate storm events must accumulate exactly once"
         );
         assert_eq!(o.state, OrderState::PartiallyFilled);
@@ -925,16 +1070,31 @@ mod tests {
     #[test]
     fn duplicate_after_terminal_state_is_noop() {
         let mut o = open_order(); // total_qty = 100
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("E1"))
-            .unwrap();
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("E2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("E1"),
+        )
+        .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("E2"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap());
 
         for _ in 0..10 {
-            o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("E2"))
-                .unwrap();
+            o.apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+                },
+                Some("E2"),
+            )
+            .unwrap();
         }
         assert_eq!(
             o.state,
@@ -942,7 +1102,8 @@ mod tests {
             "terminal state must not change on repeated duplicate fills"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(100).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(100).unwrap(),
             "filled_qty must not change on repeated duplicate fills after terminal"
         );
     }
@@ -960,11 +1121,20 @@ mod tests {
     /// - No path permits filled_qty > total_qty.
     #[test]
     fn p1_03_partial_fill_then_replace_then_fill() {
-        let mut o = OmsOrder::new("ord-p103-1", "AAPL", QtyMicros::from_whole_units(100).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-p103-1",
+            "AAPL",
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
 
         // 40 of 100 filled.
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap());
         assert_eq!(o.total_qty, QtyMicros::from_whole_units(100).unwrap());
 
@@ -972,18 +1142,33 @@ mod tests {
         o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
         assert_eq!(o.state, OrderState::ReplacePending);
 
-        o.apply(&OmsEvent::ReplaceAck { new_total_qty: QtyMicros::from_whole_units(65).unwrap() }, Some("r2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::ReplaceAck {
+                new_total_qty: QtyMicros::from_whole_units(65).unwrap(),
+            },
+            Some("r2"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::PartiallyFilled);
         assert_eq!(
-            o.total_qty, QtyMicros::from_whole_units(65).unwrap(),
+            o.total_qty,
+            QtyMicros::from_whole_units(65).unwrap(),
             "total_qty must be updated to new_total_qty"
         );
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap(), "replace must not erase prior fills");
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
+            "replace must not erase prior fills"
+        );
 
         // Final fill for remaining 25 lots.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(25).unwrap() }, Some("f2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(25).unwrap(),
+            },
+            Some("f2"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(65).unwrap());
 
@@ -999,10 +1184,19 @@ mod tests {
     /// Acceptance gate: cancel after partial fill must not erase prior fills.
     #[test]
     fn p1_03_cancel_after_partial_fill_preserves_filled_qty() {
-        let mut o = OmsOrder::new("ord-p103-2a", "MSFT", QtyMicros::from_whole_units(100).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-p103-2a",
+            "MSFT",
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
 
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap());
 
         o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
@@ -1011,7 +1205,11 @@ mod tests {
         // CancelAck: order is cancelled; prior fills must be preserved.
         o.apply(&OmsEvent::CancelAck, Some("c2")).unwrap();
         assert_eq!(o.state, OrderState::Cancelled);
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap(), "cancel must not erase prior fills");
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
+            "cancel must not erase prior fills"
+        );
     }
 
     /// S2b: new → partial_fill(40) → cancel_request → late_partial_fill(30) during pending.
@@ -1022,20 +1220,35 @@ mod tests {
     /// captures this correct OMS behavior.
     #[test]
     fn p1_03_late_fill_during_cancel_pending_applies_correctly() {
-        let mut o = OmsOrder::new("ord-p103-2b", "MSFT", QtyMicros::from_whole_units(100).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-p103-2b",
+            "MSFT",
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
 
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap());
 
         o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
         assert_eq!(o.state, OrderState::CancelPending);
 
         // Late fill arrives before the broker processes the cancel — must apply.
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(30).unwrap() }, Some("f2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(30).unwrap(),
+            },
+            Some("f2"),
+        )
+        .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(70).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(70).unwrap(),
             "late fill during CancelPending must accumulate filled_qty"
         );
         // PartialFill from CancelPending transitions to PartiallyFilled; the broker
@@ -1056,10 +1269,19 @@ mod tests {
     /// Acceptance gate: replace reject restores prior state; total_qty and filled_qty unchanged.
     #[test]
     fn p1_03_partial_fill_then_replace_reject() {
-        let mut o = OmsOrder::new("ord-p103-3", "TSLA", QtyMicros::from_whole_units(100).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-p103-3",
+            "TSLA",
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
 
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap());
 
         o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
@@ -1072,11 +1294,13 @@ mod tests {
             "replace reject must restore PartiallyFilled"
         );
         assert_eq!(
-            o.total_qty, QtyMicros::from_whole_units(100).unwrap(),
+            o.total_qty,
+            QtyMicros::from_whole_units(100).unwrap(),
             "total_qty must be unchanged on replace reject"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(40).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
             "filled_qty must be unchanged on replace reject"
         );
     }
@@ -1086,10 +1310,19 @@ mod tests {
     /// Acceptance gate: cancel reject restores prior state; filled_qty unchanged.
     #[test]
     fn p1_03_partial_fill_then_cancel_reject() {
-        let mut o = OmsOrder::new("ord-p103-4", "SPY", QtyMicros::from_whole_units(100).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-p103-4",
+            "SPY",
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
 
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap());
 
         o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
@@ -1102,7 +1335,8 @@ mod tests {
             "cancel reject must restore PartiallyFilled"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(40).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
             "filled_qty must be unchanged on cancel reject"
         );
     }
@@ -1111,10 +1345,19 @@ mod tests {
     /// No path permits filled_qty > total_qty.
     #[test]
     fn p1_03_replace_ack_below_filled_qty_is_rejected() {
-        let mut o = OmsOrder::new("ord-p103-5", "GLD", QtyMicros::from_whole_units(100).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-p103-5",
+            "GLD",
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
 
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(60).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(60).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(60).unwrap());
 
         o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
@@ -1122,7 +1365,12 @@ mod tests {
 
         // new_total_qty=40 < filled_qty=60 — must be rejected.
         let err = o
-            .apply(&OmsEvent::ReplaceAck { new_total_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("r2"))
+            .apply(
+                &OmsEvent::ReplaceAck {
+                    new_total_qty: QtyMicros::from_whole_units(40).unwrap(),
+                },
+                Some("r2"),
+            )
             .unwrap_err();
         assert_eq!(
             err.from,
@@ -1136,11 +1384,13 @@ mod tests {
             "state must not change on rejected ReplaceAck"
         );
         assert_eq!(
-            o.total_qty, QtyMicros::from_whole_units(100).unwrap(),
+            o.total_qty,
+            QtyMicros::from_whole_units(100).unwrap(),
             "total_qty must not change on rejected ReplaceAck"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(60).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(60).unwrap(),
             "filled_qty must not change on rejected ReplaceAck"
         );
     }
@@ -1149,24 +1399,49 @@ mod tests {
     /// Replace cannot erase prior fills.
     #[test]
     fn p1_03_replace_ack_preserves_filled_qty() {
-        let mut o = OmsOrder::new("ord-p103-6", "NVDA", QtyMicros::from_whole_units(100).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-p103-6",
+            "NVDA",
+            QtyMicros::from_whole_units(100).unwrap(),
+        );
 
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
-        o.apply(&OmsEvent::ReplaceAck { new_total_qty: QtyMicros::from_whole_units(65).unwrap() }, Some("r2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::ReplaceAck {
+                new_total_qty: QtyMicros::from_whole_units(65).unwrap(),
+            },
+            Some("r2"),
+        )
+        .unwrap();
 
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap(), "replace_ack must not erase prior fills");
         assert_eq!(
-            o.total_qty, QtyMicros::from_whole_units(65).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
+            "replace_ack must not erase prior fills"
+        );
+        assert_eq!(
+            o.total_qty,
+            QtyMicros::from_whole_units(65).unwrap(),
             "total_qty must be updated to new_total_qty"
         );
         // Ensure the event_id for ReplaceAck was recorded (idempotent replay).
-        o.apply(&OmsEvent::ReplaceAck { new_total_qty: QtyMicros::from_whole_units(99).unwrap() }, Some("r2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::ReplaceAck {
+                new_total_qty: QtyMicros::from_whole_units(99).unwrap(),
+            },
+            Some("r2"),
+        )
+        .unwrap();
         assert_eq!(
-            o.total_qty, QtyMicros::from_whole_units(65).unwrap(),
+            o.total_qty,
+            QtyMicros::from_whole_units(65).unwrap(),
             "duplicate ReplaceAck event_id must not re-apply"
         );
     }
@@ -1183,15 +1458,29 @@ mod tests {
         // Fill(E1, 101) from Open: 0 + 101 = 101 ≠ 100 — strict exact-balance
         // required in Open state; rejected.
         let err = o
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(101).unwrap() }, Some("E1"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(101).unwrap(),
+                },
+                Some("E1"),
+            )
             .unwrap_err();
         assert_eq!(err.from, OrderState::Open);
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(0).unwrap(), "rejected fill must not mutate filled_qty");
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(0).unwrap(),
+            "rejected fill must not mutate filled_qty"
+        );
 
         // Fill(E1, 100): same event_id, corrected delta. 0 + 100 == total_qty.
         // If E1 had been poisoned on rejection this call would silently skip.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("E1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("E1"),
+        )
+        .unwrap();
         assert_eq!(
             o.state,
             OrderState::Filled,
@@ -1216,26 +1505,41 @@ mod tests {
     /// cumulative as terminal fill qty).  The OMS must accept and cap at 3.
     #[test]
     fn alpaca_paper_terminal_fill_cumulative_qty_is_accepted() {
-        let mut o = OmsOrder::new("ord-alpaca", "AAPL", QtyMicros::from_whole_units(3).unwrap());
+        let mut o = OmsOrder::new(
+            "ord-alpaca",
+            "AAPL",
+            QtyMicros::from_whole_units(3).unwrap(),
+        );
         o.apply(&OmsEvent::Ack, Some("ack-1")).unwrap();
 
         // partial_fill: 2 shares filled, 1 remaining.
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(2).unwrap() }, Some("pf-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(2).unwrap(),
+            },
+            Some("pf-1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(2).unwrap());
         assert_eq!(o.state, OrderState::PartiallyFilled);
 
         // terminal fill: Alpaca sends delta_qty=2 (prior cumulative, not remaining 1).
         // Must be accepted and capped at total_qty=3.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(2).unwrap() }, Some("fill-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(2).unwrap(),
+            },
+            Some("fill-1"),
+        )
+        .unwrap();
         assert_eq!(
             o.state,
             OrderState::Filled,
             "terminal fill with cumulative qty must close the order"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(3).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(3).unwrap(),
             "filled_qty must be capped at total_qty, not overflowed"
         );
         assert!(o.state.is_terminal());
@@ -1251,23 +1555,42 @@ mod tests {
     #[test]
     fn alpaca_paper_two_partials_then_cumulative_terminal_fill_is_accepted() {
         let mut o = OmsOrder::new("ord-multi", "AAPL", QtyMicros::from_whole_units(3).unwrap());
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(1).unwrap() }, Some("pf-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(1).unwrap(),
+            },
+            Some("pf-1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(1).unwrap());
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(1).unwrap() }, Some("pf-2"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(1).unwrap(),
+            },
+            Some("pf-2"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(2).unwrap());
         assert_eq!(o.state, OrderState::PartiallyFilled);
 
         // Alpaca terminal fill sends delta_qty=2 (prior cumulative), not remaining 1.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(2).unwrap() }, Some("fill-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(2).unwrap(),
+            },
+            Some("fill-1"),
+        )
+        .unwrap();
         assert_eq!(
             o.state,
             OrderState::Filled,
             "two partials + cumulative terminal fill must close the order"
         );
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(3).unwrap(), "filled_qty must be capped at total_qty=3");
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(3).unwrap(),
+            "filled_qty must be capped at total_qty=3"
+        );
         assert!(o.state.is_terminal());
     }
 
@@ -1282,8 +1605,13 @@ mod tests {
     fn b14_late_ack_after_filled_is_noop() {
         let mut o = open_order(); // total_qty = 100
         o.apply(&OmsEvent::Ack, Some("ack-1")).unwrap();
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("fill-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("fill-1"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap());
 
@@ -1295,15 +1623,24 @@ mod tests {
             OrderState::Filled,
             "B14: late Ack on Filled must leave state unchanged"
         );
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(100).unwrap(), "B14: filled_qty must not change");
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(100).unwrap(),
+            "B14: filled_qty must not change"
+        );
     }
 
     /// B14-2: Ack on Cancelled (after partial fill + cancel) must also be noop.
     #[test]
     fn b14_late_ack_after_cancelled_is_noop() {
         let mut o = open_order();
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
         o.apply(&OmsEvent::CancelAck, Some("c2")).unwrap();
         assert_eq!(o.state, OrderState::Cancelled);
@@ -1316,7 +1653,8 @@ mod tests {
             "B14: late Ack on Cancelled must leave state unchanged"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(40).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
             "B14: filled_qty must not change on late Ack after Cancelled"
         );
     }
@@ -1357,7 +1695,12 @@ mod tests {
 
         // Fill arriving after confirmed cancel — must be TransitionError (halt).
         let err = o
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("fill-late"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+                },
+                Some("fill-late"),
+            )
             .unwrap_err();
         assert_eq!(
             err.from,
@@ -1371,7 +1714,8 @@ mod tests {
             "C17: state must remain Cancelled — fill after cancel is an error"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(0).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(0).unwrap(),
             "C17: filled_qty must not change on fill after CancelAck"
         );
     }
@@ -1380,8 +1724,13 @@ mod tests {
     #[test]
     fn c17_partial_fill_after_cancel_ack_is_transition_error() {
         let mut o = open_order();
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
         o.apply(&OmsEvent::CancelAck, Some("c2")).unwrap();
         assert_eq!(o.state, OrderState::Cancelled);
@@ -1389,7 +1738,12 @@ mod tests {
 
         // PartialFill arriving after confirmed cancel — must be TransitionError.
         let err = o
-            .apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() }, Some("pf-late"))
+            .apply(
+                &OmsEvent::PartialFill {
+                    delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+                },
+                Some("pf-late"),
+            )
             .unwrap_err();
         assert_eq!(err.from, OrderState::Cancelled);
         assert_eq!(
@@ -1398,7 +1752,8 @@ mod tests {
             "C17: state must remain Cancelled"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(40).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
             "C17: filled_qty must not change on PartialFill after CancelAck"
         );
     }
@@ -1413,8 +1768,13 @@ mod tests {
         assert_eq!(o.state, OrderState::CancelPending);
 
         // Fill arrives before cancel is processed — still accepted.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(100).unwrap() }, Some("f1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(100).unwrap(),
+            },
+            Some("f1"),
+        )
+        .unwrap();
         assert_eq!(
             o.state,
             OrderState::Filled,
@@ -1427,13 +1787,23 @@ mod tests {
     #[test]
     fn alpaca_paper_undercomplete_terminal_fill_is_still_rejected() {
         let mut o = OmsOrder::new("ord-test", "AAPL", QtyMicros::from_whole_units(10).unwrap());
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(5).unwrap() }, Some("pf-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(5).unwrap(),
+            },
+            Some("pf-1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(5).unwrap());
 
         // Terminal fill where proposed=5+3=8 < total=10 — undercomplete, rejected.
         let err = o
-            .apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(3).unwrap() }, Some("fill-bad"))
+            .apply(
+                &OmsEvent::Fill {
+                    delta_qty: QtyMicros::from_whole_units(3).unwrap(),
+                },
+                Some("fill-bad"),
+            )
             .unwrap_err();
         assert_eq!(err.from, OrderState::PartiallyFilled);
         assert_eq!(
@@ -1442,7 +1812,8 @@ mod tests {
             "state must not change on undercomplete terminal fill"
         );
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(5).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(5).unwrap(),
             "filled_qty must not be mutated on undercomplete terminal fill"
         );
     }
@@ -1452,14 +1823,24 @@ mod tests {
     #[test]
     fn alpaca_paper_terminal_fill_total_qty_is_accepted() {
         let mut o = OmsOrder::new("ord-test", "AAPL", QtyMicros::from_whole_units(5).unwrap());
-        o.apply(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(3).unwrap() }, Some("pf-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(3).unwrap(),
+            },
+            Some("pf-1"),
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(3).unwrap());
 
         // Alpaca sends delta_qty=5 (full order qty) for terminal fill.
         // proposed=3+5=8 > total=5 → cap at 5.
-        o.apply(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(5).unwrap() }, Some("fill-1"))
-            .unwrap();
+        o.apply(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(5).unwrap(),
+            },
+            Some("fill-1"),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(5).unwrap());
     }
@@ -1477,7 +1858,9 @@ mod tests {
     fn watermark_cross_lane_duplicate_with_different_event_ids_is_noop() {
         let mut o = OmsOrder::new("ord-wm", "AAPL", QtyMicros::from_whole_units(100).unwrap());
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("ws-msg-1"),
             Some(QtyMicros::from_whole_units(10).unwrap()),
         )
@@ -1486,13 +1869,16 @@ mod tests {
 
         // REST redelivery: different event_id, same broker-confirmed cum_qty_after.
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("rest-activity-xyz"),
             Some(QtyMicros::from_whole_units(10).unwrap()),
         )
         .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(10).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(10).unwrap(),
             "cross-lane duplicate with matching cum_qty_after must not double-apply"
         );
         assert_eq!(o.state, OrderState::PartiallyFilled);
@@ -1506,7 +1892,9 @@ mod tests {
     fn watermark_two_distinct_same_size_fills_both_apply() {
         let mut o = OmsOrder::new("ord-wm2", "AAPL", QtyMicros::from_whole_units(100).unwrap());
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("f1"),
             Some(QtyMicros::from_whole_units(10).unwrap()),
         )
@@ -1516,13 +1904,16 @@ mod tests {
         // Second, genuinely distinct fill: same delta_qty as the first, but
         // cum_qty_after proves it is a new execution (10 -> 20, not 0 -> 10).
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("f2"),
             Some(QtyMicros::from_whole_units(20).unwrap()),
         )
         .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(20).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(20).unwrap(),
             "two distinct fills with matching qty/price must both apply"
         );
     }
@@ -1539,7 +1930,9 @@ mod tests {
     fn watermark_never_substitutes_a_derived_delta_for_the_events_own() {
         let mut o = OmsOrder::new("ord-wm3", "AAPL", QtyMicros::from_whole_units(100).unwrap());
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("f1"),
             Some(QtyMicros::from_whole_units(10).unwrap()),
         )
@@ -1551,13 +1944,16 @@ mod tests {
         // -- NEVER 30 (which would mean the watermark silently overrode the
         // event's own reported quantity).
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(15).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(15).unwrap(),
+            },
             Some("f2"),
             Some(QtyMicros::from_whole_units(30).unwrap()),
         )
         .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(25).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(25).unwrap(),
             "applied quantity must always be the event's own delta_qty (10+15=25), \
              never a value derived from cum_qty_after (which would give 30)"
         );
@@ -1568,20 +1964,42 @@ mod tests {
     #[test]
     fn watermark_none_falls_back_to_event_id_dedup_only() {
         let mut o = OmsOrder::new("ord-wm4", "AAPL", QtyMicros::from_whole_units(100).unwrap());
-        o.apply_with_watermark(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() }, Some("f1"), None)
-            .unwrap();
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
+            Some("f1"),
+            None,
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(10).unwrap());
 
         // Different event_id, no cum_qty_after -> cannot be recognized as a
         // duplicate, so (as with plain `apply` today) it applies again.
-        o.apply_with_watermark(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() }, Some("f2"), None)
-            .unwrap();
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
+            Some("f2"),
+            None,
+        )
+        .unwrap();
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(20).unwrap());
 
         // Same event_id -> id-based dedup still short-circuits.
-        o.apply_with_watermark(&OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() }, Some("f2"), None)
-            .unwrap();
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(20).unwrap(), "same event_id retry must remain a no-op");
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
+            Some("f2"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(20).unwrap(),
+            "same event_id retry must remain a no-op"
+        );
     }
 
     /// A watermark-proven duplicate on a terminal Fill is also a no-op, and
@@ -1589,13 +2007,25 @@ mod tests {
     #[test]
     fn watermark_duplicate_terminal_fill_is_noop() {
         let mut o = OmsOrder::new("ord-wm5", "AAPL", QtyMicros::from_whole_units(10).unwrap());
-        o.apply_with_watermark(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(10).unwrap() }, Some("f1"), Some(QtyMicros::from_whole_units(10).unwrap()))
-            .unwrap();
+        o.apply_with_watermark(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
+            Some("f1"),
+            Some(QtyMicros::from_whole_units(10).unwrap()),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(10).unwrap());
 
-        o.apply_with_watermark(&OmsEvent::Fill { delta_qty: QtyMicros::from_whole_units(10).unwrap() }, Some("f2"), Some(QtyMicros::from_whole_units(10).unwrap()))
-            .unwrap();
+        o.apply_with_watermark(
+            &OmsEvent::Fill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
+            Some("f2"),
+            Some(QtyMicros::from_whole_units(10).unwrap()),
+        )
+        .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(10).unwrap());
     }
@@ -1609,7 +2039,9 @@ mod tests {
         let mut o = OmsOrder::new("ord-wm6", "AAPL", QtyMicros::from_whole_units(100).unwrap());
         // REST processed first this time.
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("rest-activity-xyz"),
             Some(QtyMicros::from_whole_units(10).unwrap()),
         )
@@ -1617,13 +2049,16 @@ mod tests {
         assert_eq!(o.filled_qty, QtyMicros::from_whole_units(10).unwrap());
         // WS redelivery second.
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+            },
             Some("ws-msg-1"),
             Some(QtyMicros::from_whole_units(10).unwrap()),
         )
         .unwrap();
         assert_eq!(
-            o.filled_qty, QtyMicros::from_whole_units(10).unwrap(),
+            o.filled_qty,
+            QtyMicros::from_whole_units(10).unwrap(),
             "REST-then-WS duplicate must not double-apply"
         );
     }
@@ -1641,7 +2076,9 @@ mod tests {
     fn watermark_duplicate_after_cancel_ack_is_still_transition_error() {
         let mut o = OmsOrder::new("ord-wm7", "AAPL", QtyMicros::from_whole_units(100).unwrap());
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() },
+            &OmsEvent::PartialFill {
+                delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+            },
             Some("f1"),
             Some(QtyMicros::from_whole_units(40).unwrap()),
         )
@@ -1659,7 +2096,9 @@ mod tests {
         // on a LIVE order) but the order is Cancelled — must still error.
         let err = o
             .apply_with_watermark(
-                &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(40).unwrap() },
+                &OmsEvent::PartialFill {
+                    delta_qty: QtyMicros::from_whole_units(40).unwrap(),
+                },
                 Some("rest-late-dup"),
                 Some(QtyMicros::from_whole_units(40).unwrap()),
             )
@@ -1670,7 +2109,11 @@ mod tests {
             OrderState::Cancelled,
             "state must remain Cancelled, not silently swallowed"
         );
-        assert_eq!(o.filled_qty, QtyMicros::from_whole_units(40).unwrap(), "filled_qty must not change");
+        assert_eq!(
+            o.filled_qty,
+            QtyMicros::from_whole_units(40).unwrap(),
+            "filled_qty must not change"
+        );
     }
 
     /// A7 (MANDATORY): concurrent WS + REST delivery of the SAME physical
@@ -1694,7 +2137,11 @@ mod tests {
     fn a7_concurrent_ws_and_rest_duplicate_applies_exactly_once() {
         use std::sync::{Arc, Barrier, Mutex};
 
-        let order = Arc::new(Mutex::new(OmsOrder::new("ord-a7", "AAPL", QtyMicros::from_whole_units(100).unwrap())));
+        let order = Arc::new(Mutex::new(OmsOrder::new(
+            "ord-a7",
+            "AAPL",
+            QtyMicros::from_whole_units(100).unwrap(),
+        )));
         let barrier = Arc::new(Barrier::new(2));
 
         let run = |order: Arc<Mutex<OmsOrder>>, barrier: Arc<Barrier>, event_id: &'static str| {
@@ -1703,7 +2150,9 @@ mod tests {
                 let mut guard = order.lock().unwrap();
                 guard
                     .apply_with_watermark(
-                        &OmsEvent::PartialFill { delta_qty: QtyMicros::from_whole_units(10).unwrap() },
+                        &OmsEvent::PartialFill {
+                            delta_qty: QtyMicros::from_whole_units(10).unwrap(),
+                        },
                         Some(event_id),
                         Some(QtyMicros::from_whole_units(10).unwrap()),
                     )
@@ -1719,7 +2168,8 @@ mod tests {
 
         let final_order = order.lock().unwrap();
         assert_eq!(
-            final_order.filled_qty, QtyMicros::from_whole_units(10).unwrap(),
+            final_order.filled_qty,
+            QtyMicros::from_whole_units(10).unwrap(),
             "A7: concurrent WS+REST delivery of the same physical fill must apply exactly once, \
              not 0 (lost) or 20 (double-applied)"
         );

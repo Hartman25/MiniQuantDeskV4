@@ -538,11 +538,14 @@ fn resolve_one_configured_assignment(
     let dispatch_route = if active_strategy_id == Some(strategy_id) {
         BindingDispatchRoute::LegacyBootstrap
     } else if let Some(run_id) = host_pool_run_id {
-        let selected = host_pool_selected.iter().any(|(sel_symbol, sel_strategy, sel_timeframe_secs)| {
-            sel_symbol.trim().eq_ignore_ascii_case(symbol)
-                && sel_strategy.trim() == strategy_id
-                && *sel_timeframe_secs == timeframe.duration_secs()
-        });
+        let selected =
+            host_pool_selected
+                .iter()
+                .any(|(sel_symbol, sel_strategy, sel_timeframe_secs)| {
+                    sel_symbol.trim().eq_ignore_ascii_case(symbol)
+                        && sel_strategy.trim() == strategy_id
+                        && *sel_timeframe_secs == timeframe.duration_secs()
+                });
         if !selected {
             return Err(AutonomousBindingRejection::StrategyEngineMismatch);
         }
@@ -1138,8 +1141,7 @@ fn evaluate_operation_level_gates(
         });
     }
 
-    if now_utc < operation.preopen_start_utc || now_utc >= operation.effective_operation_close_utc
-    {
+    if now_utc < operation.preopen_start_utc || now_utc >= operation.effective_operation_close_utc {
         return Some(AutonomousCompletedBarDriverOutcome::OutsideOperationWindow);
     }
 
@@ -1487,7 +1489,10 @@ pub async fn tick_autonomous_completed_bar_driver_multi(
                     input.now_utc,
                 )
                 .await?;
-                per_binding.push(AutonomousBindingTickOutcome { assignment, outcome });
+                per_binding.push(AutonomousBindingTickOutcome {
+                    assignment,
+                    outcome,
+                });
             }
             BindingIsolationClass::LocalFault(reason) => {
                 mqk_db::mark_autonomous_daily_binding_locally_blocked(
@@ -1501,10 +1506,16 @@ pub async fn tick_autonomous_completed_bar_driver_multi(
                     input.now_utc,
                 )
                 .await?;
-                per_binding.push(AutonomousBindingTickOutcome { assignment, outcome });
+                per_binding.push(AutonomousBindingTickOutcome {
+                    assignment,
+                    outcome,
+                });
             }
             BindingIsolationClass::GlobalCritical => {
-                per_binding.push(AutonomousBindingTickOutcome { assignment, outcome });
+                per_binding.push(AutonomousBindingTickOutcome {
+                    assignment,
+                    outcome,
+                });
                 halted_on_global_critical = true;
                 break;
             }
@@ -2366,11 +2377,9 @@ async fn claim_and_dispatch_observed_bar_via_host_pool(
                     Some(row) if row.status == mqk_db::DISPATCH_STATUS_COMPLETED => {
                         AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts }
                     }
-                    Some(row) => {
-                        AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
-                            status: row.status,
-                        }
-                    }
+                    Some(row) => AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+                        status: row.status,
+                    },
                     None => AutonomousCompletedBarDriverOutcome::EvidencePersistenceFailed {
                         detail: "binding-bar dispatch claim row disappeared between claim and \
                                  completion"
@@ -2404,9 +2413,11 @@ async fn claim_and_dispatch_observed_bar_via_host_pool(
         .state
         .take_binding_strategy_bar_input(&binding.symbol, &binding.strategy_id, db_timeframe_label)
         .await;
-    Ok(AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
-        status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
-    })
+    Ok(
+        AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+            status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
+        },
+    )
 }
 
 /// REPAIR 4: the mandatory authoritative re-read reached when

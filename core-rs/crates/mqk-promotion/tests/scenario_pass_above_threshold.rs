@@ -42,14 +42,50 @@ fn passes_all_thresholds() {
     // Create fills: 3 profitable round-trip trades (buy then sell at higher price)
     let fills = vec![
         // Trade 1: buy 100 @ 10.00, sell 100 @ 12.00 => profit 200
-        bf(Fill::new("AAPL", Side::Buy, QtyMicros::from_whole_units(100).unwrap(), 10_000_000, 0)),
-        bf(Fill::new("AAPL", Side::Sell, QtyMicros::from_whole_units(100).unwrap(), 12_000_000, 0)),
+        bf(Fill::new(
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(100).unwrap(),
+            10_000_000,
+            0,
+        )),
+        bf(Fill::new(
+            "AAPL",
+            Side::Sell,
+            QtyMicros::from_whole_units(100).unwrap(),
+            12_000_000,
+            0,
+        )),
         // Trade 2: buy 50 @ 20.00, sell 50 @ 25.00 => profit 250
-        bf(Fill::new("MSFT", Side::Buy, QtyMicros::from_whole_units(50).unwrap(), 20_000_000, 0)),
-        bf(Fill::new("MSFT", Side::Sell, QtyMicros::from_whole_units(50).unwrap(), 25_000_000, 0)),
+        bf(Fill::new(
+            "MSFT",
+            Side::Buy,
+            QtyMicros::from_whole_units(50).unwrap(),
+            20_000_000,
+            0,
+        )),
+        bf(Fill::new(
+            "MSFT",
+            Side::Sell,
+            QtyMicros::from_whole_units(50).unwrap(),
+            25_000_000,
+            0,
+        )),
         // Trade 3: short 80 @ 15.00, cover 80 @ 12.00 => profit 240
-        bf(Fill::new("GOOG", Side::Sell, QtyMicros::from_whole_units(80).unwrap(), 15_000_000, 0)),
-        bf(Fill::new("GOOG", Side::Buy, QtyMicros::from_whole_units(80).unwrap(), 12_000_000, 0)),
+        bf(Fill::new(
+            "GOOG",
+            Side::Sell,
+            QtyMicros::from_whole_units(80).unwrap(),
+            15_000_000,
+            0,
+        )),
+        bf(Fill::new(
+            "GOOG",
+            Side::Buy,
+            QtyMicros::from_whole_units(80).unwrap(),
+            12_000_000,
+            0,
+        )),
     ];
 
     // Use real provenance: non-nil run_id derived from a named strategy + config identity.

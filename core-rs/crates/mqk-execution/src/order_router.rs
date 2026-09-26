@@ -532,9 +532,7 @@ pub fn decode_broker_event(message_json: &serde_json::Value) -> anyhow::Result<B
             let legacy: LegacyBrokerEventWire = serde_json::from_value(message_json.clone())?;
             BrokerEvent::try_from(legacy)
         }
-        mqk_db::QuantityUnitEpoch::QtyMicros => {
-            Ok(serde_json::from_value(message_json.clone())?)
-        }
+        mqk_db::QuantityUnitEpoch::QtyMicros => Ok(serde_json::from_value(message_json.clone())?),
     }
 }
 
@@ -1095,7 +1093,10 @@ mod decode_broker_event_tests {
         });
         let ev_legacy = decode_broker_event(&legacy).unwrap();
         let ev_current = decode_broker_event(&current).unwrap();
-        assert_eq!(ev_legacy.internal_order_id(), ev_current.internal_order_id());
+        assert_eq!(
+            ev_legacy.internal_order_id(),
+            ev_current.internal_order_id()
+        );
         assert_eq!(ev_legacy.broker_order_id(), ev_current.broker_order_id());
     }
 

@@ -15,10 +15,10 @@ use mqk_daemon::daily_data_readiness::AssignmentReadiness;
 use mqk_daemon::state::autonomous_completed_bar_driver::{
     resolve_autonomous_provider_call_authorization, resolve_effective_bindings,
     resolve_single_effective_binding, tick_autonomous_completed_bar_driver,
-    AutonomousAssignmentReadinessEvaluator, AutonomousBindingRejection, BindingDispatchRoute,
+    AutonomousAssignmentReadinessEvaluator, AutonomousBindingRejection,
     AutonomousCompletedBarDriverInput, AutonomousCompletedBarDriverMode,
     AutonomousCompletedBarDriverOutcome, AutonomousDriverSetupRejection,
-    AutonomousLatestBarProviderResolver, AutonomousProviderCallAuthorization,
+    AutonomousLatestBarProviderResolver, AutonomousProviderCallAuthorization, BindingDispatchRoute,
     ResolvedSingleBinding, REASON_LOCAL_RUNTIME_NOT_ACTIVE, REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH,
     REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT, REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED,
     REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING, REASON_OPERATION_NOT_RUNNING,
@@ -1056,7 +1056,10 @@ fn same_symbol_multi_strategy_resolves_via_host_pool_never_narrowed_or_refused()
     assert_eq!(resolved.len(), 3);
     for (assignment, result) in &resolved {
         let binding = result.as_ref().unwrap_or_else(|rejection| {
-            panic!("{}/{} must resolve, not be rejected as {rejection:?}", assignment.symbol, assignment.strategy_id)
+            panic!(
+                "{}/{} must resolve, not be rejected as {rejection:?}",
+                assignment.symbol, assignment.strategy_id
+            )
         });
         assert_eq!(
             binding.dispatch_route,

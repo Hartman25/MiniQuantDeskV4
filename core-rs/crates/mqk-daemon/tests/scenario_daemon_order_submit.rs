@@ -495,11 +495,9 @@ async fn seed_cancelable_order(
                 broker_order_id: Some(broker_order_id),
                 symbol: "AAPL".to_string(),
                 total_qty: mqk_execution::QtyMicros::from_whole_units(10).unwrap(),
-                filled_qty: mqk_execution::QtyMicros::from_whole_units(if status == "PartiallyFilled" {
-                    3
-                } else {
-                    0
-                })
+                filled_qty: mqk_execution::QtyMicros::from_whole_units(
+                    if status == "PartiallyFilled" { 3 } else { 0 },
+                )
                 .unwrap(),
                 status: status.to_string(),
             });

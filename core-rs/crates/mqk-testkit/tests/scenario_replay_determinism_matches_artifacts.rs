@@ -24,7 +24,9 @@
 use chrono::DateTime;
 use mqk_artifacts::{init_run_artifacts, InitRunArtifactsArgs};
 use mqk_audit::{verify_hash_chain, AuditWriter, DurabilityPolicy, VerifyResult};
-use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, QtyMicros, Side, MICROS_SCALE};
+use mqk_portfolio::{
+    apply_entry, Fill, LedgerEntry, PortfolioState, QtyMicros, Side, MICROS_SCALE,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;

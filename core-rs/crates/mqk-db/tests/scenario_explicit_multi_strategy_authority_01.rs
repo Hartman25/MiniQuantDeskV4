@@ -217,20 +217,32 @@ async fn insert_and_fetch_round_trips() {
         .find(|b| b.symbol == "AAPL" && b.strategy_id == "intraday_scalper")
         .expect("AAPL/intraday_scalper binding must be present");
     let written_scalper = authorized_binding("AAPL", "intraday_scalper");
-    assert_eq!(fetched_scalper.timeframe_secs, written_scalper.timeframe_secs);
+    assert_eq!(
+        fetched_scalper.timeframe_secs,
+        written_scalper.timeframe_secs
+    );
     assert_eq!(fetched_scalper.authorized, written_scalper.authorized);
     assert_eq!(fetched_scalper.reason_code, written_scalper.reason_code);
     assert_eq!(
         fetched_scalper.promotion_query_ok,
         written_scalper.promotion_query_ok
     );
-    assert_eq!(fetched_scalper.promotion_state, written_scalper.promotion_state);
+    assert_eq!(
+        fetched_scalper.promotion_state,
+        written_scalper.promotion_state
+    );
     assert_eq!(
         fetched_scalper.promotion_effective,
         written_scalper.promotion_effective
     );
-    assert_eq!(fetched_scalper.promotion_expired, written_scalper.promotion_expired);
-    assert_eq!(fetched_scalper.evidence_resolved, written_scalper.evidence_resolved);
+    assert_eq!(
+        fetched_scalper.promotion_expired,
+        written_scalper.promotion_expired
+    );
+    assert_eq!(
+        fetched_scalper.evidence_resolved,
+        written_scalper.evidence_resolved
+    );
     assert_eq!(
         fetched_scalper.review_state_is_paper_candidate,
         written_scalper.review_state_is_paper_candidate
@@ -275,12 +287,18 @@ async fn insert_and_fetch_round_trips() {
         fetched_scalper.current_config_fingerprint,
         written_scalper.current_config_fingerprint
     );
-    assert_eq!(fetched_scalper.registry_enabled, written_scalper.registry_enabled);
+    assert_eq!(
+        fetched_scalper.registry_enabled,
+        written_scalper.registry_enabled
+    );
     assert_eq!(
         fetched_scalper.plugin_instantiable,
         written_scalper.plugin_instantiable
     );
-    assert_eq!(fetched_scalper.timeframe_matches, written_scalper.timeframe_matches);
+    assert_eq!(
+        fetched_scalper.timeframe_matches,
+        written_scalper.timeframe_matches
+    );
     assert_eq!(fetched_scalper.data_ready, written_scalper.data_ready);
     assert_eq!(
         fetched_scalper.canonical_score_decimal,
@@ -295,7 +313,10 @@ async fn insert_and_fetch_round_trips() {
         fetched_scalper.watchlist_assigned,
         written_scalper.watchlist_assigned
     );
-    assert_eq!(fetched_scalper.evidence_review_id, written_scalper.evidence_review_id);
+    assert_eq!(
+        fetched_scalper.evidence_review_id,
+        written_scalper.evidence_review_id
+    );
     assert_eq!(
         fetched_scalper.evidence_scanner_scan_id,
         written_scalper.evidence_scanner_scan_id
@@ -304,7 +325,10 @@ async fn insert_and_fetch_round_trips() {
         fetched_scalper.evidence_artifact_path,
         written_scalper.evidence_artifact_path
     );
-    assert_eq!(fetched_scalper.evidence_git_hash, written_scalper.evidence_git_hash);
+    assert_eq!(
+        fetched_scalper.evidence_git_hash,
+        written_scalper.evidence_git_hash
+    );
     assert_eq!(
         fetched_scalper.promotion_transition_id,
         written_scalper.promotion_transition_id

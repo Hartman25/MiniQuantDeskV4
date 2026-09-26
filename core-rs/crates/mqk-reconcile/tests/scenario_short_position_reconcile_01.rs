@@ -42,7 +42,11 @@ fn rs01_broker_snapshot_negative_qty_is_short() {
     let mut broker = BrokerSnapshot::empty_at(1_000);
     broker.positions.insert("GME".to_string(), qty(-50));
 
-    let q = broker.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
+    let q = broker
+        .positions
+        .get("GME")
+        .copied()
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
         q,
         qty(-50),
@@ -67,7 +71,11 @@ fn rs02_local_snapshot_negative_qty_is_short() {
     let mut local = LocalSnapshot::empty();
     local.positions.insert("GME".to_string(), qty(-50));
 
-    let q = local.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
+    let q = local
+        .positions
+        .get("GME")
+        .copied()
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
         q,
         qty(-50),
@@ -195,7 +203,11 @@ fn rs06_normalize_preserves_negative_qty_signed() {
     };
 
     let snap = normalize(raw).unwrap();
-    let q = snap.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
+    let q = snap
+        .positions
+        .get("GME")
+        .copied()
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
         q,
         qty(-50),
@@ -264,7 +276,11 @@ fn rs08_normalize_json_roundtrip_short_position() {
     }"#;
 
     let snap = normalize_json(json).unwrap();
-    let q = snap.positions.get("GME").copied().unwrap_or(QtyMicros::ZERO);
+    let q = snap
+        .positions
+        .get("GME")
+        .copied()
+        .unwrap_or(QtyMicros::ZERO);
     assert_eq!(
         q,
         qty(-50),

@@ -300,10 +300,18 @@ async fn seed_sent_outbox_with_map(
 /// - OMS has 1 active AAPL buy order (just acked, not yet filled)
 fn aapl_local_in_fill_window(order_id: &str) -> LocalSnapshot {
     let mut s = LocalSnapshot::empty();
-    s.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
+    s.positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
     s.orders.insert(
         order_id.to_string(),
-        OrderSnapshot::new(order_id, "AAPL", Side::Buy, QtyMicros::from_whole_units(1).unwrap(), QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
+        OrderSnapshot::new(
+            order_id,
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(1).unwrap(),
+            QtyMicros::from_whole_units(0).unwrap(),
+            OrderStatus::Accepted,
+        ),
     );
     s
 }
@@ -313,7 +321,8 @@ fn aapl_local_in_fill_window(order_id: &str) -> LocalSnapshot {
 /// - no open orders (fill closed the order)
 fn aapl_broker_post_fill(ts_ms: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty_at(ts_ms);
-    s.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(2).unwrap());
+    s.positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(2).unwrap());
     s
 }
 
@@ -560,16 +569,29 @@ async fn rdf03_halts_immediately_on_unexpected_broker_drift() -> Result<()> {
 
     // Local: AAPL=1, open AAPL buy order
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
     local.orders.insert(
         internal_id.to_string(),
-        OrderSnapshot::new(internal_id, "AAPL", Side::Buy, QtyMicros::from_whole_units(1).unwrap(), QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
+        OrderSnapshot::new(
+            internal_id,
+            "AAPL",
+            Side::Buy,
+            QtyMicros::from_whole_units(1).unwrap(),
+            QtyMicros::from_whole_units(0).unwrap(),
+            OrderStatus::Accepted,
+        ),
     );
 
     // Broker: AAPL still 1, but unexpected TSLA=5 position (not explained by any SENT order).
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
-    broker.positions.insert("TSLA".to_string(), QtyMicros::from_whole_units(5).unwrap()); // unexpected — not explained by AAPL buy
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
+    broker
+        .positions
+        .insert("TSLA".to_string(), QtyMicros::from_whole_units(5).unwrap()); // unexpected — not explained by AAPL buy
 
     let mut orch = make_orchestrator_with_snapshots(pool.clone(), run_id, clock, local, broker);
 
@@ -631,7 +653,9 @@ async fn rdf04_halts_immediately_when_no_sent_mapped_rows() -> Result<()> {
     let clock = FixedClock::new(Utc::now());
     // Dirty reconcile: local AAPL=1, broker empty.
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(1).unwrap());
     let broker = BrokerSnapshot::empty_at(2_000_000_000);
 
     let mut orch = make_orchestrator_with_snapshots(pool.clone(), run_id, clock, local, broker);
@@ -717,9 +741,13 @@ async fn rdf05_clean_reconcile_after_fill_applied() -> Result<()> {
 
     // Local and broker both show AAPL=2 (fill applied to portfolio) + no open orders.
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(2).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(2).unwrap());
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(2).unwrap());
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(2).unwrap());
 
     let mut orch = make_orchestrator_with_snapshots(pool.clone(), run_id, clock, local, broker);
 

@@ -1816,7 +1816,9 @@ impl AppState {
         let explicit_v3_authority_pending =
             crate::dynamic_selection_mode::explicit_watchlist_v3_authority_pending(
                 start_attempt_snapshot.effective_mode.effective_mode,
-                &start_attempt_snapshot.multi_symbol_raw_inputs.watchlist_outcome,
+                &start_attempt_snapshot
+                    .multi_symbol_raw_inputs
+                    .watchlist_outcome,
             );
         if start_attempt_snapshot
             .native_strategy_bootstrap
@@ -8635,7 +8637,8 @@ mod explicit_multi_strategy_start_snapshot_tests {
         );
 
         // 2. Approved v3 artifact + paper_enforced, no MQK_STRATEGY_IDS.
-        let watchlist_path = write_watchlist_v3("d1_full_wrapper", "ZZD1WRAPPER", &["intraday_scalper"]);
+        let watchlist_path =
+            write_watchlist_v3("d1_full_wrapper", "ZZD1WRAPPER", &["intraday_scalper"]);
         std::env::set_var(
             crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH,
             &watchlist_path,

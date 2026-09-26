@@ -338,9 +338,13 @@ async fn rtf01_deferred_when_terminal_fill_within_grace_and_consistent() -> Resu
     // Local: AAPL=7 (baseline 6 + fill +1 applied)
     // Broker: AAPL=6 (stale, pre-fill snapshot)
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     let clock = FixedClock::new(Utc::now());
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);
@@ -391,9 +395,13 @@ async fn rtf02_halts_when_settle_grace_expired() -> Result<()> {
     seed_running_run(&pool, run_id, "rtf02").await?;
 
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     // Clock is now+181s so the fill appears 181s old (> 180s grace).
     let clock = FixedClock::new(Utc::now() + Duration::seconds(181));
@@ -452,9 +460,13 @@ async fn rtf03_halts_when_fresh_broker_snapshot_mismatches() -> Result<()> {
     // Local: AAPL=7 (expected after buy +1 from baseline 6)
     // Broker: AAPL=8 (unexpected — more than the fill explains)
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(8).unwrap());
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(8).unwrap());
 
     let clock = FixedClock::new(Utc::now());
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);
@@ -511,7 +523,9 @@ async fn rtf04_halts_immediately_with_no_recent_fills_unexplained_drift() -> Res
 
     // Dirty reconcile with no fills to explain it.
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let broker = BrokerSnapshot::empty_at(2_000_000_000);
 
     // No inject_recent_terminal_fill_for_test call.
@@ -567,9 +581,13 @@ async fn rtf05_clean_reconcile_when_broker_snapshot_refreshes() -> Result<()> {
 
     // Local and broker both show AAPL=7 (broker snapshot has caught up).
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(7).unwrap());
 
     let clock = FixedClock::new(Utc::now());
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);
@@ -626,9 +644,13 @@ async fn rtf06_deferred_for_sell_fill_within_grace() -> Result<()> {
     // Local: AAPL=5 (sold 1 from baseline 6)
     // Broker: AAPL=6 (stale, pre-sell snapshot)
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(5).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(5).unwrap());
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
 
     let clock = FixedClock::new(Utc::now());
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);
@@ -690,9 +712,13 @@ async fn rtf07_partial_plus_terminal_fill_cumulative_drift_deferred() -> Result<
     // Broker: AAPL=3 (stale, pre-fill snapshot)
     // Drift: local(6) - broker(3) = +3 (cumulative partial+terminal)
     let mut local = LocalSnapshot::empty();
-    local.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
+    local
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(6).unwrap());
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
-    broker.positions.insert("AAPL".to_string(), QtyMicros::from_whole_units(3).unwrap());
+    broker
+        .positions
+        .insert("AAPL".to_string(), QtyMicros::from_whole_units(3).unwrap());
 
     let clock = FixedClock::new(Utc::now());
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);

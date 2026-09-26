@@ -328,12 +328,11 @@ fn resolve_order_instrument_context_from_registry(
     symbol: &str,
     legacy_equity_allowed: bool,
 ) -> Result<DurableOrderInstrumentContext, OrderInstrumentContextError> {
-    mqk_md::instrument_registry_v2::validate_registry_v2(registry)
-        .map_err(|err| {
-            OrderInstrumentContextError::Unavailable(format!(
-                "trading registry-v2 validation failed: {err}"
-            ))
-        })?;
+    mqk_md::instrument_registry_v2::validate_registry_v2(registry).map_err(|err| {
+        OrderInstrumentContextError::Unavailable(format!(
+            "trading registry-v2 validation failed: {err}"
+        ))
+    })?;
 
     if registry
         .instruments
@@ -534,31 +533,27 @@ fn legacy_equity_symbol_is_enabled(
     state: &AppState,
     symbol: &str,
 ) -> Result<bool, OrderInstrumentContextError> {
-    let instruments =
-        mqk_md::instrument_registry::load_instrument_registry(
-            std::path::Path::new(&state.instrument_registry_path),
-        )
-        .map_err(|err| {
-            OrderInstrumentContextError::Unavailable(format!(
-                "canonical legacy Equity registry load failed from '{}': {err}",
-                state.instrument_registry_path
-            ))
-        })?;
+    let instruments = mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(
+        &state.instrument_registry_path,
+    ))
+    .map_err(|err| {
+        OrderInstrumentContextError::Unavailable(format!(
+            "canonical legacy Equity registry load failed from '{}': {err}",
+            state.instrument_registry_path
+        ))
+    })?;
 
-    mqk_md::instrument_registry::validate_registry(&instruments)
-        .map_err(|err| {
-            OrderInstrumentContextError::Unavailable(format!(
-                "canonical legacy Equity registry validation failed: {err}"
-            ))
-        })?;
+    mqk_md::instrument_registry::validate_registry(&instruments).map_err(|err| {
+        OrderInstrumentContextError::Unavailable(format!(
+            "canonical legacy Equity registry validation failed: {err}"
+        ))
+    })?;
 
     let symbol = symbol.trim();
 
-    Ok(
-        mqk_md::instrument_registry::enabled_equities(&instruments)
-            .into_iter()
-            .any(|instrument| instrument.symbol.trim() == symbol),
-    )
+    Ok(mqk_md::instrument_registry::enabled_equities(&instruments)
+        .into_iter()
+        .any(|instrument| instrument.symbol.trim() == symbol))
 }
 
 fn resolve_order_instrument_context(
@@ -586,38 +581,26 @@ fn resolve_order_instrument_context(
     };
 
     let registry =
-        mqk_md::instrument_registry_v2::load_instrument_registry_v2(
-            std::path::Path::new(path),
-        )
-        .map_err(|err| {
-            OrderInstrumentContextError::Unavailable(format!(
-                "trading registry-v2 load failed from '{}': {err}",
-                path
-            ))
-        })?;
+        mqk_md::instrument_registry_v2::load_instrument_registry_v2(std::path::Path::new(path))
+            .map_err(|err| {
+                OrderInstrumentContextError::Unavailable(format!(
+                    "trading registry-v2 load failed from '{}': {err}",
+                    path
+                ))
+            })?;
 
     let matching = registry
         .instruments
         .iter()
-        .find(|instrument| {
-            instrument.symbol.trim() == symbol.trim()
-        });
+        .find(|instrument| instrument.symbol.trim() == symbol.trim());
 
     // Only an absent or explicitly Equity v2 row may fall back to v1,
     // and v1 must prove that Equity authority independently.
     let legacy_equity_allowed = match matching {
-        None => legacy_equity_symbol_is_enabled(
-            state,
-            symbol,
-        )?,
+        None => legacy_equity_symbol_is_enabled(state, symbol)?,
 
-        Some(instrument)
-            if instrument.asset_class.trim() == "equity" =>
-        {
-            legacy_equity_symbol_is_enabled(
-                state,
-                symbol,
-            )?
+        Some(instrument) if instrument.asset_class.trim() == "equity" => {
+            legacy_equity_symbol_is_enabled(state, symbol)?
         }
 
         Some(_) => false,
@@ -700,8 +683,7 @@ fn build_order_json(
     });
 
     if instrument.asset_class != "equity" {
-        order["asset_class"] =
-            serde_json::Value::String(instrument.asset_class.clone());
+        order["asset_class"] = serde_json::Value::String(instrument.asset_class.clone());
     }
 
     if let Some(snapshot) = instrument.economics_snapshot.as_ref() {
@@ -1457,30 +1439,29 @@ pub async fn submit_internal_strategy_decision(
     // Gate 7: resolve the exact trading-instrument context before the
     // durable enqueue. Crypto economics are frozen into order_json here so
     // dispatch/restart never depend on later ambient registry state.
-    let instrument_context =
-        match resolve_order_instrument_context(state, &decision.symbol) {
-            Ok(context) => context,
-            Err(OrderInstrumentContextError::Unavailable(blocker)) => {
-                return outcome(
-                    false,
-                    "unavailable",
-                    &did,
-                    &sid,
-                    Some(active_run_id),
-                    vec![blocker],
-                );
-            }
-            Err(OrderInstrumentContextError::Rejected(blocker)) => {
-                return outcome(
-                    false,
-                    "rejected",
-                    &did,
-                    &sid,
-                    Some(active_run_id),
-                    vec![blocker],
-                );
-            }
-        };
+    let instrument_context = match resolve_order_instrument_context(state, &decision.symbol) {
+        Ok(context) => context,
+        Err(OrderInstrumentContextError::Unavailable(blocker)) => {
+            return outcome(
+                false,
+                "unavailable",
+                &did,
+                &sid,
+                Some(active_run_id),
+                vec![blocker],
+            );
+        }
+        Err(OrderInstrumentContextError::Rejected(blocker)) => {
+            return outcome(
+                false,
+                "rejected",
+                &did,
+                &sid,
+                Some(active_run_id),
+                vec![blocker],
+            );
+        }
+    };
 
     if let Err(blocker) = non_equity_explicit_size_gate(
         &instrument_context.asset_class,
@@ -1491,13 +1472,17 @@ pub async fn submit_internal_strategy_decision(
             .ok()
             .as_deref(),
     ) {
-        return outcome(false, "rejected", &did, &sid, Some(active_run_id), vec![blocker]);
+        return outcome(
+            false,
+            "rejected",
+            &did,
+            &sid,
+            Some(active_run_id),
+            vec![blocker],
+        );
     }
 
-    let order_json = build_order_json(
-        &decision,
-        &instrument_context,
-    );
+    let order_json = build_order_json(&decision, &instrument_context);
 
     match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &did, order_json).await {
         Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
@@ -1541,7 +1526,6 @@ pub async fn submit_internal_strategy_decision(
     }
 }
 
-
 #[cfg(test)]
 mod m6_trading_registry_snapshot_writer_tests {
     use super::*;
@@ -1553,12 +1537,8 @@ mod m6_trading_registry_snapshot_writer_tests {
     use std::collections::BTreeMap;
 
     use mqk_md::instrument_registry_v2::{
-        ContractDefinitionV2,
-        InstrumentDefinitionV2,
-        InstrumentEconomicsMetadataV2,
-        InstrumentMetadataV2,
-        InstrumentRegistryV2,
-        SESSION_PROFILE_CRYPTO_24_7,
+        ContractDefinitionV2, InstrumentDefinitionV2, InstrumentEconomicsMetadataV2,
+        InstrumentMetadataV2, InstrumentRegistryV2, SESSION_PROFILE_CRYPTO_24_7,
     };
 
     fn btc_registry() -> InstrumentRegistryV2 {
@@ -1572,14 +1552,8 @@ mod m6_trading_registry_snapshot_writer_tests {
                 venue: Some("GLOBAL".to_string()),
                 currency: "USD".to_string(),
                 quote_currency: Some("USD".to_string()),
-                provider_symbols: BTreeMap::from([(
-                    "kraken".to_string(),
-                    "XBTUSD".to_string(),
-                )]),
-                broker_symbols: BTreeMap::from([(
-                    "alpaca".to_string(),
-                    "BTC/USD".to_string(),
-                )]),
+                provider_symbols: BTreeMap::from([("kraken".to_string(), "XBTUSD".to_string())]),
+                broker_symbols: BTreeMap::from([("alpaca".to_string(), "BTC/USD".to_string())]),
                 enabled: false,
                 paper_trading_enabled: true,
                 live_trading_enabled: false,
@@ -1589,9 +1563,7 @@ mod m6_trading_registry_snapshot_writer_tests {
                     quote: "USD".to_string(),
                 }),
                 metadata: InstrumentMetadataV2::default(),
-                notes: Some(
-                    "M6 trading-registry writer proof".to_string(),
-                ),
+                notes: Some("M6 trading-registry writer proof".to_string()),
                 allow_enabled_non_equity_for_testing: false,
                 economics: Some(InstrumentEconomicsMetadataV2 {
                     contract_multiplier: None,
@@ -1600,9 +1572,7 @@ mod m6_trading_registry_snapshot_writer_tests {
                     quantity_increment_micros: Some(100),
                     min_trade_qty_micros: Some(100),
                     price_tick_micros: Some(1_000_000),
-                    session_profile: Some(
-                        SESSION_PROFILE_CRYPTO_24_7.to_string(),
-                    ),
+                    session_profile: Some(SESSION_PROFILE_CRYPTO_24_7.to_string()),
                 }),
             }],
         }
@@ -1614,8 +1584,7 @@ mod m6_trading_registry_snapshot_writer_tests {
             strategy_id: "test-strategy".to_string(),
             symbol: "BTC/USD".to_string(),
             timeframe_secs: 300,
-            strategy_semantic_fingerprint:
-                "test-fingerprint".to_string(),
+            strategy_semantic_fingerprint: "test-fingerprint".to_string(),
             side: "buy".to_string(),
             qty: q(1),
             order_type: "market".to_string(),
@@ -1639,10 +1608,7 @@ mod m6_trading_registry_snapshot_writer_tests {
 
         assert_eq!(context.asset_class, "crypto");
 
-        let order = build_order_json(
-            &decision(),
-            &context,
-        );
+        let order = build_order_json(&decision(), &context);
 
         assert_eq!(
             order.get("asset_class").and_then(|v| v.as_str()),
@@ -1654,16 +1620,12 @@ mod m6_trading_registry_snapshot_writer_tests {
             .expect("Crypto order must carry durable economics");
 
         assert_eq!(
-            economics
-                .get("source")
-                .and_then(|v| v.as_str()),
+            economics.get("source").and_then(|v| v.as_str()),
             Some("registry_v2")
         );
 
         assert_eq!(
-            economics
-                .get("authority")
-                .and_then(|v| v.as_str()),
+            economics.get("authority").and_then(|v| v.as_str()),
             Some("MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH")
         );
 
@@ -1675,9 +1637,7 @@ mod m6_trading_registry_snapshot_writer_tests {
         );
 
         assert_eq!(
-            economics
-                .get("tick_size_micros")
-                .and_then(|v| v.as_i64()),
+            economics.get("tick_size_micros").and_then(|v| v.as_i64()),
             Some(1_000_000)
         );
 
@@ -1812,8 +1772,7 @@ mod m6_trading_registry_snapshot_writer_tests {
     fn m6_trading_registry_snapshot_writer_test_only_bypass_fails_closed() {
         let mut registry = btc_registry();
 
-        registry.instruments[0]
-            .allow_enabled_non_equity_for_testing = true;
+        registry.instruments[0].allow_enabled_non_equity_for_testing = true;
 
         let err = resolve_order_instrument_context_from_registry(
             &registry,

@@ -285,10 +285,24 @@ async fn blocking_one_binding_never_mutates_a_sibling_binding() -> anyhow::Resul
     let operation_id = seed_operation(&pool, "r2a-cross-binding-isolation").await?;
     let now = Utc::now();
 
-    mark_autonomous_daily_binding_active(&pool, operation_id, "AAPL", "intraday_scalper", "5m", now)
-        .await?;
-    mark_autonomous_daily_binding_active(&pool, operation_id, "MSFT", "intraday_scalper", "5m", now)
-        .await?;
+    mark_autonomous_daily_binding_active(
+        &pool,
+        operation_id,
+        "AAPL",
+        "intraday_scalper",
+        "5m",
+        now,
+    )
+    .await?;
+    mark_autonomous_daily_binding_active(
+        &pool,
+        operation_id,
+        "MSFT",
+        "intraday_scalper",
+        "5m",
+        now,
+    )
+    .await?;
 
     mark_autonomous_daily_binding_locally_blocked(
         &pool,
@@ -315,7 +329,10 @@ async fn blocking_one_binding_never_mutates_a_sibling_binding() -> anyhow::Resul
         .find(|s| s.symbol == "MSFT")
         .expect("MSFT row present");
     assert_eq!(aapl.status, "locally_blocked");
-    assert_eq!(msft.status, "active", "MSFT must be unaffected by AAPL's block");
+    assert_eq!(
+        msft.status, "active",
+        "MSFT must be unaffected by AAPL's block"
+    );
     assert_eq!(msft.reason_code, None);
     Ok(())
 }
@@ -325,14 +342,20 @@ async fn blocking_one_binding_never_mutates_a_sibling_binding() -> anyhow::Resul
 /// strategy's binding for the same symbol.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn same_symbol_different_strategy_bindings_are_independently_tracked() -> anyhow::Result<()>
-{
+async fn same_symbol_different_strategy_bindings_are_independently_tracked() -> anyhow::Result<()> {
     let pool = test_pool().await?;
     let operation_id = seed_operation(&pool, "r2a-same-symbol-diff-strategy").await?;
     let now = Utc::now();
 
-    mark_autonomous_daily_binding_active(&pool, operation_id, "AAPL", "intraday_scalper", "5m", now)
-        .await?;
+    mark_autonomous_daily_binding_active(
+        &pool,
+        operation_id,
+        "AAPL",
+        "intraday_scalper",
+        "5m",
+        now,
+    )
+    .await?;
     mark_autonomous_daily_binding_locally_blocked(
         &pool,
         operation_id,

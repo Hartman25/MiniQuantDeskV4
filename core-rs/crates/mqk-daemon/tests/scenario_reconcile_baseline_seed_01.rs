@@ -57,7 +57,10 @@ use mqk_reconcile::{
 
 fn broker_with_position(symbol: &str, qty: i64, ts_ms: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty_at(ts_ms);
-    s.positions.insert(symbol.to_string(), mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap());
+    s.positions.insert(
+        symbol.to_string(),
+        mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap(),
+    );
     s
 }
 
@@ -81,7 +84,10 @@ fn local_from_seeded_snapshot(seeded_positions: &[(&str, i64)]) -> LocalSnapshot
     let mut local = LocalSnapshot::empty();
     for &(sym, qty) in seeded_positions {
         if qty != 0 {
-            local.positions.insert(sym.to_string(), mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap());
+            local.positions.insert(
+                sym.to_string(),
+                mqk_reconcile::QtyMicros::from_whole_units(qty).unwrap(),
+            );
         }
     }
     local

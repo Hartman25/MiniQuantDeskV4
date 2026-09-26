@@ -105,7 +105,10 @@ fn make_reject(order_id: &str, msg_id: &str) -> BrokerEvent {
 
 fn oms_with_order(order_id: &str) -> BTreeMap<String, OmsOrder> {
     let mut map = BTreeMap::new();
-    map.insert(order_id.to_string(), OmsOrder::new(order_id, "SPY", QtyMicros::from_whole_units(100).unwrap()));
+    map.insert(
+        order_id.to_string(),
+        OmsOrder::new(order_id, "SPY", QtyMicros::from_whole_units(100).unwrap()),
+    );
     map
 }
 

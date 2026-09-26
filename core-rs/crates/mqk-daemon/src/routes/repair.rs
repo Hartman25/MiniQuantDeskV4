@@ -2362,9 +2362,10 @@ pub(crate) async fn repair_halted_run_portfolio_snapshot(
         .iter()
         .map(|(sym, pos)| PortfolioPositionSummary {
             symbol: sym.clone(),
-            qty_signed: pos.qty_signed().to_whole_units_checked().expect(
-                "fractional position unsupported by this halted-run repair route",
-            ),
+            qty_signed: pos
+                .qty_signed()
+                .to_whole_units_checked()
+                .expect("fractional position unsupported by this halted-run repair route"),
             lot_count: pos.lots.len(),
         })
         .collect();

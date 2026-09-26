@@ -1263,7 +1263,10 @@ fn acs05b08_blank_or_whitespace_asset_class_fails_closed() {
 fn k247_01_crypto_is_trading_day_on_saturday() {
     let saturday = ts(2026, 1, 3, 12, 0, 0); // a Saturday
     let truth = Crypto24x7Provider.session_for(saturday);
-    assert!(truth.is_trading_day, "K247-01: crypto must trade on Saturday");
+    assert!(
+        truth.is_trading_day,
+        "K247-01: crypto must trade on Saturday"
+    );
     assert_eq!(truth.source, "crypto_24_7");
     assert_eq!(truth.exchange, "CRYPTO");
     assert!(!truth.is_early_close);
@@ -1296,7 +1299,10 @@ fn k247_02_crypto_is_trading_day_on_nyse_holiday() {
 fn k247_03_crypto_schedule_spans_full_utc_day() {
     let now = ts(2026, 1, 3, 3, 0, 0); // 03:00 UTC Saturday — well outside any NYSE hours
     let schedule = resolve_market_session_schedule(&Crypto24x7Provider, now);
-    assert!(schedule.is_trading_day, "K247-03: crypto schedule must be a trading day");
+    assert!(
+        schedule.is_trading_day,
+        "K247-03: crypto schedule must be a trading day"
+    );
     assert_eq!(schedule.calendar_source, "crypto_24_7");
     assert_eq!(
         schedule.session_open_utc,

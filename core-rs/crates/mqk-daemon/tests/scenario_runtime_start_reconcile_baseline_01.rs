@@ -298,13 +298,27 @@ fn rsb07_baseline_with_order_and_position_matching_broker_is_clean() {
     let mut local = local_with_position("AAPL", 1);
     local.orders.insert(
         "ord-001".to_string(),
-        OrderSnapshot::new("ord-001", "AAPL", Side::Buy, mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(), mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
+        OrderSnapshot::new(
+            "ord-001",
+            "AAPL",
+            Side::Buy,
+            mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(),
+            mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(),
+            OrderStatus::Accepted,
+        ),
     );
 
     let mut broker = broker_with_position("AAPL", 1, ts());
     broker.orders.insert(
         "ord-001".to_string(),
-        OrderSnapshot::new("ord-001", "AAPL", Side::Buy, mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(), mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(), OrderStatus::Accepted),
+        OrderSnapshot::new(
+            "ord-001",
+            "AAPL",
+            Side::Buy,
+            mqk_reconcile::QtyMicros::from_whole_units(1).unwrap(),
+            mqk_reconcile::QtyMicros::from_whole_units(0).unwrap(),
+            OrderStatus::Accepted,
+        ),
     );
 
     let mut wm = SnapshotWatermark::new();

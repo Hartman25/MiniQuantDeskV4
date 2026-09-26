@@ -30,7 +30,9 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, QtyMicros, Side, MICROS_SCALE};
+use mqk_portfolio::{
+    apply_entry, Fill, LedgerEntry, PortfolioState, QtyMicros, Side, MICROS_SCALE,
+};
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;

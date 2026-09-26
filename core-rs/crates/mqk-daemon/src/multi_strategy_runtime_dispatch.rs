@@ -1290,8 +1290,14 @@ mod tests {
 
         type Mutator = Box<dyn Fn(&mut mqk_portfolio::SelectionCandidateEvidence)>;
         let mutators: Vec<(&str, Mutator)> = vec![
-            ("promotion_expired", Box::new(|e| e.promotion_expired = true)),
-            ("evidence_resolved", Box::new(|e| e.evidence_resolved = false)),
+            (
+                "promotion_expired",
+                Box::new(|e| e.promotion_expired = true),
+            ),
+            (
+                "evidence_resolved",
+                Box::new(|e| e.evidence_resolved = false),
+            ),
             (
                 "review_state_is_paper_candidate",
                 Box::new(|e| e.review_state_is_paper_candidate = false),
@@ -1328,7 +1334,10 @@ mod tests {
                 "plugin_instantiable",
                 Box::new(|e| e.plugin_instantiable = false),
             ),
-            ("timeframe_matches", Box::new(|e| e.timeframe_matches = false)),
+            (
+                "timeframe_matches",
+                Box::new(|e| e.timeframe_matches = false),
+            ),
             (
                 "canonical_score_decimal",
                 Box::new(|e| e.canonical_score_decimal = Some("2".to_string())),

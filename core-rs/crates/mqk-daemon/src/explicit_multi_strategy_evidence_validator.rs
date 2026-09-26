@@ -51,8 +51,14 @@ pub(crate) enum ExplicitMultiStrategyEvidenceValidationError {
     MarketDateMismatch,
     ApprovedForLiveTrue,
     WriterVersionMismatch,
-    BindingCountMismatch { expected: usize, stored: usize },
-    AuthorizedCountMismatch { expected: usize, stored: i32 },
+    BindingCountMismatch {
+        expected: usize,
+        stored: usize,
+    },
+    AuthorizedCountMismatch {
+        expected: usize,
+        stored: i32,
+    },
     DuplicateStoredBinding {
         symbol: String,
         strategy_id: String,
@@ -152,23 +158,27 @@ fn stored_binding_to_evaluation(
     b: &mqk_db::ExplicitMultiStrategyAuthorityBindingRecord,
 ) -> Result<ExplicitBindingEvaluation, ExplicitMultiStrategyEvidenceValidationError> {
     let exact_reason = match &b.exact_reason {
-        Some(code) => Some(mqk_portfolio::ExactSelectionReason::parse_code(code).ok_or_else(
-            || ExplicitMultiStrategyEvidenceValidationError::UnparseableExactReason {
-                symbol: b.symbol.clone(),
-                strategy_id: b.strategy_id.clone(),
-                timeframe_secs: b.timeframe_secs,
-            },
-        )?),
+        Some(code) => Some(
+            mqk_portfolio::ExactSelectionReason::parse_code(code).ok_or_else(|| {
+                ExplicitMultiStrategyEvidenceValidationError::UnparseableExactReason {
+                    symbol: b.symbol.clone(),
+                    strategy_id: b.strategy_id.clone(),
+                    timeframe_secs: b.timeframe_secs,
+                }
+            })?,
+        ),
         None => None,
     };
     let scanner_rank = match b.scanner_rank {
         Some(r) if r >= 0 => Some(r as u32),
         Some(_) => {
-            return Err(ExplicitMultiStrategyEvidenceValidationError::NegativeScannerRank {
-                symbol: b.symbol.clone(),
-                strategy_id: b.strategy_id.clone(),
-                timeframe_secs: b.timeframe_secs,
-            })
+            return Err(
+                ExplicitMultiStrategyEvidenceValidationError::NegativeScannerRank {
+                    symbol: b.symbol.clone(),
+                    strategy_id: b.strategy_id.clone(),
+                    timeframe_secs: b.timeframe_secs,
+                },
+            )
         }
         None => None,
     };
@@ -286,11 +296,7 @@ pub(crate) fn validate_explicit_multi_strategy_authority(
     let stored_authorized_count = bindings.iter().filter(|b| b.authorized).count() as i32;
     if header.authorized_count != stored_authorized_count {
         return Err(E::AuthorizedCountMismatch {
-            expected: expected
-                .evaluations
-                .iter()
-                .filter(|e| e.authorized)
-                .count(),
+            expected: expected.evaluations.iter().filter(|e| e.authorized).count(),
             stored: header.authorized_count,
         });
     }
@@ -457,16 +463,17 @@ mod tests {
             evaluation("MSFT", "swing_momentum"),
         ];
         let created_at_utc = Utc::now();
-        let new_authority = crate::multi_strategy_runtime_dispatch::build_new_explicit_multi_strategy_authority(
-            &evaluations,
-            run_id,
-            &source_identity,
-            &source_artifact_hash,
-            &config_fingerprint,
-            &market_date,
-            created_at_utc,
-        )
-        .expect("fixture scanner_rank values are within i32::MAX");
+        let new_authority =
+            crate::multi_strategy_runtime_dispatch::build_new_explicit_multi_strategy_authority(
+                &evaluations,
+                run_id,
+                &source_identity,
+                &source_artifact_hash,
+                &config_fingerprint,
+                &market_date,
+                created_at_utc,
+            )
+            .expect("fixture scanner_rank values are within i32::MAX");
 
         let header = mqk_db::ExplicitMultiStrategyAuthorityRecord {
             authority_id: new_authority.authority_id,
@@ -478,7 +485,11 @@ mod tests {
             market_date: new_authority.market_date.clone(),
             approved_for_live: new_authority.approved_for_live,
             binding_count: new_authority.bindings.len() as i32,
-            authorized_count: new_authority.bindings.iter().filter(|b| b.authorized).count() as i32,
+            authorized_count: new_authority
+                .bindings
+                .iter()
+                .filter(|b| b.authorized)
+                .count() as i32,
             writer_version: new_authority.writer_version.clone(),
             created_at_utc,
         };
@@ -486,48 +497,50 @@ mod tests {
             .bindings
             .iter()
             .enumerate()
-            .map(|(ordinal, b)| mqk_db::ExplicitMultiStrategyAuthorityBindingRecord {
-                authority_id: new_authority.authority_id,
-                ordinal: ordinal as i32,
-                symbol: b.symbol.clone(),
-                strategy_id: b.strategy_id.clone(),
-                timeframe_secs: b.timeframe_secs,
-                authorized: b.authorized,
-                reason_code: b.reason_code.clone(),
-                promotion_query_ok: b.promotion_query_ok,
-                promotion_state: b.promotion_state.clone(),
-                promotion_effective: b.promotion_effective,
-                promotion_expired: b.promotion_expired,
-                evidence_resolved: b.evidence_resolved,
-                review_state_is_paper_candidate: b.review_state_is_paper_candidate,
-                evidence_review_state: b.evidence_review_state.clone(),
-                durable_legacy_fingerprint: b.durable_legacy_fingerprint.clone(),
-                recomputed_legacy_fingerprint: b.recomputed_legacy_fingerprint.clone(),
-                legacy_fingerprint_matches: b.legacy_fingerprint_matches,
-                durable_exact_fingerprint_v2: b.durable_exact_fingerprint_v2.clone(),
-                recomputed_exact_fingerprint_v2: b.recomputed_exact_fingerprint_v2.clone(),
-                exact_fingerprint_v2_matches: b.exact_fingerprint_v2_matches,
-                config_identity_verified: b.config_identity_verified,
-                durable_config_fingerprint: b.durable_config_fingerprint.clone(),
-                current_config_fingerprint: b.current_config_fingerprint.clone(),
-                registry_enabled: b.registry_enabled,
-                plugin_instantiable: b.plugin_instantiable,
-                timeframe_matches: b.timeframe_matches,
-                data_ready: b.data_ready,
-                canonical_score_decimal: b.canonical_score_decimal.clone(),
-                canonical_score_micros: b.canonical_score_micros,
-                scanner_rank: b.scanner_rank,
-                watchlist_assigned: b.watchlist_assigned,
-                evidence_review_id: b.evidence_review_id.clone(),
-                evidence_scanner_scan_id: b.evidence_scanner_scan_id.clone(),
-                evidence_artifact_path: b.evidence_artifact_path.clone(),
-                evidence_git_hash: b.evidence_git_hash.clone(),
-                promotion_transition_id: b.promotion_transition_id.clone(),
-                promotion_effective_at: b.promotion_effective_at.clone(),
-                promotion_expires_at: b.promotion_expires_at.clone(),
-                evidence_transition_id: b.evidence_transition_id.clone(),
-                exact_reason: b.exact_reason.clone(),
-            })
+            .map(
+                |(ordinal, b)| mqk_db::ExplicitMultiStrategyAuthorityBindingRecord {
+                    authority_id: new_authority.authority_id,
+                    ordinal: ordinal as i32,
+                    symbol: b.symbol.clone(),
+                    strategy_id: b.strategy_id.clone(),
+                    timeframe_secs: b.timeframe_secs,
+                    authorized: b.authorized,
+                    reason_code: b.reason_code.clone(),
+                    promotion_query_ok: b.promotion_query_ok,
+                    promotion_state: b.promotion_state.clone(),
+                    promotion_effective: b.promotion_effective,
+                    promotion_expired: b.promotion_expired,
+                    evidence_resolved: b.evidence_resolved,
+                    review_state_is_paper_candidate: b.review_state_is_paper_candidate,
+                    evidence_review_state: b.evidence_review_state.clone(),
+                    durable_legacy_fingerprint: b.durable_legacy_fingerprint.clone(),
+                    recomputed_legacy_fingerprint: b.recomputed_legacy_fingerprint.clone(),
+                    legacy_fingerprint_matches: b.legacy_fingerprint_matches,
+                    durable_exact_fingerprint_v2: b.durable_exact_fingerprint_v2.clone(),
+                    recomputed_exact_fingerprint_v2: b.recomputed_exact_fingerprint_v2.clone(),
+                    exact_fingerprint_v2_matches: b.exact_fingerprint_v2_matches,
+                    config_identity_verified: b.config_identity_verified,
+                    durable_config_fingerprint: b.durable_config_fingerprint.clone(),
+                    current_config_fingerprint: b.current_config_fingerprint.clone(),
+                    registry_enabled: b.registry_enabled,
+                    plugin_instantiable: b.plugin_instantiable,
+                    timeframe_matches: b.timeframe_matches,
+                    data_ready: b.data_ready,
+                    canonical_score_decimal: b.canonical_score_decimal.clone(),
+                    canonical_score_micros: b.canonical_score_micros,
+                    scanner_rank: b.scanner_rank,
+                    watchlist_assigned: b.watchlist_assigned,
+                    evidence_review_id: b.evidence_review_id.clone(),
+                    evidence_scanner_scan_id: b.evidence_scanner_scan_id.clone(),
+                    evidence_artifact_path: b.evidence_artifact_path.clone(),
+                    evidence_git_hash: b.evidence_git_hash.clone(),
+                    promotion_transition_id: b.promotion_transition_id.clone(),
+                    promotion_effective_at: b.promotion_effective_at.clone(),
+                    promotion_expires_at: b.promotion_expires_at.clone(),
+                    evidence_transition_id: b.evidence_transition_id.clone(),
+                    exact_reason: b.exact_reason.clone(),
+                },
+            )
             .collect();
 
         Fixture {
@@ -559,9 +572,8 @@ mod tests {
         let f = build_fixture();
         let mut bindings = f.bindings.clone();
         bindings[0].promotion_effective = !bindings[0].promotion_effective;
-        let err =
-            validate_explicit_multi_strategy_authority(&f.expected(), &f.header, &bindings)
-                .unwrap_err();
+        let err = validate_explicit_multi_strategy_authority(&f.expected(), &f.header, &bindings)
+            .unwrap_err();
         assert_eq!(
             err,
             ExplicitMultiStrategyEvidenceValidationError::RecomputedAuthorityIdMismatch
@@ -575,9 +587,8 @@ mod tests {
         let f = build_fixture();
         let mut header = f.header.clone();
         header.source_artifact_hash = "different-hash".to_string();
-        let err =
-            validate_explicit_multi_strategy_authority(&f.expected(), &header, &f.bindings)
-                .unwrap_err();
+        let err = validate_explicit_multi_strategy_authority(&f.expected(), &header, &f.bindings)
+            .unwrap_err();
         assert_eq!(
             err,
             ExplicitMultiStrategyEvidenceValidationError::SourceArtifactHashMismatch
@@ -591,9 +602,8 @@ mod tests {
         let f = build_fixture();
         let mut header = f.header.clone();
         header.config_fingerprint = "different-cfg".to_string();
-        let err =
-            validate_explicit_multi_strategy_authority(&f.expected(), &header, &f.bindings)
-                .unwrap_err();
+        let err = validate_explicit_multi_strategy_authority(&f.expected(), &header, &f.bindings)
+            .unwrap_err();
         assert_eq!(
             err,
             ExplicitMultiStrategyEvidenceValidationError::ConfigFingerprintMismatch
@@ -609,9 +619,8 @@ mod tests {
         let f = build_fixture();
         let mut bindings = f.bindings.clone();
         bindings[0].symbol = "TSLA".to_string();
-        let err =
-            validate_explicit_multi_strategy_authority(&f.expected(), &f.header, &bindings)
-                .unwrap_err();
+        let err = validate_explicit_multi_strategy_authority(&f.expected(), &f.header, &bindings)
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -629,9 +638,8 @@ mod tests {
         let f = build_fixture();
         let mut bindings = f.bindings.clone();
         bindings.pop();
-        let err =
-            validate_explicit_multi_strategy_authority(&f.expected(), &f.header, &bindings)
-                .unwrap_err();
+        let err = validate_explicit_multi_strategy_authority(&f.expected(), &f.header, &bindings)
+            .unwrap_err();
         assert!(matches!(
             err,
             ExplicitMultiStrategyEvidenceValidationError::BindingCountMismatch { .. }
@@ -646,10 +654,12 @@ mod tests {
         let f = build_fixture();
         let mut header = f.header.clone();
         header.run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"a-different-run");
-        let err =
-            validate_explicit_multi_strategy_authority(&f.expected(), &header, &f.bindings)
-                .unwrap_err();
-        assert_eq!(err, ExplicitMultiStrategyEvidenceValidationError::RunIdMismatch);
+        let err = validate_explicit_multi_strategy_authority(&f.expected(), &header, &f.bindings)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ExplicitMultiStrategyEvidenceValidationError::RunIdMismatch
+        );
     }
 
     /// Identity mismatch: the durable row is internally self-consistent
@@ -660,9 +670,8 @@ mod tests {
         let f = build_fixture();
         let mut expected = f.expected();
         expected.authority_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"a-different-authority");
-        let err =
-            validate_explicit_multi_strategy_authority(&expected, &f.header, &f.bindings)
-                .unwrap_err();
+        let err = validate_explicit_multi_strategy_authority(&expected, &f.header, &f.bindings)
+            .unwrap_err();
         assert_eq!(
             err,
             ExplicitMultiStrategyEvidenceValidationError::ExpectedAuthorityIdMismatch
@@ -684,7 +693,12 @@ mod tests {
     /// `NegativeScannerRank`, never accepted as valid evidence.
     #[test]
     fn scanner_rank_overflow_is_always_caught_never_silently_accepted() {
-        for overflowing in [1u32 << 31, (i32::MAX as u32) + 1, 3_000_000_000u32, u32::MAX] {
+        for overflowing in [
+            1u32 << 31,
+            (i32::MAX as u32) + 1,
+            3_000_000_000u32,
+            u32::MAX,
+        ] {
             let stored_i32 = overflowing as i32;
             assert!(
                 stored_i32 < 0,
@@ -710,8 +724,7 @@ mod tests {
         let f = build_fixture();
         let mut binding = f.bindings[0].clone();
         binding.scanner_rank = Some(i32::MAX);
-        let evaluation =
-            stored_binding_to_evaluation(&binding).expect("i32::MAX must round-trip");
+        let evaluation = stored_binding_to_evaluation(&binding).expect("i32::MAX must round-trip");
         assert_eq!(evaluation.evidence.scanner_rank, Some(i32::MAX as u32));
     }
 }

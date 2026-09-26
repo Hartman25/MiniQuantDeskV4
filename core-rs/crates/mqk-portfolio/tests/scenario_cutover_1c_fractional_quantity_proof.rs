@@ -57,13 +57,26 @@ fn proof_a_whole_equity_share_round_trip_is_exact() {
 fn proof_b_fractional_btc_round_trip_is_exact() {
     let mut pf = PortfolioState::new(100_000 * 1_000_000);
     let btc_qty: QtyMicros = "0.0001".parse().unwrap();
-    assert_eq!(btc_qty.raw(), 100, "B: 0.0001 BTC must be exactly 100 raw micros");
+    assert_eq!(
+        btc_qty.raw(),
+        100,
+        "B: 0.0001 BTC must be exactly 100 raw micros"
+    );
 
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("BTC/USD", Side::Buy, btc_qty, 50_000 * 1_000_000, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "BTC/USD",
+            Side::Buy,
+            btc_qty,
+            50_000 * 1_000_000,
+            0,
+        )),
     );
-    let pos = pf.positions.get("BTC/USD").expect("BTC/USD position exists");
+    let pos = pf
+        .positions
+        .get("BTC/USD")
+        .expect("BTC/USD position exists");
     assert_eq!(
         pos.qty_signed(),
         btc_qty,
@@ -76,7 +89,13 @@ fn proof_b_fractional_btc_round_trip_is_exact() {
 
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("BTC/USD", Side::Sell, btc_qty, 51_000 * 1_000_000, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "BTC/USD",
+            Side::Sell,
+            btc_qty,
+            51_000 * 1_000_000,
+            0,
+        )),
     );
     assert!(
         pf.positions.get("BTC/USD").is_none() || pf.positions["BTC/USD"].qty_signed().is_zero(),
@@ -114,7 +133,10 @@ fn proof_c_fractional_partial_fill_summation_is_exact() {
         )),
     );
 
-    let pos = pf.positions.get("BTC/USD").expect("BTC/USD position exists");
+    let pos = pf
+        .positions
+        .get("BTC/USD")
+        .expect("BTC/USD position exists");
     let expected: QtyMicros = "0.00015".parse().unwrap();
     assert_eq!(
         pos.qty_signed(),
@@ -136,11 +158,23 @@ fn proof_e_fractional_realized_pnl_is_exact() {
 
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("BTC/USD", Side::Buy, btc_qty, 50_000 * 1_000_000, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "BTC/USD",
+            Side::Buy,
+            btc_qty,
+            50_000 * 1_000_000,
+            0,
+        )),
     );
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("BTC/USD", Side::Sell, btc_qty, 51_000 * 1_000_000, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "BTC/USD",
+            Side::Sell,
+            btc_qty,
+            51_000 * 1_000_000,
+            0,
+        )),
     );
 
     // Realized = (51_000 - 50_000) * 0.0001 = $0.10 = 100_000 micros.
@@ -172,7 +206,13 @@ fn proof_f_fractional_unrealized_pnl_is_exact() {
     let mut pf = PortfolioState::new(100_000 * 1_000_000);
     apply_entry(
         &mut pf,
-        LedgerEntry::Fill(Fill::new("BTC/USD", Side::Buy, btc_qty, avg_price_micros, 0)),
+        LedgerEntry::Fill(Fill::new(
+            "BTC/USD",
+            Side::Buy,
+            btc_qty,
+            avg_price_micros,
+            0,
+        )),
     );
     let mk = marks([("BTC/USD", mark_price_micros)]);
     let unreal = compute_unrealized_pnl_micros(&pf.positions, &mk);
@@ -241,7 +281,10 @@ fn proof_h_restart_replay_reproduces_exact_fractional_state() {
          state -- restart/replay must never reinterpret or truncate a fractional quantity"
     );
 
-    let pos = pf.positions.get("BTC/USD").expect("BTC/USD position exists");
+    let pos = pf
+        .positions
+        .get("BTC/USD")
+        .expect("BTC/USD position exists");
     let expected_remaining: QtyMicros = "0.00007".parse().unwrap();
     assert_eq!(
         pos.qty_signed(),

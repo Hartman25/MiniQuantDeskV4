@@ -152,7 +152,10 @@ pub(crate) async fn compute_broker_positions_pnl(
         // than lossy-parsing as `i64` first -- the prior `i64`-only parse
         // would have silently treated any genuinely fractional
         // broker-reported qty as flat (0).
-        let qty = p.qty.parse::<mqk_portfolio::QtyMicros>().unwrap_or(mqk_portfolio::QtyMicros::ZERO);
+        let qty = p
+            .qty
+            .parse::<mqk_portfolio::QtyMicros>()
+            .unwrap_or(mqk_portfolio::QtyMicros::ZERO);
         let Some(avg_price_micros) = parse_decimal_micros(&p.avg_price) else {
             results.insert(
                 p.symbol.clone(),
