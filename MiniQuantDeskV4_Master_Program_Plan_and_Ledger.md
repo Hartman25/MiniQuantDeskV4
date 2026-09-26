@@ -351,6 +351,8 @@ If the same bounded invariant fails implementation review twice, do not automati
 
 ## G. Current Milestone Scoreboard
 
+> **Superseded for current status by section G2 below (POST-A3 LEDGER TRUTH, 2026-09-26). The table that follows is retained as the 2026-09-07 record.**
+
 | Milestone | Status as of 2026-09-07 | Meaning |
 |---|---|---|
 | **M1 — US Equity/ETF Paper Production** | **IN PROGRESS — CURRENT TARGET** | Research/Backtest/Promotion engineering is substantially/independently accepted; the implementation ledger reached zero active/pending review at the latest closeout, but the aggressive post-ledger audit, production-state verification, genuine Paper lifecycle proof, and finite autonomous Paper validation remain before M1 acceptance. |
@@ -363,6 +365,260 @@ If the same bounded invariant fails implementation review twice, do not automati
 | **M8 — Options Paper + Live** | NOT STARTED | Foundation/scaffolding only. |
 | **M9 — Mostly/Fully Autonomous Operations** | NOT STARTED AS FINAL AUTONOMY MILESTONE | Equity Paper autonomy work exists, but project-wide multi-domain/multi-asset autonomy is not yet accepted. |
 | **M10 — Integrated Validation + V4 Release Freeze** | NOT STARTED | This is the final MiniQuantDeskV4 finish line. |
+
+## G2. POST-A3 LEDGER TRUTH + REMAINING ENGINEERING CLOSURE WAVE 01 (CURRENT TRUTH)
+
+**This section is the current-status authority. It supersedes the status of every older section that it names below; those sections are left untouched as an accurate record of what was true when they were written.** It was produced by `POST-A3-LEDGER-TRUTH-AND-REMAINING-ENGINEERING-CLOSURE-WAVE-01` on branch `v4-bulk-code-completion-stage-b-m2-01`.
+
+| | |
+|---|---|
+| Starting HEAD | `a5ae6c963fc132f6afe14db4ce636e356a2a4a86` (CUTOVER-1D-A3 **PUSHED-VERIFIED**; not reopened) |
+| Ending code HEAD | `aa1255e4f3601e5dd14f311c2fce05d6f9894967` (the ledger update is the branch-tip commit after it; a commit cannot embed its own SHA) |
+| Starting ledger blob | `d5e10f91b3f52a3d7e326f14e6e9672802b35063` |
+| Push | **NOT PUSHED.** GitHub CI on this HEAD: **NOT YET VERIFIED** |
+| Side effects | Paper orders 0; Live orders 0; broker/provider calls 0; holdout consumption 0; real LiveShadow smoke NOT RUN; engineering DB tests used the disposable TEST DB at `127.0.0.1:5434`. **Two deviations from the safety rules, disclosed in G2.10:** (a) one invocation of `scripts/windows/tests/test_official_dual_mode_launcher.ps1` against the real repo root wrote three `-CheckOnly` launcher logs (2 live, 1 paper) into the protected, git-ignored `smoke_logs/launcher/`; they were not staged, deleted or otherwise touched; (b) the second-sweep run of `scripts/windows/tests/test_offsite_b2_workflow.ps1` (in a disposable clone) most likely executed a read-only `pg_dump` inside the Paper container `mqk-paper-postgres`, plus one read-only `pg_stat_activity` count query I issued afterwards; no Paper DB writes, no orders |
+
+### G2.1 Stale authority explicitly superseded
+
+- **Section G scoreboard (2026-09-07)** and **K1/K3/K4/K10 statuses**: all `OPEN`/`UNKNOWN_NEEDS_PROOF` rows AUDIT-M1-01..12 and AUDIT-M1-U01 are resolved as recorded in G2.4.
+- **Phase N / FINAL-CLOSEOUT-01 / R1B-FINAL / PROVENANCE-FINAL-01 bucket tables** (54/3/4/5/7 = 73): recomputed in G2.6. `DEFERRED_POST_LEDGER_AUDIT` is no longer open: this wave is that audit.
+- **Deferred Design Ideas tail (2026-09-06)**: the replay-backtest order/fill idempotency finding recorded there as `STILL-OPEN - NEEDS PROOF` is closed (G2.5).
+- **Section 25 `OPS-*` statuses** and **section 28 `DAEMON-EXIT-20260824`**: reclassified in G2.4.
+- **Section 24 research-backlog `BLOCKED` reasons**: the gating condition (`RESEARCH_BACKTEST_V1_COMPLETE`) is cleared by section 34; the items remain unscheduled optional research.
+- Section J6's machine-readable index is unchanged and remains the only automation authority.
+
+### G2.2 Commits in this wave
+
+| Commit | Invariant / item | Summary |
+|---|---|---|
+| `19ba2f78` | REPLAY-BACKTEST-ORDER-FILL-IDEMPOTENCY | test(backtest): economic-state proof + R3.5 production-path invariant + mutation record |
+| `cece2b4a` | LIVESHADOW-TEST-RIGOR (LS-EV-11/12/13/17) | test(liveshadow): frozen timestamp bucket, structural evidence-dir identity, disposable-root launcher runs |
+| `73672264` | AUDIT-M1-03 recurrence (rustfmt) | style: restore canonical Rust formatting (579 hunks / 100 files) |
+| `6b1c0223` | POST-A3-FC2A-STALE-DECODE-ASSERTION-01 | test(daemon): repair stale fc2a decode-error assertion |
+| `da3c35a5` | POST-A3-CLIPPY-GATE-01 | fix(ci): cargo clippy --workspace --all-targets -D warnings clean |
+| `059192d2` | POST-A3-EXEC-M5-TEST-FEATURE-GATE-01 | fix(execution): gate M5 capability test on the testkit feature |
+| `ed3b5186` | POST-A3-MIGRATION-EOL-PIN-01 | fix(db): pin migrations 0076/0077 to LF checkout bytes |
+| `2c381c2c` | POST-A3-UNSAFE-PATTERN-FIXTURE-CLOCK-01 | test(db): stop reading the wall clock in authority test fixtures |
+| `c7f8669a` | POST-A3-CONFLICT-GUARD-STALE-ANCHOR-01 | test(guard): re-anchor conflict-policy static guard to current seams |
+| `58cc9e7c` | POST-A3-MULTISYMBOL-PS-GUARD-QTYMICROS-01 | test(guard): re-align multi-symbol PS guards to QtyMicros signatures |
+| `60d9b10c` | POST-A3-LAUNCHER-TEST-LEDGER-FILENAME-01 | test(launcher): follow the launcher to the master ledger filename |
+| `aa1255e4` | POST-A3-PHASE7B-GUARD-LIFECYCLE-SLICE-01 | test(guard): slice lifecycle.rs at the fixture module in the 7B closure guard |
+
+Each commit is one coherent invariant. No commit touches `smoke_logs/`, Paper/Live runtime behaviour, risk, reconcile, broker support, domain isolation, outbox/inbox authority, deployment/promotion authority, quantity authority or the A3 V1/V2 contract. Production-code changes are limited to behaviour-preserving lint rewrites (`da3c35a5`), an `#[allow]` on two existing APIs, and `.gitattributes`/`Cargo.toml` metadata.
+
+### G2.3 Census (unique logical items)
+
+**138 unique logical items** were resolved to their newest authoritative status. Counts below are computed from the item tables in this section, not from arithmetic on older counts.
+
+| Disposition | Count |
+|---|---|
+| `ALREADY_CLOSED_PROVEN` | 54 |
+| `STALE_LEDGER_STATUS` | 15 |
+| `FIXED_NOW` | 12 |
+| `PROOF_NOW` | 1 |
+| `PENDING_EXTERNAL_INDEPENDENT_REVIEW` | 1 |
+| `OPERATOR_VALIDATION_REQUIRED` | 9 |
+| `DEFERRED_BY_CONTRACT` | 44 |
+| `POST_V4` | 1 |
+| `FALSE_POSITIVE` | 0 |
+| `UNKNOWN_NEEDS_REAL_EVIDENCE` | 1 |
+| `HARD_STOP` | 0 |
+| **TOTAL** | **138** |
+
+| Group | Items |
+|---|---|
+| Lane | 73 |
+| K | 13 |
+| Tail | 5 |
+| OPS | 4 |
+| Backlog | 17 |
+| Research backlog (section 24) | 7 |
+| Design idea | 10 |
+| New (this wave) | 9 |
+
+Final-state vocabulary mapping: `ALREADY_CLOSED_PROVEN` -> ALREADY_CLOSED+PROVEN; `STALE_LEDGER_STATUS` -> STALE_STATUS_SUPERSEDED; `FIXED_NOW` -> FIXED+PROVEN; `PROOF_NOW` -> ALREADY_CLOSED+PROVEN with added proof; the remaining dispositions are unchanged. No item is left `PARTIAL`.
+
+**Proof-strength note for the 54 Lane rows recorded `CLOSED`:** their closure is the ledger's recorded independent acceptance / HEAD-ancestry evidence. They were not individually re-executed in this wave; the affected-crate boundary in G2.9 and the workspace compile/clippy/fmt gates are the only current-HEAD evidence for them. No deterministic contradiction was found.
+
+### G2.4 Item dispositions
+
+#### Historical M1 audit rows (section K)
+
+| ID | Prior ledger status | Disposition | Current repo truth / proof |
+|---|---|---|---|
+| AUDIT-M1-01 | OPEN | STALE_LEDGER_STATUS | umbrella over the child rows below, all resolved; exact-head GitHub CI on this HEAD is NOT YET VERIFIED (no push) |
+| AUDIT-M1-02 | OPEN | STALE_LEDGER_STATUS | f3a75571/cfd24e7b/58a9796f; scenario_gui_daemon_contract_gate 23/23 and scenario_ops_control_oc01_oc02 14/14 (2 ignored) green at this HEAD |
+| AUDIT-M1-03 | OPEN | FIXED_NOW | f5eb9544 had closed it but it REGRESSED (579 rustfmt hunks in 100 files after the A-wave); restored by 73672264; Invoke-CanonicalFmtCheck.ps1 passes all 21 packages |
+| AUDIT-M1-04 | OPEN | STALE_LEDGER_STATUS | e16e3bea; test_gui_relaunch_during_smoke.ps1 GR12/GR13 (ASCII-safe) and test_start_paper_trading_smoke.ps1 pass |
+| AUDIT-M1-05 | OPEN | STALE_LEDGER_STATUS | ee9e799b; test_start_paper_trading_smoke.ps1 all static invariants pass |
+| AUDIT-M1-06 | OPEN | STALE_LEDGER_STATUS | a2ad83bd; test_discord_secret_safety.ps1 all assertions pass |
+| AUDIT-M1-07 | OPEN | STALE_LEDGER_STATUS | c4dc969e; test_multi_symbol_day_order_cap.ps1 12/12 including SELFTEST-G05 mutation |
+| AUDIT-M1-08 | OPEN | STALE_LEDGER_STATUS | ff9abda4/2e32b49f/a6d030cb; test_multi_symbol_oms_overview_gui.ps1 13/13 |
+| AUDIT-M1-09 | OPEN | STALE_LEDGER_STATUS | 5b9c65f3; test_pdt_cross_symbol_summation_self_test.ps1 13/13 in a disposable repo (no smoke_logs fixture) |
+| AUDIT-M1-10 | OPEN | STALE_LEDGER_STATUS | f2a9aa1c plus ~15 runtime-lease release commits; scenario_broker_cursor_restart 7/7 against the disposable TEST DB (RESTRICT FK preserved) |
+| AUDIT-M1-11 | OPEN | STALE_LEDGER_STATUS | f385332f; .env.local.example and the autonomous Paper runbook document MQK_RISK_MAX_DRAWDOWN. The optional docs-vs-env contract guard ("if practical") was not built and stays optional |
+| AUDIT-M1-12 | OPEN | STALE_LEDGER_STATUS | 0c13729e; lockfile resolves nanoid 3.3.18; `npm audit --package-lock-only --json` reports 0 vulnerabilities of any severity |
+| AUDIT-M1-U01 | UNKNOWN_NEEDS_PROOF | STALE_LEDGER_STATUS | 50e9df03; all three RuntimeRiskGate lock sites now return typed fail-closed refusal on poison (no recover, no panic); poison test in mqk-runtime lib (148 passed, 0 failed) |
+
+#### Findings recorded in later addenda
+
+| ID | Prior ledger status | Disposition | Current repo truth / proof |
+|---|---|---|---|
+| REPLAY-BACKTEST-ORDER-FILL-IDEMPOTENCY | STILL-OPEN - NEEDS PROOF (Deferred Design Ideas tail) | PROOF_NOW | already closed at the root by d3b8548c + 7818c491 + 9a119e9c (see the dedicated subsection); this wave added the economic-state proof and mutation record (19ba2f78) |
+| GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR | RESOLVED LOCALLY - PENDING INDEPENDENT REVIEW | PENDING_EXTERNAL_INDEPENDENT_REVIEW | 2e1aa7d9 and 18d98953 are ancestors of HEAD; 27/27 placebo tests pass; the R3.5 production E2E reports genuine_shuffled_placebo applicable+passed. No later ledger entry grants acceptance, and this session cannot self-grant it |
+| LIVESHADOW-TESTRIGOR-LS-EV-11-12-13 | deferred non-blocking note | FIXED_NOW | cece2b4a; timestamp bucket frozen (LS-EV-11/12) / structural id-suffix proof (LS-EV-13); mutation-proven |
+| LIVESHADOW-TESTRIGOR-LS-EV-17 | deferred non-blocking note | FIXED_NOW | cece2b4a; runs the launcher from a per-test disposable repo root: only one log, no creation-time heuristic, no smoke_logs writes; mutation-proven |
+| DAEMON-EXIT-20260824 | UNKNOWN_NEEDS_PROOF | UNKNOWN_NEEDS_REAL_EVIDENCE | no current deterministic source defect is provable. The two POSSIBLE_BUT_UNPROVEN mechanisms recorded in section 28 are still present in main.rs; cause needs a recurrence with captured daemon stdout/stderr and a WER/crash dump |
+
+#### `OPS-*` backlog (section 25)
+
+| ID | Prior ledger status | Disposition | Current repo truth / proof |
+|---|---|---|---|
+| OPS-AUTO-RESTART-LOCAL-01 | OPEN | OPERATOR_VALIDATION_REQUIRED | each named restart invariant has an implemented and tested seam (see the OPS subsection); no deterministic missing seam was found in bounded inspection. Real reboot / Docker / Postgres / network / provider outage proofs cannot be simulated honestly |
+| OPS-OFFSITE-BACKUP-01 | OPEN | OPERATOR_VALIDATION_REQUIRED | backup/offsite/restore scripts and a local restore proof exist (docs/runbooks/recovery_backup_offsite_proof_truth.md); a restic-restored-from-real-B2 round trip needs real credentials and has never been run |
+| OPS-CLOUD-FAILOVER-PAPER-01 | OPEN | DEFERRED_BY_CONTRACT | no frozen M1-M10 exit gate requires it (the contract sections were searched for failover/offsite/restart and name none); not deterministically required now |
+| OPS-CLOUD-FAILOVER-LIVE-01 | DEFERRED | DEFERRED_BY_CONTRACT | explicitly deferred in section 25 until Paper failover and an explicit Live authorization exist; never enable Live to test failover |
+
+#### New deterministic defects found and fixed by this wave
+
+| ID | Prior ledger status | Disposition | Current repo truth / proof |
+|---|---|---|---|
+| POST-A3-FC2A-STALE-DECODE-ASSERTION-01 | (not in ledger) | FIXED_NOW | 6b1c0223; red at HEAD since CUTOVER-1B reworded the fail-closed decode error; assertion now requires the seam name plus a non-empty decoder detail; mutation-proven |
+| POST-A3-CLIPPY-GATE-01 | (not in ledger) | FIXED_NOW | da3c35a5; `cargo clippy --workspace --all-targets -D warnings` failed at HEAD (masked by fmt drift); now exit 0 |
+| POST-A3-EXEC-M5-TEST-FEATURE-GATE-01 | (not in ledger) | FIXED_NOW | 059192d2; standalone `cargo test -p mqk-execution` did not compile the M5 test (missing required-features); per-crate `--no-run` census found no other case |
+| POST-A3-MIGRATION-EOL-PIN-01 | (not in ledger) | FIXED_NOW | ed3b5186; check_migration_governance.sh failed at HEAD: 0076/0077 lacked eol=lf pins |
+| POST-A3-UNSAFE-PATTERN-FIXTURE-CLOCK-01 | (not in ledger) | FIXED_NOW | 2c381c2c; check_unsafe_patterns.sh failed at HEAD on a wall-clock test fixture in mqk-db/src |
+| POST-A3-CONFLICT-GUARD-STALE-ANCHOR-01 | (not in ledger) | FIXED_NOW | c7f8669a; conflict-policy static guard counted a comment as a second call site and anchored on a pre-refactor literal; production invariants verified intact; 43 mutations caught |
+| POST-A3-MULTISYMBOL-PS-GUARD-QTYMICROS-01 | (not in ledger) | FIXED_NOW | 58cc9e7c; three script guards (in CI's Windows runner) anchored on pre-A3 i64 shapes; production invariants verified intact; mutation-proven |
+| POST-A3-LAUNCHER-TEST-LEDGER-FILENAME-01 | (not in ledger) | FIXED_NOW | 60d9b10c; scripts/windows/tests/test_official_dual_mode_launcher.ps1 still required the retired ledger filename after the master-tracker migration; passes 0 violations in a clean clone, mutation-proven; status parser 27/27 |
+| POST-A3-PHASE7B-GUARD-LIFECYCLE-SLICE-01 | (not in ledger) | FIXED_NOW | aa1255e4; check_phase7b_selected_host_dispatch_closure.ps1 (and the 7C guard chaining it) sliced lifecycle.rs at its first #[cfg(test)] marker (line 50) and counted zero production call sites; passes in a clean clone, second-call-site mutation caught |
+
+#### Lane rows that are not `CLOSED`
+
+| ID | Prior bucket | Disposition | Basis / what remains |
+|---|---|---|---|
+| API-TYPES-RS-LEAN-OUT-01 | DEFERRED_POST_LEDGER_AUDIT | DEFERRED_BY_CONTRACT | broad code lean-out; not a milestone exit gate (K6) |
+| CALENDAR-TABLE-EXTENSION-2029-2030-01 | DEFERRED_FUTURE_MAINTENANCE | DEFERRED_BY_CONTRACT | calendar tables already extend through 2028; not needed before 2029 |
+| EXPORT-HANDOFF-SECRET-EXCLUSION-01 | DEFERRED_POST_LEDGER_AUDIT | DEFERRED_BY_CONTRACT | ops-tooling guard for filesystem handoff archives; no milestone exit gate; no shipped path is affected |
+| HELD-MIGRATION-0017-DECISION-01 | DEFERRED_POST_LEDGER_AUDIT | DEFERRED_BY_CONTRACT | documentation-only decision record; 0017 stays unapplied in hold/ (db_rules: committed migrations are never edited); no behaviour defect |
+| INSTRUMENT-UNIVERSE-REFRESH-01 | DEFERRED_POST_LEDGER_AUDIT | DEFERRED_BY_CONTRACT | unscoped (no finite acceptance criteria); registry breadth beyond the deployed AAPL universe is M2+ universe work; needs an operator scoping decision before any patch can exist |
+| LIFECYCLE-RS-LEAN-OUT-01 | DEFERRED_FUTURE_MAINTENANCE | DEFERRED_BY_CONTRACT | broad code lean-out (K6) |
+| LIVE-CAPITAL-EXTERNAL-PROOF-01 | BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION | OPERATOR_VALIDATION_REQUIRED | real tiny-notional Live capital start; separately gated (M4), never enabled |
+| LIVE-SHADOW-FLATTEN-ACTION-ROUTE-GAP-01 | DEFERRED_POST_LEDGER_AUDIT | DEFERRED_BY_CONTRACT | LiveShadow submits no orders (no economic positions to flatten); operator flatten for live domains is M3/M4 |
+| LIVE-TINY-CAPITAL-SMOKE-01 | IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED | OPERATOR_VALIDATION_REQUIRED | one real LiveShadow smoke (`Start-LiveShadowSmoke.ps1 -IAcknowledgeLiveShadowOnly`), never run |
+| LIVE-TRUST-CHAIN-EVIDENCE-SIGNER-01 | BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION | OPERATOR_VALIDATION_REQUIRED | requires real scored parity evidence to sign |
+| LIVE-TRUST-CHAIN-PARITY-SCORER-01 | BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION | OPERATOR_VALIDATION_REQUIRED | requires real captured shadow evidence to score |
+| LIVE-TRUST-CHAIN-SHADOW-CAPTURE-01 | BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION | OPERATOR_VALIDATION_REQUIRED | requires the real LiveShadow smoke to have produced shadow-execution evidence |
+| MULTI-ASSET-CRYPTO-EXECUTION-01 | DEFERRED_FUTURE_MAINTENANCE | STALE_LEDGER_STATUS | superseded by section I3 (multi-asset backlog is SUPERSEDED_BY_MILESTONE_CONTRACT) and by the M5-M8 work tracked in docs/CURRENT_MISSION.md and docs/V4_CODE_COMPLETION_MANIFEST.md |
+| MULTI-ASSET-FUTURES-FOREX-FOUNDATION-01 | DEFERRED_FUTURE_MAINTENANCE | STALE_LEDGER_STATUS | superseded by section I3 (multi-asset backlog is SUPERSEDED_BY_MILESTONE_CONTRACT) and by the M5-M8 work tracked in docs/CURRENT_MISSION.md and docs/V4_CODE_COMPLETION_MANIFEST.md |
+| MULTI-ASSET-OPTIONS-FOUNDATION-01 | DEFERRED_FUTURE_MAINTENANCE | STALE_LEDGER_STATUS | superseded by section I3 (multi-asset backlog is SUPERSEDED_BY_MILESTONE_CONTRACT) and by the M5-M8 work tracked in docs/CURRENT_MISSION.md and docs/V4_CODE_COMPLETION_MANIFEST.md |
+| PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01 | IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED | OPERATOR_VALIDATION_REQUIRED | real Windows Task Scheduler registration + one genuine unattended pre-open Paper start |
+| PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01-REPAIR-01 | IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED | OPERATOR_VALIDATION_REQUIRED | the permanent task registered disabled-atomically on the real Task Scheduler (transient-enable race repair) and observed |
+| STATE-RS-LEAN-OUT-01 | DEFERRED_FUTURE_MAINTENANCE | DEFERRED_BY_CONTRACT | broad code lean-out (K6) |
+| STRATEGY-POSITION-SIZING-PARITY-01 | DEFERRED_FUTURE_MAINTENANCE | DEFERRED_BY_CONTRACT | targets non-deployed strategy engines; the deployed M1 engine is intraday_scalper |
+
+#### Lane rows recorded `CLOSED` (`ALREADY_CLOSED_PROVEN`)
+
+`AUTOFRESH-SCHEDULER-BARRIER-CALL-NEVER-STARTS-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`, `AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01`, `BKT-PROMOTION-ARTIFACT-AUTHORITY-01`, `BROKER-ALPACA-CRATE-SCOPE-DOC-01`, `BROKER-ALPACA-DEAD-CODE-CLEANUP-01`, `BROKER-ALPACA-RATE-LIMIT-RETRY-AFTER-01`, `CI-TESTKIT-FEATURE-GUARD-VERIFY-01`, `CI-UNSAFE-PATTERNS-SYSTEMTIME-TESTFIXTURE-01`, `CLI-DAEMON-CONTROL-PASSTHROUGH-01`, `CLI-RUN-STUB-TRACKING-01`, `CLI-RUNCMD-DOC-DISAMBIGUATION-01`, `DB-OUTBOX-SCHEMA-VERSION-01`, `DEADMAN-LEASE-TTL-RECONCILE-01`, `DEPLOYMENT-DECISION-DOC-01`, `DISCORD-CHANNEL-ROUTING-01`, `DISCORD-DAILY-SUMMARY-PUSH-01`, `DISCORD-DATA-STALENESS-ALERT-01`, `DOCS-TRACKER-RETIREMENT-01`, `DYNAMIC-SELECTION-E2E-SCENARIO-TEST-01`, `DYNAMIC-SELECTION-MODULE-DOC-STALENESS-01`, `DYNAMIC-SELECTION-TEST-DENSITY-AUDIT-01`, `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01`, `LIVE-ACCOUNT-TRUTH-01`, `LIVE-CLI-ARM-RECONCILE-01`, `LIVE-FLATTEN-PROOF-01`, `LIVE-SECRETS-CONSOLIDATION-01`, `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`, `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-01`, `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-02`, `MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01`, `MARKET-DATA-PROVIDER-PROVENANCE-01`, `MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01`, `MD-ALPACA-FETCH-RETRY-BACKOFF-01`, `MD-KRAKEN-FETCH-RETRY-BACKOFF-01`, `MULTI-SYMBOL-CAP1-TRUNCATE-SURFACE-01`, `MULTI-SYMBOL-CAPS-PREFLIGHT-WARNING-01`, `MULTI-SYMBOL-DISPATCH-DOC-CONCURRENCY-CLARITY-01`, `MULTI-SYMBOL-DISPATCH-PANIC-ISOLATION-01`, `OFFICIAL-DUAL-MODE-LAUNCHER-01`, `PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01`, `PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01-REPAIR-01`, `PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01`, `PORTFOLIO-DYNAMIC-SELECTION-DEEP-REVIEW-01`, `PORTFOLIO-PLACEHOLDER-COMMENT-RENAME-01`, `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`, `PROMOTION-BACKTEST-EVIDENCE-SEAM-01`, `PROMOTION-STRESS-SUITE-AUTHORITY-01`, `PROMOTION-WALKFORWARD-GATE-WIRING-01`, `README-SNAPSHOT-REFRESH-01`, `RISK-AUTHORITY-DOC-NOTE-01`, `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01`, `STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01`, `STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01`
+
+#### Capability backlog, research backlog and deferred design ideas
+
+`POST_V4`: `MOBILE-OPERATOR-COMPANION-01`.
+
+`DEFERRED_BY_CONTRACT` (backlog rows only): `JOURNAL-THESIS-01`, `TRADE-REVIEW-01`, `RISK-STOP-IMMUTABILITY-01`, `ANALYTICS-MAE-MFE-01`, `REGIME-ATTRIBUTION-01`, `DECAY-01`, `FLOW-OBSERVABILITY-01`, `FORENSICS-AI-01`, `LLM-EXPLANATION-01`, `ML-REGIME-01`, `ML-SIGNAL-01`, `ML-COUNCIL-01`, `STRAT-TIME-FILTER-01`, `DEV-CODEX-VERIFY-01`, `DEV-AGENT-FLOW-01`, `DEV-AI-STACK-01`, `RESEARCH-FACTOR-CONTRACT-AND-REGISTRY-01`, `RESEARCH-FACTOR-IC-IR-QUANTILE-BENCH-01`, `RESEARCH-FACTOR-NULL-CONTROLS-01`, `RESEARCH-POINT-IN-TIME-UNIVERSE-01`, `RESEARCH-FACTOR-FDR-01`, `BKT-LIQUIDITY-IMPACT-CAPACITY-01`, `RESEARCH-FACTOR-EXPOSURE-ATTRIBUTION-01`, `DESIGN-IDEA: Persist per-fold trained model state`, `DESIGN-IDEA: Generic ResearchReplayBundle protocol`, `DESIGN-IDEA: Generic Research -> Backtest candidate adapter`, `DESIGN-IDEA: Batch-level cross-sectional decision source`, `DESIGN-IDEA: Canonical read-only evidence authority CLI`, `DESIGN-IDEA: Point-in-time research universe snapshots`, `DESIGN-IDEA: Replay compatibility/version audit`, `DESIGN-IDEA: Research/Paper equivalence proof harness`, `DESIGN-IDEA: Generic candidate-family API`, `DESIGN-IDEA: Automatic temporary-artifact ownership/retention metadata`.
+
+### G2.5 Replay-backtest order/fill idempotency
+
+- **Reproduction at HEAD:** the historical defect (one logical MARKET `order_id` filled up to 6x) does **not** reproduce on the clean tree: the R3.5 production E2E (`r3_5_full_canonical_completion_synthetic_e2e_proof`, real research-py fixture -> `run_research_replay_backtest` -> `BacktestEngine`) passes with all 9 canonical scenarios and now also asserts no `order_id` is admitted or filled twice. It **is** reproduced by disabling the two guards below (E2E fails with `an order_id was filled more than once`).
+- **Root cause:** `ResearchOosReplayStrategy` emits an empty `StrategyOutput` on every non-final physical row of a same-`end_ts` batch and on schedule-absent days; `targets_to_order_intents` read that as a complete-target *flatten everything*, re-deriving the same `(signal_ts, symbol, side, intent_seq)` order identity on each row against an unsettled book, so one logical order was economically applied repeatedly.
+- **Closing seams (already committed):** `d3b8548c` `Strategy::empty_output_is_noop()` (replay strategy and its delayed wrapper opt in; default false leaves every other strategy's complete-target contract intact); `7818c491` run-scoped `seen_order_ids` fence in `BacktestEngine::run` returning `BacktestError::DuplicateOrderId` before any risk, pending-queue, fill, portfolio or economics mutation; `9a119e9c` positive R3.5 fixture proving the gauntlet passes.
+- **Canonical authority:** order identity is `BacktestFill::make_order_id(signal_ts, symbol, side, intent_seq)` (qty is deliberately not identity-bearing, proven by B7); fill identity is `make_fill_id(order_id)`; each admitted order is filled whole or not at all. All production callers (`research_replay`, `bkt`, `sweep`, `stress_suite`, `strategy_scanner`, `robustness_gauntlet`, `p7a_p7b`) propagate `run()` errors fail-closed.
+- **Controls:** RB-IDEM-01/02 `rb01_02_extra_batch_rows_never_multiply_economics` (K=0/1/4 extra same-batch rows; hard-coded +200 USD round-trip, fills at 110 and 130) and `rb_retry_same_identity_n_times_fails_closed_identically` (N=2/3/5); RB-IDEM-03 `rb03_distinct_orders_execute_independently` (+400 USD); RB-IDEM-04/05 not applicable by design (atomic full fills, no partial-fill progression; `assert_atomic_single_fill` pins one whole-quantity fill per `Filled` order); RB-IDEM-06 rejected/duplicate attempt returns `Err` with no report and no partial state; RB-IDEM-07 `rb07_rerun_reproduces_identical_report` (byte-equal report); RB-IDEM-08 mutation record below.
+- **Mutation proof:** fence disabled -> `b1`, `b7` and the N-times retry test fail (the same `order_id` appears twice in `orders`); replay no-op declaration disabled -> the economics tests fail (fills at wrong prices); both disabled -> the R3.5 E2E fails with `an order_id was filled more than once`; all restored -> `scenario_duplicate_order_identity_bkt_b` 9/9, `scenario_replay_economic_idempotency_rb` 4/4, R3.5 E2E 1/1.
+
+#### OPS-AUTO-RESTART-LOCAL-01: existing seams per required invariant
+
+Compared against the section 25 invariants. These are existing, named seams found by bounded inspection; they were not re-run in this wave, and restart backoff bounds were not separately inspected.
+
+| Required invariant | Existing seam / proof |
+|---|---|
+| automatic startup after reboot / unattended start | `Register-PaperStartupTask.ps1`, `Register-PaperHealthWatchdogTask.ps1`, `Watch-MiniQuantDeskPaperHealth.ps1`; `PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01` (operator validation deferred) |
+| dependency-aware startup / DB recovery | `Start-MiniQuantDesk.ps1` prerequisite stages and exit codes 1/3/4; `scenario_stressed_recovery_lo02` SR-01..SR-12 (docs/runbooks/stressed_recovery_proof_matrix.md) |
+| durable state restored after restart | `scenario_restart_defaults_to_disarmed`, `scenario_broker_order_map_survives_restart`, `scenario_runtime_seeds_position_from_baseline`, `scenario_broker_cursor_restart` |
+| idempotent startup, one local execution authority, stale authority refused | runtime leader lease (`scenario_runtime_lease_*`), `scenario_deadman_sticky_across_restart`, identity-verified daemon reuse in the launcher |
+| reconcile before trading, disagreement fails closed | `scenario_reconcile_blocks_arm_and_start`, `scenario_reconcile_baseline_seed_01` |
+| open-order/position recovery, no duplicate economic action | `scenario_restart_quarantines_sending_outbox`, `scenario_restart_quarantines_sent_outbox`, `scenario_crash_recovery_no_double_order`, `scenario_crash_between_claim_and_submit`, `scenario_recovery_quarantine_after_ack_fill_01`, `scenario_broker_replay_after_restart` |
+
+### G2.6 Current bucket counts (73 Lane rows, recomputed mechanically)
+
+| Bucket (ledger vocabulary) | Count | Change vs. FINAL-CLOSEOUT/PROVENANCE-FINAL-01 |
+|---|---|---|
+| `CLOSED` | 54 | unchanged |
+| `IMPLEMENTATION_COMPLETE_OPERATOR_VALIDATION_DEFERRED` | 3 | unchanged (all `OPERATOR_VALIDATION_REQUIRED`) |
+| `BLOCKED_BY_DEFERRED_OPERATOR_VALIDATION` | 4 | unchanged (all `OPERATOR_VALIDATION_REQUIRED`) |
+| `DEFERRED_POST_LEDGER_AUDIT` | 0 | was 5: audit performed here, all 5 -> `DEFERRED_BY_CONTRACT` |
+| `DEFERRED_BY_CONTRACT` (from POST_LEDGER_AUDIT + FUTURE_MAINTENANCE) | 9 | 5 + 4 |
+| `SUPERSEDED_BY_MILESTONE_CONTRACT` (multi-asset rows) | 3 | was `DEFERRED_FUTURE_MAINTENANCE` (7 -> 4 deferred + 3 superseded) |
+| `ACTIVE_IMPLEMENTATION` / `PENDING_INDEPENDENT_REVIEW` / `PENDING_INTEGRATION` / `RED_AUTHORIZATION_REQUIRED` | 0 | unchanged |
+| **TOTAL** | **73** | mechanical check: the ledger's own bucket listings parse to exactly 73 unique IDs, each with a Lane heading |
+
+### G2.7 Milestone status
+
+**M1 ENGINEERING: LOCALLY COMPLETE - PENDING INDEPENDENT ACCEPTANCE.** Every ordinary deterministic engineering defect found by this wave is fixed and proven (G2.3); no actionable engineering item remains. This is not an M1 COMPLETE claim.
+
+**M1 OPERATIONAL VALIDATION: NOT COMPLETE.** Exact remaining gates:
+
+1. Exact-head GitHub CI for the pushed branch (fmt, clippy, workspace tests, DB proof lane, Windows guards, Safety Guards, GUI): NOT YET VERIFIED; requires a push after independent acceptance.
+2. M1.9 deployed Paper production state (manifest status `OPERATIONAL_ONLY`; `docs/CURRENT_MISSION.md` records the deployed-promotion-authority gap: `intraday_scalper`/AAPL/300 has zero promotion records).
+3. M1.10 finite autonomous Paper validation (10 countable sessions / 5 consecutive clean): recorded `OPERATOR-WAIVED` in `docs/V4_CODE_COMPLETION_MANIFEST.md` for code-completion purposes. Waived is not passed.
+4. Real-world proofs listed in G2.8.
+
+M1.7 (genuine Paper trade lifecycle) and M1.8 (genuine no-trade lifecycle) are recorded as accepted operational evidence in the manifest; this wave did not re-run them.
+
+**M2-M10** (as recorded in `docs/CURRENT_MISSION.md`, `docs/V4_CODE_COMPLETION_MANIFEST.md` and section G; this wave did not re-audit them and claims none accepted): M2 multi-strategy/multi-symbol dispatch is recorded `CODE_CLOSED` for Stage B, with formal M2 acceptance and operational proof not claimed; M3 (concurrent Paper + Live domains) and M4 (Live) have bounded censuses only and Live remains gated; M5-M8 have partial asset-neutral code (fractional `QtyMicros`, registry v2, Kraken 24/7, options permission classifier) with `CODE_MISSING`/`WIRING_MISSING` items recorded; M9 and M10 are recorded `NOT STARTED` as final milestones in section G. No milestone beyond M1 is claimed complete.
+
+### G2.8 Remaining operator / real-world validation
+
+- Real Windows Task Scheduler registration and one unattended pre-open Paper start (`PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01`, `-REPAIR-01`).
+- Real LiveShadow smoke and the dependent trust-chain rows; Live capital remains disabled.
+- Real reboot, abrupt shutdown, Docker/Postgres/network/provider outage recovery (`OPS-AUTO-RESTART-LOCAL-01`).
+- A restic restore from a real Backblaze B2 repository (`OPS-OFFSITE-BACKUP-01`).
+- Deployed Paper DB/config/provider/universe/scheduler/risk verification and the promotion-authority gap for the deployed strategy (M1.9).
+- Host sleep/Modern Standby mitigation during Paper sessions and, on recurrence of an unexplained daemon exit, capture of daemon stdout/stderr and any WER dump (`DAEMON-EXIT-20260824`).
+
+**Unknown-needs-real-evidence:** `DAEMON-EXIT-20260824` only. **Pending external independent review:** `GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR` (`2e1aa7d9`, `18d98953`) and this wave's own commits.
+
+### G2.9 Proof summary (this HEAD; local, not CI)
+
+| Category | Result |
+|---|---|
+| Rust unit/code | mqk-backtest crate 434 passed / 0 failed / 4 ignored (46 binaries); duplicate-identity 9/9; replay economics 4/4; mqk-execution standalone 154/0 (+ M5 test 5/5 with `--features testkit`); mqk-runtime lib 148/0/6 ignored (includes the U01 poison test); mqk-runtime crypto sizing 8/8; mqk-portfolio cutover 7/7; mqk-cli bin 55/0/6 ignored plus the explicit R3.5 ignored E2E 1/1; mqk-daemon lib 1042 passed / 0 failed / 22 ignored (fc2a now green); mqk-db lib 97/0/27 ignored; mqk-daemon catalog contract 23/23 and ops-control 14/14 (2 ignored) |
+| Workspace gates | `cargo check --workspace --all-targets` OK; `cargo clippy --workspace --all-targets --keep-going -- -D warnings` exit 0; `Invoke-CanonicalFmtCheck.ps1` passes all 21 packages; per-crate `cargo test --no-run` compiles for all 21 crates |
+| DB-backed (disposable TEST DB 127.0.0.1:5434) | mqk-db signal-evidence 4/4 (`--include-ignored`); daemon fractional signal evidence 7/7; testkit broker-cursor restart 7/7 (AUDIT-M1-10); daemon fill-economic-authority closure 19/19 including fc2a |
+| Research/Python | placebo suites 27/27 |
+| GUI/PowerShell/shell guards | all `scripts/guards/*.sh` exit 0 (incl. `check_unsafe_patterns.sh`, `check_migration_governance.sh`, conflict-policy guard + 43-mutation self-test); AUDIT-M1-04..09 guards green; LiveShadow guard 100% in an isolated copy with 4 mutation proofs; the three re-aligned multi-symbol guards 14/14, 15/15, 16/16; full `run_all_script_guards.ps1` **ALL SCRIPT GUARDS PASSED** in a clean local clone of HEAD `58cc9e7c` |
+| Extra PowerShell suites (disposable clone of HEAD) | `scripts/windows/tests`: 7 of 9 pass; `test_bundle7_phase7c_premarket_validation.ps1` did not finish within 240 s; `test_offsite_b2_workflow.ps1` real-restic functional sections fail in this environment (not diagnosed; see G2.10). `scripts/guards/check_*.ps1`: 8 of 9 pass (6 unchanged, plus the 7B/7C closure guards after `aa1255e4`); `check_phase7a_r6_matrix_db_required.ps1` exits 1 by design without `MQK_DATABASE_URL` |
+| Package/security | `npm audit --package-lock-only --json`: 0 vulnerabilities |
+| Paper operational / provider / Live | NOT RUN |
+
+### G2.10 Out-of-scope findings recorded, not fixed
+
+- `tests/script_guards/test_live_shadow_smoke.ps1` LSS08 still runs the wrapper against the real repo root and therefore writes a launcher log under `smoke_logs/` and an `exports/live_shadow_smoke/` manifest on every run; only LS-EV-16/17 were moved to disposable roots. The file is also not listed in `run_all_script_guards.ps1`.
+- `check_multi_strategy_conflict_policy_01.sh` is not run by any CI job (only by hand); it failed silently at HEAD until now.
+- The optional AUDIT-M1-11 docs-vs-production env-contract guard was not built (marked optional by section K).
+- **Safety hazard in test tooling:** `scripts/windows/tests/test_offsite_b2_workflow.ps1` (Sections 3/5) drives `Invoke-MiniQuantDeskOffsiteBackup.ps1`, whose stage step (`Backup-MiniQuantDeskRecovery.ps1`) defaults `-PaperDbContainer` to `mqk-paper-postgres` and `docker exec ... pg_dump`s it. Running that test therefore reads the real Paper DB. It should be pointed at a disposable container or refuse to run without one; not changed here (its R4 canary sections deliberately model the canonical Paper DB URL).
+- `scripts/windows/tests/test_official_dual_mode_launcher.ps1` invokes the real launcher `-CheckOnly` against the repo root and writes into `smoke_logs/launcher/`; run it only from a disposable clone.
+- `test_bundle7_phase7c_premarket_validation.ps1` was not run to completion (240 s); `check_phase7a_r6_matrix_db_required.ps1` was not run against a DB.
+
+### G2.11 Second adversarial sweep
+
+- Unique-item census re-derived mechanically from the ledger text; 73 Lane IDs match 73 headings; no `PARTIAL`, no untriaged item.
+- Each fixed defect's immediate callers/guards were re-inspected: clippy rewrites were each verified against the truth table of the original expression; the conflict-policy real ordering (conflict 1796 < allocation 1892 < cap#6 1963 < submit 2020) was measured before re-anchoring the guard.
+- No historical status was hidden by relabelling: AUDIT-M1-03 is recorded as a regression that was fixed, not as a stale label.
+- No deferred capability was promoted; no frozen contract was reopened; A3 was not reopened.
+
+**REMAINING ACTIONABLE ENGINEERING ITEMS: NONE.**
+
 
 ## H. Immediate Sequencing From This Contract
 
