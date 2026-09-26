@@ -355,21 +355,53 @@ pub fn evaluate_per_symbol_notional_cap(
         };
     };
 
-    let limit_price_usd = limit_price_micros as f64 / 1_000_000.0;
-    // Whole quantities convert to the exact same f64 as the historical
-    // `qty as f64`; fractional quantities keep their exact decimal value.
-    let qty_units = qty.raw() as f64 / mqk_schemas::QTY_MICROS_SCALE as f64;
-    let implied_notional = qty_units * limit_price_usd;
+    // Authority: exact checked integer arithmetic. `qty_raw × price_micros`
+    // is notional in 1e-12 USD; the cap is scaled to the same unit. Any
+    // unrepresentable value (cap, product) is a refusal, never a wrap.
+    // The f64 below is presentation/telemetry only and never decides.
+    let notional_scaled = i128::from(qty.raw()).checked_mul(i128::from(limit_price_micros));
+    let cap_scaled = usd_cap_to_micros(cap_usd)
+        .and_then(|micros| micros.checked_mul(i128::from(mqk_schemas::QTY_MICROS_SCALE)));
+    let exceeds = match (notional_scaled, cap_scaled) {
+        (Some(notional), Some(cap)) => notional > cap,
+        _ => true,
+    };
 
-    if implied_notional > cap_usd {
+    if exceeds {
+        let implied_notional_usd =
+            notional_scaled.map_or(f64::INFINITY, |n| n as f64 / (QTY_PRICE_SCALE as f64));
         return PositionSizingOutcome::SizingDeniedPerSymbolCap {
             symbol: symbol.to_string(),
-            implied_notional_usd: implied_notional,
+            implied_notional_usd,
             cap_usd,
         };
     }
 
     PositionSizingOutcome::NoSizingConstraint
+}
+
+/// `qty_raw × price_micros` unit: 1e-6 (quantity) × 1e-6 (price) USD.
+const QTY_PRICE_SCALE: i128 = 1_000_000_000_000;
+
+/// Exact conversion of a positive USD cap to micro-USD.
+///
+/// The cap is an operator-typed decimal; the shortest round-trip decimal
+/// rendering of the parsed `f64` recovers it exactly (never scientific
+/// notation). Digits beyond micro-USD are floored, which can only make the
+/// cap stricter. `None` for non-finite/non-positive input or overflow.
+fn usd_cap_to_micros(cap_usd: f64) -> Option<i128> {
+    if !cap_usd.is_finite() || cap_usd <= 0.0 {
+        return None;
+    }
+    let text = format!("{cap_usd}");
+    let (whole, frac) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    let mut frac6: String = frac.chars().take(6).collect();
+    while frac6.len() < 6 {
+        frac6.push('0');
+    }
+    let whole: i128 = whole.parse().ok()?;
+    let frac6: i128 = frac6.parse().ok()?;
+    whole.checked_mul(1_000_000)?.checked_add(frac6)
 }
 
 /// Read the optional per-symbol maximum notional cap (cap #3, design doc §6)
@@ -398,4 +430,87 @@ pub fn evaluate_per_symbol_notional_cap_from_env(
 ) -> PositionSizingOutcome {
     let cap_usd = per_symbol_max_notional_usd_cap_from_env();
     evaluate_per_symbol_notional_cap(symbol, qty, limit_price_micros, cap_usd)
+}
+
+#[cfg(test)]
+mod exact_notional_cap_tests {
+    use super::*;
+    use mqk_schemas::QtyMicros;
+
+    fn permits(raw_qty: i64, price_micros: i64, cap_usd: f64) -> bool {
+        matches!(
+            evaluate_per_symbol_notional_cap(
+                "SYM",
+                QtyMicros::new(raw_qty),
+                Some(price_micros),
+                Some(cap_usd)
+            ),
+            PositionSizingOutcome::NoSizingConstraint
+        )
+    }
+
+    #[test]
+    fn whole_equity_cases_are_unchanged() {
+        let ten = 10 * mqk_schemas::QTY_MICROS_SCALE;
+        // 10 shares x $100 = $1,000 exactly.
+        assert!(permits(ten, 100_000_000, 1_000.0));
+        assert!(!permits(ten, 100_000_000, 999.99));
+        assert!(permits(ten, 100_000_000, 1_000.01));
+        // One micro-dollar per share above the cap flips the decision.
+        assert!(permits(ten, 100_000_001, 1_000.00001));
+        assert!(!permits(ten, 100_000_001, 1_000.000009));
+    }
+
+    #[test]
+    fn fractional_boundary_immediately_below_and_above_cap() {
+        // 0.5 units x $12.000002 = $6.000001 exactly.
+        assert!(permits(500_000, 12_000_002, 6.000001), "at cap permits");
+        assert!(
+            permits(500_000, 12_000_002, 6.000002),
+            "one micro above cap"
+        );
+        assert!(!permits(500_000, 12_000_002, 6.0), "below implied notional");
+        // 0.0001 BTC x $60,000.123456 = $6.0000123456.
+        assert!(!permits(100, 60_000_123_456, 6.000012));
+        assert!(permits(100, 60_000_123_456, 6.000013));
+    }
+
+    #[test]
+    fn decision_does_not_depend_on_f64_rounding() {
+        // 0.000003 x $112 is exactly $0.000336. IEEE-754 doubles disagree:
+        // the historical `qty_units * price_usd` exceeds the cap.
+        let float_notional = (3.0_f64 / 1_000_000.0) * (112_000_000.0_f64 / 1_000_000.0);
+        assert!(float_notional > 0.000336, "fixture must defeat f64 math");
+        assert!(
+            permits(3, 112_000_000, 0.000336),
+            "exact math permits at cap"
+        );
+        assert!(!permits(3, 112_000_000, 0.000335));
+    }
+
+    #[test]
+    fn unrepresentable_values_refuse_instead_of_wrapping() {
+        // Cap so large its scaled form overflows i128, and a non-finite cap
+        // rendering: both are refused, never wrapped into an allow.
+        assert!(!permits(1, 1_000_000, 1e30));
+        assert!(!permits(1, 1_000_000, f64::MAX));
+        // Extreme quantity x price stays exact (i128) and is compared, not wrapped.
+        assert!(!permits(i64::MAX, i64::MAX, 1.0e13));
+        // Cap floored below one micro-dollar denies any positive notional.
+        assert!(!permits(1, 1_000_000, 1e-9));
+    }
+
+    #[test]
+    fn market_order_and_disabled_cap_are_unchanged() {
+        assert!(matches!(
+            evaluate_per_symbol_notional_cap("S", QtyMicros::new(100), None, Some(1.0)),
+            PositionSizingOutcome::SizingUnverifiable { .. }
+        ));
+        for off in [None, Some(0.0), Some(-1.0)] {
+            assert!(matches!(
+                evaluate_per_symbol_notional_cap("S", QtyMicros::new(100), Some(1), off),
+                PositionSizingOutcome::NoSizingConstraint
+            ));
+        }
+    }
 }
