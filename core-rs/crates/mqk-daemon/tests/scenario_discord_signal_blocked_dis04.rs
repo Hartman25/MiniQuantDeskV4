@@ -69,6 +69,7 @@ impl MockSink {
 
 fn signal_blocked_payload(disposition: &str, gate: &str) -> TradeEventPayload {
     TradeEventPayload {
+        qty_micros: None,
         stage: "signal.blocked".to_string(),
         run_id: None,
         symbol: Some("SPY".to_string()),
@@ -211,6 +212,7 @@ fn dis04_t05_already_at_target_no_discord_payload() {
     // built in the production branch for already_at_target (proved by code review
     // and absence of the call in loop_runner.rs / decision.rs for delta==0).
     let payload = TradeEventPayload {
+        qty_micros: None,
         stage: "signal.blocked".to_string(),
         run_id: None,
         symbol: Some("SPY".to_string()),

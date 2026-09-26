@@ -731,6 +731,7 @@ impl DiscordNotifier {
             "symbol": payload.symbol,
             "side": payload.side,
             "qty": payload.qty,
+            "qty_micros": payload.qty_micros,
             "price_micros": payload.price_micros,
             "order_id": payload.order_id,
             "detail": payload.detail,
@@ -789,8 +790,14 @@ pub struct TradeEventPayload {
     pub symbol: Option<String>,
     /// Order side (`"Buy"` / `"Sell"`), if applicable.
     pub side: Option<String>,
-    /// Quantity (shares), if applicable.
+    /// Whole-unit quantity (shares), if applicable. `None` when the quantity is
+    /// absent OR fractional; a known fractional quantity is carried exactly in
+    /// `qty_micros`, never dropped.
     pub qty: Option<i64>,
+    /// Exact quantity as raw `QtyMicros` (1.0 unit == 1_000_000), set by the
+    /// fractional-capable call sites; whole-unit-only sites leave `qty` authoritative.
+    #[serde(default)]
+    pub qty_micros: Option<i64>,
     /// Fill price in micros (price × 1_000_000), if applicable.
     pub price_micros: Option<i64>,
     /// Internal order ID, if applicable.

@@ -72,6 +72,7 @@ impl MockSink {
 
 fn flatten_payload(enqueued_symbols: &str) -> TradeEventPayload {
     TradeEventPayload {
+        qty_micros: None,
         stage: "flatten.requested".to_string(),
         run_id: Some("abcd1234".to_string()),
         symbol: Some(enqueued_symbols.to_string()),
@@ -92,6 +93,7 @@ fn flatten_payload(enqueued_symbols: &str) -> TradeEventPayload {
 
 fn reconcile_clean_payload(prior: &str) -> TradeEventPayload {
     TradeEventPayload {
+        qty_micros: None,
         stage: "reconcile.clean".to_string(),
         run_id: None,
         symbol: None,

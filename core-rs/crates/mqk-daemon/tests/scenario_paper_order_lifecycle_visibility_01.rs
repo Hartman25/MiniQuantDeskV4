@@ -336,7 +336,7 @@ async fn pl_08_signal_only_is_no_signal_durably_explained() {
             bars_loaded: 20,
             latest_bar_ts_utc: Some(ts),
             signal_generated: false,
-            signal_qty: None,
+            signal_qty: mqk_db::SignalQtyEvidence::NotEvaluated,
             signal_side: None,
             reason_code: "no_edge".to_string(),
             reason: "no edge detected".to_string(),
@@ -525,6 +525,137 @@ async fn pl_12_v1_whole_units_v2_exact_micros_and_v1_refuses_fractional() {
         .collect();
     micros.sort_unstable();
     assert_eq!(micros, vec![100, 5_000_000]);
+
+    pl_cleanup_run(&pool, run_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// PL-14 (CUTOVER-1D-A3): signal-evaluation quantity contract on the lifecycle
+// route. V1 keeps whole `signal_qty` (null only when on_bar never ran) and
+// REFUSES an exactly-known fractional evaluation; V2 exposes raw micros.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn pl_14_signal_qty_v1_whole_v2_exact_and_v1_refuses_fractional() {
+    use mqk_db::SignalQtyEvidence;
+    use mqk_schemas::QtyMicros;
+
+    let pool = pl_db_pool().await;
+    let run_id = Uuid::parse_str("f1600001-0000-4000-8000-0000000000b3").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-02-06T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    pl_seed_run(&pool, run_id, ts).await;
+
+    let args =
+        |id: &str, stage: &str, generated: bool, qty: SignalQtyEvidence, side: Option<&str>| {
+            mqk_db::InsertStrategySignalEvaluationArgs {
+                evaluation_id: Uuid::parse_str(id).unwrap(),
+                ts_utc: ts,
+                run_id: Some(run_id),
+                strategy_id: "swing_momentum".to_string(),
+                symbol: "AAPL".to_string(),
+                timeframe: "5m".to_string(),
+                bar_context_source: "db_loaded".to_string(),
+                bars_loaded: 10,
+                latest_bar_ts_utc: Some(ts),
+                signal_generated: generated,
+                signal_qty: qty,
+                signal_side: side.map(str::to_string),
+                reason_code: "test".to_string(),
+                reason: "test".to_string(),
+                decision_stage: stage.to_string(),
+                source: "test".to_string(),
+            }
+        };
+    mqk_db::insert_strategy_signal_evaluation(
+        &pool,
+        &args(
+            "f1600001-0000-4000-8000-0000000001b1",
+            "strategy_evaluated",
+            true,
+            SignalQtyEvidence::Exact(QtyMicros::from_whole_units(5).unwrap()),
+            Some("buy"),
+        ),
+    )
+    .await
+    .expect("PL-14: whole insert");
+    mqk_db::insert_strategy_signal_evaluation(
+        &pool,
+        &args(
+            "f1600001-0000-4000-8000-0000000001b2",
+            "pre_dispatch_gate",
+            false,
+            SignalQtyEvidence::NotEvaluated,
+            None,
+        ),
+    )
+    .await
+    .expect("PL-14: absent insert");
+
+    let v1_uri = format!("/api/v1/execution/paper-lifecycle?run_id={run_id}");
+    let v2_uri = format!("/api/v2/execution/paper-lifecycle?run_id={run_id}");
+
+    // Whole Equity + genuinely-absent: V1 keeps its historical shape.
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v1_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v1 = parse_json(body);
+    let by_id = |v: &serde_json::Value, id: &str| {
+        v["signal_evaluations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["evaluation_id"] == id)
+            .unwrap_or_else(|| panic!("row {id} missing: {v}"))
+            .clone()
+    };
+    assert_eq!(
+        by_id(&v1, "f1600001-0000-4000-8000-0000000001b1")["signal_qty"],
+        5
+    );
+    assert!(by_id(&v1, "f1600001-0000-4000-8000-0000000001b2")["signal_qty"].is_null());
+    assert!(by_id(&v1, "f1600001-0000-4000-8000-0000000001b1")
+        .get("signal_qty_micros")
+        .is_none());
+
+    // A successfully evaluated 0.0001 signal.
+    mqk_db::insert_strategy_signal_evaluation(
+        &pool,
+        &args(
+            "f1600001-0000-4000-8000-0000000001b3",
+            "strategy_evaluated",
+            true,
+            SignalQtyEvidence::Exact(QtyMicros::new(100)),
+            Some("buy"),
+        ),
+    )
+    .await
+    .expect("PL-14: fractional insert");
+
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v1_uri)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let v1 = parse_json(body);
+    assert_eq!(v1["error"], "quantity_not_representable_in_v1");
+    assert!(v1.get("signal_evaluations").is_none());
+
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v2_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v2 = parse_json(body);
+    assert_eq!(v2["quantity_schema_version"], "qty_micros_v1");
+    let frac = by_id(&v2, "f1600001-0000-4000-8000-0000000001b3");
+    assert_eq!(frac["signal_qty_micros"], 100);
+    assert_eq!(frac["signal_qty_state"], "exact");
+    assert_eq!(frac["signal_generated"], true);
+    assert_eq!(frac["signal_side"], "buy");
+    assert!(frac.get("signal_qty").is_none());
+    assert_eq!(
+        by_id(&v2, "f1600001-0000-4000-8000-0000000001b1")["signal_qty_micros"],
+        5_000_000
+    );
+    let absent = by_id(&v2, "f1600001-0000-4000-8000-0000000001b2");
+    assert!(absent["signal_qty_micros"].is_null());
+    assert_eq!(absent["signal_qty_state"], "not_evaluated");
 
     pl_cleanup_run(&pool, run_id).await;
 }

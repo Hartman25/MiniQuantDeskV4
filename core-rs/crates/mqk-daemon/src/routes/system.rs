@@ -993,7 +993,15 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     // it is returning any non-zero targets.  Both values are `None` when
     // ExternalSignalIngestion is not configured (not applicable path).
     let bar_tick_dispatch_count: Option<u64> = Some(st.bar_tick_dispatch_count());
-    let last_bar_signal_qty: Option<i64> = st.last_bar_signal_qty();
+    let last_bar_signal = st.last_bar_signal();
+    // V1 whole-unit contract: a fractional/overflowed last signal is refused,
+    // never reported as `null` (== no bar dispatched).
+    let Ok(last_bar_signal_qty) = last_bar_signal.v1_whole_units() else {
+        return super::execution_order_analysis::v1_fractional_refusal(
+            super::strategy::LAST_BAR_SIGNAL_V2_ROUTE,
+            "the autonomous readiness last bar signal",
+        );
+    };
 
     // AUTON-SIGNAL-CONTEXT-01: Derive bar context source and count.
     let raw_ctx_bars = st.last_bar_context_bars();
@@ -1005,7 +1013,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
 
     // AUTON-NO-TRADE-02: When bar ticks are being dispatched but the strategy
     // is consistently returning signal qty = 0, surface the reason.
-    if st.bar_tick_dispatch_count() > 0 && last_bar_signal_qty == Some(0) {
+    if st.bar_tick_dispatch_count() > 0 && last_bar_signal.is_flat() {
         let reason = match raw_ctx_bars {
             n if n > 0 => format!(
                 "NO_SIGNAL_GENERATED (AUTON-SIGNAL-CONTEXT-01): bar ticks dispatched with \
@@ -1176,7 +1184,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         md_readiness.start_allowed,
         &bar_ticker_gate,
         st.bar_tick_dispatch_count(),
-        last_bar_signal_qty,
+        last_bar_signal,
     );
     let diag_reason = blockers.first().cloned().unwrap_or_else(|| {
         "no blockers; runtime ready to start on next session-controller tick".to_string()
@@ -1411,7 +1419,7 @@ fn classify_no_trade_diagnostic(
     md_start_allowed: bool,
     bar_ticker_gate: &str,
     bar_tick_dispatch_count: u64,
-    last_bar_signal_qty: Option<i64>,
+    last_bar_signal: crate::decision::LastBarSignal,
 ) -> (&'static str, &'static str) {
     if !ws_continuity_ready {
         return ("WS_CONTINUITY_NOT_READY", "pre_session_window");
@@ -1441,7 +1449,7 @@ fn classify_no_trade_diagnostic(
         if bar_tick_dispatch_count == 0 {
             return ("STRATEGY_NOT_TICKED", "pre_dispatch");
         }
-        if last_bar_signal_qty == Some(0) {
+        if last_bar_signal.is_flat() {
             return ("NO_SIGNAL_GENERATED", "pre_dispatch");
         }
         return ("RUNTIME_ALREADY_ACTIVE", "pre_dispatch");
@@ -3192,6 +3200,12 @@ mod tests {
         bar_tick_dispatch_count: u64,
         last_bar_signal_qty: Option<i64>,
     ) -> (&'static str, &'static str) {
+        let last_bar_signal =
+            last_bar_signal_qty.map_or(crate::decision::LastBarSignal::NoDispatch, |q| {
+                crate::decision::LastBarSignal::Evaluated(
+                    mqk_schemas::QtyMicros::from_whole_units(q).expect("whole-unit test qty"),
+                )
+            });
         classify_no_trade_diagnostic(
             overall_ready,
             ws_continuity_ready,
@@ -3205,7 +3219,7 @@ mod tests {
             md_start_allowed,
             bar_ticker_gate,
             bar_tick_dispatch_count,
-            last_bar_signal_qty,
+            last_bar_signal,
         )
     }
 

@@ -1402,6 +1402,7 @@ pub(super) fn spawn_execution_loop(
                                                     symbol: Some(symbol_owned.clone()),
                                                     side: None,
                                                     qty: clamped_qty.to_whole_units_checked(),
+                                                    qty_micros: Some(clamped_qty.raw()),
                                                     price_micros: None,
                                                     order_id: None,
                                                     detail: Some(format!(
@@ -1429,9 +1430,7 @@ pub(super) fn spawn_execution_loop(
                             // strategy returned hold/flat for all targets this tick.
                             let raw_signal_total =
                                 crate::decision::sum_target_qty(&bar_result.intents.output.targets);
-                            state_arc.record_bar_tick_outcome(crate::decision::public_signal_qty(
-                                raw_signal_total,
-                            ));
+                            state_arc.record_bar_tick_outcome(raw_signal_total);
                             let raw_signal_qty = raw_signal_total
                                 .map_or_else(|| "overflow".to_string(), |q| q.to_string());
 
@@ -1520,6 +1519,7 @@ pub(super) fn spawn_execution_loop(
                                                 symbol: Some(symbol.clone()),
                                                 side: Some("sell".to_string()),
                                                 qty: qty_to_sell.to_whole_units_checked(),
+                                                qty_micros: Some(qty_to_sell.raw()),
                                                 price_micros: None,
                                                 order_id: None,
                                                 detail: Some(format!(
@@ -2217,6 +2217,7 @@ where
                         tokio::spawn(async move {
                             notifier
                                 .notify_trade_event(&crate::notify::TradeEventPayload {
+                                    qty_micros: None,
                                     stage: "reconcile.clean".to_string(),
                                     run_id: None,
                                     symbol: None,

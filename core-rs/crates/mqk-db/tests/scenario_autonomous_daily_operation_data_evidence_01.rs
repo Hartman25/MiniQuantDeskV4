@@ -517,7 +517,7 @@ async fn exact_evaluation_row_lookup_and_completed_claim_stores_evaluation_id() 
             bars_loaded: 5,
             latest_bar_ts_utc: Some(t0),
             signal_generated: false,
-            signal_qty: Some(0),
+            signal_qty: mqk_db::SignalQtyEvidence::Exact(mqk_schemas::QtyMicros::ZERO),
             signal_side: None,
             reason_code: "hold".to_string(),
             reason: "no signal".to_string(),

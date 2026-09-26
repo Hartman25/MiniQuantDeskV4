@@ -58,6 +58,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use mqk_schemas::QtyMicros;
+
 use crate::backtest_jobs::{new_job_store, BacktestJobStore};
 use crate::ingest_jobs::{new_ingest_job_store, IngestJobStore};
 use crate::strategy_scan_jobs::{new_strategy_scan_job_store, StrategyScanJobStore};
@@ -667,11 +669,11 @@ pub struct AppState {
     last_bar_input_ts: Arc<AtomicI64>,
     /// AUTON-NO-TRADE-01: Sum of target quantities from the last bar dispatch.
     ///
-    /// Set after each `tick_strategy_dispatch` that yields a bar result.  Zero
-    /// means the strategy returned no net-positive targets (signal = hold/flat).
-    /// `i64::MIN` means no bar has been dispatched this session (sentinel).
-    /// Surfaced in `/api/v1/strategy/summary` as `last_bar_signal_qty`.
-    last_bar_signal_qty: Arc<AtomicI64>,
+    /// Set after each `tick_strategy_dispatch` that yields a bar result. Exact
+    /// `QtyMicros`, held separately from "no bar dispatched this session"
+    /// (`LastBarSignal::NoDispatch`), so a flat, fractional, or overflowed
+    /// signal is never observable as no-dispatch.
+    last_bar_signal: Arc<std::sync::Mutex<crate::decision::LastBarSignal>>,
     /// AUTON-NO-TRADE-01: Total bar ticks dispatched to the native strategy this session.
     ///
     /// Incremented each time `tick_strategy_dispatch` fires a real bar result.
@@ -1455,12 +1457,43 @@ struct SignalEvaluationAttempt<'a> {
     /// `false` is informational, not an error: hold/flat signal or a
     /// pre-dispatch gate refused before `on_bar` ran.
     signal_generated: bool,
-    /// `None` only when a pre-dispatch gate refused before `on_bar` ran.
-    signal_qty: Option<i64>,
+    /// `NotEvaluated` only when a pre-dispatch gate refused before `on_bar` ran.
+    signal_qty: mqk_db::SignalQtyEvidence,
     reason_code: &'static str,
     reason: &'static str,
     /// `"pre_dispatch_gate"` or `"strategy_evaluated"`.
     decision_stage: &'static str,
+}
+
+impl<'a> SignalEvaluationAttempt<'a> {
+    /// A completed `on_bar` evaluation: `signal_total` is the checked target
+    /// sum (`None` == overflow). A fractional or overflowed total is carried
+    /// exactly / explicitly, never as an absent quantity.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluated(
+        now_tick: u64,
+        symbol: &'a str,
+        timeframe: &'a str,
+        bars_loaded: i64,
+        latest_bar_end_ts: i64,
+        signal_total: Option<QtyMicros>,
+        reason_code: &'static str,
+        reason: &'static str,
+    ) -> Self {
+        Self {
+            now_tick,
+            symbol,
+            timeframe,
+            bar_context_source: "db_loaded",
+            bars_loaded,
+            latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_end_ts, 0),
+            signal_generated: crate::decision::signal_generated(signal_total),
+            signal_qty: mqk_db::SignalQtyEvidence::evaluated(signal_total),
+            reason_code,
+            reason,
+            decision_stage: "strategy_evaluated",
+        }
+    }
 }
 
 /// AUTON-NO-TRADE-OFFHOURS-01B: one durable no-trade diagnostic write
@@ -2036,7 +2069,9 @@ impl AppState {
             completed_bar_completion_fault_test_hook: Arc::new(AtomicBool::new(false)),
             completed_bar_task_clock_override: Arc::new(Mutex::new(None)),
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
-            last_bar_signal_qty: Arc::new(AtomicI64::new(i64::MIN)),
+            last_bar_signal: Arc::new(std::sync::Mutex::new(
+                crate::decision::LastBarSignal::NoDispatch,
+            )),
             bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
             last_bar_context_bars: Arc::new(AtomicI64::new(-1)),
             last_strategy_diagnostics: Arc::new(Mutex::new(None)),
@@ -3228,29 +3263,31 @@ operator_reconcile_or_repair_required"
     /// AUTON-NO-TRADE-01: Record the outcome of a bar tick dispatch.
     ///
     /// Called from the execution loop after `tick_strategy_dispatch` returns
-    /// a bar result.  `signal_qty` is the sum of all target quantities the
-    /// strategy returned; zero means "no trade signal this tick".
-    ///
-    /// `signal_qty` is the whole-unit public projection: `None` when the
-    /// total is fractional/overflowed (no exact whole-unit value), stored as
-    /// the "unavailable" sentinel — never a rounded integer.
-    pub(crate) fn record_bar_tick_outcome(&self, signal_qty: Option<i64>) {
-        self.last_bar_signal_qty
-            .store(signal_qty.unwrap_or(i64::MIN), Ordering::SeqCst);
+    /// a bar result.  `signal_total` is the checked sum of all target
+    /// quantities the strategy returned (`None` == overflow); zero means "no
+    /// trade signal this tick". The exact value is retained -- a fractional or
+    /// overflowed total is never collapsed to the no-dispatch state.
+    pub(crate) fn record_bar_tick_outcome(&self, signal_total: Option<QtyMicros>) {
+        self.set_last_bar_signal(crate::decision::LastBarSignal::from_total(signal_total));
         self.bar_tick_dispatch_count.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// AUTON-NO-TRADE-01: Sum of target quantities from the last bar dispatch.
+    fn set_last_bar_signal(&self, signal: crate::decision::LastBarSignal) {
+        *self
+            .last_bar_signal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = signal;
+    }
+
+    /// AUTON-NO-TRADE-01: Exact outcome of the last bar dispatch.
     ///
-    /// `None` when no bar has been dispatched this session (sentinel = i64::MIN).
-    /// Zero means strategy returned no net-positive targets (hold/flat signal).
-    pub fn last_bar_signal_qty(&self) -> Option<i64> {
-        let v = self.last_bar_signal_qty.load(Ordering::SeqCst);
-        if v == i64::MIN {
-            None
-        } else {
-            Some(v)
-        }
+    /// `NoDispatch` when no bar has been dispatched this session; every
+    /// evaluated outcome (flat, fractional, overflowed) is distinct from it.
+    pub fn last_bar_signal(&self) -> crate::decision::LastBarSignal {
+        *self
+            .last_bar_signal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// AUTON-NO-TRADE-01: Count of bar ticks dispatched to the native strategy this session.
@@ -3266,21 +3303,70 @@ operator_reconcile_or_repair_required"
     ///
     /// `ctx_bars`:  -1 = no dispatch yet (sentinel), 0 = stub_no_price, N>0 = db_loaded.
     pub fn set_bar_tick_state_for_test(&self, dispatch_count: u64, signal_qty: i64, ctx_bars: i64) {
-        // Map dispatch_count=0 back to the "no dispatch" sentinel for signal_qty.
-        let stored_qty = if dispatch_count == 0 {
-            i64::MIN
+        self.set_bar_tick_state_exact_for_test(
+            dispatch_count,
+            QtyMicros::from_whole_units(signal_qty).expect("whole-unit test qty fits QtyMicros"),
+            ctx_bars,
+        );
+    }
+
+    /// Exact-`QtyMicros` sibling of [`Self::set_bar_tick_state_for_test`].
+    pub fn set_bar_tick_state_exact_for_test(
+        &self,
+        dispatch_count: u64,
+        signal_qty: QtyMicros,
+        ctx_bars: i64,
+    ) {
+        // dispatch_count == 0 means no bar has been dispatched.
+        self.set_last_bar_signal(if dispatch_count == 0 {
+            crate::decision::LastBarSignal::NoDispatch
         } else {
-            signal_qty
-        };
+            crate::decision::LastBarSignal::Evaluated(signal_qty)
+        });
         self.bar_tick_dispatch_count
             .store(dispatch_count, Ordering::SeqCst);
-        self.last_bar_signal_qty.store(stored_qty, Ordering::SeqCst);
         self.last_bar_context_bars.store(ctx_bars, Ordering::SeqCst);
+    }
+
+    /// Test seam: drive the real bar-tick outcome path with an exact total
+    /// (`None` == overflow).
+    pub fn record_bar_tick_outcome_for_test(&self, signal_total: Option<QtyMicros>) {
+        self.record_bar_tick_outcome(signal_total);
+    }
+
+    /// Test seam: exercise the production signal-evaluation journal writer
+    /// (`SignalEvaluationAttempt::evaluated` + `record_signal_evaluation`) for a
+    /// completed evaluation under explicit run/strategy authority.
+    pub async fn record_signal_evaluation_for_test(
+        &self,
+        run_id: Uuid,
+        strategy_id: &str,
+        symbol: &str,
+        now_tick: u64,
+        signal_total: Option<QtyMicros>,
+    ) {
+        self.record_signal_evaluation(
+            SignalEvaluationAuthority::Explicit {
+                run_id,
+                strategy_id,
+            },
+            SignalEvaluationAttempt::evaluated(
+                now_tick,
+                symbol,
+                "5m",
+                1,
+                1_700_000_000,
+                signal_total,
+                "test_seam",
+                "test seam",
+            ),
+        )
+        .await;
     }
 
     /// AUTON-NO-TRADE-01: Reset bar-tick counters on new run start.
     pub(crate) fn reset_bar_tick_counters(&self) {
-        self.last_bar_signal_qty.store(i64::MIN, Ordering::SeqCst);
+        self.set_last_bar_signal(crate::decision::LastBarSignal::NoDispatch);
         self.bar_tick_dispatch_count.store(0, Ordering::SeqCst);
         self.last_bar_context_bars.store(-1, Ordering::SeqCst);
     }
@@ -3495,7 +3581,7 @@ operator_reconcile_or_repair_required"
                     bars_loaded: 0,
                     latest_bar_ts_utc: None,
                     signal_generated: false,
-                    signal_qty: None,
+                    signal_qty: mqk_db::SignalQtyEvidence::NotEvaluated,
                     reason_code: no_order_reason,
                     reason: "no completed bars in md_bars for this symbol/timeframe",
                     decision_stage: "pre_dispatch_gate",
@@ -3565,7 +3651,7 @@ operator_reconcile_or_repair_required"
                     latest_bar_ts_utc: latest_end_ts
                         .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
                     signal_generated: false,
-                    signal_qty: None,
+                    signal_qty: mqk_db::SignalQtyEvidence::NotEvaluated,
                     reason_code: no_order_reason,
                     reason: "latest completed bar exceeds the per-symbol staleness threshold",
                     decision_stage: "pre_dispatch_gate",
@@ -3703,22 +3789,18 @@ operator_reconcile_or_repair_required"
         // attribute the row to in that case.
         if let Some(ref bar_result) = result {
             let signal_total = crate::decision::sum_target_qty(&bar_result.intents.output.targets);
-            let signal_qty: Option<i64> = crate::decision::public_signal_qty(signal_total);
             self.record_signal_evaluation(
                 SignalEvaluationAuthority::Legacy,
-                SignalEvaluationAttempt {
-                    now_tick: bar.now_tick,
+                SignalEvaluationAttempt::evaluated(
+                    bar.now_tick,
                     symbol,
-                    timeframe: md_timeframe,
-                    bar_context_source: "db_loaded",
-                    bars_loaded: bars_loaded as i64,
-                    latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
-                    signal_generated: crate::decision::signal_generated(signal_total),
-                    signal_qty,
-                    reason_code: diagnostic_decision,
-                    reason: diagnostic_reason,
-                    decision_stage: "strategy_evaluated",
-                },
+                    md_timeframe,
+                    bars_loaded as i64,
+                    latest_bar_row.end_ts,
+                    signal_total,
+                    diagnostic_decision,
+                    diagnostic_reason,
+                ),
             )
             .await;
         }
@@ -3808,9 +3890,9 @@ operator_reconcile_or_repair_required"
                 strategy_id,
             } => (Some(run_id), strategy_id.to_string()),
         };
-        let signal_side = match attempt.signal_qty {
-            Some(q) if q > 0 => Some("buy".to_string()),
-            Some(q) if q < 0 => Some("sell".to_string()),
+        let signal_side = match attempt.signal_qty.exact() {
+            Some(q) if q.is_positive() => Some("buy".to_string()),
+            Some(q) if q.is_negative() => Some("sell".to_string()),
             _ => None,
         };
         // AUDIT-EVENT-DETERMINISM: deterministic UUIDv5, never Uuid::new_v4(),
@@ -3909,7 +3991,7 @@ operator_reconcile_or_repair_required"
             bars_loaded: 0,
             latest_bar_ts_utc: None,
             signal_generated: false,
-            signal_qty: None,
+            signal_qty: mqk_db::SignalQtyEvidence::NotEvaluated,
             signal_side: None,
             reason_code: "strategy_dispatch_panicked".to_string(),
             reason: "strategy evaluation panicked for this symbol; host quarantined, no decision \
@@ -4531,7 +4613,7 @@ operator_reconcile_or_repair_required"
                                     bars_loaded: 0,
                                     latest_bar_ts_utc: None,
                                     signal_generated: false,
-                                    signal_qty: None,
+                                    signal_qty: mqk_db::SignalQtyEvidence::NotEvaluated,
                                     reason_code: "selected_host_db_bar_load_failed",
                                     reason: "DB bar-window load failed for this selected binding; \
                                              no stub fallback",
@@ -4656,22 +4738,18 @@ operator_reconcile_or_repair_required"
             check_selected_host_result_coherence(binding, &bar_result)?;
 
             let signal_total = crate::decision::sum_target_qty(&bar_result.intents.output.targets);
-            let signal_qty: Option<i64> = crate::decision::public_signal_qty(signal_total);
             self.record_signal_evaluation(
                 selected_authority,
-                SignalEvaluationAttempt {
-                    now_tick: bar.now_tick,
-                    symbol: &binding.symbol,
-                    timeframe: &binding.db_timeframe_label,
-                    bar_context_source: "db_loaded",
-                    bars_loaded: bars_loaded as i64,
-                    latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
-                    signal_generated: crate::decision::signal_generated(signal_total),
-                    signal_qty,
-                    reason_code: diagnostic_decision,
-                    reason: diagnostic_reason,
-                    decision_stage: "strategy_evaluated",
-                },
+                SignalEvaluationAttempt::evaluated(
+                    bar.now_tick,
+                    &binding.symbol,
+                    &binding.db_timeframe_label,
+                    bars_loaded as i64,
+                    latest_bar_row.end_ts,
+                    signal_total,
+                    diagnostic_decision,
+                    diagnostic_reason,
+                ),
             )
             .await;
 
@@ -6392,6 +6470,44 @@ fn autonomous_truth_event_parts(
 mod tests {
     use super::*;
     use mqk_execution::ReconcileGate;
+
+    /// CUTOVER-1D-A3: the production `record_bar_tick_outcome` retains the
+    /// exact total independently of the no-dispatch state.
+    #[test]
+    fn a3_last_bar_signal_keeps_fractional_flat_and_min_raw_distinct_from_no_dispatch() {
+        use crate::decision::LastBarSignal;
+        let state = AppState::new_with_operator_auth(OperatorAuthMode::ExplicitDevNoToken);
+        assert_eq!(state.last_bar_signal(), LastBarSignal::NoDispatch);
+        assert_eq!(state.bar_tick_dispatch_count(), 0);
+
+        state.record_bar_tick_outcome(Some(QtyMicros::new(100)));
+        assert_eq!(
+            state.last_bar_signal(),
+            LastBarSignal::Evaluated(QtyMicros::new(100))
+        );
+        assert_eq!(state.bar_tick_dispatch_count(), 1);
+
+        state.record_bar_tick_outcome(Some(QtyMicros::ZERO));
+        assert_eq!(
+            state.last_bar_signal(),
+            LastBarSignal::Evaluated(QtyMicros::ZERO)
+        );
+
+        // The old sentinel value is an ordinary raw quantity, not "no dispatch".
+        state.record_bar_tick_outcome(Some(QtyMicros::new(i64::MIN)));
+        assert_eq!(
+            state.last_bar_signal(),
+            LastBarSignal::Evaluated(QtyMicros::new(i64::MIN))
+        );
+
+        state.record_bar_tick_outcome(None);
+        assert_eq!(state.last_bar_signal(), LastBarSignal::TotalOverflowed);
+        assert_eq!(state.bar_tick_dispatch_count(), 4);
+
+        state.reset_bar_tick_counters();
+        assert_eq!(state.last_bar_signal(), LastBarSignal::NoDispatch);
+        assert_eq!(state.bar_tick_dispatch_count(), 0);
+    }
 
     // KILL-SWITCH-FAIL-CLOSED-READ-ERROR-VERIFY-01: mutation-tests the pure
     // override seam directly, rather than requiring a full DB-backed active
@@ -8575,7 +8691,10 @@ mod ownership_state_machine_tests {
             Some(7)
         );
         assert_eq!(state.bar_tick_dispatch_count.load(Ordering::SeqCst), 9);
-        assert_eq!(state.last_bar_signal_qty.load(Ordering::SeqCst), 123);
+        assert_eq!(
+            state.last_bar_signal(),
+            crate::decision::LastBarSignal::Evaluated(QtyMicros::from_whole_units(123).unwrap())
+        );
         assert_eq!(state.last_bar_context_bars.load(Ordering::SeqCst), 4);
         assert_eq!(state.per_symbol_target_states().await.len(), 1);
 
@@ -8827,7 +8946,10 @@ mod ownership_state_machine_tests {
             "per-symbol position-cap alert dedup must be cleared"
         );
         assert_eq!(state.bar_tick_dispatch_count.load(Ordering::SeqCst), 0);
-        assert_eq!(state.last_bar_signal_qty.load(Ordering::SeqCst), i64::MIN);
+        assert_eq!(
+            state.last_bar_signal(),
+            crate::decision::LastBarSignal::NoDispatch
+        );
         assert_eq!(state.last_bar_context_bars.load(Ordering::SeqCst), -1);
         assert!(state.per_symbol_target_states().await.is_empty());
     }
@@ -9483,7 +9605,7 @@ mod phase7b_selected_host_dispatch_tests {
         assert_eq!(row.reason_code, "strategy_dispatch_panicked");
         assert_eq!(row.strategy_id, "a1_legacy_panic_probe");
         assert!(!row.signal_generated);
-        assert_eq!(row.signal_qty, None);
+        assert_eq!(row.signal_qty, mqk_db::SignalQtyEvidence::NotEvaluated);
 
         assert_eq!(
             state.native_strategy_bootstrap_truth_state_for_test().await,

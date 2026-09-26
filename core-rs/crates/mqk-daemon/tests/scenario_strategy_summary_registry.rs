@@ -753,3 +753,52 @@ async fn summary_row_kind_empty_string_for_unclassified() -> anyhow::Result<()> 
 
     Ok(())
 }
+
+/// CUTOVER-1D-A3: the single-fleet row's `last_bar_signal_qty` keeps its V1
+/// whole-unit contract -- `null` only for no-dispatch, whole Equity unchanged,
+/// and a fractional last signal REFUSES (409) instead of collapsing to `null`.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn a3_summary_v1_last_bar_signal_null_only_for_no_dispatch_and_refuses_fractional() {
+    let pool = make_db_pool().await;
+    let id = unique_id("a3_lbs");
+    seed_registry(&pool, &id, "A3 Strategy", true).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: id.clone(),
+    }]))
+    .await;
+
+    let fetch = |st: &Arc<state::AppState>| {
+        let router = routes::build_router(Arc::clone(st));
+        async move { call(router, summary_request()).await }
+    };
+
+    let (status, body) = fetch(&st).await;
+    let json = parse_json(body);
+    assert_eq!(status, StatusCode::OK);
+    assert!(find_row(&json["rows"], &id).unwrap()["last_bar_signal_qty"].is_null());
+
+    st.set_bar_tick_state_for_test(1, 5, 5);
+    let (status, body) = fetch(&st).await;
+    let json = parse_json(body);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        find_row(&json["rows"], &id).unwrap()["last_bar_signal_qty"],
+        5
+    );
+
+    st.set_bar_tick_state_exact_for_test(2, mqk_schemas::QtyMicros::new(100), 5);
+    let (status, body) = fetch(&st).await;
+    let json = parse_json(body);
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], "quantity_not_representable_in_v1");
+    assert!(
+        json.get("rows").is_none(),
+        "no null/0 placeholder row: {json}"
+    );
+}

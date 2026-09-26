@@ -239,6 +239,7 @@ async fn nd10_all_notify_methods_survive_non2xx_without_blocking() {
 
     notifier
         .notify_trade_event(&TradeEventPayload {
+            qty_micros: None,
             stage: "order.submitted".to_string(),
             run_id: Some("run-test".to_string()),
             symbol: Some("AAPL".to_string()),

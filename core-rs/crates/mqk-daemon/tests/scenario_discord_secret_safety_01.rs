@@ -125,6 +125,7 @@ async fn ds02_delivery_failure_stays_best_effort_and_non_fatal() {
 
     notifier
         .notify_trade_event(&TradeEventPayload {
+            qty_micros: None,
             stage: "order.submitted".to_string(),
             run_id: Some("run-test".to_string()),
             symbol: Some("AAPL".to_string()),
@@ -198,6 +199,7 @@ fn ds04_payloads_and_status_do_not_serialize_webhook_material() {
         })
         .expect("run status payload serializes"),
         serde_json::to_string(&TradeEventPayload {
+            qty_micros: None,
             stage: "fill.terminal".to_string(),
             run_id: Some("run-test".to_string()),
             symbol: Some("AAPL".to_string()),

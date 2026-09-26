@@ -91,8 +91,10 @@ pub fn register_builtin_strategies(
 /// so the strategy is constructed from `BacktestConfig.sizing` rather than ambient
 /// env vars. This ensures `config_id` and strategy behavior are consistent.
 ///
-/// For live/paper runtime use, continue calling `register_builtin_strategies` which
-/// reads from env vars at strategy construction time (correct live behavior).
+/// Live/paper runtime bootstrap does not use this: it registers from resolved exact
+/// sizing via [`register_builtin_strategies_with_target_sizing`]. The env-constructing
+/// [`register_builtin_strategies`] is for registry/discovery, backtest, and
+/// validation callers.
 pub fn register_builtin_strategies_with_sizing(
     registry: &mut PluginRegistry,
     symbol: impl Into<String>,

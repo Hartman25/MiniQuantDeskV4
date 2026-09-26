@@ -180,6 +180,7 @@ async fn cr02_operator_action_delivers_to_c2_only() {
 
 fn trade_event_payload(environment: Option<&str>) -> TradeEventPayload {
     TradeEventPayload {
+        qty_micros: None,
         stage: "fill.terminal".to_string(),
         run_id: Some("run-test".to_string()),
         symbol: Some("AAPL".to_string()),

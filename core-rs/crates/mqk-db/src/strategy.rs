@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use mqk_schemas::QtyMicros;
 use sqlx::{PgPool, Row};
+
+use crate::runtime_qty_evidence::RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -334,6 +337,83 @@ pub async fn fetch_strategy_suppressions(pool: &PgPool) -> Result<Vec<StrategySu
 // (strategy_signal_evaluations)
 // ---------------------------------------------------------------------------
 
+/// Exact quantity evidence of one strategy signal evaluation.
+///
+/// Quantity authority is `mqk_schemas::QtyMicros`. A fractional signal is
+/// `Exact`, never `NotEvaluated`: `NotEvaluated` means only that `on_bar` never
+/// ran (a pre-dispatch gate refused first).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SignalQtyEvidence {
+    /// `on_bar` never ran; no quantity exists.
+    NotEvaluated,
+    /// `on_bar` ran; signed sum of target quantities (zero == flat/hold).
+    Exact(QtyMicros),
+    /// `on_bar` ran but the summed total overflowed; no exact quantity exists.
+    TotalOverflowed,
+}
+
+impl SignalQtyEvidence {
+    /// Evidence for an evaluation that ran: `total` is the checked target sum
+    /// (`None` == overflow).
+    pub fn evaluated(total: Option<QtyMicros>) -> Self {
+        total.map_or(Self::TotalOverflowed, Self::Exact)
+    }
+
+    pub fn exact(self) -> Option<QtyMicros> {
+        match self {
+            Self::Exact(q) => Some(q),
+            Self::NotEvaluated | Self::TotalOverflowed => None,
+        }
+    }
+
+    /// `(quantity_schema_version, signal_qty_micros)` columns for a new row.
+    fn encode(self) -> (Option<&'static str>, Option<i64>) {
+        match self {
+            Self::NotEvaluated => (None, None),
+            Self::Exact(q) => (Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1), Some(q.raw())),
+            Self::TotalOverflowed => (Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1), None),
+        }
+    }
+
+    /// Decode a stored row. Historical rows (`NULL` schema) carry whole units
+    /// in `signal_qty`; mixed or unknown authority fails closed.
+    pub fn decode(
+        quantity_schema_version: Option<&str>,
+        signal_qty: Option<i64>,
+        signal_qty_micros: Option<i64>,
+    ) -> Result<Self> {
+        match quantity_schema_version {
+            None => {
+                if signal_qty_micros.is_some() {
+                    anyhow::bail!(
+                        "historical signal-evaluation row carries unexpected signal_qty_micros"
+                    );
+                }
+                match signal_qty {
+                    None => Ok(Self::NotEvaluated),
+                    Some(units) => QtyMicros::from_whole_units(units)
+                        .map(Self::Exact)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "historical whole-unit signal_qty {units} overflows QtyMicros"
+                            )
+                        }),
+                }
+            }
+            Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1) => {
+                if signal_qty.is_some() {
+                    anyhow::bail!(
+                        "qty_micros_v1 signal-evaluation row carries unexpected legacy signal_qty"
+                    );
+                }
+                Ok(signal_qty_micros
+                    .map_or(Self::TotalOverflowed, |m| Self::Exact(QtyMicros::new(m))))
+            }
+            Some(other) => anyhow::bail!("unsupported quantity_schema_version '{other}'"),
+        }
+    }
+}
+
 /// One row from `strategy_signal_evaluations`.
 #[derive(Debug, Clone)]
 pub struct StrategySignalEvaluationRecord {
@@ -357,10 +437,11 @@ pub struct StrategySignalEvaluationRecord {
     /// ran because a pre-dispatch gate refused first) — informational, not an
     /// error.
     pub signal_generated: bool,
-    /// Signed sum of strategy target quantities. `None` when `on_bar` never ran.
-    pub signal_qty: Option<i64>,
-    /// `"buy"` / `"sell"` derived from the sign of `signal_qty`; `None` when
-    /// `signal_qty` is `None` or zero.
+    /// Signed sum of strategy target quantities;
+    /// [`SignalQtyEvidence::NotEvaluated`] only when `on_bar` never ran.
+    pub signal_qty: SignalQtyEvidence,
+    /// `"buy"` / `"sell"` derived from the sign of the exact signal quantity;
+    /// `None` when there is no exact quantity or it is zero.
     pub signal_side: Option<String>,
     pub reason_code: String,
     pub reason: String,
@@ -382,12 +463,47 @@ pub struct InsertStrategySignalEvaluationArgs {
     pub bars_loaded: i64,
     pub latest_bar_ts_utc: Option<DateTime<Utc>>,
     pub signal_generated: bool,
-    pub signal_qty: Option<i64>,
+    pub signal_qty: SignalQtyEvidence,
     pub signal_side: Option<String>,
     pub reason_code: String,
     pub reason: String,
     pub decision_stage: String,
     pub source: String,
+}
+
+const SIGNAL_EVALUATION_SELECT: &str = r#"
+    select evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
+           bar_context_source, bars_loaded, latest_bar_ts_utc,
+           signal_generated, signal_qty, quantity_schema_version, signal_qty_micros,
+           signal_side, reason_code, reason, decision_stage, source
+    from strategy_signal_evaluations
+"#;
+
+fn signal_evaluation_from_row(r: &sqlx::postgres::PgRow) -> Result<StrategySignalEvaluationRecord> {
+    let quantity_schema_version: Option<String> = r.try_get("quantity_schema_version")?;
+    let signal_qty = SignalQtyEvidence::decode(
+        quantity_schema_version.as_deref(),
+        r.try_get("signal_qty")?,
+        r.try_get("signal_qty_micros")?,
+    )?;
+    Ok(StrategySignalEvaluationRecord {
+        evaluation_id: r.try_get("evaluation_id")?,
+        ts_utc: r.try_get("ts_utc")?,
+        run_id: r.try_get("run_id")?,
+        strategy_id: r.try_get("strategy_id")?,
+        symbol: r.try_get("symbol")?,
+        timeframe: r.try_get("timeframe")?,
+        bar_context_source: r.try_get("bar_context_source")?,
+        bars_loaded: r.try_get("bars_loaded")?,
+        latest_bar_ts_utc: r.try_get("latest_bar_ts_utc")?,
+        signal_generated: r.try_get("signal_generated")?,
+        signal_qty,
+        signal_side: r.try_get("signal_side")?,
+        reason_code: r.try_get("reason_code")?,
+        reason: r.try_get("reason")?,
+        decision_stage: r.try_get("decision_stage")?,
+        source: r.try_get("source")?,
+    })
 }
 
 /// Persist a single strategy signal-evaluation row.
@@ -396,19 +512,24 @@ pub struct InsertStrategySignalEvaluationArgs {
 /// write attempt for the same logical tick (same deterministic
 /// `evaluation_id`) can never produce a second row. Never writes to, reads
 /// from, or otherwise touches `oms_outbox`/`oms_inbox`/`runs`.
+///
+/// The quantity is always written as `qty_micros_v1` evidence (or absent for
+/// [`SignalQtyEvidence::NotEvaluated`]); the historical whole-unit
+/// `signal_qty` column is never written.
 pub async fn insert_strategy_signal_evaluation(
     pool: &PgPool,
     args: &InsertStrategySignalEvaluationArgs,
 ) -> Result<()> {
+    let (quantity_schema_version, signal_qty_micros) = args.signal_qty.encode();
     sqlx::query(
         r#"
         insert into strategy_signal_evaluations (
             evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
             bar_context_source, bars_loaded, latest_bar_ts_utc,
-            signal_generated, signal_qty, signal_side,
+            signal_generated, quantity_schema_version, signal_qty_micros, signal_side,
             reason_code, reason, decision_stage, source
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
         on conflict (evaluation_id) do nothing
         "#,
     )
@@ -422,7 +543,8 @@ pub async fn insert_strategy_signal_evaluation(
     .bind(args.bars_loaded)
     .bind(args.latest_bar_ts_utc)
     .bind(args.signal_generated)
-    .bind(args.signal_qty)
+    .bind(quantity_schema_version)
+    .bind(signal_qty_micros)
     .bind(&args.signal_side)
     .bind(&args.reason_code)
     .bind(&args.reason)
@@ -445,92 +567,34 @@ pub async fn fetch_strategy_signal_evaluation(
     pool: &PgPool,
     evaluation_id: Uuid,
 ) -> Result<Option<StrategySignalEvaluationRecord>> {
-    let row = sqlx::query(
-        r#"
-        select evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
-               bar_context_source, bars_loaded, latest_bar_ts_utc,
-               signal_generated, signal_qty, signal_side,
-               reason_code, reason, decision_stage, source
-        from strategy_signal_evaluations
-        where evaluation_id = $1
-        "#,
-    )
+    let row = sqlx::query(&format!(
+        "{SIGNAL_EVALUATION_SELECT} where evaluation_id = $1"
+    ))
     .bind(evaluation_id)
     .fetch_optional(pool)
     .await
     .context("fetch_strategy_signal_evaluation failed")?;
-
-    row.map(|r| {
-        Ok(StrategySignalEvaluationRecord {
-            evaluation_id: r.try_get("evaluation_id")?,
-            ts_utc: r.try_get("ts_utc")?,
-            run_id: r.try_get("run_id")?,
-            strategy_id: r.try_get("strategy_id")?,
-            symbol: r.try_get("symbol")?,
-            timeframe: r.try_get("timeframe")?,
-            bar_context_source: r.try_get("bar_context_source")?,
-            bars_loaded: r.try_get("bars_loaded")?,
-            latest_bar_ts_utc: r.try_get("latest_bar_ts_utc")?,
-            signal_generated: r.try_get("signal_generated")?,
-            signal_qty: r.try_get("signal_qty")?,
-            signal_side: r.try_get("signal_side")?,
-            reason_code: r.try_get("reason_code")?,
-            reason: r.try_get("reason")?,
-            decision_stage: r.try_get("decision_stage")?,
-            source: r.try_get("source")?,
-        })
-    })
-    .transpose()
-    .map_err(|e: sqlx::Error| anyhow::Error::from(e))
+    row.as_ref().map(signal_evaluation_from_row).transpose()
 }
 
 /// Fetch the most recent `limit` strategy signal-evaluation rows across all
 /// runs and symbols, newest first.
 ///
 /// An empty `Vec` is authoritative: it means no evaluation has been recorded
-/// yet, not that the journal is unavailable.
+/// yet, not that the journal is unavailable. A row with mixed or unknown
+/// quantity authority fails the whole fetch.
 pub async fn fetch_recent_strategy_signal_evaluations(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<StrategySignalEvaluationRecord>> {
-    let rows = sqlx::query(
-        r#"
-        select evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
-               bar_context_source, bars_loaded, latest_bar_ts_utc,
-               signal_generated, signal_qty, signal_side,
-               reason_code, reason, decision_stage, source
-        from strategy_signal_evaluations
-        order by ts_utc desc
-        limit $1
-        "#,
-    )
+    let rows = sqlx::query(&format!(
+        "{SIGNAL_EVALUATION_SELECT} order by ts_utc desc limit $1"
+    ))
     .bind(limit)
     .fetch_all(pool)
     .await
     .context("fetch_recent_strategy_signal_evaluations failed")?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(StrategySignalEvaluationRecord {
-            evaluation_id: r.try_get("evaluation_id")?,
-            ts_utc: r.try_get("ts_utc")?,
-            run_id: r.try_get("run_id")?,
-            strategy_id: r.try_get("strategy_id")?,
-            symbol: r.try_get("symbol")?,
-            timeframe: r.try_get("timeframe")?,
-            bar_context_source: r.try_get("bar_context_source")?,
-            bars_loaded: r.try_get("bars_loaded")?,
-            latest_bar_ts_utc: r.try_get("latest_bar_ts_utc")?,
-            signal_generated: r.try_get("signal_generated")?,
-            signal_qty: r.try_get("signal_qty")?,
-            signal_side: r.try_get("signal_side")?,
-            reason_code: r.try_get("reason_code")?,
-            reason: r.try_get("reason")?,
-            decision_stage: r.try_get("decision_stage")?,
-            source: r.try_get("source")?,
-        });
-    }
-    Ok(out)
+    rows.iter().map(signal_evaluation_from_row).collect()
 }
 
 /// Fetch the most recent `limit` strategy signal-evaluation rows for a
@@ -546,46 +610,15 @@ pub async fn fetch_strategy_signal_evaluations_for_run(
     run_id: Uuid,
     limit: i64,
 ) -> Result<Vec<StrategySignalEvaluationRecord>> {
-    let rows = sqlx::query(
-        r#"
-        select evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
-               bar_context_source, bars_loaded, latest_bar_ts_utc,
-               signal_generated, signal_qty, signal_side,
-               reason_code, reason, decision_stage, source
-        from strategy_signal_evaluations
-        where run_id = $1
-        order by ts_utc desc
-        limit $2
-        "#,
-    )
+    let rows = sqlx::query(&format!(
+        "{SIGNAL_EVALUATION_SELECT} where run_id = $1 order by ts_utc desc limit $2"
+    ))
     .bind(run_id)
     .bind(limit)
     .fetch_all(pool)
     .await
     .context("fetch_strategy_signal_evaluations_for_run failed")?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(StrategySignalEvaluationRecord {
-            evaluation_id: r.try_get("evaluation_id")?,
-            ts_utc: r.try_get("ts_utc")?,
-            run_id: r.try_get("run_id")?,
-            strategy_id: r.try_get("strategy_id")?,
-            symbol: r.try_get("symbol")?,
-            timeframe: r.try_get("timeframe")?,
-            bar_context_source: r.try_get("bar_context_source")?,
-            bars_loaded: r.try_get("bars_loaded")?,
-            latest_bar_ts_utc: r.try_get("latest_bar_ts_utc")?,
-            signal_generated: r.try_get("signal_generated")?,
-            signal_qty: r.try_get("signal_qty")?,
-            signal_side: r.try_get("signal_side")?,
-            reason_code: r.try_get("reason_code")?,
-            reason: r.try_get("reason")?,
-            decision_stage: r.try_get("decision_stage")?,
-            source: r.try_get("source")?,
-        });
-    }
-    Ok(out)
+    rows.iter().map(signal_evaluation_from_row).collect()
 }
 
 /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
@@ -807,4 +840,61 @@ pub async fn fetch_autonomous_no_trade_diagnostics_for_run(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod signal_qty_evidence_tests {
+    use super::*;
+
+    const V1: Option<&str> = Some(RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1);
+
+    #[test]
+    fn fractional_total_encodes_as_exact_raw_micros_never_absent() {
+        let ev = SignalQtyEvidence::evaluated(Some(QtyMicros::new(100)));
+        assert_eq!(ev, SignalQtyEvidence::Exact(QtyMicros::new(100)));
+        assert_eq!(ev.encode(), (V1, Some(100)));
+        assert_ne!(ev.encode(), SignalQtyEvidence::NotEvaluated.encode());
+    }
+
+    #[test]
+    fn absent_flat_and_overflow_have_three_distinct_encodings() {
+        let absent = SignalQtyEvidence::NotEvaluated.encode();
+        let flat = SignalQtyEvidence::Exact(QtyMicros::ZERO).encode();
+        let overflow = SignalQtyEvidence::evaluated(None).encode();
+        assert_eq!(absent, (None, None));
+        assert_eq!(flat, (V1, Some(0)));
+        assert_eq!(overflow, (V1, None));
+    }
+
+    #[test]
+    fn decode_round_trips_every_encoding() {
+        for ev in [
+            SignalQtyEvidence::NotEvaluated,
+            SignalQtyEvidence::Exact(QtyMicros::ZERO),
+            SignalQtyEvidence::Exact(QtyMicros::new(100)),
+            SignalQtyEvidence::Exact(QtyMicros::new(-2_500_000)),
+            SignalQtyEvidence::TotalOverflowed,
+        ] {
+            let (schema, micros) = ev.encode();
+            assert_eq!(SignalQtyEvidence::decode(schema, None, micros).unwrap(), ev);
+        }
+    }
+
+    #[test]
+    fn historical_whole_units_are_scaled_by_the_canonical_scale() {
+        assert_eq!(
+            SignalQtyEvidence::decode(None, Some(3), None).unwrap(),
+            SignalQtyEvidence::Exact(QtyMicros::new(3 * mqk_schemas::QTY_MICROS_SCALE))
+        );
+        assert!(SignalQtyEvidence::decode(None, Some(i64::MAX), None).is_err());
+    }
+
+    #[test]
+    fn mixed_or_unknown_authority_fails_closed() {
+        assert!(SignalQtyEvidence::decode(None, Some(1), Some(1_000_000)).is_err());
+        assert!(SignalQtyEvidence::decode(None, None, Some(100)).is_err());
+        assert!(SignalQtyEvidence::decode(V1, Some(1), Some(1_000_000)).is_err());
+        assert!(SignalQtyEvidence::decode(V1, Some(1), None).is_err());
+        assert!(SignalQtyEvidence::decode(Some("qty_micros_v2"), None, Some(100)).is_err());
+    }
 }

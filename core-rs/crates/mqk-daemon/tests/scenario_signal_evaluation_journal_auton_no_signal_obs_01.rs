@@ -201,13 +201,15 @@ async fn so01_db_loaded_evaluation_persists_with_full_context_and_no_outbox_rows
         .tick_strategy_dispatch_for_symbol(symbol, timeframe)
         .await;
     let bar_result = result.expect("SO-01: fresh DB-loaded bar must dispatch (Some)");
-    let expected_signal_qty: i64 = bar_result
+    let expected_signal_total = bar_result
         .intents
         .output
         .targets
         .iter()
-        .map(|t| t.qty.to_whole_units_checked().expect("whole-unit target"))
-        .sum();
+        .try_fold(mqk_schemas::QtyMicros::ZERO, |acc, t| {
+            acc.checked_add(t.qty)
+        })
+        .expect("target sum must not overflow");
 
     let rows = mqk_db::fetch_recent_strategy_signal_evaluations(&pool, 50)
         .await
@@ -238,12 +240,12 @@ async fn so01_db_loaded_evaluation_persists_with_full_context_and_no_outbox_rows
     );
     assert_eq!(
         row.signal_qty,
-        Some(expected_signal_qty),
+        mqk_db::SignalQtyEvidence::Exact(expected_signal_total),
         "SO-01: signal_qty must equal the strategy's real target-qty sum"
     );
     assert_eq!(
         row.signal_generated,
-        expected_signal_qty != 0,
+        !expected_signal_total.is_zero(),
         "SO-01: signal_generated must agree with signal_qty"
     );
     assert_eq!(
@@ -322,7 +324,8 @@ async fn so02_missing_bars_persists_pre_dispatch_gate_with_zero_bars_loaded() {
         "SO-02: no signal — the strategy never ran"
     );
     assert_eq!(
-        row.signal_qty, None,
+        row.signal_qty,
+        mqk_db::SignalQtyEvidence::NotEvaluated,
         "SO-02: signal_qty must be honestly absent, not zero"
     );
     assert_eq!(
@@ -499,7 +502,7 @@ async fn so05_insert_is_idempotent_and_fetch_orders_newest_first() {
         bars_loaded: 5,
         latest_bar_ts_utc: Some(older_ts),
         signal_generated: false,
-        signal_qty: Some(0),
+        signal_qty: mqk_db::SignalQtyEvidence::Exact(mqk_schemas::QtyMicros::ZERO),
         signal_side: None,
         reason_code: "flat_below_threshold".to_string(),
         reason: "abs move_bps below threshold; insufficient displacement for signal".to_string(),
@@ -622,7 +625,7 @@ async fn so06b_route_returns_active_with_seeded_rows() {
             bars_loaded: 3,
             latest_bar_ts_utc: Some(now),
             signal_generated: false,
-            signal_qty: Some(0),
+            signal_qty: mqk_db::SignalQtyEvidence::Exact(mqk_schemas::QtyMicros::ZERO),
             signal_side: None,
             reason_code: "flat_below_threshold".to_string(),
             reason: "abs move_bps below threshold; insufficient displacement for signal"

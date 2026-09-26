@@ -379,6 +379,16 @@ pub(crate) async fn execution_paper_lifecycle(
             "the paper lifecycle outbox",
         );
     }
+    if response
+        .signal_evaluations
+        .iter()
+        .any(|r| crate::api_types::signal_qty_v1(r.signal_qty_evidence).is_err())
+    {
+        return super::execution_order_analysis::v1_fractional_refusal(
+            "/api/v2/execution/paper-lifecycle",
+            "the paper lifecycle signal evaluations",
+        );
+    }
     (status, Json(response)).into_response()
 }
 
@@ -394,7 +404,7 @@ pub(crate) async fn execution_paper_lifecycle_v2(
         Json(PaperLifecycleResponseV2 {
             quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
                 .to_string(),
-            response: response.map_outbox_orders(Into::into),
+            response: response.map_rows(Into::into, Into::into),
         }),
     )
         .into_response()
@@ -529,7 +539,11 @@ fn signal_row_to_api(
         symbol: r.symbol,
         timeframe: r.timeframe,
         signal_generated: r.signal_generated,
-        signal_qty: r.signal_qty,
+        // `None` for a fractional/overflowed signal is only the V1 field's
+        // representation gap: `signal_qty_evidence` carries the exact truth
+        // and the V1 route refuses such rows.
+        signal_qty: crate::api_types::signal_qty_v1(r.signal_qty).ok().flatten(),
+        signal_qty_evidence: r.signal_qty,
         signal_side: r.signal_side,
         reason_code: r.reason_code,
         reason: r.reason,

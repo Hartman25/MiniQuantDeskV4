@@ -809,7 +809,13 @@ pub fn classify_autonomous_daily_outcome(
     let any_nonzero_signal = snapshot.claims.iter().any(|c| {
         c.evaluation
             .as_ref()
-            .map(|e| e.signal_generated || e.signal_qty.unwrap_or(0) != 0)
+            .map(|e| {
+                // An overflowed target total is an evaluated signal of unknown
+                // magnitude, never a provably-flat one.
+                e.signal_generated
+                    || e.signal_qty == mqk_db::SignalQtyEvidence::TotalOverflowed
+                    || e.signal_qty.exact().is_some_and(|q| !q.is_zero())
+            })
             .unwrap_or(false)
     });
     if any_nonzero_signal {

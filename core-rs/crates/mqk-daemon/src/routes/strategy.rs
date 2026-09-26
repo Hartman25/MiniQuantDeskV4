@@ -6,7 +6,7 @@
 
 // MT-07E: strategy summary handler extracted to reduce file size.
 mod summary;
-pub(crate) use summary::strategy_summary;
+pub(crate) use summary::{strategy_last_bar_signal_v2, strategy_summary, LAST_BAR_SIGNAL_V2_ROUTE};
 
 // MULTI-STRATEGY-DRY-RUN-STATUS-01: dry-run diagnostics status handler.
 mod dry_run_status;
@@ -355,6 +355,7 @@ pub(crate) async fn strategy_signal(
                 tokio::spawn(async move {
                     notifier
                         .notify_trade_event(&crate::notify::TradeEventPayload {
+                            qty_micros: None,
                             stage: "signal.blocked".to_string(),
                             run_id: None,
                             symbol: None,
@@ -443,6 +444,7 @@ pub(crate) async fn strategy_signal(
                 tokio::spawn(async move {
                     notifier
                         .notify_trade_event(&crate::notify::TradeEventPayload {
+                            qty_micros: None,
                             stage: "signal.blocked".to_string(),
                             run_id: None,
                             symbol: None,
@@ -538,6 +540,7 @@ pub(crate) async fn strategy_signal(
                 tokio::spawn(async move {
                     notifier
                         .notify_trade_event(&crate::notify::TradeEventPayload {
+                            qty_micros: None,
                             stage: "signal.blocked".to_string(),
                             run_id: None,
                             symbol: None,
@@ -740,6 +743,7 @@ pub(crate) async fn strategy_signal(
             tokio::spawn(async move {
                 notifier
                     .notify_trade_event(&crate::notify::TradeEventPayload {
+                        qty_micros: None,
                         stage: "signal.blocked".to_string(),
                         run_id: None,
                         symbol: Some(symbol_owned.clone()),
@@ -937,6 +941,7 @@ pub(crate) async fn strategy_signal(
             tokio::spawn(async move {
                 notifier
                     .notify_trade_event(&crate::notify::TradeEventPayload {
+                        qty_micros: None,
                         stage: "signal.blocked".to_string(),
                         run_id: None,
                         symbol: None,
@@ -1247,6 +1252,7 @@ pub(crate) async fn strategy_signal(
                     tokio::spawn(async move {
                         notifier
                             .notify_trade_event(&crate::notify::TradeEventPayload {
+                                qty_micros: None,
                                 stage: "signal.blocked".to_string(),
                                 run_id: Some(run_id_short),
                                 symbol: None,
@@ -1369,6 +1375,7 @@ pub(crate) async fn strategy_signal(
                 tokio::spawn(async move {
                     notifier
                         .notify_trade_event(&crate::notify::TradeEventPayload {
+                            qty_micros: None,
                             stage: "signal.admitted".to_string(),
                             run_id: Some(run_id_short),
                             symbol: Some(symbol.clone()),

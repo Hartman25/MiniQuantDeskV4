@@ -76,7 +76,7 @@ async fn signal_evaluations_for_run_is_run_scoped() {
         bars_loaded: 10,
         latest_bar_ts_utc: Some(now),
         signal_generated: false,
-        signal_qty: None,
+        signal_qty: mqk_db::SignalQtyEvidence::NotEvaluated,
         signal_side: None,
         reason_code: "test_no_signal".to_string(),
         reason: "test fixture".to_string(),

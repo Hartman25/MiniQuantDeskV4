@@ -256,11 +256,11 @@ fn expected_latest_migration() -> i64 {
 }
 
 #[test]
-fn fence_expected_latest_tracks_the_canonical_manifest_and_includes_0076() {
+fn fence_expected_latest_tracks_the_canonical_manifest_and_includes_0077() {
     let latest = expected_latest_migration();
     assert!(
-        latest >= 76,
-        "immutable migration 0076 (CUTOVER-1D A1) must be part of the canonical set; got {latest}"
+        latest >= 77,
+        "immutable migration 0077 (CUTOVER-1D A3 signal-evaluation qty_micros_v1) must be part of the canonical set; got {latest}"
     );
 }
 

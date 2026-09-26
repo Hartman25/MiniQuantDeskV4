@@ -76,6 +76,7 @@ impl MockSink {
 
 fn sample_trade_payload(stage: &str) -> TradeEventPayload {
     TradeEventPayload {
+        qty_micros: None,
         stage: stage.to_string(),
         run_id: Some("abcd1234".to_string()),
         symbol: Some("SPY".to_string()),
@@ -130,6 +131,36 @@ async fn dis03_t01_order_submitted_payload_fields() {
         content.contains("order.submitted"),
         "DIS03-T01: content contains stage"
     );
+}
+
+// ---------------------------------------------------------------------------
+// DIS03-T01b (CUTOVER-1D-A3): a known fractional quantity is delivered exactly
+// as `qty_micros`; the whole-unit `qty` is null only as a representation gap,
+// never as a claim that the quantity is absent.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dis03_t01b_fractional_qty_is_delivered_exactly_in_qty_micros() {
+    let sink = MockSink::new().await;
+    let notifier = DiscordNotifier::from_url(&sink.url);
+
+    let mut payload = sample_trade_payload("signal.blocked");
+    payload.qty = None;
+    payload.qty_micros = Some(100);
+    notifier.notify_trade_event(&payload).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body = &sink.drain()[0];
+    assert!(body["qty"].is_null());
+    assert_eq!(body["qty_micros"].as_i64(), Some(100));
+
+    let mut whole = sample_trade_payload("order.submitted");
+    whole.qty_micros = Some(10_000_000);
+    notifier.notify_trade_event(&whole).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let body = &sink.drain()[0];
+    assert_eq!(body["qty"].as_i64(), Some(10));
+    assert_eq!(body["qty_micros"].as_i64(), Some(10_000_000));
 }
 
 // ---------------------------------------------------------------------------

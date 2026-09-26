@@ -559,7 +559,7 @@ async fn pe_complete_expected_bars(
                 bars_loaded: 1,
                 latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(bar_end_ts, 0),
                 signal_generated: false,
-                signal_qty: Some(0),
+                signal_qty: mqk_db::SignalQtyEvidence::Exact(mqk_schemas::QtyMicros::ZERO),
                 signal_side: None,
                 reason_code: "flat".to_string(),
                 reason: "flat".to_string(),

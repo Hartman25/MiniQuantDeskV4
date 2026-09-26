@@ -16,10 +16,10 @@ use axum::{
 };
 
 use crate::api_types::{
-    ExecutionOrderRow, ExecutionSummaryResponse, FillQualityTelemetryResponse,
+    signal_qty_v2, ExecutionOrderRow, ExecutionSummaryResponse, FillQualityTelemetryResponse,
     FillQualityTelemetryRow, ManualOrderCancelRequest, ManualOrderCancelResponse,
     ManualOrderSubmitRequest, ManualOrderSubmitResponse, SignalEvaluationRow,
-    SignalEvaluationsResponse,
+    SignalEvaluationRowV2, SignalEvaluationsResponse, SignalEvaluationsResponseV2, SignalQtyState,
 };
 use crate::state::AppState;
 
@@ -773,22 +773,87 @@ pub(crate) async fn execution_fill_quality(State(st): State<Arc<AppState>>) -> i
 /// active run — the operator must be able to inspect a no-signal evaluation
 /// that was recorded before a daemon restart, even if no run is currently
 /// active.
+///
+/// V1 (whole-unit) view. Fails closed with 409 when any row's exact signal
+/// quantity has no whole-unit form (fractional or overflowed); it is never
+/// truncated, nulled, or reported as `0`. `null` means only that `on_bar`
+/// never ran.
 pub(crate) async fn execution_signal_evaluations(
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    const CANONICAL: &str = "/api/v1/execution/signal-evaluations";
+    let v2 = load_signal_evaluations_v2(&st).await;
+    match signal_evaluations_v1_from_v2(v2) {
+        Some(v1) => (StatusCode::OK, Json(v1)).into_response(),
+        None => super::execution_order_analysis::v1_fractional_refusal(
+            "/api/v2/execution/signal-evaluations",
+            "the signal-evaluation journal",
+        ),
+    }
+}
+
+/// `GET /api/v2/execution/signal-evaluations`: exact `signal_qty_micros`.
+pub(crate) async fn execution_signal_evaluations_v2(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    (StatusCode::OK, Json(load_signal_evaluations_v2(&st).await))
+}
+
+/// Whole-unit V1 projection of the exact V2 response; `None` if any row's
+/// evaluated quantity has no exact whole-unit representation.
+pub(crate) fn signal_evaluations_v1_from_v2(
+    v2: SignalEvaluationsResponseV2,
+) -> Option<SignalEvaluationsResponse> {
+    let mut rows = Vec::with_capacity(v2.rows.len());
+    for r in v2.rows {
+        let signal_qty = match r.signal_qty_state {
+            SignalQtyState::NotEvaluated => None,
+            SignalQtyState::Exact => {
+                Some(mqk_schemas::QtyMicros::new(r.signal_qty_micros?).to_whole_units_checked()?)
+            }
+            SignalQtyState::TotalOverflowed => return None,
+        };
+        rows.push(SignalEvaluationRow {
+            evaluation_id: r.evaluation_id,
+            ts_utc: r.ts_utc,
+            run_id: r.run_id,
+            strategy_id: r.strategy_id,
+            symbol: r.symbol,
+            timeframe: r.timeframe,
+            bar_context_source: r.bar_context_source,
+            bars_loaded: r.bars_loaded,
+            latest_bar_ts_utc: r.latest_bar_ts_utc,
+            signal_generated: r.signal_generated,
+            signal_qty,
+            signal_side: r.signal_side,
+            reason_code: r.reason_code,
+            reason: r.reason,
+            decision_stage: r.decision_stage,
+            source: r.source,
+        });
+    }
+    Some(SignalEvaluationsResponse {
+        canonical_route: "/api/v1/execution/signal-evaluations".to_string(),
+        truth_state: v2.truth_state,
+        backend: v2.backend,
+        rows,
+    })
+}
+
+async fn load_signal_evaluations_v2(st: &AppState) -> SignalEvaluationsResponseV2 {
+    const CANONICAL_V2: &str = "/api/v2/execution/signal-evaluations";
+    let response = |truth_state: &str, backend: &str, rows: Vec<SignalEvaluationRowV2>| {
+        SignalEvaluationsResponseV2 {
+            quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
+                .to_string(),
+            canonical_route: CANONICAL_V2.to_string(),
+            truth_state: truth_state.to_string(),
+            backend: backend.to_string(),
+            rows,
+        }
+    };
 
     let Some(db) = st.db.as_ref() else {
-        return (
-            StatusCode::OK,
-            Json(SignalEvaluationsResponse {
-                canonical_route: CANONICAL.to_string(),
-                truth_state: "db_unavailable".to_string(),
-                backend: "unavailable".to_string(),
-                rows: vec![],
-            }),
-        )
-            .into_response();
+        return response("db_unavailable", "unavailable", vec![]);
     };
 
     let rows = match mqk_db::fetch_recent_strategy_signal_evaluations(db, 100).await {
@@ -798,52 +863,45 @@ pub(crate) async fn execution_signal_evaluations(
                 error = %e,
                 "auton_no_signal_obs_01: signal_evaluations_fetch_failed"
             );
-            return (
-                StatusCode::OK,
-                Json(SignalEvaluationsResponse {
-                    canonical_route: CANONICAL.to_string(),
-                    truth_state: "query_failed".to_string(),
-                    backend: "postgres.strategy_signal_evaluations".to_string(),
-                    rows: vec![],
-                }),
-            )
-                .into_response();
+            return response(
+                "query_failed",
+                "postgres.strategy_signal_evaluations",
+                vec![],
+            );
         }
     };
 
     let truth_state = if rows.is_empty() { "no_rows" } else { "active" };
-    let api_rows: Vec<SignalEvaluationRow> = rows
+    let api_rows: Vec<SignalEvaluationRowV2> = rows
         .into_iter()
-        .map(|r| SignalEvaluationRow {
-            evaluation_id: r.evaluation_id,
-            ts_utc: r.ts_utc.to_rfc3339(),
-            run_id: r.run_id,
-            strategy_id: r.strategy_id,
-            symbol: r.symbol,
-            timeframe: r.timeframe,
-            bar_context_source: r.bar_context_source,
-            bars_loaded: r.bars_loaded,
-            latest_bar_ts_utc: r.latest_bar_ts_utc.map(|t| t.to_rfc3339()),
-            signal_generated: r.signal_generated,
-            signal_qty: r.signal_qty,
-            signal_side: r.signal_side,
-            reason_code: r.reason_code,
-            reason: r.reason,
-            decision_stage: r.decision_stage,
-            source: r.source,
+        .map(|r| {
+            let (signal_qty_micros, signal_qty_state) = signal_qty_v2(r.signal_qty);
+            SignalEvaluationRowV2 {
+                evaluation_id: r.evaluation_id,
+                ts_utc: r.ts_utc.to_rfc3339(),
+                run_id: r.run_id,
+                strategy_id: r.strategy_id,
+                symbol: r.symbol,
+                timeframe: r.timeframe,
+                bar_context_source: r.bar_context_source,
+                bars_loaded: r.bars_loaded,
+                latest_bar_ts_utc: r.latest_bar_ts_utc.map(|t| t.to_rfc3339()),
+                signal_generated: r.signal_generated,
+                signal_qty_micros,
+                signal_qty_state,
+                signal_side: r.signal_side,
+                reason_code: r.reason_code,
+                reason: r.reason,
+                decision_stage: r.decision_stage,
+                source: r.source,
+            }
         })
         .collect();
-
-    (
-        StatusCode::OK,
-        Json(SignalEvaluationsResponse {
-            canonical_route: CANONICAL.to_string(),
-            truth_state: truth_state.to_string(),
-            backend: "postgres.strategy_signal_evaluations".to_string(),
-            rows: api_rows,
-        }),
+    response(
+        truth_state,
+        "postgres.strategy_signal_evaluations",
+        api_rows,
     )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------

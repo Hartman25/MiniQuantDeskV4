@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::api_types::{StrategySummaryResponse, StrategySummaryRow};
+use crate::api_types::{
+    LastBarSignalResponseV2, StrategySummaryResponse, StrategySummaryRow,
+    QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1,
+};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -50,6 +53,31 @@ fn admission_state_for_registry_row(
             }
         }
     }
+}
+
+pub(crate) const LAST_BAR_SIGNAL_V2_ROUTE: &str = "/api/v2/strategy/last-bar-signal";
+
+// ---------------------------------------------------------------------------
+// GET /api/v2/strategy/last-bar-signal  (qty_micros_v1)
+// ---------------------------------------------------------------------------
+
+/// Exact outcome of the last native strategy bar dispatch this session. Keeps
+/// no-dispatch, flat, fractional, and overflowed distinct.
+pub(crate) async fn strategy_last_bar_signal_v2(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let signal = state.last_bar_signal();
+    (
+        StatusCode::OK,
+        Json(LastBarSignalResponseV2 {
+            quantity_schema_version: QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string(),
+            canonical_route: LAST_BAR_SIGNAL_V2_ROUTE.to_string(),
+            truth_state: "active".to_string(),
+            bar_tick_dispatch_count: state.bar_tick_dispatch_count(),
+            signal_state: signal.state_label().to_string(),
+            signal_qty_micros: signal.exact().map(mqk_schemas::QtyMicros::raw),
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +156,7 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
         None
     };
     // AUTON-NO-TRADE-01: expose bar-tick signal telemetry for the active fleet strategy.
-    let last_bar_signal_qty = state.last_bar_signal_qty();
+    let last_bar_signal = state.last_bar_signal();
     let bar_tick_dispatch_count_val = state.bar_tick_dispatch_count();
 
     // Registry ID set used to detect fleet entries that have no registry row.
@@ -148,6 +176,14 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
 
         let (throttle_state, row_last_decision, row_signal_qty, row_tick_count) =
             if is_single_target {
+                // V1 whole-unit contract: a fractional/overflowed last signal is
+                // refused, never reported as `null` (== no bar dispatched).
+                let Ok(last_bar_signal_qty) = last_bar_signal.v1_whole_units() else {
+                    return super::super::execution_order_analysis::v1_fractional_refusal(
+                        LAST_BAR_SIGNAL_V2_ROUTE,
+                        "the strategy summary last bar signal",
+                    );
+                };
                 (
                     Some(
                         if throttle_open {

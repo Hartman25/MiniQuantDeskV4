@@ -549,7 +549,7 @@ async fn insert_evaluation(pool: &sqlx::PgPool, run_id: Uuid, now_utc: DateTime<
             bars_loaded: 1,
             latest_bar_ts_utc: Some(now_utc),
             signal_generated: false,
-            signal_qty: Some(0),
+            signal_qty: mqk_db::SignalQtyEvidence::Exact(mqk_schemas::QtyMicros::ZERO),
             signal_side: None,
             reason_code: "flat".to_string(),
             reason: "flat".to_string(),

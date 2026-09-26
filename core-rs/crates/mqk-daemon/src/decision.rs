@@ -57,11 +57,63 @@ pub(crate) fn sum_target_qty<'a>(
         .try_fold(QtyMicros::ZERO, |acc, t| acc.checked_add(t.qty))
 }
 
-/// Public whole-unit projection of a signal total. Fractional or overflowed
-/// totals have no exact whole-unit value and project to `None` (unavailable),
-/// never a rounded or reinterpreted integer.
-pub(crate) fn public_signal_qty(total: Option<QtyMicros>) -> Option<i64> {
-    total.and_then(QtyMicros::to_whole_units_checked)
+/// Outcome of the last native-strategy bar dispatch this session.
+///
+/// `NoDispatch` (no bar dispatched yet) is a different state from every
+/// evaluated outcome: a flat, fractional, or overflowed signal is never
+/// observable as `NoDispatch`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LastBarSignal {
+    NoDispatch,
+    /// Exact signed sum of the strategy's target quantities (zero == flat).
+    Evaluated(QtyMicros),
+    /// `on_bar` ran but the target sum overflowed; no exact quantity exists.
+    TotalOverflowed,
+}
+
+/// The exact quantity has no whole-unit (V1) representation.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct NotRepresentableInV1;
+
+impl LastBarSignal {
+    pub fn from_total(total: Option<QtyMicros>) -> Self {
+        total.map_or(Self::TotalOverflowed, Self::Evaluated)
+    }
+
+    pub fn exact(self) -> Option<QtyMicros> {
+        match self {
+            Self::Evaluated(q) => Some(q),
+            Self::NoDispatch | Self::TotalOverflowed => None,
+        }
+    }
+
+    /// A bar was dispatched and the strategy provably returned a zero total.
+    pub fn is_flat(self) -> bool {
+        matches!(self, Self::Evaluated(q) if q.is_zero())
+    }
+
+    /// Stable machine label for the V2 surface.
+    pub fn state_label(self) -> &'static str {
+        match self {
+            Self::NoDispatch => "no_dispatch",
+            Self::Evaluated(_) => "evaluated",
+            Self::TotalOverflowed => "total_overflowed",
+        }
+    }
+
+    /// V1 whole-unit projection: `Ok(None)` only when nothing was dispatched;
+    /// a fractional or overflowed signal is refused, never truncated or
+    /// reported as absent.
+    pub fn v1_whole_units(self) -> Result<Option<i64>, NotRepresentableInV1> {
+        match self {
+            Self::NoDispatch => Ok(None),
+            Self::Evaluated(q) => q
+                .to_whole_units_checked()
+                .map(Some)
+                .ok_or(NotRepresentableInV1),
+            Self::TotalOverflowed => Err(NotRepresentableInV1),
+        }
+    }
 }
 
 /// A signal exists unless the total is provably zero (an overflowed total is
@@ -1007,6 +1059,7 @@ pub async fn submit_internal_strategy_decision(
                 tokio::spawn(async move {
                     notifier
                         .notify_trade_event(&crate::notify::TradeEventPayload {
+                            qty_micros: None,
                             stage: "signal.blocked".to_string(),
                             run_id: None,
                             symbol: None,
@@ -1080,6 +1133,7 @@ pub async fn submit_internal_strategy_decision(
             tokio::spawn(async move {
                 notifier
                     .notify_trade_event(&crate::notify::TradeEventPayload {
+                        qty_micros: None,
                         stage: "signal.blocked".to_string(),
                         run_id: None,
                         symbol: Some(symbol_owned.clone()),
@@ -1152,6 +1206,7 @@ pub async fn submit_internal_strategy_decision(
             tokio::spawn(async move {
                 notifier
                     .notify_trade_event(&crate::notify::TradeEventPayload {
+                        qty_micros: None,
                         stage: "signal.blocked".to_string(),
                         run_id: None,
                         symbol: Some(symbol_owned.clone()),
@@ -1996,5 +2051,80 @@ mod m6_trading_registry_snapshot_writer_tests {
             None,
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod a3_signal_evidence_tests {
+    use super::*;
+
+    fn total_of(qtys: &[i64]) -> Option<QtyMicros> {
+        let targets: Vec<mqk_strategy::TargetPosition> = qtys
+            .iter()
+            .map(|q| mqk_strategy::TargetPosition::new("BTC/USD", QtyMicros::new(*q)))
+            .collect();
+        sum_target_qty(targets.iter())
+    }
+
+    /// A: a 0.0001 strategy signal is raw 100 in the exact in-memory state and
+    /// journals as exact, generated evidence -- never absent.
+    #[test]
+    fn a3_fractional_strategy_signal_is_exact_raw_100_end_to_end() {
+        let total = total_of(&[100]);
+        assert_eq!(total, Some(QtyMicros::new(100)));
+        assert!(signal_generated(total));
+        let last = LastBarSignal::from_total(total);
+        assert_eq!(last, LastBarSignal::Evaluated(QtyMicros::new(100)));
+        assert_eq!(last.exact().map(QtyMicros::raw), Some(100));
+        assert_eq!(
+            mqk_db::SignalQtyEvidence::evaluated(total),
+            mqk_db::SignalQtyEvidence::Exact(QtyMicros::new(100))
+        );
+    }
+
+    /// B/C: no-dispatch, flat, fractional, and overflowed are four distinct
+    /// states; only no-dispatch is `null` on V1.
+    #[test]
+    fn a3_no_dispatch_flat_fractional_overflow_are_distinct() {
+        let states = [
+            LastBarSignal::NoDispatch,
+            LastBarSignal::from_total(total_of(&[])),
+            LastBarSignal::from_total(total_of(&[100])),
+            LastBarSignal::from_total(total_of(&[i64::MAX, 1])),
+            LastBarSignal::from_total(Some(QtyMicros::new(i64::MIN))),
+        ];
+        for (i, a) in states.iter().enumerate() {
+            for b in &states[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_eq!(states[1], LastBarSignal::Evaluated(QtyMicros::ZERO));
+        assert!(states[1].is_flat());
+        assert_eq!(states[3], LastBarSignal::TotalOverflowed);
+        assert_eq!(states[0].v1_whole_units(), Ok(None));
+        assert_eq!(states[1].v1_whole_units(), Ok(Some(0)));
+        assert_eq!(states[2].v1_whole_units(), Err(NotRepresentableInV1));
+        assert_eq!(states[3].v1_whole_units(), Err(NotRepresentableInV1));
+        assert_eq!(
+            LastBarSignal::from_total(total_of(&[5_000_000])).v1_whole_units(),
+            Ok(Some(5))
+        );
+    }
+
+    /// An overflowed target sum is journaled as evaluated-without-quantity and
+    /// generated=true, never as a provably-flat or pre-dispatch-absent row.
+    #[test]
+    fn a3_overflowed_total_is_generated_and_not_absent() {
+        let total = total_of(&[i64::MAX, 1]);
+        assert_eq!(total, None);
+        assert!(signal_generated(total));
+        assert_eq!(
+            mqk_db::SignalQtyEvidence::evaluated(total),
+            mqk_db::SignalQtyEvidence::TotalOverflowed
+        );
+        assert_ne!(
+            mqk_db::SignalQtyEvidence::evaluated(total),
+            mqk_db::SignalQtyEvidence::NotEvaluated
+        );
     }
 }

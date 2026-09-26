@@ -641,12 +641,10 @@ impl AppState {
                         run_id: Some(format!("{:.8}", run_id.to_string())),
                         symbol: Some(symbol.clone()),
                         side: None,
-                        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `TradeEventPayload.qty`
-                        // remains whole-unit `i64`; a fractional Crypto qty
-                        // cannot fit it, so the structured field is `None`
-                        // while `summary` still shows the true fractional
-                        // value via `QtyMicros::Display`.
+                        // `qty` stays the whole-unit projection; the exact
+                        // quantity (incl. fractional Crypto) is `qty_micros`.
                         qty: qty.to_whole_units_checked(),
+                        qty_micros: Some(qty.raw()),
                         price_micros: None,
                         order_id: Some(order_id.clone()),
                         detail: None,
@@ -660,6 +658,7 @@ impl AppState {
                         broker_order_id,
                         symbol,
                     } => TradeEventPayload {
+                        qty_micros: None,
                         stage: "order.acked".to_string(),
                         run_id: Some(format!("{:.8}", run_id.to_string())),
                         symbol,
@@ -697,14 +696,10 @@ impl AppState {
                             run_id: Some(format!("{:.8}", run_id.to_string())),
                             symbol: Some(symbol.clone()),
                             side: Some(side.clone()),
-                            // CUTOVER-1B-OMS-QTY-MICROS-01: `TradeEventPayload.qty`
-                            // remains whole-unit `i64` (shared by many other
-                            // notification call sites unrelated to this
-                            // cutover). A fractional Crypto qty cannot fit
-                            // this legacy field, so the structured field is
-                            // `None` -- but `summary` below still shows the
-                            // true fractional value via `QtyMicros::Display`.
+                            // `qty` stays the whole-unit projection; the exact
+                            // quantity (incl. fractional Crypto) is `qty_micros`.
                             qty: qty.to_whole_units_checked(),
+                            qty_micros: Some(qty.raw()),
                             price_micros: Some(price_micros),
                             order_id: Some(order_id.clone()),
                             detail: None,
@@ -717,6 +712,7 @@ impl AppState {
                     }
                     TradeLifecycleEvent::ReconcileDriftHalt { run_id, reason } => {
                         TradeEventPayload {
+                            qty_micros: None,
                             stage: "halt.reconcile_drift".to_string(),
                             run_id: Some(format!("{:.8}", run_id.to_string())),
                             symbol: None,
@@ -731,6 +727,7 @@ impl AppState {
                         }
                     }
                     TradeLifecycleEvent::RecoveryQuarantine { run_id } => TradeEventPayload {
+                        qty_micros: None,
                         stage: "halt.recovery_quarantine".to_string(),
                         run_id: Some(format!("{:.8}", run_id.to_string())),
                         symbol: None,

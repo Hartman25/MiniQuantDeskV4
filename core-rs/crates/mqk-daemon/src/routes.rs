@@ -288,7 +288,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use execution::{
         execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
-        execution_signal_evaluations, execution_summary,
+        execution_signal_evaluations, execution_signal_evaluations_v2, execution_summary,
     };
     use execution_flow::execution_flow;
     use execution_order_analysis::{
@@ -327,7 +327,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use strategy::{
         multi_symbol_dispatch_summary, multi_symbol_dispatch_summary_v2, strategy_dry_run_status,
-        strategy_signal, strategy_summary, strategy_suppressions,
+        strategy_last_bar_signal_v2, strategy_signal, strategy_summary, strategy_suppressions,
     };
     use strategy_conflict::{
         strategy_conflict_plan_by_id, strategy_conflict_plan_by_id_v2, strategy_conflict_plans,
@@ -446,6 +446,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/execution/signal-evaluations",
             get(execution_signal_evaluations),
+        )
+        .route(
+            "/api/v2/execution/signal-evaluations",
+            get(execution_signal_evaluations_v2),
         )
         .route(
             "/api/v1/execution/orders/:order_id/timeline",
@@ -590,6 +594,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v2/strategy/multi-symbol-dispatch-summary",
             get(multi_symbol_dispatch_summary_v2),
+        )
+        // Exact QtyMicros outcome of the last bar dispatch; the V1 status
+        // surfaces refuse a fractional signal and point here.
+        .route(
+            "/api/v2/strategy/last-bar-signal",
+            get(strategy_last_bar_signal_v2),
         )
         // MULTI-STRATEGY-DRY-RUN-STATUS-01: read-only dry-run diagnostics (public, no auth).
         // No broker calls, no DB mutations, no orders. submitted is always false.

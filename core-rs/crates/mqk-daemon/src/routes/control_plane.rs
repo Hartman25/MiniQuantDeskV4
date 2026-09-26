@@ -2158,6 +2158,7 @@ pub(crate) async fn ops_action(
                 tokio::spawn(async move {
                     notifier
                         .notify_trade_event(&TradeEventPayload {
+                            qty_micros: None,
                             stage: "flatten.requested".to_string(),
                             run_id: run_str,
                             symbol: if enqueued_str.is_empty() {

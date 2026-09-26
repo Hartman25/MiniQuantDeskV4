@@ -4060,6 +4060,90 @@ pub struct SignalEvaluationsResponse {
     pub rows: Vec<SignalEvaluationRow>,
 }
 
+/// Durable quantity state of one signal evaluation on the exact (V2) surfaces.
+/// `NotEvaluated` (on_bar never ran) is distinct from every evaluated state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalQtyState {
+    NotEvaluated,
+    Exact,
+    TotalOverflowed,
+}
+
+/// Exact projection: raw `QtyMicros` (present only for `Exact`) plus state.
+pub fn signal_qty_v2(evidence: mqk_db::SignalQtyEvidence) -> (Option<i64>, SignalQtyState) {
+    match evidence {
+        mqk_db::SignalQtyEvidence::NotEvaluated => (None, SignalQtyState::NotEvaluated),
+        mqk_db::SignalQtyEvidence::Exact(q) => (Some(q.raw()), SignalQtyState::Exact),
+        mqk_db::SignalQtyEvidence::TotalOverflowed => (None, SignalQtyState::TotalOverflowed),
+    }
+}
+
+/// V1 whole-unit projection: `Ok(None)` only when `on_bar` never ran; a
+/// fractional or overflowed signal is refused, never truncated or nulled.
+pub fn signal_qty_v1(
+    evidence: mqk_db::SignalQtyEvidence,
+) -> Result<Option<i64>, crate::decision::NotRepresentableInV1> {
+    match evidence {
+        mqk_db::SignalQtyEvidence::NotEvaluated => Ok(None),
+        mqk_db::SignalQtyEvidence::Exact(q) => q
+            .to_whole_units_checked()
+            .map(Some)
+            .ok_or(crate::decision::NotRepresentableInV1),
+        mqk_db::SignalQtyEvidence::TotalOverflowed => Err(crate::decision::NotRepresentableInV1),
+    }
+}
+
+/// Exact-quantity (`quantity_schema_version = "qty_micros_v1"`) sibling of
+/// [`SignalEvaluationRow`]: `signal_qty_micros` is the only quantity
+/// authority; `signal_qty_state` says why it is absent when it is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SignalEvaluationRowV2 {
+    pub evaluation_id: Uuid,
+    pub ts_utc: String,
+    pub run_id: Option<Uuid>,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    pub bar_context_source: String,
+    pub bars_loaded: i64,
+    pub latest_bar_ts_utc: Option<String>,
+    pub signal_generated: bool,
+    pub signal_qty_micros: Option<i64>,
+    pub signal_qty_state: SignalQtyState,
+    pub signal_side: Option<String>,
+    pub reason_code: String,
+    pub reason: String,
+    pub decision_stage: String,
+    pub source: String,
+}
+
+/// Response wrapper for `GET /api/v2/execution/signal-evaluations`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SignalEvaluationsResponseV2 {
+    pub quantity_schema_version: String,
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub backend: String,
+    pub rows: Vec<SignalEvaluationRowV2>,
+}
+
+/// `GET /api/v2/strategy/last-bar-signal`: exact outcome of the last native
+/// strategy bar dispatch this session.
+///
+/// `signal_state`: `"no_dispatch"` (no bar dispatched; `signal_qty_micros` is
+/// null), `"evaluated"` (`signal_qty_micros` is the exact raw `QtyMicros`,
+/// zero == flat), or `"total_overflowed"` (evaluated; no exact quantity).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LastBarSignalResponseV2 {
+    pub quantity_schema_version: String,
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub bar_tick_dispatch_count: u64,
+    pub signal_state: String,
+    pub signal_qty_micros: Option<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // AUTON-NO-TRADE-OFFHOURS-01C: autonomous no-trade diagnostic response types
 // ---------------------------------------------------------------------------
@@ -5399,11 +5483,54 @@ pub struct PaperLifecycleSignalEvaluationRow {
     pub symbol: String,
     pub timeframe: String,
     pub signal_generated: bool,
+    /// V1 quantity contract: whole asset units only. `null` only when `on_bar`
+    /// never ran; a fractional or overflowed signal is refused by the V1
+    /// route (see `/api/v2/execution/paper-lifecycle`), never nulled.
     pub signal_qty: Option<i64>,
+    /// Exact source of `signal_qty`; never serialized on V1.
+    #[serde(skip)]
+    pub signal_qty_evidence: mqk_db::SignalQtyEvidence,
     pub signal_side: Option<String>,
     pub reason_code: String,
     pub reason: String,
     pub decision_stage: String,
+}
+
+/// Exact-quantity sibling of [`PaperLifecycleSignalEvaluationRow`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleSignalEvaluationRowV2 {
+    pub evaluation_id: String,
+    pub ts_utc: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    pub signal_generated: bool,
+    pub signal_qty_micros: Option<i64>,
+    pub signal_qty_state: SignalQtyState,
+    pub signal_side: Option<String>,
+    pub reason_code: String,
+    pub reason: String,
+    pub decision_stage: String,
+}
+
+impl From<PaperLifecycleSignalEvaluationRow> for PaperLifecycleSignalEvaluationRowV2 {
+    fn from(r: PaperLifecycleSignalEvaluationRow) -> Self {
+        let (signal_qty_micros, signal_qty_state) = signal_qty_v2(r.signal_qty_evidence);
+        Self {
+            evaluation_id: r.evaluation_id,
+            ts_utc: r.ts_utc,
+            strategy_id: r.strategy_id,
+            symbol: r.symbol,
+            timeframe: r.timeframe,
+            signal_generated: r.signal_generated,
+            signal_qty_micros,
+            signal_qty_state,
+            signal_side: r.signal_side,
+            reason_code: r.reason_code,
+            reason: r.reason,
+            decision_stage: r.decision_stage,
+        }
+    }
 }
 
 /// One `autonomous_no_trade_diagnostics` row, as surfaced by the paper-lifecycle route.
@@ -5520,7 +5647,10 @@ pub struct PaperLifecycleSummary {
 /// (`mqk_db::fetch_latest_run_for_engine`), never from in-memory
 /// active-run state. Never calls a broker/provider. Never writes.
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperLifecycleResponse<O = PaperLifecycleOutboxRow> {
+pub struct PaperLifecycleResponse<
+    O = PaperLifecycleOutboxRow,
+    S = PaperLifecycleSignalEvaluationRow,
+> {
     pub canonical_route: String,
     /// Route-level resolution truth_state: `"db_unavailable"` |
     /// `"invalid_request"` | `"not_found"` | `"no_rows"` | `"active"`.
@@ -5550,7 +5680,7 @@ pub struct PaperLifecycleResponse<O = PaperLifecycleOutboxRow> {
     pub pnl_truth_state: String,
     pub run_id: Option<String>,
     pub run: Option<PaperLifecycleRunRow>,
-    pub signal_evaluations: Vec<PaperLifecycleSignalEvaluationRow>,
+    pub signal_evaluations: Vec<S>,
     pub no_trade_diagnostics: Vec<PaperLifecycleNoTradeDiagnosticRow>,
     pub outbox_orders: Vec<O>,
     pub inbox_events: Vec<PaperLifecycleInboxRow>,
@@ -5560,10 +5690,14 @@ pub struct PaperLifecycleResponse<O = PaperLifecycleOutboxRow> {
     pub warnings: Vec<String>,
 }
 
-impl<O> PaperLifecycleResponse<O> {
-    /// Same response with the outbox rows re-projected; every other field is
-    /// moved unchanged.
-    pub fn map_outbox_orders<O2>(self, f: impl FnMut(O) -> O2) -> PaperLifecycleResponse<O2> {
+impl<O, S> PaperLifecycleResponse<O, S> {
+    /// Same response with the outbox and signal-evaluation rows re-projected;
+    /// every other field is moved unchanged.
+    pub fn map_rows<O2, S2>(
+        self,
+        f_outbox: impl FnMut(O) -> O2,
+        f_signal: impl FnMut(S) -> S2,
+    ) -> PaperLifecycleResponse<O2, S2> {
         PaperLifecycleResponse {
             canonical_route: self.canonical_route,
             truth_state: self.truth_state,
@@ -5576,9 +5710,9 @@ impl<O> PaperLifecycleResponse<O> {
             pnl_truth_state: self.pnl_truth_state,
             run_id: self.run_id,
             run: self.run,
-            signal_evaluations: self.signal_evaluations,
+            signal_evaluations: self.signal_evaluations.into_iter().map(f_signal).collect(),
             no_trade_diagnostics: self.no_trade_diagnostics,
-            outbox_orders: self.outbox_orders.into_iter().map(f).collect(),
+            outbox_orders: self.outbox_orders.into_iter().map(f_outbox).collect(),
             inbox_events: self.inbox_events,
             lifecycle_summary: self.lifecycle_summary,
             blockers: self.blockers,
@@ -5589,12 +5723,14 @@ impl<O> PaperLifecycleResponse<O> {
 
 /// Exact-quantity sibling of [`PaperLifecycleResponse`]:
 /// `GET /api/v2/execution/paper-lifecycle`. Identical fields, except outbox
-/// rows carry `qty_micros` (raw `QtyMicros`) instead of `qty`.
+/// rows carry `qty_micros` (raw `QtyMicros`) instead of `qty`, and signal
+/// evaluations carry `signal_qty_micros` + `signal_qty_state`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PaperLifecycleResponseV2 {
     pub quantity_schema_version: String,
     #[serde(flatten)]
-    pub response: PaperLifecycleResponse<PaperLifecycleOutboxRowV2>,
+    pub response:
+        PaperLifecycleResponse<PaperLifecycleOutboxRowV2, PaperLifecycleSignalEvaluationRowV2>,
 }
 
 /// Response for POST /api/v1/alerts/triage/ack.

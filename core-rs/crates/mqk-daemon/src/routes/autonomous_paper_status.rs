@@ -239,7 +239,14 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
     });
 
     // target_qty from last bar signal.
-    let target_qty: Option<i64> = st.last_bar_signal_qty();
+    // V1 whole-unit contract: a fractional/overflowed last signal is refused,
+    // never reported as `null` (== no bar dispatched).
+    let Ok(target_qty) = st.last_bar_signal().v1_whole_units() else {
+        return super::execution_order_analysis::v1_fractional_refusal(
+            super::strategy::LAST_BAR_SIGNAL_V2_ROUTE,
+            "the autonomous paper-status target quantity",
+        );
+    };
 
     // computed_delta = target - current (signed).
     let computed_delta_qty: Option<i64> = match (target_qty, current_position_qty) {
