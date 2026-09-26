@@ -16,16 +16,16 @@
 //! | FQB-03 | CancelAck (non-fill) → zero rows written     | No telemetry row  |
 //! | FQB-04 | PartialFill then Fill → two rows             | Phase 3b × 2      |
 //!
-//! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent or
-//! unreachable — same skip-gracefully contract as all other DB-backed tests.
+//! Each test runs in its own disposable database (`mqk_db::run_isolated`),
+//! dropped even when the test fails, so a failing scenario can never leave the
+//! singleton runtime lease behind in the shared test database. Emits a
+//! `SKIP_DB` marker and does nothing when `MQK_DATABASE_URL` is absent.
 
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::PgPool;
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
-use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 use mqk_db::FixedClock;
@@ -46,16 +46,6 @@ const FQB01_RUN_ID: &str = "1b010001-0000-0000-0000-000000000000";
 const FQB02_RUN_ID: &str = "1b020002-0000-0000-0000-000000000000";
 const FQB03_RUN_ID: &str = "1b030003-0000-0000-0000-000000000000";
 const FQB04_RUN_ID: &str = "1b040004-0000-0000-0000-000000000000";
-
-// ---------------------------------------------------------------------------
-// In-process serialization — single runtime lease row
-// ---------------------------------------------------------------------------
-
-static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-
-async fn test_guard() -> MutexGuard<'static, ()> {
-    TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().await
-}
 
 // ---------------------------------------------------------------------------
 // Stubs
@@ -131,31 +121,6 @@ impl ReconcileGate for PassGate {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn db_url_or_skip() -> Option<String> {
-    match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) if !v.trim().is_empty() => Some(v),
-        _ => {
-            println!("SKIP: requires MQK_DATABASE_URL");
-            None
-        }
-    }
-}
-
-async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
-    match PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(2))
-        .connect(url)
-        .await
-    {
-        Ok(pool) => Ok(Some(pool)),
-        Err(e) => {
-            println!("SKIP: cannot connect to DB: {e}");
-            Ok(None)
-        }
-    }
-}
-
 /// Seed a run in RUNNING state: CREATED → ARMED → RUNNING.
 async fn seed_running_run(pool: &PgPool, run_id: Uuid, tag: &str) -> Result<()> {
     mqk_db::insert_run(
@@ -174,76 +139,6 @@ async fn seed_running_run(pool: &PgPool, run_id: Uuid, tag: &str) -> Result<()> 
     .await?;
     mqk_db::arm_run(pool, run_id).await?;
     mqk_db::begin_run(pool, run_id).await?;
-    Ok(())
-}
-
-/// Delete broker_order_map rows tied to this run's outbox, then the run.
-/// `fill_quality_telemetry` cascades from `runs` so no manual deletion needed.
-async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    sqlx::query(
-        r#"
-        delete from broker_order_map
-        where internal_id in (
-            select idempotency_key from oms_outbox where run_id = $1
-        )
-        "#,
-    )
-    .bind(run_id)
-    .execute(pool)
-    .await?;
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-async fn clear_arm_state(pool: &PgPool) -> Result<()> {
-    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-async fn clear_runtime_lease_rows(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        do $$
-        declare
-            rec record;
-        begin
-            for rec in
-                select c.table_schema, c.table_name
-                from information_schema.columns c
-                where c.table_schema = 'public'
-                group by c.table_schema, c.table_name
-                having
-                    (
-                        bool_or(c.column_name = 'holder_id')
-                        or bool_or(c.column_name = 'current_holder')
-                        or bool_or(c.column_name = 'holder')
-                    )
-                    and
-                    (
-                        bool_or(c.column_name = 'current_epoch')
-                        or bool_or(c.column_name = 'epoch')
-                    )
-                    and
-                    (
-                        bool_or(c.column_name = 'lease_expires_at')
-                        or bool_or(c.column_name = 'lease_expires_at_utc')
-                        or bool_or(c.column_name = 'expires_at')
-                        or bool_or(c.column_name = 'expires_at_utc')
-                    )
-            loop
-                execute format('delete from %I.%I', rec.table_schema, rec.table_name);
-            end loop;
-        end
-        $$;
-        "#,
-    )
-    .execute(pool)
-    .await?;
     Ok(())
 }
 
@@ -334,23 +229,8 @@ fn broker_fill_json(
 /// A real orchestrator tick processes a limit Fill event and writes exactly
 /// one `fill_quality_telemetry` row. The reference price, slippage, and
 /// fill kind are derived from the outbox row and the inbox Fill event.
-#[tokio::test]
-async fn fqb01_limit_fill_writes_telemetry_with_slippage() -> anyhow::Result<()> {
-    let _guard = test_guard().await;
-
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
-    mqk_db::migrate(&pool).await?;
-
+async fn fqb01_limit_fill_writes_telemetry_with_slippage_body(pool: PgPool) -> Result<()> {
     let run_id: Uuid = FQB01_RUN_ID.parse().unwrap();
-
-    cleanup_run(&pool, run_id).await?;
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
 
     seed_running_run(&pool, run_id, "fqb01").await?;
 
@@ -431,10 +311,20 @@ async fn fqb01_limit_fill_writes_telemetry_with_slippage() -> anyhow::Result<()>
         "FQB-01: provenance_ref"
     );
 
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
-    cleanup_run(&pool, run_id).await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn fqb01_limit_fill_writes_telemetry_with_slippage() {
+    mqk_db::run_isolated(
+        "fqb01_limit_fill_writes_telemetry_with_slippage",
+        |pool| async move {
+            fqb01_limit_fill_writes_telemetry_with_slippage_body(pool)
+                .await
+                .expect("FQB01");
+        },
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,23 +334,8 @@ async fn fqb01_limit_fill_writes_telemetry_with_slippage() -> anyhow::Result<()>
 /// Market orders carry no limit_price in the outbox row.
 /// The reference_price_micros and slippage_bps fields must be null — no
 /// fabrication of slippage when the reference is undefined.
-#[tokio::test]
-async fn fqb02_market_fill_writes_telemetry_null_slippage() -> anyhow::Result<()> {
-    let _guard = test_guard().await;
-
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
-    mqk_db::migrate(&pool).await?;
-
+async fn fqb02_market_fill_writes_telemetry_null_slippage_body(pool: PgPool) -> Result<()> {
     let run_id: Uuid = FQB02_RUN_ID.parse().unwrap();
-
-    cleanup_run(&pool, run_id).await?;
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
 
     seed_running_run(&pool, run_id, "fqb02").await?;
 
@@ -516,10 +391,20 @@ async fn fqb02_market_fill_writes_telemetry_null_slippage() -> anyhow::Result<()
     );
     assert_eq!(row.fill_kind, "final_fill", "FQB-02: fill_kind");
 
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
-    cleanup_run(&pool, run_id).await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn fqb02_market_fill_writes_telemetry_null_slippage() {
+    mqk_db::run_isolated(
+        "fqb02_market_fill_writes_telemetry_null_slippage",
+        |pool| async move {
+            fqb02_market_fill_writes_telemetry_null_slippage_body(pool)
+                .await
+                .expect("FQB02");
+        },
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,23 +417,8 @@ async fn fqb02_market_fill_writes_telemetry_null_slippage() -> anyhow::Result<()
 ///
 /// CancelAck for an order that is not in the in-memory OmsOrders map is
 /// silently skipped (non-fill events for unknown orders are no-ops).
-#[tokio::test]
-async fn fqb03_cancel_ack_writes_no_telemetry() -> anyhow::Result<()> {
-    let _guard = test_guard().await;
-
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
-    mqk_db::migrate(&pool).await?;
-
+async fn fqb03_cancel_ack_writes_no_telemetry_body(pool: PgPool) -> Result<()> {
     let run_id: Uuid = FQB03_RUN_ID.parse().unwrap();
-
-    cleanup_run(&pool, run_id).await?;
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
 
     seed_running_run(&pool, run_id, "fqb03").await?;
 
@@ -578,10 +448,17 @@ async fn fqb03_cancel_ack_writes_no_telemetry() -> anyhow::Result<()> {
         rows.len()
     );
 
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
-    cleanup_run(&pool, run_id).await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn fqb03_cancel_ack_writes_no_telemetry() {
+    mqk_db::run_isolated("fqb03_cancel_ack_writes_no_telemetry", |pool| async move {
+        fqb03_cancel_ack_writes_no_telemetry_body(pool)
+            .await
+            .expect("FQB03");
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,23 +472,8 @@ async fn fqb03_cancel_ack_writes_no_telemetry() -> anyhow::Result<()> {
 /// OMS invariant enforced: PartialFill(delta_qty=6) + Fill(delta_qty=4)
 /// sums to 10 == total_qty(10). The orchestrator must process both events
 /// in canonical inbox_id ASC order in a single tick().
-#[tokio::test]
-async fn fqb04_partial_fill_then_fill_writes_two_rows() -> anyhow::Result<()> {
-    let _guard = test_guard().await;
-
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
-    mqk_db::migrate(&pool).await?;
-
+async fn fqb04_partial_fill_then_fill_writes_two_rows_body(pool: PgPool) -> Result<()> {
     let run_id: Uuid = FQB04_RUN_ID.parse().unwrap();
-
-    cleanup_run(&pool, run_id).await?;
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
 
     seed_running_run(&pool, run_id, "fqb04").await?;
 
@@ -732,8 +594,18 @@ async fn fqb04_partial_fill_then_fill_writes_two_rows() -> anyhow::Result<()> {
         "FQB-04: Fill reference_price from outbox limit_price"
     );
 
-    clear_runtime_lease_rows(&pool).await?;
-    clear_arm_state(&pool).await?;
-    cleanup_run(&pool, run_id).await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn fqb04_partial_fill_then_fill_writes_two_rows() {
+    mqk_db::run_isolated(
+        "fqb04_partial_fill_then_fill_writes_two_rows",
+        |pool| async move {
+            fqb04_partial_fill_then_fill_writes_two_rows_body(pool)
+                .await
+                .expect("FQB04");
+        },
+    )
+    .await;
 }
