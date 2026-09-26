@@ -616,8 +616,7 @@ pub struct AppState {
     /// the autonomous completed-bar driver's host-pool dispatch route
     /// (`autonomous_completed_bar_driver::claim_and_dispatch_observed_bar_via_host_pool`),
     /// never by the legacy single-engine path.
-    pending_binding_strategy_bar_inputs:
-        Arc<Mutex<HashMap<(String, String, String), StrategyBarInput>>>,
+    pending_binding_strategy_bar_inputs: PendingBindingStrategyBarInputs,
     /// D4.4: test-only rendezvous hook for the completed-bar driver's
     /// post-claim/pre-dispatch concurrency proof (see
     /// [`autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook`]).
@@ -1224,6 +1223,10 @@ impl Default for AppState {
         Self::new()
     }
 }
+
+/// Per-binding completed-bar input slots, keyed by `(symbol, strategy_id, timeframe)`.
+type PendingBindingStrategyBarInputs =
+    Arc<Mutex<HashMap<(String, String, String), StrategyBarInput>>>;
 
 /// B1B: Raw bar input parameters for one native strategy `on_bar` dispatch.
 ///
@@ -4822,7 +4825,7 @@ operator_reconcile_or_repair_required"
         };
         for t in targets.iter_mut() {
             // `checked_abs` is `None` only for i64::MIN, which exceeds any cap.
-            let exceeds = t.qty.checked_abs().map_or(true, |a| a > cap_q);
+            let exceeds = t.qty.checked_abs().is_none_or(|a| a > cap_q);
             if exceeds {
                 let original_qty = t.qty;
                 t.qty = if t.qty.is_negative() {

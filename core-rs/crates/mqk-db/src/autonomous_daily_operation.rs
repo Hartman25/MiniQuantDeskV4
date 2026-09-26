@@ -3561,6 +3561,7 @@ pub async fn mark_autonomous_daily_binding_active(
 /// upsert — a repeated block for the same or a different binding-local
 /// reason simply refreshes this one binding's row; no other binding's row
 /// is touched.
+#[allow(clippy::too_many_arguments)]
 pub async fn mark_autonomous_daily_binding_locally_blocked(
     pool: &PgPool,
     operation_id: Uuid,
@@ -3803,6 +3804,7 @@ pub async fn claim_autonomous_daily_binding_bar_dispatch(
 /// — those fields are the legacy single-engine path's own evidence and must
 /// not be double-counted or raced by the host-pool path's independent
 /// per-binding claims.
+#[allow(clippy::too_many_arguments)]
 pub async fn complete_autonomous_daily_binding_bar_dispatch(
     pool: &PgPool,
     operation_id: Uuid,

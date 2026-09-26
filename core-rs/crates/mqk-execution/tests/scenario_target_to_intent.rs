@@ -76,7 +76,8 @@ fn a3_1_one_share_target_is_scale_micros_and_whole_id_is_unchanged() {
 /// their exact economic result.
 #[test]
 fn a3_1_whole_equity_delta_vectors_unchanged() {
-    let cases: [(i64, i64, Option<(Side, i64)>); 7] = [
+    type DeltaCase = (i64, i64, Option<(Side, i64)>);
+    let cases: [DeltaCase; 7] = [
         (0, 10, Some((Side::Buy, 10))),
         (10, 0, Some((Side::Sell, 10))),
         (10, 10, None),

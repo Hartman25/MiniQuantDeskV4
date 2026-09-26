@@ -38,7 +38,7 @@ fn proof_a_whole_equity_share_round_trip_is_exact() {
         LedgerEntry::Fill(Fill::new("AAPL", Side::Sell, qty(10), 155 * 1_000_000, 0)),
     );
     assert!(
-        pf.positions.get("AAPL").is_none() || pf.positions["AAPL"].qty_signed().is_zero(),
+        !pf.positions.contains_key("AAPL") || pf.positions["AAPL"].qty_signed().is_zero(),
         "A: full round-trip sell must leave the position exactly flat"
     );
     assert_eq!(
@@ -98,7 +98,7 @@ fn proof_b_fractional_btc_round_trip_is_exact() {
         )),
     );
     assert!(
-        pf.positions.get("BTC/USD").is_none() || pf.positions["BTC/USD"].qty_signed().is_zero(),
+        !pf.positions.contains_key("BTC/USD") || pf.positions["BTC/USD"].qty_signed().is_zero(),
         "B: full round-trip sell must leave the position exactly flat"
     );
 }

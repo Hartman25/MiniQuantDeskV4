@@ -326,14 +326,14 @@ pub(crate) fn validate_explicit_multi_strategy_authority(
         .iter()
         .map(|e| binding_key(&e.symbol, &e.strategy_id, e.timeframe_secs))
         .collect();
-    for key in expected_keys.difference(&stored_keys) {
+    if let Some(key) = expected_keys.difference(&stored_keys).next() {
         return Err(E::MissingBinding {
             symbol: key.0.clone(),
             strategy_id: key.1.clone(),
             timeframe_secs: key.2,
         });
     }
-    for key in stored_keys.difference(&expected_keys) {
+    if let Some(key) = stored_keys.difference(&expected_keys).next() {
         return Err(E::ExtraBinding {
             symbol: key.0.clone(),
             strategy_id: key.1.clone(),

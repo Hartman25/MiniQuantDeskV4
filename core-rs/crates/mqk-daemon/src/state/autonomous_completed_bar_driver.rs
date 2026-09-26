@@ -429,6 +429,12 @@ pub fn resolve_single_effective_binding(
 // B-M2-01): multi-binding resolution.
 // ---------------------------------------------------------------------------
 
+/// Per-assignment effective-binding resolution outcomes, in assignment order.
+pub type EffectiveBindingResolutions = Vec<(
+    super::multi_symbol_config::SymbolStrategyAssignment,
+    Result<ResolvedSingleBinding, AutonomousBindingRejection>,
+)>;
+
 /// [`resolve_single_effective_binding`]'s multi-binding generalization: every
 /// configured `(symbol, strategy_id, timeframe)` assignment in
 /// `assignment_config.symbols` is resolved independently, rather than
@@ -477,13 +483,7 @@ pub fn resolve_effective_bindings(
     runtime_binding_identity: &str,
     host_pool_run_id: Option<Uuid>,
     host_pool_selected: &[(String, String, i64)],
-) -> Result<
-    Vec<(
-        super::multi_symbol_config::SymbolStrategyAssignment,
-        Result<ResolvedSingleBinding, AutonomousBindingRejection>,
-    )>,
-    AutonomousBindingRejection,
-> {
+) -> Result<EffectiveBindingResolutions, AutonomousBindingRejection> {
     if operation.assignment_identity != assignment_identity {
         return Err(AutonomousBindingRejection::AssignmentIdentityMismatch);
     }

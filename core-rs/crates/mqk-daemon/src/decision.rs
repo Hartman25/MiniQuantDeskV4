@@ -119,7 +119,7 @@ impl LastBarSignal {
 /// A signal exists unless the total is provably zero (an overflowed total is
 /// not provably zero).
 pub(crate) fn signal_generated(total: Option<QtyMicros>) -> bool {
-    total.map_or(true, |t| !t.is_zero())
+    total.is_none_or(|t| !t.is_zero())
 }
 
 /// `order_json["qty"]` encoding understood by the runtime decoder

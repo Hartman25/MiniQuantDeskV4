@@ -103,7 +103,8 @@ fn eval(bootstrap: &mut NativeStrategyBootstrap) -> Option<StrategyBarResult> {
 #[test]
 fn crypto_bootstrap_produces_exact_micro_target_for_explicit_size() {
     let path = registry_file("exact", vec![instrument("BTC/USD", "crypto")]);
-    for id in ["intraday_scalper"] {
+    {
+        let id = "intraday_scalper";
         let (mut b, binding) = bootstrap_with_effective_binding_from_inputs(
             Some(&fleet(id)),
             &btc_inputs(&path, Some("0.0001")),

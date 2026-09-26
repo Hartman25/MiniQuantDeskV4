@@ -73,7 +73,7 @@ fn bars(traded: &[(&str, [i64; 4])], extras: usize) -> Vec<BacktestBar> {
 fn schedule(entries: &[(&str, i64)], extras: usize) -> BTreeMap<i64, Vec<TargetPosition>> {
     let zero_extras = |mut v: Vec<TargetPosition>| {
         for k in 0..extras {
-            v.push(TargetPosition::whole(&format!("ZZ{k}"), 0));
+            v.push(TargetPosition::whole(format!("ZZ{k}"), 0));
         }
         v
     };

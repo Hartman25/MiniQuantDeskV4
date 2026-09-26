@@ -308,7 +308,7 @@ async fn purge(pool: &sqlx::PgPool, ids: &[Uuid]) {
     }
 }
 
-fn row<'a>(v: &'a serde_json::Value, id: Uuid) -> &'a serde_json::Value {
+fn row(v: &serde_json::Value, id: Uuid) -> &serde_json::Value {
     v["rows"]
         .as_array()
         .expect("rows array")

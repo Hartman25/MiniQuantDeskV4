@@ -1473,7 +1473,7 @@ pub(super) fn spawn_execution_loop(
                                 };
                                 let sell_exceeds_long = delta
                                     .checked_neg()
-                                    .map_or(true, |qty_to_sell| qty_to_sell > current);
+                                    .is_none_or(|qty_to_sell| qty_to_sell > current);
                                 let no_order_reason = if delta.is_zero() {
                                     "already_at_target"
                                 } else if delta.is_negative()

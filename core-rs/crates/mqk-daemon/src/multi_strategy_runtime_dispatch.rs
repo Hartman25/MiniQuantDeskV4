@@ -107,7 +107,7 @@ const EXPLICIT_PLAN_ID_NAMESPACE_SEED: &str = "mqk.explicit-multi-strategy-dispa
 /// `(symbol, strategy_id, timeframe_secs)` binding set — never from wall
 /// clock, input order, or any other non-reproducible fact. The same run_id
 /// + binding set always produces the same id; any change to the binding set
-/// changes it.
+///   changes it.
 fn derive_explicit_multi_strategy_plan_id(run_id: Uuid, bindings: &[HostPoolKey]) -> Uuid {
     let mut sorted = bindings.to_vec();
     sorted.sort();
@@ -214,6 +214,7 @@ pub(crate) struct ExplicitBindingEvaluation {
 /// no env var), carried through into each per-binding gate call's
 /// [`DynamicSelectionContext`] for durable-evidence-shape parity with
 /// Bundle 7.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn evaluate_explicit_bindings(
     ctx: &DynamicSelectionPlanBuildContext<'_>,
     artifact: &LoadedWatchlistArtifactV3,
@@ -286,7 +287,8 @@ pub(crate) async fn evaluate_explicit_bindings(
             // pure gate's outcome is exactly this binding's own
             // pass/refuse — Bundle 7's ranking contract is never invoked
             // with more than one candidate here.
-            let plan = compute_dynamic_selection_plan(context, &[symbol.clone()], &[candidate]);
+            let plan =
+                compute_dynamic_selection_plan(context, std::slice::from_ref(symbol), &[candidate]);
             let passed = plan
                 .symbol_results
                 .first()
@@ -322,7 +324,7 @@ pub(crate) async fn evaluate_explicit_bindings(
 /// authorized subset and the durable evidence from that one evaluation
 /// pass, so it is not itself a production caller of this function
 /// (avoiding a second, redundant evidence-gathering DB round trip).
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) async fn resolve_authorized_explicit_bindings(
     ctx: &DynamicSelectionPlanBuildContext<'_>,
     artifact: &LoadedWatchlistArtifactV3,
@@ -1227,7 +1229,7 @@ mod tests {
     #[test]
     fn c2_remaining_evidence_fields_change_authority_id() {
         let base_eval = authorized_evaluation("AAPL", "intraday_scalper");
-        let baseline_id = base_id(&[base_eval.clone()]);
+        let baseline_id = base_id(std::slice::from_ref(&base_eval));
 
         type Mutator = Box<dyn Fn(&mut mqk_portfolio::SelectionCandidateEvidence)>;
         let mutators: Vec<(&str, Mutator)> = vec![
@@ -1286,7 +1288,7 @@ mod tests {
     #[test]
     fn d2_every_previously_omitted_evidence_field_changes_authority_id() {
         let base_eval = authorized_evaluation("AAPL", "intraday_scalper");
-        let baseline_id = base_id(&[base_eval.clone()]);
+        let baseline_id = base_id(std::slice::from_ref(&base_eval));
 
         type Mutator = Box<dyn Fn(&mut mqk_portfolio::SelectionCandidateEvidence)>;
         let mutators: Vec<(&str, Mutator)> = vec![

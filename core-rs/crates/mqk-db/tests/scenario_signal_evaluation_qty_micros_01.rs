@@ -276,7 +276,8 @@ async fn sq04_mixed_or_unknown_quantity_authority_is_refused() {
         return;
     };
     purge_leftovers(&pool).await;
-    let cases: [(&str, Option<&str>, Option<i64>, Option<i64>); 3] = [
+    type AuthorityCase = (&'static str, Option<&'static str>, Option<i64>, Option<i64>);
+    let cases: [AuthorityCase; 3] = [
         ("historical row carrying micros", None, None, Some(5)),
         (
             "qty_micros_v1 row carrying legacy qty",

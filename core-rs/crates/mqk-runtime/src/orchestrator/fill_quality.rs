@@ -88,9 +88,7 @@ pub(super) async fn build_fill_quality_row(
     // path, this function is documented best-effort/non-fatal telemetry that
     // gates no economic decision — skipping telemetry for a fractional
     // Crypto fill (rather than erroring the whole tick) is safe here.
-    let Some(fill_qty) = fill_qty.to_whole_units_checked() else {
-        return None;
-    };
+    let fill_qty = fill_qty.to_whole_units_checked()?;
 
     // Best-effort outbox lookup to derive ordered_qty, reference_price, submit_ts.
     let (ordered_qty, reference_price_micros, submit_ts_utc) =

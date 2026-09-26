@@ -457,7 +457,7 @@ mod exact_notional_cap_tests {
         assert!(!permits(ten, 100_000_000, 999.99));
         assert!(permits(ten, 100_000_000, 1_000.01));
         // One micro-dollar per share above the cap flips the decision.
-        assert!(permits(ten, 100_000_001, 1_000.00001));
+        assert!(permits(ten, 100_000_001, 1_000.000_01));
         assert!(!permits(ten, 100_000_001, 1_000.000009));
     }
 
