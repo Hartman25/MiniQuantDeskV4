@@ -403,6 +403,63 @@ pub fn validate_registry_v2(registry: &InstrumentRegistryV2) -> Result<()> {
     Ok(())
 }
 
+/// Strict canonical ISO calendar date `YYYY-MM-DD` (no surrounding
+/// whitespace, zero-padded, a real day of that month).
+fn is_canonical_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    if !b
+        .iter()
+        .enumerate()
+        .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    {
+        return false;
+    }
+    let (Ok(y), Ok(m), Ok(d)) = (
+        s[0..4].parse::<i32>(),
+        s[5..7].parse::<u32>(),
+        s[8..10].parse::<u32>(),
+    ) else {
+        return false;
+    };
+    chrono::NaiveDate::from_ymd_opt(y, m, d).is_some()
+}
+
+/// Strict canonical `YYYY-MM` (zero-padded month 01-12).
+fn is_canonical_year_month(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 7 || b[4] != b'-' {
+        return false;
+    }
+    if !b
+        .iter()
+        .enumerate()
+        .all(|(i, c)| i == 4 || c.is_ascii_digit())
+    {
+        return false;
+    }
+    matches!(s[5..7].parse::<u32>(), Ok(1..=12))
+}
+
+/// Two-legged pair (`base`/`quote`): both legs nonempty and distinct
+/// (case-insensitive, whitespace-trimmed) -- `EUR/EUR` is not an instrument.
+fn validate_pair_legs_v2(kind: &str, symbol: &str, base: &str, quote: &str) -> Result<()> {
+    if base.trim().is_empty() {
+        anyhow::bail!("instrument_registry_v2: {kind} symbol={symbol} missing base");
+    }
+    if quote.trim().is_empty() {
+        anyhow::bail!("instrument_registry_v2: {kind} symbol={symbol} missing quote");
+    }
+    if base.trim().eq_ignore_ascii_case(quote.trim()) {
+        anyhow::bail!(
+            "instrument_registry_v2: {kind} symbol={symbol} base and quote must differ (got {base:?}/{quote:?})"
+        );
+    }
+    Ok(())
+}
+
 /// Contract-shape validation for one instrument. Called only from
 /// [`validate_registry_v2`]; `asset_class` membership in
 /// [`CANONICAL_ASSET_CLASSES_V2`] is already checked by the caller, so the
@@ -444,6 +501,11 @@ fn validate_contract_v2(
                 if expiry.trim().is_empty() {
                     anyhow::bail!("instrument_registry_v2: future symbol={symbol} missing expiry");
                 }
+                if !is_canonical_year_month(expiry) && !is_canonical_iso_date(expiry) {
+                    anyhow::bail!(
+                        "instrument_registry_v2: future symbol={symbol} expiry {expiry:?} must be a real YYYY-MM or YYYY-MM-DD"
+                    );
+                }
                 if *multiplier <= 0 {
                     anyhow::bail!(
                         "instrument_registry_v2: future symbol={symbol} multiplier must be positive"
@@ -476,6 +538,11 @@ fn validate_contract_v2(
                 if expiry.trim().is_empty() {
                     anyhow::bail!("instrument_registry_v2: option symbol={symbol} missing expiry");
                 }
+                if !is_canonical_iso_date(expiry) {
+                    anyhow::bail!(
+                        "instrument_registry_v2: option symbol={symbol} expiry {expiry:?} must be a real YYYY-MM-DD"
+                    );
+                }
                 if *strike_micros <= 0 {
                     anyhow::bail!(
                         "instrument_registry_v2: option symbol={symbol} strike_micros must be positive"
@@ -499,13 +566,7 @@ fn validate_contract_v2(
         },
         "crypto" => match contract {
             Some(ContractDefinitionV2::CryptoPair { base, quote }) => {
-                if base.trim().is_empty() {
-                    anyhow::bail!("instrument_registry_v2: crypto symbol={symbol} missing base");
-                }
-                if quote.trim().is_empty() {
-                    anyhow::bail!("instrument_registry_v2: crypto symbol={symbol} missing quote");
-                }
-                Ok(())
+                validate_pair_legs_v2("crypto", symbol, base, quote)
             }
             _ => anyhow::bail!(
                 "instrument_registry_v2: crypto symbol={symbol} requires contract=CryptoPair with base/quote"
@@ -513,13 +574,7 @@ fn validate_contract_v2(
         },
         "forex" => match contract {
             Some(ContractDefinitionV2::ForexPair { base, quote }) => {
-                if base.trim().is_empty() {
-                    anyhow::bail!("instrument_registry_v2: forex symbol={symbol} missing base");
-                }
-                if quote.trim().is_empty() {
-                    anyhow::bail!("instrument_registry_v2: forex symbol={symbol} missing quote");
-                }
-                Ok(())
+                validate_pair_legs_v2("forex", symbol, base, quote)
             }
             _ => anyhow::bail!(
                 "instrument_registry_v2: forex symbol={symbol} requires contract=ForexPair with base/quote"
@@ -1681,6 +1736,110 @@ mod tests {
             let mut inst = base_option("AAPL20260918C150");
             inst.contract = Some(contract);
             assert!(validate_registry_v2(&registry_of(vec![inst])).is_err());
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // RC-M7M8-A: contract expiry is a real calendar value; a pair has two
+    // distinct legs
+    // -----------------------------------------------------------------
+
+    fn future_with_expiry(expiry: &str) -> InstrumentDefinitionV2 {
+        let mut inst = base_future("ES2026U");
+        inst.contract = Some(ContractDefinitionV2::Future {
+            root: "ES".to_string(),
+            expiry: expiry.to_string(),
+            multiplier: 50,
+            tick_size_micros: 250_000,
+        });
+        inst
+    }
+
+    fn option_with_expiry(expiry: &str) -> InstrumentDefinitionV2 {
+        let mut inst = base_option("AAPL20260918C150");
+        inst.contract = Some(ContractDefinitionV2::Option {
+            underlying: "AAPL".to_string(),
+            expiry: expiry.to_string(),
+            strike_micros: 150_000_000,
+            right: "call".to_string(),
+            multiplier: 100,
+        });
+        inst
+    }
+
+    fn validates(inst: InstrumentDefinitionV2) -> bool {
+        validate_registry_v2(&registry_of(vec![inst])).is_ok()
+    }
+
+    #[test]
+    fn v2_18_future_expiry_must_be_a_real_year_month_or_date() {
+        for good in ["2026-09", "2026-12", "2026-09-18", "2028-02-29"] {
+            assert!(
+                validates(future_with_expiry(good)),
+                "{good:?} must validate"
+            );
+        }
+        for bad in [
+            "banana",
+            "2026",
+            "2026-9",
+            "2026-13",
+            "2026-00",
+            "26-09",
+            "2026/09",
+            "2026-09-31",
+            "2027-02-29",
+            "2026-09-1",
+            " 2026-09",
+            "2026-09 ",
+            "2026-09-18T00:00:00Z",
+        ] {
+            assert!(!validates(future_with_expiry(bad)), "{bad:?} must fail");
+        }
+    }
+
+    #[test]
+    fn v2_19_option_expiry_must_be_a_real_calendar_date() {
+        for good in ["2026-09-18", "2028-02-29"] {
+            assert!(
+                validates(option_with_expiry(good)),
+                "{good:?} must validate"
+            );
+        }
+        for bad in [
+            "banana",
+            "2026-09",
+            "2026-9-18",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-09-00",
+            "2026-09-31",
+            "2027-02-29",
+            "2026/09/18",
+            "20260918",
+            " 2026-09-18",
+            "2026-09-18 ",
+        ] {
+            assert!(!validates(option_with_expiry(bad)), "{bad:?} must fail");
+        }
+    }
+
+    #[test]
+    fn v2_20_pair_legs_must_be_distinct_currencies() {
+        for (base, quote) in [("EUR", "EUR"), ("eur", "EUR"), (" USD ", "USD")] {
+            let mut fx = base_forex("EUR/USD");
+            fx.contract = Some(ContractDefinitionV2::ForexPair {
+                base: base.to_string(),
+                quote: quote.to_string(),
+            });
+            assert!(!validates(fx), "forex {base:?}/{quote:?} must fail");
+
+            let mut crypto = base_crypto("BTC/USD");
+            crypto.contract = Some(ContractDefinitionV2::CryptoPair {
+                base: base.to_string(),
+                quote: quote.to_string(),
+            });
+            assert!(!validates(crypto), "crypto {base:?}/{quote:?} must fail");
         }
     }
 
