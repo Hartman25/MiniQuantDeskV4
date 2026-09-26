@@ -664,6 +664,29 @@ pub(crate) fn non_equity_explicit_size_gate(
     Ok(())
 }
 
+/// Time-in-force actually admitted for an order of `asset_class`.
+///
+/// The bar->decision translator emits `market`/`day` for every asset, but
+/// crypto has no session-scoped `day` (Alpaca crypto supports only `gtc` and
+/// `ioc`). A crypto *market* order's `day` is therefore admitted as `gtc`
+/// (a market order does not rest, so the lifetime is not widened); a resting
+/// `day` limit, or any other value crypto cannot carry, is refused rather than
+/// silently rewritten. Equity time-in-force is untouched.
+fn admit_time_in_force(asset_class: &str, order_type: &str, tif: &str) -> Result<String, String> {
+    let tif = tif.trim().to_ascii_lowercase();
+    if asset_class != "crypto" {
+        return Ok(tif);
+    }
+    match tif.as_str() {
+        "gtc" | "ioc" => Ok(tif),
+        "day" if order_type.trim().eq_ignore_ascii_case("market") => Ok("gtc".to_string()),
+        other => Err(format!(
+            "internal decision refused: crypto order time_in_force '{other}' is not admissible \
+             (crypto supports only gtc/ioc; day is mapped to gtc for market orders only)"
+        )),
+    }
+}
+
 fn build_order_json(
     d: &InternalStrategyDecision,
     instrument: &DurableOrderInstrumentContext,
@@ -1482,6 +1505,25 @@ pub async fn submit_internal_strategy_decision(
         );
     }
 
+    let mut decision = decision;
+    match admit_time_in_force(
+        &instrument_context.asset_class,
+        &decision.order_type,
+        &decision.time_in_force,
+    ) {
+        Ok(tif) => decision.time_in_force = tif,
+        Err(blocker) => {
+            return outcome(
+                false,
+                "rejected",
+                &did,
+                &sid,
+                Some(active_run_id),
+                vec![blocker],
+            );
+        }
+    }
+
     let order_json = build_order_json(&decision, &instrument_context);
 
     match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &did, order_json).await {
@@ -1866,6 +1908,68 @@ mod m6_trading_registry_snapshot_writer_tests {
             write(100),
             "identical fractional replay is byte-stable"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // RC-M6-B: crypto time-in-force is decided at admission
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rcm6b_crypto_market_day_is_admitted_as_gtc_and_survives_the_runtime_decoder() {
+        let registry = btc_registry();
+        let context = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTC/USD",
+            false,
+        )
+        .expect("valid BTC/USD Paper registry row must resolve");
+
+        // The bar->decision translator emits market + "day" for every asset.
+        let mut d = decision();
+        d.qty = mqk_schemas::QtyMicros::new(100);
+        d.time_in_force = "day".to_string();
+        d.time_in_force =
+            admit_time_in_force(&context.asset_class, &d.order_type, &d.time_in_force)
+                .expect("crypto market/day must be admissible");
+        assert_eq!(d.time_in_force, "gtc");
+
+        let order = build_order_json(&d, &context);
+        let req = mqk_runtime::orchestrator::build_validated_submit_request("oid", &order)
+            .expect("runtime decoder must accept the admitted payload");
+        assert_eq!(req.time_in_force, "gtc");
+        mqk_broker_alpaca::validate_alpaca_crypto_order_tif(&req.time_in_force)
+            .expect("the admitted TIF must satisfy the Alpaca crypto adapter");
+    }
+
+    #[test]
+    fn rcm6b_crypto_time_in_force_table() {
+        let adm = |ot: &str, tif: &str| admit_time_in_force("crypto", ot, tif);
+        assert_eq!(adm("market", "gtc").as_deref(), Ok("gtc"));
+        assert_eq!(adm("market", "ioc").as_deref(), Ok("ioc"));
+        assert_eq!(adm("limit", "gtc").as_deref(), Ok("gtc"));
+        assert_eq!(adm("limit", "IOC").as_deref(), Ok("ioc"));
+        assert_eq!(adm("market", " DAY ").as_deref(), Ok("gtc"));
+        // A resting day limit has no crypto meaning: never silently widened.
+        assert!(adm("limit", "day").is_err());
+        // Not supported by Alpaca crypto.
+        for tif in ["fok", "opg", "cls", ""] {
+            assert!(adm("market", tif).is_err(), "{tif:?}");
+        }
+    }
+
+    #[test]
+    fn rcm6b_equity_time_in_force_is_untouched() {
+        for tif in ["day", "gtc", "ioc", "fok"] {
+            for ot in ["market", "limit"] {
+                assert_eq!(
+                    admit_time_in_force("equity", ot, tif).as_deref(),
+                    Ok(tif),
+                    "{ot}/{tif}"
+                );
+            }
+        }
     }
 
     #[test]
