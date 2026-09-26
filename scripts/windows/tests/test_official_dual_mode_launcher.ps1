@@ -108,7 +108,7 @@ Assert-True 'Live confirmation is skipped for -CheckOnly and -Scheduled (never p
     ($LauncherText -match '-not \$Scheduled\.IsPresent -and -not \$CheckOnly\.IsPresent')
 
 Assert-True 'Live readiness checks reference the real ledger file, not a hardcoded verdict' `
-    ($LauncherText -match 'MiniQuantDesk_Master_Patch_Ledger_v2_updated\.md' -and $LauncherText -match 'Get-LedgerPatchStatus')
+    ($LauncherText -match 'MiniQuantDeskV4_Master_Program_Plan_and_Ledger\.md' -and $LauncherText -match 'Get-LedgerPatchStatus')
 
 Assert-True 'Live trust-chain check reads live_trust_complete from research-py source, not a literal' `
     ($LauncherText.Contains('research-py\src\mqk_research\deployment\parity.py') -and $LauncherText.Contains('live_trust_complete\s*=\s*False'))
