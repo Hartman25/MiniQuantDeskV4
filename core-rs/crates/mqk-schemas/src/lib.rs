@@ -647,6 +647,85 @@ pub enum ContractSpec {
     Crypto,
 }
 
+/// True iff `s` is a canonical compact `YYYYMM` (exactly six ASCII digits,
+/// month 01-12). Surrounding whitespace, separators and short forms are not
+/// canonical: a contract's expiry is part of its identity, so only one
+/// spelling of each month is accepted.
+pub fn is_canonical_yyyymm(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 6 && b.iter().all(u8::is_ascii_digit) && matches!(s[4..6].parse::<u32>(), Ok(1..=12))
+}
+
+/// True iff `s` is a canonical compact `YYYYMMDD`: exactly eight ASCII digits
+/// naming a real calendar day (leap years honoured).
+pub fn is_canonical_yyyymmdd(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 8 || !b.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let (Ok(y), Ok(m), Ok(d)) = (
+        s[0..4].parse::<i32>(),
+        s[4..6].parse::<u32>(),
+        s[6..8].parse::<u32>(),
+    ) else {
+        return false;
+    };
+    chrono::NaiveDate::from_ymd_opt(y, m, d).is_some()
+}
+
+#[cfg(test)]
+mod canonical_contract_date_tests {
+    use super::*;
+
+    #[test]
+    fn yyyymm_accepts_only_real_months() {
+        for ok in ["202601", "202612", "209912"] {
+            assert!(is_canonical_yyyymm(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "2026",
+            "202600",
+            "202613",
+            "2026-1",
+            "20261",
+            "2026012",
+            " 202601",
+            "202601 ",
+            "20a601",
+            "２０２６０１",
+        ] {
+            assert!(!is_canonical_yyyymm(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn yyyymmdd_accepts_only_real_days() {
+        for ok in ["20260101", "20261231", "20280229", "20000229"] {
+            assert!(is_canonical_yyyymmdd(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "202601",
+            "2026010",
+            "202601011",
+            "20260100",
+            "20260132",
+            "20260431",
+            "20270229",
+            "21000229",
+            "20261301",
+            "20260001",
+            "2026-01-01",
+            " 20260101",
+            "20260101 ",
+            "2026010a",
+        ] {
+            assert!(!is_canonical_yyyymmdd(bad), "{bad:?}");
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OptionRight {
     Call,

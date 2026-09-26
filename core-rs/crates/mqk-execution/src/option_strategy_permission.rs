@@ -214,9 +214,9 @@ fn validate_leg(leg: &ProposedOptionLeg) -> Result<(), OptionStrategyRefusal> {
             detail: "strike_micros must be positive".to_string(),
         });
     }
-    if leg.expiry_yyyymmdd.trim().is_empty() {
+    if !mqk_schemas::is_canonical_yyyymmdd(&leg.expiry_yyyymmdd) {
         return Err(OptionStrategyRefusal::InvalidLeg {
-            detail: "expiry_yyyymmdd must be non-empty".to_string(),
+            detail: "expiry_yyyymmdd must be a real YYYYMMDD calendar date".to_string(),
         });
     }
     if leg.qty.raw() <= 0 {
@@ -291,14 +291,25 @@ pub fn classify_option_strategy_structure(
         validate_leg(leg)?;
     }
 
-    match proposed.legs.as_slice() {
+    let structure = match proposed.legs.as_slice() {
         [] => Err(OptionStrategyRefusal::NoLegs),
         [leg] => classify_single_leg(leg, proposed),
         [leg_a, leg_b] => classify_two_legs(leg_a, leg_b),
         legs => Err(OptionStrategyRefusal::TooManyLegs {
             leg_count: legs.len(),
         }),
+    }?;
+
+    // Options trade in whole contracts. Shapes whose own arithmetic already
+    // refuses a non-whole quantity keep their specific refusal above; every
+    // shape that would otherwise be permitted is refused here instead of
+    // being classified with a fractional contract count.
+    if proposed.legs.iter().any(|leg| !leg.qty.is_whole()) {
+        return Err(OptionStrategyRefusal::InvalidLeg {
+            detail: "qty must be a whole number of contracts".to_string(),
+        });
     }
+    Ok(structure)
 }
 
 fn classify_single_leg(

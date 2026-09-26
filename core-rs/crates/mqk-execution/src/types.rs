@@ -427,6 +427,9 @@ fn validate_order_intent_v2(intent: &OrderIntentV2) -> IntentV2Validation {
     if let Some(invalid) = validate_intent_contract(intent) {
         return invalid;
     }
+    if let Some(invalid) = validate_whole_contract_qty(&intent.instrument.asset_class, intent.qty) {
+        return invalid;
+    }
 
     if let Some(invalid) = validate_bracket_legs(intent.bracket.as_ref()) {
         return invalid;
@@ -499,6 +502,9 @@ fn validate_order_spec_v2(spec: &OrderSpec) -> IntentV2Validation {
     }
 
     if let Some(invalid) = validate_order_spec_contract(spec) {
+        return invalid;
+    }
+    if let Some(invalid) = validate_whole_contract_qty(&spec.instrument.asset_class, spec.qty) {
         return invalid;
     }
 
@@ -661,6 +667,30 @@ fn validate_currency_pair(
             reason_code,
             "OrderIntentV2 currency-pair contract requires base and quote currencies.",
         ))
+    } else if base_currency
+        .trim()
+        .eq_ignore_ascii_case(quote_currency.trim())
+    {
+        Some(IntentV2Validation::invalid(
+            "pair_legs_not_distinct",
+            "OrderIntentV2 currency-pair contract requires distinct base and quote currencies.",
+        ))
+    } else {
+        None
+    }
+}
+
+/// Futures and options trade in whole contracts: a fractional contract
+/// quantity has no executable meaning, so it is refused rather than rounded.
+fn validate_whole_contract_qty(
+    asset_class: &AssetClass,
+    qty: QtyMicros,
+) -> Option<IntentV2Validation> {
+    if matches!(asset_class, AssetClass::Future | AssetClass::Option) && !qty.is_whole() {
+        Some(IntentV2Validation::invalid(
+            "fractional_contract_qty",
+            "Futures and options quantities must be whole contracts.",
+        ))
     } else {
         None
     }
@@ -673,13 +703,13 @@ fn validate_future_contract(
     tick_size_micros: i64,
 ) -> Option<IntentV2Validation> {
     if root.trim().is_empty()
-        || expiry_yyyymm.trim().is_empty()
+        || !mqk_schemas::is_canonical_yyyymm(expiry_yyyymm)
         || multiplier <= 0
         || tick_size_micros <= 0
     {
         Some(IntentV2Validation::invalid(
             "invalid_future_contract",
-            "OrderIntentV2 future contract requires root, expiry, positive multiplier, and positive tick size.",
+            "OrderIntentV2 future contract requires root, a real YYYYMM expiry, positive multiplier, and positive tick size.",
         ))
     } else {
         None
@@ -693,13 +723,13 @@ fn validate_option_contract(
     multiplier: i32,
 ) -> Option<IntentV2Validation> {
     if underlying.trim().is_empty()
-        || expiry_yyyymmdd.trim().is_empty()
+        || !mqk_schemas::is_canonical_yyyymmdd(expiry_yyyymmdd)
         || strike_micros <= 0
         || multiplier <= 0
     {
         Some(IntentV2Validation::invalid(
             "invalid_option_contract",
-            "OrderIntentV2 option contract requires underlying, expiry, positive strike, and positive multiplier.",
+            "OrderIntentV2 option contract requires underlying, a real YYYYMMDD expiry, positive strike, and positive multiplier.",
         ))
     } else {
         None
