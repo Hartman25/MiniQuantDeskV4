@@ -209,6 +209,75 @@ async fn max_applied_version(pool: &sqlx::PgPool) -> i64 {
     .expect("at least one migration")
 }
 
+/// Canonical migration authority: `migrations/manifest.json` (status
+/// `applied`), cross-checked against the SQL files actually on disk. The
+/// latest version any fence test expects `mqk_db::migrate` to reach is derived
+/// from here, never hard-coded.
+fn derive_expected_latest(manifest_ids: &[i64], disk_versions: &[i64]) -> Result<i64, String> {
+    let mut manifest: Vec<i64> = manifest_ids.to_vec();
+    let mut disk: Vec<i64> = disk_versions.to_vec();
+    manifest.sort_unstable();
+    disk.sort_unstable();
+    if manifest.is_empty() {
+        return Err("manifest lists no applied migrations".to_string());
+    }
+    if manifest != disk {
+        return Err(format!(
+            "manifest applied migrations {manifest:?} disagree with SQL files on disk {disk:?}"
+        ));
+    }
+    Ok(*manifest.last().expect("non-empty"))
+}
+
+fn expected_latest_migration() -> i64 {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("manifest.json")).expect("read manifest.json"),
+    )
+    .expect("parse manifest.json");
+    let manifest_ids: Vec<i64> = manifest["migrations"]
+        .as_array()
+        .expect("migrations array")
+        .iter()
+        .filter(|m| m["status"] == "applied")
+        .map(|m| m["id"].as_str().expect("id").parse().expect("numeric id"))
+        .collect();
+    let disk_versions: Vec<i64> = std::fs::read_dir(&dir)
+        .expect("read migrations dir")
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.ends_with(".sql")
+                .then(|| name.split('_').next()?.parse::<i64>().ok())
+                .flatten()
+        })
+        .collect();
+    derive_expected_latest(&manifest_ids, &disk_versions).expect("canonical migration authority")
+}
+
+#[test]
+fn fence_expected_latest_tracks_the_canonical_manifest_and_includes_0076() {
+    let latest = expected_latest_migration();
+    assert!(
+        latest >= 76,
+        "immutable migration 0076 (CUTOVER-1D A1) must be part of the canonical set; got {latest}"
+    );
+}
+
+#[test]
+fn fence_expected_latest_refuses_omitted_or_stale_authority() {
+    let disk: Vec<i64> = (1..=76).collect();
+    assert_eq!(derive_expected_latest(&disk, &disk), Ok(76));
+    // A stale manifest (omits the newest migration) is refused, not accepted
+    // as a lower ceiling.
+    let stale: Vec<i64> = (1..=70).collect();
+    assert!(derive_expected_latest(&stale, &disk).is_err());
+    // A SQL file with no manifest entry, and the converse, are refused.
+    let omitted_from_disk: Vec<i64> = (1..=75).collect();
+    assert!(derive_expected_latest(&disk, &omitted_from_disk).is_err());
+    assert!(derive_expected_latest(&[], &[]).is_err());
+}
+
 async fn lease_count(pool: &sqlx::PgPool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM runtime_leader_lease")
         .fetch_one(pool)
@@ -354,9 +423,12 @@ async fn fence04_resolved_halted_state_allows_0068_to_latest() {
 
     mqk_db::migrate(&pool)
         .await
-        .expect("HALTED state should allow 0069 and 0070 to apply");
+        .expect("HALTED state should allow 0069 through the latest migration to apply");
 
-    assert_eq!(max_applied_version(&pool).await, 70);
+    assert_eq!(
+        max_applied_version(&pool).await,
+        expected_latest_migration()
+    );
     assert_eq!(lease_count(&pool).await, 0);
     assert_eq!(fk_delete_action(&pool).await, "r");
 
@@ -424,9 +496,12 @@ async fn fence06_database_at_0069_without_legacy_lease_can_apply_0070() {
 
     mqk_db::migrate(&pool)
         .await
-        .expect("database already past 0069 must be allowed to apply 0070");
+        .expect("database already past 0069 must be allowed to apply every later migration");
 
-    assert_eq!(max_applied_version(&pool).await, 70);
+    assert_eq!(
+        max_applied_version(&pool).await,
+        expected_latest_migration()
+    );
     assert_eq!(lease_count(&pool).await, 0);
     assert_eq!(fk_delete_action(&pool).await, "r");
 

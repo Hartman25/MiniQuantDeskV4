@@ -900,20 +900,26 @@ mod cutover_1d_a3_tests {
             .expect("replay"),
             InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists
         );
-        // Divergent fractional qty (100 -> 101 micros) collides.
-        let outcome = insert_runtime_strategy_conflict_plan(
-            &pool,
-            plan(run_id, plan_id, candidate(101, 250, 351)),
-        )
-        .await
-        .expect("divergent replay");
-        assert!(
-            matches!(
-                outcome,
-                InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision { .. }
-            ),
-            "{outcome:?}"
-        );
+        // Each quantity field diverging by exactly ONE micro, in isolation,
+        // collides (a comparison that truncated or rounded any of them would
+        // call these an idempotent replay).
+        for (label, divergent) in [
+            ("qty", candidate(101, 250, 350)),
+            ("current_qty", candidate(100, 251, 350)),
+            ("proposed_target_qty", candidate(100, 250, 351)),
+        ] {
+            let outcome =
+                insert_runtime_strategy_conflict_plan(&pool, plan(run_id, plan_id, divergent))
+                    .await
+                    .expect("divergent replay");
+            assert!(
+                matches!(
+                    outcome,
+                    InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision { .. }
+                ),
+                "{label}: {outcome:?}"
+            );
+        }
 
         // Historical NULL-schema row decodes through the checked whole-unit
         // conversion (2 whole units == 2_000_000 micros), never reinterpreted.

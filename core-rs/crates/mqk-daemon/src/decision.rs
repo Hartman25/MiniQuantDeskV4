@@ -1823,6 +1823,38 @@ mod m6_trading_registry_snapshot_writer_tests {
     }
 
     #[test]
+    fn a3_4_one_qty_micro_mutation_changes_the_durable_order_qty() {
+        let registry = btc_registry();
+        let context = resolve_order_instrument_context_from_registry(
+            &registry,
+            crate::state::DeploymentMode::Paper,
+            Some(crate::state::BrokerKind::Alpaca),
+            "BTC/USD",
+            false,
+        )
+        .expect("valid BTC/USD Paper registry row must resolve");
+        let write = |raw: i64| {
+            let mut d = decision();
+            d.qty = mqk_schemas::QtyMicros::new(raw);
+            build_order_json(&d, &context)
+        };
+        let base = write(100);
+        for neighbour in [99, 101] {
+            let other = write(neighbour);
+            assert_ne!(base["qty"], other["qty"], "0.0001 vs raw {neighbour}");
+            assert_ne!(base, other);
+        }
+        assert_eq!(base["qty"], serde_json::json!("0.0001"));
+        assert_eq!(write(101)["qty"], serde_json::json!("0.000101"));
+        assert_eq!(write(99)["qty"], serde_json::json!("0.000099"));
+        assert_eq!(
+            base,
+            write(100),
+            "identical fractional replay is byte-stable"
+        );
+    }
+
+    #[test]
     fn a3_4_equity_order_json_qty_stays_a_whole_integer() {
         let ctx = DurableOrderInstrumentContext::legacy_equity();
         let mut d = decision();

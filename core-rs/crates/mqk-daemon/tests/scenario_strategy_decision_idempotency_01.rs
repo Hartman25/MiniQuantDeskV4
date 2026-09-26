@@ -205,6 +205,58 @@ fn d03_different_qty_at_same_bar_produces_different_decision_id() {
     assert_ne!(d_10[0].qty, d_20[0].qty);
 }
 
+// A3 mutation proof: ONE QtyMicro of target movement is a different economic
+// intent. It must change the decision identity (B) and the decision quantity
+// that becomes the durable order qty (A); an identical fractional replay must
+// keep both byte-stable.
+#[test]
+fn d03b_one_qty_micro_target_mutation_changes_decision_identity_and_quantity() {
+    let target = |raw: i64| {
+        live_result(vec![TargetPosition::new(
+            "BTC/USD",
+            mqk_execution::QtyMicros::new(raw),
+        )])
+    };
+    let decide = |raw: i64| {
+        bar_result_to_decisions(&target(raw), fixed_run_id(), BAR_A_END_TS, &flat())
+            .pop()
+            .expect("fractional target from flat must decide")
+    };
+
+    let base = decide(100); // 0.0001
+    let plus_one = decide(101);
+    let minus_one = decide(99);
+    assert_eq!(base.qty, mqk_execution::QtyMicros::new(100));
+    assert_eq!(plus_one.qty, mqk_execution::QtyMicros::new(101));
+    assert_eq!(minus_one.qty, mqk_execution::QtyMicros::new(99));
+
+    // B: identity moves with a single micro in either direction.
+    assert_ne!(base.decision_id, plus_one.decision_id);
+    assert_ne!(base.decision_id, minus_one.decision_id);
+    assert_ne!(plus_one.decision_id, minus_one.decision_id);
+    // Identical fractional replay is idempotent.
+    assert_eq!(base.decision_id, decide(100).decision_id);
+
+    // Whole-unit identity seed stays the historical integer rendering, so an
+    // equity decision_id is not perturbed by the QtyMicros cutover.
+    let whole = bar_result_to_decisions(
+        &live_result(vec![TargetPosition::whole("NVDA", 20)]),
+        fixed_run_id(),
+        BAR_A_END_TS,
+        &flat(),
+    );
+    let expected = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk.strategy-decision.v3|{}|test_strategy|NVDA|300|20|{BAR_A_END_TS}",
+            fixed_run_id()
+        )
+        .as_bytes(),
+    )
+    .to_string();
+    assert_eq!(whole[0].decision_id, expected);
+}
+
 #[test]
 fn d04_different_symbol_at_same_bar_produces_different_decision_id() {
     let result_nvda = live_result(vec![TargetPosition::whole("NVDA", 20)]);
