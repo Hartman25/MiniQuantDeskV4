@@ -759,6 +759,49 @@ mod tests {
         assert_eq!(r.disposition, AllocationDisposition::RefusedNoCapital);
     }
 
+    /// Price at which the 20% single-position cap on a $100k NAV buys exactly
+    /// 0.00005 units ($20,000 / 0.00005).
+    const PRICE_CAP_BUYS_50_MICROS: i64 = 400_000_000_000_000;
+
+    #[test]
+    fn fractional_target_reduces_to_capital_limit_not_to_zero() {
+        // 0.0001 requested; capital only affords 0.00005 => granted exactly
+        // 50 micros (one-micro precision), never 0 and never above the cap.
+        let res = compute_allocation_cycle(ctx(), &[frac(PRICE_CAP_BUYS_50_MICROS, 0, 100, 1)], 5);
+        let r = result_for(&res, "BTC/USD");
+        assert_eq!(r.allocation_target_qty, QtyMicros::new(50));
+        assert_eq!(r.final_target_qty, QtyMicros::new(50));
+        assert_eq!(r.disposition, AllocationDisposition::ClampedDown);
+        // Exposure never exceeds the 20% cap: 50e-6 * $4e8 = $20,000.
+        assert!(
+            i128::from(r.final_target_qty.raw()) * i128::from(PRICE_CAP_BUYS_50_MICROS)
+                <= i128::from(NAV) * 200_000_000_000 / 1_000_000_000_000
+                    * i128::from(QTY_MICROS_SCALE)
+        );
+    }
+
+    #[test]
+    fn one_micro_capital_or_target_boundary_changes_allocation_exactly() {
+        let allocate = |nav: i64, target: i64| {
+            let mut c = ctx();
+            c.equity_micros = nav;
+            let res =
+                compute_allocation_cycle(c, &[frac(PRICE_CAP_BUYS_50_MICROS, 0, target, 1)], 5);
+            let r = result_for(&res, "BTC/USD");
+            (r.final_target_qty.raw(), r.disposition)
+        };
+        // Capital boundary: one micro-dollar of NAV flips 50 -> 49 micros.
+        assert_eq!(allocate(NAV, 100), (50, AllocationDisposition::ClampedDown));
+        assert_eq!(
+            allocate(NAV - 1, 100),
+            (49, AllocationDisposition::ClampedDown)
+        );
+        // Target boundary around the 50-micro grant.
+        assert_eq!(allocate(NAV, 49), (49, AllocationDisposition::Allowed));
+        assert_eq!(allocate(NAV, 50), (50, AllocationDisposition::Allowed));
+        assert_eq!(allocate(NAV, 51), (50, AllocationDisposition::ClampedDown));
+    }
+
     #[test]
     fn invalid_quantity_floor_fails_closed_for_that_symbol() {
         for bad in [0, -1] {

@@ -253,17 +253,18 @@ fn rebuild_decision_with_qty(
     }
 }
 
-/// Granularity (raw micros) an allocation is floored to: the coarsest power
-/// of ten (`QTY_MICROS_SCALE` down to `1`) that divides both the candidate's
-/// current and target quantity. Whole-unit (Equity) candidates always floor to
-/// whole shares, unchanged; a fractional candidate is allocated in units no
-/// finer than its own. This never consults a venue increment or minimum.
+/// Precision (raw micros) an allocation is floored to. This is representation
+/// precision only, never economic policy: when both quantities are whole asset
+/// units the historical whole-unit conservative floor applies unchanged;
+/// otherwise the allocator works at one `QtyMicro`. It never consults a venue
+/// increment/minimum or the decimal shape of the quantities.
 pub(crate) fn allocation_quantity_floor_micros(current: QtyMicros, target: QtyMicros) -> i64 {
-    let mut floor = mqk_schemas::QTY_MICROS_SCALE;
-    while floor > 1 && (current.raw() % floor != 0 || target.raw() % floor != 0) {
-        floor /= 10;
+    let scale = mqk_schemas::QTY_MICROS_SCALE;
+    if current.raw() % scale == 0 && target.raw() % scale == 0 {
+        scale
+    } else {
+        1
     }
-    floor
 }
 
 fn refused_candidate_result(
@@ -1877,19 +1878,28 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn a3_4_allocation_floor_is_whole_for_whole_and_no_finer_than_the_candidate() {
+    fn a3_4_allocation_floor_is_whole_for_whole_and_one_micro_otherwise() {
         let m = mqk_schemas::QtyMicros::new;
         let scale = mqk_schemas::QTY_MICROS_SCALE;
         assert_eq!(allocation_quantity_floor_micros(q(0), q(10)), scale);
         assert_eq!(allocation_quantity_floor_micros(q(3), q(3 + 7)), scale);
-        assert_eq!(allocation_quantity_floor_micros(m(0), m(100)), 100);
-        assert_eq!(allocation_quantity_floor_micros(m(250), m(350)), 10);
-        assert_eq!(allocation_quantity_floor_micros(m(0), m(1)), 1);
-        // Coarsest power of ten (never a venue increment): 0.5 / 1.5 => 0.1.
-        assert_eq!(
-            allocation_quantity_floor_micros(m(500_000), m(1_500_000)),
-            100_000
-        );
+        // Any fractional operand => neutral one-micro precision, regardless of
+        // the decimal shape of the quantities (no decimal-place-derived policy).
+        for (cur, tgt) in [
+            (0, 100),
+            (250, 350),
+            (0, 1),
+            (500_000, 1_500_000),
+            (0, 100_000),
+            (0, 2_500_000),
+            (1_000_000, 1_000_100),
+        ] {
+            assert_eq!(
+                allocation_quantity_floor_micros(m(cur), m(tgt)),
+                1,
+                "{cur}->{tgt}"
+            );
+        }
     }
 
     #[test]
@@ -1922,6 +1932,67 @@ mod tests {
             plan_to_new_db_plan(&plan, RuntimeOpportunityAllocationMode::PaperEnforced).unwrap();
         assert_eq!(db_plan.candidates[0].strategy_target_qty.raw(), 100);
         assert_eq!(db_plan.candidates[0].final_target_qty.raw(), 100);
+    }
+
+    /// Price at which the 20% single-position cap on a $100k NAV buys exactly
+    /// 0.00005 units ($20,000 / 0.00005 = $4e8).
+    const PRICE_CAP_BUYS_50_MICROS: i64 = 400_000_000_000_000;
+
+    fn allocate_fractional_buy(
+        equity_micros: i64,
+        target_micros: i64,
+    ) -> (i64, AllocationDisposition) {
+        let mut d = buy("BTC/USD", "intraday_scalper", 1);
+        d.qty = mqk_schemas::QtyMicros::new(target_micros);
+        let pending = PendingDecisionWithBarFacts {
+            decision: d,
+            bar_facts: Some(facts(
+                "BTC/USD",
+                "intraday_scalper",
+                1_000,
+                PRICE_CAP_BUYS_50_MICROS,
+            )),
+            dynamic_selection_provenance: None,
+        };
+        let mut ctx = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
+        ctx.active_snapshot = Some(ActiveSnapshotFacts {
+            snapshot_id: "snap-1".to_string(),
+            equity_micros,
+        });
+        ctx.opportunity_set = Some(opportunity_set(vec![("BTC/USD", "intraday_scalper", 0.9)]));
+        let out = apply_runtime_opportunity_allocation(&ctx, vec![pending], &BTreeMap::new());
+        let plan = out.plan.expect("plan");
+        let c = &plan.candidates[0];
+        (c.final_target_qty.raw(), c.disposition)
+    }
+
+    // Production path (allocation floor -> portfolio cycle): 0.0001 is reduced
+    // conservatively to 0.00005 by capital policy, never to 0 and never above
+    // the cap; one micro of target or capital moves the grant by exactly one
+    // micro.
+    #[test]
+    fn a3_5_fractional_target_reduces_to_capital_limit_at_one_micro_precision() {
+        let nav = 100_000 * 1_000_000;
+        assert_eq!(
+            allocate_fractional_buy(nav, 100),
+            (50, AllocationDisposition::ClampedDown)
+        );
+        assert_eq!(
+            allocate_fractional_buy(nav - 1, 100),
+            (49, AllocationDisposition::ClampedDown)
+        );
+        assert_eq!(
+            allocate_fractional_buy(nav, 49),
+            (49, AllocationDisposition::Allowed)
+        );
+        assert_eq!(
+            allocate_fractional_buy(nav, 50),
+            (50, AllocationDisposition::Allowed)
+        );
+        assert_eq!(
+            allocate_fractional_buy(nav, 51),
+            (50, AllocationDisposition::ClampedDown)
+        );
     }
 
     #[test]
