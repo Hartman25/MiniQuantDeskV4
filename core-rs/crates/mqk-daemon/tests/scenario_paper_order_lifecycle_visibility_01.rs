@@ -661,6 +661,77 @@ async fn pl_14_signal_qty_v1_whole_v2_exact_and_v1_refuses_fractional() {
 }
 
 // ---------------------------------------------------------------------------
+// PL-15 (CUTOVER-1D-A3): a signal journal the strict QtyMicros decoder rejects
+// must surface as query_failed on V1 and V2 -- never as an empty journal.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn pl_15_undecodable_signal_journal_fails_closed_not_empty() {
+    let pool = pl_db_pool().await;
+    let run_id = Uuid::parse_str("f1600001-0000-4000-8000-0000000000b4").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-02-06T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    pl_seed_run(&pool, run_id, ts).await;
+
+    let v1_uri = format!("/api/v1/execution/paper-lifecycle?run_id={run_id}");
+    let v2_uri = format!("/api/v2/execution/paper-lifecycle?run_id={run_id}");
+
+    // D. Genuinely empty, valid journal stays distinguishable: "empty".
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v1_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    let empty = parse_json(body);
+    assert_eq!(empty["truth_state"], "active", "got: {empty}");
+    assert_eq!(empty["signal_truth_state"], "empty", "got: {empty}");
+
+    // Schema-legal historical encoding (NULL version, NULL micros) whose
+    // legacy `signal_qty` cannot convert to QtyMicros without overflow.
+    sqlx::query(
+        "insert into strategy_signal_evaluations (
+            evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
+            bar_context_source, bars_loaded, latest_bar_ts_utc,
+            signal_generated, quantity_schema_version, signal_qty_micros, signal_qty,
+            signal_side, reason_code, reason, decision_stage, source
+        ) values ($1,$2,$3,'swing_momentum','AAPL','5m','db_loaded',10,$2,
+                  true,null,null,$4,'buy','test','test','strategy_evaluated','test')",
+    )
+    .bind(Uuid::parse_str("f1600001-0000-4000-8000-0000000001c1").unwrap())
+    .bind(ts)
+    .bind(run_id)
+    .bind(i64::MAX)
+    .execute(&pool)
+    .await
+    .expect("PL-15: malformed-authority insert must be schema-legal");
+
+    // A. The DB seam itself fails closed.
+    assert!(
+        mqk_db::fetch_strategy_signal_evaluations_for_run(&pool, run_id, 200)
+            .await
+            .is_err(),
+        "PL-15: decoder must reject the overflowing legacy quantity"
+    );
+
+    // B/C. V1 and V2 report the same explicit failure, with the run still resolved.
+    for uri in [&v1_uri, &v2_uri] {
+        let (status, body) = call(router_with_pool(pool.clone()), get(uri)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let j = parse_json(body);
+        assert_eq!(j["truth_state"], "query_failed", "{uri}: {j}");
+        assert_eq!(j["signal_truth_state"], "query_failed", "{uri}: {j}");
+        assert_ne!(j["signal_truth_state"], "empty", "{uri}: {j}");
+        assert_eq!(j["run_truth_state"], "resolved", "{uri}: {j}");
+        assert_eq!(j["run_id"], run_id.to_string(), "{uri}: {j}");
+        assert!(j["lifecycle_summary"].is_null(), "{uri}: {j}");
+        assert_eq!(j["signal_evaluations"].as_array().unwrap().len(), 0);
+        let text = j.to_string();
+        assert!(!text.contains("9223372036854775807"), "{uri}: leak: {j}");
+    }
+
+    pl_cleanup_run(&pool, run_id).await;
+}
+
+// ---------------------------------------------------------------------------
 // PL-11: Outbox + inbox fill -> order_filled_pnl_pending; portfolio/pnl
 // truth_state is always the honest in-memory-only label.
 // ---------------------------------------------------------------------------

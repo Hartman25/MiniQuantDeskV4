@@ -159,9 +159,17 @@ async fn load_paper_lifecycle(
     }
 
     // Fetch every source table for this run. All read-only, all run-scoped.
-    let signal_rows = mqk_db::fetch_strategy_signal_evaluations_for_run(db, run_id, ROW_LIMIT)
+    // A signal-journal query/decode failure is unavailable evidence, never an
+    // empty journal: without it no lifecycle classification is trustworthy.
+    let signal_rows = match mqk_db::fetch_strategy_signal_evaluations_for_run(db, run_id, ROW_LIMIT)
         .await
-        .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, run_id = %run_id, "paper_lifecycle_signal_query_failed");
+            return (StatusCode::OK, signal_query_failed_response(&run, warnings));
+        }
+    };
     let no_trade_rows =
         mqk_db::fetch_autonomous_no_trade_diagnostics_for_run(db, run_id, ROW_LIMIT)
             .await
@@ -513,6 +521,24 @@ fn empty_response(
         blockers,
         warnings: Vec::new(),
     }
+}
+
+/// Run resolved, signal journal unreadable: keep the truthful run identity but
+/// report every other surface `unavailable` and carry no lifecycle summary.
+fn signal_query_failed_response(
+    run: &mqk_db::RunRow,
+    warnings: Vec<String>,
+) -> PaperLifecycleResponse {
+    let mut resp = empty_response(
+        "query_failed",
+        Some(run.run_id.to_string()),
+        vec![QUERY_FAILED_MESSAGE.to_string()],
+    );
+    resp.run_truth_state = "resolved".to_string();
+    resp.signal_truth_state = "query_failed".to_string();
+    resp.run = Some(run_row_to_api(run));
+    resp.warnings = warnings;
+    resp
 }
 
 fn run_row_to_api(r: &mqk_db::RunRow) -> PaperLifecycleRunRow {
