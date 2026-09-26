@@ -83,9 +83,35 @@ if (-not (Test-Path $VeritasLedger)) {
 $LauncherText = Get-Content -Path $Launcher -Raw
 $VeritasLedgerText = Get-Content -Path $VeritasLedger -Raw
 
+# Hermeticity: static/dot-sourced proofs read the real current files, but every
+# real launcher SUBPROCESS runs the byte-identical launcher from a test-owned
+# disposable repo root under OS temp (scripts\windows plus the read-only
+# ledger/parity inputs the LIVE gates read; deliberately no .env.local, no
+# smoke_logs, no exports). The launcher derives its RepoRoot from its own
+# location, so its logs land in that root -- never in the protected primary
+# smoke_logs\ or exports\.
+function Get-TreeFingerprint {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return @('<absent>') }
+    $base = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\')
+    return @(Get-ChildItem -LiteralPath $Path -Recurse -Force |
+        ForEach-Object { "$($_.FullName.Substring($base.Length))|$(if ($_.PSIsContainer) { 'd' } else { $_.Length })|$($_.LastWriteTimeUtc.Ticks)" } |
+        Sort-Object)
+}
+$HermeticTrees = @('smoke_logs', 'exports')
+$HermeticBefore = @{}
+foreach ($t in $HermeticTrees) { $HermeticBefore[$t] = @(Get-TreeFingerprint -Path (Join-Path $RepoRoot $t)) }
+
+$TestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_duallauncher_" + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Force -Path (Join-Path $TestRoot 'scripts'), (Join-Path $TestRoot 'research-py\src\mqk_research\deployment')
+Copy-Item -Path $WindowsDir -Destination (Join-Path $TestRoot 'scripts\windows') -Recurse
+Copy-Item -LiteralPath (Join-Path $RepoRoot 'MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md') -Destination $TestRoot
+Copy-Item -LiteralPath (Join-Path $RepoRoot 'research-py\src\mqk_research\deployment\parity.py') -Destination (Join-Path $TestRoot 'research-py\src\mqk_research\deployment')
+$TestLauncher = Join-Path $TestRoot 'scripts\windows\Start-MiniQuantDesk.ps1'
+
 function Invoke-Launcher {
     param([string[]]$LauncherArgs)
-    $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $Launcher @LauncherArgs 2>&1
+    $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $TestLauncher @LauncherArgs 2>&1
     return @{ Output = ($output -join "`n"); ExitCode = $LASTEXITCODE }
 }
 
@@ -371,6 +397,11 @@ Assert-True 'Launch-VeritasLedger.ps1 -SkipGui actually guards the GUI resolve/l
 # ---------------------------------------------------------------------------
 Show-Info ''
 Show-Info '=== Section 2: real subprocess invocations (safe/read-only paths only) ==='
+
+Assert-True 'hermetic: the disposable-root launcher is byte-identical to the real production launcher' `
+    ((Get-FileHash -LiteralPath $TestLauncher).Hash -eq (Get-FileHash -LiteralPath $Launcher).Hash)
+Assert-True 'hermetic: the disposable root is outside the primary repo and carries no .env.local (no secrets/provider config reachable)' `
+    (-not $TestRoot.StartsWith($RepoRoot, [System.StringComparison]::OrdinalIgnoreCase) -and -not (Test-Path -LiteralPath (Join-Path $TestRoot '.env.local')))
 
 $r1 = Invoke-Launcher -LauncherArgs @('-Scheduled')
 Assert-True '-Scheduled with no -Mode: STARTUP_REFUSED text present' ($r1.Output -match 'STARTUP_REFUSED')
@@ -847,6 +878,26 @@ Assert-True 'P11 (re-affirms L5): ordinary active scheduler reuse remains accept
 # even be running on this box) ------------------------------------------------
 Assert-True 'Real-repo check: -Mode Paper -CheckOnly (Section 2''s r4) never printed a required-universe/start POST attempt' `
     (-not ($r4.Output -match 'required-universe/start'))
+
+# ---------------------------------------------------------------------------
+# Hermeticity negative control: the real subprocess phase wrote its launcher
+# logs into the disposable root, and the primary smoke_logs\ / exports\ trees
+# are identical (path, length, mtime) to their pre-run state.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Hermeticity: primary runtime-artifact trees untouched ==='
+$DisposableLauncherLogs = @(Get-ChildItem -Path (Join-Path $TestRoot 'smoke_logs\launcher') -Recurse -Filter 'launch_*.json' -ErrorAction SilentlyContinue)
+Assert-True 'hermetic: the real launcher subprocesses executed and wrote their launcher logs into the disposable root' ($DisposableLauncherLogs.Count -ge 3)
+foreach ($t in $HermeticTrees) {
+    $after = @(Get-TreeFingerprint -Path (Join-Path $RepoRoot $t))
+    $before = @($HermeticBefore[$t])
+    $changed = @($after | Where-Object { $before -cnotcontains $_ } | Select-Object -First 3)
+    Assert-True "hermetic: primary $t is identical (path, length, mtime; $($after.Count) entries) before and after this test$(if ($changed.Count) { ' -- CHANGED: ' + ($changed -join ' ; ') })" `
+        (($before -join "`n") -ceq ($after -join "`n"))
+}
+if ($TestRoot.StartsWith([System.IO.Path]::GetTempPath(), [System.StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $TestRoot) -like 'mqk_duallauncher_*') {
+    Remove-Item -LiteralPath $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Show-Info ''
 if ($Violations -eq 0) {

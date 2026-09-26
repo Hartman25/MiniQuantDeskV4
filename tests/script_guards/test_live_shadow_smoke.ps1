@@ -28,7 +28,14 @@
 #           evidence layout, and its manifest truthfully reports 'not_run'
 #           (never a fabricated boolean $false, A3B) for every observed-
 #           runtime-evidence field, separately from the always-$false
-#           wrapper-static-contract fields
+#           wrapper-static-contract fields. It runs the byte-identical
+#           production scripts from a test-owned disposable repo root under
+#           OS temp; evidence is selected by exact invocation_id ownership
+#           (LSS08-OWN), never by a recent-creation-time heuristic, and a
+#           foreign/poisoned distractor evidence directory cannot be selected.
+#   LSS-HERM — the primary repo's smoke_logs\ tree and exports\live_shadow_smoke
+#           / exports\launcher trees are identical (path, length, mtime)
+#           before and after this whole guard runs.
 #
 # MQK-LEDGER-BURN-CONTROLLER-04 R1 / MQK-LIVESHADOW-R1B-FINAL -- hermetic
 # fixture tests for Resolve-LiveShadowRunEvidence (dot-sourced from the
@@ -115,6 +122,56 @@ $Failures = 0
 
 function Pass { param([string]$Id, [string]$Msg) Write-Host "  PASS  [$Id] $Msg" -ForegroundColor Green }
 function Fail { param([string]$Id, [string]$Msg) Write-Host "  FAIL  [$Id] $Msg" -ForegroundColor Red ; $script:Failures++ }
+
+# Hermeticity: fingerprint (relative path | length | mtime ticks) of primary
+# repo trees this guard must never write. Compared again at the end.
+function Get-TreeFingerprint {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return @('<absent>') }
+    $base = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\')
+    return @(Get-ChildItem -LiteralPath $Path -Recurse -Force |
+        ForEach-Object { "$($_.FullName.Substring($base.Length))|$(if ($_.PSIsContainer) { 'd' } else { $_.Length })|$($_.LastWriteTimeUtc.Ticks)" } |
+        Sort-Object)
+}
+$HermeticTrees = @('smoke_logs', 'exports\live_shadow_smoke', 'exports\launcher')
+$HermeticBefore = @{}
+foreach ($t in $HermeticTrees) { $HermeticBefore[$t] = @(Get-TreeFingerprint -Path (Join-Path $RepoRoot $t)) }
+
+# Real-launcher guards run each from its own disposable repo-root copy
+# (scripts\windows only). The scripts derive their RepoRoot from their own
+# location, so every log/evidence artifact lands under a directory that one
+# invocation alone owns: never the protected repo smoke_logs\ or exports\.
+function New-LsGuardLauncherRoot {
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_lsguard_" + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $root 'scripts')
+    Copy-Item -Path (Join-Path $RepoRoot 'scripts\windows') -Destination (Join-Path $root 'scripts\windows') -Recurse
+    return $root
+}
+function Remove-LsGuardLauncherRoot {
+    param([string]$Root)
+    # Only ever remove a disposable root created by New-LsGuardLauncherRoot.
+    if ($Root -and $Root.StartsWith([System.IO.Path]::GetTempPath(), [System.StringComparison]::OrdinalIgnoreCase) -and
+        (Split-Path -Leaf $Root) -like 'mqk_lsguard_*' -and (Test-Path $Root)) {
+        Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Evidence ownership: the directory is this invocation's iff its name suffix
+# AND its manifest invocation_id both equal the expected id. Exactly one such
+# directory must exist; none or several fail closed ($null). Never selected by
+# recency.
+function Select-OwnedLiveShadowEvidenceDir {
+    param([string]$EvidenceRoot, [string]$InvocationId)
+    if ([string]::IsNullOrWhiteSpace($InvocationId)) { return $null }
+    $owned = @(Get-ChildItem -LiteralPath $EvidenceRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+        if ($_.Name -notlike "evidence_*_$InvocationId") { return $false }
+        $mp = Join-Path $_.FullName 'manifest.json'
+        if (-not (Test-Path -LiteralPath $mp)) { return $false }
+        try { return ([string](Get-Content -Path $mp -Raw | ConvertFrom-Json).invocation_id -eq $InvocationId) } catch { return $false }
+    })
+    if ($owned.Count -ne 1) { return $null }
+    return $owned[0]
+}
 
 Write-Host ""
 Write-Host "=== Live-shadow smoke guard (LIVE-SHADOW-SMOKE-GUARD-01) ==="
@@ -255,54 +312,94 @@ if ($text) {
 $script:CheckOnlyManifest = $null
 $script:CheckOnlyManifestRaw = $null
 if (Test-Path $Target) {
+    $lss08Root = $null
     try {
-        $before = Get-Date
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Target -CheckOnly *> $null
+        $lss08Root = New-LsGuardLauncherRoot
+        $lss08Target = Join-Path $lss08Root 'scripts\windows\Start-LiveShadowSmoke.ps1'
+        $lss08Launcher = Join-Path $lss08Root 'scripts\windows\Start-MiniQuantDesk.ps1'
+
+        # The disposable copies must be the real production scripts, not a
+        # stand-in.
+        $lss08Identical = ((Get-FileHash -LiteralPath $lss08Target).Hash -eq (Get-FileHash -LiteralPath $Target).Hash) -and
+                          ((Get-FileHash -LiteralPath $lss08Launcher).Hash -eq (Get-FileHash -LiteralPath $Launcher).Hash)
+        if ($lss08Identical) {
+            Pass 'LSS08-COPY' "Disposable repo root holds byte-identical copies of the production wrapper and launcher"
+        } else {
+            Fail 'LSS08-COPY' "Disposable copies differ from the production scripts"
+        }
+
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $lss08Target -RepoRoot $lss08Root -CheckOnly *> $null
         $exitCode = $LASTEXITCODE
 
-        $evidenceRoot = Join-Path $RepoRoot 'exports\live_shadow_smoke'
-        $newestDir = Get-ChildItem -Path $evidenceRoot -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.CreationTimeUtc -ge $before.ToUniversalTime().AddSeconds(-5) } |
-            Sort-Object CreationTimeUtc -Descending | Select-Object -First 1
+        # This invocation's identity comes from the launcher log its own
+        # delegated launcher wrote into the test-owned root -- the only one.
+        $lss08LauncherLogs = @(Get-ChildItem -Path (Join-Path $lss08Root 'smoke_logs\launcher\live-shadow') -Filter 'launch_*.json' -ErrorAction SilentlyContinue)
+        $lss08Id = $null
+        if ($lss08LauncherLogs.Count -eq 1) { $lss08Id = [string](Get-Content -Path $lss08LauncherLogs[0].FullName -Raw | ConvertFrom-Json).invocation_id }
 
-        if ($null -eq $newestDir) {
-            Fail 'LSS08' "No fresh evidence folder found under $evidenceRoot after a -CheckOnly run"
+        $evidenceRoot = Join-Path $lss08Root 'exports\live_shadow_smoke'
+        $ownedDir = Select-OwnedLiveShadowEvidenceDir -EvidenceRoot $evidenceRoot -InvocationId $lss08Id
+        if ($null -eq $ownedDir) {
+            Fail 'LSS08' "No evidence folder owned by this invocation (id '$lss08Id', launcher logs: $($lss08LauncherLogs.Count)) under $evidenceRoot"
         } else {
-            $manifestPath = Join-Path $newestDir.FullName 'manifest.json'
-            if (-not (Test-Path $manifestPath)) {
-                Fail 'LSS08' "Evidence folder $($newestDir.FullName) has no manifest.json"
+            Pass 'LSS08-OWN' "Evidence folder is bound to this invocation's own launcher-log invocation_id (dir suffix + manifest id), not a recency heuristic"
+
+            # Mutation control: plant distractors AFTER the real run so each is
+            # newer than the real evidence. The old newest-by-creation-time
+            # heuristic would pick a distractor; exact ownership must not.
+            $foreignId = [guid]::NewGuid().ToString()
+            $realManifestRaw = Get-Content -Path (Join-Path $ownedDir.FullName 'manifest.json') -Raw
+            $foreignDir = Join-Path $evidenceRoot "evidence_29990101_000000_$foreignId"
+            $null = New-Item -ItemType Directory -Force -Path $foreignDir
+            Set-Content -Path (Join-Path $foreignDir 'manifest.json') -Value $realManifestRaw.Replace($lss08Id, $foreignId) -Encoding ASCII
+            $poisonedDir = Join-Path $evidenceRoot "evidence_29990101_000001_$lss08Id"
+            $null = New-Item -ItemType Directory -Force -Path $poisonedDir
+            Set-Content -Path (Join-Path $poisonedDir 'manifest.json') -Value $realManifestRaw.Replace($lss08Id, $foreignId) -Encoding ASCII
+
+            $heuristicPick = Get-ChildItem -LiteralPath $evidenceRoot -Directory | Sort-Object CreationTimeUtc -Descending | Select-Object -First 1
+            $ownedAgain = Select-OwnedLiveShadowEvidenceDir -EvidenceRoot $evidenceRoot -InvocationId $lss08Id
+            $foreignPick = Select-OwnedLiveShadowEvidenceDir -EvidenceRoot $evidenceRoot -InvocationId $foreignId
+            if ($heuristicPick.FullName -ne $ownedDir.FullName -and
+                $null -ne $ownedAgain -and $ownedAgain.FullName -eq $ownedDir.FullName -and
+                $null -ne $foreignPick -and $foreignPick.FullName -eq $foreignDir) {
+                Pass 'LSS08-DISTRACTOR' "Newer foreign and poisoned (right-name/wrong-manifest) evidence dirs fool a newest-directory heuristic but can never be selected as this invocation's evidence"
             } else {
-                $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
-                $script:CheckOnlyManifest = $manifest
-                $script:CheckOnlyManifestRaw = Get-Content -Path $manifestPath -Raw
-                # A3B/R1: CheckOnly's observed-evidence fields are the string
-                # 'not_run' (this action category was never attempted) --
-                # not a boolean $false -- per the truth-repair rationale in
-                # Start-LiveShadowSmoke.ps1's own header. wrapper_direct_*
-                # are the separate, provable-by-construction static-contract
-                # booleans (always $false for this file, both CheckOnly and
-                # full run). daemon_started_by_this_invocation /
-                # daemon_reachable_and_verified are the R1-repaired,
-                # separately-tracked observed-evidence fields (schema v3).
-                if ($manifest.check_only -eq $true -and
-                    $manifest.schema_version -eq 'live-shadow-smoke-manifest-v4' -and
-                    -not [string]::IsNullOrWhiteSpace($manifest.invocation_id) -and
-                    $manifest.deployment_mode_forced -eq 'live-shadow' -and
-                    $manifest.canonical_launcher_mode -eq 'LiveShadow' -and
-                    $manifest.wrapper_direct_broker_call -eq $false -and
-                    $manifest.wrapper_direct_order_submission -eq $false -and
-                    $manifest.daemon_started_by_this_invocation -eq 'not_run' -and
-                    $manifest.daemon_reachable_and_verified -eq 'not_run' -and
-                    $manifest.real_broker_call_performed -eq 'not_run' -and
-                    $manifest.real_order_submitted -eq 'not_run') {
-                    Pass 'LSS08' "Real -CheckOnly run (exit $exitCode) produced a manifest truthfully recording 'not_run' (never fabricated `$false) for every observed-evidence field, delegating to -Mode LiveShadow"
-                } else {
-                    Fail 'LSS08' "Manifest did not record the expected fields: $($manifest | ConvertTo-Json -Compress)"
-                }
+                Fail 'LSS08-DISTRACTOR' "Distractor control failed: heuristic=$($heuristicPick.Name) owned=$($ownedAgain.Name) foreign=$($foreignPick.Name)"
+            }
+
+            $manifestPath = Join-Path $ownedDir.FullName 'manifest.json'
+            $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+            $script:CheckOnlyManifest = $manifest
+            $script:CheckOnlyManifestRaw = Get-Content -Path $manifestPath -Raw
+            # A3B/R1: CheckOnly's observed-evidence fields are the string
+            # 'not_run' (this action category was never attempted) --
+            # not a boolean $false -- per the truth-repair rationale in
+            # Start-LiveShadowSmoke.ps1's own header. wrapper_direct_*
+            # are the separate, provable-by-construction static-contract
+            # booleans (always $false for this file, both CheckOnly and
+            # full run). daemon_started_by_this_invocation /
+            # daemon_reachable_and_verified are the R1-repaired,
+            # separately-tracked observed-evidence fields (schema v3).
+            if ($manifest.check_only -eq $true -and
+                $manifest.schema_version -eq 'live-shadow-smoke-manifest-v4' -and
+                $manifest.invocation_id -eq $lss08Id -and
+                $manifest.deployment_mode_forced -eq 'live-shadow' -and
+                $manifest.canonical_launcher_mode -eq 'LiveShadow' -and
+                $manifest.wrapper_direct_broker_call -eq $false -and
+                $manifest.wrapper_direct_order_submission -eq $false -and
+                $manifest.daemon_started_by_this_invocation -eq 'not_run' -and
+                $manifest.daemon_reachable_and_verified -eq 'not_run' -and
+                $manifest.real_broker_call_performed -eq 'not_run' -and
+                $manifest.real_order_submitted -eq 'not_run') {
+                Pass 'LSS08' "Real -CheckOnly run (exit $exitCode) produced a manifest truthfully recording 'not_run' (never fabricated `$false) for every observed-evidence field, delegating to -Mode LiveShadow"
+            } else {
+                Fail 'LSS08' "Manifest did not record the expected fields: $($manifest | ConvertTo-Json -Compress)"
             }
         }
     } catch {
         Fail 'LSS08' "Real -CheckOnly invocation threw: $($_.Exception.Message)"
+    } finally {
+        Remove-LsGuardLauncherRoot -Root $lss08Root
     }
 } else {
     Fail 'LSS08' "skipped -- target file missing"
@@ -631,25 +728,7 @@ if ((Test-Path $Target) -and (Test-Path $Launcher)) {
 # ---------------------------------------------------------------------------
 if (Test-Path $Launcher) {
     # LS-EV-16/17 run the REAL launcher, each from its own disposable repo-root
-    # copy (scripts\windows only). The launcher derives its RepoRoot from its
-    # own location, so every launcher log lands under a directory that one
-    # invocation alone owns: never the protected repo smoke_logs\, never shared
-    # with a concurrent invocation -- so the log to inspect is identified by
-    # being the only one, not by a recent-creation-time heuristic.
-    function New-LsGuardLauncherRoot {
-        $root = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_lsguard_" + [guid]::NewGuid().ToString('N'))
-        $null = New-Item -ItemType Directory -Force -Path (Join-Path $root 'scripts')
-        Copy-Item -Path (Join-Path $RepoRoot 'scripts\windows') -Destination (Join-Path $root 'scripts\windows') -Recurse
-        return $root
-    }
-    function Remove-LsGuardLauncherRoot {
-        param([string]$Root)
-        # Only ever remove a disposable root created by New-LsGuardLauncherRoot.
-        if ($Root -and $Root.StartsWith([System.IO.Path]::GetTempPath(), [System.StringComparison]::OrdinalIgnoreCase) -and
-            (Split-Path -Leaf $Root) -like 'mqk_lsguard_*' -and (Test-Path $Root)) {
-            Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
+    # copy (New-LsGuardLauncherRoot above): the only launch_*.json there is theirs.
 
     # LS-EV-16: an explicitly malformed -InvocationId must fail closed before
     # any LiveShadow startup behavior -- nonzero exit, no operational startup
@@ -706,6 +785,18 @@ if (Test-Path $Launcher) {
 } else {
     Fail 'LS-EV-16' "skipped -- launcher file missing"
     Fail 'LS-EV-17' "skipped -- launcher file missing"
+}
+
+# LSS-HERM: the primary repo's runtime-artifact trees are untouched.
+foreach ($t in $HermeticTrees) {
+    $after = @(Get-TreeFingerprint -Path (Join-Path $RepoRoot $t))
+    $before = @($HermeticBefore[$t])
+    if (($before -join "`n") -ceq ($after -join "`n")) {
+        Pass 'LSS-HERM' "Primary $t is identical (path, length, mtime; $($after.Count) entries) before and after this guard"
+    } else {
+        $changed = @($after | Where-Object { $before -cnotcontains $_ } | Select-Object -First 5)
+        Fail 'LSS-HERM' "Primary $t CHANGED during this guard (before $($before.Count), after $($after.Count) entries): $($changed -join ' ; ')"
+    }
 }
 
 Write-Host ""

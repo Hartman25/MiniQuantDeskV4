@@ -88,7 +88,8 @@ $Guards = @(
     'test_canonical_safe_ignored_matrix.ps1',
     'test_dev_shell_dsn_mask.ps1',
     'test_export_research_evidence_manifest.ps1',
-    'test_m1_critical_task_supervision_closure.ps1'
+    'test_m1_critical_task_supervision_closure.ps1',
+    'test_live_shadow_smoke.ps1'
 )
 
 # FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01 Part 4: never hard-code a legacy
