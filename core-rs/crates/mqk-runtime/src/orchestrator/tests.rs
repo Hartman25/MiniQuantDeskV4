@@ -3236,3 +3236,241 @@ fn wrap_fetch_events_error_preserves_broker_error_as_downcastable_source() {
     // carrier of the error.
     assert!(wrapped.to_string().contains("fetch_events failed"));
 }
+
+// ---------------------------------------------------------------------------
+// RC-M5-A: settle-window drift explanation is exact `QtyMicros`
+// ---------------------------------------------------------------------------
+//
+// The three drift-explanation seams compare broker-vs-local position deltas
+// (`QtyMicros`) against what pending / recently applied fills account for.
+// The expectation side must be exact too: a fractional (Crypto) fill that the
+// broker snapshot has not yet caught up with must be explained, while every
+// unexplained shape (wrong direction, excess, unknown symbol) still fails.
+
+mod drift_explanation_exact_qty {
+    use super::*;
+    use mqk_reconcile::{BrokerSnapshot, LocalSnapshot};
+
+    fn micros(s: &str) -> QtyMicros {
+        s.parse().expect("test quantity literal")
+    }
+
+    fn sent_row(key: &str, order_json: serde_json::Value) -> mqk_db::OutboxRow {
+        mqk_db::OutboxRow {
+            outbox_id: 1,
+            run_id: Uuid::nil(),
+            idempotency_key: key.to_string(),
+            order_json,
+            status: "SENT".to_string(),
+            created_at_utc: ::chrono::Utc.timestamp_opt(0, 0).unwrap(),
+            sent_at_utc: None,
+            claimed_at_utc: None,
+            claimed_by: None,
+            dispatching_at_utc: None,
+            dispatch_attempt_id: None,
+        }
+    }
+
+    fn snapshots(
+        symbol: &str,
+        local_qty: &str,
+        broker_qty: &str,
+    ) -> (LocalSnapshot, BrokerSnapshot) {
+        let mut local = LocalSnapshot::empty();
+        let mut broker = BrokerSnapshot::empty();
+        local
+            .positions
+            .insert(symbol.to_string(), micros(local_qty));
+        broker
+            .positions
+            .insert(symbol.to_string(), micros(broker_qty));
+        (local, broker)
+    }
+
+    fn pending(
+        symbol: &str,
+        side: &str,
+        qty: serde_json::Value,
+        local_qty: &str,
+        broker_qty: &str,
+    ) -> bool {
+        let rows = vec![sent_row(
+            "k1",
+            serde_json::json!({"symbol": symbol, "side": side, "qty": qty}),
+        )];
+        let (local, broker) = snapshots(symbol, local_qty, broker_qty);
+        drift_is_consistent_with_pending_fills(&rows, &local, &broker)
+    }
+
+    // -- pending SENT+mapped rows ------------------------------------------
+
+    #[test]
+    fn pending_whole_unit_buy_is_explained_and_bounded() {
+        let ten = serde_json::json!(10);
+        assert!(pending("AAPL", "buy", ten.clone(), "0", "10"));
+        assert!(pending("AAPL", "buy", ten.clone(), "0", "4"), "partial");
+        assert!(!pending("AAPL", "buy", ten.clone(), "0", "11"), "excess");
+        assert!(!pending("AAPL", "sell", ten, "0", "10"), "direction");
+    }
+
+    #[test]
+    fn pending_fractional_crypto_buy_is_explained_and_bounded() {
+        let half = serde_json::json!("0.5");
+        assert!(
+            pending("BTC/USD", "buy", half.clone(), "0", "0.5"),
+            "a fractional fill the local book has not applied yet must be explained"
+        );
+        assert!(
+            pending("BTC/USD", "buy", half.clone(), "0", "0.2501"),
+            "partial"
+        );
+        assert!(
+            !pending("BTC/USD", "buy", half.clone(), "0", "0.500001"),
+            "one micro beyond the ordered quantity is unexplained"
+        );
+        assert!(
+            !pending("BTC/USD", "sell", half, "0", "0.5"),
+            "wrong direction is unexplained"
+        );
+    }
+
+    #[test]
+    fn pending_fractional_sell_is_explained() {
+        assert!(pending(
+            "BTC/USD",
+            "sell",
+            serde_json::json!("0.25"),
+            "0.25",
+            "0"
+        ));
+    }
+
+    #[test]
+    fn pending_fractional_drift_without_pending_order_is_unexplained() {
+        let rows: Vec<mqk_db::OutboxRow> = Vec::new();
+        let (local, broker) = snapshots("BTC/USD", "0", "0.5");
+        assert!(!drift_is_consistent_with_pending_fills(
+            &rows, &local, &broker
+        ));
+    }
+
+    #[test]
+    fn pending_fill_for_a_different_symbol_does_not_explain_fractional_drift() {
+        let rows = vec![sent_row(
+            "k1",
+            serde_json::json!({"symbol": "AAPL", "side": "buy", "qty": 10}),
+        )];
+        let (local, broker) = snapshots("BTC/USD", "0", "0.5");
+        assert!(!drift_is_consistent_with_pending_fills(
+            &rows, &local, &broker
+        ));
+    }
+
+    #[test]
+    fn pending_unparseable_qty_never_explains_drift() {
+        for bad in [
+            serde_json::json!("abc"),
+            serde_json::json!(0.5),
+            serde_json::json!(null),
+            serde_json::json!("-0.5"),
+            serde_json::json!(0),
+        ] {
+            assert!(
+                !pending("BTC/USD", "buy", bad.clone(), "0", "0.5"),
+                "qty {bad} must not explain drift"
+            );
+        }
+    }
+
+    // -- recently applied terminal fills -----------------------------------
+
+    fn now() -> ::chrono::DateTime<::chrono::Utc> {
+        ::chrono::Utc.timestamp_opt(1_000_000, 0).unwrap()
+    }
+
+    fn recent(symbol: &str, signed: &str, applied_secs_ago: i64) -> VecDeque<RecentTerminalFill> {
+        VecDeque::from([RecentTerminalFill {
+            symbol: symbol.to_string(),
+            signed_delta: micros(signed),
+            applied_at: now() - ::chrono::Duration::seconds(applied_secs_ago),
+        }])
+    }
+
+    #[test]
+    fn recent_fractional_fill_explains_local_ahead_drift() {
+        // Local applied a 0.5 BTC buy; the broker snapshot still shows flat.
+        let (local, broker) = snapshots("BTC/USD", "0.5", "0");
+        assert!(drift_is_consistent_with_recent_terminal_fills(
+            &recent("BTC/USD", "0.5", 10),
+            &local,
+            &broker,
+            now()
+        ));
+        // Drift larger than the fill accounts for is unexplained.
+        let (local, broker) = snapshots("BTC/USD", "0.500001", "0");
+        assert!(!drift_is_consistent_with_recent_terminal_fills(
+            &recent("BTC/USD", "0.5", 10),
+            &local,
+            &broker,
+            now()
+        ));
+        // Opposite-direction fill does not explain it.
+        let (local, broker) = snapshots("BTC/USD", "0.5", "0");
+        assert!(!drift_is_consistent_with_recent_terminal_fills(
+            &recent("BTC/USD", "-0.5", 10),
+            &local,
+            &broker,
+            now()
+        ));
+        // Outside the settle window nothing is explained.
+        let (local, broker) = snapshots("BTC/USD", "0.5", "0");
+        assert!(!drift_is_consistent_with_recent_terminal_fills(
+            &recent("BTC/USD", "0.5", TERMINAL_FILL_SETTLE_GRACE_SECS + 1),
+            &local,
+            &broker,
+            now()
+        ));
+    }
+
+    #[test]
+    fn recent_whole_unit_fill_semantics_are_unchanged() {
+        let (local, broker) = snapshots("AAPL", "10", "0");
+        assert!(drift_is_consistent_with_recent_terminal_fills(
+            &recent("AAPL", "10", 10),
+            &local,
+            &broker,
+            now()
+        ));
+        let (local, broker) = snapshots("AAPL", "11", "0");
+        assert!(!drift_is_consistent_with_recent_terminal_fills(
+            &recent("AAPL", "10", 10),
+            &local,
+            &broker,
+            now()
+        ));
+    }
+
+    #[test]
+    fn expired_fractional_fill_explains_drift_only_inside_lookahead() {
+        let (local, broker) = snapshots("BTC/USD", "0.5", "0");
+        assert!(has_expired_terminal_fill_explaining_drift(
+            &recent("BTC/USD", "0.5", TERMINAL_FILL_SETTLE_GRACE_SECS + 5),
+            &local,
+            &broker,
+            now()
+        ));
+        assert!(!has_expired_terminal_fill_explaining_drift(
+            &recent("BTC/USD", "0.5", TERMINAL_FILL_EXPIRY_LOOKAHEAD_SECS + 5),
+            &local,
+            &broker,
+            now()
+        ));
+        let (local, broker) = snapshots("BTC/USD", "0.500001", "0");
+        assert!(!has_expired_terminal_fill_explaining_drift(
+            &recent("BTC/USD", "0.5", TERMINAL_FILL_SETTLE_GRACE_SECS + 5),
+            &local,
+            &broker,
+            now()
+        ));
+    }
+}

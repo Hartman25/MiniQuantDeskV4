@@ -253,8 +253,45 @@ const TERMINAL_FILL_EXPIRY_LOOKAHEAD_SECS: i64 = TERMINAL_FILL_SETTLE_GRACE_SECS
 struct RecentTerminalFill {
     symbol: String,
     /// Signed position delta: positive for buy fills, negative for sell fills.
-    signed_delta: i64,
+    /// Exact `QtyMicros` so a fractional (Crypto) fill is explained exactly,
+    /// never truncated or dropped.
+    signed_delta: mqk_execution::QtyMicros,
     applied_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Add `delta` to `symbol`'s expected drift. `false` on overflow, in which
+/// case the caller must treat the drift as unexplained.
+fn accumulate_expected(
+    expected: &mut BTreeMap<String, mqk_execution::QtyMicros>,
+    symbol: &str,
+    delta: mqk_execution::QtyMicros,
+) -> bool {
+    let slot = expected
+        .entry(symbol.to_string())
+        .or_insert(mqk_execution::QtyMicros::ZERO);
+    match slot.checked_add(delta) {
+        Some(sum) => {
+            *slot = sum;
+            true
+        }
+        None => false,
+    }
+}
+
+/// `actual` (a nonzero observed position drift) is explained by `expected`
+/// only when an expectation exists, points the same way, and is at least as
+/// large in magnitude.
+fn signed_drift_is_explained(
+    actual: mqk_execution::QtyMicros,
+    expected: mqk_execution::QtyMicros,
+) -> bool {
+    if expected.is_zero() {
+        return false; // no expectation for this symbol
+    }
+    if expected.is_positive() != actual.is_positive() {
+        return false; // wrong direction
+    }
+    actual.raw().unsigned_abs() <= expected.raw().unsigned_abs()
 }
 
 /// Returns `true` if the broker-vs-local reconcile drift is fully explained by
@@ -279,7 +316,7 @@ fn drift_is_consistent_with_pending_fills(
 ) -> bool {
     // Build expected position deltas and the set of mapped order IDs from the
     // SENT+mapped outbox rows.
-    let mut expected_deltas: BTreeMap<String, i64> = BTreeMap::new();
+    let mut expected_deltas: BTreeMap<String, mqk_execution::QtyMicros> = BTreeMap::new();
     let mut mapped_ids: BTreeSet<String> = BTreeSet::new();
 
     for row in sent_mapped {
@@ -294,18 +331,25 @@ fn drift_is_consistent_with_pending_fills(
             .get("side")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let qty = row
-            .order_json
-            .get("qty")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        if !sym.is_empty() && qty > 0 {
-            let delta = if side.eq_ignore_ascii_case("buy") {
-                qty
-            } else {
-                -qty
-            };
-            *expected_deltas.entry(sym.to_string()).or_default() += delta;
+        // An absent/unparseable/non-positive quantity contributes no
+        // expectation, so drift it would have explained stays unexplained.
+        let Some(qty) = outbox::order_json_qty_micros(&row.order_json).filter(|q| q.is_positive())
+        else {
+            continue;
+        };
+        if sym.is_empty() {
+            continue;
+        }
+        let delta = if side.eq_ignore_ascii_case("buy") {
+            Some(qty)
+        } else {
+            qty.checked_neg()
+        };
+        let Some(delta) = delta else {
+            return false;
+        };
+        if !accumulate_expected(&mut expected_deltas, sym, delta) {
+            return false;
         }
     }
 
@@ -315,13 +359,6 @@ fn drift_is_consistent_with_pending_fills(
     all_syms.extend(broker.positions.keys().cloned());
 
     for sym in &all_syms {
-        // CUTOVER-1G-RECONCILE-QTY-MICROS-01: `local`/`broker`.positions are
-        // `QtyMicros` (fractional-capable, for Crypto), but `expected_deltas`
-        // is derived from whole-unit-only sources (order_json `qty` parsed
-        // via `as_i64`) by design. A fractional actual delta therefore can
-        // never be explained by this whole-unit expectation -- treat it the
-        // same as "no pending fill" (fail closed, not truncate) rather than
-        // silently rounding a real Crypto delta away.
         let lq = local
             .positions
             .get(sym)
@@ -332,22 +369,16 @@ fn drift_is_consistent_with_pending_fills(
             .get(sym)
             .copied()
             .unwrap_or(mqk_execution::QtyMicros::ZERO);
-        let actual_micros = bq
-            .checked_sub(lq)
-            .expect("position delta overflowed QtyMicros");
+        let Some(actual_micros) = bq.checked_sub(lq) else {
+            return false; // unrepresentable delta is never explained
+        };
         if !actual_micros.is_zero() {
-            let Some(actual) = actual_micros.to_whole_units_checked() else {
-                return false; // fractional drift cannot be explained by a whole-unit expectation
-            };
-            let expected = expected_deltas.get(sym).copied().unwrap_or(0);
-            if expected == 0 {
-                return false; // drift on a symbol with no pending fill
-            }
-            if (expected > 0) != (actual > 0) {
-                return false; // wrong direction
-            }
-            if actual.abs() > expected.abs() {
-                return false; // more fill than ordered
+            let expected = expected_deltas
+                .get(sym)
+                .copied()
+                .unwrap_or(mqk_execution::QtyMicros::ZERO);
+            if !signed_drift_is_explained(actual_micros, expected) {
+                return false; // no pending fill / wrong direction / more fill than ordered
             }
         }
     }
@@ -396,17 +427,38 @@ fn drift_is_consistent_with_recent_terminal_fills(
     broker: &BrokerSnapshot,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    // Accumulate expected local-ahead deltas from fills within the window.
-    let mut expected: BTreeMap<String, i64> = BTreeMap::new();
-    let mut any_in_grace = false;
+    recent_fills_explain_local_ahead_drift(
+        recent_fills,
+        local,
+        broker,
+        now,
+        0..TERMINAL_FILL_SETTLE_GRACE_SECS,
+    )
+}
+
+/// Shared body of the two recent-fill explanation seams: the fills whose age
+/// (seconds) lies in `age_window` must, per symbol, explain every nonzero
+/// local-ahead-of-broker position drift exactly (same direction, magnitude
+/// not exceeded). Returns `false` if no fill lies in the window.
+fn recent_fills_explain_local_ahead_drift(
+    recent_fills: &std::collections::VecDeque<RecentTerminalFill>,
+    local: &LocalSnapshot,
+    broker: &BrokerSnapshot,
+    now: chrono::DateTime<chrono::Utc>,
+    age_window: std::ops::Range<i64>,
+) -> bool {
+    let mut expected: BTreeMap<String, mqk_execution::QtyMicros> = BTreeMap::new();
+    let mut any_in_window = false;
     for fill in recent_fills {
         let elapsed = (now - fill.applied_at).num_seconds();
-        if (0..TERMINAL_FILL_SETTLE_GRACE_SECS).contains(&elapsed) {
-            any_in_grace = true;
-            *expected.entry(fill.symbol.clone()).or_default() += fill.signed_delta;
+        if age_window.contains(&elapsed) {
+            any_in_window = true;
+            if !accumulate_expected(&mut expected, &fill.symbol, fill.signed_delta) {
+                return false;
+            }
         }
     }
-    if !any_in_grace {
+    if !any_in_window {
         return false;
     }
 
@@ -415,11 +467,6 @@ fn drift_is_consistent_with_recent_terminal_fills(
     all_syms.extend(broker.positions.keys().cloned());
 
     for sym in &all_syms {
-        // CUTOVER-1G-RECONCILE-QTY-MICROS-01: see the analogous comment in
-        // `drift_is_consistent_with_pending_fills` -- `expected` here is
-        // built from `RecentTerminalFill.signed_delta` (whole-unit i64 by
-        // design; fractional fills are never recorded into the ring buffer
-        // at all -- see the push site's `to_whole_units_checked()` guard).
         let lq = local
             .positions
             .get(sym)
@@ -430,22 +477,17 @@ fn drift_is_consistent_with_recent_terminal_fills(
             .get(sym)
             .copied()
             .unwrap_or(mqk_execution::QtyMicros::ZERO);
-        let actual_micros = lq
-            .checked_sub(bq)
-            .expect("position delta overflowed QtyMicros"); // positive = local ahead of broker
+        // positive = local ahead of broker
+        let Some(actual_micros) = lq.checked_sub(bq) else {
+            return false; // unrepresentable delta is never explained
+        };
         if !actual_micros.is_zero() {
-            let Some(actual) = actual_micros.to_whole_units_checked() else {
-                return false; // fractional drift cannot be explained by a whole-unit expectation
-            };
-            let exp = expected.get(sym).copied().unwrap_or(0);
-            if exp == 0 {
-                return false; // unexplained drift on this symbol
-            }
-            if (exp > 0) != (actual > 0) {
-                return false; // wrong direction
-            }
-            if actual.abs() > exp.abs() {
-                return false; // drift exceeds what the fills explain
+            let exp = expected
+                .get(sym)
+                .copied()
+                .unwrap_or(mqk_execution::QtyMicros::ZERO);
+            if !signed_drift_is_explained(actual_micros, exp) {
+                return false; // no fill / wrong direction / drift exceeds the fills
             }
         }
     }
@@ -470,55 +512,13 @@ fn has_expired_terminal_fill_explaining_drift(
     broker: &BrokerSnapshot,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    let mut expected: BTreeMap<String, i64> = BTreeMap::new();
-    let mut any_in_lookahead = false;
-    for fill in recent_fills {
-        let elapsed = (now - fill.applied_at).num_seconds();
-        if (TERMINAL_FILL_SETTLE_GRACE_SECS..TERMINAL_FILL_EXPIRY_LOOKAHEAD_SECS).contains(&elapsed)
-        {
-            any_in_lookahead = true;
-            *expected.entry(fill.symbol.clone()).or_default() += fill.signed_delta;
-        }
-    }
-    if !any_in_lookahead {
-        return false;
-    }
-    let mut all_syms: BTreeSet<String> = BTreeSet::new();
-    all_syms.extend(local.positions.keys().cloned());
-    all_syms.extend(broker.positions.keys().cloned());
-    for sym in &all_syms {
-        // CUTOVER-1G-RECONCILE-QTY-MICROS-01: see the analogous comment in
-        // `drift_is_consistent_with_pending_fills`.
-        let lq = local
-            .positions
-            .get(sym)
-            .copied()
-            .unwrap_or(mqk_execution::QtyMicros::ZERO);
-        let bq = broker
-            .positions
-            .get(sym)
-            .copied()
-            .unwrap_or(mqk_execution::QtyMicros::ZERO);
-        let actual_micros = lq
-            .checked_sub(bq)
-            .expect("position delta overflowed QtyMicros");
-        if !actual_micros.is_zero() {
-            let Some(actual) = actual_micros.to_whole_units_checked() else {
-                return false;
-            };
-            let exp = expected.get(sym).copied().unwrap_or(0);
-            if exp == 0 {
-                return false;
-            }
-            if (exp > 0) != (actual > 0) {
-                return false;
-            }
-            if actual.abs() > exp.abs() {
-                return false;
-            }
-        }
-    }
-    true
+    recent_fills_explain_local_ahead_drift(
+        recent_fills,
+        local,
+        broker,
+        now,
+        TERMINAL_FILL_SETTLE_GRACE_SECS..TERMINAL_FILL_EXPIRY_LOOKAHEAD_SECS,
+    )
 }
 
 #[derive(Debug)]
@@ -1514,29 +1514,22 @@ where
                 ..
             } = &event
             {
-                // CUTOVER-1B-OMS-QTY-MICROS-01: `RecentTerminalFill.signed_delta`
-                // remains whole-unit `i64` pending CUTOVER-1C (it is compared
-                // directly against the still-whole-unit reconcile broker/local
-                // snapshots). A fractional raw `delta_qty` here is not
-                // necessarily an error -- this specific event may have been a
-                // no-op duplicate that never reached the portfolio (see
-                // `apply_fill_step`'s early no-op return, which does not
-                // validate `delta_qty` for whole-unit-ness). Skip recording
-                // it rather than truncate: the ring buffer is a lenience
-                // heuristic for reconcile-drift explanation, so omitting an
-                // entry only makes that check MORE conservative, never less.
-                if let Some(whole_delta) = delta_qty.to_whole_units_checked() {
-                    let signed = if matches!(side, mqk_execution::Side::Buy) {
-                        whole_delta
-                    } else {
-                        -whole_delta
-                    };
+                // The ring buffer is a lenience heuristic for reconcile-drift
+                // explanation and records the exact signed `QtyMicros` delta.
+                // An unrepresentable negation is skipped, which only makes
+                // that check more conservative.
+                let signed = if matches!(side, mqk_execution::Side::Buy) {
+                    Some(*delta_qty)
+                } else {
+                    delta_qty.checked_neg()
+                };
+                if let Some(signed_delta) = signed {
                     if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {
                         self.recently_applied_fills.pop_front();
                     }
                     self.recently_applied_fills.push_back(RecentTerminalFill {
                         symbol: symbol.clone(),
-                        signed_delta: signed,
+                        signed_delta,
                         applied_at: self.time_source.now_utc(),
                     });
                 }
@@ -1666,6 +1659,22 @@ where
         &mut self,
         symbol: impl Into<String>,
         signed_delta: i64,
+        applied_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        self.inject_recent_terminal_fill_micros_for_test(
+            symbol,
+            mqk_execution::QtyMicros::from_whole_units(signed_delta)
+                .expect("test signed_delta fits QtyMicros"),
+            applied_at,
+        );
+    }
+    /// Exact-quantity counterpart of
+    /// [`Self::inject_recent_terminal_fill_for_test`] for fractional fills.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn inject_recent_terminal_fill_micros_for_test(
+        &mut self,
+        symbol: impl Into<String>,
+        signed_delta: mqk_execution::QtyMicros,
         applied_at: chrono::DateTime<chrono::Utc>,
     ) {
         if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {

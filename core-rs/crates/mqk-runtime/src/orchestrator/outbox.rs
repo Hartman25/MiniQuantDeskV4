@@ -110,6 +110,13 @@ pub fn build_validated_submit_request(
     })
 }
 
+/// Exact order quantity (`qty`) carried by an outbox payload, for reconcile
+/// drift explanation. `None` when absent or not an exact integer / decimal
+/// string (a bare JSON float is refused, never rounded).
+pub(super) fn order_json_qty_micros(order_json: &serde_json::Value) -> Option<QtyMicros> {
+    parse_signed_qty_micros_field("qty", order_json.get("qty")?).ok()
+}
+
 pub(super) fn build_submit_request(row: &mqk_db::OutboxRow) -> anyhow::Result<BrokerSubmitRequest> {
     build_validated_submit_request(&row.idempotency_key, &row.order_json)
 }
