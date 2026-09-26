@@ -476,6 +476,12 @@
       "path": "0077_strategy_signal_evaluations_qty_micros.sql",
       "status": "applied",
       "intent": "CUTOVER-1D-A3: add an explicit qty_micros_v1 encoding to the durable strategy_signal_evaluations journal (quantity_schema_version + signal_qty_micros) so a successfully evaluated fractional signal is never journaled as an absent quantity. Historical rows retain quantity_schema_version=NULL and the whole-unit signal_qty column, unrescaled; new evaluated rows write raw QtyMicros in signal_qty_micros with signal_qty NULL. A CHECK constraint makes the two encodings mutually exclusive. No trading authority, risk policy, order sizing, Paper/Live state, broker routing, or execution capability is changed by this migration."
+    },
+    {
+      "id": "0078",
+      "path": "0078_paper_portfolio_snapshot_positions_qty_micros.sql",
+      "status": "applied",
+      "intent": "M5/M6 asset-neutral quantity: add an explicit qty_micros_v1 encoding to sys_paper_portfolio_snapshot_positions (quantity_schema_version + qty_signed_micros; qty_signed becomes nullable) so a fractional (Crypto) broker position is stored exactly instead of refusing the whole durable snapshot. Historical rows retain quantity_schema_version=NULL and the whole-unit qty_signed column, unrescaled; whole-unit positions (all Equity) continue to be written in that historical encoding; only a fractional position writes qty_signed_micros with qty_signed NULL. A CHECK constraint makes the two encodings mutually exclusive and forbids a row with no quantity. No trading authority, risk policy, order sizing, Paper/Live state, broker routing, or execution capability is changed by this migration."
     }
   ]
 }

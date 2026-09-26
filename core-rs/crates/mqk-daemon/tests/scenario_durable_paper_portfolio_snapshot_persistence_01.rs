@@ -175,7 +175,91 @@ async fn real_source_accepted_snapshot_persists() {
     assert_eq!(durable.snapshot.cash_micros, 40_000_000_000);
     assert_eq!(durable.positions.len(), 1);
     assert_eq!(durable.positions[0].symbol, "AAPL");
-    assert_eq!(durable.positions[0].qty_signed, 10);
+    assert_eq!(
+        durable.positions[0].qty_signed,
+        mqk_schemas::QtyMicros::from_whole_units(10).unwrap()
+    );
+
+    cleanup(&pool, run_id).await;
+}
+
+/// RC-M5-C: a snapshot holding a fractional (Crypto) broker position now
+/// persists durably with the exact quantity instead of being refused as an
+/// invalid snapshot, alongside an unchanged whole-unit Equity position.
+#[tokio::test]
+async fn fractional_crypto_position_persists_exactly_next_to_equity() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("fractional_crypto_position_persists_exactly_next_to_equity");
+    cleanup(&pool, run_id).await;
+    fixture_run(&pool, run_id).await;
+
+    let mut state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    state.db = Some(pool.clone());
+
+    let captured_at_utc = Utc.with_ymd_and_hms(2099, 3, 1, 13, 5, 0).unwrap();
+    let mut snapshot = fixture_snapshot(captured_at_utc, "100000.00", "40000.00");
+    snapshot.positions.push(BrokerPosition {
+        symbol: "BTC/USD".to_string(),
+        qty: "0.000101".to_string(),
+        avg_price: "60000.00".to_string(),
+    });
+    state
+        .accept_external_broker_snapshot_for_test(snapshot, Some(run_id), None)
+        .await;
+
+    let durable = mqk_db::fetch_paper_portfolio_snapshot_by_id(
+        &pool,
+        expected_snapshot_id(captured_at_utc, run_id),
+    )
+    .await
+    .expect("fetch should succeed")
+    .expect("a snapshot with a fractional position must persist");
+    let by_symbol: std::collections::BTreeMap<_, _> = durable
+        .positions
+        .iter()
+        .map(|p| (p.symbol.as_str(), p.qty_signed))
+        .collect();
+    assert_eq!(by_symbol.len(), 2);
+    assert_eq!(by_symbol["AAPL"], mqk_schemas::QtyMicros::new(10_000_000));
+    assert_eq!(by_symbol["BTC/USD"], mqk_schemas::QtyMicros::new(101));
+
+    cleanup(&pool, run_id).await;
+}
+
+/// RC-M5-C negative control: a quantity that is not exactly representable
+/// (more than six fraction digits) still refuses the whole snapshot -- it is
+/// never rounded into a plausible position.
+#[tokio::test]
+async fn over_precise_position_quantity_still_refuses_the_snapshot() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("over_precise_position_quantity_still_refuses_the_snapshot");
+    cleanup(&pool, run_id).await;
+    fixture_run(&pool, run_id).await;
+
+    let mut state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    state.db = Some(pool.clone());
+
+    let captured_at_utc = Utc.with_ymd_and_hms(2099, 3, 1, 13, 6, 0).unwrap();
+    let mut snapshot = fixture_snapshot(captured_at_utc, "100000.00", "40000.00");
+    snapshot.positions[0].qty = "0.1234567".to_string();
+    state
+        .accept_external_broker_snapshot_for_test(snapshot, Some(run_id), None)
+        .await;
+
+    let durable = mqk_db::fetch_paper_portfolio_snapshot_by_id(
+        &pool,
+        expected_snapshot_id(captured_at_utc, run_id),
+    )
+    .await
+    .expect("fetch should succeed");
+    assert!(
+        durable.is_none(),
+        "an inexact position quantity must not produce a durable snapshot"
+    );
 
     cleanup(&pool, run_id).await;
 }

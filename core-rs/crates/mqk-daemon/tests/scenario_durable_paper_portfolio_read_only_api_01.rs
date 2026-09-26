@@ -247,7 +247,7 @@ async fn seed_snapshot(
     if qty_signed != 0 {
         positions.push(mqk_db::PaperPortfolioSnapshotPosition {
             symbol: "AAPL".to_string(),
-            qty_signed,
+            qty_signed: mqk_schemas::QtyMicros::from_whole_units(qty_signed).unwrap(),
             avg_entry_price_micros: 150_000_000,
             provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
         });
@@ -762,6 +762,125 @@ async fn durable_positions_returns_positions_from_latest_snapshot() {
     assert_eq!(positions.len(), 1);
     assert_eq!(positions[0]["symbol"], "AAPL");
     assert_eq!(positions[0]["qty_signed"], 10);
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// RC-M5-C: a snapshot holding a fractional (Crypto) position is stored
+/// exactly. V2 reports the exact micros for every position; V1 (whole-unit
+/// contract) fails the whole response closed with a pointer to V2 instead of
+/// truncating, nulling or dropping the fractional row.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_positions_fractional_position_v1_409_v2_exact() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_positions_fractional_position_v1_409_v2_exact");
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
+    let position = |symbol: &str, qty: &str| mqk_db::PaperPortfolioSnapshotPosition {
+        symbol: symbol.to_string(),
+        qty_signed: qty.parse().unwrap(),
+        avg_entry_price_micros: 60_000_000_000,
+        provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+    };
+    seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        Utc::now(),
+        "USD",
+        "active",
+        vec![position("AAPL", "10"), position("BTC/USD", "0.000101")],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router.clone(),
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let json = parse_json(body);
+    assert_eq!(json["error"], "quantity_not_representable_in_v1");
+    assert!(
+        json["detail"]
+            .as_str()
+            .unwrap()
+            .contains("/api/v2/portfolio/durable-positions"),
+        "{json}"
+    );
+
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v2/portfolio/durable-positions?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    let rows: std::collections::BTreeMap<String, i64> = json["positions"]
+        .as_array()
+        .expect("positions array")
+        .iter()
+        .map(|p| {
+            (
+                p["symbol"].as_str().unwrap().to_string(),
+                p["qty_signed_micros"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows.len(), 2, "no position may be dropped");
+    assert_eq!(rows["AAPL"], 10_000_000);
+    assert_eq!(rows["BTC/USD"], 101);
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// RC-M5-C: a whole-unit-only snapshot behaves exactly as before on V1 and
+/// is reported exactly on V2.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_positions_whole_unit_snapshot_v1_unchanged_v2_exact() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_positions_whole_unit_snapshot_v1_unchanged_v2_exact");
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
+    seed_snapshot(&pool, run_id, Utc::now(), 10).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router.clone(),
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_json(body)["positions"][0]["qty_signed"], 10);
+
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v2/portfolio/durable-positions?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["positions"][0]["symbol"], "AAPL");
+    assert_eq!(json["positions"][0]["qty_signed_micros"], 10_000_000);
 
     cleanup_run(&pool, run_id).await;
 }
@@ -1318,7 +1437,7 @@ async fn durable_summary_and_positions_reject_blank_position_symbol() {
         "active",
         vec![mqk_db::PaperPortfolioSnapshotPosition {
             symbol: "   ".to_string(),
-            qty_signed: 10,
+            qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
             avg_entry_price_micros: 150_000_000,
             provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
         }],
@@ -1366,7 +1485,7 @@ async fn durable_summary_rejects_nonzero_qty_with_non_positive_avg_price() {
         "active",
         vec![mqk_db::PaperPortfolioSnapshotPosition {
             symbol: "AAPL".to_string(),
-            qty_signed: 10,
+            qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
             avg_entry_price_micros: 0,
             provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
         }],
@@ -1401,7 +1520,7 @@ async fn durable_summary_rejects_position_provenance_not_external_alpaca() {
         "active",
         vec![mqk_db::PaperPortfolioSnapshotPosition {
             symbol: "AAPL".to_string(),
-            qty_signed: 10,
+            qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
             avg_entry_price_micros: 150_000_000,
             provenance: "manual_override".to_string(),
         }],
@@ -1526,7 +1645,7 @@ async fn durable_positions_returns_no_rows_for_invalid_snapshot() {
         "active",
         vec![mqk_db::PaperPortfolioSnapshotPosition {
             symbol: "AAPL".to_string(),
-            qty_signed: 10,
+            qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
             avg_entry_price_micros: 0,
             provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
         }],

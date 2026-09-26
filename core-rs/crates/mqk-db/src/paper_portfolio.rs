@@ -63,12 +63,71 @@ fn validate_snapshot_source(source: &str) -> Result<()> {
     }
 }
 
+/// `quantity_schema_version` value marking a position stored in the exact
+/// `qty_signed_micros` encoding (migration 0078).
+pub const PAPER_PORTFOLIO_QTY_SCHEMA_MICROS_V1: &str = "qty_micros_v1";
+
+/// One position of a durable snapshot. `qty_signed` is the exact signed
+/// quantity; how it is stored is an encoding detail (see
+/// [`encode_position_qty`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaperPortfolioSnapshotPosition {
     pub symbol: String,
-    pub qty_signed: i64,
+    pub qty_signed: mqk_schemas::QtyMicros,
     pub avg_entry_price_micros: i64,
     pub provenance: String,
+}
+
+/// Column values for one position quantity under the two mutually exclusive
+/// encodings (migration 0078): a whole-unit quantity keeps the historical
+/// `qty_signed` column (so every Equity row is unchanged); only a fractional
+/// quantity uses `qty_signed_micros` + `quantity_schema_version`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EncodedPositionQty {
+    qty_signed: Option<i64>,
+    qty_signed_micros: Option<i64>,
+    quantity_schema_version: Option<&'static str>,
+}
+
+fn encode_position_qty(qty: mqk_schemas::QtyMicros) -> EncodedPositionQty {
+    match qty.to_whole_units_checked() {
+        Some(whole) => EncodedPositionQty {
+            qty_signed: Some(whole),
+            qty_signed_micros: None,
+            quantity_schema_version: None,
+        },
+        None => EncodedPositionQty {
+            qty_signed: None,
+            qty_signed_micros: Some(qty.raw()),
+            quantity_schema_version: Some(PAPER_PORTFOLIO_QTY_SCHEMA_MICROS_V1),
+        },
+    }
+}
+
+/// Exact inverse of [`encode_position_qty`], strict about the encoding: any
+/// combination the CHECK constraint forbids, an unknown version, or a
+/// historical whole-unit value that cannot be scaled to micros without
+/// overflow is an error -- never a fabricated or wrapped quantity.
+fn decode_position_qty(
+    symbol: &str,
+    qty_signed: Option<i64>,
+    qty_signed_micros: Option<i64>,
+    quantity_schema_version: Option<&str>,
+) -> Result<mqk_schemas::QtyMicros> {
+    match (quantity_schema_version, qty_signed, qty_signed_micros) {
+        (None, Some(whole), None) => {
+            mqk_schemas::QtyMicros::from_whole_units(whole).with_context(|| {
+                format!("paper snapshot position {symbol}: whole qty {whole} overflows QtyMicros")
+            })
+        }
+        (Some(PAPER_PORTFOLIO_QTY_SCHEMA_MICROS_V1), None, Some(micros)) => {
+            Ok(mqk_schemas::QtyMicros::new(micros))
+        }
+        other => anyhow::bail!(
+            "paper snapshot position {symbol}: inconsistent quantity encoding \
+             (version, qty_signed, qty_signed_micros) = {other:?}"
+        ),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,7 +194,7 @@ fn positions_content_key(
         .map(|p| {
             (
                 p.symbol.clone(),
-                p.qty_signed,
+                p.qty_signed.raw(),
                 p.avg_entry_price_micros,
                 p.provenance.clone(),
             )
@@ -220,16 +279,20 @@ pub async fn insert_or_confirm_paper_portfolio_snapshot(
     .context("insert_or_confirm_paper_portfolio_snapshot: insert snapshot row failed")?;
 
     for position in &snapshot.positions {
+        let encoded = encode_position_qty(position.qty_signed);
         sqlx::query(
             r#"
             insert into sys_paper_portfolio_snapshot_positions
-                (snapshot_id, symbol, qty_signed, avg_entry_price_micros, provenance)
-            values ($1, $2, $3, $4, $5)
+                (snapshot_id, symbol, qty_signed, qty_signed_micros,
+                 quantity_schema_version, avg_entry_price_micros, provenance)
+            values ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
         .bind(snapshot.snapshot_id)
         .bind(&position.symbol)
-        .bind(position.qty_signed)
+        .bind(encoded.qty_signed)
+        .bind(encoded.qty_signed_micros)
+        .bind(encoded.quantity_schema_version)
         .bind(position.avg_entry_price_micros)
         .bind(&position.provenance)
         .execute(&mut *tx)
@@ -295,7 +358,8 @@ async fn fetch_positions_rows(
 ) -> Result<Vec<PaperPortfolioSnapshotPosition>> {
     let rows = sqlx::query(
         r#"
-        select symbol, qty_signed, avg_entry_price_micros, provenance
+        select symbol, qty_signed, qty_signed_micros, quantity_schema_version,
+               avg_entry_price_micros, provenance
         from sys_paper_portfolio_snapshot_positions
         where snapshot_id = $1
         order by symbol asc
@@ -306,15 +370,24 @@ async fn fetch_positions_rows(
     .await
     .context("fetch_positions_rows failed")?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| PaperPortfolioSnapshotPosition {
-            symbol: r.get("symbol"),
-            qty_signed: r.get("qty_signed"),
-            avg_entry_price_micros: r.get("avg_entry_price_micros"),
-            provenance: r.get("provenance"),
+    rows.into_iter()
+        .map(|r| {
+            let symbol: String = r.get("symbol");
+            let qty_signed = decode_position_qty(
+                &symbol,
+                r.get("qty_signed"),
+                r.get("qty_signed_micros"),
+                r.get::<Option<String>, _>("quantity_schema_version")
+                    .as_deref(),
+            )?;
+            Ok(PaperPortfolioSnapshotPosition {
+                symbol,
+                qty_signed,
+                avg_entry_price_micros: r.get("avg_entry_price_micros"),
+                provenance: r.get("provenance"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 async fn fetch_snapshot_with_positions_tx(
@@ -1081,4 +1154,87 @@ pub async fn fetch_paper_portfolio_accounting_state(
     .context("fetch_paper_portfolio_accounting_state failed")?;
 
     Ok(row.map(|r| row_to_accounting_record(&r)))
+}
+
+#[cfg(test)]
+mod qty_encoding_tests {
+    use super::*;
+    use mqk_schemas::QtyMicros;
+
+    #[test]
+    fn whole_units_keep_the_historical_encoding_including_zero() {
+        for whole in [0_i64, 1, -1, 10, -300, 1_000_000] {
+            let q = QtyMicros::from_whole_units(whole).unwrap();
+            assert_eq!(
+                encode_position_qty(q),
+                EncodedPositionQty {
+                    qty_signed: Some(whole),
+                    qty_signed_micros: None,
+                    quantity_schema_version: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn fractional_quantities_use_qty_micros_v1() {
+        for raw in [1_i64, -1, 100, 500_000, -1_500_000, 123_456_789] {
+            let q = QtyMicros::new(raw);
+            assert_eq!(
+                encode_position_qty(q),
+                EncodedPositionQty {
+                    qty_signed: None,
+                    qty_signed_micros: Some(raw),
+                    quantity_schema_version: Some("qty_micros_v1"),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn encode_then_decode_is_exact_for_whole_and_fractional() {
+        for raw in [
+            0_i64,
+            1,
+            -1,
+            999_999,
+            1_000_000,
+            -1_000_001,
+            10_000_000,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            let q = QtyMicros::new(raw);
+            let e = encode_position_qty(q);
+            let back = decode_position_qty(
+                "X",
+                e.qty_signed,
+                e.qty_signed_micros,
+                e.quantity_schema_version,
+            )
+            .unwrap();
+            assert_eq!(back, q, "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn decode_refuses_every_forbidden_or_unrepresentable_combination() {
+        // Mirrors the 0078 CHECK constraint, plus an unrepresentable whole.
+        let cases: [(Option<i64>, Option<i64>, Option<&str>); 8] = [
+            (Some(1), Some(1_000_000), None),
+            (Some(1), Some(1_000_000), Some("qty_micros_v1")),
+            (Some(1), None, Some("qty_micros_v1")),
+            (None, None, Some("qty_micros_v1")),
+            (None, Some(5), None),
+            (None, Some(5), Some("qty_micros_v2")),
+            (None, None, None),
+            (Some(i64::MAX), None, None), // whole * 1e6 overflows
+        ];
+        for (legacy, micros, version) in cases {
+            assert!(
+                decode_position_qty("X", legacy, micros, version).is_err(),
+                "{legacy:?} {micros:?} {version:?}"
+            );
+        }
+    }
 }

@@ -281,7 +281,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         run_halt, run_start, run_stop,
     };
     use durable_portfolio::{
-        portfolio_durable_positions, portfolio_durable_snapshots, portfolio_durable_summary,
+        portfolio_durable_positions, portfolio_durable_positions_v2, portfolio_durable_snapshots,
+        portfolio_durable_summary,
     };
     use dynamic_selection_evidence::{
         dynamic_selection_plan_by_id, dynamic_selection_plans, dynamic_selection_status,
@@ -489,6 +490,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/portfolio/durable-positions",
             get(portfolio_durable_positions),
+        )
+        .route(
+            "/api/v2/portfolio/durable-positions",
+            get(portfolio_durable_positions_v2),
         )
         .route(
             "/api/v1/portfolio/durable-snapshots",

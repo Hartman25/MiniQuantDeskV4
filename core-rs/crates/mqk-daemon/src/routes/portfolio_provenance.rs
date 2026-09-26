@@ -336,7 +336,7 @@ pub(crate) fn validate_run_scoped_snapshot_authority(
         if !seen_symbols.insert(trimmed) {
             return Err(SnapshotAuthorityViolation::DuplicatePositionSymbol);
         }
-        if position.qty_signed != 0 && position.avg_entry_price_micros <= 0 {
+        if !position.qty_signed.is_zero() && position.avg_entry_price_micros <= 0 {
             return Err(SnapshotAuthorityViolation::NonzeroQtyWithNonPositiveAvgPrice);
         }
         if position.provenance != mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA {
@@ -394,7 +394,7 @@ mod tests {
             },
             positions: vec![mqk_db::PaperPortfolioSnapshotPosition {
                 symbol: "AAPL".to_string(),
-                qty_signed: 10,
+                qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
                 avg_entry_price_micros: 150_000_000,
                 provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
             }],
@@ -653,7 +653,7 @@ mod tests {
     fn run_scoped_validator_allows_zero_qty_with_zero_avg_price() {
         let run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test.portfolio-provenance.v1|run-x");
         let mut snap = valid_snapshot(run_id, snap_id("valid"));
-        snap.positions[0].qty_signed = 0;
+        snap.positions[0].qty_signed = mqk_schemas::QtyMicros::ZERO;
         snap.positions[0].avg_entry_price_micros = 0;
         assert_eq!(
             validate_run_scoped_snapshot_authority(&snap, run_id),

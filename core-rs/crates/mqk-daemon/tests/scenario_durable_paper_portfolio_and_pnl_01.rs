@@ -420,7 +420,10 @@ async fn proof_d_incomplete_history_blocks_epoch_without_fabrication() {
     .expect("fetch should succeed")
     .expect("durable snapshot should exist");
     assert_eq!(snapshot.positions.len(), 1);
-    assert_eq!(snapshot.positions[0].qty_signed, 30);
+    assert_eq!(
+        snapshot.positions[0].qty_signed,
+        mqk_schemas::QtyMicros::from_whole_units(30).unwrap()
+    );
 
     // Accounting epoch is explicitly incomplete, never fabricated complete.
     let accounting = mqk_db::fetch_paper_portfolio_accounting_state(&pool, run_id)

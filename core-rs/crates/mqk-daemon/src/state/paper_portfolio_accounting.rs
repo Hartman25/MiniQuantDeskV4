@@ -54,8 +54,8 @@ pub(crate) struct PaperAccountingReplay {
 /// Returns `(symbol -> nonzero signed qty, sorted blocker reason codes)`.
 fn normalize_broker_positions(
     broker_positions: &[mqk_schemas::BrokerPosition],
-) -> (BTreeMap<String, i64>, Vec<String>) {
-    let mut by_symbol: BTreeMap<String, Vec<Option<i64>>> = BTreeMap::new();
+) -> (BTreeMap<String, mqk_schemas::QtyMicros>, Vec<String>) {
+    let mut by_symbol: BTreeMap<String, Vec<Option<mqk_schemas::QtyMicros>>> = BTreeMap::new();
     let mut blockers = Vec::new();
     for bp in broker_positions {
         let symbol = bp.symbol.trim();
@@ -66,7 +66,7 @@ fn normalize_broker_positions(
             blockers.push("broker_position_symbol_blank".to_string());
             continue;
         }
-        let parsed = super::snapshot::parse_signed_qty(&bp.qty);
+        let parsed = super::snapshot::parse_broker_position_qty_micros(&bp.qty);
         by_symbol
             .entry(symbol.to_string())
             .or_default()
@@ -81,7 +81,7 @@ fn normalize_broker_positions(
         }
         match parses[0] {
             None => blockers.push(format!("broker_position_quantity_unparseable:{symbol}")),
-            Some(0) => {}
+            Some(qty) if qty.is_zero() => {}
             Some(qty) => {
                 qty_by_symbol.insert(symbol, qty);
             }
@@ -90,11 +90,11 @@ fn normalize_broker_positions(
     (qty_by_symbol, blockers)
 }
 
-/// Bidirectional comparison of nonzero broker positions (whole units, from
+/// Bidirectional comparison of nonzero broker positions (exact `QtyMicros`, from
 /// the durable snapshot path) against the nonzero fill-replay positions
 /// (exact `QtyMicros`). Returns unsorted bounded reason codes.
 fn position_comparison_blockers(
-    broker_qty_by_symbol: &BTreeMap<String, i64>,
+    broker_qty_by_symbol: &BTreeMap<String, mqk_schemas::QtyMicros>,
     replay_qty_by_symbol: &BTreeMap<String, mqk_schemas::QtyMicros>,
 ) -> Vec<String> {
     let mut blockers = Vec::new();
@@ -113,9 +113,7 @@ fn position_comparison_blockers(
             (None, Some(_)) => {
                 blockers.push(format!("fill_history_position_missing_at_broker:{symbol}"));
             }
-            (Some(broker_qty), Some(replay_qty))
-                if mqk_schemas::QtyMicros::from_whole_units(*broker_qty) != Some(*replay_qty) =>
-            {
+            (Some(broker_qty), Some(replay_qty)) if broker_qty != replay_qty => {
                 blockers.push(format!("position_quantity_mismatch:{symbol}"));
             }
             _ => {}
@@ -163,9 +161,9 @@ pub(crate) async fn replay_paper_portfolio_accounting(
 
     let (broker_qty_by_symbol, mut blockers) = normalize_broker_positions(broker_positions);
 
-    // The broker side is whole-unit (`parse_signed_qty`, bound to the durable
-    // whole-unit snapshot column); the replay side is the exact `QtyMicros`
-    // position. A fractional replay position is compared exactly and can only
+    // Both sides are exact `QtyMicros`: the broker side is parsed exactly by
+    // `normalize_broker_positions`, the replay side is the fill-derived
+    // position. A fractional position is compared exactly and can only ever
     // surface as a blocker -- it is never truncated and never panics.
     let replay_qty_by_symbol: BTreeMap<String, mqk_schemas::QtyMicros> = portfolio
         .positions
@@ -342,7 +340,10 @@ mod normalize_broker_positions_tests {
     fn valid_position_alongside_blank_symbol_is_still_reported() {
         let positions = vec![position("AAPL", "10"), position("", "5")];
         let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
-        assert_eq!(qty_by_symbol.get("AAPL"), Some(&10));
+        assert_eq!(
+            qty_by_symbol.get("AAPL"),
+            Some(&mqk_schemas::QtyMicros::new(10_000_000))
+        );
         assert_eq!(blockers, vec!["broker_position_symbol_blank".to_string()]);
     }
 
@@ -372,6 +373,25 @@ mod normalize_broker_positions_tests {
         );
     }
 
+    /// RC-M5-C: a fractional (Crypto) broker quantity is exact broker truth,
+    /// not an unparseable value; a value that is not exactly representable
+    /// stays a bounded blocker (never rounded).
+    #[test]
+    fn fractional_quantity_is_exact_and_over_precise_is_a_blocker() {
+        let positions = vec![
+            position("BTC/USD", "0.5"),
+            position("ETH/USD", "-0.000001"),
+            position("SOL/USD", "0.1234567"),
+        ];
+        let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
+        assert_eq!(qty_by_symbol.get("BTC/USD").map(|q| q.raw()), Some(500_000));
+        assert_eq!(qty_by_symbol.get("ETH/USD").map(|q| q.raw()), Some(-1));
+        assert_eq!(
+            blockers,
+            vec!["broker_position_quantity_unparseable:SOL/USD".to_string()]
+        );
+    }
+
     /// A zero-quantity position is dropped from `qty_by_symbol` (flat, not
     /// a blocker) -- existing behavior preserved.
     #[test]
@@ -394,8 +414,8 @@ mod replay_position_comparison_tests {
     use mqk_schemas::QtyMicros;
     use std::collections::BTreeMap;
 
-    fn broker(rows: &[(&str, i64)]) -> BTreeMap<String, i64> {
-        rows.iter().map(|(s, q)| (s.to_string(), *q)).collect()
+    fn broker(rows: &[(&str, &str)]) -> BTreeMap<String, QtyMicros> {
+        replay(rows)
     }
 
     fn replay(rows: &[(&str, &str)]) -> BTreeMap<String, QtyMicros> {
@@ -406,16 +426,17 @@ mod replay_position_comparison_tests {
 
     #[test]
     fn matching_whole_unit_positions_produce_no_blockers() {
-        assert!(
-            position_comparison_blockers(&broker(&[("AAPL", 10)]), &replay(&[("AAPL", "10")]))
-                .is_empty()
-        );
+        assert!(position_comparison_blockers(
+            &broker(&[("AAPL", "10")]),
+            &replay(&[("AAPL", "10")])
+        )
+        .is_empty());
     }
 
     #[test]
     fn whole_unit_mismatch_is_a_quantity_mismatch() {
         assert_eq!(
-            position_comparison_blockers(&broker(&[("AAPL", 11)]), &replay(&[("AAPL", "10")])),
+            position_comparison_blockers(&broker(&[("AAPL", "11")]), &replay(&[("AAPL", "10")])),
             vec!["position_quantity_mismatch:AAPL".to_string()]
         );
     }
@@ -432,7 +453,7 @@ mod replay_position_comparison_tests {
     #[test]
     fn fractional_replay_position_is_never_truncated_to_a_whole_broker_quantity() {
         let blockers = position_comparison_blockers(
-            &broker(&[("BTC/USD", 1)]),
+            &broker(&[("BTC/USD", "1")]),
             &replay(&[("BTC/USD", "1.5")]),
         );
         assert_eq!(
@@ -442,9 +463,30 @@ mod replay_position_comparison_tests {
     }
 
     #[test]
+    fn matching_fractional_positions_on_both_sides_produce_no_blockers() {
+        // Broker parsed exactly from the durable snapshot; replay from fills.
+        assert!(position_comparison_blockers(
+            &broker(&[("BTC/USD", "0.000101"), ("AAPL", "10")]),
+            &replay(&[("BTC/USD", "0.000101"), ("AAPL", "10")])
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn one_micro_difference_is_a_quantity_mismatch() {
+        assert_eq!(
+            position_comparison_blockers(
+                &broker(&[("BTC/USD", "0.500001")]),
+                &replay(&[("BTC/USD", "0.5")])
+            ),
+            vec!["position_quantity_mismatch:BTC/USD".to_string()]
+        );
+    }
+
+    #[test]
     fn broker_position_without_fill_history_is_a_blocker() {
         assert_eq!(
-            position_comparison_blockers(&broker(&[("AAPL", 3)]), &replay(&[])),
+            position_comparison_blockers(&broker(&[("AAPL", "3")]), &replay(&[])),
             vec!["broker_position_missing_fill_history:AAPL".to_string()]
         );
     }

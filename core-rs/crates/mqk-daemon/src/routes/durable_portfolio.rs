@@ -37,8 +37,9 @@ use super::portfolio_provenance::{
     DURABLE_SNAPSHOT_STALE_SECS,
 };
 use crate::api_types::{
-    PortfolioDurablePositionRow, PortfolioDurablePositionsResponse, PortfolioDurableSnapshotRow,
-    PortfolioDurableSnapshotsResponse, PortfolioDurableSummaryResponse,
+    PortfolioDurablePositionRow, PortfolioDurablePositionRowV2, PortfolioDurablePositionsResponse,
+    PortfolioDurableSnapshotRow, PortfolioDurableSnapshotsResponse,
+    PortfolioDurableSummaryResponse,
 };
 use crate::state::AppState;
 
@@ -337,7 +338,7 @@ pub(crate) async fn portfolio_durable_summary(
         .iter()
         .map(|p| mqk_schemas::BrokerPosition {
             symbol: p.symbol.clone(),
-            qty: p.qty_signed.to_string(),
+            qty: p.qty_signed.to_string(), // exact canonical decimal; whole units render as before
             avg_price: (p.avg_entry_price_micros as f64 / mqk_portfolio::MICROS_SCALE as f64)
                 .to_string(),
         })
@@ -612,10 +613,69 @@ fn invalid_snapshot_summary(
 // GET /api/v1/portfolio/durable-positions
 // ---------------------------------------------------------------------------
 
+/// Canonical exact-quantity route for durable positions (raw `QtyMicros`).
+pub(crate) const DURABLE_POSITIONS_V2_ROUTE: &str = "/api/v2/portfolio/durable-positions";
+
+/// V1 contract: whole-unit quantities only. A fractional position has no
+/// whole-unit form, so the whole response fails closed (409) and points at
+/// the exact V2 route -- never truncated, rounded, or nulled.
 pub(crate) async fn portfolio_durable_positions(
     State(st): State<Arc<AppState>>,
     Query(params): Query<RunIdParam>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    durable_positions_response(&st, params, |positions| {
+        positions
+            .iter()
+            .map(|p| {
+                let Some(qty_signed) = p.qty_signed.to_whole_units_checked() else {
+                    return Err(super::execution_order_analysis::v1_fractional_refusal(
+                        DURABLE_POSITIONS_V2_ROUTE,
+                        "the durable portfolio positions",
+                    ));
+                };
+                Ok(PortfolioDurablePositionRow {
+                    symbol: p.symbol.clone(),
+                    qty_signed,
+                    avg_entry_price: p.avg_entry_price_micros as f64
+                        / mqk_portfolio::MICROS_SCALE as f64,
+                    provenance: p.provenance.clone(),
+                })
+            })
+            .collect()
+    })
+    .await
+}
+
+/// V2: exact `qty_signed_micros` for every position (whole or fractional).
+pub(crate) async fn portfolio_durable_positions_v2(
+    State(st): State<Arc<AppState>>,
+    Query(params): Query<RunIdParam>,
+) -> axum::response::Response {
+    durable_positions_response(&st, params, |positions| {
+        Ok(positions
+            .iter()
+            .map(|p| PortfolioDurablePositionRowV2 {
+                symbol: p.symbol.clone(),
+                qty_signed_micros: p.qty_signed.raw(),
+                avg_entry_price: p.avg_entry_price_micros as f64
+                    / mqk_portfolio::MICROS_SCALE as f64,
+                provenance: p.provenance.clone(),
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Shared durable-positions authority path. Everything up to the row shape
+/// (run resolution, snapshot authority/staleness) is identical for V1 and V2;
+/// only `map_rows` differs.
+async fn durable_positions_response<R: serde::Serialize>(
+    st: &Arc<AppState>,
+    params: RunIdParam,
+    map_rows: impl Fn(
+        &[mqk_db::PaperPortfolioSnapshotPosition],
+    ) -> Result<Vec<R>, axum::response::Response>,
+) -> axum::response::Response {
     let explicit_run_id = match parse_explicit_run_id(params.run_id.as_deref()) {
         Ok(id) => id,
         Err(detail) => {
@@ -630,7 +690,7 @@ pub(crate) async fn portfolio_durable_positions(
     let Some(db) = st.db.as_ref() else {
         return (
             StatusCode::OK,
-            Json(PortfolioDurablePositionsResponse {
+            Json(PortfolioDurablePositionsResponse::<R> {
                 truth_state: "db_unavailable".to_string(),
                 snapshot_id: None,
                 captured_at_utc: None,
@@ -650,7 +710,7 @@ pub(crate) async fn portfolio_durable_positions(
         RunResolution::QueryFailed => {
             return (
                 StatusCode::OK,
-                Json(PortfolioDurablePositionsResponse {
+                Json(PortfolioDurablePositionsResponse::<R> {
                     truth_state: "query_failed".to_string(),
                     snapshot_id: None,
                     captured_at_utc: None,
@@ -663,7 +723,7 @@ pub(crate) async fn portfolio_durable_positions(
         RunResolution::NotFound => {
             return (
                 StatusCode::OK,
-                Json(PortfolioDurablePositionsResponse {
+                Json(PortfolioDurablePositionsResponse::<R> {
                     truth_state: "not_found".to_string(),
                     snapshot_id: None,
                     captured_at_utc: None,
@@ -679,7 +739,7 @@ pub(crate) async fn portfolio_durable_positions(
     if run.mode != PAPER_MODE {
         return (
             StatusCode::OK,
-            Json(PortfolioDurablePositionsResponse {
+            Json(PortfolioDurablePositionsResponse::<R> {
                 truth_state: "unsupported_source".to_string(),
                 snapshot_id: None,
                 captured_at_utc: None,
@@ -703,7 +763,7 @@ pub(crate) async fn portfolio_durable_positions(
             tracing::warn!(error = %err, run_id = %run.run_id, "durable_positions_snapshot_query_failed");
             return (
                 StatusCode::OK,
-                Json(PortfolioDurablePositionsResponse {
+                Json(PortfolioDurablePositionsResponse::<R> {
                     truth_state: "query_failed".to_string(),
                     snapshot_id: None,
                     captured_at_utc: None,
@@ -718,7 +778,7 @@ pub(crate) async fn portfolio_durable_positions(
     let Some(snapshot) = snapshot else {
         return (
             StatusCode::OK,
-            Json(PortfolioDurablePositionsResponse {
+            Json(PortfolioDurablePositionsResponse::<R> {
                 truth_state: "snapshot_unavailable".to_string(),
                 snapshot_id: None,
                 captured_at_utc: None,
@@ -736,7 +796,7 @@ pub(crate) async fn portfolio_durable_positions(
     if validate_run_scoped_snapshot_authority(&snapshot, run.run_id).is_err() {
         return (
             StatusCode::OK,
-            Json(PortfolioDurablePositionsResponse {
+            Json(PortfolioDurablePositionsResponse::<R> {
                 truth_state: PortfolioProvenanceState::InvalidSnapshot
                     .as_str()
                     .to_string(),
@@ -756,20 +816,14 @@ pub(crate) async fn portfolio_durable_positions(
         "active"
     };
 
-    let positions = snapshot
-        .positions
-        .iter()
-        .map(|p| PortfolioDurablePositionRow {
-            symbol: p.symbol.clone(),
-            qty_signed: p.qty_signed,
-            avg_entry_price: p.avg_entry_price_micros as f64 / mqk_portfolio::MICROS_SCALE as f64,
-            provenance: p.provenance.clone(),
-        })
-        .collect();
+    let positions = match map_rows(&snapshot.positions) {
+        Ok(rows) => rows,
+        Err(refusal) => return refusal,
+    };
 
     (
         StatusCode::OK,
-        Json(PortfolioDurablePositionsResponse {
+        Json(PortfolioDurablePositionsResponse::<R> {
             truth_state: truth_state.to_string(),
             snapshot_id: Some(snapshot.snapshot.snapshot_id.to_string()),
             captured_at_utc: Some(snapshot.snapshot.captured_at_utc.to_rfc3339()),

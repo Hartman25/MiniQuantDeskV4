@@ -1403,15 +1403,27 @@ pub struct PortfolioDurablePositionRow {
     pub provenance: String,
 }
 
+/// V2 durable position row: the exact signed quantity as raw `QtyMicros`
+/// (1.0 unit = 1_000_000), representable for whole and fractional positions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioDurablePositionsResponse {
+pub struct PortfolioDurablePositionRowV2 {
+    pub symbol: String,
+    pub qty_signed_micros: i64,
+    pub avg_entry_price: f64,
+    pub provenance: String,
+}
+
+/// `R` is the row shape: [`PortfolioDurablePositionRow`] (V1, whole-unit) or
+/// [`PortfolioDurablePositionRowV2`] (exact micros).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioDurablePositionsResponse<R = PortfolioDurablePositionRow> {
     /// `"active"` | `"snapshot_unavailable"` | `"snapshot_stale"` |
     /// `"db_unavailable"` | `"query_failed"`.
     pub truth_state: String,
     pub snapshot_id: Option<String>,
     pub captured_at_utc: Option<String>,
     pub run_id: Option<String>,
-    pub positions: Vec<PortfolioDurablePositionRow>,
+    pub positions: Vec<R>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

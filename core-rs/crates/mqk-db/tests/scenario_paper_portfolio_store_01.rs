@@ -211,7 +211,7 @@ async fn first_snapshot_insert_round_trips() {
             operation_id: None,
             positions: vec![PaperPortfolioSnapshotPosition {
                 symbol: "AAPL".to_string(),
-                qty_signed: 10,
+                qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
                 avg_entry_price_micros: 150_000_000,
                 provenance: "external_alpaca".to_string(),
             }],
@@ -239,7 +239,10 @@ async fn first_snapshot_insert_round_trips() {
     assert_eq!(fetched.snapshot.cash_micros, 40_000_000_000);
     assert_eq!(fetched.positions.len(), 1);
     assert_eq!(fetched.positions[0].symbol, "AAPL");
-    assert_eq!(fetched.positions[0].qty_signed, 10);
+    assert_eq!(
+        fetched.positions[0].qty_signed,
+        mqk_schemas::QtyMicros::from_whole_units(10).unwrap()
+    );
 
     cleanup(&pool, &[run_id]).await;
 }
@@ -277,7 +280,7 @@ async fn exact_replay_is_idempotent() {
         operation_id: None,
         positions: vec![PaperPortfolioSnapshotPosition {
             symbol: "AAPL".to_string(),
-            qty_signed: 10,
+            qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
             avg_entry_price_micros: 150_000_000,
             provenance: "external_alpaca".to_string(),
         }],
@@ -1138,7 +1141,7 @@ async fn restart_reconstruction_reads_back_prior_writes() {
             operation_id: None,
             positions: vec![PaperPortfolioSnapshotPosition {
                 symbol: "AAPL".to_string(),
-                qty_signed: 10,
+                qty_signed: mqk_schemas::QtyMicros::from_whole_units(10).unwrap(),
                 avg_entry_price_micros: 150_000_000,
                 provenance: "external_alpaca".to_string(),
             }],

@@ -1,6 +1,7 @@
 //! Pure reconcile/snapshot helper functions for mqk-daemon.
 //!
-//! Contains: parse_signed_qty, reconcile_side_from_schema,
+//! Contains: parse_signed_qty_micros, parse_broker_position_qty_micros,
+//! reconcile_side_from_schema,
 //! reconcile_order_status_from_schema,
 //! reconcile_local_snapshot_from_runtime_with_sides,
 //! oms_execution_status_to_reconcile, outbox_json_symbol, outbox_json_qty,
@@ -67,42 +68,94 @@ pub(crate) fn outbox_json_side(json: &serde_json::Value) -> mqk_reconcile::Side 
 // Reconcile helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn parse_signed_qty(raw: &str) -> Option<i64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(value) = trimmed.parse::<i64>() {
-        return Some(value);
-    }
-
-    let (sign, magnitude) = if let Some(rest) = trimmed.strip_prefix('-') {
-        (-1_i64, rest)
-    } else if let Some(rest) = trimmed.strip_prefix('+') {
-        (1_i64, rest)
-    } else {
-        (1_i64, trimmed)
-    };
-
-    let (whole, frac) = magnitude.split_once('.')?;
-    if frac.chars().any(|c| c != '0') {
-        return None;
-    }
-    let base = whole.parse::<i64>().ok()?;
-    Some(sign * base)
-}
-
-/// CUTOVER-1G-RECONCILE-QTY-MICROS-01: fractional-capable counterpart of
-/// `parse_signed_qty`, used only by `reconcile_broker_snapshot_from_schema`
-/// (the in-memory reconcile comparison path). Every other `parse_signed_qty`
-/// caller feeds a whole-unit-only durable DB column or accounting
-/// comparison and is deliberately left unchanged -- widening those is a
-/// separate DB-migration-bearing concern, not a reconcile-comparison one.
-/// Accepts the same decimal-string wire convention as `QtyMicros::FromStr`
-/// (used elsewhere for order submission), so a real Alpaca Crypto position
-/// like `"0.5"` round-trips exactly instead of being rejected.
+/// CUTOVER-1G-RECONCILE-QTY-MICROS-01: exact quantity parser used by
+/// `reconcile_broker_snapshot_from_schema` (the in-memory reconcile
+/// comparison path). Accepts the same decimal-string wire convention as
+/// `QtyMicros::FromStr` (used elsewhere for order submission), so a real
+/// Alpaca Crypto position like `"0.5"` round-trips exactly instead of being
+/// rejected. The durable-snapshot / accounting paths use
+/// [`parse_broker_position_qty_micros`], which additionally tolerates
+/// insignificant trailing fractional zeros.
 pub(crate) fn parse_signed_qty_micros(raw: &str) -> Option<mqk_execution::QtyMicros> {
     raw.trim().parse::<mqk_execution::QtyMicros>().ok()
+}
+
+/// Exact signed broker position quantity for the durable Paper snapshot.
+///
+/// Fractional quantities (Crypto) parse exactly to `QtyMicros`. Trailing
+/// fractional zeros beyond `QtyMicros`' six digits (`"10.000000000"`) are
+/// insignificant and accepted, exactly as the historical whole-unit parser
+/// accepted them; any nonzero digit past the sixth place, or anything else
+/// unparseable, is `None` (fail closed, never rounded).
+pub(crate) fn parse_broker_position_qty_micros(raw: &str) -> Option<mqk_execution::QtyMicros> {
+    let trimmed = raw.trim();
+    let canonical = match trimmed.split_once('.') {
+        Some((whole, frac)) => {
+            let frac = frac.trim_end_matches('0');
+            if frac.is_empty() {
+                whole.to_string()
+            } else {
+                format!("{whole}.{frac}")
+            }
+        }
+        None => trimmed.to_string(),
+    };
+    canonical.parse::<mqk_execution::QtyMicros>().ok()
+}
+
+#[cfg(test)]
+mod broker_position_qty_parse_tests {
+    use super::parse_broker_position_qty_micros as parse;
+
+    fn raw(s: &str) -> Option<i64> {
+        parse(s).map(|q| q.raw())
+    }
+
+    #[test]
+    fn whole_unit_forms_keep_the_historical_whole_unit_acceptance() {
+        for (s, whole) in [
+            ("10", 10_i64),
+            ("-3", -3),
+            ("+7", 7),
+            ("0", 0),
+            ("5.", 5),
+            ("5.0", 5),
+            ("5.000000", 5),
+            ("5.000000000", 5),
+            ("-0.0", 0),
+            (" 12 ", 12),
+        ] {
+            assert_eq!(raw(s), Some(whole * 1_000_000), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn fractional_quantities_are_exact() {
+        assert_eq!(raw("0.5"), Some(500_000));
+        assert_eq!(raw("-1.5"), Some(-1_500_000));
+        assert_eq!(raw("0.000001"), Some(1));
+        assert_eq!(raw("0.0001000"), Some(100));
+        assert_eq!(raw("12.123456000"), Some(12_123_456));
+    }
+
+    #[test]
+    fn unrepresentable_or_malformed_values_fail_closed() {
+        for s in [
+            "",
+            " ",
+            "abc",
+            "0.1234567",
+            "1e3",
+            ".5",
+            "--1",
+            "1.2.3",
+            "NaN",
+            "inf",
+            "99999999999999999999",
+        ] {
+            assert_eq!(raw(s), None, "{s:?}");
+        }
+    }
 }
 
 pub(crate) fn reconcile_side_from_schema(raw: &str) -> mqk_reconcile::Side {
@@ -993,7 +1046,7 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
             tracing::warn!("durable_paper_portfolio_snapshot_skip: position_symbol_blank");
             return ExternalSnapshotPersistOutcome::InvalidSnapshot;
         }
-        let Some(qty_signed) = parse_signed_qty(&p.qty) else {
+        let Some(qty_signed) = parse_broker_position_qty_micros(&p.qty) else {
             tracing::warn!(
                 symbol = %p.symbol,
                 "durable_paper_portfolio_snapshot_skip: position_qty_unparseable"
@@ -1014,7 +1067,7 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
         // economically meaningful and is not checked, but a non-flat
         // position with a zero or negative avg price is not a valid broker
         // fill history and must be refused rather than persisted.
-        if qty_signed != 0 && avg_entry_price_micros <= 0 {
+        if !qty_signed.is_zero() && avg_entry_price_micros <= 0 {
             tracing::warn!(
                 symbol = %p.symbol,
                 avg_entry_price_micros,
