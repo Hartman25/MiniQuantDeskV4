@@ -373,10 +373,10 @@ If the same bounded invariant fails implementation review twice, do not automati
 | | |
 |---|---|
 | Starting HEAD | `a5ae6c963fc132f6afe14db4ce636e356a2a4a86` (CUTOVER-1D-A3 **PUSHED-VERIFIED**; not reopened) |
-| Ending code HEAD | `aa1255e4f3601e5dd14f311c2fce05d6f9894967` (the ledger update is the branch-tip commit after it; a commit cannot embed its own SHA) |
+| Ending code HEAD | `5ef7d969ff4f88f85da6a7eac67799bde8c2e028` (after the independent-review correction, G2.12; the wave's original code HEAD was `aa1255e4f3601e5dd14f311c2fce05d6f9894967`. The ledger updates are the branch-tip commits after it; a commit cannot embed its own SHA) |
 | Starting ledger blob | `d5e10f91b3f52a3d7e326f14e6e9672802b35063` |
 | Push | **NOT PUSHED.** GitHub CI on this HEAD: **NOT YET VERIFIED** |
-| Side effects | Paper orders 0; Live orders 0; broker/provider calls 0; holdout consumption 0; real LiveShadow smoke NOT RUN; engineering DB tests used the disposable TEST DB at `127.0.0.1:5434`. **Two deviations from the safety rules, disclosed in G2.10:** (a) one invocation of `scripts/windows/tests/test_official_dual_mode_launcher.ps1` against the real repo root wrote three `-CheckOnly` launcher logs (2 live, 1 paper) into the protected, git-ignored `smoke_logs/launcher/`; they were not staged, deleted or otherwise touched; (b) the second-sweep run of `scripts/windows/tests/test_offsite_b2_workflow.ps1` (in a disposable clone) most likely executed a read-only `pg_dump` inside the Paper container `mqk-paper-postgres`, plus one read-only `pg_stat_activity` count query I issued afterwards; no Paper DB writes, no orders |
+| Side effects | Paper orders 0; Live orders 0; broker/provider calls 0; holdout consumption 0; real LiveShadow smoke NOT RUN; engineering DB tests used the disposable TEST DB at `127.0.0.1:5434`. **Two deviations from the safety rules occurred during the original wave; both root causes were fixed by the independent-review correction (G2.12):** (a) one invocation of `scripts/windows/tests/test_official_dual_mode_launcher.ps1` against the real repo root wrote three `-CheckOnly` launcher logs (2 live, 1 paper) into the protected, git-ignored `smoke_logs/launcher/`; they were not staged, deleted or otherwise touched; (b) the second-sweep run of `scripts/windows/tests/test_offsite_b2_workflow.ps1` (in a disposable clone) most likely executed a read-only `pg_dump` inside the Paper container `mqk-paper-postgres`, plus one read-only `pg_stat_activity` count query I issued afterwards; no Paper DB writes, no orders. The correction wave itself performed zero Paper/Live DB access (G2.12) |
 
 ### G2.1 Stale authority explicitly superseded
 
@@ -393,7 +393,7 @@ If the same bounded invariant fails implementation review twice, do not automati
 |---|---|---|
 | `19ba2f78` | REPLAY-BACKTEST-ORDER-FILL-IDEMPOTENCY | test(backtest): economic-state proof + R3.5 production-path invariant + mutation record |
 | `cece2b4a` | LIVESHADOW-TEST-RIGOR (LS-EV-11/12/13/17) | test(liveshadow): frozen timestamp bucket, structural evidence-dir identity, disposable-root launcher runs |
-| `73672264` | AUDIT-M1-03 recurrence (rustfmt) | style: restore canonical Rust formatting (579 hunks / 100 files) |
+| `73672264` | AUDIT-M1-03 recurrence (rustfmt) | style: restore canonical Rust formatting. `git show --shortstat`: **98 files changed** (3275 insertions, 1182 deletions). Initial detected drift recorded before the commit: 579 rustfmt hunks in 100 files (the original session's pre-commit `cargo fmt --check`; not re-derivable now: a per-package `Invoke-CanonicalFmtCheck.ps1` re-run at `73672264^` flags 450 diff blocks in 70 files, all inside the commit's 98). The commit changed 98 files, not 100 |
 | `6b1c0223` | POST-A3-FC2A-STALE-DECODE-ASSERTION-01 | test(daemon): repair stale fc2a decode-error assertion |
 | `da3c35a5` | POST-A3-CLIPPY-GATE-01 | fix(ci): cargo clippy --workspace --all-targets -D warnings clean |
 | `059192d2` | POST-A3-EXEC-M5-TEST-FEATURE-GATE-01 | fix(execution): gate M5 capability test on the testkit feature |
@@ -403,27 +403,30 @@ If the same bounded invariant fails implementation review twice, do not automati
 | `58cc9e7c` | POST-A3-MULTISYMBOL-PS-GUARD-QTYMICROS-01 | test(guard): re-align multi-symbol PS guards to QtyMicros signatures |
 | `60d9b10c` | POST-A3-LAUNCHER-TEST-LEDGER-FILENAME-01 | test(launcher): follow the launcher to the master ledger filename |
 | `aa1255e4` | POST-A3-PHASE7B-GUARD-LIFECYCLE-SLICE-01 | test(guard): slice lifecycle.rs at the fixture module in the 7B closure guard |
+| `d79a7f88` | POST-A3-LAUNCHER-GUARD-HERMETICITY-01 (independent-review correction) | test(safety): isolate launcher guards from primary runtime artifacts |
+| `40427939` | POST-A3-OFFSITE-TEST-SOURCE-DB-FENCE-01 (independent-review correction) | test(backup): force offsite workflow proof onto disposable DB |
+| `5ef7d969` | POST-A3-LAUNCHER-GUARD-HERMETICITY-01 (independent-review correction) | test(safety): keep LS-EV-11/12/13 path seams off the primary repo |
 
 Each commit is one coherent invariant. No commit touches `smoke_logs/`, Paper/Live runtime behaviour, risk, reconcile, broker support, domain isolation, outbox/inbox authority, deployment/promotion authority, quantity authority or the A3 V1/V2 contract. Production-code changes are limited to behaviour-preserving lint rewrites (`da3c35a5`), an `#[allow]` on two existing APIs, and `.gitattributes`/`Cargo.toml` metadata.
 
 ### G2.3 Census (unique logical items)
 
-**138 unique logical items** were resolved to their newest authoritative status. Counts below are computed from the item tables in this section, not from arithmetic on older counts.
+**140 unique logical items** (138 in the original wave plus the two independent-review defects recorded in G2.12) were resolved to their newest authoritative status. Counts below are computed from the item tables in this section (row counts per disposition re-derived mechanically after the G2.12 update), not from arithmetic on older counts.
 
 | Disposition | Count |
 |---|---|
-| `ALREADY_CLOSED_PROVEN` | 54 |
+| `ALREADY_CLOSED_PROVEN` | 55 |
 | `STALE_LEDGER_STATUS` | 15 |
-| `FIXED_NOW` | 12 |
+| `FIXED_NOW` | 14 |
 | `PROOF_NOW` | 1 |
-| `PENDING_EXTERNAL_INDEPENDENT_REVIEW` | 1 |
+| `PENDING_EXTERNAL_INDEPENDENT_REVIEW` | 0 |
 | `OPERATOR_VALIDATION_REQUIRED` | 9 |
 | `DEFERRED_BY_CONTRACT` | 44 |
 | `POST_V4` | 1 |
 | `FALSE_POSITIVE` | 0 |
 | `UNKNOWN_NEEDS_REAL_EVIDENCE` | 1 |
 | `HARD_STOP` | 0 |
-| **TOTAL** | **138** |
+| **TOTAL** | **140** |
 
 | Group | Items |
 |---|---|
@@ -434,11 +437,11 @@ Each commit is one coherent invariant. No commit touches `smoke_logs/`, Paper/Li
 | Backlog | 17 |
 | Research backlog (section 24) | 7 |
 | Design idea | 10 |
-| New (this wave) | 9 |
+| New (this wave) | 11 |
 
-Final-state vocabulary mapping: `ALREADY_CLOSED_PROVEN` -> ALREADY_CLOSED+PROVEN; `STALE_LEDGER_STATUS` -> STALE_STATUS_SUPERSEDED; `FIXED_NOW` -> FIXED+PROVEN; `PROOF_NOW` -> ALREADY_CLOSED+PROVEN with added proof; the remaining dispositions are unchanged. No item is left `PARTIAL`.
+Final-state vocabulary mapping: `ALREADY_CLOSED_PROVEN` -> ALREADY_CLOSED+PROVEN; `STALE_LEDGER_STATUS` -> STALE_STATUS_SUPERSEDED; `FIXED_NOW` -> FIXED+PROVEN; `PROOF_NOW` -> ALREADY_CLOSED+PROVEN with added proof; the placebo repair is `ALREADY_CLOSED_PROVEN` with recorded independent acceptance (its row cites the accepting review); the remaining dispositions are unchanged. No item is left `PARTIAL`.
 
-**Proof-strength note for the 54 Lane rows recorded `CLOSED`:** their closure is the ledger's recorded independent acceptance / HEAD-ancestry evidence. They were not individually re-executed in this wave; the affected-crate boundary in G2.9 and the workspace compile/clippy/fmt gates are the only current-HEAD evidence for them. No deterministic contradiction was found.
+**Proof-strength note for the 54 Lane rows recorded `CLOSED` (the 55th `ALREADY_CLOSED_PROVEN` item is the independently accepted placebo repair, which is not a Lane row):** their closure is the ledger's recorded independent acceptance / HEAD-ancestry evidence. They were not individually re-executed in this wave; the affected-crate boundary in G2.9 and the workspace compile/clippy/fmt gates are the only current-HEAD evidence for them. No deterministic contradiction was found.
 
 ### G2.4 Item dispositions
 
@@ -448,7 +451,7 @@ Final-state vocabulary mapping: `ALREADY_CLOSED_PROVEN` -> ALREADY_CLOSED+PROVEN
 |---|---|---|---|
 | AUDIT-M1-01 | OPEN | STALE_LEDGER_STATUS | umbrella over the child rows below, all resolved; exact-head GitHub CI on this HEAD is NOT YET VERIFIED (no push) |
 | AUDIT-M1-02 | OPEN | STALE_LEDGER_STATUS | f3a75571/cfd24e7b/58a9796f; scenario_gui_daemon_contract_gate 23/23 and scenario_ops_control_oc01_oc02 14/14 (2 ignored) green at this HEAD |
-| AUDIT-M1-03 | OPEN | FIXED_NOW | f5eb9544 had closed it but it REGRESSED (579 rustfmt hunks in 100 files after the A-wave); restored by 73672264; Invoke-CanonicalFmtCheck.ps1 passes all 21 packages |
+| AUDIT-M1-03 | OPEN | FIXED_NOW | f5eb9544 had closed it but it REGRESSED (579 rustfmt hunks in 100 files detected before the fix, after the A-wave); restored by 73672264 (whose own diff is 98 files); Invoke-CanonicalFmtCheck.ps1 passes all 21 packages |
 | AUDIT-M1-04 | OPEN | STALE_LEDGER_STATUS | e16e3bea; test_gui_relaunch_during_smoke.ps1 GR12/GR13 (ASCII-safe) and test_start_paper_trading_smoke.ps1 pass |
 | AUDIT-M1-05 | OPEN | STALE_LEDGER_STATUS | ee9e799b; test_start_paper_trading_smoke.ps1 all static invariants pass |
 | AUDIT-M1-06 | OPEN | STALE_LEDGER_STATUS | a2ad83bd; test_discord_secret_safety.ps1 all assertions pass |
@@ -465,7 +468,7 @@ Final-state vocabulary mapping: `ALREADY_CLOSED_PROVEN` -> ALREADY_CLOSED+PROVEN
 | ID | Prior ledger status | Disposition | Current repo truth / proof |
 |---|---|---|---|
 | REPLAY-BACKTEST-ORDER-FILL-IDEMPOTENCY | STILL-OPEN - NEEDS PROOF (Deferred Design Ideas tail) | PROOF_NOW | already closed at the root by d3b8548c + 7818c491 + 9a119e9c (see the dedicated subsection); this wave added the economic-state proof and mutation record (19ba2f78) |
-| GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR | RESOLVED LOCALLY - PENDING INDEPENDENT REVIEW | PENDING_EXTERNAL_INDEPENDENT_REVIEW | 2e1aa7d9 and 18d98953 are ancestors of HEAD; 27/27 placebo tests pass; the R3.5 production E2E reports genuine_shuffled_placebo applicable+passed. No later ledger entry grants acceptance, and this session cannot self-grant it |
+| GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR | RESOLVED LOCALLY - PENDING INDEPENDENT REVIEW | ALREADY_CLOSED_PROVEN | **INDEPENDENTLY ACCEPTED / CLOSED** by external independent review of commits `2e1aa7d9` + `18d98953` (the production diff and load-bearing controls were inspected; the repair compares score assignments rather than row indices, preserves cross-sectional score multisets, guarantees non-identity where meaningfully permutable, fails `not_evaluable` when no meaningful rank permutation exists, and preserves non-rank semantics). Both are ancestors of HEAD; 27/27 placebo tests pass; the R3.5 production E2E reports genuine_shuffled_placebo applicable+passed |
 | LIVESHADOW-TESTRIGOR-LS-EV-11-12-13 | deferred non-blocking note | FIXED_NOW | cece2b4a; timestamp bucket frozen (LS-EV-11/12) / structural id-suffix proof (LS-EV-13); mutation-proven |
 | LIVESHADOW-TESTRIGOR-LS-EV-17 | deferred non-blocking note | FIXED_NOW | cece2b4a; runs the launcher from a per-test disposable repo root: only one log, no creation-time heuristic, no smoke_logs writes; mutation-proven |
 | DAEMON-EXIT-20260824 | UNKNOWN_NEEDS_PROOF | UNKNOWN_NEEDS_REAL_EVIDENCE | no current deterministic source defect is provable. The two POSSIBLE_BUT_UNPROVEN mechanisms recorded in section 28 are still present in main.rs; cause needs a recurrence with captured daemon stdout/stderr and a WER/crash dump |
@@ -491,6 +494,8 @@ Final-state vocabulary mapping: `ALREADY_CLOSED_PROVEN` -> ALREADY_CLOSED+PROVEN
 | POST-A3-CONFLICT-GUARD-STALE-ANCHOR-01 | (not in ledger) | FIXED_NOW | c7f8669a; conflict-policy static guard counted a comment as a second call site and anchored on a pre-refactor literal; production invariants verified intact; 43 mutations caught |
 | POST-A3-MULTISYMBOL-PS-GUARD-QTYMICROS-01 | (not in ledger) | FIXED_NOW | 58cc9e7c; three script guards (in CI's Windows runner) anchored on pre-A3 i64 shapes; production invariants verified intact; mutation-proven |
 | POST-A3-LAUNCHER-TEST-LEDGER-FILENAME-01 | (not in ledger) | FIXED_NOW | 60d9b10c; scripts/windows/tests/test_official_dual_mode_launcher.ps1 still required the retired ledger filename after the master-tracker migration; passes 0 violations in a clean clone, mutation-proven; status parser 27/27 |
+| POST-A3-OFFSITE-TEST-SOURCE-DB-FENCE-01 | (not in ledger; independent-review finding) | FIXED_NOW | 40427939; `test_offsite_b2_workflow.ps1` reached the real Paper DB through the backup source default; now fenced to a test-owned database in `mqk-test-postgres` (G2.12) |
+| POST-A3-LAUNCHER-GUARD-HERMETICITY-01 | (not in ledger; independent-review finding) | FIXED_NOW | d79a7f88 + 5ef7d969; LSS08, LS-EV-11 and the dual-mode launcher test wrote primary `smoke_logs/`/`exports/`; now disposable-root hermetic with before/after fingerprints (G2.12) |
 | POST-A3-PHASE7B-GUARD-LIFECYCLE-SLICE-01 | (not in ledger) | FIXED_NOW | aa1255e4; check_phase7b_selected_host_dispatch_closure.ps1 (and the 7C guard chaining it) sliced lifecycle.rs at its first #[cfg(test)] marker (line 50) and counted zero production call sites; passes in a clean clone, second-call-site mutation caught |
 
 #### Lane rows that are not `CLOSED`
@@ -564,7 +569,7 @@ Compared against the section 25 invariants. These are existing, named seams foun
 
 ### G2.7 Milestone status
 
-**M1 ENGINEERING: LOCALLY COMPLETE - PENDING INDEPENDENT ACCEPTANCE.** Every ordinary deterministic engineering defect found by this wave is fixed and proven (G2.3); no actionable engineering item remains. This is not an M1 COMPLETE claim.
+**M1 ENGINEERING: LOCALLY COMPLETE - PENDING INDEPENDENT ACCEPTANCE (of the independent-review correction, G2.12).** Every ordinary deterministic engineering defect found by this wave is fixed and proven (G2.3); no actionable engineering item remains. This is not an M1 COMPLETE claim.
 
 **M1 OPERATIONAL VALIDATION: NOT COMPLETE.** Exact remaining gates:
 
@@ -586,7 +591,7 @@ M1.7 (genuine Paper trade lifecycle) and M1.8 (genuine no-trade lifecycle) are r
 - Deployed Paper DB/config/provider/universe/scheduler/risk verification and the promotion-authority gap for the deployed strategy (M1.9).
 - Host sleep/Modern Standby mitigation during Paper sessions and, on recurrence of an unexplained daemon exit, capture of daemon stdout/stderr and any WER dump (`DAEMON-EXIT-20260824`).
 
-**Unknown-needs-real-evidence:** `DAEMON-EXIT-20260824` only. **Pending external independent review:** `GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR` (`2e1aa7d9`, `18d98953`) and this wave's own commits.
+**Unknown-needs-real-evidence:** `DAEMON-EXIT-20260824` only. **Independent review:** `GENUINE-SHUFFLED-PLACEBO-CROSS-SECTIONAL-REPAIR` (`2e1aa7d9`, `18d98953`) is independently accepted. The external review of this wave's own commits has occurred; its five findings are closed by the correction commits (G2.12), and those correction commits themselves have not been independently re-reviewed.
 
 ### G2.9 Proof summary (this HEAD; local, not CI)
 
@@ -596,19 +601,19 @@ M1.7 (genuine Paper trade lifecycle) and M1.8 (genuine no-trade lifecycle) are r
 | Workspace gates | `cargo check --workspace --all-targets` OK; `cargo clippy --workspace --all-targets --keep-going -- -D warnings` exit 0; `Invoke-CanonicalFmtCheck.ps1` passes all 21 packages; per-crate `cargo test --no-run` compiles for all 21 crates |
 | DB-backed (disposable TEST DB 127.0.0.1:5434) | mqk-db signal-evidence 4/4 (`--include-ignored`); daemon fractional signal evidence 7/7; testkit broker-cursor restart 7/7 (AUDIT-M1-10); daemon fill-economic-authority closure 19/19 including fc2a |
 | Research/Python | placebo suites 27/27 |
-| GUI/PowerShell/shell guards | all `scripts/guards/*.sh` exit 0 (incl. `check_unsafe_patterns.sh`, `check_migration_governance.sh`, conflict-policy guard + 43-mutation self-test); AUDIT-M1-04..09 guards green; LiveShadow guard 100% in an isolated copy with 4 mutation proofs; the three re-aligned multi-symbol guards 14/14, 15/15, 16/16; full `run_all_script_guards.ps1` **ALL SCRIPT GUARDS PASSED** in a clean local clone of HEAD `58cc9e7c` |
-| Extra PowerShell suites (disposable clone of HEAD) | `scripts/windows/tests`: 7 of 9 pass; `test_bundle7_phase7c_premarket_validation.ps1` did not finish within 240 s; `test_offsite_b2_workflow.ps1` real-restic functional sections fail in this environment (not diagnosed; see G2.10). `scripts/guards/check_*.ps1`: 8 of 9 pass (6 unchanged, plus the 7B/7C closure guards after `aa1255e4`); `check_phase7a_r6_matrix_db_required.ps1` exits 1 by design without `MQK_DATABASE_URL` |
+| GUI/PowerShell/shell guards | all `scripts/guards/*.sh` exit 0 (incl. `check_unsafe_patterns.sh`, `check_migration_governance.sh`, conflict-policy guard + 43-mutation self-test); AUDIT-M1-04..09 guards green; LiveShadow guard 100% in an isolated copy with 4 mutation proofs; the three re-aligned multi-symbol guards 14/14, 15/15, 16/16; full `run_all_script_guards.ps1` (now 73 guards, including the newly wired and hermetic `test_live_shadow_smoke.ps1`) **ALL SCRIPT GUARDS PASSED, 73/73, 0 failed, 0 missing** under `pwsh` (CI's host) in a fresh local clone of the final code HEAD `5ef7d969ff4f88f85da6a7eac67799bde8c2e028` (the earlier `58cc9e7c` boundary predated the guard/test commits `60d9b10c`, `aa1255e4` and the G2.12 corrections and is superseded). Same clone: `check_multi_strategy_conflict_policy_01.sh` and its `--self-test` pass; `check_unsafe_patterns.sh` passes; `git diff --check 50a2b9fd HEAD` is clean |
+| Extra PowerShell suites (disposable clone of HEAD) | `scripts/windows/tests`: 7 of 9 passed at the original-wave HEAD; `test_bundle7_phase7c_premarket_validation.ps1` did not finish within 240 s. At the final code HEAD `5ef7d969` (fresh clone, G2.12): `test_official_dual_mode_launcher.ps1` 134 OK / 0 violations; `test_offsite_b2_workflow.ps1` passes 0 violations under Windows PowerShell 5.1 (the host its scripts target, run against a throwaway database in `mqk-test-postgres`), but its real-restic Sections 3-5 report 11 failed checks when the test itself is hosted by `pwsh` 7 (the staged Backup child exits 1 at its manifest step only in that hosting; run directly under `pwsh` the Backup script succeeds; not diagnosed further and not in any runner or CI job; this is consistent with, but not proven to be the cause of, the original wave's "fail in this environment" note). `scripts/guards/check_*.ps1`: 8 of 9 pass (6 unchanged, plus the 7B/7C closure guards after `aa1255e4`); `check_phase7a_r6_matrix_db_required.ps1` exits 1 by design without `MQK_DATABASE_URL` |
 | Package/security | `npm audit --package-lock-only --json`: 0 vulnerabilities |
 | Paper operational / provider / Live | NOT RUN |
 
 ### G2.10 Out-of-scope findings recorded, not fixed
 
-- `tests/script_guards/test_live_shadow_smoke.ps1` LSS08 still runs the wrapper against the real repo root and therefore writes a launcher log under `smoke_logs/` and an `exports/live_shadow_smoke/` manifest on every run; only LS-EV-16/17 were moved to disposable roots. The file is also not listed in `run_all_script_guards.ps1`.
-- `check_multi_strategy_conflict_policy_01.sh` is not run by any CI job (only by hand); it failed silently at HEAD until now.
+The LSS08 / dual-mode launcher / offsite-test `smoke_logs`/Paper-DB hazards and the missing `run_all_script_guards.ps1` entry that this section originally recorded here were independent-review defects; they are fixed and recorded in G2.12.
+
+- `check_multi_strategy_conflict_policy_01.sh` is not run by any CI job: **intentional manual closure proof.** CI's shell guard steps are the structural repo guards (`check_unsafe_patterns`, `check_migration_governance`, `check_ignored_load_bearing_proofs`, `check_workspace_dep_inheritance`, `check_ci_local_toolchain_convergence`, `check_testkit_feature_not_default`); the bundle closure guards (`check_multi_strategy_conflict_policy_01`, `check_runtime_opportunity_allocation_01`, the `check_*closure*.ps1` set) are hand-run at their acceptance boundaries and no umbrella exists for them. It is run, with `--self-test`, in the G2.12 final boundary. No new CI framework was created for it.
 - The optional AUDIT-M1-11 docs-vs-production env-contract guard was not built (marked optional by section K).
-- **Safety hazard in test tooling:** `scripts/windows/tests/test_offsite_b2_workflow.ps1` (Sections 3/5) drives `Invoke-MiniQuantDeskOffsiteBackup.ps1`, whose stage step (`Backup-MiniQuantDeskRecovery.ps1`) defaults `-PaperDbContainer` to `mqk-paper-postgres` and `docker exec ... pg_dump`s it. Running that test therefore reads the real Paper DB. It should be pointed at a disposable container or refuse to run without one; not changed here (its R4 canary sections deliberately model the canonical Paper DB URL).
-- `scripts/windows/tests/test_official_dual_mode_launcher.ps1` invokes the real launcher `-CheckOnly` against the repo root and writes into `smoke_logs/launcher/`; run it only from a disposable clone.
-- `test_bundle7_phase7c_premarket_validation.ps1` was not run to completion (240 s); `check_phase7a_r6_matrix_db_required.ps1` was not run against a DB.
+- `test_bundle7_phase7c_premarket_validation.ps1` was not run to completion (240 s); `check_phase7a_r6_matrix_db_required.ps1` was not run against a DB. Both remain recorded, not expanded, by the independent-review correction.
+- `scripts/windows/Test-MiniQuantDeskRecoveryBackup.ps1` is a manually-run operator proof (not in any runner or CI) that documents and performs a read-only `pg_dump` of the real Paper DB by default (its header states this). It was not changed by the correction and must not be run as an engineering test; use `test_offsite_b2_workflow.ps1` (fenced to a disposable database) instead.
 
 ### G2.11 Second adversarial sweep
 
@@ -618,6 +623,22 @@ M1.7 (genuine Paper trade lifecycle) and M1.8 (genuine no-trade lifecycle) are r
 - No deferred capability was promoted; no frozen contract was reopened; A3 was not reopened.
 
 **REMAINING ACTIONABLE ENGINEERING ITEMS: NONE.**
+
+### G2.12 Independent-review safety / proof correction (commits `d79a7f88`, `40427939`, `5ef7d969`)
+
+An independent review of this wave confirmed five findings. Accepted work was not reopened (CUTOVER-1D-A3, the replay-backtest idempotency repairs, the replay economic proof, LS-EV-11/12/13/17 except the hermeticity defect below, rustfmt, fc2a, clippy, M5 gate, migration EOL pins, DB fixture repair, QtyMicros and launcher/7B guard repairs). No production Rust was touched; the only production-script change is additive parameter plumbing (below).
+
+| # | Finding | Root cause | Fix | Proof |
+|---|---|---|---|---|
+| 1 | `test_offsite_b2_workflow.ps1` read the real Paper DB | its real orchestration runs overrode only the restore destination; the staging half used `Backup-MiniQuantDeskRecovery.ps1`'s default source `mqk-paper-postgres` | `Invoke-MiniQuantDeskOffsiteBackup.ps1` gains `-SourceDbContainer/-SourceDbName/-SourceDbUser` (operator defaults unchanged: real Paper) forwarded to the backup script and prints the non-secret source identity. The test routes every real run through a fenced wrapper that throws `ENGINEERING_SOURCE_FENCE` before any subprocess launch unless the source is `mqk-test-postgres` plus a test-owned `mqk_offsite_src_<guid>` database (created with one table and dropped by the test) | 7 fence cases refused before any launch (override removed, Paper/Live container, Paper DB name, non-canonical container, non-test-owned DB name); a docker shim that never forwards to real docker proves the accepted path's first docker call is `inspect mqk-test-postgres` and that the raw script with the override removed would have inspected `mqk-paper-postgres`; a mutation of the test (empty source) aborted before any docker call; real runs report `Backup source DB: container=mqk-test-postgres db=mqk_offsite_src_...`; the throwaway DB count is 0 afterwards. **The Paper DB was not read or connected to at any point in the correction** |
+| 2 | LSS08 wrote primary `smoke_logs/` and `exports/live_shadow_smoke/` and picked evidence by a recent-CreationTime window | ran the wrapper from the real repo root | runs the byte-identical wrapper + launcher (hash-checked) from a test-owned disposable root under OS temp; evidence is owned by exact `invocation_id` (launcher-log id == dir suffix == manifest id; none/several fails closed); LS-EV-06/07 reuse that manifest | mutation control: a newer foreign-id directory and a newer poisoned directory (right name, wrong manifest) fool a newest-directory heuristic but are never selected; primary `smoke_logs`, `exports\live_shadow_smoke` and `exports\launcher` fingerprints (path, length, mtime) identical before and after; the fingerprint detects an added file |
+| 3 | dual-mode launcher test wrote three primary `smoke_logs/launcher` entries | Section 2 CheckOnly subprocesses used the real launcher | static/dot-source proofs still read the real files; every subprocess runs the hash-identical launcher from a disposable root with the read-only ledger/parity inputs and no `.env.local` | 134 OK / 0 violations; launcher logs landed in the disposable root (>=3); primary `smoke_logs` and `exports` identical before and after |
+| 4 | final integrated guard proof was not final-HEAD | the `58cc9e7c` boundary predated later guard commits | `test_live_shadow_smoke.ps1` (the only `tests/script_guards` guard missing from the runner, now hermetic) wired into `run_all_script_guards.ps1`; the conflict-policy guard dispositioned as an intentional manual closure proof (G2.10) | G2.9: 73/73 at `5ef7d969`. The clean-clone run also exposed a real leak the first hermetic pass had missed: LS-EV-11's `New-LauncherLog` creates `smoke_logs/launcher/live-shadow` in whatever root it is given; fixed in `5ef7d969` |
+| 5 | ledger truth | (this section) | `73672264` recorded as 98 files (Git) versus 100 files of initially detected drift; final boundary names the final code HEAD; the two hazards moved from out-of-scope to fixed; placebo repair normalized to independently accepted/closed; census recomputed | census re-derived from the G2.4 tables: 52 table rows (was 50), `FIXED_NOW` 14 (+2), `PENDING_EXTERNAL_INDEPENDENT_REVIEW` 0 (-1), `ALREADY_CLOSED_PROVEN` 55 (54 Lane rows + the placebo repair), total 140 |
+
+Operational truth is unchanged by this correction: exact-head GitHub CI is still NOT YET VERIFIED (no push); M1 operational validation is incomplete; a real B2 restore is not proven; real outage/reboot proof is not proven; the real LiveShadow smoke has not been run; no later milestone is accepted. Not expanded (recorded in G2.10): the phase7c 240 s timeout, the phase7a DB-required guard, cloud failover, Live execution, multi-asset expansion, the research backlog.
+
+Side effects of the correction: Paper orders 0; Live orders 0; broker/provider calls 0; Paper/Live DB access 0 (throwaway databases in the disposable `mqk-test-postgres` container only, all dropped); the three pre-existing `smoke_logs` test-generated entries from the original wave were left untouched and the primary `smoke_logs` (447 entries) and `exports` (4288 entries) trees are identical to their state before the correction began; no push.
 
 
 ## H. Immediate Sequencing From This Contract
