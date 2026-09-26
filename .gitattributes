@@ -20,3 +20,5 @@ core-rs/crates/mqk-db/migrations/0072_explicit_multi_strategy_authority.sql text
 core-rs/crates/mqk-db/migrations/0073_explicit_multi_strategy_authority_full_evidence.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0074_autonomous_daily_binding_state_strategy_mismatch_reason.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0075_autonomous_daily_binding_bar_dispatches.sql text eol=lf
+core-rs/crates/mqk-db/migrations/0076_runtime_qty_micros_evidence.sql text eol=lf
+core-rs/crates/mqk-db/migrations/0077_strategy_signal_evaluations_qty_micros.sql text eol=lf
