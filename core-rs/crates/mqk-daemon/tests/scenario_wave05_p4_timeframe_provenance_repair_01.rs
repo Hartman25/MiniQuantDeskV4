@@ -18,6 +18,8 @@
 //! torn down per-test via `mqk_db::run_isolated` (migrations applied
 //! automatically). No `MQK_DATABASE_URL` / `--include-ignored` required.
 
+mod common;
+
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
@@ -430,9 +432,11 @@ async fn seed_bare_run(pool: &sqlx::PgPool) -> Uuid {
 #[tokio::test]
 async fn tf_r1_internal_decision_persists_exact_timeframe_secs() {
     mqk_db::run_isolated("tf_r1_persist", |pool| async move {
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         let sid = unique_id("strat");
         seed_registry(&pool, &sid, true).await;
@@ -480,10 +484,10 @@ async fn tf_r1_internal_decision_persists_exact_timeframe_secs() {
 #[tokio::test]
 async fn tf_r2_current_config_drift_never_overrides_durable_timeframe() {
     mqk_db::run_isolated("tf_r2_config_drift", |pool| async move {
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        let st = Arc::new(common::with_canonical_equity_registry(state::AppState::new_with_db_and_operator_auth(
             pool.clone(),
             state::OperatorAuthMode::ExplicitDevNoToken,
-        ));
+        )));
         let sid = unique_id("strat");
         seed_registry(&pool, &sid, true).await;
         seed_active_paper_promotion(&pool, &sid, "AAPL", 300).await;
@@ -528,9 +532,11 @@ async fn tf_r2_current_config_drift_never_overrides_durable_timeframe() {
 #[tokio::test]
 async fn tf_r3_p4_route_resolves_regime_from_real_production_provenance() {
     mqk_db::run_isolated("tf_r3_route_proof", |pool| async move {
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         let sid = unique_id("strat");
         seed_registry(&pool, &sid, true).await;

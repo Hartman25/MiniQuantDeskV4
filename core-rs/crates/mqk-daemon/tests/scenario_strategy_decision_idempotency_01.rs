@@ -100,6 +100,8 @@
 //! DB-backed (port 5434 test Postgres) and load-bearing -- must fail hard if
 //! `MQK_DATABASE_URL` is absent, not skip.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -612,7 +614,9 @@ async fn seed_and_run(
     .expect("seed strategy registry");
     seed_active_paper_promotion(pool, strategy_id, symbol, 300).await;
 
-    let st = Arc::new(state::AppState::new_with_db(pool.clone()));
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db(pool.clone()),
+    ));
     mqk_db::persist_arm_state_canonical(pool, mqk_db::ArmState::Armed, None)
         .await
         .expect("arm state");
@@ -721,7 +725,9 @@ async fn d06_restart_recomputes_identical_decision_id_and_resubmit_is_a_noop() {
         // completed bar (durable evidence -- bar_end_ts -- not process
         // memory). Re-injects the running loop against the SAME run_id,
         // exactly as a real crash-restart resumes an existing RUNNING row.
-        let st_after = Arc::new(state::AppState::new_with_db(pool.clone()));
+        let st_after = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db(pool.clone()),
+        ));
         st_after.inject_running_loop_for_test(run_id).await;
         let after = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
         assert_eq!(
@@ -868,7 +874,9 @@ async fn c4_restart_replay_with_partial_fill_creates_zero_additional_order() {
 
         // Simulated restart + a partial fill (5 of 15) having landed before
         // the crash.
-        let st_after = Arc::new(state::AppState::new_with_db(pool.clone()));
+        let st_after = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db(pool.clone()),
+        ));
         st_after.inject_running_loop_for_test(run_id).await;
         let after = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &at(symbol, 5));
         assert_eq!(

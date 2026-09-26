@@ -62,6 +62,7 @@
 //! - `sto02_duplicate_decision_id_creates_no_second_row`
 //! - `sto03_disarmed_state_refuses_and_creates_no_outbox`
 //! - `sto06_outbox_order_json_has_expected_fields`
+//! - `sto09`..`sto12`: legacy-Equity registry authority — CWD independence and fail-closed controls
 //!
 //! Run DB tests:
 //! ```sh
@@ -69,6 +70,8 @@
 //!   cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 \
 //!   -- --include-ignored --nocapture --test-threads=1
 //! ```
+
+mod common;
 
 use std::sync::Arc;
 
@@ -518,9 +521,11 @@ async fn sto01_armed_running_creates_exactly_one_outbox_row() {
         .await
         .expect("persist ARMED");
 
-    let st = Arc::new(mqk_daemon::state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        mqk_daemon::state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
 
@@ -580,9 +585,11 @@ async fn sto02_duplicate_decision_id_creates_no_second_row() {
         .await
         .expect("persist ARMED");
 
-    let st = Arc::new(mqk_daemon::state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        mqk_daemon::state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
 
@@ -644,9 +651,11 @@ async fn sto03_disarmed_state_refuses_and_creates_no_outbox() {
     seed_registry(&pool, &sid, true).await;
     seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
 
-    let st = Arc::new(mqk_daemon::state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        mqk_daemon::state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     let dec_id = unique_id("dec03");
@@ -703,9 +712,11 @@ async fn sto06_outbox_order_json_has_expected_fields() {
         .await
         .expect("persist ARMED");
 
-    let st = Arc::new(mqk_daemon::state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        mqk_daemon::state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
 
@@ -760,4 +771,234 @@ async fn sto06_outbox_order_json_has_expected_fields() {
     );
 
     cleanup_run(&pool, run_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Legacy-Equity registry authority: CWD independence and fail-closed controls
+//
+// Production contract: `AppState::instrument_registry_path` is CWD-relative
+// (default `config/instruments/equities.json`; launchers pin CWD to the repo
+// root) unless the operator supplies `MQK_INSTRUMENT_REGISTRY_PATH`. Cargo runs
+// integration tests with CWD = the crate directory, so tests anchor the path
+// explicitly (`common::canonical_equity_registry_path`). These controls prove
+// that anchoring is CWD-independent and that every other registry state
+// (missing, malformed, wrong-CWD default, explicit override) still fails closed
+// without a silent fallback to a second registry.
+// ---------------------------------------------------------------------------
+
+/// The documented production default: CWD-relative, never absolute.
+const DOCUMENTED_DEFAULT_REGISTRY_PATH: &str = "config/instruments/equities.json";
+
+fn crate_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn repo_root_dir() -> std::path::PathBuf {
+    crate_dir()
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root")
+}
+
+fn core_rs_dir() -> std::path::PathBuf {
+    crate_dir()
+        .join("../..")
+        .canonicalize()
+        .expect("core-rs dir")
+}
+
+fn cwd_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Sets the process CWD and restores the previous one on drop (also on panic).
+struct CwdGuard(std::path::PathBuf);
+
+impl CwdGuard {
+    fn enter(dir: &std::path::Path) -> Self {
+        let prev = std::env::current_dir().expect("current_dir");
+        std::env::set_current_dir(dir).expect("set_current_dir");
+        CwdGuard(prev)
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+/// Seed every gate, point the legacy-Equity authority at `registry_path`, and
+/// submit one AAPL decision. Returns the outcome and the outbox row count for it.
+async fn submit_with_registry(
+    pool: &sqlx::PgPool,
+    tag: &str,
+    registry_path: &str,
+) -> (mqk_daemon::decision::InternalDecisionOutcome, i64) {
+    sqlx::query("DELETE FROM sys_arm_state WHERE sentinel_id = 1")
+        .execute(pool)
+        .await
+        .expect("cleanup sys_arm_state");
+    let sid = unique_id(tag);
+    seed_registry(pool, &sid, true).await;
+    seed_active_paper_promotion(pool, &sid, "AAPL", 86400).await;
+    mqk_db::persist_arm_state(pool, "ARMED", None)
+        .await
+        .expect("persist ARMED");
+
+    let mut state =
+        AppState::new_with_db_and_operator_auth(pool.clone(), OperatorAuthMode::ExplicitDevNoToken);
+    state.instrument_registry_path = registry_path.to_string();
+    let st = Arc::new(state);
+    let run_id = seed_active_run(&st).await;
+
+    let dec_id = unique_id("decpath");
+    let out = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
+    let rows = outbox_count_for_key(pool, &dec_id).await;
+    cleanup_run(pool, run_id).await;
+    (out, rows)
+}
+
+fn assert_registry_unavailable(
+    ctl: &str,
+    out: &mqk_daemon::decision::InternalDecisionOutcome,
+    rows: i64,
+) {
+    assert!(!out.accepted, "{ctl}: must not accept; got {out:?}");
+    assert_eq!(
+        out.disposition, "unavailable",
+        "{ctl}: unusable registry must be 'unavailable', not rejected/accepted"
+    );
+    assert!(
+        out.blockers
+            .iter()
+            .any(|b| b.contains("canonical legacy Equity registry")),
+        "{ctl}: blocker must name the registry authority; got {:?}",
+        out.blockers
+    );
+    assert_eq!(rows, 0, "{ctl}: no outbox row may be written");
+}
+
+/// PATH-01/02/03/07: the anchored canonical registry admits the decision
+/// from the repo root, from `core-rs`, and from an unrelated CWD, and resolves
+/// to byte-identical registry content in every case.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
+async fn sto09_canonical_registry_resolves_identically_from_every_cwd() {
+    let _lock = cwd_lock().lock().await;
+    let pool = make_db_pool().await;
+    let anchored = common::canonical_equity_registry_path();
+    let unrelated = tempfile::tempdir().expect("tempdir");
+
+    let mut identities: Vec<Vec<u8>> = Vec::new();
+    for (label, dir) in [
+        ("PATH-01 repo-root", repo_root_dir()),
+        ("PATH-02 core-rs", core_rs_dir()),
+        ("PATH-03 unrelated", unrelated.path().to_path_buf()),
+    ] {
+        let _cwd = CwdGuard::enter(&dir);
+        identities.push(std::fs::read(&anchored).expect("anchored registry readable"));
+        let (out, rows) = submit_with_registry(&pool, "sto09", &anchored).await;
+        assert!(
+            out.accepted && out.disposition == "accepted",
+            "{label}: anchored canonical registry must admit AAPL; got {out:?}"
+        );
+        assert_eq!(rows, 1, "{label}: exactly one outbox row");
+    }
+    assert!(
+        identities.windows(2).all(|w| w[0] == w[1]) && !identities[0].is_empty(),
+        "PATH-07: registry content identity must be identical and non-empty across CWDs"
+    );
+}
+
+/// The documented CWD-relative default: resolves only from the repo root
+/// (where launchers pin CWD) and fails closed everywhere else — it never
+/// searches for or falls back to another registry.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
+async fn sto10_documented_default_is_cwd_relative_and_fails_closed_elsewhere() {
+    let _lock = cwd_lock().lock().await;
+    let pool = make_db_pool().await;
+    let unrelated = tempfile::tempdir().expect("tempdir");
+
+    {
+        let _cwd = CwdGuard::enter(&repo_root_dir());
+        let (out, rows) =
+            submit_with_registry(&pool, "sto10a", DOCUMENTED_DEFAULT_REGISTRY_PATH).await;
+        assert!(
+            out.accepted && rows == 1,
+            "repo-root CWD: documented default must resolve; got {out:?}"
+        );
+    }
+    for (label, dir) in [
+        ("default from core-rs CWD", core_rs_dir()),
+        ("default from unrelated CWD", unrelated.path().to_path_buf()),
+    ] {
+        let _cwd = CwdGuard::enter(&dir);
+        let (out, rows) =
+            submit_with_registry(&pool, "sto10b", DOCUMENTED_DEFAULT_REGISTRY_PATH).await;
+        assert_registry_unavailable(label, &out, rows);
+    }
+}
+
+/// PATH-04/05: an explicit nonexistent or malformed registry fails closed.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
+async fn sto11_missing_or_malformed_registry_fails_closed() {
+    let _lock = cwd_lock().lock().await;
+    let pool = make_db_pool().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let missing = dir.path().join("does_not_exist.json");
+    let (out, rows) = submit_with_registry(&pool, "sto11a", missing.to_str().unwrap()).await;
+    assert_registry_unavailable("PATH-04 nonexistent", &out, rows);
+
+    let malformed = dir.path().join("malformed.json");
+    std::fs::write(&malformed, b"{ this is not a registry").unwrap();
+    let (out, rows) = submit_with_registry(&pool, "sto11b", malformed.to_str().unwrap()).await;
+    assert_registry_unavailable("PATH-05 malformed", &out, rows);
+}
+
+/// PATH-06: an explicit registry is never silently replaced by the default,
+/// even from a CWD where the default WOULD resolve and enable AAPL.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
+async fn sto12_explicit_override_is_never_replaced_by_default() {
+    let _lock = cwd_lock().lock().await;
+    let pool = make_db_pool().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _cwd = CwdGuard::enter(&repo_root_dir());
+
+    // Precondition: from this CWD the default resolves AAPL.
+    let (out, _) = submit_with_registry(&pool, "sto12p", DOCUMENTED_DEFAULT_REGISTRY_PATH).await;
+    assert!(
+        out.accepted,
+        "PATH-06 precondition: default admits AAPL; got {out:?}"
+    );
+
+    // Explicit nonexistent override: unavailable, not the default's answer.
+    let missing = dir.path().join("does_not_exist.json");
+    let (out, rows) = submit_with_registry(&pool, "sto12a", missing.to_str().unwrap()).await;
+    assert_registry_unavailable("PATH-06 nonexistent override", &out, rows);
+
+    // Explicit valid registry that does not enable AAPL: rejected, not accepted.
+    let canonical: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(common::canonical_equity_registry_path()).unwrap())
+            .unwrap();
+    let without_aapl: Vec<&serde_json::Value> = canonical
+        .iter()
+        .filter(|row| row["symbol"] != "AAPL")
+        .collect();
+    assert!(
+        without_aapl.len() + 1 == canonical.len(),
+        "PATH-06 precondition: canonical registry contains exactly one AAPL row"
+    );
+    let override_path = dir.path().join("no_aapl.json");
+    std::fs::write(&override_path, serde_json::to_vec(&without_aapl).unwrap()).unwrap();
+    let (out, rows) = submit_with_registry(&pool, "sto12b", override_path.to_str().unwrap()).await;
+    assert!(
+        !out.accepted && out.disposition == "rejected" && rows == 0,
+        "PATH-06 override without AAPL must reject; got {out:?}, rows={rows}"
+    );
 }

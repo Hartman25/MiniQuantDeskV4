@@ -11,6 +11,8 @@
 //! torn down per-test via `mqk_db::run_isolated` (migrations applied
 //! automatically). No `MQK_DATABASE_URL` / `--include-ignored` required.
 
+mod common;
+
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
@@ -401,9 +403,11 @@ async fn wl01_internal_strategy_fill_round_trip() {
         seed_active_paper_promotion(&pool, &sid, "AAPL", 86400, &fp_a).await;
         arm(&pool).await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         let run_id = seed_active_run(&st).await;
 
@@ -457,9 +461,11 @@ async fn wl02_two_strategies_same_symbol_exact_order_attribution() {
         seed_active_paper_promotion(&pool, &sid_b, "AAPL", 86400, &fp_b).await;
         arm(&pool).await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         let run_id = seed_active_run(&st).await;
 
@@ -523,9 +529,11 @@ async fn wl03_current_config_drift_never_rewrites_historical_fingerprint() {
         seed_active_paper_promotion(&pool, &sid, "AAPL", 86400, &fp_old).await;
         arm(&pool).await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         let run_id = seed_active_run(&st).await;
 
@@ -612,9 +620,11 @@ async fn wl04_legacy_row_without_fingerprint_key_reports_unknown() {
 
         insert_fill_for_order(&pool, run_id, &dec_id, "AAPL").await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         st.inject_running_loop_for_test(run_id).await;
 
@@ -685,9 +695,11 @@ async fn wl05_manual_order_reports_unattributed_not_invented() {
 
         insert_fill_for_order(&pool, run_id, &client_request_id, "MSFT").await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         st.inject_running_loop_for_test(run_id).await;
 
@@ -753,9 +765,11 @@ async fn wl06_missing_originating_outbox_reports_lineage_missing_not_unattribute
         let orphan_order_id = unique_id("orphan");
         insert_fill_for_order(&pool, run_id, &orphan_order_id, "AAPL").await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         st.inject_running_loop_for_test(run_id).await;
 
@@ -861,10 +875,10 @@ async fn wl07_cross_run_order_fill_mismatch_is_lineage_invalid() {
         // internal_order_id.
         insert_fill_for_order(&pool, run_a, &shared_order_id, "AAPL").await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        let st = Arc::new(common::with_canonical_equity_registry(state::AppState::new_with_db_and_operator_auth(
             pool.clone(),
             state::OperatorAuthMode::ExplicitDevNoToken,
-        ));
+        )));
         st.inject_running_loop_for_test(run_a).await;
 
         let journal = fetch_journal(&st).await;
@@ -924,10 +938,10 @@ async fn wl08_strategy_source_missing_strategy_id_is_lineage_invalid() {
 
         insert_fill_for_order(&pool, run_id, &dec_id, "AAPL").await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        let st = Arc::new(common::with_canonical_equity_registry(state::AppState::new_with_db_and_operator_auth(
             pool.clone(),
             state::OperatorAuthMode::ExplicitDevNoToken,
-        ));
+        )));
         st.inject_running_loop_for_test(run_id).await;
 
         let journal = fetch_journal(&st).await;
@@ -970,9 +984,11 @@ async fn wl08b_external_signal_source_missing_strategy_id_is_lineage_invalid() {
 
         insert_fill_for_order(&pool, run_id, &dec_id, "AAPL").await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         st.inject_running_loop_for_test(run_id).await;
 
@@ -1030,10 +1046,10 @@ async fn wl09_malformed_strategy_id_is_lineage_invalid() {
 
             insert_fill_for_order(&pool, run_id, &dec_id, "AAPL").await;
 
-            let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            let st = Arc::new(common::with_canonical_equity_registry(state::AppState::new_with_db_and_operator_auth(
                 pool.clone(),
                 state::OperatorAuthMode::ExplicitDevNoToken,
-            ));
+            )));
             st.inject_running_loop_for_test(run_id).await;
 
             let journal = fetch_journal(&st).await;
@@ -1101,9 +1117,11 @@ async fn wl10_fingerprint_without_strategy_id_or_malformed_is_lineage_invalid() 
             .expect("enqueue malformed-fingerprint outbox row");
         insert_fill_for_order(&pool, run_id, &dec_id_b, "AAPL").await;
 
-        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-            pool.clone(),
-            state::OperatorAuthMode::ExplicitDevNoToken,
+        let st = Arc::new(common::with_canonical_equity_registry(
+            state::AppState::new_with_db_and_operator_auth(
+                pool.clone(),
+                state::OperatorAuthMode::ExplicitDevNoToken,
+            ),
         ));
         st.inject_running_loop_for_test(run_id).await;
 
