@@ -17,6 +17,8 @@
 //!   cargo test -p mqk-daemon --test scenario_runtime_promotion_evidence_binding_01 \
 //!     -- --include-ignored --test-threads=1
 
+mod common;
+
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
@@ -188,9 +190,11 @@ async fn state_with_arm_and_run(pool: sqlx::PgPool) -> (Arc<state::AppState>, Uu
     mqk_db::persist_arm_state(&pool, "ARMED", None)
         .await
         .expect("persist ARMED");
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool,
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool,
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
     (st, run_id)
@@ -429,10 +433,12 @@ fn signal_req(body: serde_json::Value) -> Request<axum::body::Body> {
 }
 
 async fn make_external_signal_state(pool: sqlx::PgPool) -> Arc<state::AppState> {
-    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
-        pool,
-        state::DeploymentMode::Paper,
-        state::BrokerKind::Alpaca,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_for_test_with_db_mode_and_broker(
+            pool,
+            state::DeploymentMode::Paper,
+            state::BrokerKind::Alpaca,
+        ),
     ));
     st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
         last_message_id: "alpaca:c2:new:2024-01-08T14:00:00Z".to_string(),

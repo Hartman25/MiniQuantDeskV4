@@ -22,6 +22,8 @@
 //! No-DB tests (D01-D08) run unconditionally.
 //! D09 requires MQK_DATABASE_URL and is marked #[ignore].
 
+mod common;
+
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
@@ -506,9 +508,11 @@ async fn d09_acceptance_increments_account_wide_and_per_symbol_counters() {
         .await
         .expect("persist arm state");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
 

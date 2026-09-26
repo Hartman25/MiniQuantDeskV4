@@ -60,6 +60,8 @@
 //! genuinely multi-regime bars fixture (see its own doc comment) so
 //! `month_year_regime_concentration` also genuinely passes.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -684,10 +686,34 @@ async fn closure_proof_full_lifecycle_through_real_routes() {
         &symbol,
     );
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
-    ));
+    // The decision seam requires the symbol to be an enabled canonical legacy
+    // Equity. This per-run synthetic symbol is added to a copy of the canonical
+    // registry (AAPL row cloned) so that authority is satisfied genuinely.
+    let registry_path = root.join("equities_with_synthetic_symbol.json");
+    {
+        let mut rows: Vec<serde_json::Value> = serde_json::from_slice(
+            &std::fs::read(common::canonical_equity_registry_path()).expect("read registry"),
+        )
+        .expect("parse registry");
+        let mut row = rows
+            .iter()
+            .find(|r| r["symbol"] == "AAPL")
+            .cloned()
+            .expect("canonical registry has an AAPL row");
+        row["symbol"] = symbol.clone().into();
+        row["provider_symbol"] = symbol.clone().into();
+        row["instrument_id"] = format!("equity:US:{symbol}").into();
+        rows.push(row);
+        std::fs::write(&registry_path, serde_json::to_vec_pretty(&rows).unwrap())
+            .expect("write registry fixture");
+    }
+    let mut app_state =
+        common::with_canonical_equity_registry(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+    app_state.instrument_registry_path = registry_path.to_string_lossy().into_owned();
+    let st = Arc::new(app_state);
 
     // --- Step 3a: no-state -> shadow_approved, via the real route. --------
     let (status, json) = call(

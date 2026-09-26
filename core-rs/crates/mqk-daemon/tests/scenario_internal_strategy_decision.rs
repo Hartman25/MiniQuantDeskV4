@@ -20,6 +20,8 @@
 //!   MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
 //!   cargo test -p mqk-daemon --test scenario_internal_strategy_decision -- --include-ignored
 
+mod common;
+
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
@@ -418,9 +420,11 @@ async fn decision_no_db_returns_unavailable() {
 #[ignore]
 async fn decision_unregistered_strategy_rejected() {
     let pool = make_db_pool().await;
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool,
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool,
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     let sid = unique_id("unregistered");
@@ -451,9 +455,11 @@ async fn decision_disabled_strategy_rejected() {
     let sid = unique_id("disabled");
     seed_registry(&pool, &sid, false).await;
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool,
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool,
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     let d = make_decision(&unique_id("dec"), &sid);
@@ -504,9 +510,11 @@ async fn decision_active_suppression_refuses_entry() {
     .await
     .expect("insert suppression failed");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool,
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool,
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     let out = submit_internal_strategy_decision(&st, make_decision(&unique_id("dec"), &sid)).await;
@@ -562,9 +570,11 @@ async fn decision_cleared_suppression_does_not_block() {
         .await
         .expect("clear suppression failed");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool,
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool,
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     let out = submit_internal_strategy_decision(&st, make_decision(&unique_id("dec"), &sid)).await;
@@ -613,9 +623,11 @@ async fn decision_suppression_does_not_bleed_across_strategies() {
     .await
     .expect("insert suppression failed");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool,
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool,
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     // Strategy A must be refused at Gate 4.
@@ -664,9 +676,11 @@ async fn decision_suppression_blocks_before_outbox_enqueue() {
     .await
     .expect("insert suppression failed");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     let dec_id = unique_id("dec_blocked");
@@ -710,9 +724,11 @@ async fn decision_passes_registry_but_no_arm_state_rejected() {
     seed_registry(&pool, &sid, true).await;
     seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool,
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool,
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
 
     let d = make_decision(&unique_id("dec"), &sid);
@@ -759,9 +775,11 @@ async fn decision_full_enqueue_path_accepted() {
         .await
         .expect("persist arm state");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
 
@@ -827,9 +845,11 @@ async fn decision_duplicate_decision_id_returns_duplicate() {
         .await
         .expect("persist arm state");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
 

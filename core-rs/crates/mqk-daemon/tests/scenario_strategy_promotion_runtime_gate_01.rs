@@ -20,6 +20,8 @@
 //!   cargo test -p mqk-daemon --test scenario_strategy_promotion_runtime_gate_01 \
 //!     -- --include-ignored --test-threads=1
 
+mod common;
+
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
@@ -423,9 +425,11 @@ async fn assert_internal_denied(
         seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, target).await;
     }
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let _run_id = seed_active_run(&st).await;
 
@@ -504,9 +508,11 @@ async fn internal_symbol_mismatch_denied() {
     // Approve MSFT, decide on AAPL.
     seed_promotion_state(&pool, &sid, "MSFT", TIMEFRAME_SECS, "active_paper").await;
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let _run_id = seed_active_run(&st).await;
 
@@ -533,9 +539,11 @@ async fn internal_timeframe_mismatch_denied() {
     // Approve at 1H (3600s), decide at 1D (86400s).
     seed_promotion_state(&pool, &sid, SYMBOL, 3600, "active_paper").await;
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let _run_id = seed_active_run(&st).await;
 
@@ -593,9 +601,11 @@ async fn internal_active_promotion_still_blocked_by_suppression() {
         .await
         .expect("persist ARMED");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let _run_id = seed_active_run(&st).await;
 
@@ -625,9 +635,11 @@ async fn internal_active_promotion_still_blocked_by_disabled_registry() {
         .await
         .expect("persist ARMED");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let _run_id = seed_active_run(&st).await;
 
@@ -659,9 +671,11 @@ async fn internal_active_paper_exact_identity_accepted_one_outbox_row() {
         .await
         .expect("persist ARMED");
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ),
     ));
     let run_id = seed_active_run(&st).await;
 
@@ -738,10 +752,12 @@ fn signal_req(body: serde_json::Value) -> Request<axum::body::Body> {
 /// already used by `scenario_paper_alpaca_proof_bundle_brk00r06.rs`'s
 /// `reaches_db_gate`-style tests.
 async fn make_external_signal_state(pool: sqlx::PgPool) -> Arc<state::AppState> {
-    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
-        pool,
-        state::DeploymentMode::Paper,
-        state::BrokerKind::Alpaca,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_for_test_with_db_mode_and_broker(
+            pool,
+            state::DeploymentMode::Paper,
+            state::BrokerKind::Alpaca,
+        ),
     ));
     st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
         last_message_id: "alpaca:rtg01:new:2024-01-08T14:00:00Z".to_string(),
@@ -1213,10 +1229,12 @@ async fn internal_active_paper_denied_when_daemon_mode_is_live() {
         .await
         .expect("persist ARMED");
 
-    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
-        pool.clone(),
-        state::DeploymentMode::LiveShadow,
-        state::BrokerKind::Alpaca,
+    let st = Arc::new(common::with_canonical_equity_registry(
+        state::AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            state::DeploymentMode::LiveShadow,
+            state::BrokerKind::Alpaca,
+        ),
     ));
     let _run_id = seed_active_run(&st).await;
 
