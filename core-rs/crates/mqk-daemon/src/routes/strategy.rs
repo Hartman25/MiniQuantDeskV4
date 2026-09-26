@@ -22,8 +22,9 @@ use axum::{
 };
 
 use crate::api_types::{
-    MultiSymbolDispatchSummaryResponse, PerSymbolDispatchRow, StrategySignalRequest,
-    StrategySignalResponse, StrategySuppressionRow, StrategySuppressionsResponse,
+    MultiSymbolDispatchSummaryResponse, MultiSymbolDispatchSummaryResponseV2, PerSymbolDispatchRow,
+    PerSymbolDispatchRowV2, StrategySignalRequest, StrategySignalResponse, StrategySuppressionRow,
+    StrategySuppressionsResponse,
 };
 use mqk_integrity::CalendarSpec;
 
@@ -50,6 +51,8 @@ pub(crate) const OUTBOX_SIGNAL_SOURCE: &str = "external_signal_ingestion";
 
 pub(crate) const MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE: &str =
     "/api/v1/strategy/multi-symbol-dispatch-summary";
+pub(crate) const MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE_V2: &str =
+    "/api/v2/strategy/multi-symbol-dispatch-summary";
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/strategy/suppressions
@@ -114,18 +117,69 @@ pub(crate) async fn strategy_suppressions(State(st): State<Arc<AppState>>) -> im
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/strategy/multi-symbol-dispatch-summary
+// GET /api/v2/strategy/multi-symbol-dispatch-summary  (qty_micros_v1)
 // ---------------------------------------------------------------------------
 
+/// V1 (whole-unit) view. Fails closed with 409 when any row's exact quantity
+/// has no whole-unit form (fractional or overflowed); never truncates it,
+/// reports it as `null`, or reports it as `0`.
 pub(crate) async fn multi_symbol_dispatch_summary(
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let response = build_dispatch_summary_response(&st).await;
-    (StatusCode::OK, Json(response))
+    let v2 = build_dispatch_summary_response_v2(&st).await;
+    match dispatch_summary_v1_from_v2(v2) {
+        Some(v1) => (StatusCode::OK, Json(v1)).into_response(),
+        None => super::execution_order_analysis::v1_fractional_refusal(
+            "/api/v2/strategy/multi-symbol-dispatch-summary",
+            "the multi-symbol dispatch summary",
+        ),
+    }
 }
 
-pub(crate) async fn build_dispatch_summary_response(
+pub(crate) async fn multi_symbol_dispatch_summary_v2(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(build_dispatch_summary_response_v2(&st).await),
+    )
+}
+
+/// Whole-unit V1 projection of the exact V2 response; `None` if any quantity
+/// has no exact whole-unit representation.
+pub(crate) fn dispatch_summary_v1_from_v2(
+    v2: MultiSymbolDispatchSummaryResponseV2,
+) -> Option<MultiSymbolDispatchSummaryResponse> {
+    let whole = |micros: i64| mqk_schemas::QtyMicros::new(micros).to_whole_units_checked();
+    let mut per_symbol = Vec::with_capacity(v2.per_symbol.len());
+    for row in v2.per_symbol {
+        per_symbol.push(PerSymbolDispatchRow {
+            current_qty: whole(row.current_qty_micros)?,
+            target_qty: whole(row.target_qty_micros)?,
+            delta: whole(row.delta_micros?)?,
+            symbol: row.symbol,
+            strategy_id: row.strategy_id,
+            no_order_reason: row.no_order_reason,
+            last_decision_id: row.last_decision_id,
+            last_decision_disposition: row.last_decision_disposition,
+            day_order_count: row.day_order_count,
+            day_order_limit: row.day_order_limit,
+            bar_staleness_secs: row.bar_staleness_secs,
+        });
+    }
+    Some(MultiSymbolDispatchSummaryResponse {
+        canonical_route: MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE.to_string(),
+        backend: v2.backend,
+        truth_state: v2.truth_state,
+        runtime_execution_mode: v2.runtime_execution_mode,
+        configured_symbol_count: v2.configured_symbol_count,
+        per_symbol,
+    })
+}
+
+pub(crate) async fn build_dispatch_summary_response_v2(
     state: &AppState,
-) -> MultiSymbolDispatchSummaryResponse {
+) -> MultiSymbolDispatchSummaryResponseV2 {
     let target_states = state.per_symbol_target_states().await;
     let configured_symbol_count = target_states.len();
     let runtime_execution_mode = match configured_symbol_count {
@@ -144,7 +198,7 @@ pub(crate) async fn build_dispatch_summary_response(
     let day_order_limit = state.per_symbol_day_order_limit().await;
     let mut per_symbol = Vec::with_capacity(target_states.len());
     for row in target_states {
-        per_symbol.push(PerSymbolDispatchRow {
+        per_symbol.push(PerSymbolDispatchRowV2 {
             day_order_count: state.symbol_day_order_count(&row.symbol).await,
             day_order_limit,
             // Cap #9 has a classification helper, but no trusted current
@@ -152,11 +206,6 @@ pub(crate) async fn build_dispatch_summary_response(
             bar_staleness_secs: None,
             symbol: row.symbol,
             strategy_id: row.strategy_id,
-            current_qty: row.current_qty.to_whole_units_checked(),
-            target_qty: row.target_qty.to_whole_units_checked(),
-            delta: row
-                .delta
-                .and_then(mqk_schemas::QtyMicros::to_whole_units_checked),
             current_qty_micros: row.current_qty.raw(),
             target_qty_micros: row.target_qty.raw(),
             delta_micros: row.delta.map(mqk_schemas::QtyMicros::raw),
@@ -166,8 +215,10 @@ pub(crate) async fn build_dispatch_summary_response(
         });
     }
 
-    MultiSymbolDispatchSummaryResponse {
-        canonical_route: MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE.to_string(),
+    MultiSymbolDispatchSummaryResponseV2 {
+        quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
+            .to_string(),
+        canonical_route: MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE_V2.to_string(),
         backend: "daemon.runtime_state".to_string(),
         truth_state,
         runtime_execution_mode,

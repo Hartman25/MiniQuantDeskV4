@@ -4,7 +4,8 @@
 //
 // GET /api/v1/strategy/conflict/status
 // GET /api/v1/strategy/conflict/plans?limit=&run_id=
-// GET /api/v1/strategy/conflict/plans/:plan_id
+// GET /api/v1/strategy/conflict/plans/:plan_id   (whole-unit; refuses fractional)
+// GET /api/v2/strategy/conflict/plans/:plan_id   (qty_micros_v1 exact)
 //
 // GET-only: no route in this file ever inserts, updates, or deletes a row.
 // `approved_for_live` is always `false`. `null` always means unavailable —
@@ -98,23 +99,44 @@ pub(crate) struct ConflictPlanCandidateRow {
     pub strategy_id: String,
     pub timeframe_secs: i64,
     pub side: String,
-    /// Whole-unit projections (historical meaning: shares). `null` when the
-    /// value is fractional -- never rounded; the exact value is always in
-    /// the matching `*_micros` field (raw `QtyMicros`, 1.0 unit == 1_000_000).
-    pub qty: Option<i64>,
-    pub current_qty: Option<i64>,
-    /// `null` when absent OR fractional; `proposed_target_qty_micros`
-    /// disambiguates.
+    /// V1 quantity contract: whole asset units. A fractional plan is refused
+    /// by the V1 route (see `/api/v2/strategy/conflict/plans/:plan_id`),
+    /// never truncated. `proposed_target_qty` is `null` only when absent.
+    pub qty: i64,
+    pub current_qty: i64,
     pub proposed_target_qty: Option<i64>,
-    pub qty_micros: i64,
-    pub current_qty_micros: i64,
-    pub proposed_target_qty_micros: Option<i64>,
     /// `None` on a pre-0057 legacy row.
     pub order_type: Option<String>,
     /// `None` on a pre-0057 legacy row.
     pub time_in_force: Option<String>,
     pub limit_price: Option<i64>,
     /// `None` on a pre-0057 legacy row -- distinct from `Some(false)`.
+    pub bar_present: Option<bool>,
+    pub bar_symbol: Option<String>,
+    pub bar_strategy_id: Option<String>,
+    pub bar_timeframe: Option<String>,
+    pub bar_end_ts: Option<i64>,
+    pub close_micros: Option<i64>,
+    pub selected: bool,
+    pub disposition: String,
+    pub reason_code: String,
+}
+
+/// Exact-quantity (`qty_micros_v1`) candidate row: raw `QtyMicros`
+/// (1.0 unit == 1_000_000) is the only quantity authority.
+#[derive(Debug, Serialize)]
+pub(crate) struct ConflictPlanCandidateRowV2 {
+    pub symbol: String,
+    pub strategy_id: String,
+    pub timeframe_secs: i64,
+    pub side: String,
+    pub qty_micros: i64,
+    pub current_qty_micros: i64,
+    /// `null` only when absent.
+    pub proposed_target_qty_micros: Option<i64>,
+    pub order_type: Option<String>,
+    pub time_in_force: Option<String>,
+    pub limit_price: Option<i64>,
     pub bar_present: Option<bool>,
     pub bar_symbol: Option<String>,
     pub bar_strategy_id: Option<String>,
@@ -149,13 +171,22 @@ pub(crate) struct ConflictPlanRow {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ConflictPlanDetailResponse {
+pub(crate) struct ConflictPlanDetailResponse<C = ConflictPlanCandidateRow> {
     pub truth_state: ConflictTruthState,
     pub plan: Option<ConflictPlanRow>,
-    pub candidates: Vec<ConflictPlanCandidateRow>,
+    pub candidates: Vec<C>,
     /// Non-empty only when `truth_state == invalid_evidence`.
     pub evidence_blockers: Vec<String>,
     pub checked_at_utc: String,
+}
+
+/// `GET /api/v2/strategy/conflict/plans/:plan_id`: same fields as the V1
+/// response with exact-quantity candidate rows.
+#[derive(Debug, Serialize)]
+pub(crate) struct ConflictPlanDetailResponseV2 {
+    pub quantity_schema_version: String,
+    #[serde(flatten)]
+    pub response: ConflictPlanDetailResponse<ConflictPlanCandidateRowV2>,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,19 +240,14 @@ fn plan_row_from_record(rec: &mqk_db::RuntimeStrategyConflictPlanRecord) -> Conf
     }
 }
 
-fn candidate_row_from_record(
+fn candidate_row_v2_from_record(
     rec: &mqk_db::RuntimeStrategyConflictCandidateRecord,
-) -> ConflictPlanCandidateRow {
-    ConflictPlanCandidateRow {
+) -> ConflictPlanCandidateRowV2 {
+    ConflictPlanCandidateRowV2 {
         symbol: rec.symbol.clone(),
         strategy_id: rec.strategy_id.clone(),
         timeframe_secs: rec.timeframe_secs,
         side: rec.side.clone(),
-        qty: rec.qty.to_whole_units_checked(),
-        current_qty: rec.current_qty.to_whole_units_checked(),
-        proposed_target_qty: rec
-            .proposed_target_qty
-            .and_then(mqk_schemas::QtyMicros::to_whole_units_checked),
         qty_micros: rec.qty.raw(),
         current_qty_micros: rec.current_qty.raw(),
         proposed_target_qty_micros: rec.proposed_target_qty.map(mqk_schemas::QtyMicros::raw),
@@ -238,6 +264,37 @@ fn candidate_row_from_record(
         disposition: rec.disposition.clone(),
         reason_code: rec.reason_code.clone(),
     }
+}
+
+/// V1 projection; `None` when any present quantity has no whole-unit form.
+fn candidate_row_from_record(
+    rec: &mqk_db::RuntimeStrategyConflictCandidateRecord,
+) -> Option<ConflictPlanCandidateRow> {
+    let proposed_target_qty = match rec.proposed_target_qty {
+        None => None,
+        Some(q) => Some(q.to_whole_units_checked()?),
+    };
+    Some(ConflictPlanCandidateRow {
+        symbol: rec.symbol.clone(),
+        strategy_id: rec.strategy_id.clone(),
+        timeframe_secs: rec.timeframe_secs,
+        side: rec.side.clone(),
+        qty: rec.qty.to_whole_units_checked()?,
+        current_qty: rec.current_qty.to_whole_units_checked()?,
+        proposed_target_qty,
+        order_type: rec.order_type.clone(),
+        time_in_force: rec.time_in_force.clone(),
+        limit_price: rec.limit_price,
+        bar_present: rec.bar_present,
+        bar_symbol: rec.bar_symbol.clone(),
+        bar_strategy_id: rec.bar_strategy_id.clone(),
+        bar_timeframe: rec.bar_timeframe.clone(),
+        bar_end_ts: rec.bar_end_ts,
+        close_micros: rec.close_micros,
+        selected: rec.selected,
+        disposition: rec.disposition.clone(),
+        reason_code: rec.reason_code.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -554,42 +611,48 @@ pub(crate) async fn strategy_conflict_plans(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/strategy/conflict/plans/:plan_id
+// GET /api/v1/strategy/conflict/plans/:plan_id   (whole-unit; refuses fractional)
+// GET /api/v2/strategy/conflict/plans/:plan_id   (qty_micros_v1 exact)
 // ---------------------------------------------------------------------------
 
 /// Fixed bounded message for an invalid `plan_id` path param — never echoes
 /// the caller-supplied raw value back onto the wire.
 const INVALID_PLAN_ID_MESSAGE: &str = "plan_id path parameter is not a valid UUID";
 
-pub(crate) async fn strategy_conflict_plan_by_id(
-    State(st): State<Arc<AppState>>,
-    Path(plan_id_raw): Path<String>,
-) -> impl IntoResponse {
+/// Shared by the V1 and V2 routes: resolves one plan and projects its
+/// candidates with `project`. `project` returning `None` means the candidate
+/// has no representation in the caller's quantity contract, which the caller
+/// turns into a fail-closed refusal.
+async fn conflict_plan_detail<C>(
+    st: &AppState,
+    plan_id_raw: &str,
+    project: impl Fn(&mqk_db::RuntimeStrategyConflictCandidateRecord) -> Option<C>,
+    unrepresentable: impl Fn() -> axum::response::Response,
+) -> Result<ConflictPlanDetailResponse<C>, axum::response::Response> {
     let checked_at_utc = Utc::now().to_rfc3339();
+    let respond = |truth_state: ConflictTruthState, evidence_blockers: Vec<String>| {
+        ConflictPlanDetailResponse {
+            truth_state,
+            plan: None,
+            candidates: vec![],
+            evidence_blockers,
+            checked_at_utc: checked_at_utc.clone(),
+        }
+    };
 
     let Ok(plan_id) = plan_id_raw.parse::<Uuid>() else {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorBody {
                 error: "invalid_request",
                 detail: INVALID_PLAN_ID_MESSAGE.to_string(),
             }),
         )
-            .into_response();
+            .into_response());
     };
 
     let Some(db) = st.db.as_ref() else {
-        return (
-            StatusCode::OK,
-            Json(ConflictPlanDetailResponse {
-                truth_state: ConflictTruthState::DbUnavailable,
-                plan: None,
-                candidates: vec![],
-                evidence_blockers: vec![],
-                checked_at_utc,
-            }),
-        )
-            .into_response();
+        return Ok(respond(ConflictTruthState::DbUnavailable, vec![]));
     };
 
     match mqk_db::fetch_runtime_strategy_conflict_plan_for_read(
@@ -602,32 +665,25 @@ pub(crate) async fn strategy_conflict_plan_by_id(
         Ok(BoundedConflictPlanFetch::Complete(plan_record, candidate_records)) => {
             let validation = validate_plan_with_candidates(&plan_record, &candidate_records);
             if !validation.valid {
-                return (
-                    StatusCode::OK,
-                    Json(ConflictPlanDetailResponse {
-                        truth_state: ConflictTruthState::InvalidEvidence,
-                        plan: None,
-                        candidates: vec![],
-                        evidence_blockers: validation.blockers,
-                        checked_at_utc,
-                    }),
-                )
-                    .into_response();
+                return Ok(respond(
+                    ConflictTruthState::InvalidEvidence,
+                    validation.blockers,
+                ));
             }
-            (
-                StatusCode::OK,
-                Json(ConflictPlanDetailResponse {
-                    truth_state: ConflictTruthState::Active,
-                    plan: Some(plan_row_from_record(&plan_record)),
-                    candidates: candidate_records
-                        .iter()
-                        .map(candidate_row_from_record)
-                        .collect(),
-                    evidence_blockers: vec![],
-                    checked_at_utc,
-                }),
-            )
-                .into_response()
+            let Some(candidates) = candidate_records
+                .iter()
+                .map(&project)
+                .collect::<Option<Vec<_>>>()
+            else {
+                return Err(unrepresentable());
+            };
+            Ok(ConflictPlanDetailResponse {
+                truth_state: ConflictTruthState::Active,
+                plan: Some(plan_row_from_record(&plan_record)),
+                candidates,
+                evidence_blockers: vec![],
+                checked_at_utc,
+            })
         }
         Ok(BoundedConflictPlanFetch::CandidateLimitExceeded {
             observed_at_least, ..
@@ -635,42 +691,60 @@ pub(crate) async fn strategy_conflict_plan_by_id(
             // Defect 2: over-limit plan -- invalid_evidence, no partial
             // candidate projection.
             let validation = evidence_validation_for_candidate_limit_exceeded(observed_at_least);
-            (
-                StatusCode::OK,
-                Json(ConflictPlanDetailResponse {
-                    truth_state: ConflictTruthState::InvalidEvidence,
-                    plan: None,
-                    candidates: vec![],
-                    evidence_blockers: validation.blockers,
-                    checked_at_utc,
-                }),
-            )
-                .into_response()
+            Ok(respond(
+                ConflictTruthState::InvalidEvidence,
+                validation.blockers,
+            ))
         }
-        Ok(BoundedConflictPlanFetch::NotFound) => (
+        Ok(BoundedConflictPlanFetch::NotFound) => Ok(respond(ConflictTruthState::NotFound, vec![])),
+        Err(err) => {
+            tracing::warn!(error = %err, plan_id = %plan_id, "strategy_conflict_plan_by_id_query_failed");
+            Ok(respond(ConflictTruthState::QueryFailed, vec![]))
+        }
+    }
+}
+
+/// V1 (whole-unit) plan detail. Fails closed with 409 when any candidate
+/// quantity is fractional; never truncates it or reports it as null/zero.
+pub(crate) async fn strategy_conflict_plan_by_id(
+    State(st): State<Arc<AppState>>,
+    Path(plan_id_raw): Path<String>,
+) -> impl IntoResponse {
+    match conflict_plan_detail(&st, &plan_id_raw, candidate_row_from_record, || {
+        super::execution_order_analysis::v1_fractional_refusal(
+            "/api/v2/strategy/conflict/plans/:plan_id",
+            "this strategy-conflict plan",
+        )
+    })
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// V2 (`qty_micros_v1`) plan detail: exact `*_micros` for every candidate.
+pub(crate) async fn strategy_conflict_plan_by_id_v2(
+    State(st): State<Arc<AppState>>,
+    Path(plan_id_raw): Path<String>,
+) -> impl IntoResponse {
+    match conflict_plan_detail(
+        &st,
+        &plan_id_raw,
+        |rec| Some(candidate_row_v2_from_record(rec)),
+        || StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    )
+    .await
+    {
+        Ok(response) => (
             StatusCode::OK,
-            Json(ConflictPlanDetailResponse {
-                truth_state: ConflictTruthState::NotFound,
-                plan: None,
-                candidates: vec![],
-                evidence_blockers: vec![],
-                checked_at_utc,
+            Json(ConflictPlanDetailResponseV2 {
+                quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
+                    .to_string(),
+                response,
             }),
         )
             .into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, plan_id = %plan_id, "strategy_conflict_plan_by_id_query_failed");
-            (
-                StatusCode::OK,
-                Json(ConflictPlanDetailResponse {
-                    truth_state: ConflictTruthState::QueryFailed,
-                    plan: None,
-                    candidates: vec![],
-                    evidence_blockers: vec![],
-                    checked_at_utc,
-                }),
-            )
-                .into_response()
-        }
+        Err(response) => response,
     }
 }

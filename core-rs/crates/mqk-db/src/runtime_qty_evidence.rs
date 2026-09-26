@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use mqk_schemas::QtyMicros;
 
 /// Encoding tag written by every new evidence candidate row.
-pub(crate) const RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1: &str = "qty_micros_v1";
+pub const RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1: &str = "qty_micros_v1";
 
 /// Checked conversion of a historical whole-unit value.
 pub(crate) fn decode_legacy_whole(field: &str, value: i64) -> Result<QtyMicros> {

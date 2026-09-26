@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
+/// `quantity_schema_version` carried by every exact-quantity V2 response.
+/// Single authority: the durable-evidence encoding version in `mqk-db`.
+pub const QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1: &str =
+    mqk_db::runtime_qty_evidence::RUNTIME_QTY_EVIDENCE_SCHEMA_MICROS_V1;
+
 // ---------------------------------------------------------------------------
 // /v1/health
 // ---------------------------------------------------------------------------
@@ -1853,13 +1858,40 @@ pub struct MultiSymbolDispatchSummaryResponse {
 pub struct PerSymbolDispatchRow {
     pub symbol: String,
     pub strategy_id: String,
-    /// Whole-unit projection (historical meaning: shares). `null` when the
-    /// value is fractional or unrepresentable -- never rounded; the exact
-    /// value is always in the `*_micros` sibling.
-    pub current_qty: Option<i64>,
-    pub target_qty: Option<i64>,
-    pub delta: Option<i64>,
-    /// Exact quantity, raw `QtyMicros` (1.0 unit == 1_000_000).
+    /// V1 quantity contract: whole asset units only, never null. A fractional
+    /// or unrepresentable quantity is refused by the V1 route (see
+    /// `/api/v2/strategy/multi-symbol-dispatch-summary`), never truncated.
+    pub current_qty: i64,
+    pub target_qty: i64,
+    pub delta: i64,
+    pub no_order_reason: String,
+    pub last_decision_id: Option<String>,
+    pub last_decision_disposition: Option<String>,
+    pub day_order_count: u32,
+    pub day_order_limit: Option<u32>,
+    pub bar_staleness_secs: Option<i64>,
+}
+
+/// Exact-quantity (`quantity_schema_version = "qty_micros_v1"`) sibling of
+/// [`MultiSymbolDispatchSummaryResponse`]: `GET /api/v2/strategy/multi-symbol-dispatch-summary`.
+///
+/// Every quantity is raw `QtyMicros` (1.0 asset unit == 1_000_000) and is the
+/// only quantity authority on this surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiSymbolDispatchSummaryResponseV2 {
+    pub quantity_schema_version: String,
+    pub canonical_route: String,
+    pub backend: String,
+    pub truth_state: String,
+    pub runtime_execution_mode: String,
+    pub configured_symbol_count: usize,
+    pub per_symbol: Vec<PerSymbolDispatchRowV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerSymbolDispatchRowV2 {
+    pub symbol: String,
+    pub strategy_id: String,
     pub current_qty_micros: i64,
     pub target_qty_micros: i64,
     /// `null` only if `target - current` overflowed.
@@ -4815,12 +4847,15 @@ pub struct ExecutionOutboxRow {
     pub symbol: Option<String>,
     /// `"buy"` or `"sell"` from `order_json["side"]`. `None` if absent.
     pub side: Option<String>,
-    /// Whole-unit ordered qty from `order_json["qty"]`. `None` if absent,
-    /// malformed, or fractional (never rounded; see `qty_micros`).
+    /// Ordered qty from `order_json["qty"]`. `None` if absent.
+    /// V1 quantity contract: whole asset units only. A fractional order is
+    /// refused by the V1 route (see `/api/v2/execution/outbox`), never
+    /// truncated or reported as `None`.
     pub qty: Option<i64>,
-    /// Exact ordered qty, raw `QtyMicros` (1.0 unit == 1_000_000). `None` if
-    /// absent or malformed.
-    pub qty_micros: Option<i64>,
+    /// Exact source of `qty`, used by the V1 fractional guard and the V2
+    /// projection. Never serialized on V1.
+    #[serde(skip)]
+    pub qty_exact: Option<mqk_schemas::QtyMicros>,
     /// `"market"` or `"limit"` from `order_json["order_type"]`. `None` if absent.
     pub order_type: Option<String>,
     /// Originating strategy from `order_json["strategy_id"]`. `None` if absent
@@ -4869,6 +4904,60 @@ pub struct ExecutionOutboxResponse {
     pub run_id: Option<String>,
     /// At most 200 rows, newest-first.  Authoritative only when `truth_state == "active"`.
     pub rows: Vec<ExecutionOutboxRow>,
+}
+
+/// Exact-quantity (`quantity_schema_version = "qty_micros_v1"`) sibling of
+/// [`ExecutionOutboxRow`]: `qty_micros` is raw `QtyMicros` (1.0 asset unit ==
+/// 1_000_000) and the only quantity authority. `None` if absent or malformed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOutboxRowV2 {
+    pub idempotency_key: String,
+    pub run_id: String,
+    pub status: String,
+    pub lifecycle_stage: String,
+    pub symbol: Option<String>,
+    pub side: Option<String>,
+    pub qty_micros: Option<i64>,
+    pub order_type: Option<String>,
+    pub strategy_id: Option<String>,
+    pub signal_source: Option<String>,
+    pub created_at_utc: String,
+    pub claimed_at_utc: Option<String>,
+    pub dispatching_at_utc: Option<String>,
+    pub sent_at_utc: Option<String>,
+}
+
+impl From<ExecutionOutboxRow> for ExecutionOutboxRowV2 {
+    fn from(r: ExecutionOutboxRow) -> Self {
+        Self {
+            idempotency_key: r.idempotency_key,
+            run_id: r.run_id,
+            status: r.status,
+            lifecycle_stage: r.lifecycle_stage,
+            symbol: r.symbol,
+            side: r.side,
+            qty_micros: r.qty_exact.map(mqk_schemas::QtyMicros::raw),
+            order_type: r.order_type,
+            strategy_id: r.strategy_id,
+            signal_source: r.signal_source,
+            created_at_utc: r.created_at_utc,
+            claimed_at_utc: r.claimed_at_utc,
+            dispatching_at_utc: r.dispatching_at_utc,
+            sent_at_utc: r.sent_at_utc,
+        }
+    }
+}
+
+/// Response wrapper for `GET /api/v2/execution/outbox` (same truth_state
+/// vocabulary as [`ExecutionOutboxResponse`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOutboxResponseV2 {
+    pub quantity_schema_version: String,
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub backend: String,
+    pub run_id: Option<String>,
+    pub rows: Vec<ExecutionOutboxRowV2>,
 }
 
 // ---------------------------------------------------------------------------
@@ -5340,13 +5429,47 @@ pub struct PaperLifecycleOutboxRow {
     pub status: String,
     pub symbol: Option<String>,
     pub side: Option<String>,
+    /// V1 quantity contract: whole asset units only. A fractional order is
+    /// refused by the V1 route (see `/api/v2/execution/paper-lifecycle`).
     pub qty: Option<i64>,
-    /// Exact ordered qty, raw `QtyMicros`; `None` if absent or malformed.
+    /// Exact source of `qty`; never serialized on V1.
+    #[serde(skip)]
+    pub qty_exact: Option<mqk_schemas::QtyMicros>,
+    pub created_at_utc: String,
+    pub claimed_at_utc: Option<String>,
+    pub dispatching_at_utc: Option<String>,
+    pub sent_at_utc: Option<String>,
+}
+
+/// Exact-quantity sibling of [`PaperLifecycleOutboxRow`]: `qty_micros` (raw
+/// `QtyMicros`; `None` if absent or malformed) is the only quantity authority.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleOutboxRowV2 {
+    pub idempotency_key: String,
+    pub status: String,
+    pub symbol: Option<String>,
+    pub side: Option<String>,
     pub qty_micros: Option<i64>,
     pub created_at_utc: String,
     pub claimed_at_utc: Option<String>,
     pub dispatching_at_utc: Option<String>,
     pub sent_at_utc: Option<String>,
+}
+
+impl From<PaperLifecycleOutboxRow> for PaperLifecycleOutboxRowV2 {
+    fn from(r: PaperLifecycleOutboxRow) -> Self {
+        Self {
+            idempotency_key: r.idempotency_key,
+            status: r.status,
+            symbol: r.symbol,
+            side: r.side,
+            qty_micros: r.qty_exact.map(mqk_schemas::QtyMicros::raw),
+            created_at_utc: r.created_at_utc,
+            claimed_at_utc: r.claimed_at_utc,
+            dispatching_at_utc: r.dispatching_at_utc,
+            sent_at_utc: r.sent_at_utc,
+        }
+    }
 }
 
 /// One `oms_inbox` row, as surfaced by the paper-lifecycle route.
@@ -5397,7 +5520,7 @@ pub struct PaperLifecycleSummary {
 /// (`mqk_db::fetch_latest_run_for_engine`), never from in-memory
 /// active-run state. Never calls a broker/provider. Never writes.
 #[derive(Debug, Clone, Serialize)]
-pub struct PaperLifecycleResponse {
+pub struct PaperLifecycleResponse<O = PaperLifecycleOutboxRow> {
     pub canonical_route: String,
     /// Route-level resolution truth_state: `"db_unavailable"` |
     /// `"invalid_request"` | `"not_found"` | `"no_rows"` | `"active"`.
@@ -5429,12 +5552,49 @@ pub struct PaperLifecycleResponse {
     pub run: Option<PaperLifecycleRunRow>,
     pub signal_evaluations: Vec<PaperLifecycleSignalEvaluationRow>,
     pub no_trade_diagnostics: Vec<PaperLifecycleNoTradeDiagnosticRow>,
-    pub outbox_orders: Vec<PaperLifecycleOutboxRow>,
+    pub outbox_orders: Vec<O>,
     pub inbox_events: Vec<PaperLifecycleInboxRow>,
     /// `None` only when `truth_state != "active"`.
     pub lifecycle_summary: Option<PaperLifecycleSummary>,
     pub blockers: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+impl<O> PaperLifecycleResponse<O> {
+    /// Same response with the outbox rows re-projected; every other field is
+    /// moved unchanged.
+    pub fn map_outbox_orders<O2>(self, f: impl FnMut(O) -> O2) -> PaperLifecycleResponse<O2> {
+        PaperLifecycleResponse {
+            canonical_route: self.canonical_route,
+            truth_state: self.truth_state,
+            run_truth_state: self.run_truth_state,
+            signal_truth_state: self.signal_truth_state,
+            no_trade_truth_state: self.no_trade_truth_state,
+            outbox_truth_state: self.outbox_truth_state,
+            inbox_truth_state: self.inbox_truth_state,
+            portfolio_truth_state: self.portfolio_truth_state,
+            pnl_truth_state: self.pnl_truth_state,
+            run_id: self.run_id,
+            run: self.run,
+            signal_evaluations: self.signal_evaluations,
+            no_trade_diagnostics: self.no_trade_diagnostics,
+            outbox_orders: self.outbox_orders.into_iter().map(f).collect(),
+            inbox_events: self.inbox_events,
+            lifecycle_summary: self.lifecycle_summary,
+            blockers: self.blockers,
+            warnings: self.warnings,
+        }
+    }
+}
+
+/// Exact-quantity sibling of [`PaperLifecycleResponse`]:
+/// `GET /api/v2/execution/paper-lifecycle`. Identical fields, except outbox
+/// rows carry `qty_micros` (raw `QtyMicros`) instead of `qty`.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleResponseV2 {
+    pub quantity_schema_version: String,
+    #[serde(flatten)]
+    pub response: PaperLifecycleResponse<PaperLifecycleOutboxRowV2>,
 }
 
 /// Response for POST /api/v1/alerts/triage/ack.

@@ -660,6 +660,145 @@ async fn plan_by_id_returns_seeded_plan_with_candidates() {
     cleanup(&pool, run_id).await;
 }
 
+/// A3 Option B: whole plans project on V1 (non-null whole units) and V2
+/// (exact micros); a fractional plan is REFUSED on V1 (never truncated /
+/// nulled / zeroed) and exact on V2 (0.0001 == 100 micros).
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn a3_plan_by_id_v1_refuses_fractional_and_v2_exposes_exact_micros() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("a3_v1_v2");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+
+    // Whole plan.
+    let whole_plan_id = seed_plan(&pool, run_id, "a3_v1_v2").await;
+    let (status, v1) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v1/strategy/conflict/plans/{whole_plan_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v1["candidates"][0]["qty"], serde_json::json!(5));
+    assert_eq!(v1["candidates"][0]["current_qty"], serde_json::json!(20));
+    assert_eq!(
+        v1["candidates"][0]["proposed_target_qty"],
+        serde_json::json!(15)
+    );
+    assert!(v1.get("quantity_schema_version").is_none());
+    let (status, v2) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v2/strategy/conflict/plans/{whole_plan_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v2["quantity_schema_version"], "qty_micros_v1");
+    assert_eq!(v2["candidates"][0]["qty_micros"], 5_000_000);
+    assert_eq!(v2["candidates"][0]["current_qty_micros"], 20_000_000);
+    assert_eq!(
+        v2["candidates"][0]["proposed_target_qty_micros"],
+        15_000_000
+    );
+    assert!(v2["candidates"][0].get("qty").is_none());
+
+    // Fractional plan: 0.0001 sell from 0.00035 => target 0.00025. The plan id
+    // is the recomputed content-addressed cycle id (the read validator
+    // rejects any other id as invalid evidence).
+    let frac_bar_end_ts = seed_variant_bar_end_ts("a3_frac");
+    let frac_input = mqk_portfolio::ConflictCandidateInput {
+        ordinal: 0,
+        symbol: "BTC/USD".to_string(),
+        strategy_id: "strategy_a".to_string(),
+        timeframe_secs: 300,
+        side: "sell".to_string(),
+        qty: mqk_execution::QtyMicros::new(100),
+        current_qty: mqk_execution::QtyMicros::new(350),
+        order_type: "market".to_string(),
+        time_in_force: "day".to_string(),
+        limit_price: None,
+        bar_symbol: Some("BTC/USD".to_string()),
+        bar_strategy_id: Some("strategy_a".to_string()),
+        bar_timeframe: Some("5m".to_string()),
+        bar_end_ts: Some(frac_bar_end_ts),
+        close_micros: Some(0),
+    };
+    let frac_plan_id: Uuid = mqk_daemon::runtime_strategy_conflict::compute_conflict_cycle_id(
+        run_id,
+        "2099-02-02",
+        mqk_daemon::runtime_strategy_conflict_mode::ConflictPolicyMode::Shadow,
+        mqk_daemon::runtime_strategy_conflict_mode::ConflictPolicyMode::Shadow,
+        &[frac_input],
+    )
+    .parse()
+    .expect("valid cycle id");
+    mqk_db::insert_runtime_strategy_conflict_plan(
+        &pool,
+        mqk_db::NewRuntimeStrategyConflictPlan {
+            plan_id: frac_plan_id,
+            cycle_id: frac_plan_id,
+            run_id,
+            mode: "shadow".to_string(),
+            configured_mode: "shadow".to_string(),
+            market_date: "2099-02-02".to_string(),
+            policy_schema_version: mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION.to_string(),
+            symbol_group_count: 1,
+            candidate_count: 1,
+            selected_count: 1,
+            refused_count: 0,
+            truth_state: "computed".to_string(),
+            blockers: vec![],
+            created_at_utc: Utc.with_ymd_and_hms(2099, 2, 2, 12, 5, 0).unwrap(),
+            candidates: vec![mqk_db::NewRuntimeStrategyConflictCandidate {
+                ordinal: 0,
+                symbol: "BTC/USD".to_string(),
+                strategy_id: "strategy_a".to_string(),
+                timeframe_secs: 300,
+                side: "sell".to_string(),
+                qty: mqk_execution::QtyMicros::new(100),
+                current_qty: mqk_execution::QtyMicros::new(350),
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
+                proposed_target_qty: Some(mqk_execution::QtyMicros::new(250)),
+                bar_present: true,
+                bar_symbol: Some("BTC/USD".to_string()),
+                bar_strategy_id: Some("strategy_a".to_string()),
+                bar_timeframe: Some("5m".to_string()),
+                bar_end_ts: Some(frac_bar_end_ts),
+                close_micros: Some(0),
+                selected: true,
+                disposition: "passthrough".to_string(),
+                reason_code: "single_candidate_passthrough".to_string(),
+            }],
+        },
+    )
+    .await
+    .expect("seed fractional plan");
+
+    let (status, v1) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v1/strategy/conflict/plans/{frac_plan_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(v1["error"], "quantity_not_representable_in_v1");
+    assert!(v1.get("candidates").is_none());
+    let (status, v2) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v2/strategy/conflict/plans/{frac_plan_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v2["quantity_schema_version"], "qty_micros_v1");
+    assert_eq!(v2["candidates"][0]["qty_micros"], 100);
+    assert_eq!(v2["candidates"][0]["current_qty_micros"], 350);
+    assert_eq!(v2["candidates"][0]["proposed_target_qty_micros"], 250);
+
+    cleanup(&pool, run_id).await;
+}
+
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL"]
 async fn plan_by_id_unknown_uuid_is_not_found_distinct_from_query_failed() {

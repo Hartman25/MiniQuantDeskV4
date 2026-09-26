@@ -294,7 +294,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use execution_order_analysis::{
         execution_event_risk_status, execution_order_causality, execution_order_chart,
         execution_order_replay, execution_order_timeline, execution_order_trace, execution_outbox,
-        execution_protection_status, execution_replace_cancel_chains,
+        execution_outbox_v2, execution_protection_status, execution_replace_cancel_chains,
     };
     use ingest::{
         ingest_job_cancel, ingest_job_status, ingest_job_submit, ingest_jobs_list,
@@ -305,14 +305,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use market_data_readiness::market_data_readiness_status;
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
-    use paper_lifecycle::execution_paper_lifecycle;
+    use paper_lifecycle::{execution_paper_lifecycle, execution_paper_lifecycle_v2};
     use portfolio::{
         portfolio_account_equity_baseline_status, portfolio_economics_status, portfolio_fills,
         portfolio_live_weights, portfolio_open_orders, portfolio_positions, portfolio_summary,
         risk_denials, risk_summary,
     };
     use portfolio_allocation::{
-        portfolio_allocation_plan_by_id, portfolio_allocation_plans, portfolio_allocation_status,
+        portfolio_allocation_plan_by_id, portfolio_allocation_plan_by_id_v2,
+        portfolio_allocation_plans, portfolio_allocation_status,
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
     use repair::{
@@ -325,11 +326,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         required_universe_scheduler_stop, required_universe_status,
     };
     use strategy::{
-        multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
-        strategy_suppressions,
+        multi_symbol_dispatch_summary, multi_symbol_dispatch_summary_v2, strategy_dry_run_status,
+        strategy_signal, strategy_summary, strategy_suppressions,
     };
     use strategy_conflict::{
-        strategy_conflict_plan_by_id, strategy_conflict_plans, strategy_conflict_status,
+        strategy_conflict_plan_by_id, strategy_conflict_plan_by_id_v2, strategy_conflict_plans,
+        strategy_conflict_status,
     };
     use strategy_performance::strategy_performance;
     use strategy_promotions::{
@@ -425,10 +427,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/execution/outbox", get(execution_outbox))
+        // CUTOVER-1D-A3: exact-quantity (`qty_micros_v1`) siblings. V1 routes
+        // keep the whole-unit contract and refuse fractional records.
+        .route("/api/v2/execution/outbox", get(execution_outbox_v2))
         .route("/api/v1/execution/flow", get(execution_flow))
         .route(
             "/api/v1/execution/paper-lifecycle",
             get(execution_paper_lifecycle),
+        )
+        .route(
+            "/api/v2/execution/paper-lifecycle",
+            get(execution_paper_lifecycle_v2),
         )
         .route(
             "/api/v1/execution/fill-quality",
@@ -496,6 +505,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/portfolio/allocation/plans/:plan_id",
             get(portfolio_allocation_plan_by_id),
         )
+        .route(
+            "/api/v2/portfolio/allocation/plans/:plan_id",
+            get(portfolio_allocation_plan_by_id_v2),
+        )
         // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase D: read-only conflict-
         // policy truth. GET-only -- never inserts, updates, or deletes a
         // row. approved_for_live is always false in every response.
@@ -510,6 +523,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/strategy/conflict/plans/:plan_id",
             get(strategy_conflict_plan_by_id),
+        )
+        .route(
+            "/api/v2/strategy/conflict/plans/:plan_id",
+            get(strategy_conflict_plan_by_id_v2),
         )
         // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 7C Part 4: read-only
         // durable dynamic-selection plan evidence truth. GET-only -- never
@@ -569,6 +586,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/strategy/multi-symbol-dispatch-summary",
             get(multi_symbol_dispatch_summary),
+        )
+        .route(
+            "/api/v2/strategy/multi-symbol-dispatch-summary",
+            get(multi_symbol_dispatch_summary_v2),
         )
         // MULTI-STRATEGY-DRY-RUN-STATUS-01: read-only dry-run diagnostics (public, no auth).
         // No broker calls, no DB mutations, no orders. submitted is always false.

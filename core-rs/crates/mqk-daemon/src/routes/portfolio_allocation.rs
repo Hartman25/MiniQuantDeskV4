@@ -4,7 +4,8 @@
 //
 // GET /api/v1/portfolio/allocation/status
 // GET /api/v1/portfolio/allocation/plans?limit=&run_id=
-// GET /api/v1/portfolio/allocation/plans/:plan_id
+// GET /api/v1/portfolio/allocation/plans/:plan_id   (whole-unit; refuses fractional)
+// GET /api/v2/portfolio/allocation/plans/:plan_id   (qty_micros_v1 exact)
 //
 // GET-only: no route in this file ever inserts, updates, or deletes a row.
 // `approved_for_live` is always `false`. `null` always means unavailable —
@@ -76,13 +77,26 @@ pub(crate) struct AllocationPlanCandidateRow {
     pub strategy_id: String,
     pub input_score: f64,
     pub target_weight: f64,
-    /// Whole-unit projections (historical meaning: shares). `null` when the
-    /// value is fractional -- never rounded; the exact value is always in
-    /// the matching `*_micros` field (raw `QtyMicros`, 1.0 unit == 1_000_000).
-    pub current_qty: Option<i64>,
-    pub strategy_target_qty: Option<i64>,
-    pub allocation_target_qty: Option<i64>,
-    pub final_target_qty: Option<i64>,
+    /// V1 quantity contract: whole asset units, never null. A fractional plan
+    /// is refused by the V1 route (see
+    /// `/api/v2/portfolio/allocation/plans/:plan_id`), never truncated.
+    pub current_qty: i64,
+    pub strategy_target_qty: i64,
+    pub allocation_target_qty: i64,
+    pub final_target_qty: i64,
+    pub disposition: String,
+    pub reason_code: String,
+    pub evaluation_price_micros: i64,
+}
+
+/// Exact-quantity (`qty_micros_v1`) candidate row: raw `QtyMicros`
+/// (1.0 unit == 1_000_000) is the only quantity authority.
+#[derive(Debug, Serialize)]
+pub(crate) struct AllocationPlanCandidateRowV2 {
+    pub symbol: String,
+    pub strategy_id: String,
+    pub input_score: f64,
+    pub target_weight: f64,
     pub current_qty_micros: i64,
     pub strategy_target_qty_micros: i64,
     pub allocation_target_qty_micros: i64,
@@ -117,6 +131,15 @@ pub(crate) struct AllocationPlanDetailResponse {
     pub truth_state: AllocationTruthState,
     pub plan: Option<AllocationPlanRow>,
     pub candidates: Vec<AllocationPlanCandidateRow>,
+    pub checked_at_utc: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AllocationPlanDetailResponseV2 {
+    pub quantity_schema_version: String,
+    pub truth_state: AllocationTruthState,
+    pub plan: Option<AllocationPlanRow>,
+    pub candidates: Vec<AllocationPlanCandidateRowV2>,
     pub checked_at_utc: String,
 }
 
@@ -158,18 +181,33 @@ fn plan_row_from_record(rec: &mqk_db::RuntimeOpportunityAllocationPlanRecord) ->
     }
 }
 
+/// V1 projection; `None` when any quantity has no whole-unit form.
 fn candidate_row_from_record(
     rec: &mqk_db::RuntimeOpportunityAllocationCandidateRecord,
-) -> AllocationPlanCandidateRow {
-    AllocationPlanCandidateRow {
+) -> Option<AllocationPlanCandidateRow> {
+    Some(AllocationPlanCandidateRow {
         symbol: rec.symbol.clone(),
         strategy_id: rec.strategy_id.clone(),
         input_score: micros_to_f64(rec.input_score_micros),
         target_weight: micros_to_f64(rec.target_weight_micros),
-        current_qty: rec.current_qty.to_whole_units_checked(),
-        strategy_target_qty: rec.strategy_target_qty.to_whole_units_checked(),
-        allocation_target_qty: rec.allocation_target_qty.to_whole_units_checked(),
-        final_target_qty: rec.final_target_qty.to_whole_units_checked(),
+        current_qty: rec.current_qty.to_whole_units_checked()?,
+        strategy_target_qty: rec.strategy_target_qty.to_whole_units_checked()?,
+        allocation_target_qty: rec.allocation_target_qty.to_whole_units_checked()?,
+        final_target_qty: rec.final_target_qty.to_whole_units_checked()?,
+        disposition: rec.disposition.clone(),
+        reason_code: rec.reason_code.clone(),
+        evaluation_price_micros: rec.evaluation_price_micros,
+    })
+}
+
+fn candidate_row_v2_from_record(
+    rec: &mqk_db::RuntimeOpportunityAllocationCandidateRecord,
+) -> AllocationPlanCandidateRowV2 {
+    AllocationPlanCandidateRowV2 {
+        symbol: rec.symbol.clone(),
+        strategy_id: rec.strategy_id.clone(),
+        input_score: micros_to_f64(rec.input_score_micros),
+        target_weight: micros_to_f64(rec.target_weight_micros),
         current_qty_micros: rec.current_qty.raw(),
         strategy_target_qty_micros: rec.strategy_target_qty.raw(),
         allocation_target_qty_micros: rec.allocation_target_qty.raw(),
@@ -380,79 +418,122 @@ pub(crate) async fn portfolio_allocation_plans(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/portfolio/allocation/plans/:plan_id
+// GET /api/v1/portfolio/allocation/plans/:plan_id   (whole-unit; refuses fractional)
+// GET /api/v2/portfolio/allocation/plans/:plan_id   (qty_micros_v1 exact)
 // ---------------------------------------------------------------------------
 
 /// Fixed bounded message for an invalid `plan_id` path param — never echoes
 /// the caller-supplied raw value back onto the wire.
 const INVALID_PLAN_ID_MESSAGE: &str = "plan_id path parameter is not a valid UUID";
 
+/// Outcome of resolving one plan for the by-id routes.
+enum PlanFetch {
+    BadRequest,
+    State(AllocationTruthState),
+    Found(
+        Box<mqk_db::RuntimeOpportunityAllocationPlanRecord>,
+        Vec<mqk_db::RuntimeOpportunityAllocationCandidateRecord>,
+    ),
+}
+
+async fn fetch_plan(st: &AppState, plan_id_raw: &str) -> PlanFetch {
+    let Ok(plan_id) = plan_id_raw.parse::<Uuid>() else {
+        return PlanFetch::BadRequest;
+    };
+    let Some(db) = st.db.as_ref() else {
+        return PlanFetch::State(AllocationTruthState::DbUnavailable);
+    };
+    match mqk_db::fetch_runtime_opportunity_allocation_plan(db, plan_id).await {
+        Ok(Some((plan_record, candidate_records))) => {
+            PlanFetch::Found(Box::new(plan_record), candidate_records)
+        }
+        Ok(None) => PlanFetch::State(AllocationTruthState::NotFound),
+        Err(err) => {
+            tracing::warn!(error = %err, plan_id = %plan_id, "portfolio_allocation_plan_by_id_query_failed");
+            PlanFetch::State(AllocationTruthState::QueryFailed)
+        }
+    }
+}
+
+fn invalid_plan_id_response() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            error: "invalid_request",
+            detail: INVALID_PLAN_ID_MESSAGE.to_string(),
+        }),
+    )
+        .into_response()
+}
+
+/// V1 (whole-unit) plan detail. Fails closed with 409 when any candidate
+/// quantity is fractional; never truncates it or reports it as null/zero.
 pub(crate) async fn portfolio_allocation_plan_by_id(
     State(st): State<Arc<AppState>>,
     Path(plan_id_raw): Path<String>,
 ) -> impl IntoResponse {
     let checked_at_utc = Utc::now().to_rfc3339();
-
-    let Ok(plan_id) = plan_id_raw.parse::<Uuid>() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "invalid_request",
-                detail: INVALID_PLAN_ID_MESSAGE.to_string(),
-            }),
-        )
-            .into_response();
-    };
-
-    let Some(db) = st.db.as_ref() else {
-        return (
-            StatusCode::OK,
-            Json(AllocationPlanDetailResponse {
-                truth_state: AllocationTruthState::DbUnavailable,
-                plan: None,
-                candidates: vec![],
-                checked_at_utc,
-            }),
-        )
-            .into_response();
-    };
-
-    match mqk_db::fetch_runtime_opportunity_allocation_plan(db, plan_id).await {
-        Ok(Some((plan_record, candidate_records))) => (
-            StatusCode::OK,
-            Json(AllocationPlanDetailResponse {
-                truth_state: AllocationTruthState::Active,
-                plan: Some(plan_row_from_record(&plan_record)),
-                candidates: candidate_records
-                    .iter()
-                    .map(candidate_row_from_record)
-                    .collect(),
-                checked_at_utc,
-            }),
-        )
-            .into_response(),
-        Ok(None) => (
-            StatusCode::OK,
-            Json(AllocationPlanDetailResponse {
-                truth_state: AllocationTruthState::NotFound,
-                plan: None,
-                candidates: vec![],
-                checked_at_utc,
-            }),
-        )
-            .into_response(),
-        Err(err) => {
-            tracing::warn!(error = %err, plan_id = %plan_id, "portfolio_allocation_plan_by_id_query_failed");
+    let (truth_state, plan, candidates) = match fetch_plan(&st, &plan_id_raw).await {
+        PlanFetch::BadRequest => return invalid_plan_id_response(),
+        PlanFetch::State(truth_state) => (truth_state, None, vec![]),
+        PlanFetch::Found(plan_record, candidate_records) => {
+            let Some(candidates) = candidate_records
+                .iter()
+                .map(candidate_row_from_record)
+                .collect::<Option<Vec<_>>>()
+            else {
+                return super::execution_order_analysis::v1_fractional_refusal(
+                    "/api/v2/portfolio/allocation/plans/:plan_id",
+                    "this allocation plan",
+                );
+            };
             (
-                StatusCode::OK,
-                Json(AllocationPlanDetailResponse {
-                    truth_state: AllocationTruthState::QueryFailed,
-                    plan: None,
-                    candidates: vec![],
-                    checked_at_utc,
-                }),
+                AllocationTruthState::Active,
+                Some(plan_row_from_record(&plan_record)),
+                candidates,
             )
-                .into_response()
         }
-    }
+    };
+    (
+        StatusCode::OK,
+        Json(AllocationPlanDetailResponse {
+            truth_state,
+            plan,
+            candidates,
+            checked_at_utc,
+        }),
+    )
+        .into_response()
+}
+
+/// V2 (`qty_micros_v1`) plan detail: exact `*_qty_micros` for every candidate.
+pub(crate) async fn portfolio_allocation_plan_by_id_v2(
+    State(st): State<Arc<AppState>>,
+    Path(plan_id_raw): Path<String>,
+) -> impl IntoResponse {
+    let checked_at_utc = Utc::now().to_rfc3339();
+    let (truth_state, plan, candidates) = match fetch_plan(&st, &plan_id_raw).await {
+        PlanFetch::BadRequest => return invalid_plan_id_response(),
+        PlanFetch::State(truth_state) => (truth_state, None, vec![]),
+        PlanFetch::Found(plan_record, candidate_records) => (
+            AllocationTruthState::Active,
+            Some(plan_row_from_record(&plan_record)),
+            candidate_records
+                .iter()
+                .map(candidate_row_v2_from_record)
+                .collect(),
+        ),
+    };
+    (
+        StatusCode::OK,
+        Json(AllocationPlanDetailResponseV2 {
+            quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
+                .to_string(),
+            truth_state,
+            plan,
+            candidates,
+            checked_at_utc,
+        }),
+    )
+        .into_response()
 }

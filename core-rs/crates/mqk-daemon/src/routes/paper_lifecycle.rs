@@ -38,12 +38,13 @@ use super::portfolio_provenance::{
 };
 use crate::api_types::{
     PaperLifecycleInboxRow, PaperLifecycleNoTradeDiagnosticRow, PaperLifecycleOutboxRow,
-    PaperLifecycleResponse, PaperLifecycleRunRow, PaperLifecycleSignalEvaluationRow,
-    PaperLifecycleSummary,
+    PaperLifecycleResponse, PaperLifecycleResponseV2, PaperLifecycleRunRow,
+    PaperLifecycleSignalEvaluationRow, PaperLifecycleSummary,
 };
 use crate::state::AppState;
 
 const CANONICAL: &str = "/api/v1/execution/paper-lifecycle";
+const CANONICAL_V2: &str = "/api/v2/execution/paper-lifecycle";
 
 /// This route only ever resolves PAPER-mode runs when no explicit `run_id`
 /// is supplied — matching the route's name and mission (paper order
@@ -70,10 +71,10 @@ pub(crate) struct PaperLifecycleParams {
 // Handler
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn execution_paper_lifecycle(
-    State(st): State<Arc<AppState>>,
-    Query(params): Query<PaperLifecycleParams>,
-) -> impl IntoResponse {
+async fn load_paper_lifecycle(
+    st: &AppState,
+    params: PaperLifecycleParams,
+) -> (StatusCode, PaperLifecycleResponse) {
     // Gate 1: explicit run_id, if supplied, must be a valid UUID. Uses the
     // exact same fixed, bounded message every other durable-portfolio route
     // uses -- never echoes the caller-supplied raw value onto the wire (B4
@@ -84,13 +85,12 @@ pub(crate) async fn execution_paper_lifecycle(
             Err(_) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(empty_response(
+                    empty_response(
                         "invalid_request",
                         None,
                         vec![INVALID_RUN_ID_MESSAGE.to_string()],
-                    )),
-                )
-                    .into_response();
+                    ),
+                );
             }
         },
         None => None,
@@ -101,13 +101,12 @@ pub(crate) async fn execution_paper_lifecycle(
     let Some(db) = st.db.as_ref() else {
         return (
             StatusCode::OK,
-            Json(empty_response(
+            empty_response(
                 "db_unavailable",
                 None,
                 vec!["no DB pool configured".to_string()],
-            )),
-        )
-            .into_response();
+            ),
+        );
     };
 
     // Resolve the target run: explicit run_id takes priority, else the
@@ -122,13 +121,12 @@ pub(crate) async fn execution_paper_lifecycle(
         RunResolution::QueryFailed => {
             return (
                 StatusCode::OK,
-                Json(empty_response(
+                empty_response(
                     "query_failed",
                     explicit_run_id.map(|id| id.to_string()),
                     vec![QUERY_FAILED_MESSAGE.to_string()],
-                )),
-            )
-                .into_response();
+                ),
+            );
         }
         RunResolution::NotFound => {
             let truth_state = if explicit_run_id.is_some() {
@@ -138,16 +136,15 @@ pub(crate) async fn execution_paper_lifecycle(
             };
             return (
                 StatusCode::OK,
-                Json(empty_response(
+                empty_response(
                     truth_state,
                     explicit_run_id.map(|id| id.to_string()),
                     vec![match explicit_run_id {
                         Some(id) => format!("no run found for run_id={id}"),
                         None => format!("no {PAPER_MODE} run exists for engine={DAEMON_ENGINE_ID}"),
                     }],
-                )),
-            )
-                .into_response();
+                ),
+            );
         }
     };
 
@@ -337,7 +334,7 @@ pub(crate) async fn execution_paper_lifecycle(
 
     (
         StatusCode::OK,
-        Json(PaperLifecycleResponse {
+        PaperLifecycleResponse {
             canonical_route: CANONICAL.to_string(),
             truth_state: "active".to_string(),
             run_truth_state: "resolved".to_string(),
@@ -360,6 +357,44 @@ pub(crate) async fn execution_paper_lifecycle(
             lifecycle_summary: Some(summary),
             blockers: Vec::new(),
             warnings,
+        },
+    )
+}
+
+/// V1 (whole-unit) paper lifecycle. Fails closed with 409 when any outbox
+/// row carries a present-but-fractional quantity; never reports it as
+/// `qty: null`.
+pub(crate) async fn execution_paper_lifecycle(
+    State(st): State<Arc<AppState>>,
+    Query(params): Query<PaperLifecycleParams>,
+) -> impl IntoResponse {
+    let (status, response) = load_paper_lifecycle(&st, params).await;
+    if response
+        .outbox_orders
+        .iter()
+        .any(|r| r.qty_exact.is_some() && r.qty.is_none())
+    {
+        return super::execution_order_analysis::v1_fractional_refusal(
+            "/api/v2/execution/paper-lifecycle",
+            "the paper lifecycle outbox",
+        );
+    }
+    (status, Json(response)).into_response()
+}
+
+/// V2 (`qty_micros_v1`) paper lifecycle: outbox rows carry exact `qty_micros`.
+pub(crate) async fn execution_paper_lifecycle_v2(
+    State(st): State<Arc<AppState>>,
+    Query(params): Query<PaperLifecycleParams>,
+) -> impl IntoResponse {
+    let (status, mut response) = load_paper_lifecycle(&st, params).await;
+    response.canonical_route = CANONICAL_V2.to_string();
+    (
+        status,
+        Json(PaperLifecycleResponseV2 {
+            quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
+                .to_string(),
+            response: response.map_outbox_orders(Into::into),
         }),
     )
         .into_response()
@@ -533,14 +568,13 @@ fn outbox_row_to_api(r: mqk_db::OutboxSupervisorRow) -> PaperLifecycleOutboxRow 
         .map(|s| s.to_string());
     let qty_exact = crate::state::outbox_json_qty(&r.order_json);
     let qty = qty_exact.and_then(mqk_execution::QtyMicros::to_whole_units_checked);
-    let qty_micros = qty_exact.map(mqk_execution::QtyMicros::raw);
     PaperLifecycleOutboxRow {
         idempotency_key: r.idempotency_key,
         status: r.status,
         symbol,
         side,
         qty,
-        qty_micros,
+        qty_exact,
         created_at_utc: r.created_at_utc.to_rfc3339(),
         claimed_at_utc: r.claimed_at_utc.map(|t| t.to_rfc3339()),
         dispatching_at_utc: r.dispatching_at_utc.map(|t| t.to_rfc3339()),

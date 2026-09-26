@@ -457,6 +457,79 @@ async fn pl_10_outbox_only_is_order_submitted_fill_pending() {
 }
 
 // ---------------------------------------------------------------------------
+// PL-12 (CUTOVER-1D-A3): V1 whole-unit / V2 exact-quantity contract.
+// V1 keeps non-null whole `qty` and REFUSES a fractional outbox order (never
+// truncated/nulled/zeroed); V2 exposes `qty_micros` (0.0001 == 100).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn pl_12_v1_whole_units_v2_exact_micros_and_v1_refuses_fractional() {
+    let pool = pl_db_pool().await;
+    let run_id = Uuid::parse_str("f1600001-0000-4000-8000-0000000000a3").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-02-05T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    pl_seed_run(&pool, run_id, ts).await;
+
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "pl12-order-whole",
+        serde_json::json!({"symbol": "AAPL", "qty": 5, "side": "buy"}),
+    )
+    .await
+    .expect("PL-12: whole outbox_enqueue failed");
+
+    let v1_uri = format!("/api/v1/execution/paper-lifecycle?run_id={run_id}");
+    let v2_uri = format!("/api/v2/execution/paper-lifecycle?run_id={run_id}");
+
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v1_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v1 = parse_json(body);
+    assert_eq!(v1["outbox_orders"][0]["qty"], serde_json::json!(5));
+    assert!(v1["outbox_orders"][0].get("qty_micros").is_none());
+    assert!(v1.get("quantity_schema_version").is_none());
+
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v2_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v2 = parse_json(body);
+    assert_eq!(v2["quantity_schema_version"], "qty_micros_v1");
+    assert_eq!(v2["outbox_orders"][0]["qty_micros"], 5_000_000);
+    assert!(v2["outbox_orders"][0].get("qty").is_none());
+
+    // A fractional order (writer shape: exact decimal string).
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "pl12-order-frac",
+        serde_json::json!({"symbol": "BTC/USD", "qty": "0.0001", "side": "buy"}),
+    )
+    .await
+    .expect("PL-12: fractional outbox_enqueue failed");
+
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v1_uri)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let v1 = parse_json(body);
+    assert_eq!(v1["error"], "quantity_not_representable_in_v1");
+    assert!(v1.get("outbox_orders").is_none());
+
+    let (status, body) = call(router_with_pool(pool.clone()), get(&v2_uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    let v2 = parse_json(body);
+    let mut micros: Vec<i64> = v2["outbox_orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["qty_micros"].as_i64().expect("exact micros, never null"))
+        .collect();
+    micros.sort_unstable();
+    assert_eq!(micros, vec![100, 5_000_000]);
+
+    pl_cleanup_run(&pool, run_id).await;
+}
+
+// ---------------------------------------------------------------------------
 // PL-11: Outbox + inbox fill -> order_filled_pnl_pending; portfolio/pnl
 // truth_state is always the honest in-memory-only label.
 // ---------------------------------------------------------------------------

@@ -306,6 +306,102 @@ async fn plan_by_id_returns_seeded_plan_with_candidates() {
     cleanup(&pool, run_id).await;
 }
 
+/// A3 Option B: whole plan => V1 whole non-null + V2 exact micros; a
+/// fractional plan (0.0001 reduced to 0.00005 by capital policy) is REFUSED
+/// on V1 and exact on V2.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn a3_plan_by_id_v1_refuses_fractional_and_v2_exposes_exact_micros() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("a3_v1_v2");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+
+    let whole_id = fixed_plan_id("a3_whole");
+    seed_plan(&pool, run_id, whole_id).await;
+    let (status, v1) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v1/portfolio/allocation/plans/{whole_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        v1["candidates"][0]["final_target_qty"],
+        serde_json::json!(10)
+    );
+    assert!(v1.get("quantity_schema_version").is_none());
+    let (status, v2) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v2/portfolio/allocation/plans/{whole_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v2["quantity_schema_version"], "qty_micros_v1");
+    assert_eq!(v2["candidates"][0]["final_target_qty_micros"], 10_000_000);
+    assert!(v2["candidates"][0].get("final_target_qty").is_none());
+
+    let frac_id = fixed_plan_id("a3_frac");
+    mqk_db::insert_runtime_opportunity_allocation_plan(
+        &pool,
+        mqk_db::NewRuntimeOpportunityAllocationPlan {
+            plan_id: frac_id,
+            cycle_id: frac_id,
+            run_id,
+            mode: "shadow".to_string(),
+            opportunity_artifact_id: "artifact-1".to_string(),
+            source_snapshot_id: None,
+            equity_micros: 100_000 * 1_000_000,
+            candidate_count: 1,
+            allowed_count: 1,
+            gross_weight_micros: 200_000,
+            net_weight_micros: 200_000,
+            truth_state: "computed".to_string(),
+            blockers: vec![],
+            created_at_utc: Utc.with_ymd_and_hms(2099, 2, 2, 12, 5, 0).unwrap(),
+            candidates: vec![mqk_db::NewRuntimeOpportunityAllocationCandidate {
+                ordinal: 0,
+                symbol: "BTC/USD".to_string(),
+                strategy_id: "intraday_scalper".to_string(),
+                input_score_micros: 900_000,
+                target_weight_micros: 200_000,
+                current_qty: mqk_execution::QtyMicros::new(0),
+                strategy_target_qty: mqk_execution::QtyMicros::new(100),
+                allocation_target_qty: mqk_execution::QtyMicros::new(50),
+                final_target_qty: mqk_execution::QtyMicros::new(50),
+                disposition: "clamped_down".to_string(),
+                reason_code: "allocator_target_clamped_to_capital_limit".to_string(),
+                evaluation_price_micros: 400_000_000_000_000,
+            }],
+        },
+    )
+    .await
+    .expect("seed fractional plan");
+
+    let (status, v1) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v1/portfolio/allocation/plans/{frac_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(v1["error"], "quantity_not_representable_in_v1");
+    assert!(v1.get("candidates").is_none());
+    let (status, v2) = call(
+        router_with_pool(pool.clone()),
+        get(&format!("/api/v2/portfolio/allocation/plans/{frac_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let c = &v2["candidates"][0];
+    assert_eq!(c["strategy_target_qty_micros"], 100);
+    assert_eq!(c["allocation_target_qty_micros"], 50);
+    assert_eq!(c["final_target_qty_micros"], 50);
+    assert_eq!(c["current_qty_micros"], 0);
+
+    cleanup(&pool, run_id).await;
+}
+
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL"]
 async fn plan_by_id_unknown_uuid_is_not_found_distinct_from_query_failed() {

@@ -99,6 +99,109 @@ async fn request_summary(st: Arc<AppState>) -> MultiSymbolDispatchSummaryRespons
     serde_json::from_slice(&body).expect("summary response json")
 }
 
+async fn request_raw(st: Arc<AppState>, route: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(route)
+        .body(axum::body::Body::empty())
+        .expect("request");
+    let resp = routes::build_router(st)
+        .oneshot(req)
+        .await
+        .expect("oneshot");
+    let status = resp.status();
+    let body = resp.into_body().collect().await.expect("body").to_bytes();
+    (status, serde_json::from_slice(&body).expect("json body"))
+}
+
+fn frac_state(current_micros: i64, target_micros: i64) -> PerSymbolTargetState {
+    let mut s = target_state(
+        "BTC/USD",
+        "intraday_scalper",
+        0,
+        0,
+        "order_will_be_submitted",
+    );
+    s.current_qty = mqk_execution::QtyMicros::new(current_micros);
+    s.target_qty = mqk_execution::QtyMicros::new(target_micros);
+    s.delta = s.target_qty.checked_sub(s.current_qty);
+    s
+}
+
+const ROUTE_V2: &str = "/api/v2/strategy/multi-symbol-dispatch-summary";
+
+/// A3 Option B: V1 keeps non-null whole-unit `qty` (never micros-scaled).
+#[tokio::test]
+async fn a3_v1_whole_unit_quantities_are_non_null_and_never_micros_scaled() {
+    let _lock = env_lock().lock().await;
+    let _env = no_runtime_config_env();
+    let st = bare_state();
+    st.record_per_symbol_target_state(target_state("AAPL", "swing_momentum", 3, 8, "x"))
+        .await;
+    let (status, body) = request_raw(st, ROUTE).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = &body["per_symbol"][0];
+    assert_eq!(row["current_qty"], serde_json::json!(3));
+    assert_eq!(row["target_qty"], serde_json::json!(8));
+    assert_eq!(row["delta"], serde_json::json!(5));
+    for k in ["current_qty_micros", "target_qty_micros", "delta_micros"] {
+        assert!(row.get(k).is_none(), "V1 must not carry {k}");
+    }
+    assert!(body.get("quantity_schema_version").is_none());
+}
+
+/// A fractional quantity is refused by V1 (409), never truncated, rounded,
+/// nulled, or reported as 0 -- and no row leaks into the refusal body.
+#[tokio::test]
+async fn a3_v1_refuses_fractional_quantity_instead_of_projecting_it() {
+    let _lock = env_lock().lock().await;
+    let _env = no_runtime_config_env();
+    for (current, target) in [
+        (0, 100),
+        (0, 500_000),
+        (250_000, 1_000_000),
+        (1_000_000, 1_000_001),
+    ] {
+        let st = bare_state();
+        st.record_per_symbol_target_state(frac_state(current, target))
+            .await;
+        let (status, body) = request_raw(st, ROUTE).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{current}->{target}");
+        assert_eq!(body["error"], "quantity_not_representable_in_v1");
+        assert!(body["detail"].as_str().unwrap().contains(ROUTE_V2));
+        assert!(body.get("per_symbol").is_none());
+    }
+}
+
+/// V2: whole quantity exposes exact micros; 0.0001 exposes qty_micros=100.
+#[tokio::test]
+async fn a3_v2_exposes_exact_qty_micros_for_whole_and_fractional() {
+    let _lock = env_lock().lock().await;
+    let _env = no_runtime_config_env();
+    let st = bare_state();
+    st.record_per_symbol_target_state(target_state("AAPL", "swing_momentum", 3, 8, "x"))
+        .await;
+    st.record_per_symbol_target_state(frac_state(0, 100)).await;
+    let (status, body) = request_raw(st, ROUTE_V2).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["quantity_schema_version"], "qty_micros_v1");
+    assert_eq!(body["canonical_route"], ROUTE_V2);
+    let rows = body["per_symbol"].as_array().unwrap();
+    let aapl = rows.iter().find(|r| r["symbol"] == "AAPL").unwrap();
+    assert_eq!(aapl["current_qty_micros"], 3_000_000);
+    assert_eq!(aapl["target_qty_micros"], 8_000_000);
+    assert_eq!(aapl["delta_micros"], 5_000_000);
+    let btc = rows.iter().find(|r| r["symbol"] == "BTC/USD").unwrap();
+    assert_eq!(btc["current_qty_micros"], 0);
+    assert_eq!(btc["target_qty_micros"], 100);
+    assert_eq!(btc["delta_micros"], 100);
+    for r in rows {
+        for k in ["current_qty", "target_qty", "delta"] {
+            assert!(r.get(k).is_none(), "V2 must not carry legacy {k}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn s01_no_target_states_returns_no_snapshot_and_empty_per_symbol() {
     let _lock = env_lock().lock().await;
@@ -190,9 +293,9 @@ async fn s06_row_fields_copy_qty_delta_and_no_order_reason() {
     let mut rows = request_summary(st).await.per_symbol;
     let row = rows.remove(0);
 
-    assert_eq!(row.current_qty, Some(3));
-    assert_eq!(row.target_qty, Some(8));
-    assert_eq!(row.delta, Some(5));
+    assert_eq!(row.current_qty, 3);
+    assert_eq!(row.target_qty, 8);
+    assert_eq!(row.delta, 5);
     assert_eq!(row.no_order_reason, "already_at_target");
 }
 

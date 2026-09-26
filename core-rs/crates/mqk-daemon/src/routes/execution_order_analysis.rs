@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::api_types::{EventRiskStatusResponse, ExecutionOutboxResponse, ExecutionOutboxRow};
+use crate::api_types::{
+    EventRiskStatusResponse, ExecutionOutboxResponse, ExecutionOutboxResponseV2, ExecutionOutboxRow,
+};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -47,21 +49,38 @@ fn lifecycle_stage_from_outbox_status(status: &str) -> &'static str {
     }
 }
 
-pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    const CANONICAL: &str = "/api/v1/execution/outbox";
+/// V1 whole-unit guard shared by the V1 quantity surfaces: the body a V1
+/// route returns when a record's exact quantity has no whole-unit form.
+/// Fail closed (never truncate/round/null); the caller is directed to the
+/// exact V2 route.
+pub(crate) fn v1_fractional_refusal(v2_route: &str, what: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "quantity_not_representable_in_v1",
+            "detail": format!(
+                "{what} contains a fractional or non-whole-unit quantity that the V1 whole-unit \
+                 contract cannot represent; request the exact qty_micros representation at {v2_route}"
+            ),
+        })),
+    )
+        .into_response()
+}
+
+async fn load_execution_outbox(
+    st: &AppState,
+    canonical: &str,
+) -> Result<ExecutionOutboxResponse, axum::response::Response> {
+    let unavailable = |truth_state: &str| ExecutionOutboxResponse {
+        canonical_route: canonical.to_string(),
+        truth_state: truth_state.to_string(),
+        backend: "unavailable".to_string(),
+        run_id: None,
+        rows: vec![],
+    };
 
     let Some(db) = st.db.as_ref() else {
-        return (
-            StatusCode::OK,
-            Json(ExecutionOutboxResponse {
-                canonical_route: CANONICAL.to_string(),
-                truth_state: "no_db".to_string(),
-                backend: "unavailable".to_string(),
-                run_id: None,
-                rows: vec![],
-            }),
-        )
-            .into_response();
+        return Ok(unavailable("no_db"));
     };
 
     let active_run_id = match st.current_status_snapshot().await {
@@ -70,30 +89,20 @@ pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl In
     };
 
     let Some(run_id) = active_run_id else {
-        return (
-            StatusCode::OK,
-            Json(ExecutionOutboxResponse {
-                canonical_route: CANONICAL.to_string(),
-                truth_state: "no_active_run".to_string(),
-                backend: "unavailable".to_string(),
-                run_id: None,
-                rows: vec![],
-            }),
-        )
-            .into_response();
+        return Ok(unavailable("no_active_run"));
     };
 
     let db_rows = match mqk_db::outbox_fetch_for_supervisor(db, run_id).await {
         Ok(rows) => rows,
         Err(e) => {
-            return (
+            return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
                     "error": "outbox_fetch_failed",
                     "detail": e.to_string(),
                 })),
             )
-                .into_response();
+                .into_response());
         }
     };
 
@@ -112,7 +121,6 @@ pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl In
                 .map(|s| s.to_string());
             let qty_exact = crate::state::outbox_json_qty(&r.order_json);
             let qty = qty_exact.and_then(mqk_execution::QtyMicros::to_whole_units_checked);
-            let qty_micros = qty_exact.map(mqk_execution::QtyMicros::raw);
             let order_type = r
                 .order_json
                 .get("order_type")
@@ -138,7 +146,7 @@ pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl In
                 symbol,
                 side,
                 qty,
-                qty_micros,
+                qty_exact,
                 order_type,
                 strategy_id,
                 signal_source,
@@ -150,17 +158,57 @@ pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl In
         })
         .collect();
 
-    (
-        StatusCode::OK,
-        Json(ExecutionOutboxResponse {
-            canonical_route: CANONICAL.to_string(),
-            truth_state: "active".to_string(),
-            backend: "postgres.oms_outbox".to_string(),
-            run_id: Some(run_id.to_string()),
-            rows: api_rows,
-        }),
-    )
-        .into_response()
+    Ok(ExecutionOutboxResponse {
+        canonical_route: canonical.to_string(),
+        truth_state: "active".to_string(),
+        backend: "postgres.oms_outbox".to_string(),
+        run_id: Some(run_id.to_string()),
+        rows: api_rows,
+    })
+}
+
+/// V1 (whole-unit) outbox view. Fails closed with 409 when any row's exact
+/// quantity is present but fractional; never reports it as `qty: null`.
+pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    const CANONICAL: &str = "/api/v1/execution/outbox";
+    match load_execution_outbox(&st, CANONICAL).await {
+        Ok(response) => execution_outbox_v1_view(response),
+        Err(response) => response,
+    }
+}
+
+/// V1 projection of a loaded outbox: the whole-unit response, or the 409
+/// refusal when any row's present quantity has no whole-unit form.
+fn execution_outbox_v1_view(response: ExecutionOutboxResponse) -> axum::response::Response {
+    if response
+        .rows
+        .iter()
+        .any(|r| r.qty_exact.is_some() && r.qty.is_none())
+    {
+        return v1_fractional_refusal("/api/v2/execution/outbox", "the execution outbox");
+    }
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// V2 (`qty_micros_v1`) outbox view: exact `qty_micros`, no whole-unit `qty`.
+pub(crate) async fn execution_outbox_v2(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    const CANONICAL: &str = "/api/v2/execution/outbox";
+    match load_execution_outbox(&st, CANONICAL).await {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(ExecutionOutboxResponseV2 {
+                quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
+                    .to_string(),
+                canonical_route: response.canonical_route,
+                truth_state: response.truth_state,
+                backend: response.backend,
+                run_id: response.run_id,
+                rows: response.rows.into_iter().map(Into::into).collect(),
+            }),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +460,88 @@ pub(crate) async fn execution_event_risk_status(_: State<Arc<AppState>>) -> impl
 #[cfg(test)]
 mod tests {
     use super::lifecycle_stage_from_outbox_status;
+
+    fn outbox_row(qty_micros: Option<i64>) -> crate::api_types::ExecutionOutboxRow {
+        let qty_exact = qty_micros.map(mqk_schemas::QtyMicros::new);
+        crate::api_types::ExecutionOutboxRow {
+            idempotency_key: "k".to_string(),
+            run_id: "r".to_string(),
+            status: "PENDING".to_string(),
+            lifecycle_stage: "queued".to_string(),
+            symbol: Some("BTC/USD".to_string()),
+            side: Some("buy".to_string()),
+            qty: qty_exact.and_then(mqk_schemas::QtyMicros::to_whole_units_checked),
+            qty_exact,
+            order_type: None,
+            strategy_id: None,
+            signal_source: None,
+            created_at_utc: "t".to_string(),
+            claimed_at_utc: None,
+            dispatching_at_utc: None,
+            sent_at_utc: None,
+        }
+    }
+
+    fn outbox(
+        rows: Vec<crate::api_types::ExecutionOutboxRow>,
+    ) -> crate::api_types::ExecutionOutboxResponse {
+        crate::api_types::ExecutionOutboxResponse {
+            canonical_route: "/api/v1/execution/outbox".to_string(),
+            truth_state: "active".to_string(),
+            backend: "postgres.oms_outbox".to_string(),
+            run_id: Some("r".to_string()),
+            rows,
+        }
+    }
+
+    async fn body_json(
+        resp: axum::response::Response,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use http_body_util::BodyExt;
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    // A3 Option B on the outbox surface: V1 whole-unit rows serialize a
+    // non-null whole `qty` (no micros); any fractional row refuses the whole
+    // V1 response; V2 exposes exact micros (0.0001 == 100).
+    #[tokio::test]
+    async fn a3_outbox_v1_whole_ok_fractional_refused_v2_exact() {
+        let (status, v1) = body_json(super::execution_outbox_v1_view(outbox(vec![outbox_row(
+            Some(5_000_000),
+        )])))
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(v1["rows"][0]["qty"], serde_json::json!(5));
+        assert!(v1["rows"][0].get("qty_micros").is_none());
+
+        for raw in [100, 1_500_000, 1_000_001] {
+            let (status, body) = body_json(super::execution_outbox_v1_view(outbox(vec![
+                outbox_row(Some(5_000_000)),
+                outbox_row(Some(raw)),
+            ])))
+            .await;
+            assert_eq!(status, axum::http::StatusCode::CONFLICT, "raw={raw}");
+            assert_eq!(body["error"], "quantity_not_representable_in_v1");
+            assert!(body.get("rows").is_none());
+        }
+
+        // An absent quantity is not "fractional": V1 keeps its historical None.
+        let (status, v1) = body_json(super::execution_outbox_v1_view(outbox(vec![outbox_row(
+            None,
+        )])))
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(v1["rows"][0]["qty"].is_null());
+
+        let v2: crate::api_types::ExecutionOutboxRowV2 = outbox_row(Some(100)).into();
+        assert_eq!(v2.qty_micros, Some(100));
+        let v2_whole: crate::api_types::ExecutionOutboxRowV2 = outbox_row(Some(5_000_000)).into();
+        assert_eq!(v2_whole.qty_micros, Some(5_000_000));
+        let json = serde_json::to_value(&v2).unwrap();
+        assert!(json.get("qty").is_none());
+    }
 
     // U01: every known outbox status maps to a non-"unknown" lifecycle stage.
     #[test]
