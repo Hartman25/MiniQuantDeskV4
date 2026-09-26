@@ -2528,9 +2528,16 @@ mod fill_economic_authority_closure_tests {
                 msg.contains("fc2a-malformed-msg"),
                 "error must carry the offending broker_message_id: {msg}"
             );
+            // The schema-gated decoder's own failure detail must be carried,
+            // not swallowed: the text after the seam name is non-empty.
+            let decode_detail = msg
+                .split("failed to decode as BrokerEvent: ")
+                .nth(1)
+                .map(str::trim)
+                .unwrap_or("");
             assert!(
-                msg.to_lowercase().contains("deserial"),
-                "error must carry deserialization error context: {msg}"
+                !decode_detail.is_empty(),
+                "error must carry the BrokerEvent decode failure detail: {msg}"
             );
         })
         .await;
