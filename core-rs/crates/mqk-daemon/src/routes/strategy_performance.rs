@@ -158,9 +158,12 @@ struct AttributedCloseEvent {
 /// -> `(qty_sum, gross_pnl_sum, fragment_count)`.
 type EventAccumulatorMap = BTreeMap<(String, String, i64, String), (i64, i64, i64)>;
 
+/// `None` when an attributed fragment carries a fractional quantity: the
+/// whole-unit performance aggregation cannot represent it, so the caller must
+/// fail closed rather than truncate, drop or panic.
 fn build_attributed_close_events(
     fragments: &[ClosureFragment],
-) -> BTreeMap<(String, String), Vec<AttributedCloseEvent>> {
+) -> Option<BTreeMap<(String, String), Vec<AttributedCloseEvent>>> {
     // Intermediate grouping key includes the close identity so multiple
     // fragments from the SAME closing fill collapse into one event; the key
     // order (strategy_id, fingerprint, close_inbox_id, close_internal_order_id)
@@ -177,14 +180,7 @@ fn build_attributed_close_events(
             f.close_inbox_id,
             f.close_internal_order_id.clone(),
         );
-        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `ClosureFragment.qty` is
-        // `QtyMicros`; this aggregation stays whole-unit `i64` (Crypto
-        // execution is not wired yet, so a fractional closure fragment
-        // cannot occur in production today).
-        let whole_qty = f
-            .qty
-            .to_whole_units_checked()
-            .expect("fractional closure fragment unsupported by strategy-performance aggregation");
+        let whole_qty = f.qty.to_whole_units_checked()?;
         let entry = event_map.entry(key).or_insert((0, 0, 0));
         entry.0 = entry.0.saturating_add(whole_qty);
         entry.1 = entry.1.saturating_add(f.gross_realized_pnl_micros);
@@ -207,7 +203,7 @@ fn build_attributed_close_events(
                 close_internal_order_id,
             });
     }
-    by_strategy
+    Some(by_strategy)
 }
 
 /// P3.5 drawdown definition: cumulative realized gross P&L across the
@@ -913,7 +909,11 @@ pub(crate) async fn strategy_performance(
         || has_coverage_bucket("lineage_missing");
     let coverage_has_manual_mixed = has_coverage_bucket("manual_or_mixed");
 
-    let events_by_strategy = build_attributed_close_events(&view.fragments);
+    let Some(events_by_strategy) = build_attributed_close_events(&view.fragments) else {
+        return super::execution_order_analysis::v1_fractional_unavailable(
+            "the strategy-performance closed-trade aggregation",
+        );
+    };
     let mut rows = Vec::with_capacity(events_by_strategy.len());
     for ((strategy_id, fingerprint), events) in events_by_strategy {
         // P4: decay monitoring is pure/no I/O; regime context resolution and
@@ -1075,5 +1075,67 @@ mod tests {
         );
         assert_eq!(recommended_operator_action("watch"), "review");
         assert_eq!(recommended_operator_action("normal"), "none");
+    }
+}
+
+#[cfg(test)]
+mod attributed_close_event_qty_tests {
+    use super::build_attributed_close_events;
+    use crate::state::closed_trade_attribution::{
+        ClosureAttribution, ClosureFragment, ResolvedLineage,
+    };
+    use mqk_schemas::QtyMicros;
+
+    fn fragment(qty: &str, attribution: ClosureAttribution) -> ClosureFragment {
+        let lineage = || ResolvedLineage::Strategy {
+            strategy_id: "s".to_string(),
+            strategy_semantic_fingerprint: "f".repeat(64),
+        };
+        ClosureFragment {
+            symbol: "X".to_string(),
+            direction: "long",
+            qty: qty.parse::<QtyMicros>().unwrap(),
+            entry_price_micros: 100_000_000,
+            exit_price_micros: 110_000_000,
+            gross_realized_pnl_micros: 10_000_000,
+            open_inbox_id: 1,
+            open_internal_order_id: "o1".to_string(),
+            close_inbox_id: 2,
+            close_internal_order_id: "o2".to_string(),
+            open_lineage: lineage(),
+            close_lineage: lineage(),
+            attribution,
+        }
+    }
+
+    #[test]
+    fn whole_unit_attributed_fragments_aggregate() {
+        let events = build_attributed_close_events(&[
+            fragment("10", ClosureAttribution::Attributed),
+            fragment("4", ClosureAttribution::Attributed),
+        ])
+        .expect("whole-unit fragments are representable");
+        let series = events.values().next().expect("one strategy series");
+        assert_eq!(series.len(), 1, "fragments of one closing order collapse");
+    }
+
+    #[test]
+    fn a_fractional_attributed_fragment_yields_none_not_a_panic() {
+        assert!(
+            build_attributed_close_events(&[fragment("0.5", ClosureAttribution::Attributed)])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_fractional_non_attributed_fragment_is_not_aggregated_so_it_is_not_refused() {
+        // Only attributed fragments contribute to this aggregation; a
+        // non-attributed one is skipped exactly as before.
+        let events = build_attributed_close_events(&[
+            fragment("10", ClosureAttribution::Attributed),
+            fragment("0.5", ClosureAttribution::CrossStrategy),
+        ])
+        .expect("non-attributed fragments never reach the whole-unit conversion");
+        assert_eq!(events.len(), 1);
     }
 }

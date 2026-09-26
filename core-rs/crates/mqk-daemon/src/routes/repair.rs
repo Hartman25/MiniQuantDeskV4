@@ -2156,6 +2156,25 @@ async fn write_rest_recovery_audit(
 
 const PORTFOLIO_SNAPSHOT_CONFIRMATION_TOKEN: &str = "WRITE_PORTFOLIO_SNAPSHOT";
 
+/// Derived open-position summary of a reconstructed portfolio (flat symbols
+/// omitted). `None` when any position is fractional: the V1 whole-unit row
+/// cannot represent it, and the caller must refuse rather than truncate, drop
+/// or panic.
+fn portfolio_position_summaries(
+    pf: &mqk_portfolio::PortfolioState,
+) -> Option<Vec<PortfolioPositionSummary>> {
+    pf.positions
+        .iter()
+        .map(|(sym, pos)| {
+            Some(PortfolioPositionSummary {
+                symbol: sym.clone(),
+                qty_signed: pos.qty_signed().to_whole_units_checked()?,
+                lot_count: pos.lots.len(),
+            })
+        })
+        .collect()
+}
+
 /// POST /api/v1/ops/repair/halted-run-portfolio-snapshot
 pub(crate) async fn repair_halted_run_portfolio_snapshot(
     State(st): State<Arc<AppState>>,
@@ -2352,23 +2371,34 @@ pub(crate) async fn repair_halted_run_portfolio_snapshot(
         }
     };
 
-    // Build derived positions summary (flat symbols omitted).
-    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionState::qty_signed()` is
-    // `QtyMicros`; this repair-route API row stays whole-unit `i64` (Crypto
-    // execution is not wired yet, so a fractional position cannot occur in
-    // production today).
-    let positions: Vec<PortfolioPositionSummary> = pf
-        .positions
-        .iter()
-        .map(|(sym, pos)| PortfolioPositionSummary {
-            symbol: sym.clone(),
-            qty_signed: pos
-                .qty_signed()
-                .to_whole_units_checked()
-                .expect("fractional position unsupported by this halted-run repair route"),
-            lot_count: pos.lots.len(),
-        })
-        .collect();
+    // Build derived positions summary (flat symbols omitted). This repair-route
+    // API row is the V1 whole-unit contract: a fractional position is refused
+    // (never truncated, dropped or panicked on).
+    let Some(positions) = portfolio_position_summaries(&pf) else {
+        return (
+            StatusCode::CONFLICT,
+            Json(HaltedRunPortfolioSnapshotResponse {
+                truth_state: "active".to_string(),
+                decision: "refused".to_string(),
+                dry_run,
+                run_id: body.run_id.clone(),
+                applied_fill_count,
+                positions: vec![],
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                initial_cash_micros,
+                snapshot_written: false,
+                audit_event_id: None,
+                source: "applied_inbox_rows".to_string(),
+                evidence: format!(
+                    "canonical durable economic replay of run '{}' holds a fractional \n                     position that the whole-unit repair snapshot cannot represent. \n                     Portfolio reconstruction refused — manual reconcile required.",
+                    body.run_id
+                ),
+                gate: Some("snapshot.fractional_position_unsupported".to_string()),
+            }),
+        )
+            .into_response();
+    };
 
     // --- dry_run=true: return computed summary without writing anything. ---
     if dry_run {
@@ -3101,4 +3131,41 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod portfolio_position_summary_tests {
+    use super::portfolio_position_summaries;
+    use mqk_portfolio::{apply_fill, Fill, PortfolioState, QtyMicros, Side};
+
+    fn book(fills: &[(&str, Side, &str, i64)]) -> PortfolioState {
+        let mut pf = PortfolioState::new(1_000_000_000_000);
+        for (symbol, side, qty, price) in fills {
+            let qty: QtyMicros = qty.parse().unwrap();
+            apply_fill(&mut pf, &Fill::new(*symbol, *side, qty, *price, 0));
+        }
+        pf
+    }
+
+    #[test]
+    fn whole_unit_positions_are_summarized_and_flat_symbols_omitted() {
+        let pf = book(&[
+            ("AAPL", Side::Buy, "10", 100_000_000),
+            ("MSFT", Side::Buy, "3", 200_000_000),
+            ("MSFT", Side::Sell, "3", 210_000_000),
+        ]);
+        let s = portfolio_position_summaries(&pf).expect("whole-unit book is representable");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].symbol, "AAPL");
+        assert_eq!(s[0].qty_signed, 10);
+    }
+
+    #[test]
+    fn a_fractional_position_yields_none_instead_of_panicking() {
+        let pf = book(&[
+            ("AAPL", Side::Buy, "10", 100_000_000),
+            ("BTC/USD", Side::Buy, "0.5", 60_000_000_000),
+        ]);
+        assert!(portfolio_position_summaries(&pf).is_none());
+    }
 }

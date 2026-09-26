@@ -93,7 +93,7 @@ fn unavailable_response(truth_state: &str) -> Response {
 fn map_closure_fragments(
     run_id: uuid::Uuid,
     fragments: &[ClosureFragment],
-) -> Vec<PaperJournalClosedTradeRow> {
+) -> Option<Vec<PaperJournalClosedTradeRow>> {
     fragments
         .iter()
         .map(|f| {
@@ -101,18 +101,15 @@ fn map_closure_fragments(
                 f.open_lineage.identity_pair();
             let (close_strategy_id, close_strategy_semantic_fingerprint) =
                 f.close_lineage.identity_pair();
-            PaperJournalClosedTradeRow {
+            // `ClosureFragment.qty` is `QtyMicros`; this API row is the V1
+            // whole-unit contract. A fractional fragment has no whole-unit
+            // form: the mapping yields `None` and the caller fails closed.
+            let qty = f.qty.to_whole_units_checked()?;
+            Some(PaperJournalClosedTradeRow {
                 run_id,
                 symbol: f.symbol.clone(),
                 direction: f.direction.to_string(),
-                // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `ClosureFragment.qty`
-                // is `QtyMicros`; this API row stays whole-unit `i64`
-                // (Crypto execution is not wired yet, so a fractional
-                // closure fragment cannot occur in production today).
-                qty: f
-                    .qty
-                    .to_whole_units_checked()
-                    .expect("fractional closure fragment unsupported by this API row"),
+                qty,
                 entry_price_micros: f.entry_price_micros,
                 exit_price_micros: f.exit_price_micros,
                 gross_realized_pnl_micros: f.gross_realized_pnl_micros,
@@ -125,7 +122,7 @@ fn map_closure_fragments(
                 close_strategy_id,
                 close_strategy_semantic_fingerprint,
                 attribution_state: f.attribution.as_str().to_string(),
-            }
+            })
         })
         .collect()
 }
@@ -350,7 +347,11 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
     let closed_trades_canonical_watermark = view.canonical_last_applied_inbox_id;
     let closed_trades_accounting_watermark = view.accounting_last_applied_inbox_id;
     let closed_trades_watermark_state = view.accounting_watermark_state;
-    let api_closed_trades = map_closure_fragments(run_id, &view.fragments);
+    let Some(api_closed_trades) = map_closure_fragments(run_id, &view.fragments) else {
+        return super::execution_order_analysis::v1_fractional_unavailable(
+            "the paper-journal closed-trade lane",
+        );
+    };
 
     (
         StatusCode::OK,
@@ -382,4 +383,45 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod closure_fragment_qty_tests {
+    use super::map_closure_fragments;
+    use crate::state::closed_trade_attribution::{
+        ClosureAttribution, ClosureFragment, ResolvedLineage,
+    };
+    use mqk_schemas::QtyMicros;
+
+    fn fragment(qty: &str) -> ClosureFragment {
+        let lineage = || ResolvedLineage::Strategy {
+            strategy_id: "s".to_string(),
+            strategy_semantic_fingerprint: "f".repeat(64),
+        };
+        ClosureFragment {
+            symbol: "X".to_string(),
+            direction: "long",
+            qty: qty.parse::<QtyMicros>().unwrap(),
+            entry_price_micros: 100_000_000,
+            exit_price_micros: 110_000_000,
+            gross_realized_pnl_micros: 10_000_000,
+            open_inbox_id: 1,
+            open_internal_order_id: "o1".to_string(),
+            close_inbox_id: 2,
+            close_internal_order_id: "o2".to_string(),
+            open_lineage: lineage(),
+            close_lineage: lineage(),
+            attribution: ClosureAttribution::Attributed,
+        }
+    }
+
+    #[test]
+    fn whole_unit_fragments_map_and_a_fractional_one_yields_none_not_a_panic() {
+        let run_id = uuid::Uuid::nil();
+        let rows = map_closure_fragments(run_id, &[fragment("10"), fragment("3")])
+            .expect("whole-unit fragments are representable");
+        assert_eq!(rows.iter().map(|r| r.qty).collect::<Vec<_>>(), vec![10, 3]);
+
+        assert!(map_closure_fragments(run_id, &[fragment("10"), fragment("0.5")]).is_none());
+    }
 }

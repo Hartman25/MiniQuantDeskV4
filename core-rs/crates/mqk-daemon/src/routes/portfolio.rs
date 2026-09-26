@@ -875,17 +875,15 @@ fn clamp_i128_to_i64(x: i128) -> i64 {
     }
 }
 
-fn live_weight_row_from_pure(row: mqk_portfolio::PositionWeightRow) -> PortfolioLiveWeightRow {
-    PortfolioLiveWeightRow {
+/// `None` when the position quantity is fractional: this V1 API row is
+/// whole-unit, so the caller must fail closed rather than truncate, drop or
+/// panic.
+fn live_weight_row_from_pure(
+    row: mqk_portfolio::PositionWeightRow,
+) -> Option<PortfolioLiveWeightRow> {
+    Some(PortfolioLiveWeightRow {
         symbol: row.symbol,
-        // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionWeightRow.signed_qty`
-        // is `QtyMicros`; this API row stays whole-unit `i64` (Crypto
-        // execution is not wired yet, so a fractional weight row cannot
-        // occur in production today).
-        signed_qty: row
-            .signed_qty
-            .to_whole_units_checked()
-            .expect("fractional position unsupported by this live-weights API row"),
+        signed_qty: row.signed_qty.to_whole_units_checked()?,
         mark_price_micros: row.mark_price_micros,
         mark_ts_utc: row.mark_ts_utc,
         mark_source: row.mark_source,
@@ -893,7 +891,7 @@ fn live_weight_row_from_pure(row: mqk_portfolio::PositionWeightRow) -> Portfolio
         absolute_notional_micros: row.absolute_notional_micros.map(clamp_i128_to_i64),
         weight_bps: row.weight_bps,
         missing_mark: row.missing_mark,
-    }
+    })
 }
 
 /// Truthful, read-only live position valuation seam.
@@ -993,6 +991,17 @@ pub(crate) async fn portfolio_live_weights(
         result.truth_state
     };
 
+    let Some(positions) = result
+        .positions
+        .into_iter()
+        .map(live_weight_row_from_pure)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return super::execution_order_analysis::v1_fractional_unavailable(
+            "the live-weights position valuation",
+        );
+    };
+
     (
         StatusCode::OK,
         Json(PortfolioLiveWeightsResponse {
@@ -1001,11 +1010,7 @@ pub(crate) async fn portfolio_live_weights(
             cash_micros: result.cash_micros,
             nav_micros: result.nav_micros.map(clamp_i128_to_i64),
             gross_exposure_micros: result.gross_exposure_micros.map(clamp_i128_to_i64),
-            positions: result
-                .positions
-                .into_iter()
-                .map(live_weight_row_from_pure)
-                .collect(),
+            positions,
             missing_mark_symbols: result.missing_mark_symbols,
         }),
     )
@@ -1917,5 +1922,31 @@ mod broker_position_pnl_qty_tests {
         let s = state_of(&[position("AAPL", "10"), position("TSLA", "-3")]).await;
         assert_eq!(s["AAPL"].0, "db_unavailable");
         assert_eq!(s["TSLA"].0, "db_unavailable");
+    }
+}
+
+#[cfg(test)]
+mod live_weight_row_qty_tests {
+    use super::live_weight_row_from_pure;
+
+    fn row(qty: &str) -> mqk_portfolio::PositionWeightRow {
+        mqk_portfolio::PositionWeightRow {
+            symbol: "X".to_string(),
+            signed_qty: qty.parse().unwrap(),
+            mark_price_micros: Some(100_000_000),
+            mark_ts_utc: None,
+            mark_source: None,
+            market_value_micros: Some(0),
+            absolute_notional_micros: Some(0),
+            weight_bps: Some(0),
+            missing_mark: false,
+        }
+    }
+
+    #[test]
+    fn whole_unit_rows_convert_and_a_fractional_row_yields_none_not_a_panic() {
+        assert_eq!(live_weight_row_from_pure(row("10")).unwrap().signed_qty, 10);
+        assert_eq!(live_weight_row_from_pure(row("-3")).unwrap().signed_qty, -3);
+        assert!(live_weight_row_from_pure(row("0.5")).is_none());
     }
 }
