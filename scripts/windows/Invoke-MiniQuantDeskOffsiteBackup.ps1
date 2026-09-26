@@ -64,6 +64,14 @@ param(
     [string] $B2Region              = '',
     [string] $RepositoryPrefix      = 'miniquantdesk-recovery',
     [string] $DisposableDbContainer = 'mqk-test-postgres',
+
+    # Backup SOURCE database (forwarded to Backup-MiniQuantDeskRecovery.ps1).
+    # Operator default is the real Paper DB -- that is the purpose of the
+    # operational backup. Engineering tests must always override all three
+    # with a disposable test database; they must never rely on this default.
+    [string] $SourceDbContainer     = 'mqk-paper-postgres',
+    [string] $SourceDbName          = 'miniquantdesk_paper',
+    [string] $SourceDbUser          = 'postgres',
     [ValidateRange(1, [int]::MaxValue)][int] $ResticTimeoutSeconds = 600,
 
     # D-R2-R2-03 test-only mutation seam: when supplied, this exact path is
@@ -434,8 +442,9 @@ $cleanupErrors = New-Object 'System.Collections.Generic.List[string]'
 try {
 
 Write-Sect 'Stage fresh recovery set'
+Write-Step "Backup source DB: container=$SourceDbContainer db=$SourceDbName"
 $stagingDir = if (-not [string]::IsNullOrWhiteSpace($StagingDirOverrideForCleanupTest)) { $StagingDirOverrideForCleanupTest } else { Join-Path $env:TEMP ("mqk_offsite_stage_" + [guid]::NewGuid().ToString('N')) }
-& powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $BackupScript -RepoRoot $RepoRoot -OutDir $stagingDir | Out-Host
+& powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $BackupScript -RepoRoot $RepoRoot -OutDir $stagingDir -PaperDbContainer $SourceDbContainer -PaperDbName $SourceDbName -PaperDbUser $SourceDbUser | Out-Host
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "Backup-MiniQuantDeskRecovery.ps1 failed to stage a clean recovery set (exit $LASTEXITCODE) -- refusing to snapshot an unproven set."
     exit 1

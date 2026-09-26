@@ -18,6 +18,15 @@
 #   file the operator has not yet supplied on this machine (this script
 #   reports that truthfully rather than fabricating it).
 #
+# ENGINEERING SOURCE-DB FENCE: the backup SOURCE database for every real
+# orchestration run below is a throwaway database created inside the
+# canonical disposable test container (mqk-test-postgres) and dropped at the
+# end. Every real run goes through Invoke-OffsiteEngineeringRun, which refuses
+# (before any subprocess/docker call) unless the source is that container and
+# a test-owned mqk_offsite_src_<guid> database. The operator default source
+# (real Paper DB) is never reachable from this test; Section 2c proves that
+# with a docker shim that never forwards to real docker.
+#
 # Exit codes: 0 = all proofs held, 1 = at least one did not.
 # =============================================================================
 
@@ -54,6 +63,7 @@ if (-not (Test-Path -LiteralPath $OffsiteScript)) {
 
 function Invoke-TestSubprocess {
     param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+    $script:SubprocessLaunchCount++
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
     try {
@@ -64,6 +74,102 @@ function Invoke-TestSubprocess {
     } finally {
         Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     }
+}
+
+$CanonicalTestDbContainer   = 'mqk-test-postgres'
+$ForbiddenSourceContainers = @('mqk-paper-postgres', 'mqk-live-postgres')
+$script:SubprocessLaunchCount = 0
+
+# Fails closed BEFORE any subprocess/docker call unless the backup source is
+# the canonical disposable test container and a test-owned throwaway database.
+function Assert-DisposableSourceOrThrow {
+    param([string]$Container, [string]$DbName)
+    if ([string]::IsNullOrWhiteSpace($Container) -or [string]::IsNullOrWhiteSpace($DbName)) {
+        throw 'ENGINEERING_SOURCE_FENCE: backup source container/database not explicitly supplied -- refusing to fall back to the operator default (real Paper DB).'
+    }
+    if (($ForbiddenSourceContainers -contains $Container) -or ($Container -match '(?i)paper|live') -or ($DbName -match '(?i)paper|live')) {
+        throw "ENGINEERING_SOURCE_FENCE: '$Container'/'$DbName' names a Paper/Live operational database."
+    }
+    if ($Container -ne $CanonicalTestDbContainer) {
+        throw "ENGINEERING_SOURCE_FENCE: source container '$Container' is not the canonical disposable test container '$CanonicalTestDbContainer'."
+    }
+    if ($DbName -notmatch '^mqk_offsite_src_[0-9a-f]{32}$') {
+        throw "ENGINEERING_SOURCE_FENCE: source database '$DbName' is not a test-owned mqk_offsite_src_<guid> database."
+    }
+}
+
+function Invoke-OffsiteEngineeringRun {
+    param(
+        [Parameter(Mandatory = $true)][string]$FixtureRepoRoot,
+        [string]$SourceDbContainer,
+        [string]$SourceDbName,
+        [string[]]$ExtraArgs = @()
+    )
+    Assert-DisposableSourceOrThrow -Container $SourceDbContainer -DbName $SourceDbName
+    $argList = @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript,
+        '-RepoRoot', $FixtureRepoRoot,
+        '-DisposableDbContainer', $CanonicalTestDbContainer,
+        '-SourceDbContainer', $SourceDbContainer, '-SourceDbName', $SourceDbName, '-SourceDbUser', 'postgres',
+        '-ResticTimeoutSeconds', '120'
+    ) + $ExtraArgs
+    return Invoke-TestSubprocess -ArgumentList $argList
+}
+
+# SQL against the canonical disposable test container only (never a parameter).
+function Invoke-TestContainerSql {
+    param([Parameter(Mandatory = $true)][string]$Database, [Parameter(Mandatory = $true)][string]$Sql)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & docker exec $CanonicalTestDbContainer psql -U postgres -d $Database -v ON_ERROR_STOP=1 -c $Sql 2>&1 | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+# Runs $Block with a fake `docker` first on PATH. The shim only records its
+# arguments and exits 1 -- it NEVER forwards to real docker, so a bypassed
+# fence still cannot reach any database.
+function Use-DockerShim {
+    param([Parameter(Mandatory = $true)][scriptblock]$Block)
+    $shimDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_offsite_dockershim_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+    $logPath = Join-Path $shimDir 'calls.log'
+    Set-Content -Path (Join-Path $shimDir 'docker.cmd') -Value "@echo off`r`necho %*>>`"%MQK_DOCKER_SHIM_LOG%`"`r`nexit /b 1`r`n" -Encoding ASCII
+    $prevPath = $env:PATH; $prevLog = $env:MQK_DOCKER_SHIM_LOG
+    $result = $null
+    try {
+        $env:PATH = "$shimDir;$prevPath"
+        $env:MQK_DOCKER_SHIM_LOG = $logPath
+        $result = & $Block
+    } finally {
+        $env:PATH = $prevPath
+        $env:MQK_DOCKER_SHIM_LOG = $prevLog
+    }
+    $calls = @()
+    if (Test-Path -LiteralPath $logPath) { $calls = @(Get-Content -Path $logPath | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    Remove-Item -Path $shimDir -Recurse -Force -ErrorAction SilentlyContinue
+    return [pscustomobject]@{ Result = $result; DockerCalls = $calls }
+}
+
+function New-OffsiteFixtureRepo {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $repo = Join-Path $Root 'fixture_repo'
+    New-Item -ItemType Directory -Force -Path (Join-Path $repo 'config') | Out-Null
+    Set-Content -Path (Join-Path $repo '.gitignore') -Value '.env.local' -Encoding UTF8
+    Set-Content -Path (Join-Path $repo 'config\fixture.json') -Value '{"fixture": true}' -Encoding UTF8
+    & git -C $repo init -q 2>&1 | Out-Null
+    & git -C $repo -c user.email='test@example.com' -c user.name='test' add .gitignore config 2>&1 | Out-Null
+    & git -C $repo -c user.email='test@example.com' -c user.name='test' commit -q -m 'fixture' 2>&1 | Out-Null
+    $resticDir = Join-Path $Root 'restic_repo'
+    New-Item -ItemType Directory -Force -Path $resticDir | Out-Null
+    $pwFile = Join-Path $Root 'restic-password.txt'
+    Set-Content -Path $pwFile -Value 'fixture-local-repo-password-not-a-real-secret' -Encoding UTF8 -NoNewline
+    $envLines = @("MQK_RESTIC_REPOSITORY=$resticDir", "MQK_RESTIC_PASSWORD_FILE=$pwFile", 'B2_ACCOUNT_ID=fixture-not-a-real-b2-account-id', 'B2_ACCOUNT_KEY=fixture-not-a-real-b2-account-key')
+    Set-Content -Path (Join-Path $repo '.env.local') -Value ($envLines -join "`n") -Encoding UTF8
+    return $repo
 }
 
 # ---------------------------------------------------------------------------
@@ -237,6 +343,85 @@ Assert-True 'an MQK_RESTIC_REPOSITORY override matching S3+*.backblazeb2.com+fro
 Remove-Item -Path $qualifyingOverrideRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------------------
+# Section 2c: engineering source-DB fence. Establishes -- with no real docker
+# call and no Paper/Live access -- that (a) the operator default source is the
+# real Paper DB (the hazard), (b) removing the test-source override is refused
+# by the fence BEFORE any subprocess launches, and (c) the accepted path
+# plumbs ONLY the disposable test source through the real
+# Invoke-MiniQuantDeskOffsiteBackup.ps1 -> Backup-MiniQuantDeskRecovery.ps1.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 2c: engineering source-DB fence ==='
+
+$resticCmd = Get-Command 'restic' -ErrorAction SilentlyContinue
+$TestSourceContainer = $CanonicalTestDbContainer
+$TestSourceDb = 'mqk_offsite_src_' + [guid]::NewGuid().ToString('N')
+$TestSourceDbCreated = $false
+
+# Fence negative controls: every refusal must occur BEFORE a subprocess launch.
+$fenceCases = @(
+    @{ Label = 'override removed (empty source)';   Container = '';                        Db = '' },
+    @{ Label = 'override removed (container only)'; Container = $TestSourceContainer;      Db = '' },
+    @{ Label = 'real Paper container';              Container = 'mqk-paper-postgres';      Db = $TestSourceDb },
+    @{ Label = 'real Live container';               Container = 'mqk-live-postgres';       Db = $TestSourceDb },
+    @{ Label = 'real Paper database name';          Container = $TestSourceContainer;      Db = 'miniquantdesk_paper' },
+    @{ Label = 'non-canonical container';           Container = 'mqk-some-other-postgres'; Db = $TestSourceDb },
+    @{ Label = 'non-test-owned database name';      Container = $TestSourceContainer;      Db = 'mqk_test' }
+)
+foreach ($case in $fenceCases) {
+    $launchesBefore = $script:SubprocessLaunchCount
+    $threw = $null
+    try {
+        Invoke-OffsiteEngineeringRun -FixtureRepoRoot $RepoRoot -SourceDbContainer $case.Container -SourceDbName $case.Db | Out-Null
+    } catch {
+        $threw = $_.Exception.Message
+    }
+    Assert-True ("fence: $($case.Label) is refused before any subprocess/docker call") `
+        (($threw -match 'ENGINEERING_SOURCE_FENCE') -and ($script:SubprocessLaunchCount -eq $launchesBefore))
+}
+
+if ($resticCmd) {
+    $shimRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_offsite_shim_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $shimRoot | Out-Null
+    $shimFixtureRepo = New-OffsiteFixtureRepo -Root $shimRoot
+
+    # Accepted path through the real scripts, docker shimmed: the very first
+    # docker call must target the disposable test container and nothing else.
+    $shimAccepted = Use-DockerShim { Invoke-OffsiteEngineeringRun -FixtureRepoRoot $shimFixtureRepo -SourceDbContainer $TestSourceContainer -SourceDbName $TestSourceDb }
+    Assert-True 'fence: accepted path reaches the backup source probe (docker shim recorded a call)' ($shimAccepted.DockerCalls.Count -ge 1)
+    Assert-True 'fence: accepted path probes ONLY the disposable test container (docker inspect mqk-test-postgres)' `
+        ($shimAccepted.DockerCalls.Count -ge 1 -and $shimAccepted.DockerCalls[0] -eq "inspect $TestSourceContainer")
+    Assert-True 'fence: accepted path never names a Paper/Live container in any docker call' `
+        (@($shimAccepted.DockerCalls | Where-Object { $_ -match '(?i)paper|live' }).Count -eq 0)
+    Assert-True 'fence: accepted path stdout identifies the test-owned source database' `
+        ($shimAccepted.Result.Stdout -match [regex]::Escape("Backup source DB: container=$TestSourceContainer db=$TestSourceDb"))
+
+    # Mutation control: the test-source override is REMOVED and the raw script
+    # is invoked. Only run when the accepted path above proved the shim is
+    # first on PATH (otherwise this could reach real docker).
+    if ($shimAccepted.DockerCalls.Count -ge 1) {
+        $shimMutated = Use-DockerShim {
+            Invoke-TestSubprocess -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript,
+                '-RepoRoot', $shimFixtureRepo, '-DisposableDbContainer', $CanonicalTestDbContainer, '-ResticTimeoutSeconds', '120')
+        }
+        Assert-True 'fence mutation: without the override the operator default WOULD read the real Paper container (proven via shim; real docker never invoked)' `
+            ($shimMutated.DockerCalls.Count -ge 1 -and $shimMutated.DockerCalls[0] -eq 'inspect mqk-paper-postgres')
+    }
+    Remove-Item -Path $shimRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Test-owned throwaway source database inside the disposable container only.
+    Assert-DisposableSourceOrThrow -Container $TestSourceContainer -DbName $TestSourceDb
+    $TestSourceDbCreated = (Invoke-TestContainerSql -Database 'postgres' -Sql "CREATE DATABASE $TestSourceDb;")
+    Assert-True "fixture: throwaway source database created inside $TestSourceContainer" $TestSourceDbCreated
+    if ($TestSourceDbCreated) {
+        $tableOk = Invoke-TestContainerSql -Database $TestSourceDb -Sql 'CREATE TABLE offsite_fixture (id integer PRIMARY KEY); INSERT INTO offsite_fixture VALUES (1);'
+        Assert-True 'fixture: throwaway source database seeded with one public table' $tableOk
+    }
+}
+
+try {
+
+# ---------------------------------------------------------------------------
 # Section 3: REAL end-to-end functional proof against a LOCAL restic
 # repository (not B2 -- the B2 transport itself remains blocked on operator-
 # supplied bucket/endpoint/region + application key + password file on this
@@ -275,9 +460,11 @@ if (-not $resticCmd) {
     )
     Set-Content -Path (Join-Path $fixtureRepoRoot '.env.local') -Value ($envLines -join "`n") -Encoding UTF8
 
-    $r4 = Invoke-TestSubprocess -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript, '-RepoRoot', $fixtureRepoRoot, '-DisposableDbContainer', 'mqk-test-postgres', '-ResticTimeoutSeconds', '120')
+    $r4 = Invoke-OffsiteEngineeringRun -FixtureRepoRoot $fixtureRepoRoot -SourceDbContainer $TestSourceContainer -SourceDbName $TestSourceDb
     Assert-True 'real functional proof (local repository): orchestration exits 0' ($r4.ExitCode -eq 0)
     Assert-True 'real functional proof (local repository): reports a real snapshot_id' ($r4.Stdout -match 'snapshot_id=\S+')
+    Assert-True 'source identity: the run backed up ONLY the disposable test source (test container + test-owned database, no Paper/Live name in output)' `
+        ($r4.Stdout -match [regex]::Escape("Backup source DB: container=$TestSourceContainer db=$TestSourceDb") -and -not ($r4.Stdout -match '(?i)mqk-paper-postgres|mqk-live-postgres|miniquantdesk_paper'))
     Assert-True 'real functional proof (local repository): full-manifest + disposable-DB restore proof ran' ($r4.Stdout -match [regex]::Escape('Full manifest verification passed'))
     Assert-True 'real functional proof (local repository): secret-canary re-scan ran and found nothing' ($r4.Stdout -match [regex]::Escape('No allowlisted local secret value found in the restic-restored material'))
     # B2A/B2B (D-R2-R2-01): a local filesystem repository must report
@@ -381,11 +568,8 @@ if (-not $resticCmd) {
     $lockStream = [System.IO.File]::Open($lockedFixtureFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $r5 = $null
     try {
-        $r5 = Invoke-TestSubprocess -ArgumentList @(
-            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript,
-            '-RepoRoot', $cleanupFixtureRepoRoot, '-DisposableDbContainer', 'mqk-test-postgres',
-            '-ResticTimeoutSeconds', '120', '-StagingDirOverrideForCleanupTest', $forcedStagingDir
-        )
+        $r5 = Invoke-OffsiteEngineeringRun -FixtureRepoRoot $cleanupFixtureRepoRoot -SourceDbContainer $TestSourceContainer -SourceDbName $TestSourceDb `
+            -ExtraArgs @('-StagingDirOverrideForCleanupTest', $forcedStagingDir)
     } finally {
         $lockStream.Close()
         $lockStream.Dispose()
@@ -450,7 +634,7 @@ if (-not $resticCmd) {
     )
     Set-Content -Path (Join-Path $r4PosFixtureRepoRoot '.env.local') -Value ($r4PosEnvLines -join "`n") -Encoding UTF8
 
-    $r4Pos = Invoke-TestSubprocess -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript, '-RepoRoot', $r4PosFixtureRepoRoot, '-DisposableDbContainer', 'mqk-test-postgres', '-ResticTimeoutSeconds', '120')
+    $r4Pos = Invoke-OffsiteEngineeringRun -FixtureRepoRoot $r4PosFixtureRepoRoot -SourceDbContainer $TestSourceContainer -SourceDbName $TestSourceDb
     Assert-True 'R4-1/R4-12: canonical local Paper DB URL in tracked docs survives the FULL real round trip (pre-stage AND post-restore both allow it, orchestration exits 0)' ($r4Pos.ExitCode -eq 0)
     Assert-True 'R4-1: pre-stage scan reports the canonical exemption' ($r4Pos.Stdout -match [regex]::Escape('CANONICAL_LOCAL_PAPER_DB_CONFIG=YES'))
     Assert-True 'R4-1: post-restore re-scan independently reports the SAME canonical exemption (not just the pre-stage one)' `
@@ -488,12 +672,29 @@ if (-not $resticCmd) {
     )
     Set-Content -Path (Join-Path $r4NegFixtureRepoRoot '.env.local') -Value ($r4NegEnvLines -join "`n") -Encoding UTF8
 
-    $r4Neg = Invoke-TestSubprocess -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $OffsiteScript, '-RepoRoot', $r4NegFixtureRepoRoot, '-DisposableDbContainer', 'mqk-test-postgres', '-ResticTimeoutSeconds', '120')
+    $r4Neg = Invoke-OffsiteEngineeringRun -FixtureRepoRoot $r4NegFixtureRepoRoot -SourceDbContainer $TestSourceContainer -SourceDbName $TestSourceDb
     Assert-True 'R4-3: a loopback MQK_DATABASE_URL differing from canonical only by password is refused end-to-end (nonzero exit, never exempted)' ($r4Neg.ExitCode -ne 0)
     Assert-True 'R4-3: the non-canonical value itself never appears in captured stdout (no secret printed, R4-13)' (-not ($r4Neg.Stdout -match [regex]::Escape($r4NegValue)))
 
     Remove-Item -Path $r4NegRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+} finally {
+    # Drop ONLY the test-owned throwaway source database (fenced name, canonical test container).
+    if ($TestSourceDbCreated) {
+        Assert-DisposableSourceOrThrow -Container $TestSourceContainer -DbName $TestSourceDb
+        $dropped = Invoke-TestContainerSql -Database 'postgres' -Sql "DROP DATABASE IF EXISTS $TestSourceDb;"
+        Assert-True 'cleanup: throwaway source database dropped from the disposable test container' $dropped
+    }
+}
+
+# Static: the only raw -DisposableDbContainer argument sites are the fenced
+# wrapper and the shimmed (never-forwarding) mutation control.
+$SelfText = Get-Content -Path $MyInvocation.MyCommand.Definition -Raw
+Assert-True 'static: exactly two raw -DisposableDbContainer argument sites exist (fenced wrapper + shimmed mutation control)' `
+    (([regex]::Matches($SelfText, "'-Disposable" + "DbContainer'")).Count -eq 2)
+Assert-True 'static: no real orchestration run passes a Paper/Live container as a source' `
+    (-not ($SelfText -match "'-SourceDbContainer',\s*'mqk-(paper|live)"))
 
 # ---------------------------------------------------------------------------
 # Summary
