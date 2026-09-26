@@ -30,6 +30,8 @@ mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-risk = { path = "../mqk-risk" }
 # B1A: native strategy runtime bootstrap seam.
 mqk-strategy = { path = "../mqk-strategy" }
+# A3 correction: asset-class truth for strategy sizing comes from registry-v2.
+mqk-md = { path = "../mqk-md" }
 
 [features]
 # Patch 1: test-only wiring helpers (e.g., PassGate paper gateway).

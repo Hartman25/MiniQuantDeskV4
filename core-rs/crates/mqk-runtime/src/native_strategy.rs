@@ -46,7 +46,7 @@
 
 use mqk_strategy::{
     BarStub, PluginRegistry, RecentBarsWindow, ShadowMode, StrategyBarResult, StrategyContext,
-    StrategyHost,
+    StrategyHost, TargetSizing,
 };
 
 // ---------------------------------------------------------------------------
@@ -310,32 +310,200 @@ pub fn build_daemon_plugin_registry() -> PluginRegistry {
 /// share, so a caller building both never risks a second, independently-read
 /// symbol value disagreeing with the one baked into the registry's strategy
 /// factories (DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED Phase C).
+///
+/// A sizing refusal (e.g. Crypto without an explicit exact size) returns an
+/// EMPTY registry: no strategy can be instantiated. Callers wanting the
+/// refusal reason use [`build_plugin_registry_from_inputs`].
 pub fn build_daemon_plugin_registry_and_symbol() -> (PluginRegistry, Option<String>) {
-    let mut registry = PluginRegistry::new();
-    // Symbol captured in closures; provided to strategy engines via on_bar context.
-    let symbol = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
-    mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol.clone())
-        .expect("daemon built-in strategy registration must not fail: duplicate names are a programming error");
-    let trimmed = symbol.trim();
+    let inputs = StrategyBootstrapInputs::from_process_env();
+    let trimmed = inputs.symbol.trim();
     let effective_symbol = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    let registry = build_plugin_registry_from_inputs(&inputs).unwrap_or_default();
     (registry, effective_symbol)
 }
 
 /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 5: build a plugin registry for
-/// one explicit, caller-supplied symbol — never `MQK_STRATEGY_SYMBOL` or any
-/// other env read. Identical registration set to
-/// [`build_daemon_plugin_registry_and_symbol`] (all built-in engines), the
-/// only difference being the symbol source: a parameter here, `std::env::var`
-/// there. This is the narrow constructor Bundle 7's per-symbol run-scoped
-/// host pool uses to instantiate one strategy for one exact selected symbol,
-/// independent of whatever `MQK_STRATEGY_SYMBOL` currently holds — the
-/// env-based builder above remains completely unchanged and is still what
-/// `off`-mode/legacy single-symbol dispatch uses.
+/// one explicit, caller-supplied symbol — never `MQK_STRATEGY_SYMBOL`. The
+/// symbol source is a parameter; sizing/asset-class resolution is identical
+/// to [`build_daemon_plugin_registry_and_symbol`] (registry-v2 truth; a
+/// refusal yields an empty registry). Bundle 7's per-symbol run-scoped host
+/// pool uses this to instantiate one strategy for one exact selected symbol.
 pub fn build_daemon_plugin_registry_for_symbol(symbol: &str) -> PluginRegistry {
+    try_build_daemon_plugin_registry_for_symbol(symbol).unwrap_or_default()
+}
+
+/// [`build_daemon_plugin_registry_for_symbol`] that surfaces the refusal.
+pub fn try_build_daemon_plugin_registry_for_symbol(
+    symbol: &str,
+) -> Result<PluginRegistry, StrategySizingResolutionError> {
+    build_plugin_registry_from_inputs(&StrategyBootstrapInputs::from_process_env_for_symbol(
+        symbol,
+    ))
+}
+
+/// Env var naming the registry-v2 trading authority (same source the daemon's
+/// order-admission seam resolves the instrument asset class from).
+pub const TRADING_REGISTRY_V2_PATH_ENV: &str = "MQK_TRADING_INSTRUMENT_REGISTRY_V2_PATH";
+
+/// Raw operator inputs a production strategy registry is built from, kept as
+/// unparsed strings so sizing is resolved exactly once, by
+/// [`resolve_strategy_target_sizing`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StrategyBootstrapInputs {
+    pub symbol: String,
+    pub trading_registry_v2_path: Option<String>,
+    pub raw_target_qty: Option<String>,
+    pub raw_max_target_qty: Option<String>,
+    pub raw_max_notional_usd: Option<String>,
+}
+
+impl StrategyBootstrapInputs {
+    /// Read every input from the process environment for `symbol`.
+    pub fn from_process_env_for_symbol(symbol: impl Into<String>) -> Self {
+        use mqk_strategy::engines::intraday_scalper as scalper;
+        let env = |name: &str| std::env::var(name).ok();
+        Self {
+            symbol: symbol.into(),
+            trading_registry_v2_path: env(TRADING_REGISTRY_V2_PATH_ENV),
+            raw_target_qty: env(scalper::TARGET_QTY_ENV),
+            raw_max_target_qty: env(scalper::MAX_TARGET_QTY_ENV),
+            raw_max_notional_usd: env(scalper::MAX_NOTIONAL_USD_ENV),
+        }
+    }
+
+    /// Symbol from `MQK_STRATEGY_SYMBOL` (empty placeholder when unset).
+    pub fn from_process_env() -> Self {
+        Self::from_process_env_for_symbol(std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default())
+    }
+}
+
+/// Fail-closed refusal to resolve production strategy sizing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategySizingResolutionError(pub String);
+
+impl std::fmt::Display for StrategySizingResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StrategySizingResolutionError {}
+
+/// Resolve the exact target sizing a production strategy instance is built with.
+///
+/// Asset class comes from registry-v2 truth for `inputs.symbol`, never from
+/// symbol spelling:
+/// - no registry-v2 path configured, blank symbol, or symbol absent from the
+///   registry => Equity (historical env semantics; the daemon's admission seam
+///   independently proves legacy-Equity authority per decision);
+/// - `equity` row => Equity;
+/// - `crypto` row => explicit exact size mandatory ([`TargetSizing::resolve`]),
+///   validated (never chosen) against the row's increment / minimum economics;
+/// - any other class, or an unreadable/invalid registry => refused.
+pub fn resolve_strategy_target_sizing(
+    inputs: &StrategyBootstrapInputs,
+) -> Result<TargetSizing, StrategySizingResolutionError> {
+    use mqk_execution::AssetClass;
+    use mqk_md::instrument_registry_v2 as v2;
+    let refuse = StrategySizingResolutionError;
+
+    let symbol = inputs.symbol.trim();
+    let resolve_as = |class: AssetClass| {
+        TargetSizing::resolve(
+            class,
+            inputs.raw_target_qty.as_deref(),
+            inputs.raw_max_target_qty.as_deref(),
+            inputs.raw_max_notional_usd.as_deref(),
+        )
+    };
+    let resolve_equity = || {
+        resolve_as(AssetClass::Equity)
+            .map_err(|e| refuse(format!("equity strategy sizing refused: {e}")))
+    };
+
+    let path = inputs
+        .trading_registry_v2_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let Some(path) = path.filter(|_| !symbol.is_empty()) else {
+        return resolve_equity();
+    };
+
+    let registry = v2::load_instrument_registry_v2(std::path::Path::new(path)).map_err(|e| {
+        refuse(format!(
+            "trading registry-v2 load failed from '{path}': {e}"
+        ))
+    })?;
+    v2::validate_registry_v2(&registry)
+        .map_err(|e| refuse(format!("trading registry-v2 validation failed: {e}")))?;
+    if registry
+        .instruments
+        .iter()
+        .any(|i| i.allow_enabled_non_equity_for_testing)
+    {
+        return Err(refuse(
+            "trading registry-v2 carries allow_enabled_non_equity_for_testing=true; \
+             test-only bypasses are forbidden as production sizing authority"
+                .to_string(),
+        ));
+    }
+
+    let Some(instrument) = registry
+        .instruments
+        .iter()
+        .find(|i| i.symbol.trim() == symbol)
+    else {
+        return resolve_equity();
+    };
+
+    match v2::registry_v2_gate_asset_class(&instrument.asset_class)
+        .map_err(|e| refuse(format!("strategy asset class for '{symbol}' refused: {e}")))?
+    {
+        v2::RegistryV2GateAssetClass::Equity => resolve_equity(),
+        v2::RegistryV2GateAssetClass::NonEquity { asset_class } if asset_class == "crypto" => {
+            let sizing = resolve_as(AssetClass::Crypto)
+                .map_err(|e| refuse(format!("crypto strategy '{symbol}' sizing refused: {e}")))?;
+            let economics = instrument.economics.as_ref();
+            let (Some(increment), Some(min_trade)) = (
+                economics.and_then(|e| e.quantity_increment_micros),
+                economics.and_then(|e| e.min_trade_qty_micros),
+            ) else {
+                return Err(refuse(format!(
+                    "crypto strategy '{symbol}' refused: registry-v2 economics lack \
+                     quantity_increment_micros/min_trade_qty_micros"
+                )));
+            };
+            sizing.validate_against(increment, min_trade).map_err(|e| {
+                refuse(format!(
+                    "crypto strategy '{symbol}' explicit size violates registry-v2 economics: {e}"
+                ))
+            })?;
+            Ok(sizing)
+        }
+        v2::RegistryV2GateAssetClass::NonEquity { asset_class } => Err(refuse(format!(
+            "strategy '{symbol}' asset class '{asset_class}' has no supported target-sizing policy"
+        ))),
+    }
+}
+
+/// Build the production plugin registry from explicit inputs. Every asset
+/// class goes through resolved [`TargetSizing`]; a refusal yields no registry
+/// at all (fail closed).
+pub fn build_plugin_registry_from_inputs(
+    inputs: &StrategyBootstrapInputs,
+) -> Result<PluginRegistry, StrategySizingResolutionError> {
+    let sizing = resolve_strategy_target_sizing(inputs)?;
     let mut registry = PluginRegistry::new();
-    mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol.to_string())
-        .expect("daemon built-in strategy registration must not fail: duplicate names are a programming error");
-    registry
+    mqk_strategy::engines::register_builtin_strategies_with_target_sizing(
+        &mut registry,
+        inputs.symbol.clone(),
+        sizing,
+    )
+    .map_err(|e| {
+        StrategySizingResolutionError(format!("built-in strategy registration failed: {e}"))
+    })?;
+    Ok(registry)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,8 +539,37 @@ pub struct EffectiveRuntimeBinding {
 pub fn bootstrap_with_effective_binding(
     fleet_ids: Option<&[String]>,
 ) -> (NativeStrategyBootstrap, EffectiveRuntimeBinding) {
-    let (registry, effective_runtime_target_symbol) = build_daemon_plugin_registry_and_symbol();
-    let bootstrap = NativeStrategyBootstrap::bootstrap(fleet_ids, &registry);
+    bootstrap_with_effective_binding_from_inputs(
+        fleet_ids,
+        &StrategyBootstrapInputs::from_process_env(),
+    )
+}
+
+/// [`bootstrap_with_effective_binding`] over explicit inputs (the production
+/// function body; the env variant only supplies the inputs).
+///
+/// A sizing refusal is `Failed` (with the refusal reason) when a fleet
+/// strategy is selected, and irrelevant (`Dormant`) when none is.
+pub fn bootstrap_with_effective_binding_from_inputs(
+    fleet_ids: Option<&[String]>,
+    inputs: &StrategyBootstrapInputs,
+) -> (NativeStrategyBootstrap, EffectiveRuntimeBinding) {
+    let trimmed = inputs.symbol.trim();
+    let effective_runtime_target_symbol = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    let bootstrap = match build_plugin_registry_from_inputs(inputs) {
+        Ok(registry) => NativeStrategyBootstrap::bootstrap(fleet_ids, &registry),
+        Err(refusal) => match fleet_ids.and_then(|ids| ids.first()) {
+            Some(strategy_id) => NativeStrategyBootstrap {
+                outcome: NativeStrategyBootstrapOutcome::Failed {
+                    strategy_id: strategy_id.clone(),
+                    reason: refusal.to_string(),
+                },
+            },
+            None => NativeStrategyBootstrap {
+                outcome: NativeStrategyBootstrapOutcome::Dormant,
+            },
+        },
+    };
     let binding = effective_binding_from_bootstrap(&bootstrap, effective_runtime_target_symbol);
     (bootstrap, binding)
 }

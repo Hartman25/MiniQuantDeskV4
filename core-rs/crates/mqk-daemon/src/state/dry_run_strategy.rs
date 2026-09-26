@@ -29,7 +29,7 @@
 //! Callers must treat an empty list as "do nothing" — existing single-strategy
 //! behavior is unchanged when the env var is absent.
 
-use mqk_strategy::{PluginRegistry, RecentBarsWindow, ShadowMode, StrategyContext, StrategyHost};
+use mqk_strategy::{RecentBarsWindow, ShadowMode, StrategyContext, StrategyHost};
 
 use crate::capital_policy::{
     classify_order_intent, evaluate_short_entry_policy, order_intent_to_short_entry_intent,
@@ -175,7 +175,7 @@ fn would_default_short_entry_policy_block(intent: OrderIntent) -> (bool, Option<
 
 /// Evaluate exactly one dry-run strategy against `recent`.
 ///
-/// Builds a throwaway [`PluginRegistry`] + [`StrategyHost`] pair — independent
+/// Builds a throwaway `PluginRegistry` + [`StrategyHost`] pair — independent
 /// from the primary strategy's bootstrap — registers `strategy_id`, and calls
 /// `on_bar` once. The strategy's own targets are filtered to `symbol` (the
 /// same fail-closed guard the primary dispatch loop applies via
@@ -195,15 +195,21 @@ pub fn evaluate_dry_run_strategy(
     let strategy_id = strategy_id.trim();
     let symbol = symbol.trim();
 
-    let mut registry = PluginRegistry::new();
-    if let Err(e) = mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol) {
-        return unavailable(
-            strategy_id,
-            symbol,
-            current_qty,
-            format!("dry-run registry build failed: {e}"),
-        );
-    }
+    // Same registry-v2-resolved sizing seam the primary bootstrap uses: a
+    // Crypto symbol without explicit exact sizing is unavailable, never a
+    // default-one-unit diagnostic.
+    let registry =
+        match mqk_runtime::native_strategy::try_build_daemon_plugin_registry_for_symbol(symbol) {
+            Ok(registry) => registry,
+            Err(e) => {
+                return unavailable(
+                    strategy_id,
+                    symbol,
+                    current_qty,
+                    format!("dry-run registry build failed: {e}"),
+                );
+            }
+        };
 
     let instance = match registry.instantiate_verified(strategy_id) {
         Ok(s) => s,

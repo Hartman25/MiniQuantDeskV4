@@ -2012,6 +2012,7 @@ dependencies = [
  "mqk-broker-paper",
  "mqk-db",
  "mqk-execution",
+ "mqk-md",
  "mqk-portfolio",
  "mqk-reconcile",
  "mqk-risk",
