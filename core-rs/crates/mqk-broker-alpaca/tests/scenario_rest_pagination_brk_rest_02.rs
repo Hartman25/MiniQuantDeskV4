@@ -216,6 +216,7 @@ fn adapter_for(port: u16) -> AlpacaBrokerAdapter {
         base_url: format!("http://127.0.0.1:{port}"),
         api_key_id: "test-key".to_string(),
         api_secret_key: "test-secret".to_string(),
+        crypto_capability_enabled: false,
     })
 }
 

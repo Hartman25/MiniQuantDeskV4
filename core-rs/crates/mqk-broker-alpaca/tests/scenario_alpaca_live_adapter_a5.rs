@@ -51,6 +51,7 @@ fn unreachable_adapter() -> AlpacaBrokerAdapter {
         base_url: "http://127.0.0.1:1".to_string(),
         api_key_id: "test-key-id".to_string(),
         api_secret_key: "test-secret-key".to_string(),
+        crypto_capability_enabled: false,
     })
 }
 fn make_submit_req(

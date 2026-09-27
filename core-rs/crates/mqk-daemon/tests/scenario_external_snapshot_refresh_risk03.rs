@@ -56,6 +56,7 @@ async fn r03_02_refresher_field_accepts_adapter_arc() {
             base_url: "https://paper-api.alpaca.markets".to_string(),
             api_key_id: "test-key".to_string(),
             api_secret_key: "test-secret".to_string(),
+            crypto_capability_enabled: false,
         })
     });
     *state.external_snapshot_refresher.write().await = Some(Arc::new(adapter));

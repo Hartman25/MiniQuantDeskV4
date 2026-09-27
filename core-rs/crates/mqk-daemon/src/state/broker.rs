@@ -219,6 +219,7 @@ pub(crate) fn build_daemon_broker(
                     base_url,
                     api_key_id: key_id,
                     api_secret_key: secret,
+                    crypto_capability_enabled: false,
                 },
             )))
         }
@@ -322,6 +323,7 @@ pub(super) fn build_fill_activity_fetcher_from_env(
             base_url,
             api_key_id: key_id,
             api_secret_key: secret,
+            crypto_capability_enabled: false,
         }),
     )))
 }
@@ -392,6 +394,7 @@ pub(super) fn build_ws_gap_fill_fetcher_from_env(
             base_url,
             api_key_id: key_id,
             api_secret_key: secret,
+            crypto_capability_enabled: false,
         },
     ))))
 }
@@ -458,6 +461,7 @@ pub(super) fn build_snapshot_fetcher_from_env(
             base_url,
             api_key_id: key_id,
             api_secret_key: secret,
+            crypto_capability_enabled: false,
         },
     ))))
 }
@@ -539,6 +543,7 @@ pub(super) fn build_asset_shortable_preflight_fetcher_from_env(
             base_url,
             api_key_id: key_id,
             api_secret_key: secret,
+            crypto_capability_enabled: false,
         }),
         source,
     }))

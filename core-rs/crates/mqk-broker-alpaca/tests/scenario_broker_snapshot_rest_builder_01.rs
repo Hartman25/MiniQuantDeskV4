@@ -46,6 +46,7 @@ fn adapter_with_creds(api_key_id: &str, api_secret_key: &str) -> AlpacaBrokerAda
         base_url: "http://127.0.0.1:1".to_string(),
         api_key_id: api_key_id.to_string(),
         api_secret_key: api_secret_key.to_string(),
+        crypto_capability_enabled: false,
     })
 }
 
@@ -92,6 +93,7 @@ fn bsr_builder_02_base_url_trailing_crlf_is_trimmed() {
         base_url: "https://paper-api.alpaca.markets \r\n".to_string(),
         api_key_id: "key".to_string(),
         api_secret_key: "secret".to_string(),
+        crypto_capability_enabled: false,
     });
     let debug = format!("{adapter:?}");
     assert!(
@@ -142,6 +144,7 @@ fn bsr_builder_04_fetch_broker_snapshot_with_crlf_creds_does_not_produce_builder
         base_url: "http://127.0.0.1:1".to_string(),
         api_key_id: "APCA_PAPER_KEY\r".to_string(),
         api_secret_key: "APCA_PAPER_SECRET\r".to_string(),
+        crypto_capability_enabled: false,
     });
     let result = adapter.fetch_broker_snapshot(chrono::Utc::now());
     assert!(result.is_err(), "unreachable host must return Err");
@@ -178,6 +181,7 @@ fn bsr_builder_06_clean_inputs_are_unchanged_by_trim() {
         base_url: "https://paper-api.alpaca.markets".to_string(),
         api_key_id: "PKABCDEF1234".to_string(),
         api_secret_key: "supersecret".to_string(),
+        crypto_capability_enabled: false,
     });
     let debug = format!("{adapter:?}");
     assert!(

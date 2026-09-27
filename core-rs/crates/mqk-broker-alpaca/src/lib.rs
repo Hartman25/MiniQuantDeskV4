@@ -184,6 +184,27 @@ pub struct AlpacaConfig {
     pub api_key_id: String,
     /// Alpaca API secret key (`APCA-API-SECRET-KEY` header).
     pub api_secret_key: String,
+    /// D2/B4 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01): explicit,
+    /// default-off Crypto capability. Never `true` in any checked-in
+    /// default constructor (`paper()`, `live()`, `new_for_test()`) -- a
+    /// caller must opt in explicitly via [`AlpacaConfig::with_crypto_capability_enabled`].
+    ///
+    /// This flag is necessary but never sufficient: [`AlpacaBrokerAdapter::
+    /// supports_asset_class`] additionally requires [`AlpacaConfig::
+    /// targets_paper_api`] to be `true` before ever advertising Crypto, so a
+    /// Live-targeting config can never advertise Crypto regardless of this
+    /// field's value -- a structural guarantee, not a convention.
+    pub crypto_capability_enabled: bool,
+}
+
+impl AlpacaConfig {
+    /// `true` iff `base_url` targets Alpaca's PAPER API host. The sole
+    /// authority `supports_asset_class` consults (together with
+    /// `crypto_capability_enabled`) to decide Crypto capability -- never
+    /// inferred from deployment-mode labels or any other config field.
+    fn targets_paper_api(&self) -> bool {
+        self.base_url.contains("paper-api.alpaca.markets")
+    }
 }
 // ---------------------------------------------------------------------------
 // AlpacaBrokerAdapter
@@ -223,9 +244,30 @@ impl AlpacaBrokerAdapter {
                 base_url: cfg.base_url.trim().to_owned(),
                 api_key_id: cfg.api_key_id.trim().to_owned(),
                 api_secret_key: cfg.api_secret_key.trim().to_owned(),
+                crypto_capability_enabled: cfg.crypto_capability_enabled,
             },
             client,
         }
+    }
+
+    /// D2/B4: explicit opt-in for the Crypto capability flag, callable on
+    /// any already-constructed adapter. Never wired to a checked-in default
+    /// -- an operator/config layer above this crate calls it explicitly.
+    /// Actual capability still requires [`AlpacaConfig::targets_paper_api`]
+    /// (see `supports_asset_class`); calling this on a `live()` adapter sets
+    /// the flag but has no capability effect.
+    pub fn with_crypto_capability_enabled(mut self, enabled: bool) -> Self {
+        self.cfg.crypto_capability_enabled = enabled;
+        self
+    }
+
+    /// D2/B4: the Crypto capability flag as configured (not the same as
+    /// whether Crypto is actually advertised -- see `supports_asset_class`,
+    /// which additionally requires a Paper-targeting `base_url`). Exposed
+    /// for status/provenance surfaces so the operator-visible capability
+    /// choice is never silently inferred from deployment-mode labels alone.
+    pub fn crypto_capability_enabled(&self) -> bool {
+        self.cfg.crypto_capability_enabled
     }
 
     /// Test constructor: injects a mock base URL so `Retry-After`-threading
@@ -236,17 +278,24 @@ impl AlpacaBrokerAdapter {
             base_url,
             api_key_id: "test-key".to_string(),
             api_secret_key: "test-secret".to_string(),
+            crypto_capability_enabled: false,
         })
     }
     /// Convenience constructor for Alpaca paper trading.
     ///
     /// Targets `https://paper-api.alpaca.markets`.  Use for `(Paper, Alpaca)`
     /// deployment mode only.  Do NOT use for live-shadow or live-capital.
+    ///
+    /// D2/B4: Crypto capability defaults to `false` here -- call
+    /// `.with_crypto_capability_enabled(true)` on the result to opt in
+    /// explicitly. This is the ONLY constructor for which that opt-in can
+    /// ever have an effect (see `targets_paper_api`).
     pub fn paper(api_key_id: String, api_secret_key: String) -> Self {
         Self::new(AlpacaConfig {
             base_url: "https://paper-api.alpaca.markets".to_string(),
             api_key_id,
             api_secret_key,
+            crypto_capability_enabled: false,
         })
     }
 
@@ -254,11 +303,17 @@ impl AlpacaBrokerAdapter {
     ///
     /// Targets `https://api.alpaca.markets`.  Use for `(LiveShadow, Alpaca)`
     /// deployment mode.  Do NOT use for paper-only deployments.
+    ///
+    /// D2/B4: Crypto capability is always `false` and structurally cannot
+    /// become effective for this adapter -- `supports_asset_class` also
+    /// requires `targets_paper_api()`, which a live `base_url` never
+    /// satisfies.
     pub fn live(api_key_id: String, api_secret_key: String) -> Self {
         Self::new(AlpacaConfig {
             base_url: "https://api.alpaca.markets".to_string(),
             api_key_id,
             api_secret_key,
+            crypto_capability_enabled: false,
         })
     }
     // -----------------------------------------------------------------------
@@ -661,7 +716,17 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
     /// coherent Alpaca-crypto completion commit, once those production
     /// seams exist and are proven by focused tests.
     fn supports_asset_class(&self, asset_class: mqk_execution::AssetClass) -> bool {
-        matches!(asset_class, mqk_execution::AssetClass::Equity)
+        match asset_class {
+            mqk_execution::AssetClass::Equity => true,
+            // D2/B4: Crypto requires BOTH the explicit capability flag AND a
+            // Paper-targeting base_url -- a Live adapter can never satisfy
+            // the second condition, so it can never advertise Crypto
+            // regardless of the flag's value.
+            mqk_execution::AssetClass::Crypto => {
+                self.cfg.crypto_capability_enabled && self.cfg.targets_paper_api()
+            }
+            _ => false,
+        }
     }
 
     /// Submit a new order to Alpaca.
@@ -1077,6 +1142,63 @@ mod supports_asset_class_tests {
     fn ir_b1_03_crypto_remains_unsupported_pending_alpaca_crypto_completion() {
         let a = adapter();
         assert!(!a.supports_asset_class(AssetClass::Crypto));
+    }
+
+    // --- D2/B4: explicit, default-off, Paper-only Crypto capability ---
+
+    #[test]
+    fn d2b4_default_off_for_paper() {
+        let a = AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url: "https://paper-api.alpaca.markets".to_string(),
+            api_key_id: "k".to_string(),
+            api_secret_key: "s".to_string(),
+            crypto_capability_enabled: false,
+        });
+        assert!(!a.supports_asset_class(AssetClass::Crypto));
+    }
+
+    #[test]
+    fn d2b4_paper_with_flag_enabled_supports_crypto() {
+        let a = AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url: "https://paper-api.alpaca.markets".to_string(),
+            api_key_id: "k".to_string(),
+            api_secret_key: "s".to_string(),
+            crypto_capability_enabled: true,
+        });
+        assert!(a.supports_asset_class(AssetClass::Crypto));
+        assert!(a.crypto_capability_enabled());
+    }
+
+    #[test]
+    fn d2b4_live_with_flag_enabled_still_refuses_crypto() {
+        // MUTATION-RESISTANT: the flag alone must never be sufficient --
+        // Live's base_url structurally blocks Crypto regardless.
+        let a = AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url: "https://api.alpaca.markets".to_string(),
+            api_key_id: "k".to_string(),
+            api_secret_key: "s".to_string(),
+            crypto_capability_enabled: true,
+        });
+        assert!(!a.supports_asset_class(AssetClass::Crypto));
+    }
+
+    #[test]
+    fn d2b4_live_constructor_never_enables_crypto_capability() {
+        let a = AlpacaBrokerAdapter::live("k".to_string(), "s".to_string());
+        assert!(!a.crypto_capability_enabled());
+        assert!(!a.supports_asset_class(AssetClass::Crypto));
+    }
+
+    #[test]
+    fn d2b4_paper_constructor_defaults_off_but_can_opt_in() {
+        let default_off = AlpacaBrokerAdapter::paper("k".to_string(), "s".to_string());
+        assert!(!default_off.crypto_capability_enabled());
+        assert!(!default_off.supports_asset_class(AssetClass::Crypto));
+
+        let opted_in = AlpacaBrokerAdapter::paper("k".to_string(), "s".to_string())
+            .with_crypto_capability_enabled(true);
+        assert!(opted_in.crypto_capability_enabled());
+        assert!(opted_in.supports_asset_class(AssetClass::Crypto));
     }
 
     #[test]
