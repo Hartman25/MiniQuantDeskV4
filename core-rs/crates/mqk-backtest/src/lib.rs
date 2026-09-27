@@ -35,9 +35,9 @@ pub mod types;
 pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
 pub use dsr_pbo_sensitivity::{dsr_pbo_sensitivity_scenario, DSR_PBO_SENSITIVITY_SCENARIO_NAME};
 pub use economics::{
-    mark_to_market_value_micros, notional_micros, realized_pnl_micros, BacktestEconomicsReport,
-    BacktestInstrumentEconomics, EconomicsError,
-}; // BACKTEST-MULTIPLIER-MARGIN-01 / BACKTEST-REPORT-ECONOMICS-ARTIFACT-01
+    mark_to_market_value_micros, notional_micros, notional_micros_qty, realized_pnl_micros,
+    BacktestEconomicsReport, BacktestInstrumentEconomics, EconomicsError,
+}; // BACKTEST-MULTIPLIER-MARGIN-01 / BACKTEST-REPORT-ECONOMICS-ARTIFACT-01 / D6-A2
 pub use engine::{BacktestEngine, BacktestError};
 pub use genuine_shuffled_placebo::{
     genuine_shuffled_placebo_scenario, GENUINE_SHUFFLED_PLACEBO_PROTOCOL_ID,
@@ -91,8 +91,9 @@ pub use sweep::{
 };
 pub use types::{
     derive_input_data_hash, derive_run_id, derive_run_id_with_economics,
-    derive_run_id_with_execution_model, derive_run_id_with_semantic_identity, BacktestBar,
-    BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
-    CommissionModel, LiquidityConfig, OrderStatus, StrategySizingConfig, StressProfile,
+    derive_run_id_with_execution_model, derive_run_id_with_quantity_semantics,
+    derive_run_id_with_semantic_identity, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder,
+    BacktestOrderSide, BacktestOrderV2, BacktestReport, CommissionModel, LiquidityConfig,
+    OrderStatus, QuantitySemanticsId, StrategySizingConfig, StressProfile,
     BACKTEST_EXECUTION_MODEL_ID,
 };

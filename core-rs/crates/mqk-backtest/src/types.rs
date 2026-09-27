@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use mqk_integrity::CalendarSpec;
-use mqk_portfolio::Fill;
+use mqk_portfolio::{Fill, QtyMicros};
 use uuid::Uuid;
 
 use crate::corporate_actions::CorporateActionPolicy;
@@ -217,6 +217,34 @@ pub struct BacktestOrder {
     pub status: OrderStatus,
 }
 
+/// D6/A2 additive V2 order record for the `FractionalQtyMicrosV1` quantity
+/// domain (Crypto only). Used exclusively for an order whose exact quantity
+/// has no whole-unit representation (`QtyMicros::to_whole_units_checked()`
+/// returns `None`); a whole-unit order -- including every order in a
+/// `WholeUnitsV1` run -- is still recorded as an ordinary [`BacktestOrder`].
+///
+/// `BacktestOrder.qty: i64` is never populated with a truncated, rounded, or
+/// fabricated value for a fractional order -- this is a wholly separate,
+/// additive record instead. See `mqk_backtest::engine`'s admission/resolve
+/// path for the exact split.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BacktestOrderV2 {
+    /// Deterministic per-order UUID (same namespace/value as the `BacktestOrder`
+    /// this order would have used had its quantity been whole).
+    pub order_id: Uuid,
+    /// Bar end timestamp at which the strategy decision that produced this
+    /// order was made.
+    pub signal_ts: i64,
+    /// Symbol this order targets.
+    pub symbol: String,
+    /// Direction.
+    pub side: BacktestOrderSide,
+    /// Exact quantity (whole or fractional), 1e-6 scale.
+    pub qty_micros: QtyMicros,
+    /// Outcome status.
+    pub status: OrderStatus,
+}
+
 // ---------------------------------------------------------------------------
 // StressProfile
 // ---------------------------------------------------------------------------
@@ -329,6 +357,79 @@ impl CommissionModel {
             0
         };
         per_share.saturating_add(bps_fee).max(0)
+    }
+
+    /// D6/A2 — exact fee for a `QtyMicros` quantity (whole or fractional).
+    ///
+    /// Exact for whole-unit inputs: `compute_fee_micros(QtyMicros::from_whole_units(n).unwrap(), price) ==
+    /// compute_fee(n, price)` for every representable `n` -- `qty_micros.raw()` is an exact multiple of
+    /// `QTY_MICROS_SCALE` for a whole quantity, so the division below is exact, never a floored
+    /// approximation. For a genuine fractional quantity the per-share component scales linearly with the
+    /// fractional amount (e.g. 0.5 units pays half the flat per-unit fee); `bps_of_notional` is already
+    /// qty-scale-invariant (it reads the exact notional, not a share count) and needs no separate handling.
+    pub fn compute_fee_micros(&self, qty_micros: QtyMicros, fill_price_micros: i64) -> i64 {
+        if !qty_micros.is_positive() {
+            return 0;
+        }
+        // Mirrors `mqk_schemas::QTY_MICROS_SCALE` (1 unit = 1_000_000 QtyMicros);
+        // not re-exported through `mqk_portfolio`, so duplicated here as the
+        // same fixed, never-changing scale constant.
+        const QTY_MICROS_SCALE_I128: i128 = 1_000_000;
+        let raw = qty_micros.raw() as i128;
+        let per_share = ((self.per_share_micros as i128) * raw / QTY_MICROS_SCALE_I128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let notional = (fill_price_micros as i128) * raw / QTY_MICROS_SCALE_I128;
+        let bps_fee = if self.bps_of_notional > 0 {
+            let fee = notional * (self.bps_of_notional as i128) / 10_000i128;
+            fee.min(i64::MAX as i128) as i64
+        } else {
+            0
+        };
+        per_share.saturating_add(bps_fee).max(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QuantitySemanticsId — D6/A1 (behavior-bearing quantity-semantics identity)
+// ---------------------------------------------------------------------------
+
+/// The configured, behavior-bearing quantity-semantics domain for a backtest
+/// run (D6). Distinct from any artifact/transport encoding version: changing
+/// only how a run's data is serialized/laid out on disk must never change
+/// this value, and changing this value always changes
+/// [`derive_run_id_with_quantity_semantics`]'s output.
+///
+/// `WholeUnitsV1` is the historical, default domain and is byte-identical to
+/// every backtest run before this type existed. `FractionalQtyMicrosV1` is
+/// the additive V2 domain (D6/A2): it may carry a genuinely fractional
+/// `QtyMicros` order quantity, and is refused by [`BacktestEngine::run`]
+/// (`mqk_backtest::engine`) unless the run's economics carry
+/// `contract_multiplier == 1` (no fractional futures/options contracts).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum QuantitySemanticsId {
+    /// V1: whole-unit `i64` order/fill domain (equities/ETF/futures/options).
+    WholeUnitsV1,
+    /// V2: additive fractional `QtyMicros` order/fill domain (Crypto only).
+    FractionalQtyMicrosV1,
+}
+
+impl QuantitySemanticsId {
+    /// Canonical token folded into `BacktestConfig::config_id()` and
+    /// [`derive_run_id_with_quantity_semantics`]. Never changes meaning for
+    /// an existing variant.
+    pub const fn canonical_str(self) -> &'static str {
+        match self {
+            QuantitySemanticsId::WholeUnitsV1 => "whole_units_v1",
+            QuantitySemanticsId::FractionalQtyMicrosV1 => "fractional_qty_micros_v1",
+        }
+    }
+}
+
+impl Default for QuantitySemanticsId {
+    /// Preserves every existing `BacktestConfig` construction site's behavior
+    /// exactly: the historical whole-unit domain.
+    fn default() -> Self {
+        QuantitySemanticsId::WholeUnitsV1
     }
 }
 
@@ -515,6 +616,14 @@ pub struct BacktestConfig {
     /// produce different identity hashes.  Defaults to `target_qty=1` with no caps,
     /// which matches live-strategy conservative defaults.
     pub sizing: StrategySizingConfig,
+
+    /// D6/A1 — the configured, behavior-bearing quantity-semantics domain
+    /// for this run (see [`QuantitySemanticsId`]). Captured in `config_id()`
+    /// and folded into run identity via
+    /// [`derive_run_id_with_quantity_semantics`] whenever it differs from
+    /// `WholeUnitsV1`. Defaults to `WholeUnitsV1`, preserving every existing
+    /// backtest byte-for-byte.
+    pub quantity_semantics: QuantitySemanticsId,
 }
 
 impl BacktestConfig {
@@ -560,6 +669,9 @@ impl BacktestConfig {
             corporate_action_policy: CorporateActionPolicy::Allow,
             // BACKTEST-CONFIG-DETERMINISM-SIZING-01: default 1 share, no caps
             sizing: StrategySizingConfig::default_sizing(),
+            // D6/A1: historical whole-unit domain, unchanged for every
+            // existing test.
+            quantity_semantics: QuantitySemanticsId::WholeUnitsV1,
         }
     }
 
@@ -640,6 +752,9 @@ impl BacktestConfig {
             corporate_action_policy: CorporateActionPolicy::ForbidPeriods(vec![]),
             // BACKTEST-CONFIG-DETERMINISM-SIZING-01: default 1 share, no caps
             sizing: StrategySizingConfig::default_sizing(),
+            // D6/A1: historical whole-unit domain, unchanged for every
+            // existing caller.
+            quantity_semantics: QuantitySemanticsId::WholeUnitsV1,
         }
     }
 
@@ -672,11 +787,20 @@ impl BacktestConfig {
         // CalendarSpec derives Debug; format! gives stable enum variant names.
         let cal_str = format!("{:?}", self.integrity_calendar);
         let sizing_str = self.sizing.canonical_str();
+        // D6/A1: appended ONLY for a non-default quantity-semantics domain,
+        // so `config_id()` (and therefore `run_id`, which takes `config_id`
+        // as an input) stays byte-for-byte identical to every historical
+        // `WholeUnitsV1` backtest -- adding this field must not itself
+        // manufacture a new identity for a caller who never touches it.
+        let qty_sem_suffix = match self.quantity_semantics {
+            QuantitySemanticsId::WholeUnitsV1 => String::new(),
+            other => format!("|qty_sem={}", other.canonical_str()),
+        };
         let canonical = format!(
             "v2|ts={ts}|hist={hist}|cash={cash}|shadow={shadow}|dll={dll}|mdd={mdd}|\
              rs={rs}|pdt={pdt}|ks={ks}|exp={exp}|slip={slip}|vol={vol}|impact={impact}|\
              comm_ps={comm_ps}|comm_bps={comm_bps}|liq={liq}|\
-             int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}|{sz}",
+             int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}|{sz}{qty_sem_suffix}",
             ts = self.timeframe_secs,
             hist = self.bar_history_len,
             cash = self.initial_cash_micros,
@@ -1000,6 +1124,67 @@ pub fn derive_run_id_with_semantic_identity(
     Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
 }
 
+/// D6/A1 — run-identity derivation aware of the configured
+/// [`QuantitySemanticsId`]. This is "the next semantic derivation seam"
+/// (D6): [`derive_run_id_with_semantic_identity`] (V1) is called UNCHANGED,
+/// and its output is returned UNCHANGED, for `WholeUnitsV1` -- every
+/// historical run_id stays byte-for-byte identical. Only a genuinely new
+/// quantity-semantics domain (`FractionalQtyMicrosV1`) takes the new `v6`
+/// namespace tag and folds the domain token into the hash input, so two
+/// runs that are identical in every other respect but configured for a
+/// different quantity domain can never collide on `run_id` -- even if the
+/// realized path happens to use only whole quantities (the permitted
+/// action/quantity domain itself changed, which is what identity tracks).
+pub fn derive_run_id_with_quantity_semantics(
+    strategy_name: &str,
+    config_id: &Uuid,
+    input_data_hash: &str,
+    economics: &BacktestInstrumentEconomics,
+    execution_model_id: &str,
+    strategy_semantic_fingerprint: &str,
+    quantity_semantics: QuantitySemanticsId,
+) -> Uuid {
+    match quantity_semantics {
+        QuantitySemanticsId::WholeUnitsV1 => derive_run_id_with_semantic_identity(
+            strategy_name,
+            config_id,
+            input_data_hash,
+            economics,
+            execution_model_id,
+            strategy_semantic_fingerprint,
+        ),
+        other => {
+            let economics_token = if economics.is_default_equity() {
+                "equity".to_string()
+            } else {
+                format!(
+                    "mult={}|im={}|mm={}",
+                    economics.contract_multiplier,
+                    economics
+                        .initial_margin_micros
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    economics
+                        .maintenance_margin_micros
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                )
+            };
+            let data = format!(
+                "mqk-bkt.run.v6|{}|{}|{}|{}|exec={}|sem={}|qty_sem={}",
+                strategy_name,
+                config_id,
+                input_data_hash,
+                economics_token,
+                execution_model_id,
+                strategy_semantic_fingerprint,
+                other.canonical_str(),
+            );
+            Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BacktestReport
 // ---------------------------------------------------------------------------
@@ -1054,6 +1239,10 @@ pub struct BacktestReport {
     /// BKT-04P: one row per intent, regardless of risk outcome.
     /// `order_id` matches `BacktestFill.order_id` for filled orders.
     pub orders: Vec<BacktestOrder>,
+    /// D6/A2 — additive V2 order records for a genuinely fractional order
+    /// under `QuantitySemanticsId::FractionalQtyMicrosV1` (Crypto only).
+    /// Always empty for a `WholeUnitsV1` run. See [`BacktestOrderV2`].
+    pub orders_v2: Vec<BacktestOrderV2>,
     /// All fills executed during the backtest, with per-fill provenance.
     ///
     /// BKT-01P: each fill carries `fill_id`, `order_id`, `signal_ts`, and `fill_ts`.
@@ -1090,6 +1279,10 @@ pub struct BacktestReport {
     /// value's identity contribution is independently verifiable from the
     /// report alone.
     pub execution_model_id: String,
+    /// D6/A1 — the quantity-semantics domain this run was actually
+    /// configured with (copied from `BacktestConfig.quantity_semantics`).
+    /// `WholeUnitsV1` for every historical/default backtest.
+    pub quantity_semantics: QuantitySemanticsId,
 }
 
 impl BacktestReport {
@@ -1113,6 +1306,7 @@ impl BacktestReport {
             halt_reason: None,
             equity_curve: Vec::new(),
             orders: Vec::new(),
+            orders_v2: Vec::new(),
             fills: Vec::new(),
             last_prices: BTreeMap::new(),
             execution_blocked: false,
@@ -1121,6 +1315,160 @@ impl BacktestReport {
             sizing: StrategySizingConfig::default_sizing(),
             economics: BacktestEconomicsReport::equity(),
             execution_model_id: String::new(),
+            quantity_semantics: QuantitySemanticsId::WholeUnitsV1,
         }
+    }
+}
+
+#[cfg(test)]
+mod quantity_semantics_tests {
+    use super::*;
+
+    const M: i64 = 1_000_000;
+
+    fn econ_equity() -> BacktestInstrumentEconomics {
+        BacktestInstrumentEconomics::equity()
+    }
+
+    // --- QS-T01: config_id is byte-identical to before this field existed ---
+    // for the default (WholeUnitsV1) domain -- proven by comparing two
+    // configs, one built the "old" way (no quantity_semantics knowledge
+    // needed since it's the zero-cost default) against one that explicitly
+    // sets WholeUnitsV1.
+    #[test]
+    fn qs_t01_config_id_unchanged_for_default_whole_units_domain() {
+        let default_cfg = BacktestConfig::test_defaults();
+        let mut explicit_cfg = BacktestConfig::test_defaults();
+        explicit_cfg.quantity_semantics = QuantitySemanticsId::WholeUnitsV1;
+        assert_eq!(default_cfg.config_id(), explicit_cfg.config_id());
+    }
+
+    // --- QS-T02: a non-default quantity-semantics domain changes config_id ---
+    #[test]
+    fn qs_t02_fractional_domain_changes_config_id() {
+        let whole_cfg = BacktestConfig::test_defaults();
+        let mut fractional_cfg = BacktestConfig::test_defaults();
+        fractional_cfg.quantity_semantics = QuantitySemanticsId::FractionalQtyMicrosV1;
+        assert_ne!(whole_cfg.config_id(), fractional_cfg.config_id());
+    }
+
+    // --- QS-T03: derive_run_id_with_quantity_semantics(WholeUnitsV1) is
+    // byte-identical to calling the untouched V1 function directly ---
+    #[test]
+    fn qs_t03_whole_units_delegates_exactly_to_v1_function() {
+        let config_id = Uuid::new_v4();
+        let economics = econ_equity();
+        let v1 = derive_run_id_with_semantic_identity(
+            "strat", &config_id, "hash", &economics, "exec", "fp",
+        );
+        let v2 = derive_run_id_with_quantity_semantics(
+            "strat",
+            &config_id,
+            "hash",
+            &economics,
+            "exec",
+            "fp",
+            QuantitySemanticsId::WholeUnitsV1,
+        );
+        assert_eq!(v1, v2);
+    }
+
+    // --- QS-T04: a different quantity-semantics domain (same everything
+    // else) produces a different run_id than the V1 function would ---
+    #[test]
+    fn qs_t04_fractional_domain_changes_run_id() {
+        let config_id = Uuid::new_v4();
+        let economics = econ_equity();
+        let v1 = derive_run_id_with_semantic_identity(
+            "strat", &config_id, "hash", &economics, "exec", "fp",
+        );
+        let v2_fractional = derive_run_id_with_quantity_semantics(
+            "strat",
+            &config_id,
+            "hash",
+            &economics,
+            "exec",
+            "fp",
+            QuantitySemanticsId::FractionalQtyMicrosV1,
+        );
+        assert_ne!(v1, v2_fractional);
+    }
+
+    // --- QS-T05: retry/replay determinism -- identical inputs, identical
+    // output, for the new (fractional) branch too ---
+    #[test]
+    fn qs_t05_fractional_run_id_is_deterministic() {
+        let config_id = Uuid::new_v4();
+        let economics = econ_equity();
+        let a = derive_run_id_with_quantity_semantics(
+            "strat",
+            &config_id,
+            "hash",
+            &economics,
+            "exec",
+            "fp",
+            QuantitySemanticsId::FractionalQtyMicrosV1,
+        );
+        let b = derive_run_id_with_quantity_semantics(
+            "strat",
+            &config_id,
+            "hash",
+            &economics,
+            "exec",
+            "fp",
+            QuantitySemanticsId::FractionalQtyMicrosV1,
+        );
+        assert_eq!(a, b);
+    }
+
+    // --- QS-T06: compute_fee_micros exact parity with compute_fee for every
+    // whole-unit quantity (mutation: a floored/approximate implementation
+    // would diverge here for a non-trivial per_share_micros value) ---
+    #[test]
+    fn qs_t06_compute_fee_micros_matches_compute_fee_for_whole_quantities() {
+        let model = CommissionModel {
+            per_share_micros: 5_000,
+            bps_of_notional: 12,
+        };
+        for qty in [1i64, 2, 3, 7, 100, 12_345] {
+            let whole_fee = model.compute_fee(qty, 4_500 * M);
+            let micros_fee =
+                model.compute_fee_micros(QtyMicros::from_whole_units(qty).unwrap(), 4_500 * M);
+            assert_eq!(
+                whole_fee, micros_fee,
+                "qty={qty}: compute_fee={whole_fee} compute_fee_micros={micros_fee}"
+            );
+        }
+    }
+
+    // --- QS-T07: compute_fee_micros scales linearly for a genuinely
+    // fractional quantity (0.5 units pays exactly half the per-unit fee) ---
+    #[test]
+    fn qs_t07_compute_fee_micros_scales_fractional_per_share_fee_exactly() {
+        let model = CommissionModel {
+            per_share_micros: 10_000,
+            bps_of_notional: 0,
+        };
+        let half_unit = QtyMicros::new(500_000); // 0.5
+        let one_unit = QtyMicros::from_whole_units(1).unwrap();
+        let half_fee = model.compute_fee_micros(half_unit, 100 * M);
+        let one_fee = model.compute_fee_micros(one_unit, 100 * M);
+        assert_eq!(half_fee * 2, one_fee);
+        assert_eq!(half_fee, 5_000);
+    }
+
+    // --- QS-T08: non-positive quantity never produces a fee (mirrors
+    // compute_fee's own contract) ---
+    #[test]
+    fn qs_t08_compute_fee_micros_zero_for_non_positive_qty() {
+        let model = CommissionModel {
+            per_share_micros: 5_000,
+            bps_of_notional: 10,
+        };
+        assert_eq!(model.compute_fee_micros(QtyMicros::ZERO, 100 * M), 0);
+        assert_eq!(
+            model.compute_fee_micros(QtyMicros::new(-500_000), 100 * M),
+            0
+        );
     }
 }

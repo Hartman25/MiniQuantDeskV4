@@ -27,29 +27,6 @@ use mqk_execution::{targets_to_order_intents, Side as ExecSide};
 
 type PositionBook = BTreeMap<String, QtyMicros>;
 
-/// Read a position's signed quantity as whole-unit `i64` shares.
-///
-/// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionState::qty_signed()` returns
-/// `QtyMicros` (fractional-capable, for Crypto). The backtest engine is
-/// equities-only (`PositionBook`, `BacktestOrder.qty`, and every strategy
-/// interface here are whole-unit `i64` by design -- see module docs); every
-/// position it holds is built exclusively from this crate's own whole-unit
-/// `Fill`s (via `whole_qty_to_micros` below), so this conversion can never
-/// legitimately observe a fractional remainder.
-fn whole_qty_signed(p: &PositionState) -> i64 {
-    p.qty_signed()
-        .to_whole_units_checked()
-        .expect("backtest positions are built exclusively from whole-unit fills")
-}
-
-/// Convert a whole-unit `i64` order/fill quantity to `QtyMicros` for the
-/// `mqk_portfolio::Fill` boundary. See `whole_qty_signed` for why the
-/// backtest engine's own domain stays whole-unit `i64`.
-fn whole_qty_to_micros(qty: i64) -> QtyMicros {
-    QtyMicros::from_whole_units(qty)
-        .expect("backtest order/fill qty is validated whole-unit i64 by construction")
-}
-
 use mqk_integrity::{
     evaluate_bar as integrity_evaluate_bar, Bar as IntegrityBar, BarKey, FeedId, IntegrityAction,
     IntegrityConfig, IntegrityState, Timeframe as IntegrityTimeframe,
@@ -57,7 +34,7 @@ use mqk_integrity::{
 use mqk_isolation::enforce_allocation_cap_micros;
 use mqk_portfolio::{
     apply_fill, compute_equity_micros, compute_exposure_micros, Fill, MarkMap, PortfolioState,
-    PositionState, QtyMicros, Side as PfSide,
+    QtyMicros, Side as PfSide,
 };
 use mqk_risk::{
     evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput,
@@ -69,13 +46,13 @@ use mqk_strategy::{
 };
 
 use crate::economics::{
-    clamp_i128_to_i64, notional_micros, saturating_mul_i128, BacktestEconomicsLedger,
+    clamp_i128_to_i64, notional_micros_qty, saturating_mul_i128, BacktestEconomicsLedger,
     BacktestEconomicsReport, BacktestInstrumentEconomics,
 };
 use crate::types::{
-    derive_input_data_hash, derive_run_id_with_semantic_identity, BacktestBar, BacktestConfig,
-    BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport, OrderStatus,
-    BACKTEST_EXECUTION_MODEL_ID,
+    derive_input_data_hash, derive_run_id_with_quantity_semantics, BacktestBar, BacktestConfig,
+    BacktestFill, BacktestOrder, BacktestOrderSide, BacktestOrderV2, BacktestReport, OrderStatus,
+    QuantitySemanticsId, BACKTEST_EXECUTION_MODEL_ID,
 };
 
 /// Backtest error variants.
@@ -104,6 +81,12 @@ pub enum BacktestError {
     /// fields are public, so a caller could construct an invalid value
     /// without going through the validating `::new()` constructor.
     InvalidEconomics { multiplier: i64 },
+    /// D6/A2 -- `QuantitySemanticsId::FractionalQtyMicrosV1` was configured
+    /// with a `contract_multiplier != 1`. Fractional quantities are Crypto
+    /// (spot, multiplier-less) only -- no fractional futures/options
+    /// contract exists under this domain. Fails closed before any bar is
+    /// processed.
+    InvalidQuantitySemantics { contract_multiplier: i64 },
     /// BKT-FUTURE-EXECUTION-01 -- the input bar sequence is not sorted by
     /// `end_ts` (globally, across all symbols). Future-symbol-correct
     /// execution requires that "the first later bar for a symbol" be
@@ -171,6 +154,11 @@ impl core::fmt::Display for BacktestError {
                 "invalid economics rejected: contract_multiplier = {} (must be > 0)",
                 multiplier
             ),
+            BacktestError::InvalidQuantitySemantics { contract_multiplier } => write!(
+                f,
+                "invalid quantity semantics rejected: FractionalQtyMicrosV1 requires contract_multiplier == 1, got {} (no fractional futures/options contracts)",
+                contract_multiplier
+            ),
             BacktestError::UnsortedInput {
                 end_ts,
                 prev_end_ts,
@@ -218,7 +206,10 @@ struct PendingBacktestOrder {
     order_id: Uuid,
     symbol: String,
     side: BacktestOrderSide,
-    qty: i64,
+    /// D6/A2: exact quantity (whole or fractional), 1e-6 scale. Whole for
+    /// every `WholeUnitsV1` order -- validated at admission time (see
+    /// `BacktestEngine::run`).
+    qty: QtyMicros,
     /// Bar end timestamp at which the strategy decision that produced this
     /// order was made. A later bar is eligible to fill it iff its own
     /// `end_ts` is strictly greater than this value.
@@ -241,6 +232,9 @@ pub struct BacktestEngine {
     last_prices: MarkMap,
     /// All order intents recorded during the run (filled AND rejected).
     orders: Vec<BacktestOrder>,
+    /// D6/A2: additive V2 order records for a genuinely fractional order.
+    /// Always empty for a `WholeUnitsV1` run.
+    orders_v2: Vec<BacktestOrderV2>,
     /// All fills recorded during the run (with per-fill provenance).
     fills: Vec<BacktestFill>,
     /// BKT-FUTURE-EXECUTION-01: orders admitted by risk at signal time that
@@ -332,6 +326,7 @@ impl BacktestEngine {
             recent_bars: Vec::new(),
             last_prices: BTreeMap::new(),
             orders: Vec::new(),
+            orders_v2: Vec::new(),
             fills: Vec::new(),
             pending_orders: Vec::new(),
             seen_order_ids: HashSet::new(),
@@ -443,7 +438,54 @@ impl BacktestEngine {
                 multiplier: self.economics.contract_multiplier,
             });
         }
+        // D6/A2: fractional quantities are Crypto (spot) only -- refuse a
+        // fractional domain configured alongside a multiplier-bearing
+        // (futures/options-style) instrument before any bar is processed.
+        if matches!(
+            self.config.quantity_semantics,
+            QuantitySemanticsId::FractionalQtyMicrosV1
+        ) && self.economics.contract_multiplier != 1
+        {
+            return Err(BacktestError::InvalidQuantitySemantics {
+                contract_multiplier: self.economics.contract_multiplier,
+            });
+        }
         Ok(())
+    }
+
+    /// D6/A2 -- record one order/intent outcome, routing to the V1
+    /// `BacktestOrder` collection when `qty_micros` has a whole-unit
+    /// representation (every `WholeUnitsV1` order, always) and to the
+    /// additive V2 `BacktestOrderV2` collection otherwise (a genuinely
+    /// fractional `FractionalQtyMicrosV1` order). `BacktestOrder.qty: i64`
+    /// is never populated with a truncated or fabricated value.
+    fn push_order_record(
+        &mut self,
+        order_id: Uuid,
+        signal_ts: i64,
+        symbol: String,
+        side: BacktestOrderSide,
+        qty_micros: QtyMicros,
+        status: OrderStatus,
+    ) {
+        match qty_micros.to_whole_units_checked() {
+            Some(qty) => self.orders.push(BacktestOrder {
+                order_id,
+                signal_ts,
+                symbol,
+                side,
+                qty,
+                status,
+            }),
+            None => self.orders_v2.push(BacktestOrderV2 {
+                order_id,
+                signal_ts,
+                symbol,
+                side,
+                qty_micros,
+                status,
+            }),
+        }
     }
 
     /// BKT-BAR-VOLUME-PARTICIPATION-CAP-01 -- Validate the bar-volume
@@ -712,16 +754,26 @@ impl BacktestEngine {
                     });
                 }
 
-                // The backtest engine is equities-only (whole-unit order/fill
-                // domain). A fractional intent quantity is unsupported here:
-                // fail closed rather than truncating.
-                let Some(intent_qty) = intent.qty.to_whole_units_checked() else {
-                    self.halted = true;
-                    self.halt_reason = Some(format!(
-                        "fractional_intent_qty_unsupported_in_backtest: {} {}",
-                        intent.symbol, intent.qty
-                    ));
-                    break;
+                // D6/A2: the backtest engine's default domain is whole-unit
+                // order/fill (`QuantitySemanticsId::WholeUnitsV1`) -- a
+                // fractional intent quantity fails closed rather than
+                // truncating, exactly as before. Only an explicitly
+                // configured `FractionalQtyMicrosV1` run (Crypto only,
+                // validated `contract_multiplier == 1` at `run()` start)
+                // carries the intent's exact quantity through unchanged,
+                // whole or fractional.
+                let intent_qty_micros: QtyMicros = match self.config.quantity_semantics {
+                    QuantitySemanticsId::WholeUnitsV1
+                        if intent.qty.to_whole_units_checked().is_none() =>
+                    {
+                        self.halted = true;
+                        self.halt_reason = Some(format!(
+                            "fractional_intent_qty_unsupported_in_backtest: {} {}",
+                            intent.symbol, intent.qty
+                        ));
+                        break;
+                    }
+                    _ => intent.qty,
                 };
 
                 let is_risk_reducing = self.is_intent_risk_reducing(intent);
@@ -747,31 +799,31 @@ impl BacktestEngine {
                             order_id,
                             symbol: intent.symbol.clone(),
                             side: bkt_side,
-                            qty: intent_qty,
+                            qty: intent_qty_micros,
                             signal_ts: bar.end_ts,
                         });
                     }
                     RiskAction::Reject => {
                         // BKT-04P: log rejected order (no fill)
-                        self.orders.push(BacktestOrder {
+                        self.push_order_record(
                             order_id,
-                            signal_ts: bar.end_ts,
-                            symbol: intent.symbol.clone(),
-                            side: bkt_side,
-                            qty: intent_qty,
-                            status: OrderStatus::Rejected,
-                        });
+                            bar.end_ts,
+                            intent.symbol.clone(),
+                            bkt_side,
+                            intent_qty_micros,
+                            OrderStatus::Rejected,
+                        );
                     }
                     RiskAction::Halt => {
                         // BKT-04P: log halt-triggering order
-                        self.orders.push(BacktestOrder {
+                        self.push_order_record(
                             order_id,
-                            signal_ts: bar.end_ts,
-                            symbol: intent.symbol.clone(),
-                            side: bkt_side,
-                            qty: intent_qty,
-                            status: OrderStatus::HaltTriggered,
-                        });
+                            bar.end_ts,
+                            intent.symbol.clone(),
+                            bkt_side,
+                            intent_qty_micros,
+                            OrderStatus::HaltTriggered,
+                        );
                         self.halted = true;
                         self.halt_reason = Some(format!("{:?}", risk_decision.reason));
                     }
@@ -781,14 +833,14 @@ impl BacktestEngine {
                         // is not an ordinary strategy intent and is
                         // deliberately out of scope for future-bar deferral
                         // (see `flatten_all`).
-                        self.orders.push(BacktestOrder {
+                        self.push_order_record(
                             order_id,
-                            signal_ts: bar.end_ts,
-                            symbol: intent.symbol.clone(),
-                            side: bkt_side,
-                            qty: intent_qty,
-                            status: OrderStatus::HaltTriggered,
-                        });
+                            bar.end_ts,
+                            intent.symbol.clone(),
+                            bkt_side,
+                            intent_qty_micros,
+                            OrderStatus::HaltTriggered,
+                        );
                         self.flatten_all(bar);
                         self.halted = true;
                         self.halt_reason = Some(format!("{:?}", risk_decision.reason));
@@ -828,15 +880,16 @@ impl BacktestEngine {
         } else {
             OrderStatus::UnfilledEndOfData
         };
-        for pending in self.pending_orders.drain(..) {
-            self.orders.push(BacktestOrder {
-                order_id: pending.order_id,
-                signal_ts: pending.signal_ts,
-                symbol: pending.symbol,
-                side: pending.side,
-                qty: pending.qty,
-                status: terminal_status.clone(),
-            });
+        let terminal_pending: Vec<PendingBacktestOrder> = self.pending_orders.drain(..).collect();
+        for pending in terminal_pending {
+            self.push_order_record(
+                pending.order_id,
+                pending.signal_ts,
+                pending.symbol,
+                pending.side,
+                pending.qty,
+                terminal_status.clone(),
+            );
         }
 
         // BKT-PROV-01: strategy identity — derive from spec if registered.
@@ -849,25 +902,33 @@ impl BacktestEngine {
         let strategy_semantic_fingerprint = self.host.semantic_fingerprint().unwrap_or_default();
         let config_id = self.config.config_id();
         // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01 / BKT-FUTURE-EXECUTION-01-REPAIR-01
-        // (Blocker 2) / BACKTEST-STRATEGY-SEMANTIC-RUN-IDENTITY-01: run
-        // identity folds in economics, the execution-model semantic, and the
-        // strategy's semantic fingerprint, so two runs with identical
+        // (Blocker 2) / BACKTEST-STRATEGY-SEMANTIC-RUN-IDENTITY-01 / D6-A1:
+        // run identity folds in economics, the execution-model semantic, the
+        // strategy's semantic fingerprint, and (via
+        // `derive_run_id_with_quantity_semantics`) the configured
+        // quantity-semantics domain, so two runs with identical
         // strategy_name/config/input but different multiplier/margin,
-        // different fill semantics, or different strategy semantics cannot
-        // collide on run_id. See `derive_run_id_with_semantic_identity`.
-        let run_id = derive_run_id_with_semantic_identity(
+        // different fill semantics, different strategy semantics, or a
+        // different quantity domain cannot collide on run_id. Delegates to
+        // the unchanged V1 `derive_run_id_with_semantic_identity` (byte-for-
+        // byte) for `WholeUnitsV1` -- see that function's doc comment.
+        let run_id = derive_run_id_with_quantity_semantics(
             &strategy_name,
             &config_id,
             &input_data_hash,
             &self.economics,
             BACKTEST_EXECUTION_MODEL_ID,
             &strategy_semantic_fingerprint,
+            self.config.quantity_semantics,
         );
 
         // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: report.equity_curve stays the
         // unmodified mqk_portfolio-driven curve (byte-identical to every
-        // existing equity backtest) when multiplier=1. For multiplier>1 it
-        // surfaces the multiplier-aware economics curve instead, since the
+        // existing equity backtest) when multiplier=1 -- which is every
+        // `FractionalQtyMicrosV1` run too (validated at `run()` start), so a
+        // Crypto run's equity curve is always the exact, QtyMicros-native
+        // `self.portfolio`-driven curve. For multiplier>1 it surfaces the
+        // multiplier-aware economics curve instead, since the
         // mqk_portfolio-driven curve was never multiplier-aware.
         let equity_curve = if self.economics.contract_multiplier == 1 {
             self.equity_curve.clone()
@@ -875,10 +936,21 @@ impl BacktestEngine {
             self.economics_equity_curve.clone()
         };
 
-        let economics_report = BacktestEconomicsReport::from_run(
-            &self.economics,
-            self.economics_realized_pnl_micros(),
-        );
+        // D6/A2: `self.economics_ledger` only ever observes a
+        // `FractionalQtyMicrosV1` run's WHOLE-unit fills (see
+        // `resolve_one_pending_order`/`flatten_all`) -- a genuinely
+        // fractional fill is never applied to it, since `contract_multiplier
+        // == 1` there makes it a byte-identical (and therefore redundant)
+        // mirror of `self.portfolio`, which IS exact/QtyMicros-native for
+        // every fill. Source realized P&L from the authoritative portfolio
+        // directly in that mode instead of the (incompletely-populated)
+        // shadow ledger.
+        let realized_pnl_micros = match self.config.quantity_semantics {
+            QuantitySemanticsId::FractionalQtyMicrosV1 => self.portfolio.realized_pnl_micros,
+            QuantitySemanticsId::WholeUnitsV1 => self.economics_realized_pnl_micros(),
+        };
+        let economics_report =
+            BacktestEconomicsReport::from_run(&self.economics, realized_pnl_micros);
 
         Ok(BacktestReport {
             strategy_name,
@@ -890,6 +962,7 @@ impl BacktestEngine {
             halt_reason: self.halt_reason.clone(),
             equity_curve,
             orders: self.orders.clone(),
+            orders_v2: self.orders_v2.clone(),
             fills: self.fills.clone(),
             last_prices: self.last_prices.clone(),
             execution_blocked: self.execution_blocked,
@@ -898,6 +971,7 @@ impl BacktestEngine {
             sizing: self.config.sizing.clone(),
             economics: economics_report,
             execution_model_id: BACKTEST_EXECUTION_MODEL_ID.to_string(),
+            quantity_semantics: self.config.quantity_semantics,
         })
     }
 
@@ -1167,15 +1241,20 @@ impl BacktestEngine {
                 let cap_i128 = (bar.volume as i128) * (rate_bps as i128) / 10_000i128;
                 cap_i128.min(i64::MAX as i128) as i64
             };
-            if pending.qty > cap_qty {
-                self.orders.push(BacktestOrder {
-                    order_id: pending.order_id,
-                    signal_ts: pending.signal_ts,
-                    symbol: pending.symbol,
-                    side: pending.side,
-                    qty: pending.qty,
-                    status: OrderStatus::RejectedLiquidityCapacity,
-                });
+            // D6/A2: compare in exact micros scale (`pending.qty` may be
+            // fractional) rather than converting the cap to `QtyMicros`,
+            // which could itself overflow for an astronomically large bar
+            // volume -- i128 has ample headroom for `cap_qty * 1_000_000`.
+            let cap_micros_i128 = (cap_qty as i128) * 1_000_000i128;
+            if (pending.qty.raw() as i128) > cap_micros_i128 {
+                self.push_order_record(
+                    pending.order_id,
+                    pending.signal_ts,
+                    pending.symbol,
+                    pending.side,
+                    pending.qty,
+                    OrderStatus::RejectedLiquidityCapacity,
+                );
                 return;
             }
         }
@@ -1185,23 +1264,34 @@ impl BacktestEngine {
             BacktestOrderSide::Sell => ExecSide::Sell,
         };
 
-        let (reducing_qty, residual_increasing_qty): (i64, i64) = {
-            let current_qty = self
+        // D6/A2: `QtyMicros` checked arithmetic throughout -- exact for both
+        // the whole-unit V1 domain and the additive fractional domain.
+        // `current_qty` reads `PositionState::qty_signed()` directly (no
+        // whole-unit-only panic path), so a fractional Crypto position can
+        // never crash this decomposition.
+        let (reducing_qty, residual_increasing_qty): (QtyMicros, QtyMicros) = {
+            let current_qty: QtyMicros = self
                 .portfolio
                 .positions
                 .get(&pending.symbol)
-                .map(whole_qty_signed)
-                .unwrap_or(0);
+                .map(|p| p.qty_signed())
+                .unwrap_or(QtyMicros::ZERO);
             let reducing_capacity = match exec_side {
                 // Buy only reduces risk while covering a short.
-                ExecSide::Buy => (-current_qty).max(0),
+                ExecSide::Buy => current_qty
+                    .checked_neg()
+                    .unwrap_or(QtyMicros::ZERO)
+                    .max(QtyMicros::ZERO),
                 // Sell only reduces risk while closing a long.
-                ExecSide::Sell => current_qty.max(0),
+                ExecSide::Sell => current_qty.max(QtyMicros::ZERO),
             };
             let reducing_qty = pending.qty.min(reducing_capacity);
-            (reducing_qty, pending.qty - reducing_qty)
+            let residual = pending.qty.checked_sub(reducing_qty).expect(
+                "reducing_qty <= pending.qty by construction (min of two non-negative quantities)",
+            );
+            (reducing_qty, residual)
         };
-        let is_risk_reducing = residual_increasing_qty == 0;
+        let is_risk_reducing = residual_increasing_qty.is_zero();
 
         let fill_price = self.conservative_fill_price(bar, &exec_side, pending.qty);
 
@@ -1224,20 +1314,24 @@ impl BacktestEngine {
             // reversal for the risk it is actually closing.
             let mark_micros = *self.last_prices.get(&pending.symbol).unwrap_or(&0);
             let closing_exposure_micros: i64 = {
-                let product = (reducing_qty as i128) * (mark_micros as i128);
+                // `reducing_qty` is in micros scale (qty * 1_000_000); divide
+                // back out so the product is a value in micros, not
+                // micros-squared.
+                let product = (reducing_qty.raw() as i128) * (mark_micros as i128) / 1_000_000i128;
                 product.clamp(i64::MIN as i128, i64::MAX as i128) as i64
             };
             let prospective_gross_exposure_micros = exposure
                 .gross_exposure_micros
                 .saturating_sub(closing_exposure_micros);
-            // BACKTEST-MULTIPLIER-RUN-WIRE-01: multiplier-aware notional.
-            // With `economics.contract_multiplier == 1` this is exactly
-            // `qty * fill_price`, unchanged for every existing equity backtest.
-            // Wave-2 repair: only the risk-INCREASING residual's notional is
-            // proposed against the cap -- the reducing component never adds
-            // gross exposure, so it must not be charged against headroom.
+            // BACKTEST-MULTIPLIER-RUN-WIRE-01 / D6-A2: multiplier-aware,
+            // `QtyMicros`-exact notional. With `economics.contract_multiplier
+            // == 1` this is exactly `qty * fill_price`, unchanged for every
+            // existing equity backtest. Wave-2 repair: only the
+            // risk-INCREASING residual's notional is proposed against the
+            // cap -- the reducing component never adds gross exposure, so it
+            // must not be charged against headroom.
             let proposed_notional_micros: i64 =
-                notional_micros(residual_increasing_qty, fill_price, &self.economics);
+                notional_micros_qty(residual_increasing_qty, fill_price, &self.economics);
 
             if enforce_allocation_cap_micros(
                 equity,
@@ -1247,14 +1341,14 @@ impl BacktestEngine {
             )
             .is_err()
             {
-                self.orders.push(BacktestOrder {
-                    order_id: pending.order_id,
-                    signal_ts: pending.signal_ts,
-                    symbol: pending.symbol,
-                    side: pending.side,
-                    qty: pending.qty,
-                    status: OrderStatus::Rejected,
-                });
+                self.push_order_record(
+                    pending.order_id,
+                    pending.signal_ts,
+                    pending.symbol,
+                    pending.side,
+                    pending.qty,
+                    OrderStatus::Rejected,
+                );
                 return;
             }
         }
@@ -1265,24 +1359,34 @@ impl BacktestEngine {
         };
         let fill_id = BacktestFill::make_fill_id(&pending.order_id);
         // BKT-03P: commission fee computed at fill time, never at signal time.
-        let fee = self.config.commission.compute_fee(pending.qty, fill_price);
+        let fee = self
+            .config
+            .commission
+            .compute_fee_micros(pending.qty, fill_price);
         let inner = Fill::new(
             pending.symbol.clone(),
             pf_side,
-            whole_qty_to_micros(pending.qty),
+            pending.qty,
             fill_price,
             fee,
         );
         apply_fill(&mut self.portfolio, &inner);
         // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel multiplier-aware shadow
-        // ledger update. Never reads from or mutates `self.portfolio`.
-        self.economics_ledger.apply_fill(
-            &pending.symbol,
-            matches!(exec_side, ExecSide::Buy),
-            pending.qty,
-            fill_price,
-            fee,
-        );
+        // ledger update. Never reads from or mutates `self.portfolio`. D6/A2:
+        // only applied when `pending.qty` has a whole-unit representation --
+        // see the report-construction comment in `run()` for why a genuinely
+        // fractional fill deliberately bypasses this ledger (it is always
+        // multiplier=1 there, so `self.portfolio` is already the exact,
+        // authoritative source).
+        if let Some(whole_qty) = pending.qty.to_whole_units_checked() {
+            self.economics_ledger.apply_fill(
+                &pending.symbol,
+                matches!(exec_side, ExecSide::Buy),
+                whole_qty,
+                fill_price,
+                fee,
+            );
+        }
         self.fills.push(BacktestFill {
             fill_id,
             order_id: pending.order_id,
@@ -1290,14 +1394,14 @@ impl BacktestEngine {
             fill_ts: bar.end_ts,
             inner,
         });
-        self.orders.push(BacktestOrder {
-            order_id: pending.order_id,
-            signal_ts: pending.signal_ts,
-            symbol: pending.symbol,
-            side: pending.side,
-            qty: pending.qty,
-            status: OrderStatus::Filled,
-        });
+        self.push_order_record(
+            pending.order_id,
+            pending.signal_ts,
+            pending.symbol,
+            pending.side,
+            pending.qty,
+            OrderStatus::Filled,
+        );
     }
 
     /// Build a PositionBook from current portfolio positions.
@@ -1337,7 +1441,7 @@ impl BacktestEngine {
     /// see `crate::economics::saturating_mul_i128` -- so no accepted
     /// nonnegative configuration can panic, wrap, or produce a favorable
     /// (rather than conservative) price via overflow.
-    fn conservative_fill_price(&self, bar: &BacktestBar, side: &ExecSide, qty: i64) -> i64 {
+    fn conservative_fill_price(&self, bar: &BacktestBar, side: &ExecSide, qty: QtyMicros) -> i64 {
         let base = match side {
             ExecSide::Buy => bar.high_micros,
             ExecSide::Sell => bar.low_micros,
@@ -1353,10 +1457,15 @@ impl BacktestEngine {
         let impact_component: i128 = if self.config.stress.participation_impact_bps == 0 {
             0
         } else {
+            // D6/A2: `qty.raw()` is qty scaled by 1_000_000; dividing the
+            // bar-volume side by the same scale keeps this ratio exact and
+            // identical to the pre-existing whole-unit formula (substitute
+            // `qty.raw() = n * 1_000_000` and the scale cancels exactly).
             let participation_bps: i128 = if bar.volume <= 0 {
                 10_000
             } else {
-                ((qty as i128) * 10_000i128 / (bar.volume as i128)).min(10_000i128)
+                (qty.raw() as i128 * 10_000i128 / ((bar.volume as i128) * 1_000_000i128))
+                    .min(10_000i128)
             };
             saturating_mul_i128(
                 participation_bps,
@@ -1379,16 +1488,16 @@ impl BacktestEngine {
 
     /// Check if an execution intent reduces risk (closing / reducing existing position).
     fn is_intent_risk_reducing(&self, intent: &mqk_execution::ExecutionIntent) -> bool {
-        let current_qty = self
+        let current_qty: QtyMicros = self
             .portfolio
             .positions
             .get(&intent.symbol)
-            .map(whole_qty_signed)
-            .unwrap_or(0);
+            .map(|p| p.qty_signed())
+            .unwrap_or(QtyMicros::ZERO);
 
         match intent.side {
-            ExecSide::Buy => current_qty < 0,  // buying reduces a short
-            ExecSide::Sell => current_qty > 0, // selling reduces a long
+            ExecSide::Buy => current_qty.is_negative(), // buying reduces a short
+            ExecSide::Sell => current_qty.is_positive(), // selling reduces a long
         }
     }
 
@@ -1408,42 +1517,45 @@ impl BacktestEngine {
     fn flatten_all(&mut self, bar: &BacktestBar) {
         let symbols: Vec<String> = self.portfolio.positions.keys().cloned().collect();
         for (symbol_seq, sym) in symbols.into_iter().enumerate() {
-            let qty = match self.portfolio.positions.get(&sym) {
-                Some(pos) => whole_qty_signed(pos),
+            let qty: QtyMicros = match self.portfolio.positions.get(&sym) {
+                Some(pos) => pos.qty_signed(),
                 None => continue,
             };
-            if qty == 0 {
+            if qty.is_zero() {
                 continue;
             }
 
-            let (pf_side, bkt_side, abs_qty) = if qty > 0 {
+            let (pf_side, bkt_side, abs_qty) = if qty.is_positive() {
                 (PfSide::Sell, BacktestOrderSide::Sell, qty)
             } else {
-                (PfSide::Buy, BacktestOrderSide::Buy, -qty)
+                (
+                    PfSide::Buy,
+                    BacktestOrderSide::Buy,
+                    qty.checked_neg()
+                        .expect("i64::MIN-magnitude position is not a realistic backtest state"),
+                )
             };
 
             let mark = *self.last_prices.get(&sym).unwrap_or(&bar.close_micros);
             let order_id = BacktestFill::make_flatten_order_id(bar.end_ts, &sym, symbol_seq);
             let fill_id = BacktestFill::make_fill_id(&order_id);
             // BKT-03P: apply commission to flatten fills too
-            let fee = self.config.commission.compute_fee(abs_qty, mark);
-            let inner = Fill::new(
-                sym.clone(),
-                pf_side,
-                whole_qty_to_micros(abs_qty),
-                mark,
-                fee,
-            );
+            let fee = self.config.commission.compute_fee_micros(abs_qty, mark);
+            let inner = Fill::new(sym.clone(), pf_side, abs_qty, mark, fee);
             apply_fill(&mut self.portfolio, &inner);
             // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel multiplier-aware
             // shadow ledger update, mirroring the intent-fill call site.
-            self.economics_ledger.apply_fill(
-                &sym,
-                matches!(pf_side, PfSide::Buy),
-                abs_qty,
-                mark,
-                fee,
-            );
+            // D6/A2: whole-unit only -- see the report-construction comment
+            // in `run()`.
+            if let Some(whole_abs_qty) = abs_qty.to_whole_units_checked() {
+                self.economics_ledger.apply_fill(
+                    &sym,
+                    matches!(pf_side, PfSide::Buy),
+                    whole_abs_qty,
+                    mark,
+                    fee,
+                );
+            }
             self.fills.push(BacktestFill {
                 fill_id,
                 order_id,
@@ -1452,14 +1564,14 @@ impl BacktestEngine {
                 inner,
             });
             // BKT-04P: log flatten order as filled
-            self.orders.push(BacktestOrder {
+            self.push_order_record(
                 order_id,
-                signal_ts: bar.end_ts,
-                symbol: sym,
-                side: bkt_side,
-                qty: abs_qty,
-                status: OrderStatus::Filled,
-            });
+                bar.end_ts,
+                sym,
+                bkt_side,
+                abs_qty,
+                OrderStatus::Filled,
+            );
         }
     }
 }

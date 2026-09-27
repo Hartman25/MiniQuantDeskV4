@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use mqk_backtest::{
-    BacktestEconomicsReport, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
-    OrderStatus, StrategySizingConfig,
+    BacktestEconomicsReport, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestOrderV2,
+    BacktestReport, OrderStatus, QuantitySemanticsId, StrategySizingConfig,
 };
 use mqk_portfolio::{Fill, QtyMicros, Side};
 use serde::{Deserialize, Serialize};
@@ -128,45 +128,62 @@ impl From<OrderStatusDto> for OrderStatus {
     }
 }
 
-/// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `qty` stays whole-unit `i64` on the
-/// wire -- mqk-backtest is equities-only (no fractional Crypto quantities
-/// are ever produced here), and this is a durable on-disk artifact format;
-/// widening it to `QtyMicros` would be a gratuitous schema break for a case
-/// this crate never actually exercises. See `whole_qty_signed` in
-/// mqk-backtest's engine.rs for the same reasoning at the live boundary.
+/// CUTOVER-1C-PORTFOLIO-QTY-MICROS-01 / D6-A2/A4: `qty` stays whole-unit
+/// `i64` on the wire for backward compatibility -- every artifact written
+/// before D6/A2 is whole-unit, and `qty` alone remains sufficient and
+/// accurate for every whole-unit fill (equity/futures/options, and any
+/// Crypto fill that happens to be a whole amount) going forward too.
+///
+/// `qty_micros` is the additive D6/A2 sibling: present (`Some`) ONLY for a
+/// genuinely fractional fill (`QuantitySemanticsId::FractionalQtyMicrosV1`
+/// runs only). `#[serde(default)]` (absent -> `None`) is truthful for every
+/// artifact written before this field existed -- `mqk-backtest` never
+/// produced a fractional fill before D6/A2. When `qty_micros` is `Some`,
+/// `qty` is a non-meaningful placeholder (`0`), never the real quantity --
+/// always prefer `qty_micros` when present.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FillDto {
     symbol: String,
     side: SideDto,
     qty: i64,
+    #[serde(default)]
+    qty_micros: Option<i64>,
     price_micros: i64,
     fee_micros: i64,
 }
 
 impl From<&Fill> for FillDto {
     fn from(f: &Fill) -> Self {
-        Self {
-            symbol: f.symbol.clone(),
-            side: f.side.into(),
-            qty: f
-                .qty
-                .to_whole_units_checked()
-                .expect("backtest fills are built exclusively from whole-unit orders"),
-            price_micros: f.price_micros,
-            fee_micros: f.fee_micros,
+        match f.qty.to_whole_units_checked() {
+            Some(whole) => Self {
+                symbol: f.symbol.clone(),
+                side: f.side.into(),
+                qty: whole,
+                qty_micros: None,
+                price_micros: f.price_micros,
+                fee_micros: f.fee_micros,
+            },
+            None => Self {
+                symbol: f.symbol.clone(),
+                side: f.side.into(),
+                qty: 0,
+                qty_micros: Some(f.qty.raw()),
+                price_micros: f.price_micros,
+                fee_micros: f.fee_micros,
+            },
         }
     }
 }
 
 impl From<FillDto> for Fill {
     fn from(f: FillDto) -> Self {
-        Fill::new(
-            f.symbol,
-            f.side.into(),
-            QtyMicros::from_whole_units(f.qty).expect("FillDto.qty is validated whole-unit i64"),
-            f.price_micros,
-            f.fee_micros,
-        )
+        let qty = match f.qty_micros {
+            Some(raw) => QtyMicros::new(raw),
+            None => {
+                QtyMicros::from_whole_units(f.qty).expect("FillDto.qty is validated whole-unit i64")
+            }
+        };
+        Fill::new(f.symbol, f.side.into(), qty, f.price_micros, f.fee_micros)
     }
 }
 
@@ -235,6 +252,76 @@ impl From<BacktestOrderDto> for BacktestOrder {
             side: o.side.into(),
             qty: o.qty,
             status: o.status.into(),
+        }
+    }
+}
+
+/// D6/A2/A4 -- additive V2 order record for a genuinely fractional order.
+/// Mirrors [`mqk_backtest::BacktestOrderV2`] exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BacktestOrderV2Dto {
+    order_id: Uuid,
+    signal_ts: i64,
+    symbol: String,
+    side: BacktestOrderSideDto,
+    qty_micros: i64,
+    status: OrderStatusDto,
+}
+
+impl From<&BacktestOrderV2> for BacktestOrderV2Dto {
+    fn from(o: &BacktestOrderV2) -> Self {
+        Self {
+            order_id: o.order_id,
+            signal_ts: o.signal_ts,
+            symbol: o.symbol.clone(),
+            side: (&o.side).into(),
+            qty_micros: o.qty_micros.raw(),
+            status: (&o.status).into(),
+        }
+    }
+}
+
+impl From<BacktestOrderV2Dto> for BacktestOrderV2 {
+    fn from(o: BacktestOrderV2Dto) -> Self {
+        BacktestOrderV2 {
+            order_id: o.order_id,
+            signal_ts: o.signal_ts,
+            symbol: o.symbol,
+            side: o.side.into(),
+            qty_micros: QtyMicros::new(o.qty_micros),
+            status: o.status.into(),
+        }
+    }
+}
+
+/// D6/A1/A4 -- wire mirror of [`QuantitySemanticsId`]. `#[serde(default)]`
+/// (absent -> `WholeUnitsV1`) is truthful for every artifact written before
+/// this field existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+enum QuantitySemanticsIdDto {
+    #[default]
+    WholeUnitsV1,
+    FractionalQtyMicrosV1,
+}
+
+impl From<QuantitySemanticsId> for QuantitySemanticsIdDto {
+    fn from(q: QuantitySemanticsId) -> Self {
+        match q {
+            QuantitySemanticsId::WholeUnitsV1 => QuantitySemanticsIdDto::WholeUnitsV1,
+            QuantitySemanticsId::FractionalQtyMicrosV1 => {
+                QuantitySemanticsIdDto::FractionalQtyMicrosV1
+            }
+        }
+    }
+}
+
+impl From<QuantitySemanticsIdDto> for QuantitySemanticsId {
+    fn from(q: QuantitySemanticsIdDto) -> Self {
+        match q {
+            QuantitySemanticsIdDto::WholeUnitsV1 => QuantitySemanticsId::WholeUnitsV1,
+            QuantitySemanticsIdDto::FractionalQtyMicrosV1 => {
+                QuantitySemanticsId::FractionalQtyMicrosV1
+            }
         }
     }
 }
@@ -319,6 +406,11 @@ pub struct BacktestReportArtifact {
     halt_reason: Option<String>,
     equity_curve: Vec<(i64, i64)>,
     orders: Vec<BacktestOrderDto>,
+    /// D6/A2/A4: additive V2 order records for a genuinely fractional order.
+    /// `#[serde(default)]` (absent -> empty) is truthful for every artifact
+    /// written before this field existed.
+    #[serde(default)]
+    orders_v2: Vec<BacktestOrderV2Dto>,
     fills: Vec<BacktestFillDto>,
     last_prices: BTreeMap<String, i64>,
     execution_blocked: bool,
@@ -327,6 +419,11 @@ pub struct BacktestReportArtifact {
     sizing: StrategySizingConfigDto,
     economics: BacktestEconomicsReportDto,
     execution_model_id: String,
+    /// D6/A1/A4: the quantity-semantics domain this run was configured
+    /// with. `#[serde(default)]` (absent -> `WholeUnitsV1`) is truthful for
+    /// every artifact written before this field existed.
+    #[serde(default)]
+    quantity_semantics: QuantitySemanticsIdDto,
 }
 
 impl From<&BacktestReport> for BacktestReportArtifact {
@@ -342,6 +439,7 @@ impl From<&BacktestReport> for BacktestReportArtifact {
             halt_reason: r.halt_reason.clone(),
             equity_curve: r.equity_curve.clone(),
             orders: r.orders.iter().map(BacktestOrderDto::from).collect(),
+            orders_v2: r.orders_v2.iter().map(BacktestOrderV2Dto::from).collect(),
             fills: r.fills.iter().map(BacktestFillDto::from).collect(),
             last_prices: r.last_prices.clone(),
             execution_blocked: r.execution_blocked,
@@ -350,6 +448,7 @@ impl From<&BacktestReport> for BacktestReportArtifact {
             sizing: (&r.sizing).into(),
             economics: (&r.economics).into(),
             execution_model_id: r.execution_model_id.clone(),
+            quantity_semantics: r.quantity_semantics.into(),
         }
     }
 }
@@ -366,6 +465,7 @@ impl From<BacktestReportArtifact> for BacktestReport {
             halt_reason: a.halt_reason,
             equity_curve: a.equity_curve,
             orders: a.orders.into_iter().map(BacktestOrder::from).collect(),
+            orders_v2: a.orders_v2.into_iter().map(BacktestOrderV2::from).collect(),
             fills: a.fills.into_iter().map(BacktestFill::from).collect(),
             last_prices: a.last_prices,
             execution_blocked: a.execution_blocked,
@@ -374,6 +474,7 @@ impl From<BacktestReportArtifact> for BacktestReport {
             sizing: a.sizing.into(),
             economics: a.economics.into(),
             execution_model_id: a.execution_model_id,
+            quantity_semantics: a.quantity_semantics.into(),
         }
     }
 }

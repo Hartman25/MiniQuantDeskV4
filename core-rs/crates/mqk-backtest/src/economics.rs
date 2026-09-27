@@ -201,6 +201,27 @@ pub fn notional_micros(
     clamp_i128_to_i64(step2)
 }
 
+/// D6/A2 — `QtyMicros`-native sibling of [`notional_micros`] for the
+/// additive fractional quantity domain. Exact for whole-unit inputs:
+/// `notional_micros_qty(QtyMicros::from_whole_units(qty).unwrap(), price, economics) ==
+/// notional_micros(qty, price, economics)` for every representable `qty` --
+/// `qty_micros.raw()` is an exact multiple of `1_000_000` for a whole
+/// quantity, so the division below is exact, never a floored approximation.
+/// Callers in `mqk_backtest::engine` only ever pass this a Crypto-run
+/// quantity, whose `contract_multiplier` is validated `== 1` at `run()`
+/// start (D6: no fractional futures/options contracts).
+pub fn notional_micros_qty(
+    qty_micros: mqk_portfolio::QtyMicros,
+    price_micros: i64,
+    economics: &BacktestInstrumentEconomics,
+) -> i64 {
+    const QTY_MICROS_SCALE_I128: i128 = 1_000_000;
+    let step1 =
+        saturating_mul_i128(qty_micros.raw() as i128, price_micros as i128) / QTY_MICROS_SCALE_I128;
+    let step2 = saturating_mul_i128(step1, economics.contract_multiplier as i128);
+    clamp_i128_to_i64(step2)
+}
+
 /// Multiplier-aware signed mark-to-market value:
 /// `signed_qty * mark_price_micros * contract_multiplier`.
 ///
@@ -634,6 +655,30 @@ mod tests {
         let econ = BacktestInstrumentEconomics::equity();
         let r = BacktestEconomicsReport::from_run(&econ, 0);
         assert_eq!(r, BacktestEconomicsReport::equity());
+    }
+
+    // --- D6/A2: notional_micros_qty exact parity with notional_micros ---
+
+    #[test]
+    fn d6a2_notional_micros_qty_matches_notional_micros_for_whole_quantities() {
+        use mqk_portfolio::QtyMicros;
+        let econ = BacktestInstrumentEconomics::new(50, None, None).unwrap();
+        for qty in [1i64, 2, 3, 7, 100] {
+            let whole = notional_micros(qty, 4_500 * M, &econ);
+            let micros =
+                notional_micros_qty(QtyMicros::from_whole_units(qty).unwrap(), 4_500 * M, &econ);
+            assert_eq!(whole, micros, "qty={qty}");
+        }
+    }
+
+    #[test]
+    fn d6a2_notional_micros_qty_scales_fractional_exactly() {
+        use mqk_portfolio::QtyMicros;
+        let econ = BacktestInstrumentEconomics::equity(); // multiplier=1 (Crypto path)
+        let half = notional_micros_qty(QtyMicros::new(500_000), 100 * M, &econ);
+        let one = notional_micros_qty(QtyMicros::from_whole_units(1).unwrap(), 100 * M, &econ);
+        assert_eq!(half * 2, one);
+        assert_eq!(half, 50 * M);
     }
 
     // --- bmw_ledger: BacktestEconomicsLedger (BACKTEST-MULTIPLIER-RUN-WIRE-01) ---
