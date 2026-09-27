@@ -82,6 +82,7 @@
 //! | scr03_s09_release_then_clear_succeeds_immediately            | S09: releasing the lease unblocks an immediate successful clear |
 //! | scr03_s21_s22_s23_s24_fenced_claim_authority_matrix           | S21-S24: fenced claim succeeds only for exact RUNNING+matching unexpired lease |
 //! | scr03_s25_s26_fenced_claim_refuses_halted_and_stopped          | S25/S26: fenced claim refuses on HALTED/STOPPED |
+//! | scr03_s27_cross_domain_lease_row_cannot_authorize_outbox_claim | S27 (B2.3): a lease row corrupted into the wrong domain's run_id cannot authorize an outbox claim -- proves the execution_domain predicate is load-bearing, not redundant with run_id/holder_id/epoch |
 //! | scr03_operator_route_409_on_active_lease                      | §19: the real HTTP clear-halted-run route returns 409 with zero mutation when a lease is active |
 //!
 //! (S10/crash-expiry is covered by `b3e_halted_orphan_with_expired_lease_takeover_succeeds_and_cleans_up_lease`
@@ -152,6 +153,33 @@ async fn seed_run(pool: &sqlx::PgPool, run_id: Uuid, engine_id: &str) {
     )
     .await
     .expect("insert_run");
+}
+
+/// B2.3: like `seed_run`, but bound to an explicit `execution_domain` rather
+/// than the `insert_run` default (`equity_nyse`) -- needed to construct a
+/// genuinely cross-domain fixture.
+async fn seed_run_for_domain(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    engine_id: &str,
+    execution_domain: &str,
+) {
+    mqk_db::insert_run_for_domain(
+        pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: engine_id.to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: Utc::now(),
+            git_hash: "SCR02-TEST".to_string(),
+            config_hash: format!("CFG-{run_id}"),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "TESTHOST".to_string(),
+        },
+        execution_domain,
+    )
+    .await
+    .expect("insert_run_for_domain");
 }
 
 /// Advance a freshly-inserted run to RUNNING (Created -> Armed -> Running),
@@ -1343,6 +1371,131 @@ async fn scr03_s25_s26_fenced_claim_refuses_halted_and_stopped() {
                 actual_status: "STOPPED".to_string()
             }
         );
+    })
+    .await;
+}
+
+/// B2.3 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01, Wave B): proves the
+/// `execution_domain = $1` predicate in
+/// `outbox_claim_batch_for_run_with_lease_authority`'s fenced lease check
+/// (`mqk-db/src/orders.rs`) is load-bearing, not redundant with the
+/// `run_id`/`holder_id`/`epoch` predicates already there.
+///
+/// # Why this scenario, not just "wrong holder"/"wrong epoch" (already
+/// covered by S22/S23 above)
+///
+/// In every ordinary production path, a lease row's `run_id` column can only
+/// ever be set by `acquire_lease`, which is itself always called for the
+/// domain that row belongs to -- so `run_id` alone already disambiguates the
+/// correct row in the common case, making the domain predicate look
+/// redundant. This test constructs the one adversarial state where it is
+/// NOT redundant: a lease row physically stored under `crypto_24_7`'s key
+/// whose `run_id` column has been corrupted (via direct SQL, standing in for
+/// any future defect upstream of this function -- e.g. a hypothetical
+/// acquire-path bug that writes the wrong run_id) to point at an
+/// `equity_nyse` run. `run_id`/`holder_id`/`epoch` alone would match this
+/// row for the equity run's claim; only the domain predicate distinguishes
+/// "this row lives in crypto's slot" from "this row is equity's real lease".
+///
+/// # Mutation proof (recorded here, not automated -- see commit message)
+///
+/// Manually removing the `AND execution_domain = $1` line from that SQL and
+/// re-running this test flips the final assertion from `LeaseInvalid` to
+/// `Claimed` (RED): the corrupted crypto-slot row's `run_id`/`holder_id`/
+/// `epoch` alone are sufficient to authorize a claim for the equity run,
+/// proving the domain predicate is the only thing refusing it. Restoring the
+/// predicate returns the suite to GREEN.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn scr03_s27_cross_domain_lease_row_cannot_authorize_outbox_claim() {
+    mqk_db::run_isolated("scr03_s27", |pool| async move {
+        let equity_run = Uuid::new_v4();
+        seed_run_for_domain(
+            &pool,
+            equity_run,
+            "mqk-daemon-equity",
+            mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+        )
+        .await;
+        advance_to_running(&pool, equity_run).await;
+        mqk_db::outbox_enqueue(
+            &pool,
+            equity_run,
+            "scr03-s27-equity-order-1",
+            serde_json::json!({"symbol": "AAPL", "qty": 1, "side": "buy"}),
+        )
+        .await
+        .expect("outbox_enqueue");
+
+        let crypto_run = Uuid::new_v4();
+        seed_run_for_domain(
+            &pool,
+            crypto_run,
+            "mqk-daemon-crypto",
+            mqk_db::EXECUTION_DOMAIN_CRYPTO_24_7,
+        )
+        .await;
+        advance_to_running(&pool, crypto_run).await;
+
+        let t0 = Utc::now();
+        let crypto_lease = match mqk_db::runtime_lease::acquire_or_refresh_lease_for_running_run(
+            &pool,
+            crypto_run,
+            "crypto-runtime",
+            None,
+            t0,
+            30,
+            30,
+        )
+        .await
+        .expect("crypto acquire")
+        {
+            mqk_db::runtime_lease::RunLeaseAuthorityOutcome::Acquired(lease) => lease,
+            other => panic!("expected Acquired, got {other:?}"),
+        };
+
+        // Adversarial corruption: the lease row still lives under
+        // execution_domain='crypto_24_7' (its real primary key), but its
+        // run_id column now points at the EQUITY run. This is not reachable
+        // through any production acquire/refresh path today -- it stands in
+        // for a hypothetical upstream defect, so the fenced claim check below
+        // must refuse it on domain grounds alone.
+        sqlx::query("UPDATE runtime_leader_lease SET run_id = $1 WHERE execution_domain = $2")
+            .bind(equity_run)
+            .bind(mqk_db::EXECUTION_DOMAIN_CRYPTO_24_7)
+            .execute(&pool)
+            .await
+            .expect("corrupt crypto lease row's run_id");
+
+        // run_id/holder_id/epoch alone would match the corrupted row; only
+        // the execution_domain predicate (equity_nyse, resolved from
+        // equity_run's own durable identity) refuses it.
+        let outcome = mqk_db::outbox_claim_batch_for_run_with_lease_authority(
+            &pool,
+            equity_run,
+            "crypto-runtime",
+            crypto_lease.epoch,
+            10,
+            "crypto-runtime",
+            t0,
+        )
+        .await
+        .expect("call must not error");
+        assert_eq!(
+            outcome,
+            mqk_db::FencedClaimOutcome::LeaseInvalid,
+            "B2.3: a lease row corrupted into pointing at the wrong domain's \
+             run must never authorize an outbox claim for that run, even \
+             when run_id/holder_id/epoch alone would match"
+        );
+
+        // The equity run's outbox row must remain untouched (still PENDING,
+        // not claimed) -- zero mutation on refusal.
+        let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, "scr03-s27-equity-order-1")
+            .await
+            .expect("outbox_fetch_by_idempotency_key")
+            .expect("row must exist");
+        assert_eq!(row.status, "PENDING");
     })
     .await;
 }
