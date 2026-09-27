@@ -61,6 +61,27 @@ pub const ALL_OPERATION_STATES: [&str; 16] = [
     STATE_EVIDENCE_DEGRADED,
 ];
 
+// ---------------------------------------------------------------------------
+// D1/B1 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01): execution domain
+// ---------------------------------------------------------------------------
+
+/// NYSE-session equities (the only domain any historical row could ever
+/// have been -- see migration `0080`).
+pub const EXECUTION_DOMAIN_EQUITY_NYSE: &str = "equity_nyse";
+/// UTC-continuous Crypto (D1). No production caller emits this today --
+/// `mqk_broker_alpaca`'s `supports_asset_class(Crypto)` remains `false`.
+pub const EXECUTION_DOMAIN_CRYPTO_24_7: &str = "crypto_24_7";
+
+pub const ALL_EXECUTION_DOMAINS: [&str; 2] =
+    [EXECUTION_DOMAIN_EQUITY_NYSE, EXECUTION_DOMAIN_CRYPTO_24_7];
+
+/// `true` iff `execution_domain` is one of the 2 canonical domains
+/// (migration `0080`'s `..._execution_domain_known` CHECK mirrors this
+/// exactly).
+pub fn is_known_execution_domain(execution_domain: &str) -> bool {
+    ALL_EXECUTION_DOMAINS.contains(&execution_domain)
+}
+
 /// `true` iff `state` is one of the 16 canonical operation states.
 pub fn is_known_operation_state(state: &str) -> bool {
     ALL_OPERATION_STATES.contains(&state)
@@ -233,6 +254,11 @@ pub struct AutonomousDailyOperationRecord {
     pub market_date: NaiveDate,
     pub deployment_mode: String,
     pub adapter_id: String,
+    /// D1/B1: `EXECUTION_DOMAIN_EQUITY_NYSE` for every row created before
+    /// migration `0080` (deterministically backfilled, proven not guessed --
+    /// see that migration's doc comment) and for every current equities
+    /// caller.
+    pub execution_domain: String,
     pub session_plan_identity: String,
     pub assignment_identity: String,
     pub runtime_binding_identity: String,
@@ -318,7 +344,8 @@ const OPERATION_COLUMNS: &str = r#"
     exchange_session_open_utc, exchange_session_close_utc, exchange_is_early_close,
     previous_trading_date,
     stop_attempt_count, last_stop_attempt_utc,
-    state_blocker_signature
+    state_blocker_signature,
+    execution_domain
 "#;
 
 const EVENT_COLUMNS: &str = r#"
@@ -375,6 +402,7 @@ fn row_to_operation_record(
         updated_at_utc: r.try_get("updated_at_utc")?,
         stop_attempt_count: r.try_get("stop_attempt_count")?,
         last_stop_attempt_utc: r.try_get("last_stop_attempt_utc")?,
+        execution_domain: r.try_get("execution_domain")?,
     })
 }
 
@@ -410,6 +438,9 @@ pub struct CreateAutonomousDailyOperationArgs {
     pub market_date: NaiveDate,
     pub deployment_mode: String,
     pub adapter_id: String,
+    /// D1/B1: must be one of `ALL_EXECUTION_DOMAINS` -- no SQL default,
+    /// every caller supplies it explicitly.
+    pub execution_domain: String,
     pub session_plan_identity: String,
     pub assignment_identity: String,
     pub runtime_binding_identity: String,
@@ -469,12 +500,14 @@ fn identity_slot_lock_key(
     market_date: NaiveDate,
     deployment_mode: &str,
     adapter_id: &str,
+    execution_domain: &str,
 ) -> String {
     format!(
-        "mqk-autonomous-daily-operation-slot.v1|{}|{}|{}",
+        "mqk-autonomous-daily-operation-slot.v2|{}|{}|{}|{}",
         market_date,
         deployment_mode.trim(),
-        adapter_id.trim()
+        adapter_id.trim(),
+        execution_domain.trim()
     )
 }
 
@@ -486,6 +519,12 @@ fn validate_create_args(args: &CreateAutonomousDailyOperationArgs) -> Result<()>
     }
     if args.adapter_id.trim().is_empty() {
         anyhow::bail!("create_or_recover_autonomous_daily_operation: adapter_id must not be empty");
+    }
+    if !is_known_execution_domain(&args.execution_domain) {
+        anyhow::bail!(
+            "create_or_recover_autonomous_daily_operation: unknown execution_domain '{}'",
+            args.execution_domain
+        );
     }
     if args.session_plan_identity.trim().is_empty() {
         anyhow::bail!(
@@ -572,8 +611,12 @@ pub async fn create_or_recover_autonomous_daily_operation(
         .await
         .context("create_or_recover_autonomous_daily_operation: begin transaction failed")?;
 
-    let lock_key =
-        identity_slot_lock_key(args.market_date, &args.deployment_mode, &args.adapter_id);
+    let lock_key = identity_slot_lock_key(
+        args.market_date,
+        &args.deployment_mode,
+        &args.adapter_id,
+        &args.execution_domain,
+    );
     sqlx::query("select pg_advisory_xact_lock(hashtext($1)::bigint)")
         .bind(&lock_key)
         .execute(&mut *tx)
@@ -582,11 +625,13 @@ pub async fn create_or_recover_autonomous_daily_operation(
 
     let existing_row = sqlx::query(&format!(
         "select {OPERATION_COLUMNS} from sys_autonomous_daily_operations \
-         where market_date = $1 and deployment_mode = $2 and adapter_id = $3"
+         where market_date = $1 and deployment_mode = $2 and adapter_id = $3 \
+         and execution_domain = $4"
     ))
     .bind(args.market_date)
     .bind(&args.deployment_mode)
     .bind(&args.adapter_id)
+    .bind(&args.execution_domain)
     .fetch_optional(&mut *tx)
     .await
     .context("create_or_recover_autonomous_daily_operation: slot read failed")?;
@@ -611,7 +656,8 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     $37,$38,
                     $39,$40,$41,$42,
                     $43,$44,
-                    $45
+                    $45,
+                    $46
                 )
                 "#
             ))
@@ -660,6 +706,7 @@ pub async fn create_or_recover_autonomous_daily_operation(
             .bind(args.stop_attempt_count)
             .bind(None::<DateTime<Utc>>) // last_stop_attempt_utc
             .bind(None::<String>) // state_blocker_signature
+            .bind(&args.execution_domain)
             .execute(&mut *tx)
             .await
             .context("create_or_recover_autonomous_daily_operation: insert operation row failed")?;
@@ -692,6 +739,7 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     market_date: args.market_date,
                     deployment_mode: args.deployment_mode.clone(),
                     adapter_id: args.adapter_id.clone(),
+                    execution_domain: args.execution_domain.clone(),
                     session_plan_identity: args.session_plan_identity.clone(),
                     assignment_identity: args.assignment_identity.clone(),
                     runtime_binding_identity: args.runtime_binding_identity.clone(),
@@ -1440,21 +1488,24 @@ pub async fn fetch_autonomous_daily_operation_by_id(
 }
 
 /// Fetch the operation occupying one daily slot
-/// (`market_date`, `deployment_mode`, `adapter_id`). `Ok(None)` is
-/// authoritative "no operation yet for this slot".
+/// (`market_date`, `deployment_mode`, `adapter_id`, `execution_domain`).
+/// `Ok(None)` is authoritative "no operation yet for this slot".
 pub async fn fetch_autonomous_daily_operation_for_slot(
     pool: &PgPool,
     market_date: NaiveDate,
     deployment_mode: &str,
     adapter_id: &str,
+    execution_domain: &str,
 ) -> Result<Option<AutonomousDailyOperationRecord>> {
     let row = sqlx::query(&format!(
         "select {OPERATION_COLUMNS} from sys_autonomous_daily_operations \
-         where market_date = $1 and deployment_mode = $2 and adapter_id = $3"
+         where market_date = $1 and deployment_mode = $2 and adapter_id = $3 \
+         and execution_domain = $4"
     ))
     .bind(market_date)
     .bind(deployment_mode)
     .bind(adapter_id)
+    .bind(execution_domain)
     .fetch_optional(pool)
     .await
     .context("fetch_autonomous_daily_operation_for_slot failed")?;

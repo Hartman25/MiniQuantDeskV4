@@ -821,6 +821,10 @@ async fn create_or_recover(
         market_date: parse_market_date(&plan.market_date)?,
         deployment_mode: deployment_mode.to_string(),
         adapter_id: adapter_id.to_string(),
+        // D1/B1: this coordinator drives only the equity-NYSE autonomous
+        // path today; a future crypto_24_7 coordinator is a separate B2/B3
+        // wiring effort, not introduced by this patch.
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         session_plan_identity: plan.session_plan_identity.clone(),
         assignment_identity: assignment_identity.to_string(),
         runtime_binding_identity: runtime_binding_identity.to_string(),

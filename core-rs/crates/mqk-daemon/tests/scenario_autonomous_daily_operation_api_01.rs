@@ -416,6 +416,7 @@ async fn create_operation(
         operation_id: Uuid::new_v4(),
         market_date,
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.to_string(),
         session_plan_identity: "sp".to_string(),
         assignment_identity: "ai".to_string(),

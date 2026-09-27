@@ -311,6 +311,7 @@ fn pe_create_args(
         operation_id: Uuid::new_v4(),
         market_date: pe_parse_market_date(&plan.market_date),
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.to_string(),
         session_plan_identity: plan.session_plan_identity.clone(),
         assignment_identity,

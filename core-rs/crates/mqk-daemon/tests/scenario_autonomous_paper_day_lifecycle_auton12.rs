@@ -782,6 +782,7 @@ async fn al03_durable_coordinator_drives_a_real_successful_start_and_stop() {
         market_date,
         "PAPER",
         AL03_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("AL-03: fetch operation failed")
@@ -827,6 +828,7 @@ async fn al03_durable_coordinator_drives_a_real_successful_start_and_stop() {
         market_date,
         "PAPER",
         AL03_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("AL-03: fetch operation after stop failed")

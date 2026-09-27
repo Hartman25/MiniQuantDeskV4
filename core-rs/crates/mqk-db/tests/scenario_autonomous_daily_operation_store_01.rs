@@ -85,6 +85,7 @@ fn make_create_args(
         market_date,
         deployment_mode: deployment_mode.to_string(),
         adapter_id: adapter_id.to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         session_plan_identity: session_plan_identity.to_string(),
         assignment_identity: assignment_identity.to_string(),
         runtime_binding_identity: runtime_binding_identity.to_string(),
@@ -184,14 +185,16 @@ async fn schema_tables_and_constraints_exist() -> anyhow::Result<()> {
         "sys_autonomous_daily_operation_events must exist"
     );
 
+    // D1/B1 (migration 0080): the 3-column unique constraint was replaced by
+    // a 4-column one including execution_domain.
     let slot_unique_exists: bool = sqlx::query_scalar(
-        "select exists (select 1 from pg_constraint where conname = 'sys_autonomous_daily_operations_daily_slot_unique')",
+        "select exists (select 1 from pg_constraint where conname = 'sys_autonomous_daily_operations_daily_slot_domain_unique')",
     )
     .fetch_one(&pool)
     .await?;
     assert!(
         slot_unique_exists,
-        "daily-slot unique constraint must exist"
+        "daily-slot+execution-domain unique constraint must exist"
     );
 
     Ok(())
@@ -627,7 +630,7 @@ async fn legacy_row_with_null_exchange_fields_is_not_fabricated() -> anyhow::Res
     sqlx::query(
         r#"
         insert into sys_autonomous_daily_operations (
-            operation_id, market_date, deployment_mode, adapter_id,
+            operation_id, market_date, deployment_mode, adapter_id, execution_domain,
             session_plan_identity, assignment_identity, runtime_binding_identity,
             calendar_source, calendar_coverage_state, schedule_source,
             session_open_utc, session_close_utc, preopen_start_utc, postclose_finalize_utc,
@@ -640,7 +643,7 @@ async fn legacy_row_with_null_exchange_fields_is_not_fabricated() -> anyhow::Res
             outcome, no_trade_reason, last_error,
             created_at_utc, updated_at_utc
         ) values (
-            $1,$2,'paper','legacy_null_test',
+            $1,$2,'paper','legacy_null_test','equity_nyse',
             'splan-legacy','asgn-legacy','bind-legacy',
             'nyse_weekdays_heuristic','active','nyse_weekdays_heuristic',
             $3,$4,$5,$6,
@@ -926,9 +929,15 @@ async fn manual_intervention_required_prior_day_does_not_block_next_day() -> any
     // Fetching day 1's slot directly still honestly reports its own terminal
     // state -- day 1's history is preserved, not rewritten or deleted by
     // day 2's creation.
-    let day1_refetched = fetch_autonomous_daily_operation_for_slot(&pool, day1, "paper", &adapter)
-        .await?
-        .expect("day 1 row must still exist");
+    let day1_refetched = fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        day1,
+        "paper",
+        &adapter,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+    )
+    .await?
+    .expect("day 1 row must still exist");
     assert_eq!(day1_refetched.state, STATE_MANUAL_INTERVENTION_REQUIRED);
     assert_eq!(day1_refetched.operation_id, day1_final.operation_id);
 
@@ -1647,9 +1656,15 @@ async fn reads_are_pure_deterministic_and_preserve_null_vs_zero() -> anyhow::Res
         by_id.previous_trading_date,
         Some(args_a.previous_trading_date)
     );
-    let by_slot = fetch_autonomous_daily_operation_for_slot(&pool, day_a, "paper", &adapter)
-        .await?
-        .unwrap();
+    let by_slot = fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        day_a,
+        "paper",
+        &adapter,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+    )
+    .await?
+    .unwrap();
     assert_eq!(by_slot.operation_id, rec_a.operation_id);
     assert_eq!(
         by_slot.exchange_session_close_utc,
@@ -1706,5 +1721,139 @@ async fn reads_are_pure_deterministic_and_preserve_null_vs_zero() -> anyhow::Res
 
     cleanup_operation(&pool, rec_a.operation_id).await;
     cleanup_operation(&pool, rec_b.operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// D1/B1: execution-domain daily-slot identity
+// ---------------------------------------------------------------------------
+
+/// Same (market_date, deployment_mode, adapter_id), two different
+/// execution_domain values -- both must succeed as independent `Created`
+/// rows. Before migration 0080 the second create would have collided on the
+/// old 3-column unique constraint (recovered as the SAME row, silently
+/// discarding the crypto_24_7 identity) or raced against the equity row's
+/// CAS state.
+#[tokio::test]
+async fn equity_and_crypto_domains_coexist_for_the_same_daily_slot() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2099, 4, 12).unwrap();
+    let adapter = format!("b1-coexist-{}", unique_suffix());
+    let now = Utc::now();
+
+    let mut equity_args = make_create_args(
+        market_date,
+        "paper",
+        &adapter,
+        "splan-equity",
+        "asgn-equity",
+        "bind-equity",
+        now,
+    );
+    equity_args.execution_domain = mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string();
+    equity_args.operation_id = test_operation_id(&format!("b1-coexist-equity-{adapter}"));
+
+    let mut crypto_args = make_create_args(
+        market_date,
+        "paper",
+        &adapter,
+        "splan-crypto",
+        "asgn-crypto",
+        "bind-crypto",
+        now,
+    );
+    crypto_args.execution_domain = mqk_db::EXECUTION_DOMAIN_CRYPTO_24_7.to_string();
+    crypto_args.operation_id = test_operation_id(&format!("b1-coexist-crypto-{adapter}"));
+
+    let equity_outcome = create_or_recover_autonomous_daily_operation(&pool, &equity_args).await?;
+    let crypto_outcome = create_or_recover_autonomous_daily_operation(&pool, &crypto_args).await?;
+
+    let equity_rec = match equity_outcome {
+        CreateOrRecoverAutonomousDailyOperationOutcome::Created(r) => r,
+        other => panic!("equity: expected Created, got {other:?}"),
+    };
+    let crypto_rec = match crypto_outcome {
+        CreateOrRecoverAutonomousDailyOperationOutcome::Created(r) => r,
+        other => panic!("crypto: expected Created, got {other:?}"),
+    };
+
+    assert_ne!(
+        equity_rec.operation_id, crypto_rec.operation_id,
+        "equity and crypto must be two distinct operation rows, not one collapsed row"
+    );
+    assert_eq!(
+        equity_rec.execution_domain,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE
+    );
+    assert_eq!(
+        crypto_rec.execution_domain,
+        mqk_db::EXECUTION_DOMAIN_CRYPTO_24_7
+    );
+
+    // Each domain's own slot fetch returns only its own row.
+    let equity_fetched = fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        market_date,
+        "paper",
+        &adapter,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+    )
+    .await?
+    .expect("equity slot must exist");
+    let crypto_fetched = fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        market_date,
+        "paper",
+        &adapter,
+        mqk_db::EXECUTION_DOMAIN_CRYPTO_24_7,
+    )
+    .await?
+    .expect("crypto slot must exist");
+    assert_eq!(equity_fetched.operation_id, equity_rec.operation_id);
+    assert_eq!(crypto_fetched.operation_id, crypto_rec.operation_id);
+
+    cleanup_operation(&pool, equity_rec.operation_id).await;
+    cleanup_operation(&pool, crypto_rec.operation_id).await;
+    Ok(())
+}
+
+/// A second create for the SAME (market_date, deployment_mode, adapter_id,
+/// execution_domain) -- the duplicate-owner case -- still recovers the
+/// existing row (identical identity) rather than creating a second one.
+/// Negative control for `equity_and_crypto_domains_coexist_for_the_same_daily_slot`:
+/// proves the coexistence above is genuinely gated on a DIFFERING
+/// execution_domain, not merely on always creating a new row.
+#[tokio::test]
+async fn duplicate_same_domain_create_recovers_not_creates() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2099, 4, 13).unwrap();
+    let adapter = format!("b1-dup-{}", unique_suffix());
+    let now = Utc::now();
+
+    let args = make_create_args(
+        market_date,
+        "paper",
+        &adapter,
+        "splan-dup",
+        "asgn-dup",
+        "bind-dup",
+        now,
+    );
+
+    let first = create_or_recover_autonomous_daily_operation(&pool, &args).await?;
+    let second = create_or_recover_autonomous_daily_operation(&pool, &args).await?;
+
+    let first_rec = match first {
+        CreateOrRecoverAutonomousDailyOperationOutcome::Created(r) => r,
+        other => panic!("first: expected Created, got {other:?}"),
+    };
+    match second {
+        CreateOrRecoverAutonomousDailyOperationOutcome::Recovered(r) => {
+            assert_eq!(r.operation_id, first_rec.operation_id);
+        }
+        other => panic!("second: expected Recovered, got {other:?}"),
+    }
+
+    cleanup_operation(&pool, first_rec.operation_id).await;
     Ok(())
 }

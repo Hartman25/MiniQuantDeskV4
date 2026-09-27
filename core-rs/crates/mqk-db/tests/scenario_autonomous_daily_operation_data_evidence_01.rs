@@ -75,6 +75,7 @@ async fn create_test_operation(
         market_date,
         deployment_mode: "paper".to_string(),
         adapter_id: adapter_id.to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         session_plan_identity: format!("evidence-test-plan|{adapter_id}"),
         assignment_identity: "evidence-test-assignment".to_string(),
         runtime_binding_identity: "evidence-test-binding".to_string(),

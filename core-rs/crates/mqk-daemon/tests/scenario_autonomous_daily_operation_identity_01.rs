@@ -902,6 +902,7 @@ fn sample_operation_record(operation_id: Uuid) -> mqk_db::AutonomousDailyOperati
         operation_id,
         market_date: chrono::NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(),
         deployment_mode: "paper".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: "alpaca".to_string(),
         session_plan_identity: "splan-x".to_string(),
         assignment_identity: "asgn-x".to_string(),

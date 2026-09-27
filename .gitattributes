@@ -24,3 +24,4 @@ core-rs/crates/mqk-db/migrations/0076_runtime_qty_micros_evidence.sql text eol=l
 core-rs/crates/mqk-db/migrations/0077_strategy_signal_evaluations_qty_micros.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0078_paper_portfolio_snapshot_positions_qty_micros.sql text eol=lf
 core-rs/crates/mqk-db/migrations/0079_fill_quality_telemetry_qty_micros.sql text eol=lf
+core-rs/crates/mqk-db/migrations/0080_autonomous_daily_operations_execution_domain.sql text eol=lf

@@ -195,7 +195,14 @@ async fn fetch_slot_row(
     adapter_id: &str,
 ) -> anyhow::Result<Option<mqk_db::AutonomousDailyOperationRecord>> {
     let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
-    mqk_db::fetch_autonomous_daily_operation_for_slot(pool, market_date, "PAPER", adapter_id).await
+    mqk_db::fetch_autonomous_daily_operation_for_slot(
+        pool,
+        market_date,
+        "PAPER",
+        adapter_id,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +442,7 @@ async fn b04_identity_conflict_creates_no_second_row_and_calls_neither_start_nor
         operation_id: other_operation_id,
         market_date: plan.market_date.parse().unwrap(),
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.clone(),
         session_plan_identity: plan.session_plan_identity.clone(),
         assignment_identity: "a-completely-different-assignment".to_string(),
@@ -680,6 +688,7 @@ fn stub_operation_awaiting_open(
         operation_id,
         market_date: NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.to_string(),
         session_plan_identity: "stub-plan".to_string(),
         assignment_identity: "stub-assignment".to_string(),
@@ -734,6 +743,7 @@ async fn seed_stub_row(
         market_date: operation.market_date,
         deployment_mode: operation.deployment_mode.clone(),
         adapter_id: operation.adapter_id.clone(),
+        execution_domain: operation.execution_domain.clone(),
         session_plan_identity: operation.session_plan_identity.clone(),
         assignment_identity: operation.assignment_identity.clone(),
         runtime_binding_identity: operation.runtime_binding_identity.clone(),
@@ -2889,6 +2899,7 @@ async fn o01_coordinator_tick_error_projects_bounded_start_refused_truth() -> an
         operation_id: Uuid::new_v4(),
         market_date: market_date_b,
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.clone(),
         session_plan_identity: "stub-plan-b".to_string(),
         assignment_identity: "stub-assignment-b".to_string(),

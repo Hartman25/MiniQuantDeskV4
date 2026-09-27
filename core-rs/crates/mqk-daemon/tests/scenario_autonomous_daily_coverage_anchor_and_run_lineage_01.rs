@@ -231,6 +231,7 @@ async fn create_test_operation(
         operation_id,
         market_date: chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.to_string(),
         session_plan_identity: plan.session_plan_identity.clone(),
         assignment_identity,
@@ -1199,6 +1200,7 @@ async fn e01_coordinator_binds_pristine_anchor_and_replays_on_second_tick() {
         chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
         "PAPER",
         &adapter_id,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("fetch ok")
@@ -1546,6 +1548,7 @@ async fn f02_adapter_proceeds_once_the_coordinator_has_bound_the_authority() {
         chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
         "PAPER",
         &adapter_id,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("fetch ok")
@@ -1839,6 +1842,7 @@ async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_
             chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
             "PAPER",
             &adapter_id,
+            mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
         )
         .await
         .expect("fetch ok")
@@ -2041,6 +2045,7 @@ async fn g01_prepare_data_only_mid_day_drift_returns_conflict_and_invokes_no_dri
         chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
         "PAPER",
         &adapter_id,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .unwrap()

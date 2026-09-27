@@ -180,6 +180,7 @@ async fn create_test_operation(
         operation_id,
         market_date: timing.market_date,
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.to_string(),
         session_plan_identity,
         assignment_identity,
@@ -2736,6 +2737,7 @@ async fn m01_task_level_prepare_to_running_exactly_once() {
         market_date,
         "PAPER",
         M01_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("m01: fetch operation failed")
@@ -2978,6 +2980,7 @@ async fn n01_supervised_task_drives_real_adapter_under_injected_clock() {
         market_date,
         "PAPER",
         M01_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("n01: fetch operation failed")

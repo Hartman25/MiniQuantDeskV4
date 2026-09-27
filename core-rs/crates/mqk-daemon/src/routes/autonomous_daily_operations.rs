@@ -434,6 +434,7 @@ pub(crate) async fn compute_daily_operation_summary(
         market_date,
         deployment_mode,
         adapter_id,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     {
@@ -557,6 +558,7 @@ pub(crate) async fn autonomous_daily_operation(
         market_date,
         deployment_mode,
         &adapter_id,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     {

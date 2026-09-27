@@ -403,6 +403,7 @@ async fn t08_bound_operation_row_is_untouched() {
             market_date,
             deployment_mode: "PAPER".to_string(),
             adapter_id: "orphan-repair-t08".to_string(),
+            execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
             session_plan_identity: "orphan-repair-t08-plan".to_string(),
             assignment_identity: "orphan-repair-t08-assignment".to_string(),
             runtime_binding_identity: "orphan-repair-t08-binding".to_string(),

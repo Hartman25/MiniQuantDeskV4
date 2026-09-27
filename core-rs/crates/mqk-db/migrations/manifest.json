@@ -488,6 +488,12 @@
       "path": "0079_fill_quality_telemetry_qty_micros.sql",
       "status": "applied",
       "intent": "D6/A5, D7: add an explicit qty_micros_v1 encoding to fill_quality_telemetry (quantity_schema_version + ordered_qty_micros + fill_qty_micros; ordered_qty/fill_qty become nullable, fill_qty's own > 0 check replaced by the combined encoding CHECK) so a genuinely fractional Crypto fill is captured exactly instead of being silently skipped entirely (mqk_runtime::orchestrator::fill_quality::build_fill_quality_row previously returned None for a fractional order/fill). Historical rows retain quantity_schema_version=NULL and the whole-unit ordered_qty/fill_qty columns, unrescaled -- there is no historical fractional row to reconcile since the prior code path wrote nothing for one; the historical gap is a genuine absence of telemetry, not a truncated value, and stays UNKNOWN. Two CHECK constraints make the fill-side and order-side encodings mutually exclusive/well-formed. No trading authority, risk policy, order sizing, Paper/Live state, broker routing, or execution capability is changed by this migration."
+    },
+    {
+      "id": "0080",
+      "path": "0080_autonomous_daily_operations_execution_domain.sql",
+      "status": "applied",
+      "intent": "D1, B1: add execution_domain (equity_nyse | crypto_24_7) to sys_autonomous_daily_operations' daily-slot identity -- the unique (market_date, deployment_mode, adapter_id) anchor becomes unique (market_date, deployment_mode, adapter_id, execution_domain) so both domains can run independently for the same broker/deployment/day without colliding on one applicable-operation slot. Every historical row is deterministically classified equity_nyse (proven, not guessed: the Alpaca adapter's supports_asset_class(Crypto) has never returned true in any shipped commit, so no historical operation could have been crypto_24_7); the column's DEFAULT is dropped immediately after backfilling existing rows so every future insert must supply it explicitly. No production runtime-ownership/lease wiring is added by this migration -- see B1 disposition in the mission ledger for what remains open (per-domain lease/runtime ownership, B2/B3, is out of scope for this patch)."
     }
   ]
 }

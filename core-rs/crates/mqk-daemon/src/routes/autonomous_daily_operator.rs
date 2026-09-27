@@ -1615,6 +1615,7 @@ mod prestart_retry_safety_tests {
             market_date,
             deployment_mode: "PAPER".to_string(),
             adapter_id: adapter_id.to_string(),
+            execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
             session_plan_identity: format!("prestart-retry-safety-plan|{adapter_id}"),
             assignment_identity: "prestart-retry-safety-assignment".to_string(),
             runtime_binding_identity: "prestart-retry-safety-binding".to_string(),

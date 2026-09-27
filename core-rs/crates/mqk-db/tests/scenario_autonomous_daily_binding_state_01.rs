@@ -62,6 +62,7 @@ async fn seed_operation(pool: &sqlx::PgPool, seed: &str) -> anyhow::Result<Uuid>
         market_date,
         deployment_mode: "paper".to_string(),
         adapter_id: "alpaca".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         session_plan_identity: format!("r2a-session-{seed}"),
         assignment_identity: format!("r2a-assignment-{seed}"),
         runtime_binding_identity: format!("r2a-binding-{seed}"),

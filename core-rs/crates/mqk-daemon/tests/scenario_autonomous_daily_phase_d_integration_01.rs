@@ -498,6 +498,7 @@ async fn create_light_operation(
         operation_id,
         market_date: timing.market_date,
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: adapter_id.to_string(),
         session_plan_identity,
         assignment_identity,
@@ -1964,6 +1965,7 @@ async fn phase_d_full_day_lifecycle() {
         market_date,
         "PAPER",
         PD_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("PD: fetch preopen operation failed")
@@ -2112,6 +2114,7 @@ async fn phase_d_full_day_lifecycle() {
         market_date,
         "PAPER",
         PD_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("PD: fetch running operation failed")
@@ -2280,6 +2283,7 @@ async fn phase_d_full_day_lifecycle() {
         market_date,
         "PAPER",
         PD_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("fetch ok")
@@ -2337,6 +2341,7 @@ async fn phase_d_full_day_lifecycle() {
         market_date,
         "PAPER",
         PD_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("fetch ok")
@@ -2476,6 +2481,7 @@ async fn pd_seed_stale_running_row(
         // would silently make the stale row invisible to every real
         // production lookup instead of genuinely exercising release logic.
         deployment_mode: "PAPER".to_string(),
+        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
         adapter_id: PD_ADAPTER_ID.to_string(),
         session_plan_identity: format!("phase-d-stale|{stale_market_date}"),
         assignment_identity: "phase-d-stale-assignment".to_string(),
@@ -2618,6 +2624,7 @@ async fn phase_d_integrated_stale_running_row_releases_and_bar_chain_completes()
         market_date,
         "PAPER",
         PD_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("PD integrated: fetch preopen operation failed")
@@ -2683,6 +2690,7 @@ async fn phase_d_integrated_stale_running_row_releases_and_bar_chain_completes()
         market_date,
         "PAPER",
         PD_ADAPTER_ID,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
     )
     .await
     .expect("PD integrated: fetch running operation failed")
