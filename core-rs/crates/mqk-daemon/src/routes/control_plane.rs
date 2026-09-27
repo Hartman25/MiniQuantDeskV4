@@ -1310,10 +1310,14 @@ pub(crate) async fn ops_action(
 
             let _op = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
 
-            let active = match mqk_db::fetch_active_run_for_engine(
+            // B2.5: scoped to the domain this call already holds the
+            // lifecycle guard for — recovering an "orphaned" run must never
+            // adopt a different domain's independently active durable run.
+            let active = match mqk_db::fetch_active_run_for_engine_for_domain(
                 db,
                 DAEMON_ENGINE_ID,
                 st.deployment_mode().as_db_mode(),
+                crate::state::ExecutionDomain::EquityNyse.as_str(),
             )
             .await
             {
@@ -2630,10 +2634,14 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
     // to decide catalog availability.
     let has_orphaned_active_run = if matches!(st.deployment_mode(), DeploymentMode::Paper) {
         if let Some(db) = st.db.as_ref() {
-            let active = mqk_db::fetch_active_run_for_engine(
+            // B2.5: scoped to the same domain `recover-orphaned-run` itself
+            // now recovers (EquityNyse) — a Crypto-domain active run must
+            // never be reported as an equity orphan available to recover.
+            let active = mqk_db::fetch_active_run_for_engine_for_domain(
                 db,
                 DAEMON_ENGINE_ID,
                 st.deployment_mode().as_db_mode(),
+                crate::state::ExecutionDomain::EquityNyse.as_str(),
             )
             .await
             .ok()
