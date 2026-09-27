@@ -289,7 +289,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use execution::{
         execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
-        execution_signal_evaluations, execution_signal_evaluations_v2, execution_summary,
+        execution_orders_v2, execution_signal_evaluations, execution_signal_evaluations_v2,
+        execution_summary,
     };
     use execution_flow::execution_flow;
     use execution_order_analysis::{
@@ -428,6 +429,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
+        .route("/api/v2/execution/orders", get(execution_orders_v2))
         .route("/api/v1/execution/outbox", get(execution_outbox))
         // CUTOVER-1D-A3: exact-quantity (`qty_micros_v1`) siblings. V1 routes
         // keep the whole-unit contract and refuse fractional records.

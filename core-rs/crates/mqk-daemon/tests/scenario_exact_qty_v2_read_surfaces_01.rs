@@ -16,6 +16,8 @@
 //! | EQ06  | strategy-performance: fractional V1 409, V2 exact total                 |
 //! | EQ07  | strategy-performance: whole-unit V1 unchanged, V2 exact                 |
 //! | EQ08  | journal admissions: a non-integer admission qty is skipped, never `0`   |
+//! | EQ09  | execution orders: V2 exact; V1 keeps its documented fractional null     |
+//! | EQ10  | execution orders V2: no snapshot is 503, not an empty list              |
 //!
 //! EQ01-EQ03 are in-process. EQ04-EQ08 run against a real disposable Postgres
 //! database (`mqk_db::run_isolated`).
@@ -652,4 +654,60 @@ async fn eq08_journal_admission_with_a_non_integer_qty_is_skipped_never_reported
         assert_eq!(rows[0]["signal_id"], "sig0");
     })
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// execution orders (in-memory OMS): exact V2 alongside the documented V1 null
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn eq09_execution_orders_v2_is_exact_and_v1_keeps_its_documented_null() {
+    let (st, router) = no_db_router();
+    let mut snap = snapshot(&[]);
+    let order = |id: &str, total: &str, filled: &str| mqk_runtime::observability::OrderSnapshot {
+        order_id: id.to_string(),
+        broker_order_id: None,
+        symbol: format!("SYM{id}"),
+        total_qty: total.parse::<QtyMicros>().unwrap(),
+        filled_qty: filled.parse::<QtyMicros>().unwrap(),
+        status: "PartiallyFilled".to_string(),
+    };
+    snap.active_orders = vec![order("w", "10", "4"), order("f", "0.5", "0.125")];
+    st.execution_snapshot.write().await.replace(snap);
+
+    let (status, v1) = call(router.clone(), "/api/v1/execution/orders").await;
+    assert_eq!(status, StatusCode::OK);
+    let by_id = |v: &serde_json::Value, id: &str| {
+        v.as_array()
+            .expect("V1 is a bare array")
+            .iter()
+            .find(|r| r["internal_order_id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by_id(&v1, "w")["requested_qty"], 10);
+    assert_eq!(by_id(&v1, "w")["filled_qty"], 4);
+    assert!(
+        by_id(&v1, "f")["requested_qty"].is_null(),
+        "documented V1 contract: a fractional quantity is null, never truncated or zero"
+    );
+
+    let (status, v2) = call(router, "/api/v2/execution/orders").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v2["quantity_schema_version"], V2_VERSION);
+    let rows = v2["rows"].as_array().unwrap();
+    let get = |id: &str| rows.iter().find(|r| r["internal_order_id"] == id).unwrap();
+    assert_eq!(get("w")["requested_qty_micros"], 10_000_000);
+    assert_eq!(get("w")["filled_qty_micros"], 4_000_000);
+    assert_eq!(get("f")["requested_qty_micros"], 500_000);
+    assert_eq!(get("f")["filled_qty_micros"], 125_000);
+    assert!(get("f").get("requested_qty").is_none());
+}
+
+#[tokio::test]
+async fn eq10_execution_orders_v2_without_a_snapshot_is_unavailable_not_an_empty_list() {
+    let (_st, router) = no_db_router();
+    let (status, v) = call(router, "/api/v2/execution/orders").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"], "no_execution_snapshot");
 }

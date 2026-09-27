@@ -3489,6 +3489,38 @@ pub struct ManualOrderCancelResponse {
     pub blockers: Vec<String>,
 }
 
+/// Exact-quantity live order row for `GET /api/v2/execution/orders`: `requested_qty_micros`
+/// and `filled_qty_micros` are the raw OMS `QtyMicros` (1.0 unit == 1_000_000), always
+/// present; every other field is identical to [`ExecutionOrderRow`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOrderRowV2 {
+    pub internal_order_id: String,
+    pub broker_order_id: Option<String>,
+    pub symbol: String,
+    pub strategy_id: Option<String>,
+    pub side: Option<String>,
+    pub order_type: Option<String>,
+    pub requested_qty_micros: i64,
+    pub filled_qty_micros: i64,
+    pub current_status: String,
+    pub current_stage: String,
+    pub age_ms: Option<u64>,
+    pub has_warning: bool,
+    pub has_critical: bool,
+    pub updated_at: String,
+}
+
+/// Response for `GET /api/v2/execution/orders` (`qty_micros_v1`). Unlike the bare-array V1
+/// route it is an object carrying the version tag; an absent execution snapshot is the same
+/// 503 `no_execution_snapshot` as V1 (unavailable, never an empty list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOrdersResponseV2 {
+    pub quantity_schema_version: String,
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub rows: Vec<ExecutionOrderRowV2>,
+}
+
 /// One live order row sourced from the in-memory OMS runtime snapshot.
 ///
 /// Fields that are not present in the OMS snapshot are emitted as `null`:

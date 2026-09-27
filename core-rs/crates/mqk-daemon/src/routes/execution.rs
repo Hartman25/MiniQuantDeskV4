@@ -16,10 +16,11 @@ use axum::{
 };
 
 use crate::api_types::{
-    signal_qty_v2, ExecutionOrderRow, ExecutionSummaryResponse, FillQualityTelemetryResponse,
-    FillQualityTelemetryRow, ManualOrderCancelRequest, ManualOrderCancelResponse,
-    ManualOrderSubmitRequest, ManualOrderSubmitResponse, SignalEvaluationRow,
-    SignalEvaluationRowV2, SignalEvaluationsResponse, SignalEvaluationsResponseV2, SignalQtyState,
+    signal_qty_v2, ExecutionOrderRow, ExecutionOrderRowV2, ExecutionOrdersResponseV2,
+    ExecutionSummaryResponse, FillQualityTelemetryResponse, FillQualityTelemetryRow,
+    ManualOrderCancelRequest, ManualOrderCancelResponse, ManualOrderSubmitRequest,
+    ManualOrderSubmitResponse, SignalEvaluationRow, SignalEvaluationRowV2,
+    SignalEvaluationsResponse, SignalEvaluationsResponseV2, SignalQtyState,
 };
 use crate::state::AppState;
 
@@ -133,6 +134,61 @@ pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl In
         .collect();
 
     (StatusCode::OK, Json(rows)).into_response()
+}
+
+/// `GET /api/v2/execution/orders` (`qty_micros_v1`): the same OMS rows with the exact
+/// `requested_qty_micros` / `filled_qty_micros` (whole or fractional, never `null`).
+pub(crate) async fn execution_orders_v2(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.execution_snapshot.read().await.clone();
+
+    let Some(snapshot) = snap else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "no_execution_snapshot",
+                "detail": "Execution loop has not started or has no active run; OMS order truth is unavailable."
+            })),
+        )
+            .into_response();
+    };
+
+    let sides = st.local_order_sides.read().await.clone();
+    let updated_at = snapshot.snapshot_at_utc.to_rfc3339();
+    let rows: Vec<ExecutionOrderRowV2> = snapshot
+        .active_orders
+        .iter()
+        .map(|o| ExecutionOrderRowV2 {
+            internal_order_id: o.order_id.clone(),
+            broker_order_id: o.broker_order_id.clone(),
+            symbol: o.symbol.clone(),
+            strategy_id: None,
+            side: sides.get(&o.order_id).map(|s| match s {
+                mqk_reconcile::Side::Buy => "buy".to_string(),
+                mqk_reconcile::Side::Sell => "sell".to_string(),
+            }),
+            order_type: None,
+            requested_qty_micros: o.total_qty.raw(),
+            filled_qty_micros: o.filled_qty.raw(),
+            current_status: o.status.clone(),
+            current_stage: oms_stage_label(&o.status).to_string(),
+            age_ms: None,
+            has_warning: false,
+            has_critical: o.status == "Rejected",
+            updated_at: updated_at.clone(),
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(ExecutionOrdersResponseV2 {
+            quantity_schema_version: crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1
+                .to_string(),
+            canonical_route: "/api/v2/execution/orders".to_string(),
+            truth_state: "active".to_string(),
+            rows,
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
