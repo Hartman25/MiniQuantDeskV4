@@ -218,25 +218,29 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
 
     // current_position_qty: look up symbol in exec snapshot portfolio.
     //
-    // CUTOVER-1C-PORTFOLIO-QTY-MICROS-01: `PositionSnapshot.net_qty` is
-    // `QtyMicros` (fractional-capable, for Crypto); this diagnostic field
-    // stays whole-unit `i64` (mirrors `TradeEventPayload.qty`'s established
-    // precedent) -- `None` for a genuinely fractional position, same as an
-    // absent lookup, since this route has no fractional-quantity consumer.
-    let current_position_qty: Option<i64> = current_symbol.as_deref().and_then(|sym| {
+    // `PositionSnapshot.net_qty` is `QtyMicros` (fractional-capable); this V1
+    // field is whole-unit `i64` and `null` means only "no snapshot / no
+    // position for the symbol". A fractional position has no whole-unit form
+    // and must never collapse into that absence, so it is refused (never
+    // truncated/nulled), pointing at the exact live-weights V2 surface, which
+    // reads the same execution snapshot.
+    let mut current_position_qty: Option<i64> = None;
+    if let Some(position) = current_symbol.as_deref().and_then(|sym| {
         exec_snap
             .as_ref()?
             .portfolio
             .positions
             .iter()
-            .find_map(|p| {
-                if p.symbol == sym {
-                    p.net_qty.to_whole_units_checked()
-                } else {
-                    None
-                }
-            })
-    });
+            .find(|p| p.symbol == sym)
+    }) {
+        let Some(whole) = position.net_qty.to_whole_units_checked() else {
+            return super::execution_order_analysis::v1_fractional_refusal(
+                super::portfolio::LIVE_WEIGHTS_V2_ROUTE,
+                "the autonomous paper-status current position",
+            );
+        };
+        current_position_qty = Some(whole);
+    }
 
     // target_qty from last bar signal.
     // V1 whole-unit contract: a fractional/overflowed last signal is refused,
