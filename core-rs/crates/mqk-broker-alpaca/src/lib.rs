@@ -1528,7 +1528,7 @@ fn build_replace_body_for_symbol(
 /// (contains `/`, e.g. `"BTC/USD"`) rather than a bare equity ticker (e.g.
 /// `"AAPL"`). Used by [`AlpacaBrokerAdapter::replace_order`] to decide
 /// whether a broker-reported `filled_qty` may legitimately be fractional.
-fn is_alpaca_crypto_symbol(symbol: &str) -> bool {
+pub fn is_alpaca_crypto_symbol(symbol: &str) -> bool {
     symbol.contains('/')
 }
 /// Convert Alpaca's `PATCH /v2/orders/{id}` response into a `BrokerReplaceResponse`.

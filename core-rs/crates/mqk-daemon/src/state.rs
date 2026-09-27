@@ -174,8 +174,9 @@ pub use session_controller::{
     AutonomousSessionSchedule, SessionWindow, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
 };
 pub(crate) use snapshot::{
-    outbox_json_qty, parse_broker_position_qty_micros, reconcile_broker_snapshot_from_schema,
-    reconcile_local_snapshot_from_runtime_with_sides, recover_oms_and_portfolio,
+    outbox_json_qty, outbox_json_symbol, parse_broker_position_qty_micros,
+    reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
+    recover_oms_and_portfolio,
 };
 pub use types::{
     AcceptedArtifactProvenance, AlpacaWsContinuityState, AutonomousRecoveryResumeSource,

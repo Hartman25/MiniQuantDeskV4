@@ -1633,7 +1633,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         }
     };
 
-    // Gate 8b: a partial_fill activity's broker-native cum_qty is REQUIRED.
+    // Gate 8b: quantity evidence.
     //
     // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01 (defect #5): a
     // FILL/partial_fill activity without a parseable cum_qty cannot be given
@@ -1642,33 +1642,67 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
     // physical execution once durable replay's watermark-based dedup
     // (`apply_with_watermark`) is in play. Refuse rather than insert
     // ambiguous evidence.
+    //
+    // Quantities are parsed exactly (`QtyMicros`, never rounded). A fractional
+    // fill or cumulative is legitimate only for a crypto-pair order, and that
+    // is decided from durable evidence (the run's own outbox row for this
+    // `internal_order_id`), never from the activity's own symbol spelling
+    // alone -- see `fractional_fill_order_evidence`. Equity keeps its
+    // whole-share guard.
     let event_kind_for_gate = mqk_broker_alpaca::classify_fill_subtype(activity)
         .ok()
         .flatten()
         .expect("Gate 7 already filtered to activities with a recognized fill subtype");
-    if event_kind_for_gate == "partial_fill" {
-        let cum_qty_ok = activity
-            .cum_qty
-            .as_deref()
-            .is_some_and(|s| mqk_broker_alpaca::normalize::parse_alpaca_whole_share_qty(s).is_ok());
-        if !cum_qty_ok {
+    let delta_qty = mqk_broker_alpaca::normalize::parse_alpaca_qty_micros(&qty_str).ok();
+    let cum_qty = activity
+        .cum_qty
+        .as_deref()
+        .and_then(|s| mqk_broker_alpaca::normalize::parse_alpaca_qty_micros(s).ok());
+    if event_kind_for_gate == "partial_fill" && cum_qty.is_none() {
+        let evidence = format!(
+            "Alpaca REST activity (id='{}') for broker_order_id='{}' is a partial_fill \
+             with a missing/unparseable broker-native cum_qty; refusing to insert an \
+             economically ambiguous partial-fill row. Manual reconcile required.",
+            activity.id, body.broker_order_id
+        );
+        let audit_id = write_rest_recovery_audit(
+            &rest_audit_ctx,
+            "refused",
+            "repair.recovery_data_malformed",
+            &evidence,
+        )
+        .await;
+        return refused_active!(
+            classification,
+            evidence,
+            Some("repair.recovery_data_malformed".to_string()),
+            audit_id.map(|id| id.to_string())
+        );
+    }
+    let is_fractional =
+        delta_qty.is_some_and(|q| !q.is_whole()) || cum_qty.is_some_and(|q| !q.is_whole());
+    if is_fractional {
+        if let Err(why) =
+            fractional_fill_order_evidence(db, run_id, &body.internal_order_id, &activity.symbol)
+                .await
+        {
             let evidence = format!(
-                "Alpaca REST activity (id='{}') for broker_order_id='{}' is a partial_fill \
-                 with a missing/unparseable broker-native cum_qty; refusing to insert an \
-                 economically ambiguous partial-fill row. Manual reconcile required.",
-                activity.id, body.broker_order_id
+                "Alpaca REST activity (id='{}') for broker_order_id='{}' carries a \
+                 fractional quantity (qty='{}', cum_qty={:?}) but {why}; refusing to insert \
+                 an unproven fractional fill. Manual reconcile required.",
+                activity.id, body.broker_order_id, qty_str, activity.cum_qty
             );
             let audit_id = write_rest_recovery_audit(
                 &rest_audit_ctx,
                 "refused",
-                "repair.recovery_data_malformed",
+                "repair.fractional_fill_unproven",
                 &evidence,
             )
             .await;
             return refused_active!(
                 classification,
                 evidence,
-                Some("repair.recovery_data_malformed".to_string()),
+                Some("repair.fractional_fill_unproven".to_string()),
                 audit_id.map(|id| id.to_string())
             );
         }
@@ -2057,6 +2091,52 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         }),
     )
         .into_response()
+}
+
+/// Durable evidence that a fractional recovered fill belongs to a crypto-pair order.
+///
+/// `Ok(())` only when this run's own outbox row for `internal_order_id` exists, carries a
+/// crypto-pair symbol, and that symbol equals the activity's symbol exactly. Anything else is
+/// `Err(reason)` and the caller refuses: the activity symbol form for crypto fills is not
+/// documented, so this route neither aliases nor normalizes it, and absent evidence is not
+/// permission.
+async fn fractional_fill_order_evidence(
+    db: &sqlx::PgPool,
+    run_id: uuid::Uuid,
+    internal_order_id: &str,
+    activity_symbol: &str,
+) -> Result<(), String> {
+    let row = match mqk_db::outbox_fetch_by_idempotency_key(db, internal_order_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return Err(format!(
+                "no durable outbox row exists for internal_order_id='{internal_order_id}'"
+            ))
+        }
+        Err(e) => return Err(format!("the durable outbox lookup failed: {e}")),
+    };
+    if row.run_id != run_id {
+        return Err(format!(
+            "the durable outbox row for internal_order_id='{internal_order_id}' belongs to a \
+             different run"
+        ));
+    }
+    let Some(order_symbol) = crate::state::outbox_json_symbol(&row.order_json) else {
+        return Err("the durable outbox row carries no order symbol".to_string());
+    };
+    if !mqk_broker_alpaca::is_alpaca_crypto_symbol(&order_symbol) {
+        return Err(format!(
+            "the durable order symbol '{order_symbol}' is not a crypto pair (fractional \
+             quantities are only valid for crypto orders)"
+        ));
+    }
+    if activity_symbol != order_symbol {
+        return Err(format!(
+            "the activity symbol '{activity_symbol}' does not equal the durable order symbol \
+             '{order_symbol}'"
+        ));
+    }
+    Ok(())
 }
 
 struct RestRecoveryAuditCtx<'a> {
