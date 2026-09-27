@@ -1644,10 +1644,10 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
     // ambiguous evidence.
     //
     // Quantities are parsed exactly (`QtyMicros`, never rounded). A fractional
-    // fill or cumulative is legitimate only for a crypto-pair order, and that
-    // is decided from durable evidence (the run's own outbox row for this
-    // `internal_order_id`), never from the activity's own symbol spelling
-    // alone -- see `fractional_fill_order_evidence`. Equity keeps its
+    // fill or cumulative is legitimate only for an explicitly crypto order, and
+    // that is decided from durable evidence (the run's own outbox row for this
+    // `internal_order_id` carrying `asset_class`), never from any symbol
+    // spelling -- see `fractional_fill_order_evidence`. Equity keeps its
     // whole-share guard.
     let event_kind_for_gate = mqk_broker_alpaca::classify_fill_subtype(activity)
         .ok()
@@ -2093,10 +2093,13 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         .into_response()
 }
 
-/// Durable evidence that a fractional recovered fill belongs to a crypto-pair order.
+/// Durable evidence that a fractional recovered fill belongs to a crypto order.
 ///
-/// `Ok(())` only when this run's own outbox row for `internal_order_id` exists, carries a
-/// crypto-pair symbol, and that symbol equals the activity's symbol exactly. Anything else is
+/// `Ok(())` only when this run's own outbox row for `internal_order_id` exists, its
+/// `order_json` explicitly carries `"asset_class": "crypto"` (the value the decision seam
+/// stamps from the instrument registry), it carries an order symbol, and that symbol equals the
+/// activity's symbol exactly. A missing or any other asset class is not legacy-equity
+/// compatible here: a symbol's shape (a `/`) is never asset-class authority. Anything else is
 /// `Err(reason)` and the caller refuses: the activity symbol form for crypto fills is not
 /// documented, so this route neither aliases nor normalizes it, and absent evidence is not
 /// permission.
@@ -2121,15 +2124,16 @@ async fn fractional_fill_order_evidence(
              different run"
         ));
     }
+    if row.order_json.get("asset_class").and_then(|v| v.as_str()) != Some("crypto") {
+        return Err(
+            "the durable outbox row does not explicitly carry asset_class='crypto' (fractional \
+             quantities are only valid for orders durably identified as crypto)"
+                .to_string(),
+        );
+    }
     let Some(order_symbol) = crate::state::outbox_json_symbol(&row.order_json) else {
         return Err("the durable outbox row carries no order symbol".to_string());
     };
-    if !mqk_broker_alpaca::is_alpaca_crypto_symbol(&order_symbol) {
-        return Err(format!(
-            "the durable order symbol '{order_symbol}' is not a crypto pair (fractional \
-             quantities are only valid for crypto orders)"
-        ));
-    }
     if activity_symbol != order_symbol {
         return Err(format!(
             "the activity symbol '{activity_symbol}' does not equal the durable order symbol \

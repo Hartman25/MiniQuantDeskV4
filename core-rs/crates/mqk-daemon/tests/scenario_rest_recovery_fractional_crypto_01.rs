@@ -4,18 +4,19 @@
 //!
 //! Gate 8b previously parsed `cum_qty` with the whole-share parser, so every
 //! fractional partial fill was refused into a manual reconcile even when the
-//! run's own outbox row proved a crypto-pair order. It now parses exact
+//! run's own outbox row proved a crypto order. It now parses exact
 //! `QtyMicros`; a fractional quantity needs the run-coherent durable outbox
-//! row for `internal_order_id` to carry a crypto-pair symbol equal to the
-//! activity's symbol. Everything else still refuses.
+//! row for `internal_order_id` to explicitly carry `asset_class = "crypto"`
+//! and a symbol equal to the activity's symbol. A slash-shaped symbol is not
+//! asset-class authority. Everything else still refuses.
 //!
 //! | Test  | Claim                                                                       |
 //! |-------|-----------------------------------------------------------------------------|
 //! | RF01  | crypto partial fill: dry-run plan, apply, exact QtyMicros durable, replay  |
 //! | RF02  | re-apply is an idempotent no-op; run stays HALTED; other runs untouched     |
 //! | RF03  | complete (non-partial) fractional crypto fill is recoverable too            |
-//! | RF04  | unproven fractional fills refuse and write nothing (equity order, no symbol,|
-//! |       | symbol-form mismatch, missing outbox row, other-run outbox row)             |
+//! | RF04  | unproven fractional fills refuse and write nothing (equity order, missing / |
+//! |       | wrong / malformed asset_class, no symbol, symbol mismatch, other-run row)   |
 //! | RF05  | partial fill with missing/garbage cum_qty still refuses                     |
 //! | RF06  | whole-unit equity partial fill recovery is unchanged                        |
 //!
@@ -92,8 +93,9 @@ async fn recovery(
     (status, serde_json::from_slice(&bytes).expect("json body"))
 }
 
-/// A HALTED run, one SENT outbox order (`order_symbol` in `order_json`, or no
-/// symbol when `None`), its broker map row and a cursor-only evidence cursor.
+/// A HALTED run, one SENT outbox order (`order_symbol` / `asset_class` in
+/// `order_json`, each omitted when `None`), its broker map row and a
+/// cursor-only evidence cursor.
 struct Fixture {
     run_id: Uuid,
     internal_id: String,
@@ -125,11 +127,30 @@ async fn halted_run(pool: &sqlx::PgPool) -> Uuid {
     run_id
 }
 
+/// Production-shaped durable order: the decision seam stamps
+/// `asset_class = "crypto"` on a crypto pair and omits it for equity.
 async fn fixture(pool: &sqlx::PgPool, order_symbol: Option<&str>) -> Fixture {
+    let asset_class = order_symbol.filter(|s| s.contains('/')).map(|_| "crypto");
+    fixture_with_class(pool, order_symbol, asset_class).await
+}
+
+async fn fixture_with_class(
+    pool: &sqlx::PgPool,
+    order_symbol: Option<&str>,
+    asset_class: Option<&str>,
+) -> Fixture {
     let run_id = halted_run(pool).await;
     let internal_id = Uuid::new_v4().to_string();
     let broker_id = Uuid::new_v4().to_string();
-    seed_order(pool, run_id, &internal_id, &broker_id, order_symbol).await;
+    seed_order(
+        pool,
+        run_id,
+        &internal_id,
+        &broker_id,
+        order_symbol,
+        asset_class,
+    )
+    .await;
     seed_cursor(pool, &broker_id).await;
     Fixture {
         run_id,
@@ -144,10 +165,14 @@ async fn seed_order(
     internal_id: &str,
     broker_id: &str,
     order_symbol: Option<&str>,
+    asset_class: Option<&str>,
 ) {
     let mut order_json = serde_json::json!({"qty": "0.5", "side": "buy"});
     if let Some(symbol) = order_symbol {
         order_json["symbol"] = serde_json::json!(symbol);
+    }
+    if let Some(class) = asset_class {
+        order_json["asset_class"] = serde_json::json!(class);
     }
     let now = chrono::Utc::now();
     sqlx::query(
@@ -399,41 +424,116 @@ async fn rf03_complete_fractional_crypto_fill_is_recoverable_too() {
 #[tokio::test]
 async fn rf04_unproven_fractional_fills_refuse_and_write_nothing() {
     mqk_db::run_isolated("rf04_unproven", |pool| async move {
-        // (order symbol in the durable outbox row, activity symbol, activity type)
-        let cases: [(Option<&str>, &str, &str, &str); 5] = [
+        // (durable order symbol, durable asset_class, activity symbol, activity type, why)
+        type Case = (
+            Option<&'static str>,
+            Option<&'static str>,
+            &'static str,
+            &'static str,
+            &'static str,
+        );
+        let cases: [Case; 14] = [
             (
                 Some("AAPL"),
+                None,
                 "AAPL",
                 "partial_fill",
                 "equity order: fractional is invalid",
             ),
             (
                 Some("AAPL"),
+                None,
                 "AAPL",
                 "fill",
                 "equity order: fractional complete fill",
             ),
             (
+                Some("BTC/USD"),
                 None,
                 "BTC/USD",
                 "partial_fill",
-                "durable row carries no symbol",
+                "slash-shaped symbol but asset_class missing",
             ),
             (
                 Some("BTC/USD"),
+                None,
+                "BTC/USD",
+                "fill",
+                "slash-shaped symbol but asset_class missing (complete fill)",
+            ),
+            (
+                Some("BTC/USD"),
+                Some("equity"),
+                "BTC/USD",
+                "partial_fill",
+                "asset_class=equity",
+            ),
+            (
+                Some("BTC/USD"),
+                Some("forex"),
+                "BTC/USD",
+                "partial_fill",
+                "asset_class=forex",
+            ),
+            (
+                Some("BTC/USD"),
+                Some("future"),
+                "BTC/USD",
+                "fill",
+                "asset_class=future",
+            ),
+            (
+                Some("BTC/USD"),
+                Some("option"),
+                "BTC/USD",
+                "fill",
+                "asset_class=option",
+            ),
+            (
+                Some("BTC/USD"),
+                Some(""),
+                "BTC/USD",
+                "partial_fill",
+                "asset_class blank",
+            ),
+            (
+                Some("BTC/USD"),
+                Some("CRYPTO"),
+                "BTC/USD",
+                "partial_fill",
+                "asset_class not the canonical spelling",
+            ),
+            (
+                None,
+                Some("crypto"),
+                "BTC/USD",
+                "partial_fill",
+                "crypto but durable row carries no symbol",
+            ),
+            (
+                Some("BTC/USD"),
+                Some("crypto"),
                 "BTCUSD",
                 "partial_fill",
-                "activity symbol form differs",
+                "crypto but activity symbol form differs",
             ),
             (
                 Some("BTC/USD"),
+                Some("crypto"),
                 "ETH/USD",
                 "fill",
-                "activity symbol is another pair",
+                "crypto but activity symbol is another pair",
+            ),
+            (
+                Some("AAPL"),
+                Some("crypto"),
+                "BTC/USD",
+                "fill",
+                "crypto but activity symbol differs from the durable symbol",
             ),
         ];
-        for (order_symbol, activity_symbol, kind, why) in cases {
-            let f = fixture(&pool, order_symbol).await;
+        for (order_symbol, asset_class, activity_symbol, kind, why) in cases {
+            let f = fixture_with_class(&pool, order_symbol, asset_class).await;
             let act = activity(
                 &f.broker_id,
                 "act-rf04",
@@ -461,6 +561,7 @@ async fn rf04_unproven_fractional_fills_refuse_and_write_nothing() {
                 0,
                 "{why}: nothing written"
             );
+            assert_eq!(run_status(&pool, f.run_id).await, "HALTED", "{why}");
         }
 
         // No durable outbox row for the internal order id at all.
@@ -471,7 +572,15 @@ async fn rf04_unproven_fractional_fills_refuse_and_write_nothing() {
         // The stale broker map entry needs an outbox row to be discoverable; a
         // row owned by ANOTHER run models "not this run's evidence".
         let other_run = halted_run(&pool).await;
-        seed_order(&pool, other_run, &internal_id, &broker_id, Some("BTC/USD")).await;
+        seed_order(
+            &pool,
+            other_run,
+            &internal_id,
+            &broker_id,
+            Some("BTC/USD"),
+            Some("crypto"),
+        )
+        .await;
         let act = activity(&broker_id, "act-rf04-x", "fill", "BTC/USD", "0.5", None);
         let router = router_with(&pool, vec![act]);
         let (status, v) = recovery(router, run_id, &internal_id, &broker_id, true).await;
