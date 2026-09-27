@@ -759,6 +759,132 @@ Hard stops HS-1..HS-5 (IBKR, option lifecycle, multi-leg submission, 24/7 schedu
 
 **Resource boundary:** full local `cargo test --workspace`: **NOT RUN - RESOURCE BOUNDED** (neither PASS nor FAIL). GitHub CI: NOT VERIFIED (no push). Paper orders 0; Live orders 0; broker/provider network calls 0; `smoke_logs/` untouched. No milestone is claimed `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`.
 
+### G5. Research-First ML / Autonomous-Intelligence Architecture Reconciliation (docs-only planning record, 2026-09-26)
+
+**Status:** `PLANNING CONTRACT RECORDED — PLANNED / NOT AUTHORIZED FOR IMPLEMENTATION`. This is planning / architecture guidance only. It does not authorize TensorFlow, an ONNX/model runtime, a local LLM service, or production model inference; it does not alter M1-M10, does not create an M11, and is not a V4 blocker by itself.
+
+**Evidence basis / truth boundary:** the planning conclusions below were originally reached by an independent read-only architecture census of GitHub `main` at `8e029b86d763f5668e159d39460caa79957e5c50` plus the master document as it stood then. That review did **not** inspect the local M5-M8 work (G3/G4 above; not on GitHub `main` at that time). This record was reconciled into the current ledger after that work: current repo code/tests/Git/DB proof supersede any stale source wording, and this docs merge neither accepts nor rejects any code beyond what G3/G4 already record. The eight "current repo truth" statements below describe the earlier accepted boundary; the future read-only census re-verifies them against the then-current tree.
+
+**Why this section exists:** the prior backlog correctly preserved TensorFlow/model-inference as a deferred idea, but it understated how much ML infrastructure already exists in Research and did not isolate the few seams that matter most for preventing a later rewrite. This section promotes the architecture decision into the current planning layer without changing the frozen M1-M10 finish line or authorizing implementation.
+
+#### Current repo truth confirmed by the census
+
+1. `research-py/src/mqk_research/ml/` is already a real Research ML/evaluation layer, not an empty placeholder. It contains the current deterministic logistic baseline plus feature-schema validation, purged walk-forward evaluation, economic walk-forward, experiment/registry integration, holdout governance, multiple-testing judgment, replay authority, and OOS replay-bundle machinery.
+2. `feature_schema.json` / `mqk_research.ml.schema` already bind feature columns/order/types and the concrete features-file hash. This is valuable Research evidence. A future deployed-model path still needs a distinct semantic **FeatureDefinitionIdentity** describing how each production feature is computed, separate from **FeatureDatasetIdentity** describing the historical values used.
+3. `ml/train.py` is deliberately bounded as `DIAGNOSTIC_OR_FIT_ONLY`, not promotion-grade OOS evidence. Future TensorFlow/tree/neural training must integrate inside the accepted purged walk-forward protocol rather than treating `train.py` as a production shortcut.
+4. `economic_walkforward.py` already consumes a framework-neutral OOS score stream (`fold`, `symbol`, `decision_ts`, `ml_score`) and therefore should remain downstream of model-framework choice.
+5. The durable experiment model already distinguishes hypothesis, trial, attempt, and evaluation slice. Hyperparameter searches, random seeds, retries, and training restarts must continue to use that accounting; winner-only registration remains forbidden.
+6. Rust strategy semantic identity already provides a useful future binding point. A deployed model strategy should eventually fingerprint the accepted model artifact, feature/inference contract, signal-conversion policy, and other behavior-bearing semantics rather than relying on a strategy name alone.
+7. The old Research `signal_pack` scaffold has useful content-addressing/lineage ideas, but no Rust consumer of `signal_pack_v1`/`signals.csv` was found on the audited GitHub baseline. Do not assume the old signal-pack format is the future production model-delivery path merely because it exists.
+8. Existing strategy-performance, decay/regime visibility, OMS metrics, alerts, reconciliation state, and autonomous-operation status are good canonical inputs for a future local AI supervisor. The AI should consume these truth surfaces rather than becoming a second source of operational truth.
+
+#### Permanent authority boundary
+
+**`AI/ML MAY GENERATE INTELLIGENCE. DETERMINISTIC MQD CODE RETAINS TRADING AUTHORITY.`**
+
+AI/ML and local AI/LLM systems remain information/proposal producers unless a separately authorized deterministic MQD seam validates and applies a bounded request. AI/ML may eventually generate or refine bounded Research hypotheses, train/evaluate candidate models inside the canonical Research protocol, explain evidence/anomalies/risk/execution/decay, recommend rejection/revalidation/quarantine/halt/reduced activity, and request restrictive safety action through a deterministic gateway.
+
+AI/ML must never: submit directly to a broker or own broker credentials/transport; bypass Research, Backtest, promotion, risk, reconciliation, deployment-mode or execution gates; promote itself or treat training success as deployment authority; change Paper to Live, authorize Live capital, or increase position/capital/risk limits; disable/clear safety gates or rewrite its own authority; fabricate orders, fills, positions, market state, broker agreement, readiness, promotion evidence or profitability; use result values to define trial/data/source identity or hide failed attempts; or weaken conservative production/backtest behavior merely to improve a Research result. A retrained model is a **new candidate/model artifact** that must traverse the same evidence and promotion boundaries as any other candidate.
+
+No specific ML framework, neural network, local LLM, or AI supervisor is required to complete V4. Framework choice is empirical, not a source of authority.
+
+**Scope note:** the source copy also carried a standalone "D1" authority section inside §D and an addendum inside Milestone 9. Neither was merged into the frozen §D/§E text (M1-M10 are unchanged); the same substance is recorded here and in §I2B. The historical "Optional ML / Model-Inference Architecture" deferred-idea note, which the source copy carried but this repo ledger did not, is imported under DEFERRED DESIGN IDEAS as historical provenance with its current-authority note pointing at §G5/§I2B.
+
+#### Architecture decision: Research first, expand only after proof
+
+The intended expansion sequence is:
+
+```text
+PHASE 1 — RESEARCH ML
+canonical data/provenance
+    -> deterministic Research features
+    -> framework-neutral ModelBackend
+    -> purged walk-forward / reserved holdout
+    -> canonical OOS scores
+    -> economic walk-forward / costs / execution assumptions
+    -> experiment registry + multiple-testing judge
+    -> candidate evidence
+
+PHASE 2 — NATIVE BACKTEST INFERENCE
+accepted trained ModelArtifact
+    + authenticated historical features
+    -> deterministic MQD inference adapter
+    -> Rust BacktestEngine
+    -> Research-vs-native-inference parity proof
+
+PHASE 3 — PAPER MODEL INFERENCE
+promoted ModelArtifact
+    + production feature implementation
+    -> deterministic strategy inference
+    -> normal portfolio/risk/safety/execution gates
+    -> Paper
+    -> drift/decay/parity monitoring
+
+PHASE 4 — AUTONOMOUS RESEARCH
+bounded Research supervisor
+    -> hypothesis/candidate generation
+    -> registered trials/attempts
+    -> training/evaluation
+    -> reject or candidate-for-promotion
+    -> never self-promote
+
+PHASE 5 — LOCAL AI SYSTEM SUPERVISOR
+canonical MQD status/evidence/metrics
+    -> diagnosis/explanation/recommendation
+    -> bounded pre-approved diagnostics or restrictive requests
+    -> deterministic authority gateway
+```
+
+#### Four seams to protect before any production ML deployment
+
+**A. Framework-neutral fold model backend (`ML-ARCH-FORWARD-COMPAT-01`).**\
+The accepted Research protocol owns chronology, folds, purging, embargo, holdout reservation, trial accounting, and evidence. A model backend owns only model-specific fit/predict/serialize behavior. TensorFlow, boosted trees, PyTorch, or another framework must plug into this boundary rather than create parallel Research protocols.
+
+**B. Canonical trained model artifact (`ML-MODEL-ARTIFACT-01`).**\
+Complex models must not depend on being perfectly reconstructible by a future library version. Promotion-grade ML should be able to persist authenticated per-fold trained state where required and a final deployable artifact with explicit identity/provenance. At minimum where applicable, identity should bind model bytes/hash, model family/backend/version, training protocol, inference protocol, feature-definition/schema identity, label definition, dataset/source identity, hypothesis/trial/attempt lineage, hyperparameters/preprocessing, random seed/determinism configuration, training window, output semantics, and manifest hash.
+
+**C. Research -> runtime feature parity (`ML-FEATURE-PARITY-01`).**\
+This is the largest future rewrite risk. Production inference must receive the same semantic features Research trained on: timestamp boundaries, completed-bar semantics, warmup, missing-value policy, normalization, cross-sectional universe/rank population, and parameterization must match. Do not rewrite the entire Python Research feature stack into Rust speculatively. When a model is genuinely promotion-worthy, implement only the required deployed feature subset and prove Python-vs-Rust parity with golden/mutation controls.
+
+**D. Deterministic runtime inference (`ML-RUNTIME-INFERENCE-01`).**\
+Inference must be local/deterministic behind an MQD adapter, network-free at the decision seam, artifact/hash/schema checked, non-finite-output checked, and fail closed. A portable representation such as ONNX may be considered if it is the simplest validated design, but no interchange format is frozen by this section.
+
+#### Framework-selection rule
+
+TensorFlow/Keras is a **candidate Research backend, not a committed dependency**. Simple models and tree/boosting baselines should be tested under exactly the same OOS/economic/promotion standard. A more complex model earns adoption only if credible OOS and later Paper evidence show incremental value that justifies the complexity. A positive backtest is not proof of alpha.
+
+Potential Research uses include regime classification, cross-sectional ranking, volatility estimation, signal filtering, feature interactions, return classification, and meta-modeling over existing alpha/regime/liquidity/volatility inputs. None is presumed profitable.
+
+#### AI supervisor and safety-controller rule
+
+`AI-SUPERVISOR-01` is a future M9 candidate, not current execution authority. The AI may observe canonical facts, diagnose, explain, recommend, create bounded Research work, and request restrictive actions. Deterministic MQD code validates/executes any request. The AI must not own broker submission, promotion, risk-limit increases, mode transitions to Live, halt clearing, credential changes, or self-modification of authority.
+
+`ML-DRIFT-01` may later compare production/Paper feature distributions, prediction behavior, realized execution/slippage, and strategy performance against accepted evidence. Drift may trigger alert/revalidation/quarantine/halt requests; it does not autonomously deploy a replacement model.
+
+`ML-AUTONOMOUS-RESEARCH-01` may later automate bounded hypothesis -> trial -> attempt -> evaluation workflows. Retraining always creates a candidate/artifact that must earn advancement; retraining is never synonymous with redeployment.
+
+#### Negative controls required before production ML
+
+- model/artifact hash mismatch -> refuse;
+- unknown model or inference protocol -> refuse;
+- feature-definition/schema mismatch -> refuse;
+- missing/non-finite feature or prediction -> refuse;
+- Python-vs-runtime feature parity mutation -> detected;
+- Research OOS vs native-inference parity mutation -> detected;
+- training result cannot define trial/data/source identity;
+- winner-only registration -> rejected;
+- retry/restart cannot manufacture an independent trial;
+- model cannot bypass canonical promotion;
+- model/AI cannot increase risk or switch Paper -> Live;
+- no TensorFlow/Python/local-LLM -> broker direct path;
+- AI supervisor unavailable/failing must not remove deterministic supervision/safety.
+
+#### Sequencing / current authorization
+
+No TensorFlow dependency, model-runtime crate, ONNX runtime, local-LLM supervisor, new AI service, or production-model inference path is authorized by this docs update. The next ML-specific mission, when the active milestone sequence permits it, should be a **read-only** `MQD-ML-AUTONOMOUS-INTELLIGENCE-ARCHITECTURE-CENSUS-01` that rechecks current repo truth and determines whether these four seams are already sufficient, need a narrow forward-compatibility repair, or should remain documented extension points.
+
+This G5 entry does **not** alter G2's historical census/bucket counts, G3, or G4, and does not make any new ML/AI ID a Lane row or V4 blocker. It supersedes only conflicting interpretation of the older deferred ML design note near the end of this document; that historical note remains preserved. Durable capability detail lives in §I2B (planning-only statuses `MILESTONE_CANDIDATE` / `RESEARCH_HYPOTHESIS` / `PLANNED / NOT AUTHORIZED`); this section is the decision record and does not duplicate it.
+
 ## H. Immediate Sequencing From This Contract
 
 1. Current read-only audit/preparation: inspect Milestone 1 bounded subsystems and build the complete finding set without spending Claude implementation usage unnecessarily.
@@ -805,9 +931,16 @@ Moving an item from `MILESTONE_CANDIDATE` or `OPTIONAL_V4` to `MILESTONE_REQUIRE
 | `FORENSICS-AI-01` | AI post-trade forensics | M9 / post-trade analysis | `OPTIONAL_V4` | AI may help explain losses, changing conditions, and recurring patterns after trades. | AI remains advisory; it does not authorize Live trades. |
 | `LLM-EXPLANATION-01` | LLM trade explanation layer | M9 / operator observability | `OPTIONAL_V4` | Human-readable explanation of signal alignment, regime, risk posture, and why a trade occurred. | Explanation only; never execution authority. |
 | `FLOW-OBSERVABILITY-01` | Internal trading-flow visualization | M3, M9, M10 | `MILESTONE_CANDIDATE` | Visualize market data → signal → portfolio/risk → order intent → broker → fill → OMS → portfolio → reconcile → alerts, with Paper/Live domain identity visible. | Required only if an audit proves current operator/evidence surfaces are insufficient for a frozen milestone. |
-| `ML-REGIME-01` | ML regime classifier | Research layer | `RESEARCH_HYPOTHESIS` | Potential research feature for regime-specific strategy selection or attribution. | Never a software-completion gate by itself. |
-| `ML-SIGNAL-01` | Specialist ML signal scoring | Research layer | `RESEARCH_HYPOTHESIS` | Potential research model for candidate scoring. | Never direct Live execution authority. |
-| `ML-COUNCIL-01` | Multi-agent/model signal council | Research layer | `RESEARCH_HYPOTHESIS` | Explore ensemble/specialist research decisions without giving LLMs unilateral broker authority. | Research-only unless separately promoted through normal evidence gates. |
+| `ML-REGIME-01` | ML regime classifier | Research layer | `RESEARCH_HYPOTHESIS` | Potential regime-classification feature/model evaluated through the same framework-neutral Research, OOS, economic, registry, and promotion contracts in §I2B. | Never a software-completion gate by itself; no direct trading authority. |
+| `ML-SIGNAL-01` | Specialist ML signal scoring | Research layer | `RESEARCH_HYPOTHESIS` | Potential candidate-scoring model. Framework choice is empirical and must reuse the canonical Research evidence path rather than create a parallel ML promotion path. | Never direct Live execution authority. |
+| `ML-COUNCIL-01` | Multi-model / specialist Research ensemble | Research layer | `RESEARCH_HYPOTHESIS` | Explore ensembles/specialist model combinations while registering all component trials/attempts and preserving complete evidence. | Research-only unless the resulting candidate separately passes normal evidence/promotion gates. |
+| `ML-ARCH-FORWARD-COMPAT-01` | Framework-neutral Research model-backend contract | Research layer; supports M9 | `MILESTONE_CANDIDATE` | Prevent future TensorFlow/tree/neural work from owning fold/holdout/trial/evidence logic or forcing parallel Research architecture. | Planning/forward-compatibility only until explicitly authorized; does not block current milestone work. |
+| `ML-MODEL-ARTIFACT-01` | Canonical authenticated trained-model artifact + per-fold trained-state persistence where required | Research -> Backtest -> Paper; supports M9/M10 | `MILESTONE_CANDIDATE` | Complex models should be replayable/deployable by artifact identity rather than assuming deterministic refit under future library versions. | Required only before a complex trained model is allowed beyond Research; not a current V4 blocker. |
+| `ML-FEATURE-PARITY-01` | Research-to-runtime semantic feature parity | Research/Backtest/Paper; supports M9/M10 | `MILESTONE_CANDIDATE` | Prevent training-serving skew in timestamps, warmup, missing values, normalization, cross-sectional ranks/universe, and feature parameters. | Becomes required before native runtime inference for a promoted model; do not rewrite all features speculatively. |
+| `ML-RUNTIME-INFERENCE-01` | Deterministic local model-inference adapter | Backtest/Paper strategy runtime; supports M9/M10 | `MILESTONE_CANDIDATE` | Load only validated model artifacts and emit strategy information through normal MQD strategy/risk/execution seams. | No broker path; required only if/when a model candidate advances beyond Research. |
+| `ML-DRIFT-01` | Model / feature / execution drift monitoring | M9 | `MILESTONE_CANDIDATE` | Compare Paper/production behavior and feature distributions with accepted evidence; support alert, revalidation, quarantine, or halt requests. | May restrict activity; never authorizes replacement models or increased Live risk. |
+| `ML-AUTONOMOUS-RESEARCH-01` | Bounded autonomous Research controller | M9 | `MILESTONE_CANDIDATE` | Automate hypothesis/candidate generation, registered trials/attempts, training/evaluation, rejection, and candidate-for-promotion handoff. | Retraining is candidate creation, never self-promotion/deployment. |
+| `AI-SUPERVISOR-01` | Local AI Research/operations supervisor over canonical MQD facts | M9 | `MILESTONE_CANDIDATE` | Diagnose/explain anomalies and performance, recommend actions, launch pre-approved diagnostics/Research, and request bounded restrictive actions through deterministic authority. | Optional for M9; never replaces risk, reconcile, promotion, runtime ownership, or broker authority. |
 | `STRAT-TIME-FILTER-01` | Time-of-day trading filters | Research campaigns | `RESEARCH_HYPOTHESIS` | Can test whether opening volatility or other intraday windows degrade a particular strategy. | Strategy hypothesis, not platform infrastructure. |
 | `MOBILE-OPERATOR-COMPANION-01` | MiniQuantDesk Mobile / Operator Companion — Windows-first iPhone/iPad/Android companion using React Native + Expo + TypeScript + EAS | Post-V4 companion product; may consume M9/M10 operator/read APIs | `POST_V4` | Preserve a mobile observability/alerts/portfolio/risk/operator-status path without creating a second trading engine. | Does not block V4. Backend remains authoritative; dangerous actions require explicit server-side fail-closed authorization. |
 
@@ -1076,6 +1209,210 @@ For Jellyfin_Automation, start with:
 
 Expand toward richer mobile functionality only after those foundations are reliable.
 
+### I2B. Research-First ML + Autonomous Intelligence Architecture
+
+**Status:** PLANNED / NOT AUTHORIZED FOR IMPLEMENTATION BY THIS SECTION (decision record: §G5; not an M11, not a V4 blocker)\
+**Primary mapping:** Research capability + M9 autonomy candidates; supports M10 evidence if adopted\
+**Disposition:** the named infrastructure items are `MILESTONE_CANDIDATE`; model ideas remain `RESEARCH_HYPOTHESIS`\
+**Permanent authority invariant:** `AI/ML MAY GENERATE INTELLIGENCE. DETERMINISTIC MQD CODE RETAINS TRADING AUTHORITY.`\
+**Current architectural decision:** start ML inside Research, prove value against simple/conventional baselines, then expand toward native Backtest inference, Paper inference, autonomous Research, and finally a local AI supervisor. Do not begin by inserting AI into execution.
+
+#### Current reusable foundation
+
+The current architecture already provides most of the hard Research/evidence controls that future ML needs:
+
+- deterministic Research feature generation and `feature_schema.json` validation;
+- a simple logistic-regression ML baseline;
+- purged/embargoed walk-forward evaluation with reserved holdout semantics;
+- persisted TEST-fold-only OOS prediction streams;
+- cost/execution-aware economic walk-forward evaluation;
+- experiment registry with distinct hypothesis/trial/attempt identities;
+- holdout governance and multiple-testing DSR/PBO judgment;
+- authenticated Research replay/evidence authority into Rust Backtest and promotion;
+- Rust strategy semantic fingerprints;
+- strategy performance, regime/decay, OMS metrics, alerts, reconcile, and autonomous-operation truth surfaces usable by a future supervisor.
+
+This foundation should be **reused**, not replaced by a separate TensorFlow/AI pipeline.
+
+#### Framework-neutral Research model backend
+
+The canonical Research controller must own:
+- dataset/source identity;
+- feature/label identity;
+- chronology;
+- fold boundaries;
+- purge/embargo;
+- reserved holdout;
+- hypothesis/trial/attempt registration;
+- evaluation slices;
+- artifact/evidence persistence;
+- multiple-testing/economic evaluation;
+- promotion handoff.
+
+A pluggable model backend may own only bounded model-specific behavior such as:
+- fit;
+- predict/score;
+- serialize/deserialize;
+- model-specific hyperparameter validation;
+- deterministic seed/runtime configuration;
+- model-specific diagnostics that do not change MQD authority.
+
+TensorFlow/Keras may become one backend. Tree/boosting and simple linear models should remain valid baselines. PyTorch or another framework may be added later without changing downstream evidence/promotion contracts.
+
+#### Model artifact contract
+
+Before any complex trained model can advance beyond Research, define one versioned, fail-closed `ModelArtifact` family. Exact final field names are deferred to the future census, but the semantics should cover, where applicable:
+
+```text
+artifact format/version/hash
+model family/backend/backend version
+training protocol identity
+inference protocol identity
+model bytes/content hash
+feature-definition identity
+feature-schema identity
+label-definition identity
+dataset/source identity
+experiment/hypothesis/trial/attempt lineage
+hyperparameters
+preprocessing/normalization identity
+random seed / determinism configuration
+training/validation/holdout windows
+input/output shape and output semantics
+training code/version identity
+manifest hash
+```
+
+For complex models, persist per-fold trained state when replay/evidence requires it rather than assuming future refit reproduces the accepted model exactly.
+
+#### Feature identity and parity contract
+
+Separate:
+- **FeatureDefinitionIdentity** — what the feature means/how it is computed; from
+- **FeatureDatasetIdentity** — the concrete historical feature values used in one dataset/run.
+
+A promotion-worthy model's runtime feature subset must be implemented behind a deterministic production feature adapter with golden parity against Research. The parity contract must cover at least:
+- timestamp/decision-bar semantics;
+- completed-bar requirements;
+- lookback/warmup;
+- missing-value behavior;
+- normalization/scaling;
+- feature parameters;
+- universe membership;
+- same-timestamp cross-sectional rank population and tie policy;
+- source/provenance where economically relevant.
+
+Do not port every experimental Python feature to Rust. Port only the deployed subset once a candidate has earned the need.
+
+#### Native inference contract
+
+A future `ModelInference`/equivalent Rust seam should:
+- accept only an authenticated, compatible model artifact;
+- bind model identity into strategy semantic identity;
+- consume only the declared feature schema/definition;
+- reject missing, malformed, stale/incompatible, or non-finite inputs;
+- reject unknown artifact/inference versions;
+- reject hash or shape mismatch;
+- reject non-finite/invalid output;
+- perform no network/broker/database side effects from the inference call;
+- expose prediction/signal information to the normal strategy layer, not to the broker.
+
+Research/Backtest parity should eventually prove:
+
+```text
+same accepted model artifact + same semantic feature vector
+    ->
+Research inference result
+    ==
+native MQD inference result
+    ->
+same strategy decision input
+```
+
+within an explicitly versioned exact/tolerance contract.
+
+#### Promotion and deployment
+
+Do not create a parallel `MLPromotionGate`. ML candidates use the canonical Research -> Backtest -> robustness/economic evidence -> promotion path. Model integrity/parity evidence may become **additional required evidence** for model-based candidates; it may never weaken ordinary promotion requirements.
+
+The old `signal_pack` scaffold may remain useful historical/research machinery, but its existence does not define the production deployment artifact. A future census must choose the smallest canonical delivery path based on current repo truth.
+
+#### Drift / retraining
+
+Drift monitoring may observe:
+- feature-distribution drift;
+- missingness/coverage changes;
+- prediction-distribution changes;
+- realized vs accepted execution/slippage behavior;
+- strategy performance/expectancy degradation;
+- regime dependence;
+- Research-vs-Paper parity.
+
+Drift may trigger alert, quarantine, Paper revalidation, reduced activity, or a deterministic halt request according to policy. It does not authorize a replacement model.
+
+Retraining creates a new candidate/model artifact and must preserve complete trial/attempt accounting. An automated retrain may be rejected. A successful training run is not deployment authority.
+
+#### Local AI supervisor
+
+The future local AI supervisor should consume canonical MQD read/evidence surfaces rather than raw authority. It may:
+- explain system state;
+- correlate alerts/metrics/evidence;
+- diagnose failures;
+- summarize performance/decay/drift;
+- recommend repairs/revalidation;
+- propose bounded Research hypotheses;
+- initiate pre-approved diagnostics/Research jobs;
+- request restrictive safety actions through a deterministic gateway.
+
+It may not:
+- submit orders;
+- write broker truth;
+- fabricate state;
+- bypass promotion/risk/reconcile;
+- clear a safety halt without deterministic/human authority;
+- switch Paper to Live;
+- independently authorize/increase Live capital or risk;
+- edit its own permissions;
+- silently deploy a newly trained model.
+
+The deterministic autonomous controller remains responsible for normal lifecycle operation. AI supervision is additive intelligence, not replacement control.
+
+#### Planned sequencing
+
+```text
+1. Finish/freeze the credible ordinary equity/ETF production baseline.
+2. Run ML architecture census only; make narrow forward-compatibility repairs if current repo truth requires them.
+3. Keep simple logistic/conventional baselines.
+4. Add one framework-neutral Research ModelBackend implementation at a time.
+5. Compare tree/neural/other candidates under identical OOS/economic/multiple-testing rules.
+6. Add canonical ModelArtifact only when a real candidate requires durable complex trained state.
+7. Add native Backtest inference + Research/native parity proof.
+8. Add Paper model inference behind existing strategy/risk/safety/execution gates.
+9. Add model/feature/execution drift monitoring.
+10. Add bounded autonomous Research.
+11. Add local AI supervisor last, initially read-only/advisory.
+```
+
+#### Explicit non-goals now
+
+- no TensorFlow dependency merely because TensorFlow is a planned option;
+- no new AI service/process merely to claim autonomy;
+- no LLM in OMS, risk, reconcile, outbox/inbox, broker adapters, or Live authority;
+- no direct Python/TensorFlow -> Alpaca signal/order path;
+- no rewrite of accepted Research/Backtest/Promotion contracts;
+- no speculative port of the whole Research feature library into Rust;
+- no claim that ML ensures profitability or prevents losses.
+
+#### Future read-only mission
+
+When sequencing permits, run `MQD-ML-AUTONOMOUS-INTELLIGENCE-ARCHITECTURE-CENSUS-01`.
+
+Its bounded question is:
+
+> Do the current Research -> Backtest -> Promotion -> Paper contracts permit a future model-based candidate and local AI supervisor without fundamental redesign, and which of the four protected seams (`ModelBackend`, `ModelArtifact`, `FeatureParity`, `ModelInference`) are already sufficient versus narrowly incomplete?
+
+The mission must perform a defect/architecture census across current feature/data identity, candidate/trial identity, Research evidence, trained-state persistence, replay, strategy semantic identity, Backtest inputs, promotion evidence, persistence schemas, Paper strategy loading, performance/drift surfaces, alerts/metrics, and authority boundaries. It is **read-only by default**; no TensorFlow/model-runtime/LLM implementation is authorized unless a separate controller is issued after review.
+
 ### I3. Multi-asset backlog disposition
 
 The prior generic “multi-asset expansion” backlog is **`SUPERSEDED_BY_MILESTONE_CONTRACT`**.
@@ -1104,8 +1441,9 @@ These items may improve engineering efficiency but are **not MiniQuantDeskV4 pro
 
 The following remain true unless the milestone contract is explicitly changed:
 
-- advanced AI execution systems are not current implementation priorities;
-- AI/LLMs do not independently authorize Live orders or Live strategy admission;
+- Research-first ML architecture is now explicitly planned in §I2B, but ML framework/runtime implementation is not a current priority unless the active milestone sequence or a deterministic forward-compatibility finding requires it;
+- TensorFlow/Keras is a candidate backend, not a frozen dependency; simple/tree/neural models compete under the same evidence standard;
+- AI/LLMs do not independently authorize Live orders, Live strategy admission, risk increases, promotion, or broker actions;
 - complex visualization work does not outrank correctness, safety, Paper/Live isolation, or milestone exit gates;
 - research hypotheses such as time-of-day filters do not become infrastructure requirements merely because they are interesting;
 - multi-asset work proceeds in the frozen M5–M8 order rather than interrupting M1;
@@ -5523,6 +5861,29 @@ RESEARCH_BACKTEST_V1_FINAL_ACCEPTANCE_INTEGRATION_01.zip`.
 Non-required architecture ideas surfaced during `W06-A-P9-REPLAY-SOURCE-AUTHORITY-REPAIR-WAVE-02` (2026-09-05). Preserved for future reference only.
 
 **NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.** Every entry below carries this same status individually; do not treat any entry as scheduled, prioritized, or authorized work. Do not alter active patch status/count based on this section.
+
+### Optional ML / Model-Inference Architecture
+
+**CURRENT-AUTHORITY NOTE (2026-09-26):** The useful substance of this historical deferred design idea is now promoted into the authoritative planning layers at §G5 and §I2B. This section remains preserved as historical provenance only. Where wording differs, the newer sections govern. This note does not authorize implementation.
+
+A future Research capability may evaluate machine-learning models, including TensorFlow/Keras or another framework selected by evidence rather than precommitted here. ML remains an optional Research/modeling engine and does not become trading, promotion, risk, or execution authority.
+
+The intended authority path is:
+
+`Research features/labels -> ML training/evaluation -> immutable validated model artifact -> MQD model/evidence registry -> promotion gates -> deterministic production inference -> strategy decision -> risk/safety/mode authority -> broker adapter`
+
+Any future implementation must preserve the existing causal Research/Backtest/Promotion contracts, including `fwd_ret` as a classification LABEL rather than executable P&L, reserved final holdout, complete trial/attempt accounting, cost-aware and execution-aware OOS evidence, and no winner-only experiment registration. Retries, random seeds, and hyperparameter searches must not manufacture independent hypotheses or hide failed attempts.
+
+Model identity/evidence must bind, at minimum where applicable, the model artifact/hash, architecture, training code/version, dataset/source identity, feature-schema identity, label-definition identity, training configuration, random seed, framework/runtime version, train/validation/holdout periods, OOS metrics, transaction-cost/slippage/execution assumptions, sample counts, and leakage/causality checks. Semantic input changes must change the relevant identity; transport/layout-only changes must not manufacture a new candidate.
+
+Production inference must fail closed on missing/incompatible features, schema/version mismatch, malformed or unverifiable model artifacts, artifact/hash mismatch, non-finite output, inference failure, or unknown model identity. No ML framework or model may connect directly to Alpaca or another broker, bypass MQD promotion/risk/safety gates, independently authorize Live deployment/capital, or weaken conservative production/backtest behavior to improve Research results.
+
+Training may remain in Python while production inference uses a validated portable representation/runtime (for example ONNX) behind an explicit MQD inference adapter if that proves to be the simplest deterministic design. TensorFlow is therefore a candidate training framework, not a frozen dependency. Simpler baselines remain valid and ML must prove incremental value under the same OOS, cost, execution, and holdout standards before advancement.
+
+Potential future uses include regime classification, cross-sectional ranking, volatility estimation, signal filtering, feature-interaction modeling, return classification, and meta-modeling over already-defined alpha/regime/liquidity/volatility inputs. None is presumed to contain alpha merely because ML is used.
+
+Deferred until the credible US equity/ETF Research -> Backtest -> Promotion -> Paper path is closed and a conventional baseline exists. Revisit only when bounded ML research can be compared against that baseline without interrupting the active milestone sequence.
+**NOT AN APPROVED PATCH. NOT PART OF ACTIVE 43-PATCH COUNT. NOT AUTHORIZED FOR IMPLEMENTATION.**
 
 ### Persist per-fold trained model state
 A future artifact version may durably store coefficients/intercept/standardization state for stronger long-term replay.
