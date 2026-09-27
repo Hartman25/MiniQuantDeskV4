@@ -5106,10 +5106,16 @@ operator_reconcile_or_repair_required"
 
         let snapshot = match self.db.as_ref() {
             Some(db) => {
-                let latest = mqk_db::fetch_latest_run_for_engine(
+                // B2.5: this function is keyed by `domain` for local
+                // ownership above; the durable "latest run" lookup must
+                // agree, or a Crypto-domain snapshot would silently report
+                // Equity's durable run truth (and vice versa) the moment a
+                // second domain has any run history.
+                let latest = mqk_db::fetch_latest_run_for_engine_for_domain(
                     db,
                     DAEMON_ENGINE_ID,
                     self.deployment_mode().as_db_mode(),
+                    domain.as_str(),
                 )
                 .await
                 .map_err(|err| {
@@ -6404,7 +6410,13 @@ impl AppState {
         run_id: Uuid,
     ) -> Result<(), RuntimeLifecycleError> {
         let db = self.db_pool()?;
-        mqk_db::insert_run(
+        // B2.5: bind the inserted row to the caller's `domain` rather than
+        // the equity-hardcoded `insert_run` wrapper -- a test that passes
+        // `Crypto24_7` here must get a durable row tagged `crypto_24_7`, or
+        // any cross-domain isolation proof built on this helper would be a
+        // false-positive fixture (local ownership says one domain, the
+        // durable row says another).
+        mqk_db::insert_run_for_domain(
             &db,
             &mqk_db::NewRun {
                 run_id,
@@ -6421,6 +6433,7 @@ impl AppState {
                 }),
                 host_fingerprint: self.node_id.clone(),
             },
+            domain.as_str(),
         )
         .await
         .map_err(|err| RuntimeLifecycleError::internal("test insert_run failed", err))?;

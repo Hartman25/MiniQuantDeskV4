@@ -4776,6 +4776,75 @@ mod real_production_effects_matrix_tests {
     }
 
     // -------------------------------------------------------------------
+    // B2.5-STATUS-DOMAIN-ISOLATION-01: `current_status_snapshot(domain)`
+    // takes an explicit `domain`, so its durable "latest run" lookup must
+    // agree with that `domain` -- a Crypto-domain snapshot must never
+    // report an Equity-domain durable run's identity/state as its own, even
+    // though (today) only Equity has any real run history. Negative
+    // control: temporarily reverting `current_status_snapshot` to call the
+    // equity-hardcoded `fetch_latest_run_for_engine` regardless of `domain`
+    // turns this test RED (the Crypto snapshot below reports the Equity
+    // run's `active_run_id`/`state`); reverted before this commit.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_snapshot_does_not_leak_other_domains_durable_run() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("B2.5-STATUS-DOMAIN-ISOLATION-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        // The `arm_state` row is a process-wide singleton this module's other
+        // tests also write (e.g. via `halt_execution_runtime`); reset it to
+        // a clean `Armed` baseline so this test's "crypto reads idle, not
+        // some leftover halted reason from an earlier test in this module"
+        // assertion is hermetic regardless of run order (CLAUDE.md #14).
+        mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+            .await
+            .expect("B2.5-STATUS-DOMAIN-ISOLATION-01: arm_state baseline reset must succeed");
+        let state = hermetic_paper_state(&pool);
+        let equity_run_id = uuid::Uuid::new_v4();
+        state
+            .establish_db_backed_active_run_for_test(ExecutionDomain::EquityNyse, equity_run_id)
+            .await
+            .expect("B2.5-STATUS-DOMAIN-ISOLATION-01: equity fixture setup must succeed");
+
+        let equity_snapshot = state
+            .current_status_snapshot(ExecutionDomain::EquityNyse)
+            .await
+            .expect("equity snapshot must succeed");
+        assert_eq!(
+            equity_snapshot.active_run_id,
+            Some(equity_run_id),
+            "positive control: equity's own snapshot must report its own durable run"
+        );
+        assert_eq!(equity_snapshot.state, "running");
+
+        let crypto_snapshot = state
+            .current_status_snapshot(ExecutionDomain::Crypto24_7)
+            .await
+            .expect("crypto snapshot must succeed");
+        assert_ne!(
+            crypto_snapshot.active_run_id,
+            Some(equity_run_id),
+            "crypto's snapshot must never report equity's durable run as its own active_run_id"
+        );
+        assert_eq!(
+            crypto_snapshot.state, "idle",
+            "crypto has no local ownership and no durable crypto run -- must read idle, not \
+             equity's running state"
+        );
+
+        state
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                equity_run_id,
+                crate::state::LifecycleClearReason::OperatorStop,
+            )
+            .await;
+        delete_run_and_its_events(&pool, equity_run_id).await;
+    }
+
+    // -------------------------------------------------------------------
     // FAULT-SEAM-01: the `AfterOrchestratorConstruction` seam, now finally
     // exercised end-to-end through a *genuinely successful* orchestrator
     // construction (hermetic broker override) rather than the real
