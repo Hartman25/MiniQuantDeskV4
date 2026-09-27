@@ -1136,4 +1136,19 @@ M8 options permission classifier (frozen set)                                   
 M8 options execution, exercise/assignment/expiration lifecycle, mleg spreads          BLOCKED_HARD_STOP (contract decision: broker-truth non-fill events)
 ```
 
-Overall status: **M5-M8 deterministic code-completion is NOT complete.** Ordinary deterministic defects found in the audited seams are fixed and proven; the remaining items above are either operator-gated, design-gated hard stops, or optional V2 read surfaces (ledger G3-03/04). No milestone is claimed `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`.
+Overall status: **M5-M8 deterministic code-completion is NOT complete.** Ordinary deterministic defects found in the audited seams are fixed and proven; the remaining items above are either operator-gated, design-gated hard stops, or (formerly optional V2 read surfaces, ledger G3-03/04, since closed by G4) deferred telemetry. No milestone is claimed `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`.
+
+## M5-M8 Consolidated Surgical Correction Controller (`V4-M5-M8-CONSOLIDATED-SURGICAL-CORRECTION-01`, 2026-09-27)
+
+Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G4. Starting HEAD `ead40bf1`; five local commits (`f9cc021a`, `63e9cdf5`, `bdca372f`, `db63ca7a`, `46bf694a`), not pushed; full `cargo test --workspace` NOT RUN (resource bounded); GitHub CI not verified.
+
+```text
+Exact QtyMicros V2 reads: live-weights, paper-journal, strategy-performance, broker-snapshot positions/orders/fills, execution orders   CLOSED_PROVEN (local)
+Broker-snapshot routes never report a fractional/garbage quantity as 0                                                                   CLOSED_PROVEN (63e9cdf5)
+paper-status current position never null for a fractional position                                                                        CLOSED_PROVEN (db63ca7a)
+Halted-run REST recovery of a fractional fill (durable crypto-order evidence required)                                                    CLOSED_PROVEN (46bf694a)
+Fill-quality / lifecycle telemetry exact quantity (journal fills lane)                                                                    DEFERRED_BY_CONTRACT (G3-05 / G4-A9)
+M5-M8 hard stops HS-1..HS-5 (IBKR, option lifecycle, mleg, 24/7 scheduling, fractional backtest)                                          BLOCKED_HARD_STOP (unchanged)
+```
+
+This supersedes the closing sentence of the previous section: the "optional V2 read surfaces (ledger G3-03/04)" are closed. No ordinary deterministic defect known to this controller remains open in the M5-M8 quantity seams; that is code closure only. M5-M8 are not `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`: operator validation of a real Alpaca crypto Paper session, the crypto capability decision, IBKR, options lifecycle and 24/7 scheduling remain outside this controller.

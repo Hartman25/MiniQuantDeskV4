@@ -6,6 +6,16 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -10. M5-M8 Consolidated Surgical Correction Controller (2026-09-27, `V4-M5-M8-CONSOLIDATED-SURGICAL-CORRECTION-01`)
+
+Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G4 and the section of the same name at the end of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `ead40bf1`; five local commits, NOT pushed. Supersedes §-9 where they differ.
+
+- Closed (local code + proof): exact `qty_micros_v1` V2 reads for live-weights, paper-journal, strategy-performance, broker-snapshot positions/orders/fills and the OMS order list; broker-snapshot routes no longer serve a fractional/garbage quantity as `0`; paper-status no longer serves a fractional position as `null`; halted-run REST recovery accepts a fractional fill only on durable crypto-order evidence.
+- Unchanged hard stops: IBKR (M7), option lifecycle and multi-leg (M8), 24/7 autonomous scheduling, fractional research/backtest. Alpaca crypto capability still off (operator decision). Fill-quality telemetry stays whole-unit best-effort (G3-05).
+- Not run: full `cargo test --workspace` (resource bounded), any Paper/Live/provider session, GitHub CI. Nothing is operationally validated.
+
+---
+
 ## -9. M5-M8 Deterministic Code-Completion Controller (2026-09-26, `V4-M5-M8-DETERMINISTIC-CODE-COMPLETION-01`)
 
 Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G3 and the section of the same name at the end of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Baseline `8e029b86` (main = origin/main); nine local commits, NOT pushed.
