@@ -17,11 +17,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::api_types::{
     PortfolioEconomicsStatusExposureRow, PortfolioEconomicsStatusPositionRow,
-    PortfolioEconomicsStatusResponse, PortfolioFillRow, PortfolioFillsResponse,
+    PortfolioEconomicsStatusResponse, PortfolioFillRow, PortfolioFillRowV2, PortfolioFillsResponse,
     PortfolioLiveWeightRow, PortfolioLiveWeightRowV2, PortfolioLiveWeightsResponse,
-    PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
-    PortfolioPositionsResponse, PortfolioSummaryResponse, RiskDenialRow, RiskDenialsResponse,
-    RiskSummaryResponse,
+    PortfolioOpenOrderRow, PortfolioOpenOrderRowV2, PortfolioOpenOrdersResponse,
+    PortfolioPositionRow, PortfolioPositionRowV2, PortfolioPositionsResponse,
+    PortfolioSummaryResponse, RiskDenialRow, RiskDenialsResponse, RiskSummaryResponse,
 };
 use crate::state::{
     bridge_instrument_registry_v2_to_economics, AppState, InstrumentEconomicsBridgeResult,
@@ -484,22 +484,123 @@ pub(crate) async fn portfolio_summary(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/portfolio/positions
+// GET /api/v1/portfolio/positions | orders/open | fills  (and their V2 siblings)
 // ---------------------------------------------------------------------------
+
+/// Canonical exact-quantity routes for the broker-snapshot surfaces.
+pub(crate) const POSITIONS_V2_ROUTE: &str = "/api/v2/portfolio/positions";
+pub(crate) const OPEN_ORDERS_V2_ROUTE: &str = "/api/v2/portfolio/orders/open";
+pub(crate) const FILLS_V2_ROUTE: &str = "/api/v2/portfolio/fills";
+
+/// A broker-snapshot quantity string that is not an exact decimal `QtyMicros`
+/// is unavailable truth: the whole surface refuses (never `0`, which would
+/// read as flat / no order / no fill).
+fn broker_quantity_unparseable(what: &str, symbol: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "broker_quantity_unparseable",
+            "detail": format!(
+                "{what}: the broker quantity for '{symbol}' is not an exact decimal quantity; \
+                 no value was substituted"
+            ),
+        })),
+    )
+        .into_response()
+}
+
+/// Exact broker-snapshot quantity (see `parse_broker_position_qty_micros`).
+fn parse_broker_qty(raw: &str) -> Option<mqk_portfolio::QtyMicros> {
+    crate::state::parse_broker_position_qty_micros(raw)
+}
 
 pub(crate) async fn portfolio_positions(
     Query(query): Query<PortfolioPnlQuery>,
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    positions_response(&st, query, None, position_row_v1).await
+}
+
+/// V2: exact `qty_micros` / `broker_qty_micros` (signed, whole or fractional).
+pub(crate) async fn portfolio_positions_v2(
+    Query(query): Query<PortfolioPnlQuery>,
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    positions_response(
+        &st,
+        query,
+        Some(crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string()),
+        position_row_v2,
+    )
+    .await
+}
+
+fn position_row_v1(
+    p: &mqk_schemas::BrokerPosition,
+    qty: mqk_portfolio::QtyMicros,
+    pnl: PositionPnlResult,
+) -> Option<PortfolioPositionRow> {
+    let qty = qty.to_whole_units_checked()?;
+    Some(PortfolioPositionRow {
+        symbol: p.symbol.clone(),
+        strategy_id: None,
+        qty,
+        avg_price: parse_decimal(&p.avg_price),
+        mark_price: pnl.mark_price,
+        unrealized_pnl: pnl.unrealized_pnl,
+        realized_pnl_today: None,
+        broker_qty: qty,
+        drift: None,
+        pnl_truth_state: pnl.pnl_truth_state,
+        pnl_unavailable_reason: pnl.pnl_unavailable_reason,
+        mark_source: pnl.mark_source,
+    })
+}
+
+fn position_row_v2(
+    p: &mqk_schemas::BrokerPosition,
+    qty: mqk_portfolio::QtyMicros,
+    pnl: PositionPnlResult,
+) -> Option<PortfolioPositionRowV2> {
+    Some(PortfolioPositionRowV2 {
+        symbol: p.symbol.clone(),
+        strategy_id: None,
+        qty_micros: qty.raw(),
+        avg_price: parse_decimal(&p.avg_price),
+        mark_price: pnl.mark_price,
+        unrealized_pnl: pnl.unrealized_pnl,
+        realized_pnl_today: None,
+        broker_qty_micros: qty.raw(),
+        drift: None,
+        pnl_truth_state: pnl.pnl_truth_state,
+        pnl_unavailable_reason: pnl.pnl_unavailable_reason,
+        mark_source: pnl.mark_source,
+    })
+}
+
+/// Shared positions path: identical for V1 and V2 except the row shape. A
+/// `None` row (V1 cannot represent a fractional quantity) fails the whole
+/// response closed.
+async fn positions_response<R: serde::Serialize>(
+    st: &Arc<AppState>,
+    query: PortfolioPnlQuery,
+    quantity_schema_version: Option<String>,
+    map_row: fn(
+        &mqk_schemas::BrokerPosition,
+        mqk_portfolio::QtyMicros,
+        PositionPnlResult,
+    ) -> Option<R>,
+) -> axum::response::Response {
     let timeframe = selected_positions_pnl_timeframe(&query);
     let snap = st.broker_snapshot.read().await.clone();
     // PORT-05: session_boundary is always "in_memory_only" — broker_snapshot is
     // held in-memory and lost on daemon restart regardless of broker kind.
     let session_boundary = "in_memory_only".to_string();
-    match snap {
-        None => (
+    let Some(snapshot) = snap else {
+        return (
             StatusCode::OK,
-            Json(PortfolioPositionsResponse {
+            Json(PortfolioPositionsResponse::<R> {
+                quantity_schema_version,
                 snapshot_state: "no_snapshot".to_string(),
                 captured_at_utc: None,
                 rows: vec![],
@@ -507,52 +608,43 @@ pub(crate) async fn portfolio_positions(
                 session_boundary,
             }),
         )
-            .into_response(),
-        Some(snapshot) => {
-            let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
-            let pnl_by_symbol =
-                compute_broker_positions_pnl(&st, &snapshot.positions, &timeframe).await;
-            let rows = snapshot
-                .positions
-                .iter()
-                .map(|p| {
-                    let qty = p.qty.parse::<i64>().unwrap_or(0);
-                    let avg_price = parse_decimal(&p.avg_price);
-                    let pnl = pnl_by_symbol.get(&p.symbol).cloned().unwrap_or_else(|| {
-                        PositionPnlResult::unavailable(
-                            "mark_unavailable",
-                            "internal_pnl_lookup_missing",
-                        )
-                    });
-                    PortfolioPositionRow {
-                        symbol: p.symbol.clone(),
-                        strategy_id: None,
-                        qty,
-                        avg_price,
-                        mark_price: pnl.mark_price,
-                        unrealized_pnl: pnl.unrealized_pnl,
-                        realized_pnl_today: None,
-                        broker_qty: qty,
-                        drift: None,
-                        pnl_truth_state: pnl.pnl_truth_state,
-                        pnl_unavailable_reason: pnl.pnl_unavailable_reason,
-                        mark_source: pnl.mark_source,
-                    }
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(PortfolioPositionsResponse {
-                    snapshot_state: "active".to_string(),
-                    captured_at_utc: Some(captured_at_utc),
-                    rows,
-                    snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
-                    session_boundary,
-                }),
-            )
-                .into_response()
+            .into_response();
+    };
+
+    let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
+    let mut qtys = Vec::with_capacity(snapshot.positions.len());
+    for p in &snapshot.positions {
+        match parse_broker_qty(&p.qty) {
+            Some(q) => qtys.push(q),
+            None => return broker_quantity_unparseable("the broker positions", &p.symbol),
         }
     }
+    let pnl_by_symbol = compute_broker_positions_pnl(st, &snapshot.positions, &timeframe).await;
+    let mut rows = Vec::with_capacity(snapshot.positions.len());
+    for (p, qty) in snapshot.positions.iter().zip(qtys) {
+        let pnl = pnl_by_symbol.get(&p.symbol).cloned().unwrap_or_else(|| {
+            PositionPnlResult::unavailable("mark_unavailable", "internal_pnl_lookup_missing")
+        });
+        let Some(row) = map_row(p, qty, pnl) else {
+            return super::execution_order_analysis::v1_fractional_refusal(
+                POSITIONS_V2_ROUTE,
+                "the broker positions",
+            );
+        };
+        rows.push(row);
+    }
+    (
+        StatusCode::OK,
+        Json(PortfolioPositionsResponse::<R> {
+            quantity_schema_version,
+            snapshot_state: "active".to_string(),
+            captured_at_utc: Some(captured_at_utc),
+            rows,
+            snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
+            session_boundary,
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -560,12 +652,54 @@ pub(crate) async fn portfolio_positions(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    open_orders_response(&st, None, |o, requested| {
+        Some(PortfolioOpenOrderRow {
+            internal_order_id: o.client_order_id.clone(),
+            symbol: o.symbol.clone(),
+            strategy_id: None,
+            side: o.side.clone(),
+            status: o.status.clone(),
+            requested_qty: requested.to_whole_units_checked()?,
+            filled_qty: None,
+            entered_at: o.created_at_utc.to_rfc3339(),
+        })
+    })
+    .await
+}
+
+/// V2: exact `requested_qty_micros`.
+pub(crate) async fn portfolio_open_orders_v2(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    open_orders_response(
+        &st,
+        Some(crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string()),
+        |o, requested| {
+            Some(PortfolioOpenOrderRowV2 {
+                internal_order_id: o.client_order_id.clone(),
+                symbol: o.symbol.clone(),
+                strategy_id: None,
+                side: o.side.clone(),
+                status: o.status.clone(),
+                requested_qty_micros: requested.raw(),
+                filled_qty_micros: None,
+                entered_at: o.created_at_utc.to_rfc3339(),
+            })
+        },
+    )
+    .await
+}
+
+async fn open_orders_response<R: serde::Serialize>(
+    st: &Arc<AppState>,
+    quantity_schema_version: Option<String>,
+    map_row: fn(&mqk_schemas::BrokerOrder, mqk_portfolio::QtyMicros) -> Option<R>,
+) -> axum::response::Response {
     let snap = st.broker_snapshot.read().await.clone();
     let session_boundary = "in_memory_only".to_string();
-    match snap {
-        None => (
+    let Some(snapshot) = snap else {
+        return (
             StatusCode::OK,
-            Json(PortfolioOpenOrdersResponse {
+            Json(PortfolioOpenOrdersResponse::<R> {
+                quantity_schema_version,
                 snapshot_state: "no_snapshot".to_string(),
                 captured_at_utc: None,
                 rows: vec![],
@@ -573,39 +707,35 @@ pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> im
                 session_boundary,
             }),
         )
-            .into_response(),
-        Some(snapshot) => {
-            let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
-            let rows = snapshot
-                .orders
-                .iter()
-                .map(|o| {
-                    let requested_qty = o.qty.parse::<i64>().unwrap_or(0);
-                    PortfolioOpenOrderRow {
-                        internal_order_id: o.client_order_id.clone(),
-                        symbol: o.symbol.clone(),
-                        strategy_id: None,
-                        side: o.side.clone(),
-                        status: o.status.clone(),
-                        requested_qty,
-                        filled_qty: None,
-                        entered_at: o.created_at_utc.to_rfc3339(),
-                    }
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(PortfolioOpenOrdersResponse {
-                    snapshot_state: "active".to_string(),
-                    captured_at_utc: Some(captured_at_utc),
-                    rows,
-                    snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
-                    session_boundary,
-                }),
-            )
-                .into_response()
-        }
+            .into_response();
+    };
+
+    let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
+    let mut rows = Vec::with_capacity(snapshot.orders.len());
+    for o in &snapshot.orders {
+        let Some(requested) = parse_broker_qty(&o.qty) else {
+            return broker_quantity_unparseable("the broker open orders", &o.symbol);
+        };
+        let Some(row) = map_row(o, requested) else {
+            return super::execution_order_analysis::v1_fractional_refusal(
+                OPEN_ORDERS_V2_ROUTE,
+                "the broker open orders",
+            );
+        };
+        rows.push(row);
     }
+    (
+        StatusCode::OK,
+        Json(PortfolioOpenOrdersResponse::<R> {
+            quantity_schema_version,
+            snapshot_state: "active".to_string(),
+            captured_at_utc: Some(captured_at_utc),
+            rows,
+            snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
+            session_boundary,
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -613,12 +743,58 @@ pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> im
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    fills_response(&st, None, |f, qty| {
+        Some(PortfolioFillRow {
+            fill_id: f.broker_fill_id.clone(),
+            internal_order_id: f.client_order_id.clone(),
+            symbol: f.symbol.clone(),
+            strategy_id: None,
+            side: f.side.clone(),
+            qty: qty.to_whole_units_checked()?,
+            price: parse_decimal(&f.price),
+            broker_exec_id: f.broker_fill_id.clone(),
+            applied: true,
+            at: f.ts_utc.to_rfc3339(),
+        })
+    })
+    .await
+}
+
+/// V2: exact `qty_micros`.
+pub(crate) async fn portfolio_fills_v2(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    fills_response(
+        &st,
+        Some(crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string()),
+        |f, qty| {
+            Some(PortfolioFillRowV2 {
+                fill_id: f.broker_fill_id.clone(),
+                internal_order_id: f.client_order_id.clone(),
+                symbol: f.symbol.clone(),
+                strategy_id: None,
+                side: f.side.clone(),
+                qty_micros: qty.raw(),
+                price: parse_decimal(&f.price),
+                broker_exec_id: f.broker_fill_id.clone(),
+                applied: true,
+                at: f.ts_utc.to_rfc3339(),
+            })
+        },
+    )
+    .await
+}
+
+async fn fills_response<R: serde::Serialize>(
+    st: &Arc<AppState>,
+    quantity_schema_version: Option<String>,
+    map_row: fn(&mqk_schemas::BrokerFill, mqk_portfolio::QtyMicros) -> Option<R>,
+) -> axum::response::Response {
     let snap = st.broker_snapshot.read().await.clone();
     let session_boundary = "in_memory_only".to_string();
-    match snap {
-        None => (
+    let Some(snapshot) = snap else {
+        return (
             StatusCode::OK,
-            Json(PortfolioFillsResponse {
+            Json(PortfolioFillsResponse::<R> {
+                quantity_schema_version,
                 snapshot_state: "no_snapshot".to_string(),
                 captured_at_utc: None,
                 rows: vec![],
@@ -626,42 +802,35 @@ pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl Int
                 session_boundary,
             }),
         )
-            .into_response(),
-        Some(snapshot) => {
-            let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
-            let rows = snapshot
-                .fills
-                .iter()
-                .map(|f| {
-                    let qty = f.qty.parse::<i64>().unwrap_or(0);
-                    let price = parse_decimal(&f.price);
-                    PortfolioFillRow {
-                        fill_id: f.broker_fill_id.clone(),
-                        internal_order_id: f.client_order_id.clone(),
-                        symbol: f.symbol.clone(),
-                        strategy_id: None,
-                        side: f.side.clone(),
-                        qty,
-                        price,
-                        broker_exec_id: f.broker_fill_id.clone(),
-                        applied: true,
-                        at: f.ts_utc.to_rfc3339(),
-                    }
-                })
-                .collect();
-            (
-                StatusCode::OK,
-                Json(PortfolioFillsResponse {
-                    snapshot_state: "active".to_string(),
-                    captured_at_utc: Some(captured_at_utc),
-                    rows,
-                    snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
-                    session_boundary,
-                }),
-            )
-                .into_response()
-        }
+            .into_response();
+    };
+
+    let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
+    let mut rows = Vec::with_capacity(snapshot.fills.len());
+    for f in &snapshot.fills {
+        let Some(qty) = parse_broker_qty(&f.qty) else {
+            return broker_quantity_unparseable("the broker fills", &f.symbol);
+        };
+        let Some(row) = map_row(f, qty) else {
+            return super::execution_order_analysis::v1_fractional_refusal(
+                FILLS_V2_ROUTE,
+                "the broker fills",
+            );
+        };
+        rows.push(row);
     }
+    (
+        StatusCode::OK,
+        Json(PortfolioFillsResponse::<R> {
+            quantity_schema_version,
+            snapshot_state: "active".to_string(),
+            captured_at_utc: Some(captured_at_utc),
+            rows,
+            snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
+            session_boundary,
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

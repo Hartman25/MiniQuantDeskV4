@@ -309,8 +309,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use paper_lifecycle::{execution_paper_lifecycle, execution_paper_lifecycle_v2};
     use portfolio::{
         portfolio_account_equity_baseline_status, portfolio_economics_status, portfolio_fills,
-        portfolio_live_weights, portfolio_live_weights_v2, portfolio_open_orders,
-        portfolio_positions, portfolio_summary, risk_denials, risk_summary,
+        portfolio_fills_v2, portfolio_live_weights, portfolio_live_weights_v2,
+        portfolio_open_orders, portfolio_open_orders_v2, portfolio_positions,
+        portfolio_positions_v2, portfolio_summary, risk_denials, risk_summary,
     };
     use portfolio_allocation::{
         portfolio_allocation_plan_by_id, portfolio_allocation_plan_by_id_v2,
@@ -476,6 +477,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/portfolio/positions", get(portfolio_positions))
         .route("/api/v1/portfolio/orders/open", get(portfolio_open_orders))
         .route("/api/v1/portfolio/fills", get(portfolio_fills))
+        .route("/api/v2/portfolio/positions", get(portfolio_positions_v2))
+        .route(
+            "/api/v2/portfolio/orders/open",
+            get(portfolio_open_orders_v2),
+        )
+        .route("/api/v2/portfolio/fills", get(portfolio_fills_v2))
         .route(
             "/api/v1/portfolio/live-weights",
             get(portfolio_live_weights),

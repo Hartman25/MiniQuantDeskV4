@@ -60,6 +60,54 @@ pub struct PortfolioPositionRow {
     pub mark_source: Option<String>,
 }
 
+/// Exact-quantity position row for `GET /api/v2/portfolio/positions`: `qty_micros` and
+/// `broker_qty_micros` are raw `QtyMicros` (1.0 unit == 1_000_000, signed);
+/// every other field is identical to [`PortfolioPositionRow`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioPositionRowV2 {
+    pub symbol: String,
+    pub strategy_id: Option<String>,
+    pub qty_micros: i64,
+    pub avg_price: f64,
+    pub mark_price: Option<f64>,
+    pub unrealized_pnl: Option<f64>,
+    pub realized_pnl_today: Option<f64>,
+    pub broker_qty_micros: i64,
+    pub drift: Option<bool>,
+    pub pnl_truth_state: String,
+    pub pnl_unavailable_reason: Option<String>,
+    pub mark_source: Option<String>,
+}
+
+/// Exact-quantity open-order row for `GET /api/v2/portfolio/orders/open`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioOpenOrderRowV2 {
+    pub internal_order_id: String,
+    pub symbol: String,
+    pub strategy_id: Option<String>,
+    pub side: String,
+    pub status: String,
+    pub requested_qty_micros: i64,
+    /// `null` — partial fill quantity is not tracked in the broker snapshot.
+    pub filled_qty_micros: Option<i64>,
+    pub entered_at: String,
+}
+
+/// Exact-quantity fill row for `GET /api/v2/portfolio/fills`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioFillRowV2 {
+    pub fill_id: String,
+    pub internal_order_id: String,
+    pub symbol: String,
+    pub strategy_id: Option<String>,
+    pub side: String,
+    pub qty_micros: i64,
+    pub price: f64,
+    pub broker_exec_id: String,
+    pub applied: bool,
+    pub at: String,
+}
+
 /// Response wrapper for `/api/v1/portfolio/positions`.
 ///
 /// `snapshot_state`:
@@ -70,11 +118,17 @@ pub struct PortfolioPositionRow {
 ///
 /// PORT-05: `snapshot_source` and `session_boundary` make restart-aware
 /// supervision explicit for operators.
+///
+/// `R` is the row shape: [`PortfolioPositionRow`] (V1, whole-unit) or
+/// [`PortfolioPositionRowV2`] (exact micros); likewise for the two responses below.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioPositionsResponse {
+pub struct PortfolioPositionsResponse<R = PortfolioPositionRow> {
+    /// `Some("qty_micros_v1")` on the exact V2 route; absent on V1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_schema_version: Option<String>,
     pub snapshot_state: String,
     pub captured_at_utc: Option<String>,
-    pub rows: Vec<PortfolioPositionRow>,
+    pub rows: Vec<R>,
     /// PORT-05: How this snapshot was produced.
     /// - `"synthetic"` — paper mode; derived from local OMS + portfolio engine.
     /// - `"external"` — Alpaca REST fetch (external broker).
@@ -113,10 +167,13 @@ pub struct PortfolioOpenOrderRow {
 /// PORT-05: `snapshot_source` and `session_boundary` make restart-aware
 /// supervision explicit for operators.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioOpenOrdersResponse {
+pub struct PortfolioOpenOrdersResponse<R = PortfolioOpenOrderRow> {
+    /// `Some("qty_micros_v1")` on the exact V2 route; absent on V1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_schema_version: Option<String>,
     pub snapshot_state: String,
     pub captured_at_utc: Option<String>,
-    pub rows: Vec<PortfolioOpenOrderRow>,
+    pub rows: Vec<R>,
     /// PORT-05: How this snapshot was produced. `null` when no snapshot.
     /// `"synthetic"` (paper/local OMS) or `"external"` (Alpaca REST).
     pub snapshot_source: Option<String>,
@@ -153,10 +210,13 @@ pub struct PortfolioFillRow {
 /// PORT-05: `snapshot_source` and `session_boundary` make restart-aware
 /// supervision explicit for operators.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioFillsResponse {
+pub struct PortfolioFillsResponse<R = PortfolioFillRow> {
+    /// `Some("qty_micros_v1")` on the exact V2 route; absent on V1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_schema_version: Option<String>,
     pub snapshot_state: String,
     pub captured_at_utc: Option<String>,
-    pub rows: Vec<PortfolioFillRow>,
+    pub rows: Vec<R>,
     /// PORT-05: How this snapshot was produced. `null` when no snapshot.
     /// `"synthetic"` (paper/local OMS) or `"external"` (Alpaca REST).
     pub snapshot_source: Option<String>,
