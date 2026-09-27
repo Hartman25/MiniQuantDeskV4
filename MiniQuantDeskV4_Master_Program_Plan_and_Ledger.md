@@ -89,7 +89,7 @@ AI/ML must never:
 - use result values to define trial/data/source identity or hide failed/losing attempts;
 - weaken conservative production/backtest behavior merely to improve a Research result.
 
-A retrained model is a **new candidate/model artifact** unless its accepted identity contract proves otherwise; it must traverse the same evidence and promotion boundaries as any other candidate. Restrictive actions may be automated sooner than risk-increasing actions, but the deterministic safety controller remains authoritative.
+A retrained model is a **new candidate/model artifact**; it must traverse the same evidence and promotion boundaries as any other candidate. Restrictive actions may be automated sooner than risk-increasing actions, but the deterministic safety controller remains authoritative.
 
 No specific ML framework, neural network, local LLM, or AI supervisor is required to complete V4. TensorFlow/Keras, tree-based ML, PyTorch, ONNX-compatible tooling, or another framework may be evaluated later under one framework-neutral MQD contract. Framework choice is empirical, not an architectural source of authority.
 
