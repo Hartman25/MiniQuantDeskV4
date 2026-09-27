@@ -65,6 +65,34 @@ Human authority remains required for initial approval of a strategy/deployment f
 
 Passing an engineering or statistical gate must never silently grant new Live-capital authority.
 
+### D1. Permanent AI / ML Authority Boundary
+
+**Permanent invariant:** `AI/ML MAY GENERATE INTELLIGENCE. DETERMINISTIC MQD CODE RETAINS TRADING AUTHORITY.`
+
+MiniQuantDeskV4 may use machine learning and local AI/LLM systems for Research, diagnostics, observability, explanation, bounded experiment generation, candidate-model training/evaluation, drift/decay analysis, and operational supervision. Those systems remain information/proposal producers unless a separately-authorized deterministic MQD seam validates and applies a bounded request.
+
+AI/ML may eventually:
+- generate or refine bounded Research hypotheses;
+- train/evaluate candidate models inside the canonical Research protocol;
+- schedule approved Research experiments/backtests and record every trial/attempt;
+- explain evidence, anomalies, strategy behavior, risk state, execution quality, regime/decay context, and operational faults;
+- recommend rejection, revalidation, quarantine, halt, or reduced activity;
+- request a restrictive safety action such as halt/disable/de-risk through a deterministic authority gateway.
+
+AI/ML must never:
+- submit directly to a broker or own broker credentials/transport authority;
+- bypass Research, Backtest, promotion, risk, reconciliation, deployment-mode, or execution gates;
+- promote itself or treat retraining/training success as deployment authority;
+- change Paper to Live, independently authorize Live capital, or increase position/capital/risk limits;
+- disable/clear safety gates or rewrite its own authority;
+- fabricate orders, fills, positions, market state, broker agreement, readiness, promotion evidence, or profitability;
+- use result values to define trial/data/source identity or hide failed/losing attempts;
+- weaken conservative production/backtest behavior merely to improve a Research result.
+
+A retrained model is a **new candidate/model artifact** unless its accepted identity contract proves otherwise; it must traverse the same evidence and promotion boundaries as any other candidate. Restrictive actions may be automated sooner than risk-increasing actions, but the deterministic safety controller remains authoritative.
+
+No specific ML framework, neural network, local LLM, or AI supervisor is required to complete V4. TensorFlow/Keras, tree-based ML, PyTorch, ONNX-compatible tooling, or another framework may be evaluated later under one framework-neutral MQD contract. Framework choice is empirical, not an architectural source of authority.
+
 ## E. Frozen Milestone Roadmap
 
 The project has exactly ten top-level milestones. New work may be added inside them only when a deterministic finding proves it is required for that milestone's exit gate. New top-level milestones require explicit operator approval and an edit to this section.
@@ -228,6 +256,10 @@ Then options V4 scope is frozen.
 **Purpose:** Make routine Research, Paper, and authorized Live operation self-running while retaining explicit human authority at the boundaries above.
 
 Research autonomy includes campaign scheduling, correct trial registration, execution/evaluation, rejection, Paper advancement, bounded retries that do not manufacture trials, and preserved holdouts.
+
+Research autonomy may later use framework-neutral ML backends and/or a local AI Research supervisor, but neither is required for M9 completion. If used, model training/retraining produces candidates and evidence only; it does not grant promotion, Paper, or Live authority. Every ML trial/attempt remains subject to the existing hypothesis/trial/attempt/evaluation-slice, holdout, multiple-testing, economic, replay, and promotion contracts.
+
+A local AI/LLM operations supervisor may observe canonical MQD facts, diagnose anomalies, explain state, recommend actions, initiate pre-approved diagnostics/research, or request bounded restrictive actions through the authority boundary in §D1. It does not replace the deterministic autonomous controller, risk engine, reconciliation authority, promotion authority, or broker/execution boundary.
 
 Paper autonomy includes data preparation, universe establishment, startup, arm, trading, risk management, reconciliation, recovery, shutdown, evidence, notification, and subsequent-session continuation.
 
@@ -782,13 +814,9 @@ Hard stops HS-1..HS-5 (IBKR, option lifecycle, multi-leg submission, 24/7 schedu
 
 **`AI/ML MAY GENERATE INTELLIGENCE. DETERMINISTIC MQD CODE RETAINS TRADING AUTHORITY.`**
 
-AI/ML and local AI/LLM systems remain information/proposal producers unless a separately authorized deterministic MQD seam validates and applies a bounded request. AI/ML may eventually generate or refine bounded Research hypotheses, train/evaluate candidate models inside the canonical Research protocol, explain evidence/anomalies/risk/execution/decay, recommend rejection/revalidation/quarantine/halt/reduced activity, and request restrictive safety action through a deterministic gateway.
+The full permanent AI / ML authority boundary (what AI/ML may eventually do, what it must never do, retrained-model-is-a-new-candidate, framework-neutrality) is the standalone **§D1** and is not restated here. No specific ML framework, neural network, local LLM, or AI supervisor is required to complete V4. Framework choice is empirical, not a source of authority.
 
-AI/ML must never: submit directly to a broker or own broker credentials/transport; bypass Research, Backtest, promotion, risk, reconciliation, deployment-mode or execution gates; promote itself or treat training success as deployment authority; change Paper to Live, authorize Live capital, or increase position/capital/risk limits; disable/clear safety gates or rewrite its own authority; fabricate orders, fills, positions, market state, broker agreement, readiness, promotion evidence or profitability; use result values to define trial/data/source identity or hide failed attempts; or weaken conservative production/backtest behavior merely to improve a Research result. A retrained model is a **new candidate/model artifact** that must traverse the same evidence and promotion boundaries as any other candidate.
-
-No specific ML framework, neural network, local LLM, or AI supervisor is required to complete V4. Framework choice is empirical, not a source of authority.
-
-**Scope note:** the source copy also carried a standalone "D1" authority section inside §D and an addendum inside Milestone 9. Neither was merged into the frozen §D/§E text (M1-M10 are unchanged); the same substance is recorded here and in §I2B. The historical "Optional ML / Model-Inference Architecture" deferred-idea note, which the source copy carried but this repo ledger did not, is imported under DEFERRED DESIGN IDEAS as historical provenance with its current-authority note pointing at §G5/§I2B.
+**Scope note:** the operator-selected source document also carried the standalone §D1 authority section and an addendum inside Milestone 9. Both are retained in place as additive clarifications of the frozen roadmap (the Milestone 9 addendum states that ML backends and a local AI supervisor are optional and not required for M9 completion); M1-M10 are unchanged and no M11 exists. The historical "Optional ML / Model-Inference Architecture" deferred-idea note is retained under DEFERRED DESIGN IDEAS as historical provenance with its current-authority note pointing at §D1, §G5 and §I2B.
 
 #### Architecture decision: Research first, expand only after proof
 
@@ -5864,7 +5892,7 @@ Non-required architecture ideas surfaced during `W06-A-P9-REPLAY-SOURCE-AUTHORIT
 
 ### Optional ML / Model-Inference Architecture
 
-**CURRENT-AUTHORITY NOTE (2026-09-26):** The useful substance of this historical deferred design idea is now promoted into the authoritative planning layers at §G5 and §I2B. This section remains preserved as historical provenance only. Where wording differs, the newer sections govern. This note does not authorize implementation.
+**CURRENT-AUTHORITY NOTE (2026-09-26):** The useful substance of this historical deferred design idea is now promoted into the authoritative planning layers at §D1, §G5, and §I2B. This section remains preserved as historical provenance only. Where wording differs, the newer sections govern. This note does not authorize implementation.
 
 A future Research capability may evaluate machine-learning models, including TensorFlow/Keras or another framework selected by evidence rather than precommitted here. ML remains an optional Research/modeling engine and does not become trading, promotion, risk, or execution authority.
 
