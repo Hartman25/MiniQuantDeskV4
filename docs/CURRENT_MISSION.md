@@ -10,8 +10,9 @@ This file is intentionally short. It records current durable project state, not 
 
 Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G4 and the section of the same name at the end of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `ead40bf1`; five local commits, NOT pushed. Supersedes §-9 where they differ.
 
-- Closed (local code + proof): exact `qty_micros_v1` V2 reads for live-weights, paper-journal, strategy-performance, broker-snapshot positions/orders/fills and the OMS order list; broker-snapshot routes no longer serve a fractional/garbage quantity as `0`; paper-status no longer serves a fractional position as `null`; halted-run REST recovery accepts a fractional fill only on durable crypto-order evidence.
+- Closed (local code + proof): exact `qty_micros_v1` V2 reads for live-weights, paper-journal, strategy-performance, broker-snapshot positions/orders/fills and the OMS order list; broker-snapshot routes no longer serve a fractional/garbage quantity as `0`; paper-status no longer serves a fractional position as `null`; halted-run REST recovery accepts a fractional fill only on durable crypto-order evidence (explicit `asset_class=crypto`, per the IR-1 correction below).
 - Unchanged hard stops: IBKR (M7), option lifecycle and multi-leg (M8), 24/7 autonomous scheduling, fractional research/backtest. Alpaca crypto capability still off (operator decision). Fill-quality telemetry stays whole-unit best-effort (G3-05).
+- **Independent review correction (2026-09-26, three further local commits `a27852e5`, `1f1c9961`, `2e9e8c5c`, not pushed):** fractional REST recovery requires explicit durable `asset_class="crypto"` (a slash-shaped symbol is not authority); **crypto time-in-force is EXPLICIT-ONLY (operator decision)** - `gtc`/`ioc` admitted, `day` and the rest refused, no rewrite, so the Crypto strategy path fails closed until an authorized surface emits `gtc`/`ioc`; a malformed outbox side can no longer explain reconcile drift. Crypto capability still off.
 - Not run: full `cargo test --workspace` (resource bounded), any Paper/Live/provider session, GitHub CI. Nothing is operationally validated.
 
 ---
@@ -22,7 +23,7 @@ Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G3 and the se
 
 Current truth for M5-M8, superseding the §-8 census where they differ (that census predates the QtyMicros runtime cutover):
 
-- Fractional quantity now survives reconcile drift explanation, paper accounting, the durable Paper snapshot (migration 0078), broker P&L, and fails closed (409, no panic) on four V1 read/repair seams. Alpaca crypto wire correctness (position symbol, TIF, REST fractional fills) and admission TIF are fixed. Contract-identity validators (expiry, whole contracts, pair legs) are fixed in registry-v2, the intent/spec models and the options permission classifier.
+- Fractional quantity now survives reconcile drift explanation, paper accounting, the durable Paper snapshot (migration 0078), broker P&L, and fails closed (409, no panic) on four V1 read/repair seams. Alpaca crypto wire correctness (position symbol, TIF, REST fractional fills) are fixed; admission TIF was subsequently CORRECTED to explicit-only `gtc`/`ioc` (see §-10). Contract-identity validators (expiry, whole contracts, pair legs) are fixed in registry-v2, the intent/spec models and the options permission classifier.
 - Alpaca still does NOT advertise crypto capability (operator decision); M7 (IBKR) and M8 (options execution/lifecycle) are BLOCKED_HARD_STOP for design/dependency reasons; per-instrument session handling in the autonomous controller and the fractional backtest domain are BLOCKED_HARD_STOP (design / frozen contract).
 - Not run: full `cargo test --workspace` (resource bounded), any Paper/Live/provider session, GitHub CI.
 

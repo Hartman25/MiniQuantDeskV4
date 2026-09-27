@@ -1125,7 +1125,7 @@ M5 backtest/promotion fractional quantity domain                                
 M5 production-grade asset contract "proven by later assets"                           OPEN (needs M7/M8 requirements)
 
 M6 crypto admission economics/sizing/24x7 registry profile                            CODE_PRESENT (pre-existing; B1 Paper-only cutover)
-M6 Alpaca crypto wire (position symbol, TIF, REST fractional fills)                   CLOSED_PROVEN (4f4f6d25, 1f131803)
+M6 Alpaca crypto wire (position symbol, TIF, REST fractional fills)                   CLOSED_PROVEN (4f4f6d25); TIF admission CORRECTED to explicit-only gtc/ioc (1f1c9961, supersedes 1f131803's day->gtc rewrite)
 M6 Alpaca `supports_asset_class(Crypto)` advertisement                                OPERATOR decision (deliberately still false)
 M6 real Alpaca crypto Paper lifecycle                                                 OPERATOR_VALIDATION_REQUIRED (never run)
 M6 24/7 concurrent operation / autonomous daily ops                                   BLOCKED_HARD_STOP (G3-01)
@@ -1146,9 +1146,22 @@ Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G4. 
 Exact QtyMicros V2 reads: live-weights, paper-journal, strategy-performance, broker-snapshot positions/orders/fills, execution orders   CLOSED_PROVEN (local)
 Broker-snapshot routes never report a fractional/garbage quantity as 0                                                                   CLOSED_PROVEN (63e9cdf5)
 paper-status current position never null for a fractional position                                                                        CLOSED_PROVEN (db63ca7a)
-Halted-run REST recovery of a fractional fill (durable crypto-order evidence required)                                                    CLOSED_PROVEN (46bf694a)
+Halted-run REST recovery of a fractional fill (explicit durable asset_class=crypto required)                                              CLOSED_PROVEN (46bf694a, CORRECTED by a27852e5)
 Fill-quality / lifecycle telemetry exact quantity (journal fills lane)                                                                    DEFERRED_BY_CONTRACT (G3-05 / G4-A9)
 M5-M8 hard stops HS-1..HS-5 (IBKR, option lifecycle, mleg, 24/7 scheduling, fractional backtest)                                          BLOCKED_HARD_STOP (unchanged)
 ```
 
 This supersedes the closing sentence of the previous section: the "optional V2 read surfaces (ledger G3-03/04)" are closed. No ordinary deterministic defect known to this controller remains open in the M5-M8 quantity seams; that is code closure only. M5-M8 are not `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`: operator validation of a real Alpaca crypto Paper session, the crypto capability decision, IBKR, options lifecycle and 24/7 scheduling remain outside this controller.
+
+### Independent Review Correction (2026-09-26, `V4-INDEPENDENT-REVIEW-SURGICAL-CORRECTION-01`)
+
+Authoritative record: ledger §G4 "INDEPENDENT REVIEW CORRECTION". Starting HEAD `544b7c92`; three further local commits, not pushed; full `cargo test --workspace` NOT RUN (resource bounded); GitHub CI not verified.
+
+```text
+IR-1 fractional REST recovery requires explicit durable asset_class=crypto (symbol shape is not authority)   CLOSED_PROVEN (a27852e5)
+IR-2 crypto time-in-force is EXPLICIT-ONLY (operator policy): gtc/ioc admitted, day/other refused, no rewrite   CLOSED_PROVEN (1f1c9961)
+IR-3 malformed/unknown outbox side cannot explain reconcile drift                                            CLOSED_PROVEN (2e9e8c5c)
+Alpaca supports_asset_class(Crypto)                                                                          STILL FALSE (operator decision; unchanged)
+```
+
+Crypto time-in-force is no longer an open operator decision. Because the generic translator emits `day`, the Crypto strategy path fails closed at admission until a future authorized surface emits `gtc`/`ioc`. M5-M8 remain not `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`.
