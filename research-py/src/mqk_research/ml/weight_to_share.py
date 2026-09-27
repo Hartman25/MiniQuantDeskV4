@@ -125,6 +125,26 @@ from mqk_research.ml.execution_pricing import to_micros
 WEIGHT_TO_SHARE_PROTOCOL_ID_V1 = "weight_to_share_v1"
 KNOWN_WEIGHT_TO_SHARE_PROTOCOL_IDS = frozenset({WEIGHT_TO_SHARE_PROTOCOL_ID_V1})
 
+# D6/A3 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01): additive fractional
+# QtyMicros sizing protocol -- the Python-side sibling of Rust's
+# `mqk_backtest::QuantitySemanticsId::FractionalQtyMicrosV1` (core-rs/crates/
+# mqk-backtest/src/types.rs). `weight_to_target_qty` (V1, above) remains the
+# whole-share-only translation and is UNCHANGED by this addition. The two
+# protocols differ ONLY in rounding granularity (whole shares vs. 1e-6
+# QtyMicros units) -- everything else (price basis, causality, signed
+# translation, cap semantics) is identical, and `WEIGHT_TO_SHARE_QTY_MICROS_
+# PROTOCOL_ID_V1` folds that granularity choice into its own protocol
+# identity so a caller can never silently reinterpret one series as the
+# other.
+WEIGHT_TO_SHARE_QTY_MICROS_PROTOCOL_ID_V1 = "weight_to_share_qty_micros_v1"
+KNOWN_WEIGHT_TO_SHARE_QTY_MICROS_PROTOCOL_IDS = frozenset(
+    {WEIGHT_TO_SHARE_QTY_MICROS_PROTOCOL_ID_V1}
+)
+
+# Mirrors `mqk_schemas::QTY_MICROS_SCALE` / `mqk_portfolio::QtyMicros` exactly
+# (core-rs/crates/mqk-schemas/src/lib.rs): 1.0 unit == 1_000_000 QtyMicros.
+QTY_MICROS_SCALE = 1_000_000
+
 # P7B-REPAIR-01 (mission Section 4G/4H): explicit, versioned evidence that
 # discrete signed target quantities actually drove the economic result for
 # a given fold/run, distinct from the weight_to_share_protocol_id itself
@@ -290,6 +310,93 @@ def weight_to_target_qty(*, weight: float, price: Optional[float], spec: WeightT
 
     qty_magnitude = max(qty_magnitude, 0)
     return int(sign * qty_magnitude)
+
+
+def weight_to_share_qty_micros_protocol_identity(spec: Optional[WeightToShareSpec]) -> Dict[str, Any]:
+    """D6/A3: canonical, result-independent identity fragment for the
+    additive fractional QtyMicros sizing protocol -- mirrors
+    `weight_to_share_protocol_identity` exactly except for
+    `weight_to_share_qty_micros_protocol_id` (distinct from the V1 whole-
+    share `weight_to_share_protocol_id`, so the two can never be silently
+    conflated in evidence/config identity)."""
+    if spec is None:
+        return {"weight_to_share_qty_micros_protocol_id": None}
+    normalized = spec.normalized()
+    return {
+        "weight_to_share_qty_micros_protocol_id": WEIGHT_TO_SHARE_QTY_MICROS_PROTOCOL_ID_V1,
+        "rounding_policy": WEIGHT_TO_SHARE_ROUNDING_POLICY_V1,
+        "qty_micros_scale": QTY_MICROS_SCALE,
+        "price_basis": WEIGHT_TO_SHARE_PRICE_BASIS_V1,
+        "equity_usd": normalized.equity_usd,
+        "max_target_qty": normalized.max_target_qty,
+        "max_position_notional_usd": normalized.max_position_notional_usd,
+    }
+
+
+def weight_to_target_qty_micros(
+    *, weight: float, price: Optional[float], spec: WeightToShareSpec
+) -> int:
+    """D6/A3 -- additive fractional sizing seam. Same causality/price-basis/
+    signed-translation contract as `weight_to_target_qty` (V1, above; see
+    its docstring for the SIGNAL-TIME SIZING requirement, which applies
+    here identically and is not repeated), but the result is a raw
+    `QtyMicros` integer (1.0 unit == 1_000_000; parity with
+    `mqk_portfolio::QtyMicros` / `mqk_schemas::QTY_MICROS_SCALE`) instead of
+    a whole-share `int`. `weight_to_target_qty` (V1) is NEVER replaced or
+    modified by this function -- both protocols coexist, distinguished by
+    `weight_to_share_qty_micros_protocol_id` vs. `weight_to_share_protocol_id`.
+
+    Deterministic, integer-only arithmetic: the result is computed entirely
+    via `//` (floor) division on already-micros-scaled integers -- never by
+    formatting or parsing a float string, so there is no float-string
+    round-trip ambiguity. Rounding policy is still
+    `WEIGHT_TO_SHARE_ROUNDING_POLICY_V1` ("floor_toward_zero_magnitude_v1"),
+    now applied at `QtyMicros` (1e-6) granularity instead of V1's whole-share
+    granularity -- the ONLY behavioral difference between the two protocols.
+
+    PARITY (required by D6/A3): for any `(weight, price, spec)` for which V1
+    is defined, `weight_to_target_qty_micros(...) // QTY_MICROS_SCALE ==
+    weight_to_target_qty(...)` when the result is non-negative, and
+    `-(-weight_to_target_qty_micros(...) // QTY_MICROS_SCALE) ==
+    weight_to_target_qty(...)` when negative (Python's `//` floors toward
+    negative infinity, not toward zero, so the negative case needs the
+    magnitude-preserving flip) -- i.e. truncating this function's exact
+    output down to whole shares always reproduces V1's whole-share output
+    exactly. See `test_weight_to_share_qty_micros_parity.py`.
+
+    `weight == 0.0` always returns `0` without requiring a price (mirrors
+    V1). Any other `weight` requires a positive finite `price` -- fails
+    closed otherwise (mirrors V1's `RuntimeError`).
+    """
+    spec = spec.normalized()
+    weight = float(weight)
+    if not math.isfinite(weight):
+        raise ValueError(f"weight_to_target_qty_micros: weight must be finite, got {weight!r}")
+    if weight == 0.0:
+        return 0
+
+    if price is None or not math.isfinite(price) or price <= 0.0:
+        raise RuntimeError(
+            f"Fail-closed: {WEIGHT_TO_SHARE_QTY_MICROS_PROTOCOL_ID_V1} requires a positive finite "
+            f"sizing price for a nonzero target weight (weight={weight!r}, price={price!r})"
+        )
+
+    sign = 1 if weight > 0.0 else -1
+    price_micros = to_micros(price)
+    magnitude_notional_micros = to_micros(abs(weight) * spec.equity_usd)
+    qty_magnitude_micros = (magnitude_notional_micros * QTY_MICROS_SCALE) // price_micros
+
+    if spec.max_target_qty is not None:
+        qty_magnitude_micros = min(qty_magnitude_micros, spec.max_target_qty * QTY_MICROS_SCALE)
+
+    if spec.max_position_notional_usd is not None:
+        cap_notional_micros = to_micros(spec.max_position_notional_usd)
+        qty_magnitude_micros = min(
+            qty_magnitude_micros, (cap_notional_micros * QTY_MICROS_SCALE) // price_micros
+        )
+
+    qty_magnitude_micros = max(qty_magnitude_micros, 0)
+    return int(sign * qty_magnitude_micros)
 
 
 def target_qty_to_order_delta(*, current_qty: int, target_qty: int) -> Optional[Tuple[str, int]]:
