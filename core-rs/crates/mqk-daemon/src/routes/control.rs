@@ -145,15 +145,21 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
     };
 
     let now_utc = control_plane_now_utc();
+    // B2.2/B2.7: this operator status route predates any crypto runtime
+    // capability and has never reported anything but the equity_nyse
+    // runtime's leadership state -- explicit equity_nyse here is honest
+    // scoping of an existing equity-only route, not new crypto routing
+    // (which B3 introduces deliberately, not implicitly via this route).
     let lease_row: Option<(String, i64, DateTime<Utc>)> = match sqlx::query_as(
         r#"
             SELECT holder_id,
                    epoch,
                    lease_expires_at
               FROM runtime_leader_lease
-             WHERE id = 1
+             WHERE execution_domain = $1
             "#,
     )
+    .bind(mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
     .fetch_optional(db)
     .await
     {

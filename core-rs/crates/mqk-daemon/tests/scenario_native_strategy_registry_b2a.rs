@@ -124,7 +124,7 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
 
 #[cfg(feature = "manual-external")]
 async fn clean_db_state(pool: &sqlx::PgPool, strategy_id: &str) {
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(pool)
         .await
         .ok();

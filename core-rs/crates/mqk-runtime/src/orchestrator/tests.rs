@@ -2668,7 +2668,7 @@ async fn runtime_test_pool() -> PgPool {
         .await
         .expect("connect");
     mqk_db::migrate(&pool).await.expect("migrate");
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(&pool)
         .await
         .expect("cleanup runtime_leader_lease");
@@ -2775,9 +2775,15 @@ async fn runtime_refuses_to_run_without_lease() {
     let pool = runtime_test_pool().await;
     let clock = MutableClock::new(runtime_ts(10_000));
     let run_id = make_running_run(&pool, clock.now_utc()).await;
-    let locked = mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
-        .await
-        .expect("seed active lease");
+    let locked = mqk_db::runtime_lease::acquire_lease(
+        &pool,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+        "other-runtime",
+        clock.now_utc(),
+        30,
+    )
+    .await
+    .expect("seed active lease");
     assert!(matches!(
         locked,
         mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(_)
@@ -2812,9 +2818,15 @@ async fn runtime_halts_when_lease_is_lost() {
         .expect("first tick acquires lease");
     // Advance past the new TTL (90s) so the lease is expired and can be stolen.
     clock.set(runtime_ts(20_091));
-    let stolen = mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
-        .await
-        .expect("steal expired lease");
+    let stolen = mqk_db::runtime_lease::acquire_lease(
+        &pool,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+        "other-runtime",
+        clock.now_utc(),
+        30,
+    )
+    .await
+    .expect("steal expired lease");
     assert!(matches!(
         stolen,
         mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(_)
@@ -2834,7 +2846,7 @@ async fn runtime_halts_when_lease_is_lost() {
         .expect("load arm state")
         .expect("arm state persisted");
     assert_eq!(arm_state.0, "DISARMED");
-    let lease = mqk_db::runtime_lease::fetch_current_lease(&pool)
+    let lease = mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
         .await
         .expect("fetch current lease")
         .expect("active lease row");
@@ -2862,6 +2874,7 @@ async fn lease_refresh_survives_33_second_blocking_gap() {
     // Acquire lease at T=50_000 (mirrors Phase 0b of the initial tick).
     let outcome = mqk_db::runtime_lease::acquire_lease(
         &pool,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
         "test-holder|run=lease-ttl-test",
         clock.now_utc(),
         RUNTIME_LEASE_TTL_SECS,
@@ -2882,6 +2895,7 @@ async fn lease_refresh_survives_33_second_blocking_gap() {
 
     let refreshed = mqk_db::runtime_lease::refresh_lease(
         &pool,
+        mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
         "test-holder|run=lease-ttl-test",
         epoch,
         clock.now_utc(),
@@ -2917,7 +2931,7 @@ async fn runtime_holder_id_is_compact_and_stable() {
         .await
         .expect("first tick acquires lease");
 
-    let lease = mqk_db::runtime_lease::fetch_current_lease(&pool)
+    let lease = mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
         .await
         .expect("fetch_current_lease")
         .expect("active lease row");

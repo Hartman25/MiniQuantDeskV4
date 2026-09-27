@@ -670,14 +670,15 @@ pub async fn outbox_claim_batch_for_run_with_lease_authority(
         .await
         .context("outbox_claim_batch_for_run_with_lease_authority: begin tx failed")?;
 
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
-            .bind(run_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("outbox_claim_batch_for_run_with_lease_authority: run lock failed")?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("outbox_claim_batch_for_run_with_lease_authority: run lock failed")?;
 
-    let Some(status) = status else {
+    let Some((status, execution_domain)) = row else {
         tx.rollback().await.ok();
         return Err(anyhow!(
             "outbox_claim_batch_for_run_with_lease_authority: run {run_id} not found"
@@ -693,16 +694,23 @@ pub async fn outbox_claim_batch_for_run_with_lease_authority(
         });
     }
 
+    // B2.2: the lease lookup is scoped to this run's own execution_domain
+    // AND fenced to this exact run_id -- a holder_id/epoch that happens to
+    // match a DIFFERENT domain's (or a different run's) lease row can never
+    // authorize a claim here.
     let lease_valid: Option<(String,)> = sqlx::query_as(
         r#"
         SELECT holder_id
           FROM runtime_leader_lease
-         WHERE id = 1
-           AND holder_id = $1
-           AND epoch = $2
-           AND lease_expires_at > $3
+         WHERE execution_domain = $1
+           AND run_id = $2
+           AND holder_id = $3
+           AND epoch = $4
+           AND lease_expires_at > $5
         "#,
     )
+    .bind(&execution_domain)
+    .bind(run_id)
     .bind(holder_id)
     .bind(epoch)
     .bind(claimed_at)

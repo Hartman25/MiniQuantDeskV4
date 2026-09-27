@@ -184,7 +184,7 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     // orchestrator in this test binary -- clear it so an earlier test (or an
     // earlier failed run of this same test) never blocks a later one from
     // acquiring leadership under a different holder/run.
-    sqlx::query("delete from runtime_leader_lease where id = 1")
+    sqlx::query("delete from runtime_leader_lease")
         .execute(pool)
         .await?;
     Ok(())

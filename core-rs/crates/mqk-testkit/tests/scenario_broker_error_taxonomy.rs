@@ -483,7 +483,7 @@ mod db_tests {
     }
 
     async fn cleanup_runtime_lease(pool: &PgPool) -> Result<()> {
-        sqlx::query("delete from runtime_leader_lease where id = 1")
+        sqlx::query("delete from runtime_leader_lease")
             .execute(pool)
             .await?;
         Ok(())

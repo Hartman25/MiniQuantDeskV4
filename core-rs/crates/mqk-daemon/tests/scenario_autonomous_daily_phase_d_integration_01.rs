@@ -1662,7 +1662,7 @@ async fn pd_pool() -> sqlx::PgPool {
         .expect("PD connect failed");
     mqk_db::migrate(&pool).await.expect("PD migrate failed");
 
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(&pool)
         .await
         .expect("cleanup runtime_leader_lease");

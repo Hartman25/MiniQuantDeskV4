@@ -279,7 +279,7 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup daemon runs");
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(&pool)
         .await
         .expect("cleanup runtime_leader_lease");

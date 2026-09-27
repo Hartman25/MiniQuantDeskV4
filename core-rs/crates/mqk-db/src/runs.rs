@@ -919,14 +919,15 @@ pub async fn clear_halted_run_and_reset_stale_claims(
 
     // Lock the run row FIRST — the same serialization boundary
     // `acquire_or_refresh_lease_for_running_run` uses. See doc comment above.
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
-            .bind(run_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("clear_halted_run_and_reset_stale_claims: run lock failed")?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("clear_halted_run_and_reset_stale_claims: run lock failed")?;
 
-    let Some(status) = status else {
+    let Some((status, execution_domain)) = row else {
         tx.rollback().await.ok();
         return Err(anyhow!(
             "clear_halted_run_and_reset_stale_claims: run {run_id} not found"
@@ -943,9 +944,13 @@ pub async fn clear_halted_run_and_reset_stale_claims(
     }
 
     // LAYER A — quiescence before halt clear (§3/§9/-02's false assumption).
+    // B2.2: scoped to this run's own execution_domain -- a stale lease
+    // belonging to the OTHER domain can never be inspected or cleaned up by
+    // this run's own halt-clear.
     let lease: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
+        "SELECT holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE execution_domain = $1",
     )
+    .bind(&execution_domain)
     .fetch_optional(&mut *tx)
     .await
     .context("clear_halted_run_and_reset_stale_claims: lease read failed")?;
@@ -968,8 +973,9 @@ pub async fn clear_halted_run_and_reset_stale_claims(
     // atomic from the operator's perspective. An absent lease is a no-op.
     if let Some((holder_id, epoch, _)) = lease {
         sqlx::query(
-            "DELETE FROM runtime_leader_lease WHERE id = 1 AND holder_id = $1 AND epoch = $2",
+            "DELETE FROM runtime_leader_lease WHERE execution_domain = $1 AND holder_id = $2 AND epoch = $3",
         )
+        .bind(&execution_domain)
         .bind(&holder_id)
         .bind(epoch)
         .execute(&mut *tx)
@@ -1162,14 +1168,15 @@ pub async fn stop_run_if_evidence_clean(
 
     // Lock the run row FIRST -- see doc comment above for the serialization
     // boundary this shares with the lease/claim/clear-halted-run primitives.
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
-            .bind(run_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .context("stop_run_if_evidence_clean: run lock failed")?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT status, execution_domain FROM runs WHERE run_id = $1 FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("stop_run_if_evidence_clean: run lock failed")?;
 
-    let Some(status) = status else {
+    let Some((status, execution_domain)) = row else {
         tx.rollback().await.ok();
         return Err(anyhow!(
             "stop_run_if_evidence_clean: run {run_id} not found"
@@ -1188,10 +1195,13 @@ pub async fn stop_run_if_evidence_clean(
     // Active-runtime-lease check: durable evidence a runtime could still
     // hold claim/dispatch authority, independent of this caller's
     // process-local "no local owner" observation. An expired lease is not
-    // active authority and does not block recovery.
+    // active authority and does not block recovery. B2.2: scoped to this
+    // run's own execution_domain -- the other domain's lease can never
+    // block or influence this recovery.
     let lease: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
+        "SELECT holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE execution_domain = $1",
     )
+    .bind(&execution_domain)
     .fetch_optional(&mut *tx)
     .await
     .context("stop_run_if_evidence_clean: lease read failed")?;

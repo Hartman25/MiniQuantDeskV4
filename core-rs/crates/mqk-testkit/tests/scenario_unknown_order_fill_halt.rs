@@ -200,7 +200,7 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         .await?;
     // Clear the runtime leader lease so a subsequent test run of the same
     // fixed run_id is not refused with RUNTIME_LEASE_UNAVAILABLE.
-    sqlx::query("delete from runtime_leader_lease where id = 1")
+    sqlx::query("delete from runtime_leader_lease")
         .execute(pool)
         .await?;
     Ok(())

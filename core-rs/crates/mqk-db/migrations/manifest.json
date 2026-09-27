@@ -500,6 +500,12 @@
       "path": "0081_runs_execution_domain.sql",
       "status": "applied",
       "intent": "B2 (part 1 of the domain-keyed runtime/lease ownership migration): add execution_domain (equity_nyse | crypto_24_7) to `runs` identity so the single-active-run gate (fetch_active_run_for_engine/fetch_latest_run_for_engine) can be scoped per (engine_id, mode, execution_domain) instead of per (engine_id, mode) alone -- the structural prerequisite for equity_nyse and crypto_24_7 to each hold an independent, coexisting durable run. Every historical row is deterministically classified equity_nyse (identical proof to migration 0080: supports_asset_class(Crypto) has never returned true in any shipped commit); the column's DEFAULT is dropped immediately after backfill so every future insert must supply it explicitly. This migration only widens run identity -- the runtime_leader_lease table, in-memory AppState runtime ownership, and control-route/coordinator threading are separate B2 patches."
+    },
+    {
+      "id": "0082",
+      "path": "0082_runtime_leader_lease_execution_domain.sql",
+      "status": "applied",
+      "intent": "B2.2 (second half of the domain-keyed runtime/lease ownership prerequisite): domain-key `runtime_leader_lease`. Row identity moves from the meaningless global singleton `id = 1` to the natural `execution_domain` key (equity_nyse | crypto_24_7), so each domain's runtime can hold its own independent, coexisting leadership lease instead of contending for one global row. The pre-existing row (if any) is deterministically classified equity_nyse (same proof as 0080/0081); the old CHECK(id=1) singleton constraint and the now-redundant `id` column are dropped (identified by constraint definition text, not a guessed auto-generated name; confirmed no other table's foreign key references `runtime_leader_lease.id`). mqk-db's lease API (runtime_lease.rs), the two runs.rs recovery paths that read/clear this table (clear_halted_run_and_reset_stale_claims, stop_run_if_evidence_clean), and orders.rs's fenced outbox claim (outbox_claim_batch_for_run_with_lease_authority) are updated in the same patch to resolve execution_domain from the run's own durable identity rather than accepting it from a caller, so no dual (old-singleton, new-domain-keyed) authority path exists at any point."
     }
   ]
 }

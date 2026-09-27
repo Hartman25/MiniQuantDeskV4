@@ -317,7 +317,7 @@ async fn b1a_l04_start_with_registered_strategy_stores_active_bootstrap() {
     mqk_db::migrate(&pool).await.expect("migrate");
 
     // Clean up any stale state from prior test runs.
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(&pool)
         .await
         .ok();
@@ -406,7 +406,7 @@ async fn b1a_l05_stop_clears_native_strategy_bootstrap() {
 
     mqk_db::migrate(&pool).await.expect("migrate");
 
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(&pool)
         .await
         .ok();
@@ -501,7 +501,7 @@ async fn b1a_l06_halt_clears_native_strategy_bootstrap() {
 
     mqk_db::migrate(&pool).await.expect("migrate");
 
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(&pool)
         .await
         .ok();

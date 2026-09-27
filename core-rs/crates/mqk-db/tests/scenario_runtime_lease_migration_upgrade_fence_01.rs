@@ -131,21 +131,31 @@ async fn insert_run_with_status(
 ) -> Uuid {
     let run_id = Uuid::new_v4();
 
-    mqk_db::insert_run(
-        pool,
-        &mqk_db::NewRun {
-            run_id,
-            engine_id: format!("m113c-{run_id}"),
-            mode: "PAPER".to_string(),
-            started_at_utc: ts(0),
-            git_hash: "TEST".to_string(),
-            config_hash: format!("cfg-{run_id}"),
-            config_json: serde_json::json!({}),
-            host_fingerprint: "TESTHOST".to_string(),
-        },
+    // This fixture seeds runs at a migration-capped (<= 0069) schema
+    // snapshot that predates migration 0081's `runs.execution_domain`
+    // column, so it cannot go through the current `mqk_db::insert_run`
+    // (which now unconditionally writes that column) -- raw SQL matching
+    // the historical schema shape is required here, not the latest public
+    // write API.
+    sqlx::query(
+        r#"
+        INSERT INTO runs
+            (run_id, engine_id, mode, started_at_utc, git_hash, config_hash, config_json, host_fingerprint)
+        VALUES
+            ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
     )
+    .bind(run_id)
+    .bind(format!("m113c-{run_id}"))
+    .bind("PAPER")
+    .bind(ts(0))
+    .bind("TEST")
+    .bind(format!("cfg-{run_id}"))
+    .bind(serde_json::json!({}))
+    .bind("TESTHOST")
+    .execute(pool)
     .await
-    .expect("insert run");
+    .expect("insert run (pre-0081 schema)");
 
     sqlx::query(
         "UPDATE runs

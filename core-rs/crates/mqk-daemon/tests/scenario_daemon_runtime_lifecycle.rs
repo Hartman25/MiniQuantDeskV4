@@ -253,7 +253,7 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .expect("connect");
 
     mqk_db::migrate(&pool).await.expect("migrate");
-    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+    sqlx::query("DELETE FROM runtime_leader_lease")
         .execute(&pool)
         .await
         .expect("cleanup runtime_leader_lease");
@@ -1038,9 +1038,9 @@ async fn control_status_reflects_real_runtime_truth() {
 
     sqlx::query(
         r#"
-        INSERT INTO runtime_leader_lease (id, holder_id, epoch, lease_expires_at, updated_at)
-        VALUES (1, 'scenario-daemon', 7, $1, $2)
-        ON CONFLICT (id) DO UPDATE
+        INSERT INTO runtime_leader_lease (execution_domain, holder_id, epoch, lease_expires_at, updated_at)
+        VALUES ($3, 'scenario-daemon', 7, $1, $2)
+        ON CONFLICT (execution_domain) DO UPDATE
            SET holder_id = excluded.holder_id,
                epoch = excluded.epoch,
                lease_expires_at = excluded.lease_expires_at,
@@ -1049,6 +1049,7 @@ async fn control_status_reflects_real_runtime_truth() {
     )
     .bind(now_utc + chrono::Duration::seconds(30))
     .bind(now_utc)
+    .bind(mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
     .execute(pool)
     .await
     .expect("seed runtime_leader_lease");

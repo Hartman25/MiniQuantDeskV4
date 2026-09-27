@@ -425,9 +425,15 @@ async fn b3e_halted_orphan_with_expired_lease_takeover_succeeds_and_cleans_up_le
         // A crashed runtime's lease that has since expired -- not active
         // authority per §12.
         let t0 = Utc::now();
-        let acquired = mqk_db::runtime_lease::acquire_lease(&pool, "crashed-runtime", t0, 5)
-            .await
-            .expect("acquire_lease");
+        let acquired = mqk_db::runtime_lease::acquire_lease(
+            &pool,
+            mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+            "crashed-runtime",
+            t0,
+            5,
+        )
+        .await
+        .expect("acquire_lease");
         assert!(matches!(
             acquired,
             mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(_)
@@ -449,9 +455,10 @@ async fn b3e_halted_orphan_with_expired_lease_takeover_succeeds_and_cleans_up_le
         );
         assert_eq!(outbox_status(&pool, &key).await, "PENDING");
 
-        let lease_after = mqk_db::runtime_lease::fetch_current_lease(&pool)
-            .await
-            .expect("fetch_current_lease");
+        let lease_after =
+            mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+                .await
+                .expect("fetch_current_lease");
         assert!(
             lease_after.is_none(),
             "B3E: the expired lease row must be cleaned up as part of the same \
@@ -911,10 +918,11 @@ async fn scr03_neg1_s07_s08_active_lease_survives_halt_and_blocks_clear_with_zer
         let run_after = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
         assert!(matches!(run_after.status, mqk_db::RunStatus::Halted));
         assert_eq!(outbox_status(&pool, &key).await, "CLAIMED");
-        let lease_after = mqk_db::runtime_lease::fetch_current_lease(&pool)
-            .await
-            .expect("fetch_current_lease")
-            .expect("lease row must still exist");
+        let lease_after =
+            mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+                .await
+                .expect("fetch_current_lease")
+                .expect("lease row must still exist");
         assert_eq!(lease_after.holder_id, holder_id);
         assert_eq!(lease_after.epoch, epoch);
     })
@@ -969,9 +977,10 @@ async fn scr03_neg2_neg6_no_lease_row_race_run_not_running_after_clear() {
             "NEG-2: a runtime that observed RUNNING before clear but never acquired a lease \
              must be refused after clear — it must not acquire authority"
         );
-        let lease = mqk_db::runtime_lease::fetch_current_lease(&pool)
-            .await
-            .expect("fetch_current_lease");
+        let lease =
+            mqk_db::runtime_lease::fetch_current_lease(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+                .await
+                .expect("fetch_current_lease");
         assert!(
             lease.is_none(),
             "NEG-2: the refused acquire attempt must not create a lease row"
@@ -1154,9 +1163,14 @@ async fn scr03_s09_release_then_clear_succeeds_immediately() {
         ));
 
         // The local runtime observes HALTED, exits, and releases its lease.
-        mqk_db::runtime_lease::release_lease(&pool, &lease.holder_id, lease.epoch)
-            .await
-            .expect("release_lease");
+        mqk_db::runtime_lease::release_lease(
+            &pool,
+            mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE,
+            &lease.holder_id,
+            lease.epoch,
+        )
+        .await
+        .expect("release_lease");
 
         // Clear now succeeds immediately.
         let outcome = mqk_db::clear_halted_run_and_reset_stale_claims(&pool, run_id, t0)

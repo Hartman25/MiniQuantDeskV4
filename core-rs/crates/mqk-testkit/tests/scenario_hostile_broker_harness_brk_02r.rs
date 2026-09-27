@@ -308,7 +308,7 @@ async fn require_pool(url: &str) -> PgPool {
 }
 
 async fn clear_runtime_lease_rows(pool: &PgPool) -> Result<()> {
-    sqlx::query("delete from runtime_leader_lease where id = 1")
+    sqlx::query("delete from runtime_leader_lease")
         .execute(pool)
         .await?;
     Ok(())
