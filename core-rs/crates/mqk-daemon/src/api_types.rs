@@ -4039,8 +4039,25 @@ pub struct FillQualityTelemetryRow {
     pub symbol: String,
     /// `"buy"` or `"sell"`
     pub side: String,
-    pub ordered_qty: i64,
-    pub fill_qty: i64,
+    /// D6/A5, D7: `None` when the order quantity was never resolvable
+    /// (best-effort outbox lookup miss) OR when it is genuinely fractional
+    /// (Crypto) -- this V1 whole-unit surface never truncates or fabricates
+    /// a value; see `ordered_qty_micros`. Mirrors the accepted
+    /// `GET /api/v1/execution/orders` V1 contract (documented fractional
+    /// `null`, CUTOVER-1B).
+    pub ordered_qty: Option<i64>,
+    /// Exact raw `QtyMicros` ordered quantity (whole or fractional). `None`
+    /// only when the order quantity was never resolvable at all.
+    pub ordered_qty_micros: Option<i64>,
+    /// D6/A5, D7: `None` only for a genuinely fractional fill -- see
+    /// `fill_qty_micros` for the exact quantity in that case.
+    pub fill_qty: Option<i64>,
+    /// Exact raw `QtyMicros` fill quantity (whole or fractional). Always
+    /// present when `fill_qty` is `None`.
+    pub fill_qty_micros: Option<i64>,
+    /// `"qty_micros_v1"` for a row written under the exact encoding
+    /// (migration 0079); `None` for a historical row.
+    pub quantity_schema_version: Option<String>,
     pub fill_price_micros: i64,
     /// `None` for market orders.
     pub reference_price_micros: Option<i64>,
@@ -4454,8 +4471,25 @@ pub struct PaperJournalFillRow {
     pub symbol: String,
     /// `"buy"` or `"sell"`
     pub side: String,
-    pub ordered_qty: i64,
-    pub fill_qty: i64,
+    /// D6/A5, D7: `None` when the order quantity was never resolvable
+    /// (best-effort outbox lookup miss) OR when it is genuinely fractional
+    /// (Crypto) -- this V1 whole-unit surface never truncates or fabricates
+    /// a value; see `ordered_qty_micros`. Mirrors the accepted
+    /// `GET /api/v1/execution/orders` V1 contract (documented fractional
+    /// `null`, CUTOVER-1B).
+    pub ordered_qty: Option<i64>,
+    /// Exact raw `QtyMicros` ordered quantity (whole or fractional). `None`
+    /// only when the order quantity was never resolvable at all.
+    pub ordered_qty_micros: Option<i64>,
+    /// D6/A5, D7: `None` only for a genuinely fractional fill -- see
+    /// `fill_qty_micros` for the exact quantity in that case.
+    pub fill_qty: Option<i64>,
+    /// Exact raw `QtyMicros` fill quantity (whole or fractional). Always
+    /// present when `fill_qty` is `None`.
+    pub fill_qty_micros: Option<i64>,
+    /// `"qty_micros_v1"` for a row written under the exact encoding
+    /// (migration 0079); `None` for a historical row.
+    pub quantity_schema_version: Option<String>,
     pub fill_price_micros: i64,
     /// `None` for market orders.
     pub reference_price_micros: Option<i64>,

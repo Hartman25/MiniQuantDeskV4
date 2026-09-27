@@ -482,6 +482,12 @@
       "path": "0078_paper_portfolio_snapshot_positions_qty_micros.sql",
       "status": "applied",
       "intent": "M5/M6 asset-neutral quantity: add an explicit qty_micros_v1 encoding to sys_paper_portfolio_snapshot_positions (quantity_schema_version + qty_signed_micros; qty_signed becomes nullable) so a fractional (Crypto) broker position is stored exactly instead of refusing the whole durable snapshot. Historical rows retain quantity_schema_version=NULL and the whole-unit qty_signed column, unrescaled; whole-unit positions (all Equity) continue to be written in that historical encoding; only a fractional position writes qty_signed_micros with qty_signed NULL. A CHECK constraint makes the two encodings mutually exclusive and forbids a row with no quantity. No trading authority, risk policy, order sizing, Paper/Live state, broker routing, or execution capability is changed by this migration."
+    },
+    {
+      "id": "0079",
+      "path": "0079_fill_quality_telemetry_qty_micros.sql",
+      "status": "applied",
+      "intent": "D6/A5, D7: add an explicit qty_micros_v1 encoding to fill_quality_telemetry (quantity_schema_version + ordered_qty_micros + fill_qty_micros; ordered_qty/fill_qty become nullable, fill_qty's own > 0 check replaced by the combined encoding CHECK) so a genuinely fractional Crypto fill is captured exactly instead of being silently skipped entirely (mqk_runtime::orchestrator::fill_quality::build_fill_quality_row previously returned None for a fractional order/fill). Historical rows retain quantity_schema_version=NULL and the whole-unit ordered_qty/fill_qty columns, unrescaled -- there is no historical fractional row to reconcile since the prior code path wrote nothing for one; the historical gap is a genuine absence of telemetry, not a truncated value, and stays UNKNOWN. Two CHECK constraints make the fill-side and order-side encodings mutually exclusive/well-formed. No trading authority, risk policy, order sizing, Paper/Live state, broker routing, or execution capability is changed by this migration."
     }
   ]
 }

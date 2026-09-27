@@ -144,8 +144,11 @@ async fn fq01_fill_event_produces_one_telemetry_row_with_exact_field_truth() {
         broker_message_id: broker_message_id.to_string(),
         symbol: "AAPL".to_string(),
         side: "buy".to_string(),
-        ordered_qty: 100,
-        fill_qty: 100,
+        ordered_qty: Some(100),
+        ordered_qty_micros: None,
+        fill_qty: Some(100),
+        fill_qty_micros: None,
+        quantity_schema_version: None,
         fill_price_micros: 150_500_000,
         reference_price_micros: None,
         slippage_bps: None,
@@ -175,7 +178,7 @@ async fn fq01_fill_event_produces_one_telemetry_row_with_exact_field_truth() {
     assert_eq!(r.run_id, run_id, "FQ-01: run_id must match");
     assert_eq!(r.symbol, "AAPL", "FQ-01: symbol must be AAPL");
     assert_eq!(r.side, "buy", "FQ-01: side must be buy");
-    assert_eq!(r.fill_qty, 100, "FQ-01: fill_qty must be exact");
+    assert_eq!(r.fill_qty, Some(100), "FQ-01: fill_qty must be exact");
     assert_eq!(
         r.fill_price_micros, 150_500_000,
         "FQ-01: fill_price_micros must be exact"
@@ -241,8 +244,11 @@ async fn fq02_limit_fill_carries_non_null_slippage_bps() {
         broker_message_id: broker_message_id.to_string(),
         symbol: "TSLA".to_string(),
         side: "buy".to_string(),
-        ordered_qty: 50,
-        fill_qty: 50,
+        ordered_qty: Some(50),
+        ordered_qty_micros: None,
+        fill_qty: Some(50),
+        fill_qty_micros: None,
+        quantity_schema_version: None,
         fill_price_micros: fill_price,
         reference_price_micros: Some(reference_price),
         slippage_bps: Some(expected_slippage),
@@ -321,8 +327,11 @@ async fn fq03_market_fill_null_reference_and_null_slippage() {
         broker_message_id: broker_message_id.to_string(),
         symbol: "GOOG".to_string(),
         side: "sell".to_string(),
-        ordered_qty: 10,
-        fill_qty: 10,
+        ordered_qty: Some(10),
+        ordered_qty_micros: None,
+        fill_qty: Some(10),
+        fill_qty_micros: None,
+        quantity_schema_version: None,
         fill_price_micros: 200_000_000,
         reference_price_micros: None, // market order
         slippage_bps: None,           // must not be fabricated
@@ -425,8 +434,11 @@ async fn fq05_read_surface_returns_active_truth_with_exact_rows() {
         broker_message_id: broker_message_id.to_string(),
         symbol: "MSFT".to_string(),
         side: "buy".to_string(),
-        ordered_qty: 25,
-        fill_qty: 25,
+        ordered_qty: Some(25),
+        ordered_qty_micros: None,
+        fill_qty: Some(25),
+        fill_qty_micros: None,
+        quantity_schema_version: None,
         fill_price_micros: 300_000_000,
         reference_price_micros: Some(299_000_000),
         slippage_bps: Some((300_000_000 - 299_000_000) * 10_000 / 299_000_000),
@@ -587,8 +599,11 @@ async fn fq06_any_run_fetch_cross_run_visible_honest_empty_idempotent() {
         broker_message_id: broker_message_id.to_string(),
         symbol: "AAPL".to_string(),
         side: "buy".to_string(),
-        ordered_qty: 5,
-        fill_qty: 5,
+        ordered_qty: Some(5),
+        ordered_qty_micros: None,
+        fill_qty: Some(5),
+        fill_qty_micros: None,
+        quantity_schema_version: None,
         fill_price_micros: 298_266_000,
         reference_price_micros: None,
         slippage_bps: None,
@@ -632,7 +647,7 @@ async fn fq06_any_run_fetch_cross_run_visible_honest_empty_idempotent() {
         "FQ-06: returned row must report its true run_id (run_a), not fabricated"
     );
     assert_eq!(row.symbol, "AAPL");
-    assert_eq!(row.fill_qty, 5);
+    assert_eq!(row.fill_qty, Some(5));
     assert_eq!(row.fill_kind, "final_fill");
 
     // Honest empty: an internal_order_id with zero telemetry rows anywhere

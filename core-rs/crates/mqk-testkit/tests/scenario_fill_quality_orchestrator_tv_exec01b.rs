@@ -46,6 +46,8 @@ const FQB01_RUN_ID: &str = "1b010001-0000-0000-0000-000000000000";
 const FQB02_RUN_ID: &str = "1b020002-0000-0000-0000-000000000000";
 const FQB03_RUN_ID: &str = "1b030003-0000-0000-0000-000000000000";
 const FQB04_RUN_ID: &str = "1b040004-0000-0000-0000-000000000000";
+const FQB05_RUN_ID: &str = "1b050005-0000-0000-0000-000000000000";
+const FQB06_RUN_ID: &str = "1b060006-0000-0000-0000-000000000000";
 
 // ---------------------------------------------------------------------------
 // Stubs
@@ -54,6 +56,66 @@ const FQB04_RUN_ID: &str = "1b040004-0000-0000-0000-000000000000";
 struct NullBroker;
 
 impl BrokerAdapter for NullBroker {
+    fn submit_order(
+        &self,
+        req: BrokerSubmitRequest,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
+        Ok(BrokerSubmitResponse {
+            broker_order_id: format!("null-{}", req.order_id),
+            submitted_at: 1,
+            status: "ok".to_string(),
+        })
+    }
+
+    fn cancel_order(
+        &self,
+        id: &str,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
+        Ok(BrokerCancelResponse {
+            broker_order_id: id.to_string(),
+            cancelled_at: 1,
+            status: "ok".to_string(),
+        })
+    }
+
+    fn replace_order(
+        &self,
+        req: BrokerReplaceRequest,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
+        Ok(BrokerReplaceResponse {
+            broker_order_id: req.broker_order_id,
+            replaced_at: 1,
+            status: "ok".to_string(),
+        })
+    }
+
+    fn fetch_events(
+        &self,
+        _cursor: Option<&str>,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
+    }
+}
+
+/// D6/A5, D7 (FQB-05/06): a broker stub that explicitly declares Crypto
+/// support -- `NullBroker`'s default (`BrokerAdapter::supports_asset_class`)
+/// is fail-closed Equity-only by design (D2: "no implicit or configuration-
+/// driven way to widen capability"), so a fractional/whole Crypto submit
+/// test needs its own explicitly-opted-in stub, never a widened shared one.
+struct NullCryptoBroker;
+
+impl BrokerAdapter for NullCryptoBroker {
+    fn supports_asset_class(&self, asset_class: mqk_execution::AssetClass) -> bool {
+        matches!(
+            asset_class,
+            mqk_execution::AssetClass::Equity | mqk_execution::AssetClass::Crypto
+        )
+    }
+
     fn submit_order(
         &self,
         req: BrokerSubmitRequest,
@@ -169,6 +231,29 @@ fn make_orchestrator(
     )
 }
 
+fn make_crypto_orchestrator(
+    pool: PgPool,
+    run_id: Uuid,
+    initial_cash_micros: i64,
+) -> ExecutionOrchestrator<NullCryptoBroker, PassGate, PassGate, PassGate, FixedClock> {
+    let gateway = BrokerGateway::for_test(NullCryptoBroker, PassGate, PassGate, PassGate);
+    let portfolio = PortfolioState::new(initial_cash_micros);
+    ExecutionOrchestrator::new(
+        pool,
+        gateway,
+        BrokerOrderMap::new(),
+        BTreeMap::new(),
+        portfolio,
+        run_id,
+        "fqb-dispatcher",
+        "test",
+        None,
+        FixedClock::new(Utc::now()),
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: current-epoch broker-event JSON
 // ---------------------------------------------------------------------------
@@ -194,6 +279,47 @@ fn broker_fill_json(
     let internal_order_id = internal_order_id.to_string();
     let symbol = "AAPL".to_string();
     let delta_qty = QtyMicros::from_whole_units(whole_qty).expect("whole-unit qty");
+    let event = match kind {
+        FillKind::Partial => BrokerEvent::PartialFill {
+            broker_message_id,
+            broker_fill_id: None,
+            internal_order_id,
+            broker_order_id,
+            symbol,
+            side: Side::Buy,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+            cum_qty_after: None,
+        },
+        FillKind::Final => BrokerEvent::Fill {
+            broker_message_id,
+            broker_fill_id: None,
+            internal_order_id,
+            broker_order_id,
+            symbol,
+            side: Side::Buy,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+        },
+    };
+    serde_json::to_value(event).expect("serialize BrokerEvent")
+}
+
+/// D6/A5, D7 (FQB-05): same as `broker_fill_json` but takes an exact
+/// (possibly fractional) `QtyMicros` delta directly, for a Crypto fill.
+fn broker_fill_json_micros(
+    kind: FillKind,
+    broker_message_id: &str,
+    internal_order_id: &str,
+    delta_qty: QtyMicros,
+    price_micros: i64,
+) -> serde_json::Value {
+    let broker_message_id = broker_message_id.to_string();
+    let broker_order_id = Some(format!("null-{internal_order_id}"));
+    let internal_order_id = internal_order_id.to_string();
+    let symbol = "BTC/USD".to_string();
     let event = match kind {
         FillKind::Partial => BrokerEvent::PartialFill {
             broker_message_id,
@@ -286,7 +412,7 @@ async fn fqb01_limit_fill_writes_telemetry_with_slippage_body(pool: PgPool) -> R
     );
     assert_eq!(row.symbol, "AAPL", "FQB-01: symbol");
     assert_eq!(row.side, "buy", "FQB-01: side");
-    assert_eq!(row.fill_qty, 1, "FQB-01: fill_qty");
+    assert_eq!(row.fill_qty, Some(1), "FQB-01: fill_qty");
     assert_eq!(
         row.fill_price_micros, 10_050_000,
         "FQB-01: fill_price_micros"
@@ -376,7 +502,7 @@ async fn fqb02_market_fill_writes_telemetry_null_slippage_body(pool: PgPool) -> 
     );
 
     let row = &rows[0];
-    assert_eq!(row.fill_qty, 1, "FQB-02: fill_qty");
+    assert_eq!(row.fill_qty, Some(1), "FQB-02: fill_qty");
     assert_eq!(
         row.fill_price_micros, 10_050_000,
         "FQB-02: fill_price_micros"
@@ -546,7 +672,8 @@ async fn fqb04_partial_fill_then_fill_writes_two_rows_body(pool: PgPool) -> Resu
         "FQB-04: PartialFill must be partial_fill"
     );
     assert_eq!(
-        pfill_row.fill_qty, 6,
+        pfill_row.fill_qty,
+        Some(6),
         "FQB-04: PartialFill fill_qty must be 6"
     );
     assert_eq!(
@@ -565,7 +692,11 @@ async fn fqb04_partial_fill_then_fill_writes_two_rows_body(pool: PgPool) -> Resu
         fill_row.fill_kind, "final_fill",
         "FQB-04: Fill must be final_fill"
     );
-    assert_eq!(fill_row.fill_qty, 4, "FQB-04: Fill fill_qty must be 4");
+    assert_eq!(
+        fill_row.fill_qty,
+        Some(4),
+        "FQB-04: Fill fill_qty must be 4"
+    );
     assert_eq!(fill_row.fill_price_micros, 10_050_000, "FQB-04: Fill price");
     // slippage for Fill: (10_050_000 - 10_000_000) * 10_000 / 10_000_000 = 50 bps
     assert_eq!(
@@ -576,11 +707,13 @@ async fn fqb04_partial_fill_then_fill_writes_two_rows_body(pool: PgPool) -> Resu
 
     // Both rows reference the same order and share the outbox ordered_qty.
     assert_eq!(
-        pfill_row.ordered_qty, 10,
+        pfill_row.ordered_qty,
+        Some(10),
         "FQB-04: PartialFill ordered_qty from outbox"
     );
     assert_eq!(
-        fill_row.ordered_qty, 10,
+        fill_row.ordered_qty,
+        Some(10),
         "FQB-04: Fill ordered_qty from outbox"
     );
     assert_eq!(
@@ -605,6 +738,250 @@ async fn fqb04_partial_fill_then_fill_writes_two_rows() {
             fqb04_partial_fill_then_fill_writes_two_rows_body(pool)
                 .await
                 .expect("FQB04");
+        },
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// FQB-05 (D6/A5, D7): a genuinely fractional Crypto fill now writes an exact
+// qty_micros_v1 telemetry row -- it is NO LONGER silently skipped.
+// ---------------------------------------------------------------------------
+
+async fn fqb05_fractional_crypto_fill_writes_exact_qty_micros_body(pool: PgPool) -> Result<()> {
+    let run_id: Uuid = FQB05_RUN_ID.parse().unwrap();
+    seed_running_run(&pool, run_id, "fqb05").await?;
+
+    // A Crypto order for a genuinely fractional quantity (0.5 BTC), qty
+    // carried as a decimal STRING in order_json (as the real Crypto
+    // decision/admission seam stamps it).
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "fqb05-ord-001",
+        json!({
+            "symbol": "BTC/USD",
+            "qty": "0.5",
+            "side": "buy",
+            "order_type": "market",
+            "asset_class": "crypto",
+            "instrument_economics": {
+                "source": "registry_v2",
+                "instrument_id": "BTC-USD",
+                "symbol": "BTC/USD",
+                "asset_class": "crypto",
+                "quote_currency": "USD",
+                "contract_multiplier_micros": 1_000_000,
+                "quantity_scale": 8,
+                "min_trade_qty_micros": 100,
+                "tick_size_micros": 100,
+                "quantity_increment_micros": 100
+            }
+        }),
+    )
+    .await?;
+
+    let half_btc = QtyMicros::new(500_000); // 0.5 BTC
+    let fill_json = broker_fill_json_micros(
+        FillKind::Final,
+        "fqb05-msg-001",
+        "fqb05-ord-001",
+        half_btc,
+        50_000 * 1_000_000,
+    );
+    let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "fqb05-msg-001", fill_json).await?;
+    assert!(inserted, "FQB-05: inbox Fill row must be inserted");
+
+    let mut orch = make_crypto_orchestrator(pool.clone(), run_id, 500_000_000);
+    orch.tick().await.map_err(|e| {
+        anyhow::anyhow!("FQB-05: tick() must succeed for a fractional Fill, got: {e}")
+    })?;
+
+    // Before D6/A5 this would be 0 rows (silently skipped). It must now be 1.
+    let rows = mqk_db::fetch_fill_quality_telemetry_recent(&pool, run_id, 10).await?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "FQB-05: a fractional Crypto fill must produce exactly one telemetry row (was silently skipped pre-D6/A5)"
+    );
+
+    let row = &rows[0];
+    assert_eq!(row.symbol, "BTC/USD", "FQB-05: symbol");
+    assert_eq!(
+        row.fill_qty, None,
+        "FQB-05: whole-unit fill_qty must be None for a genuinely fractional fill -- never fabricated/truncated"
+    );
+    assert_eq!(
+        row.fill_qty_micros,
+        Some(500_000),
+        "FQB-05: fill_qty_micros must carry the exact raw QtyMicros value"
+    );
+    assert_eq!(
+        row.quantity_schema_version.as_deref(),
+        Some("qty_micros_v1"),
+        "FQB-05: quantity_schema_version must mark this row's exact encoding"
+    );
+    assert_eq!(
+        row.ordered_qty, None,
+        "FQB-05: whole-unit ordered_qty must be None -- the outbox order qty is also fractional"
+    );
+    assert_eq!(
+        row.ordered_qty_micros,
+        Some(500_000),
+        "FQB-05: ordered_qty_micros must carry the exact fractional order quantity from order_json"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fqb05_fractional_crypto_fill_writes_exact_qty_micros() {
+    mqk_db::run_isolated(
+        "fqb05_fractional_crypto_fill_writes_exact_qty_micros",
+        |pool| async move {
+            fqb05_fractional_crypto_fill_writes_exact_qty_micros_body(pool)
+                .await
+                .expect("FQB05");
+        },
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// FQB-06 (D6/A5, D7 negative control): a WHOLE Crypto fill (e.g. exactly
+// 1.0 BTC) still uses the historical whole-unit encoding
+// (quantity_schema_version = NULL), proving the two encodings are genuinely
+// conditional on the fill's own wholeness -- not a blanket switch to
+// qty_micros_v1 for every Crypto symbol.
+// ---------------------------------------------------------------------------
+
+async fn fqb06_whole_crypto_fill_still_uses_whole_unit_encoding_body(pool: PgPool) -> Result<()> {
+    let run_id: Uuid = FQB06_RUN_ID.parse().unwrap();
+    seed_running_run(&pool, run_id, "fqb06").await?;
+
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "fqb06-ord-001",
+        json!({
+            "symbol": "BTC/USD",
+            "qty": "2",
+            "side": "buy",
+            "order_type": "market",
+            "asset_class": "crypto",
+            "instrument_economics": {
+                "source": "registry_v2",
+                "instrument_id": "BTC-USD",
+                "symbol": "BTC/USD",
+                "asset_class": "crypto",
+                "quote_currency": "USD",
+                "contract_multiplier_micros": 1_000_000,
+                "quantity_scale": 8,
+                "min_trade_qty_micros": 100,
+                "tick_size_micros": 100,
+                "quantity_increment_micros": 100
+            }
+        }),
+    )
+    .await?;
+
+    let two_btc = QtyMicros::from_whole_units(2).unwrap();
+    let fill_json = broker_fill_json_micros(
+        FillKind::Final,
+        "fqb06-msg-001",
+        "fqb06-ord-001",
+        two_btc,
+        50_000 * 1_000_000,
+    );
+    let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "fqb06-msg-001", fill_json).await?;
+    assert!(inserted, "FQB-06: inbox Fill row must be inserted");
+
+    let mut orch = make_crypto_orchestrator(pool.clone(), run_id, 500_000_000);
+    orch.tick()
+        .await
+        .map_err(|e| anyhow::anyhow!("FQB-06: tick() must succeed for a whole Fill, got: {e}"))?;
+
+    let rows = mqk_db::fetch_fill_quality_telemetry_recent(&pool, run_id, 10).await?;
+    assert_eq!(rows.len(), 1, "FQB-06: expected exactly 1 telemetry row");
+    let row = &rows[0];
+    assert_eq!(
+        row.fill_qty,
+        Some(2),
+        "FQB-06: a whole Crypto fill keeps the historical whole-unit column populated"
+    );
+    assert_eq!(
+        row.fill_qty_micros, None,
+        "FQB-06: fill_qty_micros must be None when fill_qty already carries the exact value"
+    );
+    assert_eq!(
+        row.quantity_schema_version, None,
+        "FQB-06: quantity_schema_version must be NULL (historical encoding) for a whole quantity"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fqb06_whole_crypto_fill_still_uses_whole_unit_encoding() {
+    mqk_db::run_isolated(
+        "fqb06_whole_crypto_fill_still_uses_whole_unit_encoding",
+        |pool| async move {
+            fqb06_whole_crypto_fill_still_uses_whole_unit_encoding_body(pool)
+                .await
+                .expect("FQB06");
+        },
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// FQB-07 (D6/A5 migration negative control): the DB itself rejects a
+// fill_quality_telemetry row that violates the encoding CHECK constraint
+// (neither fill_qty nor fill_qty_micros populated) -- proves the constraint
+// is real, not merely documented.
+// ---------------------------------------------------------------------------
+
+async fn fqb07_db_rejects_malformed_fill_qty_encoding_body(pool: PgPool) -> Result<()> {
+    let run_id: Uuid = FQB06_RUN_ID.parse().unwrap();
+    seed_running_run(&pool, run_id, "fqb07").await?;
+
+    let result = sqlx::query(
+        r#"
+        insert into fill_quality_telemetry (
+            telemetry_id, run_id, internal_order_id, broker_message_id,
+            symbol, side, ordered_qty, fill_qty, fill_price_micros,
+            fill_received_at_utc, fill_kind, provenance_ref, created_at_utc,
+            quantity_schema_version, ordered_qty_micros, fill_qty_micros
+        )
+        values (
+            $1, $2, 'fqb07-ord-001', 'fqb07-msg-001',
+            'AAPL', 'buy', NULL, NULL, 100000000,
+            now(), 'final_fill', 'oms_inbox:fqb07-msg-001', now(),
+            NULL, NULL, NULL
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(run_id)
+    .execute(&pool)
+    .await;
+
+    assert!(
+        result.is_err(),
+        "FQB-07: DB must reject a row with neither fill_qty nor fill_qty_micros populated"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fqb07_db_rejects_malformed_fill_qty_encoding() {
+    mqk_db::run_isolated(
+        "fqb07_db_rejects_malformed_fill_qty_encoding",
+        |pool| async move {
+            fqb07_db_rejects_malformed_fill_qty_encoding_body(pool)
+                .await
+                .expect("FQB07");
         },
     )
     .await;

@@ -22,10 +22,29 @@ pub struct NewFillQualityTelemetry {
     pub symbol: String,
     /// `"buy"` or `"sell"`
     pub side: String,
-    /// Ordered qty from outbox order_json (`qty` field).
-    pub ordered_qty: i64,
-    /// Delta fill qty for this event.
-    pub fill_qty: i64,
+    /// D6/A5/D7: exactly one of (`ordered_qty`, `ordered_qty_micros`) is a
+    /// meaningful value per row, or both are `None` when the order quantity
+    /// was never resolvable (best-effort outbox lookup miss) -- see
+    /// `fill_quality_telemetry_ordered_qty_encoding_check` (migration 0079).
+    /// Ordered qty from outbox order_json (`qty` field). Whole-unit only.
+    pub ordered_qty: Option<i64>,
+    /// Raw `QtyMicros` ordered quantity (whole or fractional). `None` when
+    /// `ordered_qty` carries the value, or when never resolvable.
+    pub ordered_qty_micros: Option<i64>,
+    /// D6/A5/D7: exactly one of (`fill_qty`, `fill_qty_micros`) is `Some` --
+    /// see `fill_quality_telemetry_fill_qty_encoding_check` (migration
+    /// 0079). Never both `None` (a fill event always has a positive
+    /// quantity).
+    /// Delta fill qty for this event. Whole-unit only; `None` for a
+    /// genuinely fractional fill.
+    pub fill_qty: Option<i64>,
+    /// Raw `QtyMicros` delta fill quantity (whole or fractional). `None`
+    /// when `fill_qty` carries the value.
+    pub fill_qty_micros: Option<i64>,
+    /// `"qty_micros_v1"` for a row written by this encoding; `None` for a
+    /// historical row written before this schema existed (whole-unit
+    /// columns are authoritative for those).
+    pub quantity_schema_version: Option<String>,
     /// Actual executed price in micros.
     pub fill_price_micros: i64,
     /// Limit price in micros from outbox order_json. `None` for market orders.
@@ -56,8 +75,11 @@ pub struct FillQualityRow {
     pub broker_message_id: String,
     pub symbol: String,
     pub side: String,
-    pub ordered_qty: i64,
-    pub fill_qty: i64,
+    pub ordered_qty: Option<i64>,
+    pub ordered_qty_micros: Option<i64>,
+    pub fill_qty: Option<i64>,
+    pub fill_qty_micros: Option<i64>,
+    pub quantity_schema_version: Option<String>,
     pub fill_price_micros: i64,
     pub reference_price_micros: Option<i64>,
     pub slippage_bps: Option<i64>,
@@ -84,9 +106,10 @@ pub async fn insert_fill_quality_telemetry(
             broker_message_id, symbol, side, ordered_qty, fill_qty,
             fill_price_micros, reference_price_micros, slippage_bps,
             submit_ts_utc, fill_received_at_utc, submit_to_fill_ms,
-            fill_kind, provenance_ref, created_at_utc
+            fill_kind, provenance_ref, created_at_utc,
+            quantity_schema_version, ordered_qty_micros, fill_qty_micros
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
         on conflict (telemetry_id) do nothing
         "#,
     )
@@ -109,6 +132,9 @@ pub async fn insert_fill_quality_telemetry(
     .bind(&row.fill_kind)
     .bind(&row.provenance_ref)
     .bind(row.created_at_utc)
+    .bind(&row.quantity_schema_version)
+    .bind(row.ordered_qty_micros)
+    .bind(row.fill_qty_micros)
     .execute(pool)
     .await
     .context("insert_fill_quality_telemetry failed")?;
@@ -130,7 +156,8 @@ pub async fn fetch_fill_quality_telemetry_for_order(
                broker_message_id, symbol, side, ordered_qty, fill_qty,
                fill_price_micros, reference_price_micros, slippage_bps,
                submit_ts_utc, fill_received_at_utc, submit_to_fill_ms,
-               fill_kind, provenance_ref, created_at_utc
+               fill_kind, provenance_ref, created_at_utc,
+               quantity_schema_version, ordered_qty_micros, fill_qty_micros
         from fill_quality_telemetry
         where run_id = $1
           and internal_order_id = $2
@@ -166,6 +193,9 @@ pub async fn fetch_fill_quality_telemetry_for_order(
             fill_kind: r.try_get("fill_kind")?,
             provenance_ref: r.try_get("provenance_ref")?,
             created_at_utc: r.try_get("created_at_utc")?,
+            quantity_schema_version: r.try_get("quantity_schema_version")?,
+            ordered_qty_micros: r.try_get("ordered_qty_micros")?,
+            fill_qty_micros: r.try_get("fill_qty_micros")?,
         });
     }
     Ok(out)
@@ -192,7 +222,8 @@ pub async fn fetch_fill_quality_telemetry_for_order_any_run(
                broker_message_id, symbol, side, ordered_qty, fill_qty,
                fill_price_micros, reference_price_micros, slippage_bps,
                submit_ts_utc, fill_received_at_utc, submit_to_fill_ms,
-               fill_kind, provenance_ref, created_at_utc
+               fill_kind, provenance_ref, created_at_utc,
+               quantity_schema_version, ordered_qty_micros, fill_qty_micros
         from fill_quality_telemetry
         where internal_order_id = $1
         order by fill_received_at_utc asc
@@ -226,6 +257,9 @@ pub async fn fetch_fill_quality_telemetry_for_order_any_run(
             fill_kind: r.try_get("fill_kind")?,
             provenance_ref: r.try_get("provenance_ref")?,
             created_at_utc: r.try_get("created_at_utc")?,
+            quantity_schema_version: r.try_get("quantity_schema_version")?,
+            ordered_qty_micros: r.try_get("ordered_qty_micros")?,
+            fill_qty_micros: r.try_get("fill_qty_micros")?,
         });
     }
     Ok(out)
@@ -243,7 +277,8 @@ pub async fn fetch_fill_quality_telemetry_recent(
                broker_message_id, symbol, side, ordered_qty, fill_qty,
                fill_price_micros, reference_price_micros, slippage_bps,
                submit_ts_utc, fill_received_at_utc, submit_to_fill_ms,
-               fill_kind, provenance_ref, created_at_utc
+               fill_kind, provenance_ref, created_at_utc,
+               quantity_schema_version, ordered_qty_micros, fill_qty_micros
         from fill_quality_telemetry
         where run_id = $1
         order by fill_received_at_utc desc
@@ -278,6 +313,9 @@ pub async fn fetch_fill_quality_telemetry_recent(
             fill_kind: r.try_get("fill_kind")?,
             provenance_ref: r.try_get("provenance_ref")?,
             created_at_utc: r.try_get("created_at_utc")?,
+            quantity_schema_version: r.try_get("quantity_schema_version")?,
+            ordered_qty_micros: r.try_get("ordered_qty_micros")?,
+            fill_qty_micros: r.try_get("fill_qty_micros")?,
         });
     }
     Ok(out)

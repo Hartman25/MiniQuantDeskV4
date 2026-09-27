@@ -83,31 +83,22 @@ pub(super) async fn build_fill_quality_row(
     if !fill_qty.is_positive() {
         return None;
     }
-    // CUTOVER-1B-OMS-QTY-MICROS-01: `mqk_db::NewFillQualityTelemetry.fill_qty`
-    // remains whole-unit `i64` pending CUTOVER-1C. Unlike the portfolio apply
-    // path, this function is documented best-effort/non-fatal telemetry that
-    // gates no economic decision — skipping telemetry for a fractional
-    // Crypto fill (rather than erroring the whole tick) is safe here.
-    let fill_qty = fill_qty.to_whole_units_checked()?;
 
     // Best-effort outbox lookup to derive ordered_qty, reference_price, submit_ts.
-    let (ordered_qty, reference_price_micros, submit_ts_utc) =
+    let (ordered_qty_micros, reference_price_micros, submit_ts_utc) =
         match mqk_db::outbox_fetch_by_idempotency_key(pool, &internal_order_id).await {
             Ok(Some(outbox)) => {
-                let Some(ordered_qty) = ordered_qty_from_order_json(&outbox.order_json, fill_qty)
-                else {
-                    // The order quantity is present but not a whole unit (a
-                    // fractional Crypto order). Whole-unit telemetry cannot
-                    // represent it and must not substitute the fill quantity.
-                    return None;
-                };
                 let reference_price_micros = outbox
                     .order_json
                     .get("limit_price")
                     .and_then(|v| v.as_i64());
-                (ordered_qty, reference_price_micros, outbox.sent_at_utc)
+                (
+                    ordered_qty_micros_from_order_json(&outbox.order_json, fill_qty),
+                    reference_price_micros,
+                    outbox.sent_at_utc,
+                )
             }
-            _ => (fill_qty, None, None),
+            _ => (Some(fill_qty), None, None),
         };
 
     // Slippage in bps — only meaningful when a reference (limit) price exists.
@@ -131,6 +122,33 @@ pub(super) async fn build_fill_quality_row(
         format!("mqk.fill-quality.v1|{}|{}", run_id, broker_message_id).as_bytes(),
     );
 
+    // D6/A5, D7 (CUTOVER-1B-OMS-QTY-MICROS-01 superseded): a genuinely
+    // fractional Crypto fill is no longer skipped -- migration 0079 gives
+    // `fill_quality_telemetry` an explicit qty_micros_v1 encoding
+    // (`fill_qty_encoding_check`) so the exact `QtyMicros` value is captured
+    // instead of silently omitting telemetry for the event. A whole fill
+    // writes the historical whole-unit column unchanged
+    // (`quantity_schema_version = NULL`, byte-identical to a pre-D6/A5 row).
+    let (fill_qty_col, fill_qty_micros_col, quantity_schema_version) =
+        match fill_qty.to_whole_units_checked() {
+            Some(whole) => (Some(whole), None, None),
+            None => (
+                None,
+                Some(fill_qty.raw()),
+                Some("qty_micros_v1".to_string()),
+            ),
+        };
+    // Ordered-qty encoding is independent (`ordered_qty_encoding_check`):
+    // whole when representable, exact micros when genuinely fractional, or
+    // both absent when the order quantity was never resolvable at all.
+    let (ordered_qty_col, ordered_qty_micros_col) = match ordered_qty_micros {
+        None => (None, None),
+        Some(q) => match q.to_whole_units_checked() {
+            Some(whole) => (Some(whole), None),
+            None => (None, Some(q.raw())),
+        },
+    };
+
     Some(mqk_db::NewFillQualityTelemetry {
         telemetry_id,
         run_id,
@@ -140,8 +158,11 @@ pub(super) async fn build_fill_quality_row(
         broker_message_id: broker_message_id.to_string(),
         symbol,
         side: side_str.to_string(),
-        ordered_qty,
-        fill_qty,
+        ordered_qty: ordered_qty_col,
+        ordered_qty_micros: ordered_qty_micros_col,
+        fill_qty: fill_qty_col,
+        fill_qty_micros: fill_qty_micros_col,
+        quantity_schema_version,
         fill_price_micros,
         reference_price_micros,
         slippage_bps,
@@ -154,14 +175,22 @@ pub(super) async fn build_fill_quality_row(
     })
 }
 
-/// Ordered quantity for whole-unit telemetry. An absent `qty` falls back to the
-/// whole fill quantity (unchanged best-effort behavior); a present-but-non-whole
-/// `qty` (fractional decimal string or malformed) yields `None` -- never the
-/// fill quantity standing in for an order size that is not knowable here.
-fn ordered_qty_from_order_json(order_json: &serde_json::Value, fill_qty: i64) -> Option<i64> {
+/// Ordered quantity (raw `QtyMicros`) for telemetry. An absent `qty` falls
+/// back to the fill's own exact quantity (unchanged best-effort behavior,
+/// now exact rather than whole-unit-only); a present-but-unparseable `qty`
+/// (malformed JSON) yields `None` -- never the fill quantity standing in for
+/// an order size that is not knowable here.
+fn ordered_qty_micros_from_order_json(
+    order_json: &serde_json::Value,
+    fill_qty: mqk_execution::QtyMicros,
+) -> Option<mqk_execution::QtyMicros> {
     match order_json.get("qty") {
         None => Some(fill_qty),
-        Some(v) => v.as_i64(),
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .and_then(mqk_execution::QtyMicros::from_whole_units),
+        Some(serde_json::Value::String(s)) => s.parse().ok(),
+        Some(_) => None,
     }
 }
 
@@ -175,13 +204,27 @@ fn side_to_str(side: &mqk_execution::Side) -> &'static str {
 #[cfg(test)]
 mod cutover_1d_a3_tests {
     use super::*;
+    use mqk_execution::QtyMicros;
+
+    fn whole(n: i64) -> QtyMicros {
+        QtyMicros::from_whole_units(n).unwrap()
+    }
 
     #[test]
-    fn ordered_qty_is_never_fabricated_for_a_fractional_order() {
-        let j = |v: serde_json::Value| ordered_qty_from_order_json(&v, 3);
-        assert_eq!(j(serde_json::json!({"qty": 10})), Some(10));
-        assert_eq!(j(serde_json::json!({})), Some(3));
-        assert_eq!(j(serde_json::json!({"qty": "0.0001"})), None);
+    fn ordered_qty_is_never_fabricated_for_an_unparseable_order() {
+        let j = |v: serde_json::Value| ordered_qty_micros_from_order_json(&v, whole(3));
+        assert_eq!(j(serde_json::json!({"qty": 10})), Some(whole(10)));
+        assert_eq!(j(serde_json::json!({})), Some(whole(3)));
+        // D6/A5: a fractional decimal STRING is now genuinely parseable
+        // (exact), unlike the old whole-unit-only `as_i64()` path.
+        assert_eq!(
+            j(serde_json::json!({"qty": "0.0001"})),
+            Some(QtyMicros::new(100))
+        );
+        // A fractional JSON *number* (float) is never fabricated -- lossy
+        // f64 decimal reconstruction is refused, not approximated.
         assert_eq!(j(serde_json::json!({"qty": 0.5})), None);
+        assert_eq!(j(serde_json::json!({"qty": "garbage"})), None);
+        assert_eq!(j(serde_json::json!({"qty": null})), None);
     }
 }

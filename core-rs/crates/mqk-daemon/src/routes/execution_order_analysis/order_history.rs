@@ -27,6 +27,22 @@ use crate::state::AppState;
 use super::super::helpers::oms_stage_label;
 use super::lifecycle_stage_from_outbox_status;
 
+/// D6/A5, D7: human-readable exact quantity for a `fill_quality_telemetry`
+/// row -- never fabricates or truncates. `whole` (the V1 column) is
+/// preferred when present; a genuinely fractional fill (`whole` absent)
+/// renders `micros` via `QtyMicros`'s exact decimal `Display` instead of
+/// silently showing nothing or a truncated whole number. Both absent is
+/// `"unknown"` (never a fabricated `0`).
+pub(super) fn fill_qty_display(whole: Option<i64>, micros: Option<i64>) -> String {
+    if let Some(w) = whole {
+        return w.to_string();
+    }
+    if let Some(m) = micros {
+        return mqk_execution::QtyMicros::new(m).to_string();
+    }
+    "unknown".to_string()
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/v1/execution/orders/:order_id/timeline  (Batch A5A)
 // ---------------------------------------------------------------------------
@@ -173,7 +189,7 @@ pub(crate) async fn execution_order_timeline(
         .map(|r| {
             let detail = Some(format!(
                 "qty={} fill_price={:.6} ({})",
-                r.fill_qty,
+                fill_qty_display(r.fill_qty, r.fill_qty_micros),
                 r.fill_price_micros as f64 / 1_000_000.0,
                 r.fill_kind,
             ));
@@ -183,7 +199,7 @@ pub(crate) async fn execution_order_timeline(
                 stage: r.fill_kind,
                 source: "fill_quality_telemetry".to_string(),
                 detail,
-                fill_qty: Some(r.fill_qty),
+                fill_qty: r.fill_qty,
                 fill_price_micros: Some(r.fill_price_micros),
                 slippage_bps: r.slippage_bps,
                 provenance_ref: Some(r.provenance_ref),
@@ -395,7 +411,7 @@ pub(crate) async fn execution_order_trace(
         .map(|r| {
             let detail = Some(format!(
                 "qty={} fill_price={:.6} ({})",
-                r.fill_qty,
+                fill_qty_display(r.fill_qty, r.fill_qty_micros),
                 r.fill_price_micros as f64 / 1_000_000.0,
                 r.fill_kind,
             ));
@@ -405,7 +421,7 @@ pub(crate) async fn execution_order_trace(
                 stage: r.fill_kind,
                 source: "fill_quality_telemetry".to_string(),
                 detail,
-                fill_qty: Some(r.fill_qty),
+                fill_qty: r.fill_qty,
                 fill_price_micros: Some(r.fill_price_micros),
                 slippage_bps: r.slippage_bps,
                 submit_ts_utc: r.submit_ts_utc.map(|t| t.to_rfc3339()),
@@ -580,7 +596,15 @@ pub(crate) async fn execution_order_replay(
     let frames: Vec<OrderReplayFrame> = fill_rows
         .into_iter()
         .map(|r| {
-            cumulative_filled += r.fill_qty;
+            // D6/A5, D7: a genuinely fractional fill (r.fill_qty is None,
+            // exact value in r.fill_qty_micros) is documented, not silently
+            // truncated, in this whole-unit-only running total -- open_qty
+            // and cumulative_filled below may under-count a fractional
+            // fill's contribution. requested_qty/OMS filled_qty are a
+            // separate, still whole-unit-only surface out of this
+            // migration's scope; state_delta below always shows the exact
+            // quantity regardless.
+            cumulative_filled += r.fill_qty.unwrap_or(0);
             let open_qty = requested_qty.map(|rq| (rq - cumulative_filled).max(0));
             let boundary_tags = if r.fill_kind == "final_fill" {
                 vec!["final_fill".to_string()]
@@ -589,7 +613,7 @@ pub(crate) async fn execution_order_replay(
             };
             let state_delta = format!(
                 "fill_qty={} fill_price={:.6} ({})",
-                r.fill_qty,
+                fill_qty_display(r.fill_qty, r.fill_qty_micros),
                 r.fill_price_micros as f64 / 1_000_000.0,
                 r.fill_kind,
             );

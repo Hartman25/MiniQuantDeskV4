@@ -18,6 +18,8 @@ use axum::{
 use crate::api_types::{OrderCausalityCausalNode, OrderCausalityResponse, OrderChartResponse};
 use crate::state::AppState;
 
+use super::order_history::fill_qty_display;
+
 // ---------------------------------------------------------------------------
 // GET /api/v1/execution/orders/:order_id/chart  (Batch A5D)
 // ---------------------------------------------------------------------------
@@ -312,7 +314,7 @@ pub(crate) async fn execution_order_causality(
                     anomaly_tags: vec![],
                     summary: format!(
                         "fill_qty={} fill_price={:.6} ({})",
-                        r.fill_qty,
+                        fill_qty_display(r.fill_qty, r.fill_qty_micros),
                         r.fill_price_micros as f64 / 1_000_000.0,
                         r.fill_kind,
                     ),
