@@ -3382,6 +3382,87 @@ mod drift_explanation_exact_qty {
         }
     }
 
+    #[test]
+    fn pending_malformed_side_never_explains_drift_in_either_direction() {
+        for bad in ["", "hold", "b", "long", "buy sell", "buyy", "sel l"] {
+            for (qty, local_qty, broker_qty, dir) in [
+                (serde_json::json!("0.5"), "0", "0.5", "positive fractional"),
+                (serde_json::json!("0.5"), "0.5", "0", "negative fractional"),
+                (serde_json::json!(10), "0", "10", "positive whole"),
+                (serde_json::json!(10), "10", "0", "negative whole"),
+            ] {
+                assert!(
+                    !pending("BTC/USD", bad, qty.clone(), local_qty, broker_qty),
+                    "side {bad:?} must not explain {dir} drift"
+                );
+            }
+        }
+        // Missing and non-string `side` are equally unproven.
+        for side in [
+            None,
+            Some(serde_json::json!(null)),
+            Some(serde_json::json!(1)),
+        ] {
+            for (local_qty, broker_qty) in [("0", "0.5"), ("0.5", "0")] {
+                let mut order = serde_json::json!({"symbol": "BTC/USD", "qty": "0.5"});
+                if let Some(side) = side.clone() {
+                    order["side"] = side;
+                }
+                let rows = vec![sent_row("k1", order)];
+                let (local, broker) = snapshots("BTC/USD", local_qty, broker_qty);
+                assert!(
+                    !drift_is_consistent_with_pending_fills(&rows, &local, &broker),
+                    "side {side:?} drift {local_qty}->{broker_qty}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_side_uses_the_dispatch_decoder_normalization() {
+        let half = serde_json::json!("0.5");
+        for buy in ["buy", "BUY", " Buy "] {
+            assert!(pending("BTC/USD", buy, half.clone(), "0", "0.5"), "{buy:?}");
+            assert!(
+                !pending("BTC/USD", buy, half.clone(), "0.5", "0"),
+                "{buy:?}"
+            );
+        }
+        for sell in ["sell", "SELL", " Sell "] {
+            assert!(
+                pending("BTC/USD", sell, half.clone(), "0.5", "0"),
+                "{sell:?}"
+            );
+            assert!(
+                !pending("BTC/USD", sell, half.clone(), "0", "0.5"),
+                "{sell:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_malformed_side_row_does_not_disturb_a_valid_expectation() {
+        let rows = vec![
+            sent_row(
+                "k1",
+                serde_json::json!({"symbol": "BTC/USD", "side": "buy", "qty": "0.5"}),
+            ),
+            sent_row(
+                "k2",
+                serde_json::json!({"symbol": "BTC/USD", "side": "hold", "qty": "0.5"}),
+            ),
+        ];
+        let (local, broker) = snapshots("BTC/USD", "0", "0.5");
+        assert!(drift_is_consistent_with_pending_fills(
+            &rows, &local, &broker
+        ));
+        let (local, broker) = snapshots("BTC/USD", "0", "0.500001");
+        assert!(
+            !drift_is_consistent_with_pending_fills(&rows, &local, &broker),
+            "the malformed row adds nothing beyond the valid order's 0.5"
+        );
+    }
+
     // -- recently applied terminal fills -----------------------------------
 
     fn now() -> ::chrono::DateTime<::chrono::Utc> {

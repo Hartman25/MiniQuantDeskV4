@@ -340,10 +340,13 @@ fn drift_is_consistent_with_pending_fills(
         if sym.is_empty() {
             continue;
         }
-        let delta = if side.eq_ignore_ascii_case("buy") {
-            Some(qty)
-        } else {
-            qty.checked_neg()
+        // Same normalization as the dispatch decoder (`validated_order_side`).
+        // Any other side is malformed durable evidence: it contributes no
+        // expectation, so it can never explain drift in either direction.
+        let delta = match side.trim().to_ascii_lowercase().as_str() {
+            "buy" => Some(qty),
+            "sell" => qty.checked_neg(),
+            _ => continue,
         };
         let Some(delta) = delta else {
             return false;
