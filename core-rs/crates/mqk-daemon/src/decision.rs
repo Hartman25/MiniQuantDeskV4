@@ -664,25 +664,22 @@ pub(crate) fn non_equity_explicit_size_gate(
     Ok(())
 }
 
-/// Time-in-force actually admitted for an order of `asset_class`.
+/// Time-in-force admitted for an order of `asset_class`.
 ///
-/// The bar->decision translator emits `market`/`day` for every asset, but
-/// crypto has no session-scoped `day` (Alpaca crypto supports only `gtc` and
-/// `ioc`). A crypto *market* order's `day` is therefore admitted as `gtc`
-/// (a market order does not rest, so the lifetime is not widened); a resting
-/// `day` limit, or any other value crypto cannot carry, is refused rather than
-/// silently rewritten. Equity time-in-force is untouched.
-fn admit_time_in_force(asset_class: &str, order_type: &str, tif: &str) -> Result<String, String> {
+/// Crypto time-in-force is EXPLICIT-ONLY (operator policy): an order must itself
+/// carry `gtc` or `ioc`. Crypto has no session-scoped `day`, and no crypto order
+/// is ever rewritten from one time-in-force into another -- `day`, `fok`, `opg`,
+/// `cls`, empty and unknown are refused. Equity time-in-force is untouched.
+fn admit_time_in_force(asset_class: &str, tif: &str) -> Result<String, String> {
     let tif = tif.trim().to_ascii_lowercase();
     if asset_class != "crypto" {
         return Ok(tif);
     }
     match tif.as_str() {
         "gtc" | "ioc" => Ok(tif),
-        "day" if order_type.trim().eq_ignore_ascii_case("market") => Ok("gtc".to_string()),
         other => Err(format!(
             "internal decision refused: crypto order time_in_force '{other}' is not admissible \
-             (crypto supports only gtc/ioc; day is mapped to gtc for market orders only)"
+             (crypto requires an explicit gtc or ioc; no time_in_force is defaulted or rewritten)"
         )),
     }
 }
@@ -1506,11 +1503,7 @@ pub async fn submit_internal_strategy_decision(
     }
 
     let mut decision = decision;
-    match admit_time_in_force(
-        &instrument_context.asset_class,
-        &decision.order_type,
-        &decision.time_in_force,
-    ) {
+    match admit_time_in_force(&instrument_context.asset_class, &decision.time_in_force) {
         Ok(tif) => decision.time_in_force = tif,
         Err(blocker) => {
             return outcome(
@@ -1914,62 +1907,77 @@ mod m6_trading_registry_snapshot_writer_tests {
     // RC-M6-B: crypto time-in-force is decided at admission
     // -----------------------------------------------------------------
 
-    #[test]
-    fn rcm6b_crypto_market_day_is_admitted_as_gtc_and_survives_the_runtime_decoder() {
-        let registry = btc_registry();
-        let context = resolve_order_instrument_context_from_registry(
-            &registry,
+    fn btc_context() -> DurableOrderInstrumentContext {
+        resolve_order_instrument_context_from_registry(
+            &btc_registry(),
             crate::state::DeploymentMode::Paper,
             Some(crate::state::BrokerKind::Alpaca),
             "BTC/USD",
             false,
         )
-        .expect("valid BTC/USD Paper registry row must resolve");
+        .expect("valid BTC/USD Paper registry row must resolve")
+    }
 
-        // The bar->decision translator emits market + "day" for every asset.
-        let mut d = decision();
-        d.qty = mqk_schemas::QtyMicros::new(100);
-        d.time_in_force = "day".to_string();
-        d.time_in_force =
-            admit_time_in_force(&context.asset_class, &d.order_type, &d.time_in_force)
-                .expect("crypto market/day must be admissible");
-        assert_eq!(d.time_in_force, "gtc");
+    #[test]
+    fn rcm6b_crypto_explicit_gtc_and_ioc_survive_the_runtime_decoder_and_adapter() {
+        let context = btc_context();
+        for order_type in ["market", "limit"] {
+            for tif in ["gtc", "ioc"] {
+                let mut d = decision();
+                d.qty = mqk_schemas::QtyMicros::new(100);
+                d.order_type = order_type.to_string();
+                d.limit_price = (order_type == "limit").then_some(60_000_000_000);
+                d.time_in_force = tif.to_string();
+                d.time_in_force = admit_time_in_force(&context.asset_class, &d.time_in_force)
+                    .unwrap_or_else(|e| {
+                        panic!("crypto {order_type}/{tif} must be admissible: {e}")
+                    });
+                assert_eq!(d.time_in_force, tif, "explicit TIF is never rewritten");
 
-        let order = build_order_json(&d, &context);
-        let req = mqk_runtime::orchestrator::build_validated_submit_request("oid", &order)
-            .expect("runtime decoder must accept the admitted payload");
-        assert_eq!(req.time_in_force, "gtc");
-        mqk_broker_alpaca::validate_alpaca_crypto_order_tif(&req.time_in_force)
-            .expect("the admitted TIF must satisfy the Alpaca crypto adapter");
+                let order = build_order_json(&d, &context);
+                assert_eq!(order["time_in_force"], tif);
+                let req = mqk_runtime::orchestrator::build_validated_submit_request("oid", &order)
+                    .expect("runtime decoder must accept the admitted payload");
+                assert_eq!(req.time_in_force, tif);
+                mqk_broker_alpaca::validate_alpaca_crypto_order_tif(&req.time_in_force)
+                    .expect("the admitted TIF must satisfy the Alpaca crypto adapter");
+            }
+        }
+    }
+
+    #[test]
+    fn rcm6b_crypto_day_from_the_generic_translator_is_refused_not_rewritten() {
+        // The bar->decision translator emits market + "day" for every asset; a
+        // crypto order therefore fails closed until a crypto policy surface
+        // explicitly emits gtc/ioc.
+        let context = btc_context();
+        let err = admit_time_in_force(&context.asset_class, "day")
+            .expect_err("crypto day must be refused");
+        assert!(err.contains("'day'"), "{err}");
     }
 
     #[test]
     fn rcm6b_crypto_time_in_force_table() {
-        let adm = |ot: &str, tif: &str| admit_time_in_force("crypto", ot, tif);
-        assert_eq!(adm("market", "gtc").as_deref(), Ok("gtc"));
-        assert_eq!(adm("market", "ioc").as_deref(), Ok("ioc"));
-        assert_eq!(adm("limit", "gtc").as_deref(), Ok("gtc"));
-        assert_eq!(adm("limit", "IOC").as_deref(), Ok("ioc"));
-        assert_eq!(adm("market", " DAY ").as_deref(), Ok("gtc"));
-        // A resting day limit has no crypto meaning: never silently widened.
-        assert!(adm("limit", "day").is_err());
-        // Not supported by Alpaca crypto.
-        for tif in ["fok", "opg", "cls", ""] {
-            assert!(adm("market", tif).is_err(), "{tif:?}");
+        let adm = |tif: &str| admit_time_in_force("crypto", tif);
+        assert_eq!(adm("gtc").as_deref(), Ok("gtc"));
+        assert_eq!(adm("ioc").as_deref(), Ok("ioc"));
+        // Trim / case normalization follows the existing contract.
+        assert_eq!(adm(" GTC ").as_deref(), Ok("gtc"));
+        assert_eq!(adm("IOC").as_deref(), Ok("ioc"));
+        // No day -> gtc / ioc rewrite in any spelling.
+        for tif in [
+            "day", " DAY ", "Day", "fok", "opg", "cls", "", "  ", "gtd", "gtc1",
+        ] {
+            assert!(adm(tif).is_err(), "{tif:?} must be refused");
         }
     }
 
     #[test]
     fn rcm6b_equity_time_in_force_is_untouched() {
         for tif in ["day", "gtc", "ioc", "fok"] {
-            for ot in ["market", "limit"] {
-                assert_eq!(
-                    admit_time_in_force("equity", ot, tif).as_deref(),
-                    Ok(tif),
-                    "{ot}/{tif}"
-                );
-            }
+            assert_eq!(admit_time_in_force("equity", tif).as_deref(), Ok(tif));
         }
+        assert_eq!(admit_time_in_force("equity", " DAY ").as_deref(), Ok("day"));
     }
 
     #[test]
