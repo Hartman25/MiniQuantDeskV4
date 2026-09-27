@@ -979,7 +979,7 @@ pub(crate) async fn strategy_signal(
         );
     }
 
-    let _lifecycle = st.lifecycle_guard().await;
+    let _lifecycle = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
 
     // Gate 2: DB must be present.
     let Some(db) = st.db.as_ref() else {
@@ -1142,7 +1142,7 @@ pub(crate) async fn strategy_signal(
     }
 
     // Gates 4+5: active run must exist and be in running state.
-    let status = match st.current_status_snapshot().await {
+    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return refused_signal_response(

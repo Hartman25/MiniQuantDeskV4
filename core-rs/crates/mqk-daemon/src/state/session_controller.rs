@@ -681,7 +681,7 @@ pub async fn run_session_controller_tick(
     now: chrono::DateTime<Utc>,
 ) {
     let in_session = schedule.is_in_session(state, now).await;
-    let has_active_run = state.locally_owned_run_id().await.is_some();
+    let has_active_run = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await.is_some();
 
     match (in_session, *locally_started, has_active_run) {
         (true, true, true) => {}
@@ -743,7 +743,7 @@ async fn attempt_auto_start(
         return;
     }
 
-    match state.start_execution_runtime().await {
+    match state.start_execution_runtime(super::ExecutionDomain::EquityNyse).await {
         Ok(snap) => {
             *locally_started = true;
             let current_truth = state.autonomous_session_truth().await;
@@ -803,8 +803,8 @@ async fn attempt_auto_stop(
     locally_started: &mut bool,
 ) {
     let env = env_label(state);
-    let run_id_before = state.locally_owned_run_id().await.map(|id| id.to_string());
-    match state.stop_execution_runtime().await {
+    let run_id_before = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await.map(|id| id.to_string());
+    match state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await {
         Ok(_) => {
             *locally_started = false;
             state

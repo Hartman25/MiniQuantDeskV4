@@ -70,7 +70,7 @@ fn fingerprint(byte: char) -> String {
 // ---------------------------------------------------------------------------
 
 /// Seed a RUNNING run in the DB and wire up the local loop handle so
-/// `st.current_status_snapshot().await.active_run_id` resolves to it.
+/// `st.current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.active_run_id` resolves to it.
 async fn seed_active_run(st: &Arc<state::AppState>) -> Uuid {
     let pool = st.db.as_ref().expect("db configured");
     let run_id = Uuid::new_v4();
@@ -97,7 +97,7 @@ async fn seed_active_run(st: &Arc<state::AppState>) -> Uuid {
         .await
         .expect("heartbeat_run");
 
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     run_id
 }
 

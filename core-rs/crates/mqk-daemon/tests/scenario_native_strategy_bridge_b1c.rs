@@ -629,7 +629,7 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
         mqk_db::heartbeat_run(&pool, run_id, now)
             .await
             .expect("C14: heartbeat_run");
-        st.inject_running_loop_for_test(run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
         // --- Exercise the loop-owned translation path ---
         // Flat current position: target=+10, current=0 → delta=+10 → buy 10.

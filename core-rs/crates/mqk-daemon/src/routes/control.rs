@@ -92,11 +92,11 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             .into_response();
     };
 
-    let runtime_status = match state.current_status_snapshot().await {
+    let runtime_status = match state.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot,
         Err(err) => return lifecycle_error_response(err),
     };
-    let local_owned_run_id = state.locally_owned_run_id().await;
+    let local_owned_run_id = state.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await;
     let run_owned_locally = local_owned_run_id
         .zip(runtime_status.active_run_id)
         .is_some_and(|(local, active)| local == active);
@@ -472,7 +472,7 @@ fn control_plane_now_utc() -> DateTime<Utc> {
 }
 
 async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, note: &str) {
-    let mut snapshot = match state.current_status_snapshot().await {
+    let mut snapshot = match state.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot,
         Err(_) => crate::state::StatusSnapshot {
             daemon_uptime_secs: crate::state::uptime_secs(),
@@ -502,7 +502,7 @@ async fn write_control_operator_audit_event(
     // If no active run and no durable run exist, return Ok(None) so the caller
     // represents the audit event as absent rather than anchored to a fake row.
     let run_id = if let Some(run_id) = state
-        .current_status_snapshot()
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
         .await
         .ok()
         .and_then(|s| s.active_run_id)

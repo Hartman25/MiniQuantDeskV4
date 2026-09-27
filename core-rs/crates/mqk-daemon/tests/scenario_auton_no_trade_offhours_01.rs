@@ -269,7 +269,7 @@ async fn nt03_no_signal_generated_diagnostic_persists_and_does_not_touch_signal_
 
     let st = db_state_paper_alpaca_armed(pool.clone()).await;
     let run_id = Uuid::new_v4();
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
     st.record_no_trade_diagnostic(state::NoTradeDiagnosticSnapshot {
         run_id: Some(run_id),

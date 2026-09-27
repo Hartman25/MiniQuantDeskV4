@@ -97,7 +97,7 @@ async fn lr01_repeated_in_session_ticks_without_live_ws_never_creates_ownership(
         "LR-01 pre: must start ColdStartUnproven"
     );
     assert!(
-        state.locally_owned_run_id().await.is_none(),
+        state.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "LR-01 pre: must have no active run"
     );
 
@@ -112,7 +112,7 @@ async fn lr01_repeated_in_session_ticks_without_live_ws_never_creates_ownership(
             "LR-01 tick {tick}: locally_started must remain false (no phantom start)"
         );
         assert!(
-            state.locally_owned_run_id().await.is_none(),
+            state.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
             "LR-01 tick {tick}: locally_owned_run_id must remain None"
         );
 
@@ -150,7 +150,7 @@ async fn lr02_repeated_gap_halt_cycles_remain_fail_closed() {
 
     let run_id_c1 = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"lr02.cycle1");
     let exit_c1 = state
-        .run_loop_one_tick_for_test(run_id_c1)
+        .run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id_c1)
         .await
         .unwrap_or_default();
 
@@ -194,7 +194,7 @@ async fn lr02_repeated_gap_halt_cycles_remain_fail_closed() {
 
     let run_id_c2 = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"lr02.cycle2");
     let exit_c2 = state
-        .run_loop_one_tick_for_test(run_id_c2)
+        .run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id_c2)
         .await
         .unwrap_or_default();
 
@@ -224,7 +224,7 @@ async fn lr02_repeated_gap_halt_cycles_remain_fail_closed() {
 
     let run_id_c3 = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"lr02.cycle3");
     let exit_c3 = state
-        .run_loop_one_tick_for_test(run_id_c3)
+        .run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id_c3)
         .await
         .unwrap_or_default();
 

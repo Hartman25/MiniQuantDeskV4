@@ -497,7 +497,7 @@ async fn b01_real_integrity_disarmed_gate_maps_through_the_public_policy_api() {
     );
 
     let err = state
-        .start_execution_runtime()
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect_err("fresh disarmed state must refuse start");
     assert_eq!(

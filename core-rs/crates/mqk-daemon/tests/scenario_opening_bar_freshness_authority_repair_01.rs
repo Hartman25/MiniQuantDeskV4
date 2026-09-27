@@ -328,7 +328,7 @@ async fn obf_01_45s_after_open_returns_latest_completed_bar_pending_and_coordina
         .await;
 
     let err = st
-        .start_execution_runtime()
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect_err("OBF-01: a structurally pending first bar must still refuse start");
 

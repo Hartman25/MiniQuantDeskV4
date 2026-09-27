@@ -96,7 +96,7 @@ async fn apsks01a_fault_injection_pool_genuinely_fails_current_status_snapshot()
         DeploymentMode::Paper,
         BrokerKind::Alpaca,
     ));
-    let result = state.current_status_snapshot().await;
+    let result = state.current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await;
     assert!(
         result.is_err(),
         "APSKS-01a: fault-injecting pool must make current_status_snapshot genuinely fail \

@@ -429,7 +429,7 @@ async fn seed_active_run(st: &Arc<state::AppState>, inject_local_owner: bool) ->
         .expect("heartbeat run");
 
     if inject_local_owner {
-        st.inject_running_loop_for_test(run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     }
 
     {

@@ -80,7 +80,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::routes;
-    use crate::state::{AppState, BrokerKind, DeploymentMode, StrategyFleetEntry};
+    use crate::state::{AppState, BrokerKind, DeploymentMode, ExecutionDomain, StrategyFleetEntry};
 
     async fn call(
         router: axum::Router,
@@ -482,7 +482,7 @@ mod tests {
         // Existing test-only runtime-ownership seam. This supplies the
         // exact local ownership the operator-order route requires without
         // spawning a real execution loop that can race this enqueue proof.
-        st.inject_running_loop_for_test(run_id).await;
+        st.inject_running_loop_for_test(ExecutionDomain::EquityNyse, run_id).await;
 
         {
             let mut execution = st.execution_snapshot.write().await;
@@ -767,7 +767,7 @@ mod tests {
             );
 
             let _orchestrator = st
-                .build_execution_orchestrator(pool.clone(), run_id)
+                .build_execution_orchestrator(ExecutionDomain::EquityNyse, pool.clone(), run_id)
                 .await
                 .expect("build_execution_orchestrator must succeed");
 

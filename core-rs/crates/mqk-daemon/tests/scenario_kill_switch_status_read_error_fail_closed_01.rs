@@ -182,7 +182,7 @@ async fn ksre02_durable_read_error_fails_closed_never_reports_inactive_kill_swit
     ));
 
     let snapshot = st
-        .current_status_snapshot()
+        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect("KSRE-02: current_status_snapshot must not itself error on an arm-state read failure -- it must fail CLOSED (halted), not propagate a hard error or fall through to an unsafe default");
 

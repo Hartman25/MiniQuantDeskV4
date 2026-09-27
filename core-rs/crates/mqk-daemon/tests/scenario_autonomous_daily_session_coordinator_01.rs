@@ -497,7 +497,7 @@ async fn b04_identity_conflict_creates_no_second_row_and_calls_neither_start_nor
     );
 
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "identity conflict must never call the canonical start path"
     );
 
@@ -934,7 +934,7 @@ async fn d05_operator_managed_run_is_never_stopped_attached_or_started_over() ->
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let operator_run_id = Uuid::new_v4();
-    st.establish_db_backed_active_run_for_test(operator_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, operator_run_id)
         .await
         .expect("establish operator run");
 
@@ -963,7 +963,7 @@ async fn d05_operator_managed_run_is_never_stopped_attached_or_started_over() ->
         "must never attach the operator-managed run to this operation"
     );
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(operator_run_id),
         "the operator-managed run must remain untouched and still locally owned"
     );
@@ -1032,7 +1032,7 @@ async fn e01_matching_local_run_remains_running_with_no_writes() -> anyhow::Resu
     let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     let before = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
@@ -1069,7 +1069,7 @@ async fn e02_mismatched_local_run_becomes_controller_degraded_manual() -> anyhow
         seed_running_operation(&pool, operation_id, &adapter_id, operation_run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(local_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, local_run_id)
         .await?;
 
     let outcome = handle_running(&st, &pool, operation, now).await?;
@@ -1299,7 +1299,7 @@ async fn f01_matching_runtime_is_stopped_at_close() -> anyhow::Result<()> {
     let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     let outcome = handle_session_close(&st, &pool, operation, now).await?;
     assert_eq!(
@@ -1313,7 +1313,7 @@ async fn f01_matching_runtime_is_stopped_at_close() -> anyhow::Result<()> {
     assert!(row.stopped_at_utc.is_some());
     assert_eq!(row.stop_attempt_count, Some(1));
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "the matching runtime must actually be stopped"
     );
 
@@ -1369,7 +1369,7 @@ async fn f03_mismatched_runtime_is_never_stopped_at_close() -> anyhow::Result<()
         seed_running_operation(&pool, operation_id, &adapter_id, operation_run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(local_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, local_run_id)
         .await?;
 
     let outcome = handle_session_close(&st, &pool, operation, now).await?;
@@ -1378,7 +1378,7 @@ async fn f03_mismatched_runtime_is_never_stopped_at_close() -> anyhow::Result<()
         AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired { .. }
     ));
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(local_run_id),
         "a mismatched runtime must never be stopped by the coordinator"
     );
@@ -1622,7 +1622,7 @@ async fn f07_stop_retry_with_mismatched_local_run_makes_zero_stop_calls() -> any
     // stop must be re-proven as owned immediately before the stop call —
     // never stopped merely because the operation remains stop_retrying.
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(mismatched_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, mismatched_run_id)
         .await?;
 
     let outcome = retry_stop(&st, &pool, operation, now).await?;
@@ -1645,7 +1645,7 @@ async fn f07_stop_retry_with_mismatched_local_run_makes_zero_stop_calls() -> any
         "no stop call may be made against a mismatched runtime"
     );
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(mismatched_run_id),
         "the mismatched runtime must remain untouched"
     );
@@ -1701,7 +1701,7 @@ async fn d11_stop_retry_defers_finalization_while_order_unresolved_then_stops_on
     .await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     // A broker-reachable order that has not yet resolved to a terminal
     // outcome -- exactly the scenario PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01
@@ -1741,7 +1741,7 @@ async fn d11_stop_retry_defers_finalization_while_order_unresolved_then_stops_on
          classify_autonomous_daily_outcome unreachable until the order actually resolves"
     );
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id),
         "d11: local ownership must be preserved so a late broker event for this order is still \
          durably ingested, not silently dropped"
@@ -1790,7 +1790,7 @@ async fn d11_stop_retry_defers_finalization_while_order_unresolved_then_stops_on
         "d11: stopped_at_utc must now be set -- finalization is eligible"
     );
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         None,
         "d11: local ownership must be cleared once the drained stop completes"
     );
@@ -2007,7 +2007,7 @@ async fn i01_newly_applied_is_true_once_then_false_for_an_unchanged_blocker() ->
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let operator_run_id = Uuid::new_v4();
-    st.establish_db_backed_active_run_for_test(operator_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, operator_run_id)
         .await
         .expect("establish operator run");
 
@@ -2076,7 +2076,7 @@ async fn j01_running_identity_conflict_becomes_controller_degraded_with_full_sig
     seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     // A resolvable assignment env now computes a real assignment_identity
     // that differs from the seeded row's "stub-assignment" -- an identity
@@ -2120,7 +2120,7 @@ async fn j01_running_identity_conflict_becomes_controller_degraded_with_full_sig
         "degrading to controller_degraded must never rewrite the bound run_id"
     );
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id),
         "REPAIR 3: no runtime interaction at all -- the matching runtime is neither stopped \
          nor attached during this degrade"
@@ -2143,7 +2143,7 @@ async fn j02_repeated_identical_running_conflict_creates_no_second_event() -> an
     seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
     set_resolvable_assignment_env("AAPL");
 
     tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
@@ -2207,7 +2207,7 @@ async fn j03_changed_conflicting_assignment_updates_signature_once_while_remaini
     seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
     set_resolvable_assignment_env("AAPL");
 
     tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
@@ -2295,7 +2295,7 @@ async fn j04_running_identity_conflict_still_reaches_canonical_stop_at_persisted
     seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
     // The assignment env is never reverted -- the identity conflict recurs
     // on every subsequent tick, exactly the "recurring conflict" scenario
     // REPAIR 3's close-time branch exists to handle.
@@ -2324,7 +2324,7 @@ async fn j04_running_identity_conflict_still_reaches_canonical_stop_at_persisted
          runtime -- persisted close still triggers canonical stop reconciliation, got {outcome:?}"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "the matching runtime must actually be stopped"
     );
     let stopped = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
@@ -2354,7 +2354,7 @@ async fn k01_changed_manual_blocker_records_exactly_one_self_refresh_event() -> 
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let operator_run_id = Uuid::new_v4();
-    st.establish_db_backed_active_run_for_test(operator_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, operator_run_id)
         .await?;
 
     // First blocker: an operator-managed run active, via the real start
@@ -2441,7 +2441,7 @@ async fn k02_repeating_changed_manual_blocker_produces_no_further_event() -> any
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let operator_run_id = Uuid::new_v4();
-    st.establish_db_backed_active_run_for_test(operator_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, operator_run_id)
         .await?;
     attempt_canonical_start(&st, &pool, stub.clone(), now, mqk_db::STATE_AWAITING_OPEN).await?;
 
@@ -2506,7 +2506,7 @@ async fn l01_assignment_resolution_failure_degrades_running_operation_and_stops_
     seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
     // No assignment env configured -- build_multi_symbol_runtime_config_from_env
     // fails this tick, but a relevant (running) existing operation exists.
 
@@ -2533,7 +2533,7 @@ async fn l01_assignment_resolution_failure_degrades_running_operation_and_stops_
         "REPAIR 2: must never attempt a new start without freshly proven configuration"
     );
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id),
         "the matching runtime must remain untouched before close"
     );
@@ -2562,7 +2562,7 @@ async fn l01_assignment_resolution_failure_degrades_running_operation_and_stops_
         "REPAIR 2: the matching runtime must still be stopped at persisted close even though \
          current assignment resolution never recovered, got {outcome2:?}"
     );
-    assert!(st.locally_owned_run_id().await.is_none());
+    assert!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none());
 
     cleanup_operation(&pool, operation_id).await;
     cleanup_run(&pool, run_id).await;
@@ -2598,7 +2598,7 @@ async fn l02_no_relevant_existing_operation_with_invalid_config_creates_nothing(
         row.is_none(),
         "REPAIR 1/2: no operation may be created when none is relevant and config is invalid"
     );
-    assert!(st.locally_owned_run_id().await.is_none());
+    assert!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none());
 
     Ok(())
 }
@@ -2616,7 +2616,7 @@ async fn l03_invalid_fixed_window_override_does_not_strand_existing_running_oper
     seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
     // Only one of the two required override env vars is set -- an invalid
     // configuration, never treated as absent (mirrors a03).
     std::env::set_var(SESSION_START_ENV, "14:30");
@@ -2651,7 +2651,7 @@ async fn l03_invalid_fixed_window_override_does_not_strand_existing_running_oper
         "an invalid fixed-window override must never strand an existing running operation at \
          its own persisted close, got {outcome2:?}"
     );
-    assert!(st.locally_owned_run_id().await.is_none());
+    assert!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none());
 
     cleanup_operation(&pool, operation_id).await;
     cleanup_run(&pool, run_id).await;
@@ -2692,7 +2692,7 @@ async fn m01_store_error_with_unconfirmed_reread_stops_local_runtime() -> anyhow
     // Simulates: the canonical start call already succeeded and this run is
     // locally owned, but the DB was never actually updated to `running`
     // (the store call is about to report an error).
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     let outcome = handle_running_transition_store_error(
         &st,
@@ -2713,7 +2713,7 @@ async fn m01_store_error_with_unconfirmed_reread_stops_local_runtime() -> anyhow
         "REPAIR 5: a store error whose re-read does not prove commit must fail closed"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "REPAIR 5: the run must be best-effort stopped, never left active and unmanaged"
     );
     let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
@@ -2758,7 +2758,7 @@ async fn m02_store_error_with_confirmed_reread_is_accepted_idempotently() -> any
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let run_id = Uuid::new_v4();
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     // The running transition actually commits for real -- simulating a
     // transaction that committed server-side despite the client observing
@@ -2795,7 +2795,7 @@ async fn m02_store_error_with_confirmed_reread_is_accepted_idempotently() -> any
         "REPAIR 5: a re-read that proves the exact commit must be accepted as durable truth"
     );
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id),
         "a confirmed commit must never trigger a best-effort stop"
     );
@@ -2989,7 +2989,7 @@ async fn p01_weekend_with_existing_running_operation_reaches_canonical_close() -
     seed_running_operation(&pool, operation_id, &adapter_id, run_id, seed_now).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     // 2026-07-25 is the Saturday following the 2026-07-20 Monday seed date --
     // well after the operation's own persisted close.
@@ -3006,7 +3006,7 @@ async fn p01_weekend_with_existing_running_operation_reaches_canonical_close() -
          reach canonical close reconciliation and stop the matching runtime, got {outcome:?}"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "the matching runtime must actually be stopped"
     );
     let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
@@ -3062,7 +3062,7 @@ async fn p02_weekend_with_db_and_no_existing_operation_creates_nothing() -> anyh
         count.0, 0,
         "REPAIR 1/2: no operation may be created merely by looking up a nontrading day"
     );
-    assert!(st.locally_owned_run_id().await.is_none());
+    assert!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none());
 
     Ok(())
 }
@@ -3095,7 +3095,7 @@ async fn p03_holiday_stopping_operation_continues_restart_safe_stop_reconciliati
     assert_eq!(stopping.run_id, Some(run_id));
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     let later_same_holiday = seed_now + ChronoDuration::minutes(5);
     let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
@@ -3109,7 +3109,7 @@ async fn p03_holiday_stopping_operation_continues_restart_safe_stop_reconciliati
         "REPAIR 3: an existing stopping operation observed on a nontrading day must continue \
          restart-safe stop reconciliation, got {outcome:?}"
     );
-    assert!(st.locally_owned_run_id().await.is_none());
+    assert!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none());
     let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
@@ -3162,7 +3162,7 @@ async fn q01_store_error_reread_showing_unrelated_running_degrades_legally() -> 
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let committed_run_id = Uuid::new_v4();
-    st.establish_db_backed_active_run_for_test(committed_run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, committed_run_id)
         .await?;
 
     // The running transition genuinely commits (to `committed_run_id`) --
@@ -3209,7 +3209,7 @@ async fn q01_store_error_reread_showing_unrelated_running_degrades_legally() -> 
         "REPAIR 5: must degrade legally, never bail on an illegal edge, got {outcome:?}"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "REPAIR 5: the locally-owned run must still be best-effort stopped"
     );
     let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
@@ -3259,7 +3259,7 @@ async fn q02_store_error_reread_showing_degraded_state_refreshes_in_place() -> a
     assert_eq!(degraded.run_id, Some(run_id));
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    st.establish_db_backed_active_run_for_test(run_id).await?;
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await?;
 
     let outcome = handle_running_transition_store_error(
         &st,

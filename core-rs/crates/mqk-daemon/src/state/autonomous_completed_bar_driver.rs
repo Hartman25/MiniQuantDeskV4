@@ -898,7 +898,7 @@ async fn prove_host_pool_dispatch_eligibility(
             },
         );
     }
-    match input.state.dynamic_selection_runtime_snapshot().await {
+    match input.state.dynamic_selection_runtime_snapshot(super::ExecutionDomain::EquityNyse).await {
         Some(snapshot) if snapshot.run_id == expected_run_id && snapshot.host_pool_present => {
             Ok(())
         }
@@ -1415,7 +1415,7 @@ pub async fn tick_autonomous_completed_bar_driver_multi(
     // resolve_effective_bindings treats identically to "no host pool
     // exists this tick" — every binding then falls back to the legacy
     // engine-match check exactly as before this repair.
-    let dynamic_selection_snapshot = input.state.dynamic_selection_runtime_snapshot().await;
+    let dynamic_selection_snapshot = input.state.dynamic_selection_runtime_snapshot(super::ExecutionDomain::EquityNyse).await;
     let host_pool_run_id = dynamic_selection_snapshot
         .as_ref()
         .filter(|s| s.host_pool_present)

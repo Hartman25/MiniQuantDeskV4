@@ -1540,7 +1540,7 @@ async fn ptauto01b_e14a_gap_detected_halts_real_execution_loop() {
     }
 
     let run_id = uuid::Uuid::parse_str(E14_RUN_ID_STR).expect("E14 fixed run_id must parse");
-    let exit_note = st.run_loop_one_tick_for_test(run_id).await;
+    let exit_note = st.run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
     // The loop must exit with the PT-AUTO-01 note (not tick error, not deadman).
     //
@@ -1596,7 +1596,7 @@ async fn ptauto01b_e14b_live_continuity_does_not_trigger_pt_auto01_halt() {
     .await;
 
     let run_id = uuid::Uuid::parse_str(E14_RUN_ID_STR).expect("E14 fixed run_id must parse");
-    let exit_note = st.run_loop_one_tick_for_test(run_id).await;
+    let exit_note = st.run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
     // The exit note must NOT be the PT-AUTO-01 message — PT-AUTO-01 did not fire.
     // (The loop exits via tick error when the lazy pool fails Phase-0 DB check.)

@@ -255,7 +255,7 @@ async fn dt04_test_discord_alert_does_not_mutate_state() {
         let ig = state.integrity.read().await;
         ig.disarmed
     };
-    let run_before = state.locally_owned_run_id().await;
+    let run_before = state.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await;
 
     let router = build_router(Arc::clone(&state));
     let (status, _) = call(router, ops_action_req("test-discord-alert")).await;
@@ -266,7 +266,7 @@ async fn dt04_test_discord_alert_does_not_mutate_state() {
         let ig = state.integrity.read().await;
         ig.disarmed
     };
-    let run_after = state.locally_owned_run_id().await;
+    let run_after = state.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await;
 
     assert_eq!(
         arm_before, arm_after,

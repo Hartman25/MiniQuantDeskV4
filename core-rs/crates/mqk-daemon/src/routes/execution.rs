@@ -213,7 +213,7 @@ pub(crate) async fn execution_order_submit(
         }
     };
 
-    let _lifecycle = st.lifecycle_guard().await;
+    let _lifecycle = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
 
     let Some(db) = st.db.as_ref() else {
         return manual_order_submit_response(
@@ -275,7 +275,7 @@ pub(crate) async fn execution_order_submit(
         );
     }
 
-    let status = match st.current_status_snapshot().await {
+    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return manual_order_submit_response(
@@ -417,7 +417,7 @@ pub(crate) async fn execution_order_cancel(
         }
     };
 
-    let _lifecycle = st.lifecycle_guard().await;
+    let _lifecycle = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
 
     let Some(db) = st.db.as_ref() else {
         return manual_order_cancel_response(
@@ -479,7 +479,7 @@ pub(crate) async fn execution_order_cancel(
         );
     }
 
-    let status = match st.current_status_snapshot().await {
+    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return manual_order_cancel_response(
@@ -750,7 +750,7 @@ pub(crate) async fn execution_fill_quality(State(st): State<Arc<AppState>>) -> i
     };
 
     // Derive active run_id from the durable status snapshot.
-    let active_run_id = match st.current_status_snapshot().await {
+    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };

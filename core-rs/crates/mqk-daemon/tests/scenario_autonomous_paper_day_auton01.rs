@@ -322,7 +322,7 @@ async fn au06_gap_detected_triggers_execution_loop_self_halt() {
 
     // run_loop_one_tick_for_test exercises the real spawn_execution_loop path
     // and returns the exit note when the loop terminates.
-    let exit_note = st.run_loop_one_tick_for_test(run_id).await;
+    let exit_note = st.run_loop_one_tick_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
     let note = exit_note.expect("loop must exit with a note");
     assert!(
@@ -837,12 +837,12 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         .execute(&pool)
         .await
         .expect("AU-10F: pre-test run cleanup failed");
-    st.establish_db_backed_active_run_for_test(run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
         .await
         .expect("AU-10F: DB-backed active run must be established");
 
     let start_truth = st
-        .current_status_snapshot()
+        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect("AU-10F: status snapshot after DB-backed active run");
     assert_eq!(start_truth.active_run_id, Some(run_id));
@@ -885,7 +885,7 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         );
     }
     let halted_truth = st
-        .current_status_snapshot()
+        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect("AU-10F: halted status snapshot");
     assert_eq!(halted_truth.state, "halted");

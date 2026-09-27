@@ -477,7 +477,7 @@ async fn r08_genuinely_owned_local_run_refuses() {
         // This AppState IS the local owner of run_id -- the exact opposite
         // of the crash-orphan shape. recover-orphaned-run must refuse, never
         // race a runtime this process is actively driving.
-        st.inject_running_loop_for_test(run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
         let router = build_router(Arc::clone(&st));
         let (status, j) = post_action(
@@ -534,7 +534,7 @@ async fn r09_mismatched_local_run_also_refuses() {
         // the guard is "does this process own ANY local run", not an
         // exact-match check, because owning any run at all means this is
         // not the cold no-local-runtime case this route exists for.
-        st.inject_running_loop_for_test(other_run_id).await;
+        st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, other_run_id).await;
 
         let router = build_router(Arc::clone(&st));
         let (status, j) = post_action(

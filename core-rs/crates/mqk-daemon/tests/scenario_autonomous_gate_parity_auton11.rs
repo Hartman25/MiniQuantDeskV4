@@ -113,7 +113,7 @@ async fn ap01_ws_cold_start_unproven_blocks_autonomous_start() {
     );
     // Verify no run was started.
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "AP-01: no locally-owned run must exist after a gate-blocked start"
     );
 }
@@ -158,7 +158,7 @@ async fn ap02_ws_gap_detected_blocks_autonomous_start() {
         "AP-02: autonomous session truth must be StartRefused; got: {truth:?}"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "AP-02: no locally-owned run must exist after a gate-blocked start"
     );
 }
@@ -204,7 +204,7 @@ async fn ap03_halted_integrity_blocks_autonomous_arm_and_start() {
         "AP-03: autonomous session truth must be StartRefused; got: {truth:?}"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "AP-03: no locally-owned run must exist after a halted-arm refusal"
     );
 }
@@ -261,7 +261,7 @@ async fn ap04_dirty_reconcile_blocks_autonomous_start() {
         "AP-04: autonomous session truth must be StartRefused; got: {truth:?}"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "AP-04: no locally-owned run must exist after a dirty-reconcile refusal"
     );
 }
@@ -318,7 +318,7 @@ async fn ap05_disarmed_no_db_blocks_autonomous_arm() {
         "AP-05: autonomous session truth must be StartRefused; got: {truth:?}"
     );
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "AP-05: no locally-owned run must exist after a no-DB arm refusal"
     );
 }

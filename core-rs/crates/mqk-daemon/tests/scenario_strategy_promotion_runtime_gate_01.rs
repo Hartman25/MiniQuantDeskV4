@@ -371,7 +371,7 @@ async fn seed_active_run(st: &Arc<state::AppState>) -> Uuid {
     mqk_db::heartbeat_run(pool, run_id, now)
         .await
         .expect("heartbeat_run");
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     run_id
 }
 

@@ -33,7 +33,7 @@ use super::{
 };
 use super::{
     AcceptedArtifactProvenance, BrokerKind, DeploymentMode, DynamicSelectionLifecycleFaultSeam,
-    DynamicSelectionRuntimeState, OperatorAuthMode, RuntimeLifecycleError,
+    DynamicSelectionRuntimeState, ExecutionDomain, OperatorAuthMode, RuntimeLifecycleError,
     RuntimeStrategyAuthorityKind, StatusSnapshot, StrategyMarketDataSource,
 };
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
@@ -1268,9 +1268,10 @@ impl AppState {
 
     pub async fn start_execution_runtime(
         self: &Arc<Self>,
+        domain: ExecutionDomain,
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
-        let _op = self.lifecycle_op.lock().await;
-        self.reap_finished_execution_loop().await?;
+        let _op = self.lifecycle_op.get(domain).lock().await;
+        self.reap_finished_execution_loop(domain).await?;
 
         if !self.deployment_readiness().start_allowed {
             return Err(RuntimeLifecycleError::forbidden(
@@ -1302,7 +1303,7 @@ impl AppState {
             ));
         }
 
-        if let Some(run_id) = self.active_owned_run_id().await {
+        if let Some(run_id) = self.active_owned_run_id(domain).await {
             return Err(RuntimeLifecycleError::conflict(
                 "runtime.control_refusal.already_owned",
                 format!("runtime already active under local ownership: {run_id}"),
@@ -2172,21 +2173,16 @@ impl AppState {
             }
         }
 
-        // B2 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01): the durable
+        // B2.4 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01): the durable
         // single-active-run-per-domain identity (migration 0081,
-        // `fetch_active_run_for_engine_for_domain`/`next_daemon_run_id`) is
-        // real for both domains, but this call site still hardcodes
-        // equity_nyse -- AppState's in-memory runtime-ownership slot
-        // (`self.runtime_ownership`), `lifecycle_op`, and
-        // `reconcile_task_owner` remain single, process-wide singletons.
-        // Exposing execution_domain any further up this call chain before
-        // those in-memory authorities are themselves domain-keyed would let
-        // a caller ask to start crypto_24_7 durably while local ownership
-        // silently continued to treat it as "the" one runtime slot -- a
-        // dual-authority hazard, not a fix. That in-memory migration is the
-        // next B2 patch; tracked, not silently dropped.
+        // `fetch_active_run_for_engine_for_domain`/`next_daemon_run_id`) and
+        // AppState's in-memory runtime-ownership/`lifecycle_op`/
+        // `reconcile_task_owner` slots (`PerDomain`, B2.4) are now both keyed
+        // by the same `domain` this call was made under — a caller starting
+        // `crypto_24_7` claims durable AND local ownership for that domain
+        // only, never colliding with (or being blocked by) `equity_nyse`.
         let run_id = self
-            .create_or_reuse_run_for_start(&db, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+            .create_or_reuse_run_for_start(&db, domain.as_str())
             .await?;
 
         // BUNDLE-7-PHASE-7A fault seam: after run row creation, before
@@ -2268,6 +2264,7 @@ impl AppState {
         let readiness_link = daily_data_readiness_evaluation_id.map(|id| (id, Utc::now()));
         let effects = ProductionRuntimeStartEffects {
             state: self,
+            domain,
             db: db.clone(),
             artifact_intake: std::sync::Mutex::new(Some(artifact_intake)),
             // ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the frozen legacy assignment
@@ -2416,7 +2413,7 @@ impl AppState {
                 // M1-RECONCILE-CANCELLATION-COMPLETION-01: the prior
                 // Paper worker must be fully terminal before the next
                 // worker is even spawned.
-                self.prepare_reconcile_task_spawn().await;
+                self.prepare_reconcile_task_spawn(domain).await;
             }
 
             let reconcile_handle = spawn_reconcile_tick(
@@ -2431,7 +2428,7 @@ impl AppState {
             // Dropping the JoinHandle in non-Paper modes preserves the
             // pre-wave detached reconcile-task behavior there.
             if supervise_reconcile {
-                self.install_reconcile_task_owner(run_id, reconcile_handle)
+                self.install_reconcile_task_owner(domain, run_id, reconcile_handle)
                     .await;
             }
         }
@@ -2567,8 +2564,9 @@ impl AppState {
 
     pub async fn stop_execution_runtime(
         self: &Arc<Self>,
+        domain: ExecutionDomain,
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
-        let _op = self.lifecycle_op.lock().await;
+        let _op = self.lifecycle_op.get(domain).lock().await;
 
         // CI599-R1: whether a panicked execution-loop task is already
         // finished when stop begins is scheduler/platform timing, not
@@ -2576,7 +2574,7 @@ impl AppState {
         // already reports the aggregate "stop join or release failed" class.
         // Normalize the reap-first join failure to that same stop contract
         // while preserving the specific join-failure detail.
-        if let Err(err) = self.reap_finished_execution_loop().await {
+        if let Err(err) = self.reap_finished_execution_loop(domain).await {
             if err.fault_class() == "loop join failed" {
                 return Err(RuntimeLifecycleError::internal(
                     "stop join or release failed",
@@ -2605,7 +2603,7 @@ impl AppState {
         // instead, which this patch deliberately leaves untouched (halt is a
         // sticky, fail-closed emergency stop; retrofitting drain-gating onto
         // halt recovery is out of this patch's scope).
-        if let Some(run_id) = self.locally_owned_run_id().await {
+        if let Some(run_id) = self.locally_owned_run_id(domain).await {
             if let Some(db) = self.db.as_ref() {
                 let run = mqk_db::fetch_run(db, run_id)
                     .await
@@ -2648,14 +2646,21 @@ impl AppState {
         // fail, and before either the truth-mismatch conflict return or
         // the no-local-owner idle return.
         let Some((run_id, outcome)) = self
-            .clear_currently_owned_local_runtime(crate::state::LifecycleClearReason::OperatorStop)
+            .clear_currently_owned_local_runtime(
+                domain,
+                crate::state::LifecycleClearReason::OperatorStop,
+            )
             .await
         else {
             if let Some(db) = self.db.as_ref() {
-                if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                // B2.4: scoped to this domain's own durable identity —
+                // stopping `equity_nyse` must never observe (or refuse over)
+                // `crypto_24_7`'s independently active durable run.
+                if let Some(active) = mqk_db::fetch_active_run_for_engine_for_domain(
                     db,
                     DAEMON_ENGINE_ID,
                     self.deployment_mode().as_db_mode(),
+                    domain.as_str(),
                 )
                 .await
                 .map_err(|err| {
@@ -2670,7 +2675,7 @@ impl AppState {
                     ));
                 }
             }
-            return self.current_status_snapshot().await;
+            return self.current_status_snapshot(domain).await;
         };
 
         // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 4: a join
@@ -2690,6 +2695,7 @@ impl AppState {
                 _ => "unknown degraded cleanup".to_string(),
             };
             self.note_local_runtime_degraded(
+                domain,
                 run_id,
                 crate::state::BoundedLifecycleDegradation {
                     operation: "stop_join_or_release",
@@ -2717,6 +2723,7 @@ impl AppState {
                 // truth honestly `Degraded` rather than silently leaving a
                 // clean-looking `Idle` behind a failed durable transition.
                 self.note_local_runtime_degraded(
+                    domain,
                     run_id,
                     crate::state::BoundedLifecycleDegradation {
                         operation: "stop_run",
@@ -2728,15 +2735,16 @@ impl AppState {
             }
         }
 
-        let snapshot = self.current_status_snapshot().await?;
+        let snapshot = self.current_status_snapshot(domain).await?;
         Ok(snapshot)
     }
 
     pub async fn halt_execution_runtime(
         self: &Arc<Self>,
+        domain: ExecutionDomain,
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
-        let _op = self.lifecycle_op.lock().await;
-        self.reap_finished_execution_loop().await?;
+        let _op = self.lifecycle_op.get(domain).lock().await;
+        self.reap_finished_execution_loop(domain).await?;
 
         // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
         // 4: the single unified cleanup authority — clears ownership
@@ -2745,15 +2753,22 @@ impl AppState {
         // either the truth-mismatch conflict return or the no-local-owner
         // path.
         let cleared = self
-            .clear_currently_owned_local_runtime(crate::state::LifecycleClearReason::OperatorHalt)
+            .clear_currently_owned_local_runtime(
+                domain,
+                crate::state::LifecycleClearReason::OperatorHalt,
+            )
             .await;
 
         if cleared.is_none() {
             if let Some(db) = self.db.as_ref() {
-                if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                // B2.5: scoped to this domain — halting `equity_nyse` must
+                // never report a truth-mismatch conflict over `crypto_24_7`'s
+                // independently active durable run.
+                if let Some(active) = mqk_db::fetch_active_run_for_engine_for_domain(
                     db,
                     DAEMON_ENGINE_ID,
                     self.deployment_mode().as_db_mode(),
+                    domain.as_str(),
                 )
                 .await
                 .map_err(|err| {
@@ -2791,6 +2806,7 @@ impl AppState {
                     _ => "unknown degraded cleanup".to_string(),
                 };
                 self.note_local_runtime_degraded(
+                    domain,
                     run_id,
                     crate::state::BoundedLifecycleDegradation {
                         operation: "halt_join_or_release",
@@ -2809,6 +2825,7 @@ impl AppState {
                 // silently leaving a clean-looking `Idle` behind a failed
                 // durable transition.
                 self.note_local_runtime_degraded(
+                    domain,
                     run_id,
                     crate::state::BoundedLifecycleDegradation {
                         operation: "halt_run",
@@ -2829,7 +2846,7 @@ impl AppState {
 
         let snapshot = StatusSnapshot {
             daemon_uptime_secs: uptime_secs(),
-            active_run_id: self.current_status_snapshot().await?.active_run_id,
+            active_run_id: self.current_status_snapshot(domain).await?.active_run_id,
             state: "halted".to_string(),
             notes: Some("operator halt asserted; execution loop disarmed".to_string()),
             integrity_armed: false,
@@ -2937,7 +2954,20 @@ impl AppState {
             .map_err(|rejection| rejection.legacy_message())
     }
 
+    /// B2.5: process shutdown deliberately stops every domain by explicit
+    /// iteration over [`ExecutionDomain::all`] — one domain's absence of an
+    /// owned run, or one domain's degraded cleanup, never skips or blocks
+    /// the other domain's shutdown. Each iteration acquires only that
+    /// domain's own `lifecycle_op`/`runtime_ownership`, so this can never
+    /// serialize behind — or steal from — the other domain's independent
+    /// lifecycle.
     pub async fn stop_for_shutdown(self: &Arc<Self>) {
+        for domain in ExecutionDomain::all() {
+            self.stop_one_domain_for_shutdown(domain).await;
+        }
+    }
+
+    async fn stop_one_domain_for_shutdown(self: &Arc<Self>, domain: ExecutionDomain) {
         // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
         // 4: acquire the same lifecycle serialization every other local
         // start/stop/halt transition uses. Because every start attempt
@@ -2950,8 +2980,8 @@ impl AppState {
         // `Active`/`Degraded` state first. This is what "shutdown safely
         // cancels Reserved/Starting" means in practice here: safety by
         // construction via serialization, not an explicit cancellation
-        // race.
-        let _op = self.lifecycle_op.lock().await;
+        // race. Scoped to this domain's own lock only.
+        let _op = self.lifecycle_op.get(domain).lock().await;
 
         // Clears ownership (including dynamic-selection truth) AND every
         // economic mirror together — closing the pre-existing asymmetry
@@ -2959,7 +2989,7 @@ impl AppState {
         // `accepted_artifact`/`native_strategy_bootstrap`/other mirrors
         // stale.
         let cleared = self
-            .clear_currently_owned_local_runtime(crate::state::LifecycleClearReason::Shutdown)
+            .clear_currently_owned_local_runtime(domain, crate::state::LifecycleClearReason::Shutdown)
             .await;
 
         let Some((run_id, outcome)) = cleared else {
@@ -2977,8 +3007,9 @@ impl AppState {
                 }
                 _ => "unknown degraded cleanup".to_string(),
             };
-            tracing::warn!("shutdown join_or_release failed for {run_id}: {detail}");
+            tracing::warn!("shutdown join_or_release failed for {domain} run {run_id}: {detail}");
             self.note_local_runtime_degraded(
+                domain,
                 run_id,
                 crate::state::BoundedLifecycleDegradation {
                     operation: "shutdown_join_or_release",
@@ -2998,8 +3029,9 @@ impl AppState {
                     mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
                 ) {
                     if let Err(err) = mqk_db::stop_run(db, run_id).await {
-                        tracing::warn!("shutdown stop_run failed for {run_id}: {err}");
+                        tracing::warn!("shutdown stop_run failed for {domain} run {run_id}: {err}");
                         self.note_local_runtime_degraded(
+                            domain,
                             run_id,
                             crate::state::BoundedLifecycleDegradation {
                                 operation: "stop_run",
@@ -3011,7 +3043,7 @@ impl AppState {
                 }
             }
             Err(err) => {
-                tracing::warn!("shutdown fetch_run_failed for {run_id}: {err}");
+                tracing::warn!("shutdown fetch_run_failed for {domain} run {run_id}: {err}");
             }
         }
     }
@@ -3031,6 +3063,12 @@ impl AppState {
 
 struct ProductionRuntimeStartEffects<'a> {
     state: &'a Arc<AppState>,
+    /// B2.4: the execution domain this start attempt is claiming ownership
+    /// under — set once at construction from `start_execution_runtime`'s own
+    /// `domain` parameter, read by every `RuntimeStartEffects` method below
+    /// instead of being threaded through the trait's own signature (which
+    /// two test-only fakes also implement without any domain-keyed state).
+    domain: ExecutionDomain,
     db: PgPool,
     /// Consumed exactly once by `start_runtime_effects` (TV-01C provenance
     /// capture) — `std::sync::Mutex` for interior mutability behind `&self`;
@@ -3152,7 +3190,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         use crate::daily_data_readiness::RuntimeStartEffectsError;
 
         self.state
-            .reserve_runtime_ownership(run_id)
+            .reserve_runtime_ownership(self.domain, run_id)
             .await
             .map_err(|_conflicting_run_id| {
                 RuntimeStartEffectsError::conflict(
@@ -3175,7 +3213,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
 
         let mut orchestrator = self
             .state
-            .build_execution_orchestrator(self.db.clone(), run_id)
+            .build_execution_orchestrator(self.domain, self.db.clone(), run_id)
             .await
             .map_err(|err| {
                 let fault_class = err.fault_class();
@@ -3435,6 +3473,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         if let Err(err) = self
             .state
             .prepare_starting_metadata_and_mirrors(
+                self.domain,
                 run_id,
                 crate::state::RunStartLocalBundle {
                     execution_snapshot,
@@ -3566,7 +3605,11 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             dispatch_authority,
             barrier_rx,
         );
-        if let Err(install_err) = self.state.install_active_runtime(run_id, handle).await {
+        if let Err(install_err) = self
+            .state
+            .install_active_runtime(self.domain, run_id, handle)
+            .await
+        {
             // `install_active_runtime` already sent the task its stop
             // signal and joined it on any mismatch — the task wakes via
             // the stop arm of its startup select, never the barrier arm,
@@ -3644,7 +3687,11 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         }
 
         self.state
-            .clear_local_runtime_for_run(run_id, crate::state::LifecycleClearReason::FailedStart)
+            .clear_local_runtime_for_run(
+                self.domain,
+                run_id,
+                crate::state::LifecycleClearReason::FailedStart,
+            )
             .await;
 
         crate::daily_data_readiness::LocalRollbackOutcome {
@@ -3704,6 +3751,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
 impl AppState {
     pub(crate) async fn drive_production_start_effects_for_test(
         self: &Arc<Self>,
+        domain: ExecutionDomain,
         db: PgPool,
         run_id: uuid::Uuid,
         dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
@@ -3713,6 +3761,7 @@ impl AppState {
     ) {
         let effects = ProductionRuntimeStartEffects {
             state: self,
+            domain,
             db: db.clone(),
             artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
             native_strategy_bootstrap: std::sync::Mutex::new(None),
@@ -3750,6 +3799,7 @@ impl AppState {
     /// reachable only from this crate's own test build.
     pub(crate) async fn drive_production_start_effects_with_dispatch_authority_for_test(
         self: &Arc<Self>,
+        domain: ExecutionDomain,
         db: PgPool,
         run_id: uuid::Uuid,
         dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
@@ -3762,6 +3812,7 @@ impl AppState {
     ) {
         let effects = ProductionRuntimeStartEffects {
             state: self,
+            domain,
             db: db.clone(),
             artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
             native_strategy_bootstrap: std::sync::Mutex::new(None),
@@ -3794,6 +3845,7 @@ impl AppState {
     #[cfg(test)]
     pub(crate) async fn drive_production_start_effects_with_readiness_link_for_test(
         self: &Arc<Self>,
+        domain: ExecutionDomain,
         db: PgPool,
         run_id: uuid::Uuid,
         dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
@@ -3804,6 +3856,7 @@ impl AppState {
     ) {
         let effects = ProductionRuntimeStartEffects {
             state: self,
+            domain,
             db: db.clone(),
             artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
             native_strategy_bootstrap: std::sync::Mutex::new(None),
@@ -4102,7 +4155,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -4152,12 +4205,12 @@ mod real_production_effects_matrix_tests {
         assert!(!rollback.durable_status_unknown);
 
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "FA-01: a failed start must release its own reservation"
         );
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "FA-01: no dynamic-selection state may survive a failed start — \
              start_runtime_effects failed before the local bundle was ever built"
         );
@@ -4192,7 +4245,7 @@ mod real_production_effects_matrix_tests {
             b"mqk-daemon.phase7a.final.fa02.run_a",
         );
         state
-            .establish_db_backed_active_run_for_test(run_a)
+            .establish_db_backed_active_run_for_test(ExecutionDomain::EquityNyse, run_a)
             .await
             .expect("FA-02: run A must be established as the active owner");
 
@@ -4210,7 +4263,7 @@ mod real_production_effects_matrix_tests {
             .commit_dynamic_selection_runtime_state_for_test(off_disposition_fixture(run_a))
             .await;
 
-        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_a));
 
         let run_b = uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_DNS,
@@ -4233,7 +4286,7 @@ mod real_production_effects_matrix_tests {
         .expect("FA-02: run_b insert must succeed");
 
         let (result_b, trace_b) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_b,
                 Some(off_disposition_fixture(run_b)),
@@ -4267,13 +4320,13 @@ mod real_production_effects_matrix_tests {
         );
 
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             Some(run_a),
             "FA-02: the slot must still show run A as the Active owner — run \
              B's rollback must never clear a different run's reservation"
         );
         let after_selection = state
-            .dynamic_selection_runtime_snapshot()
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
             .await
             .expect("FA-02: run A's dynamic-selection state must still be present");
         assert_eq!(
@@ -4307,7 +4360,7 @@ mod real_production_effects_matrix_tests {
             mqk_db::RunStatus::Created
         ));
 
-        let _ = state.stop_execution_runtime().await;
+        let _ = state.stop_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         delete_run_and_its_events(&pool, run_a).await;
         delete_run_and_its_events(&pool, run_b).await;
     }
@@ -4340,7 +4393,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -4366,7 +4419,7 @@ mod real_production_effects_matrix_tests {
             "SUCCESS-01: every ordered-trace tag must fire exactly once, in order"
         );
 
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -4376,13 +4429,13 @@ mod real_production_effects_matrix_tests {
         ));
 
         // A real stop through the real cleanup path.
-        let stop_result = state.stop_execution_runtime().await;
+        let stop_result = state.stop_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             stop_result.is_ok(),
             "SUCCESS-01: stop must succeed: {stop_result:?}"
         );
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "SUCCESS-01: stop must fully clear local ownership"
         );
@@ -4410,7 +4463,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(shadow_allowed_disposition_fixture(run_id)),
@@ -4432,7 +4485,7 @@ mod real_production_effects_matrix_tests {
                 "loop_spawned"
             ]
         );
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -4442,7 +4495,7 @@ mod real_production_effects_matrix_tests {
         ));
 
         let snapshot = state
-            .dynamic_selection_runtime_snapshot()
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
             .await
             .expect("SUCCESS-02: dynamic-selection metadata must be committed for ShadowAllowed");
         assert!(matches!(
@@ -4460,14 +4513,14 @@ mod real_production_effects_matrix_tests {
         );
         assert!(!snapshot.approved_for_live);
 
-        let stop_result = state.stop_execution_runtime().await;
+        let stop_result = state.stop_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             stop_result.is_ok(),
             "SUCCESS-02: stop must succeed: {stop_result:?}"
         );
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "SUCCESS-02: stop must clear dynamic-selection metadata too"
         );
 
@@ -4494,7 +4547,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(shadow_invalid_disposition_fixture(run_id)),
@@ -4516,7 +4569,7 @@ mod real_production_effects_matrix_tests {
                 "loop_spawned"
             ]
         );
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -4526,7 +4579,7 @@ mod real_production_effects_matrix_tests {
         ));
 
         let snapshot = state
-            .dynamic_selection_runtime_snapshot()
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
             .await
             .expect("SUCCESS-03: dynamic-selection metadata must be committed for ShadowInvalid");
         assert!(matches!(
@@ -4545,12 +4598,12 @@ mod real_production_effects_matrix_tests {
             crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid { .. }
         ));
 
-        let stop_result = state.stop_execution_runtime().await;
+        let stop_result = state.stop_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             stop_result.is_ok(),
             "SUCCESS-03: stop must succeed: {stop_result:?}"
         );
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
 
         delete_run_and_its_events(&pool, run_id).await;
     }
@@ -4574,7 +4627,7 @@ mod real_production_effects_matrix_tests {
             .await
             .expect("run creation must succeed");
         let (result, _trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -4584,15 +4637,15 @@ mod real_production_effects_matrix_tests {
             .set_hermetic_test_broker_override_for_test(false)
             .await;
         result.expect("CLEANUP-HALT-01: setup must reach Active");
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
-        let halt_result = state.halt_execution_runtime().await;
+        let halt_result = state.halt_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             halt_result.is_ok(),
             "CLEANUP-HALT-01: halt must succeed: {halt_result:?}"
         );
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "CLEANUP-HALT-01: halt must fully clear local ownership"
         );
@@ -4625,7 +4678,7 @@ mod real_production_effects_matrix_tests {
             .expect("CLEANUP-HALT-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
         let (restart_result, _trace2) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id_2,
                 Some(off_disposition_fixture(run_id_2)),
@@ -4639,7 +4692,7 @@ mod real_production_effects_matrix_tests {
             "CLEANUP-HALT-01: restart after halt must succeed: {restart_result:?}"
         );
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("CLEANUP-HALT-01: cleanup stop must succeed");
 
@@ -4667,7 +4720,7 @@ mod real_production_effects_matrix_tests {
             .await
             .expect("run creation must succeed");
         let (result, _trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -4677,12 +4730,12 @@ mod real_production_effects_matrix_tests {
             .set_hermetic_test_broker_override_for_test(false)
             .await;
         result.expect("CLEANUP-SHUTDOWN-01: setup must reach Active");
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
         state.stop_for_shutdown().await;
 
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "CLEANUP-SHUTDOWN-01: shutdown must fully clear local ownership"
         );
@@ -4700,7 +4753,7 @@ mod real_production_effects_matrix_tests {
             .expect("CLEANUP-SHUTDOWN-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
         let (restart_result, _trace2) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id_2,
                 Some(off_disposition_fixture(run_id_2)),
@@ -4714,7 +4767,7 @@ mod real_production_effects_matrix_tests {
             "CLEANUP-SHUTDOWN-01: restart after shutdown must succeed: {restart_result:?}"
         );
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("CLEANUP-SHUTDOWN-01: cleanup stop must succeed");
 
@@ -4749,7 +4802,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -4796,7 +4849,7 @@ mod real_production_effects_matrix_tests {
              acquired) before the seam fired, so rollback must release it \
              exactly once, successfully"
         );
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
 
         delete_run_and_its_events(&pool, run_id).await;
     }
@@ -4826,7 +4879,7 @@ mod real_production_effects_matrix_tests {
             .expect("FAULT-ARM-01: pre-arming the row must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -4864,7 +4917,7 @@ mod real_production_effects_matrix_tests {
             "FAULT-ARM-01: a real orchestrator was constructed before the \
              real arm_run failure, so rollback must release its lease"
         );
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -4879,7 +4932,7 @@ mod real_production_effects_matrix_tests {
             .expect("FAULT-ARM-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
         let (restart_result, _trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 restart_run_id,
                 Some(off_disposition_fixture(restart_run_id)),
@@ -4893,7 +4946,7 @@ mod real_production_effects_matrix_tests {
             "FAULT-ARM-01: restart must succeed: {restart_result:?}"
         );
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("FAULT-ARM-01: cleanup stop must succeed");
 
@@ -4928,7 +4981,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -4962,7 +5015,7 @@ mod real_production_effects_matrix_tests {
         ));
         assert!(!rollback.durable_status_unknown);
         assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -5000,7 +5053,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5034,7 +5087,7 @@ mod real_production_effects_matrix_tests {
         ));
         assert!(!rollback.durable_status_unknown);
         assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -5073,7 +5126,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5110,7 +5163,7 @@ mod real_production_effects_matrix_tests {
         ));
         assert!(!rollback.durable_status_unknown);
         assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -5149,7 +5202,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5192,7 +5245,7 @@ mod real_production_effects_matrix_tests {
         assert!(!rollback.durable_status_unknown);
         assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "FAULT-POST-COMMIT-01: the already-published Starting metadata \
              must be cleared by rollback, not left dangling"
@@ -5235,7 +5288,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5277,7 +5330,7 @@ mod real_production_effects_matrix_tests {
         ));
         assert!(!rollback.durable_status_unknown);
         assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_id)
                 .await
@@ -5320,7 +5373,7 @@ mod real_production_effects_matrix_tests {
         let linked_at_utc = Utc::now();
 
         let (result, trace) = state
-            .drive_production_start_effects_with_readiness_link_for_test(
+            .drive_production_start_effects_with_readiness_link_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5343,10 +5396,10 @@ mod real_production_effects_matrix_tests {
             "RUN-LINK-01: run_link_event_persisted must fire between \
              reservation and local bundle commit"
         );
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("RUN-LINK-01: cleanup stop must succeed");
         delete_run_and_its_events(&pool, run_id).await;
@@ -5375,7 +5428,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, _trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5398,7 +5451,7 @@ mod real_production_effects_matrix_tests {
         // timing must not change the operator-visible stop contract: both
         // paths report the aggregate stop/join/release fault class while
         // retaining the specific execution-loop join failure in the detail.
-        let stop_result = state.stop_execution_runtime().await;
+        let stop_result = state.stop_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             stop_result.is_err(),
             "TASK-PANIC-01: a joined panic must be reported as an error, not silently absorbed"
@@ -5416,7 +5469,7 @@ mod real_production_effects_matrix_tests {
         );
 
         // Degraded truth, not a clean Idle.
-        match &*state.runtime_ownership.lock().await {
+        match &*state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await {
             crate::state::LocalRuntimeOwnership::Degraded {
                 run_id: degraded_run_id,
                 ..
@@ -5431,7 +5484,7 @@ mod real_production_effects_matrix_tests {
         // Clear the local Degraded slot the same way a real operator
         // recovery would before attempting a new run.
         {
-            let mut lock = state.runtime_ownership.lock().await;
+            let mut lock = state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await;
             *lock = crate::state::LocalRuntimeOwnership::Idle;
         }
         mqk_db::clear_halted_run(&pool, run_id).await.ok();
@@ -5441,7 +5494,7 @@ mod real_production_effects_matrix_tests {
             .expect("TASK-PANIC-01: restart run creation must succeed");
         state.set_hermetic_test_broker_override_for_test(true).await;
         let (restart_result, _trace2) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id_2,
                 Some(off_disposition_fixture(run_id_2)),
@@ -5540,7 +5593,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5580,7 +5633,7 @@ mod real_production_effects_matrix_tests {
             rollback.is_degraded(),
             "FAULT-ROLLBACK-QUERY-01: is_degraded() must reflect durable_status_unknown"
         );
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
 
         // The row was deleted; nothing further to clean up.
     }
@@ -5613,7 +5666,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5701,7 +5754,7 @@ mod real_production_effects_matrix_tests {
         );
 
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "BARRIER-TRUTH-01: the failed install must not leave a stuck \
              Starting/Active slot"
@@ -5744,7 +5797,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
 
         let (result, trace) = state
-            .drive_production_start_effects_for_test(
+            .drive_production_start_effects_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(off_disposition_fixture(run_id)),
@@ -5778,7 +5831,7 @@ mod real_production_effects_matrix_tests {
         // The release failure must not prevent the rest of rollback
         // (reservation release) from completing.
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "LEADERSHIP-RELEASE-FAILURE-01: reservation must still be \
              released even though the leadership-release sub-step failed"
@@ -6067,7 +6120,7 @@ mod real_production_effects_matrix_tests {
         );
 
         let (result, trace) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6092,10 +6145,10 @@ mod real_production_effects_matrix_tests {
                 "loop_spawned"
             ]
         );
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
         let snapshot = state
-            .dynamic_selection_runtime_snapshot()
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-01: dynamic-selection metadata must be committed");
         assert!(matches!(
@@ -6109,7 +6162,7 @@ mod real_production_effects_matrix_tests {
         assert_eq!(snapshot.selected_pairs.len(), 2);
 
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-01: cleanup stop must succeed");
         delete_run_and_its_events(&pool, run_id).await;
@@ -6152,7 +6205,7 @@ mod real_production_effects_matrix_tests {
         let (plan, authority) = blocker3_plan_and_authority(run_id, aapl, msft);
 
         let (result, _trace) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6342,7 +6395,7 @@ mod real_production_effects_matrix_tests {
         );
 
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-02: cleanup stop must succeed");
         delete_run_and_its_events(&pool, run_id).await;
@@ -6373,7 +6426,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB303AAPL", "PB303MSFT");
         let (result, _trace) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6386,20 +6439,20 @@ mod real_production_effects_matrix_tests {
             .set_hermetic_test_broker_override_for_test(false)
             .await;
         result.expect("BLOCKER3-03: setup must reach Active");
-        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
-        let stop_result = state.stop_execution_runtime().await;
+        let stop_result = state.stop_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             stop_result.is_ok(),
             "BLOCKER3-03: stop must succeed: {stop_result:?}"
         );
         assert_eq!(
-            state.locally_owned_run_id().await,
+            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
             None,
             "BLOCKER3-03: stop must fully clear local ownership"
         );
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "BLOCKER3-03: stop must clear dynamic-selection metadata, \
              including the DynamicPaperEnforced authority's own run/plan \
              binding"
@@ -6431,7 +6484,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB304AAPL", "PB304MSFT");
         let (result, _trace) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6445,14 +6498,14 @@ mod real_production_effects_matrix_tests {
             .await;
         result.expect("BLOCKER3-04: setup must reach Active");
 
-        let halt_result = state.halt_execution_runtime().await;
+        let halt_result = state.halt_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             halt_result.is_ok(),
             "BLOCKER3-04: halt must succeed: {halt_result:?}"
         );
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "BLOCKER3-04: halt must clear the DynamicPaperEnforced authority's \
              run/plan metadata"
         );
@@ -6488,7 +6541,7 @@ mod real_production_effects_matrix_tests {
             blocker3_plan_and_authority(run_id_2, "PB304AAPL2", "PB304MSFT2");
         state.set_hermetic_test_broker_override_for_test(true).await;
         let (restart_result, _trace2) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id_2,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6505,7 +6558,7 @@ mod real_production_effects_matrix_tests {
             "BLOCKER3-04: restart after halt must succeed: {restart_result:?}"
         );
         let snapshot_2 = state
-            .dynamic_selection_runtime_snapshot()
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-04: restart must commit fresh dynamic-selection metadata");
         assert_eq!(
@@ -6521,7 +6574,7 @@ mod real_production_effects_matrix_tests {
         );
 
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-04: cleanup stop must succeed");
         delete_run_and_its_events(&pool, run_id).await;
@@ -6552,7 +6605,7 @@ mod real_production_effects_matrix_tests {
             .expect("run creation must succeed");
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB305AAPL", "PB305MSFT");
         let (result, _trace) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6568,9 +6621,9 @@ mod real_production_effects_matrix_tests {
 
         state.stop_for_shutdown().await;
 
-        assert_eq!(state.locally_owned_run_id().await, None);
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, None);
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "BLOCKER3-05: shutdown must clear the DynamicPaperEnforced \
              authority's run/plan metadata"
         );
@@ -6589,7 +6642,7 @@ mod real_production_effects_matrix_tests {
             blocker3_plan_and_authority(run_id_2, "PB305AAPL2", "PB305MSFT2");
         state.set_hermetic_test_broker_override_for_test(true).await;
         let (restart_result, _trace2) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id_2,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6607,7 +6660,7 @@ mod real_production_effects_matrix_tests {
         );
 
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-05: cleanup stop must succeed");
         delete_run_and_its_events(&pool, run_id).await;
@@ -6662,7 +6715,7 @@ mod real_production_effects_matrix_tests {
         let (plan, authority) = blocker3_plan_and_authority(run_id, "PB306AAPL", "PB306MSFT");
 
         let (result, _trace) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_id,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6679,7 +6732,7 @@ mod real_production_effects_matrix_tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         state.set_execution_loop_panic_for_test(false);
 
-        let stop_result = state.stop_execution_runtime().await;
+        let stop_result = state.stop_execution_runtime(ExecutionDomain::EquityNyse, ).await;
         assert!(
             stop_result.is_err(),
             "BLOCKER3-06: a joined panic must be reported as an error, not \
@@ -6700,7 +6753,7 @@ mod real_production_effects_matrix_tests {
              execution-loop join failure in its structured error message; got: {stop_err}"
         );
 
-        match &*state.runtime_ownership.lock().await {
+        match &*state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await {
             crate::state::LocalRuntimeOwnership::Degraded {
                 run_id: degraded_run_id,
                 ..
@@ -6714,7 +6767,7 @@ mod real_production_effects_matrix_tests {
         }
 
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "BLOCKER3-06: no detached selected-host authority/metadata may \
              survive a panicked task"
         );
@@ -6732,7 +6785,7 @@ mod real_production_effects_matrix_tests {
         );
 
         {
-            let mut lock = state.runtime_ownership.lock().await;
+            let mut lock = state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await;
             *lock = crate::state::LocalRuntimeOwnership::Idle;
         }
 
@@ -6780,7 +6833,7 @@ mod real_production_effects_matrix_tests {
             .expect("run A creation must succeed");
         let (plan_a, authority_a) = blocker3_plan_and_authority(run_a, "PB307AAPL", "PB307MSFT");
         let (result_a, _trace_a) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_a,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6793,7 +6846,7 @@ mod real_production_effects_matrix_tests {
             .set_hermetic_test_broker_override_for_test(false)
             .await;
         result_a.expect("BLOCKER3-07: run A setup must reach Active");
-        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_a));
 
         // Run B: a distinct run_id attempting to start while run A still
         // genuinely owns the local runtime slot -- refused by the real
@@ -6819,7 +6872,7 @@ mod real_production_effects_matrix_tests {
         .expect("run B row must insert");
         let (plan_b, authority_b) = blocker3_plan_and_authority(run_b, "PB307AAPL2", "PB307MSFT2");
         let (result_b, trace_b) = state
-            .drive_production_start_effects_with_dispatch_authority_for_test(
+            .drive_production_start_effects_with_dispatch_authority_for_test(ExecutionDomain::EquityNyse,
                 pool.clone(),
                 run_b,
                 Some(blocker3_paper_enforced_allowed_disposition_fixture(
@@ -6842,7 +6895,7 @@ mod real_production_effects_matrix_tests {
         // Run A's committed dynamic-selection state must be completely
         // unchanged by run B's refused attempt and its rollback.
         let snapshot_after = state
-            .dynamic_selection_runtime_snapshot()
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-07: run A's metadata must still be present");
         assert_eq!(
@@ -6857,7 +6910,7 @@ mod real_production_effects_matrix_tests {
              original binding set, never run B's"
         );
         assert!(snapshot_after.host_pool_present);
-        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_a));
         assert!(matches!(
             mqk_db::fetch_run(&pool, run_a)
                 .await
@@ -6874,7 +6927,7 @@ mod real_production_effects_matrix_tests {
         ));
 
         state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect("BLOCKER3-07: cleanup stop must succeed");
         delete_run_and_its_events(&pool, run_a).await;
@@ -7276,9 +7329,9 @@ mod dynamic_selection_cleanup_contract_tests {
             b"mqk-daemon.phase7a.cleanup.stop",
         );
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_id))
             .await;
-        assert!(state.dynamic_selection_runtime_snapshot().await.is_some());
+        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_some());
         state
             .plant_accepted_artifact_for_test(Some(AcceptedArtifactProvenance {
                 artifact_id: "stop-sentinel".to_string(),
@@ -7290,7 +7343,7 @@ mod dynamic_selection_cleanup_contract_tests {
         state.plant_day_signal_count_for_test(77);
 
         let err = state
-            .stop_execution_runtime()
+            .stop_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect_err("stop must reach db_pool() once the trivial fixture loop is stopped");
         assert_eq!(
@@ -7298,7 +7351,7 @@ mod dynamic_selection_cleanup_contract_tests {
             "runtime.start_refused.service_unavailable"
         );
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "stop_execution_runtime must clear dynamic-selection state before the \
              DB-dependent step that can fail"
         );
@@ -7330,9 +7383,9 @@ mod dynamic_selection_cleanup_contract_tests {
             b"mqk-daemon.phase7a.cleanup.halt",
         );
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_id))
             .await;
-        assert!(state.dynamic_selection_runtime_snapshot().await.is_some());
+        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_some());
         state
             .plant_accepted_artifact_for_test(Some(AcceptedArtifactProvenance {
                 artifact_id: "halt-sentinel".to_string(),
@@ -7344,7 +7397,7 @@ mod dynamic_selection_cleanup_contract_tests {
         state.plant_day_signal_count_for_test(88);
 
         let err = state
-            .halt_execution_runtime()
+            .halt_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect_err("halt without a configured DB must error at db_pool()");
         assert_eq!(
@@ -7352,7 +7405,7 @@ mod dynamic_selection_cleanup_contract_tests {
             "runtime.start_refused.service_unavailable"
         );
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "halt_execution_runtime must clear dynamic-selection state before the DB-dependent \
              steps that can fail, not only on a fully successful halt"
         );
@@ -7379,7 +7432,7 @@ mod dynamic_selection_cleanup_contract_tests {
             b"mqk-daemon.phase7a.cleanup.shutdown",
         );
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_id))
             .await;
         state
             .plant_accepted_artifact_for_test(Some(AcceptedArtifactProvenance {
@@ -7393,7 +7446,7 @@ mod dynamic_selection_cleanup_contract_tests {
 
         state.stop_for_shutdown().await;
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "stop_for_shutdown must clear dynamic-selection state"
         );
         assert!(
@@ -7412,19 +7465,19 @@ mod dynamic_selection_cleanup_contract_tests {
             DeploymentMode::Paper,
             BrokerKind::Alpaca,
         ));
-        state.clear_dynamic_selection_runtime_state().await;
-        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+        state.clear_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, ).await;
+        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none());
 
         let run_id = uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.cleanup.idempotent",
         );
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_id))
             .await;
-        state.clear_dynamic_selection_runtime_state().await;
-        state.clear_dynamic_selection_runtime_state().await;
-        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+        state.clear_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, ).await;
+        state.clear_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, ).await;
+        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none());
     }
 
     /// A fresh commit is always a full overwrite, never a merge with a
@@ -7446,11 +7499,11 @@ mod dynamic_selection_cleanup_contract_tests {
         );
 
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_a))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_a))
             .await;
         assert_eq!(
             state
-                .dynamic_selection_runtime_snapshot()
+                .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
                 .await
                 .unwrap()
                 .run_id,
@@ -7458,9 +7511,9 @@ mod dynamic_selection_cleanup_contract_tests {
         );
 
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_b))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_b))
             .await;
-        let after = state.dynamic_selection_runtime_snapshot().await.unwrap();
+        let after = state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.unwrap();
         assert_eq!(
             after.run_id, run_b,
             "the second commit must fully replace the first"
@@ -7517,7 +7570,7 @@ mod dynamic_selection_cleanup_contract_tests {
             frozen_assignments_source: "test_fixture",
             approved_for_live: false,
         });
-        *state.runtime_ownership.lock().await =
+        *state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await =
             crate::state::types::LocalRuntimeOwnership::Active {
                 run_id,
                 metadata,
@@ -7534,12 +7587,12 @@ mod dynamic_selection_cleanup_contract_tests {
         state.plant_day_signal_count_for_test(66);
 
         let exit = state
-            .reap_finished_execution_loop()
+            .reap_finished_execution_loop(ExecutionDomain::EquityNyse, )
             .await
             .expect("reap must not error");
         assert!(exit.is_some(), "reap must observe the finished loop");
         assert!(
-            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none(),
             "reap_finished_execution_loop must clear dynamic-selection state \
              for a loop that finished on its own"
         );
@@ -7624,14 +7677,14 @@ mod dynamic_selection_cleanup_contract_tests {
         // Run A committed, then Run B supersedes it (the ordinary
         // stop-A/start-B sequence).
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_a))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_a))
             .await;
         state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_b))
+            .commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, fixture_off_state(run_b))
             .await;
         assert_eq!(
             state
-                .dynamic_selection_runtime_snapshot()
+                .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
                 .await
                 .unwrap()
                 .run_id,
@@ -7640,11 +7693,11 @@ mod dynamic_selection_cleanup_contract_tests {
 
         // A late rollback for the now-superseded run A must not clear B.
         state
-            .clear_dynamic_selection_runtime_state_for_run(run_a)
+            .clear_dynamic_selection_runtime_state_for_run(ExecutionDomain::EquityNyse, run_a)
             .await;
         assert_eq!(
             state
-                .dynamic_selection_runtime_snapshot()
+                .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, )
                 .await
                 .unwrap()
                 .run_id,
@@ -7654,9 +7707,9 @@ mod dynamic_selection_cleanup_contract_tests {
 
         // The matching run_id does clear it.
         state
-            .clear_dynamic_selection_runtime_state_for_run(run_b)
+            .clear_dynamic_selection_runtime_state_for_run(ExecutionDomain::EquityNyse, run_b)
             .await;
-        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none());
     }
 
     /// Compare-and-clear against an already-`None` value is a safe no-op
@@ -7672,9 +7725,9 @@ mod dynamic_selection_cleanup_contract_tests {
             b"mqk-daemon.phase7a.atomicity.absent",
         );
         state
-            .clear_dynamic_selection_runtime_state_for_run(run_id)
+            .clear_dynamic_selection_runtime_state_for_run(ExecutionDomain::EquityNyse, run_id)
             .await;
-        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none());
     }
 }
 
@@ -8657,7 +8710,7 @@ mod explicit_multi_strategy_start_snapshot_tests {
         // 1. Ordinary case: nothing configured -- Dormant gate fires exactly
         // as before this patch.
         let err = state
-            .start_execution_runtime()
+            .start_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect_err("paper+alpaca with no fleet and no v3 artifact must refuse closed");
         assert_eq!(
@@ -8682,7 +8735,7 @@ mod explicit_multi_strategy_start_snapshot_tests {
         std::env::remove_var("MQK_STRATEGY_SYMBOL");
 
         let err = state
-            .start_execution_runtime()
+            .start_execution_runtime(ExecutionDomain::EquityNyse, )
             .await
             .expect_err("no DB pool means this cannot succeed end-to-end in this test");
 

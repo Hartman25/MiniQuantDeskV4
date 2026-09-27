@@ -1413,7 +1413,7 @@ pub async fn submit_internal_strategy_decision(
     }
 
     // Gate 6: active run must exist and be in "running" state.
-    let status = match state.current_status_snapshot().await {
+    let status = match state.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(s) => s,
         Err(err) => {
             return outcome(

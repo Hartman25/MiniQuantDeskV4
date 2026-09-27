@@ -309,7 +309,7 @@ async fn sh05_deployment_gate_fires_before_ws_continuity_gate() {
     .await;
 
     let err = st
-        .start_execution_runtime()
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect_err("SH05: paper+paper must fail at deployment gate");
 
@@ -341,7 +341,7 @@ async fn sh06_integrity_gate_fires_before_ws_continuity_gate() {
     .await;
 
     let err = st
-        .start_execution_runtime()
+        .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect_err("SH06: disarmed integrity must block before WS gate");
 

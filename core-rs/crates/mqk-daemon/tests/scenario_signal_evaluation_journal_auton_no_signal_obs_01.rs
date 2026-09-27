@@ -439,7 +439,7 @@ async fn so04_active_run_id_links_onto_journal_row() {
         .execute(&pool)
         .await
         .expect("pre-test runs cleanup failed");
-    st.establish_db_backed_active_run_for_test(run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
         .await
         .expect("SO-04: establish_db_backed_active_run_for_test failed");
 

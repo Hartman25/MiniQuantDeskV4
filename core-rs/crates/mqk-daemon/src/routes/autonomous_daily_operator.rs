@@ -1271,7 +1271,7 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale_manual(
             .into_response();
     }
 
-    if st.locally_owned_run_id().await == Some(expected_run_id) {
+    if st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await == Some(expected_run_id) {
         return (
             StatusCode::CONFLICT,
             Json(finalize_stale_manual_refusal_response(

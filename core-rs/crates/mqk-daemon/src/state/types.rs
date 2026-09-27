@@ -379,6 +379,71 @@ impl fmt::Display for BoundedLifecycleDegradation {
     }
 }
 
+/// B2.4: canonical execution-domain identity for per-domain runtime
+/// ownership. A closed, typed set — never a free-form string or a pair of
+/// separately-named fields — so every call site that touches runtime,
+/// lifecycle-op, or reconcile-task ownership must name the exact domain it
+/// operates on. `equity_nyse` and `crypto_24_7` runtime ownership must
+/// coexist (existing operator decision, not deferred); adding a variant
+/// here forces every `PerDomain` accessor to be updated exhaustively.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ExecutionDomain {
+    EquityNyse,
+    Crypto24_7,
+}
+
+impl ExecutionDomain {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EquityNyse => "equity_nyse",
+            Self::Crypto24_7 => "crypto_24_7",
+        }
+    }
+
+    /// Every domain, in a stable canonical order — used by process-wide
+    /// shutdown to iterate and stop each domain explicitly rather than
+    /// relying on a single shared lock to cover "all of them".
+    pub fn all() -> [ExecutionDomain; 2] {
+        [Self::EquityNyse, Self::Crypto24_7]
+    }
+}
+
+impl fmt::Display for ExecutionDomain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// B2.4: a value held independently per [`ExecutionDomain`] — the seam that
+/// replaces a single process-wide runtime-ownership / lifecycle-op /
+/// reconcile-task-owner field. `get` returns only that domain's own value;
+/// there is no shared storage or shared lock between domains, so an
+/// operation scoped to one domain's value can never observe or mutate the
+/// other domain's. Deliberately not a `HashMap<ExecutionDomain, T>` — the
+/// fixed, named shape makes exhaustiveness (and the absence of a shared
+/// map lock) a compile-time property, not a runtime one.
+#[derive(Debug, Clone)]
+pub(crate) struct PerDomain<T> {
+    equity_nyse: T,
+    crypto_24_7: T,
+}
+
+impl<T> PerDomain<T> {
+    pub(crate) fn new(equity_nyse: T, crypto_24_7: T) -> Self {
+        Self {
+            equity_nyse,
+            crypto_24_7,
+        }
+    }
+
+    pub(crate) fn get(&self, domain: ExecutionDomain) -> &T {
+        match domain {
+            ExecutionDomain::EquityNyse => &self.equity_nyse,
+            ExecutionDomain::Crypto24_7 => &self.crypto_24_7,
+        }
+    }
+}
+
 /// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 2: the
 /// single source-of-truth local runtime lifecycle-ownership state machine,
 /// replacing the prior split of three independently-mutated authorities —

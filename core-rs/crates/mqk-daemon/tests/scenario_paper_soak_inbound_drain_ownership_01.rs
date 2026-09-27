@@ -91,12 +91,12 @@ async fn d01_stop_with_no_open_orders_succeeds_immediately() {
     cleanup(&pool, run_id).await;
 
     let st = make_state(pool.clone());
-    st.establish_db_backed_active_run_for_test(run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
         .await
         .expect("D01: establishing active run must succeed");
 
     let snapshot = st
-        .stop_execution_runtime()
+        .stop_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect("D01: stop with no open orders must succeed (unchanged behavior)");
     assert_eq!(
@@ -128,7 +128,7 @@ async fn d02_stop_with_unresolved_order_returns_typed_conflict_and_preserves_own
     cleanup(&pool, run_id).await;
 
     let st = make_state(pool.clone());
-    st.establish_db_backed_active_run_for_test(run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
         .await
         .expect("D02: establishing active run must succeed");
 
@@ -149,7 +149,7 @@ async fn d02_stop_with_unresolved_order_returns_typed_conflict_and_preserves_own
         .expect("mark ACKED failed");
 
     let err = st
-        .stop_execution_runtime()
+        .stop_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect_err("D02: stop must be refused while an order is unresolved");
     assert_eq!(
@@ -165,7 +165,7 @@ async fn d02_stop_with_unresolved_order_returns_typed_conflict_and_preserves_own
     // Ownership must NOT have been cleared -- this is the entire point: the
     // WS inbound transport's active_owned_run_id() gate must still see this
     // run as owned, so a late frame is durably ingested instead of dropped.
-    let owned = st.locally_owned_run_id().await;
+    let owned = st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await;
     assert_eq!(
         owned,
         Some(run_id),
@@ -201,7 +201,7 @@ async fn d03_stop_succeeds_once_order_resolves() {
     cleanup(&pool, run_id).await;
 
     let st = make_state(pool.clone());
-    st.establish_db_backed_active_run_for_test(run_id)
+    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
         .await
         .expect("D03: establishing active run must succeed");
 
@@ -220,7 +220,7 @@ async fn d03_stop_succeeds_once_order_resolves() {
         .expect("mark SENT failed");
 
     // First stop attempt: refused, exactly like D02.
-    let first = st.stop_execution_runtime().await;
+    let first = st.stop_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await;
     assert!(
         first.is_err(),
         "D03 precondition: first stop attempt must be refused while unresolved"
@@ -258,7 +258,7 @@ async fn d03_stop_succeeds_once_order_resolves() {
 
     // Second stop attempt: every broker-reachable order is now resolved.
     let snapshot = st
-        .stop_execution_runtime()
+        .stop_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect("D03: stop must succeed once the order has resolved");
     assert_eq!(
@@ -272,7 +272,7 @@ async fn d03_stop_succeeds_once_order_resolves() {
         "D03: run must reach STOPPED once drained"
     );
 
-    let owned = st.locally_owned_run_id().await;
+    let owned = st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await;
     assert_eq!(
         owned, None,
         "D03: local ownership must be cleared once the drained stop completes"

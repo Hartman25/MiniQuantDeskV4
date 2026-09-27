@@ -2159,7 +2159,7 @@ pub async fn dispatch_by_state(
                 // here for `controller_degraded`. No new legal transition
                 // edge: `manual_intervention_required -> stopping` is
                 // already legal in `mqk_db::is_legal_operation_transition`.
-                match state.locally_owned_run_id().await {
+                match state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await {
                     Some(local_run_id) if local_run_id == expected_run_id => Ok(
                         AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                             reason_code: bounded_static_reason(reason_code),
@@ -2278,7 +2278,7 @@ pub async fn dispatch_by_state(
                 );
             };
 
-            match state.locally_owned_run_id().await {
+            match state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await {
                 Some(local_run_id) if local_run_id == expected_run_id => {
                     attempt_controller_degraded_recovery(
                         state,
@@ -2652,7 +2652,7 @@ pub async fn attempt_canonical_start(
     // recovery_retrying always has a prior run_id and reaches this
     // function only after `handle_running` has already ruled out the
     // operator-managed case.
-    if operation.run_id.is_none() && state.locally_owned_run_id().await.is_some() {
+    if operation.run_id.is_none() && state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await.is_some() {
         let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
@@ -2736,10 +2736,10 @@ pub async fn attempt_canonical_start(
         }
     };
 
-    match state.start_execution_runtime().await {
+    match state.start_execution_runtime(super::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => {
             let Some(run_id) = snapshot.active_run_id else {
-                let _ = state.stop_execution_runtime().await;
+                let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
                 let newly_applied = apply_manual_if_changed(
                     pool,
                     &operation,
@@ -2757,11 +2757,11 @@ pub async fn attempt_canonical_start(
                     },
                 );
             };
-            if state.locally_owned_run_id().await != Some(run_id) {
+            if state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await != Some(run_id) {
                 // D2.12 crash-window policy: a successful start whose
                 // durable operation binding cannot be confirmed must never
                 // be presented as running.
-                let _ = state.stop_execution_runtime().await;
+                let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
                 let newly_applied = apply_manual_if_changed(
                     pool,
                     &operation,
@@ -2824,7 +2824,7 @@ pub async fn attempt_canonical_start(
                     // transition could not be confirmed. Best-effort stop;
                     // the operation is never presented as running and the
                     // run is never silently adopted.
-                    let _ = state.stop_execution_runtime().await;
+                    let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
                     let newly_applied = apply_manual_if_changed(
                         pool,
                         &operation,
@@ -2965,7 +2965,7 @@ pub async fn handle_running_transition_store_error(
             // illegal degraded target (the re-read row may genuinely be
             // `running`, whose only legal manual-adjacent edge is
             // `controller_degraded`, never `manual_intervention_required`).
-            let _ = state.stop_execution_runtime().await;
+            let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
             let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
                 fault_class: "durable_transition_unconfirmed_after_start",
             };
@@ -2997,7 +2997,7 @@ pub async fn handle_running_transition_store_error(
             )
         }
         Ok(None) => {
-            let _ = state.stop_execution_runtime().await;
+            let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
             anyhow::bail!(
                 "autonomous_daily_coordinator: operation {} vanished after a running-transition \
                  store error ({store_err})",
@@ -3013,7 +3013,7 @@ pub async fn handle_running_transition_store_error(
             // the pre-attempt snapshot (always `start_retrying` or
             // `recovery_retrying` here), which always has a legal edge to
             // `manual_intervention_required`.
-            let _ = state.stop_execution_runtime().await;
+            let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
             let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
                 fault_class: "durable_transition_unconfirmed_after_start",
             };
@@ -3163,7 +3163,7 @@ pub async fn handle_running(
         );
     };
 
-    let local_run_id = state.locally_owned_run_id().await;
+    let local_run_id = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await;
     if local_run_id == Some(expected_run_id) {
         return Ok(AutonomousDailyCoordinatorTickOutcome::Running {
             run_id: expected_run_id,
@@ -3447,7 +3447,7 @@ async fn attempt_evidence_degraded_recovery(
         // there is no "still exactly this run" success case to short-
         // circuit here; any local ownership at all is a contradiction with
         // this operation's own durable `stopped_at_utc` truth.
-        if state.locally_owned_run_id().await.is_some() {
+        if state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await.is_some() {
             let newly_applied = apply_manual_if_changed(
                 pool,
                 operation,
@@ -3740,7 +3740,7 @@ async fn attempt_controller_degraded_recovery(
     // run+operation authority seam below rather than trusting the ownership
     // check `dispatch_by_state` performed before any of this async work
     // ran.
-    if state.locally_owned_run_id().await != Some(expected_run_id) {
+    if state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await != Some(expected_run_id) {
         let newly_applied = apply_manual_if_changed(
             pool,
             operation,
@@ -4067,7 +4067,7 @@ pub async fn handle_session_close(
     operation: AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
-    let local_run_id = state.locally_owned_run_id().await;
+    let local_run_id = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await;
 
     match (operation.run_id, local_run_id) {
         (Some(expected), Some(actual)) if expected == actual => {
@@ -4212,7 +4212,7 @@ pub async fn retry_stop(
     // that appeared, disappeared, or changed identity since the last tick
     // must never be stopped (or left un-reconciled) merely because the
     // operation remains `stop_retrying`.
-    let local_run_id = state.locally_owned_run_id().await;
+    let local_run_id = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await;
 
     match (operation.run_id, local_run_id) {
         (Some(expected), Some(actual)) if expected == actual => {
@@ -4285,7 +4285,7 @@ pub async fn retry_stop(
             }
         };
 
-    match state.stop_execution_runtime().await {
+    match state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await {
         Ok(_) => {
             // REPAIR 5: restart-safe, idempotent stop completion — never
             // rewinds an already-recorded stopped_at_utc, and clears stale
@@ -4337,7 +4337,7 @@ async fn matching_local_runtime_active(
     operation: &AutonomousDailyOperationRecord,
 ) -> bool {
     match operation.run_id {
-        Some(expected) => state.locally_owned_run_id().await == Some(expected),
+        Some(expected) => state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await == Some(expected),
         None => false,
     }
 }

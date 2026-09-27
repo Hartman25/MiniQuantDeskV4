@@ -92,7 +92,7 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
     // --- Gather live state from AppState ---
 
     // Status snapshot (fail-soft if unavailable).
-    let status = match st.current_status_snapshot().await {
+    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(s) => s,
         Err(_) => {
             return (
@@ -200,7 +200,7 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
         .is_none_or(|f| f.is_empty());
 
     // Runtime start: no locally-owned run.
-    let locally_owned_run = st.locally_owned_run_id().await;
+    let locally_owned_run = st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await;
     let runtime_start_allowed = locally_owned_run.is_none();
 
     // --- Execution snapshot for position/order counts ---

@@ -471,8 +471,8 @@ async fn a1_a2_matching_local_owner_with_active_blocker_stays_degraded_never_orp
 
     // The live local runtime never stopped -- it still genuinely owns
     // run_id.
-    st.inject_running_loop_for_test(run_id).await;
-    assert_eq!(st.locally_owned_run_id().await, Some(run_id));
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    assert_eq!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
     // No bars seeded: the original readiness blocker is still genuinely
     // true.
@@ -534,7 +534,7 @@ async fn a3_a7_a8_matching_local_owner_with_cleared_blocker_recovers_to_running(
     let adapter_id = format!("ctrl-live-a3-{}", unique_suffix());
     let (st, plan, operation_id, run_id, now) = build_fixture(&pool, &adapter_id).await?;
 
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
     // Repair data through the real production ingestion path -- canonical
     // readiness now genuinely passes.
@@ -618,7 +618,7 @@ async fn a4_no_local_owner_durable_active_run_stays_fail_closed() -> anyhow::Res
 
     // Deliberately no `inject_running_loop_for_test` -- no local runtime
     // owns anything in this AppState.
-    assert_eq!(st.locally_owned_run_id().await, None);
+    assert_eq!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, None);
 
     let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
@@ -659,8 +659,8 @@ async fn a5_mismatched_local_owner_run_id_fails_closed() -> anyhow::Result<()> {
     seed_bars_via_normal_ingestion(&pool, &bars).await;
 
     let other_run_id = Uuid::new_v4();
-    st.inject_running_loop_for_test(other_run_id).await;
-    assert_eq!(st.locally_owned_run_id().await, Some(other_run_id));
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, other_run_id).await;
+    assert_eq!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, Some(other_run_id));
 
     let before = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
@@ -709,7 +709,7 @@ async fn a6_recovery_cas_race_never_applies_against_stale_state() -> anyhow::Res
     let adapter_id = format!("ctrl-live-a6-{}", unique_suffix());
     let (st, plan, operation_id, run_id, now) = build_fixture(&pool, &adapter_id).await?;
 
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
     // The coordinator will read this stale snapshot -- readiness is
     // genuinely repaired, so without the CAS guard it would recover.
@@ -832,8 +832,8 @@ async fn a9_nondata_reason_provider_disabled_never_recovers_even_with_green_read
     seed_controller_degraded_operation(&pool, operation_id, run_id, REASON_PROVIDER_DISABLED, now)
         .await?;
 
-    st.inject_running_loop_for_test(run_id).await;
-    assert_eq!(st.locally_owned_run_id().await, Some(run_id));
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    assert_eq!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
     // Readiness is otherwise green -- repaired through the real production
     // ingestion path -- so only the NonData classification gate can be
@@ -943,8 +943,8 @@ async fn a10_matching_owner_durable_armed_with_green_readiness_never_recovers() 
     let bars = expected_bar_window(now, 5);
     seed_bars_via_normal_ingestion(&pool, &bars).await;
 
-    st.inject_running_loop_for_test(run_id).await;
-    assert_eq!(st.locally_owned_run_id().await, Some(run_id));
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    assert_eq!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
     let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
@@ -1003,8 +1003,8 @@ async fn a11_run_halted_before_atomic_commit_recovery_must_refuse() -> anyhow::R
     let adapter_id = format!("ctrl-live-a11-{}", unique_suffix());
     let (st, _plan, operation_id, run_id, now) = build_fixture(&pool, &adapter_id).await?;
 
-    st.inject_running_loop_for_test(run_id).await;
-    assert_eq!(st.locally_owned_run_id().await, Some(run_id));
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    assert_eq!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, Some(run_id));
 
     // Readiness genuinely repaired -- every upstream gate the coordinator
     // checks before entering the atomic seam has already passed for this

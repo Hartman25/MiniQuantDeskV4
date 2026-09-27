@@ -546,7 +546,7 @@ async fn active_bootstrap_state(pool: sqlx::PgPool) -> AppState {
 
 async fn running_dispatch_eligible_state(pool: sqlx::PgPool, run_id: Uuid) -> AppState {
     let state = active_bootstrap_state(pool).await;
-    state.inject_running_loop_for_test(run_id).await;
+    state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     // D4 REPAIR 2: `AppState::record_signal_evaluation` derives its
     // evaluation identity from `status.active_run_id`, not from
     // `execution_loop`'s injected ownership — production keeps both in sync
@@ -955,7 +955,7 @@ async fn phase_d_missing_evaluation_evidence_fails_closed_never_completes_claim(
     state
         .set_native_strategy_bootstrap_for_test(Some(bootstrap))
         .await;
-    state.inject_running_loop_for_test(run_id).await;
+    state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     state.status.write().await.active_run_id = Some(run_id);
 
     let expected_ts = timing.effective_open.timestamp() + 300;
@@ -1436,7 +1436,7 @@ async fn phase_d_task_permanent_failure_degrades_operation_once_and_stays_visibl
 
     // No runtime ownership change: this test never established local
     // ownership, and none was created by the failure path.
-    assert!(st.locally_owned_run_id().await.is_none());
+    assert!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none());
     assert_eq!(
         degraded.run_id, run_id_before,
         "run_id must be untouched by task failure"
@@ -2122,7 +2122,7 @@ async fn phase_d_full_day_lifecycle() {
     assert_eq!(running_operation.state, mqk_db::STATE_RUNNING);
     assert_eq!(running_operation.run_id, Some(run_id_1));
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id_1),
         "local ownership must bind to the exact run_id"
     );
@@ -2290,7 +2290,7 @@ async fn phase_d_full_day_lifecycle() {
     .expect("row exists");
     assert_eq!(recovered_row.state, mqk_db::STATE_RUNNING);
     assert_eq!(recovered_row.run_id, Some(run_id_2));
-    assert_eq!(st2.locally_owned_run_id().await, Some(run_id_2));
+    assert_eq!(st2.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, Some(run_id_2));
 
     // The already-completed bar must not be reevaluated after recovery.
     let post_recovery_tick = tick_autonomous_completed_bar_driver_from_state(
@@ -2349,7 +2349,7 @@ async fn phase_d_full_day_lifecycle() {
     assert_eq!(stopped_row.state, mqk_db::STATE_STOPPING);
     assert!(stopped_row.stopped_at_utc.is_some());
     assert!(
-        st2.locally_owned_run_id().await.is_none(),
+        st2.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "local ownership must be cleared after the canonical stop"
     );
 

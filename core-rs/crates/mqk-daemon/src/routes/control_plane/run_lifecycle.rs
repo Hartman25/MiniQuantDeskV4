@@ -23,7 +23,7 @@ use super::super::helpers::{runtime_error_response, write_operator_audit_event};
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> Response {
-    match st.start_execution_runtime().await {
+    match st.start_execution_runtime(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => {
             info!(run_id = ?snapshot.active_run_id, "run/start");
             let audit_uuid = if let Some(run_id) = snapshot.active_run_id {
@@ -68,7 +68,7 @@ pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> Response {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run_stop(State(st): State<Arc<AppState>>) -> Response {
-    match st.stop_execution_runtime().await {
+    match st.stop_execution_runtime(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => {
             info!("run/stop");
             let audit_uuid =
@@ -110,7 +110,7 @@ pub(crate) async fn run_stop(State(st): State<Arc<AppState>>) -> Response {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> Response {
-    match st.halt_execution_runtime().await {
+    match st.halt_execution_runtime(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => {
             info!("run/halt");
             let audit_uuid =

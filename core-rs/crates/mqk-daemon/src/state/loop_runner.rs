@@ -2305,6 +2305,7 @@ where
 /// halt that unrelated, currently-healthy run.
 pub(super) async fn supervise_reconcile_terminal_task(
     state: Arc<AppState>,
+    domain: super::ExecutionDomain,
     run_id: Uuid,
     handle: JoinHandle<()>,
     completion_tx: watch::Sender<bool>,
@@ -2320,7 +2321,7 @@ pub(super) async fn supervise_reconcile_terminal_task(
         return;
     }
 
-    if !state.reconcile_task_owner_matches(run_id).await {
+    if !state.reconcile_task_owner_matches(domain, run_id).await {
         tracing::info!(
             run_id = %run_id,
             "reconcile_tick: terminal resolution for a superseded run; ignoring \

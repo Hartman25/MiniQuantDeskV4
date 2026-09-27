@@ -697,7 +697,7 @@ async fn ci_03_matching_local_runtime_active_is_always_false_with_no_local_runti
     assert_eq!(operation.run_id, Some(run_id), "fixture bound a run_id");
     let st = ci_daemon_state(pool.clone(), &webhook_url).await;
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         None,
         "a freshly-constructed AppState never owns a local execution loop"
     );
@@ -818,9 +818,9 @@ async fn ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_no
     let st = ci_daemon_state(pool.clone(), &webhook_url).await;
     // The matching-runtime fact under test: a locally-owned execution loop
     // bound to the exact same run_id this operation durably bound.
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id),
         "fixture: AppState now owns the matching run_id"
     );

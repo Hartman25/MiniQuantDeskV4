@@ -36,7 +36,7 @@
 //! constructs a fresh `AppState` (no local execution-loop ownership at all —
 //! `LocalRuntimeOwnership::Idle`) against a durably `HALTED` run and proves
 //! `clear-halted-run` still succeeds — the new local-quiescence gate in
-//! `routes/control_plane.rs` (`st.locally_owned_run_id().await ==
+//! `routes/control_plane.rs` (`st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await ==
 //! Some(run_id)`) is trivially `false` for an `Idle` slot, so a genuinely
 //! crashed prior process (or, as here, a process that never held local
 //! ownership of this run at all) is never blocked from recovery.
@@ -507,7 +507,7 @@ async fn h06_after_clear_halted_lifecycle_gate_is_unblocked() {
     // so no broker client is constructed and no network path is entered.
     {
         let err = st
-            .start_execution_runtime()
+            .start_execution_runtime(mqk_daemon::state::ExecutionDomain::EquityNyse, )
             .await
             .expect_err("H06: start must fail before clear");
         assert_eq!(
@@ -809,7 +809,7 @@ async fn h08_deadman_halt_cannot_be_cleared_under_live_local_loop() {
         st.set_deadman_local_quiescence_pause_entered_for_test(Arc::clone(&entered));
         let st = Arc::new(st);
 
-        st.install_real_execution_loop_for_test(run_id).await;
+        st.install_real_execution_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
         // Deterministic barrier wait -- never a timing sleep: the loop
         // notifies `entered` right before it awaits `pause`, i.e. strictly
@@ -824,7 +824,7 @@ async fn h08_deadman_halt_cannot_be_cleared_under_live_local_loop() {
             halted_run.status
         );
         assert_eq!(
-            st.locally_owned_run_id().await,
+            st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
             Some(run_id),
             "H08 precondition: the real execution-loop task must still be this AppState's \
              local owner while paused post-halt-commit"
@@ -872,7 +872,7 @@ async fn h08_deadman_halt_cannot_be_cleared_under_live_local_loop() {
         // correctness synchronization), not a substitute for a barrier.
         let mut exited = false;
         for _ in 0..500 {
-            if st.locally_owned_run_id().await.is_none() {
+            if st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none() {
                 exited = true;
                 break;
             }

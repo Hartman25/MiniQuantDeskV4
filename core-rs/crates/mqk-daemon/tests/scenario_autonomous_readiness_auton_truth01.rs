@@ -645,7 +645,7 @@ async fn ar13_no_active_run_runtime_start_allowed() {
     let st = make_paper_alpaca();
     // Default: no execution loop spawned; locally_owned_run_id() returns None.
     assert!(
-        st.locally_owned_run_id().await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
         "precondition: fresh test AppState has no active run"
     );
 
@@ -683,11 +683,11 @@ async fn ar14_active_run_blocks_readiness_and_start() {
     let run_id = Uuid::new_v4(); // test-seam only; never enters domain event path
 
     // Inject a never-finishing fake execution loop.
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
 
     // Precondition: locally_owned_run_id must now be Some.
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id),
         "inject_running_loop_for_test must populate locally_owned_run_id"
     );

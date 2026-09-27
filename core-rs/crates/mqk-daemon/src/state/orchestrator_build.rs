@@ -164,6 +164,7 @@ impl AppState {
 
     pub(super) async fn build_execution_orchestrator(
         &self,
+        domain: super::ExecutionDomain,
         db: PgPool,
         run_id: Uuid,
     ) -> Result<DaemonOrchestrator, RuntimeLifecycleError> {
@@ -445,7 +446,7 @@ impl AppState {
             ),
             ReconcileTruthGate {
                 reconcile_status: Arc::clone(&self.reconcile_status),
-                reconcile_task_owner: Arc::clone(&self.reconcile_task_owner),
+                reconcile_task_owner: Arc::clone(self.reconcile_task_owner.get(domain)),
             },
         );
 

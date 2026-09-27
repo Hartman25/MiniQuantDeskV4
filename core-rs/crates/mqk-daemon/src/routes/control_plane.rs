@@ -78,7 +78,7 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> Response {
         }
     }
 
-    let status = match st.current_status_snapshot().await {
+    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
@@ -152,7 +152,7 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
         }
     }
 
-    let status = match st.current_status_snapshot().await {
+    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
@@ -278,7 +278,7 @@ pub(crate) async fn ops_action(
             });
             // LO-03G: Write durable operator audit event for arm action.
             // Non-fatal: audit write failure does not block the arm.
-            let arm_run_id = st.locally_owned_run_id().await;
+            let arm_run_id = st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await;
             let arm_audit_uuid =
                 write_operator_audit_event(&st, arm_run_id, "control.arm", "ARMED")
                     .await
@@ -357,7 +357,7 @@ pub(crate) async fn ops_action(
             });
             // LO-03G: Write durable operator audit event for disarm action.
             // Non-fatal: audit write failure does not block the disarm.
-            let disarm_run_id = st.locally_owned_run_id().await;
+            let disarm_run_id = st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await;
             let disarm_audit_uuid =
                 write_operator_audit_event(&st, disarm_run_id, "control.disarm", "DISARMED")
                     .await
@@ -410,7 +410,7 @@ pub(crate) async fn ops_action(
             (StatusCode::OK, Json(response)).into_response()
         }
 
-        "start-system" => match st.start_execution_runtime().await {
+        "start-system" => match st.start_execution_runtime(crate::state::ExecutionDomain::EquityNyse).await {
             Ok(snapshot) => {
                 info!("ops/action start-system");
                 let audit_uuid = if let Some(run_id) = snapshot.active_run_id {
@@ -470,7 +470,7 @@ pub(crate) async fn ops_action(
             Err(err) => runtime_error_response(err),
         },
 
-        "stop-system" => match st.stop_execution_runtime().await {
+        "stop-system" => match st.stop_execution_runtime(crate::state::ExecutionDomain::EquityNyse).await {
             Ok(snapshot) => {
                 info!("ops/action stop-system");
                 let audit_uuid =
@@ -527,7 +527,7 @@ pub(crate) async fn ops_action(
             Err(err) => runtime_error_response(err),
         },
 
-        "kill-switch" => match st.halt_execution_runtime().await {
+        "kill-switch" => match st.halt_execution_runtime(crate::state::ExecutionDomain::EquityNyse).await {
             Ok(snapshot) => {
                 info!("ops/action kill-switch");
                 let audit_uuid =
@@ -936,7 +936,7 @@ pub(crate) async fn ops_action(
             // AppState for the whole clear attempt, so the local-quiescence
             // check below and the durable clear cannot straddle a race with
             // another lifecycle transition.
-            let _op = st.lifecycle_guard().await;
+            let _op = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
 
             let latest = match mqk_db::fetch_latest_run_for_engine(
                 db,
@@ -1028,7 +1028,7 @@ pub(crate) async fn ops_action(
             // instant the task's `JoinHandle` finishes, even before that
             // handle has been reaped, so this can never falsely block on a
             // task that has actually already exited.
-            if st.locally_owned_run_id().await == Some(run_id) {
+            if st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await == Some(run_id) {
                 info!(
                     run_id = %run_id,
                     "ops/action clear-halted-run refused: local execution-loop task still active"
@@ -1308,7 +1308,7 @@ pub(crate) async fn ops_action(
                     .into_response();
             };
 
-            let _op = st.lifecycle_guard().await;
+            let _op = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
 
             let active = match mqk_db::fetch_active_run_for_engine(
                 db,
@@ -1356,7 +1356,7 @@ pub(crate) async fn ops_action(
 
             let run_id = active.run_id;
 
-            if st.locally_owned_run_id().await.is_some() {
+            if st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await.is_some() {
                 info!(
                     run_id = %run_id,
                     "ops/action recover-orphaned-run refused: this daemon owns a local \
@@ -1863,7 +1863,7 @@ pub(crate) async fn ops_action(
             }
 
             // Gates 5 & 6: active run + running state.
-            let status = match st.current_status_snapshot().await {
+            let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
                 Ok(s) => s,
                 Err(err) => return runtime_error_response(err),
             };
@@ -2583,7 +2583,7 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
         (ig.disarmed, ig.halted)
     };
 
-    let state_str = match st.current_status_snapshot().await {
+    let state_str = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
         Ok(snapshot) => snapshot.state,
         Err(_) => "idle".to_string(),
     };
@@ -2638,7 +2638,7 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             .await
             .ok()
             .flatten();
-            active.is_some() && st.locally_owned_run_id().await.is_none()
+            active.is_some() && st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await.is_none()
         } else {
             false
         }

@@ -66,20 +66,20 @@ use mqk_daemon::state::{AppState, BrokerKind, DeploymentMode};
 #[tokio::test]
 async fn constructors_initialize_dynamic_selection_runtime_to_none() {
     assert!(AppState::new()
-        .dynamic_selection_runtime_snapshot()
+        .dynamic_selection_runtime_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .is_none());
     assert!(AppState::new_for_test_with_mode(DeploymentMode::Paper)
-        .dynamic_selection_runtime_snapshot()
+        .dynamic_selection_runtime_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .is_none());
     assert!(AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca)
-        .dynamic_selection_runtime_snapshot()
+        .dynamic_selection_runtime_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .is_none());
     assert!(
         AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca)
-            .dynamic_selection_runtime_snapshot()
+            .dynamic_selection_runtime_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
             .await
             .is_none()
     );

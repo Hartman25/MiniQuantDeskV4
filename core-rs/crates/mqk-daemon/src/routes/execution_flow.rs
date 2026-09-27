@@ -130,7 +130,7 @@ pub(crate) async fn execution_flow(
     let resolved_run_id: Option<Uuid> = if explicit_run_id.is_some() {
         explicit_run_id
     } else {
-        match st.current_status_snapshot().await {
+        match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
             Ok(snap) => snap.active_run_id,
             Err(_) => None,
         }

@@ -265,7 +265,7 @@ async fn seed_active_run(st: &Arc<AppState>) -> Uuid {
         .await
         .expect("heartbeat_run");
 
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     run_id
 }
 
@@ -483,7 +483,7 @@ async fn sto08_live_routing_remains_false_in_paper_mode() {
     // Verify via the status snapshot which surfaces live_routing_enabled.
     // With no active run, state is not "running", so live_routing is false.
     let status = st
-        .current_status_snapshot()
+        .current_status_snapshot(mqk_daemon::state::ExecutionDomain::EquityNyse, )
         .await
         .expect("status snapshot must succeed without DB");
     assert_ne!(

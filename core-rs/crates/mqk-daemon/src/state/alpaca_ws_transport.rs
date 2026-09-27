@@ -526,7 +526,7 @@ operator_reconcile_or_repair_required"
         };
 
         // Route through the durable ingest path if a run is active.
-        let run_id = state.active_owned_run_id().await;
+        let run_id = state.active_owned_run_id(super::ExecutionDomain::EquityNyse).await;
         if let (Some(run_id), Some(pool)) = (run_id, state.db.as_ref()) {
             match process_ws_inbound_batch(
                 pool,

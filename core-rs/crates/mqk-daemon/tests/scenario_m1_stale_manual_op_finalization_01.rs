@@ -1254,9 +1254,9 @@ async fn n13_local_execution_loop_active_is_refused() -> anyhow::Result<()> {
             + chrono::Duration::minutes(5),
     ))
     .await;
-    st.inject_running_loop_for_test(run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
     assert_eq!(
-        st.locally_owned_run_id().await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
         Some(run_id),
         "fixture precondition"
     );
