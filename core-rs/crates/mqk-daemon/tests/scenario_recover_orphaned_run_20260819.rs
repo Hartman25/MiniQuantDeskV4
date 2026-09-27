@@ -288,7 +288,7 @@ async fn r05_crash_orphaned_run_is_recovered_and_unblocks_fresh_start() {
         // start_execution_runtime) must be BLOCKED from starting a new run
         // while the orphaned run is still durably active.
         let blocked = st
-            .create_or_reuse_run_for_start(&pool)
+            .create_or_reuse_run_for_start(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
             .await
             .expect_err("R05 precondition: a fresh start must be blocked by the orphaned run");
         assert_eq!(
@@ -339,7 +339,7 @@ async fn r05_crash_orphaned_run_is_recovered_and_unblocks_fresh_start() {
         // Thursday-readiness proof: the same fresh-start check that was
         // refused above must now succeed -- a brand new run may be created.
         let fresh_run_id = st
-            .create_or_reuse_run_for_start(&pool)
+            .create_or_reuse_run_for_start(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
             .await
             .expect("R05: a fresh start must be unblocked once the orphan is recovered");
         assert_ne!(

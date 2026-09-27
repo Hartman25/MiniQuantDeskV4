@@ -225,7 +225,7 @@ async fn reachability_crashed_running_run_blocks_normal_start_before_orchestrato
             OperatorAuthMode::ExplicitDevNoToken,
         ));
 
-        let result = st.create_or_reuse_run_for_start(&pool).await;
+        let result = st.create_or_reuse_run_for_start(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE).await;
         let err = result.expect_err(
             "REACHABILITY: the normal start path must refuse a durable-RUNNING run \
              with no local owner, never silently adopting or bypassing it",

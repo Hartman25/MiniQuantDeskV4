@@ -2172,7 +2172,22 @@ impl AppState {
             }
         }
 
-        let run_id = self.create_or_reuse_run_for_start(&db).await?;
+        // B2 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01): the durable
+        // single-active-run-per-domain identity (migration 0081,
+        // `fetch_active_run_for_engine_for_domain`/`next_daemon_run_id`) is
+        // real for both domains, but this call site still hardcodes
+        // equity_nyse -- AppState's in-memory runtime-ownership slot
+        // (`self.runtime_ownership`), `lifecycle_op`, and
+        // `reconcile_task_owner` remain single, process-wide singletons.
+        // Exposing execution_domain any further up this call chain before
+        // those in-memory authorities are themselves domain-keyed would let
+        // a caller ask to start crypto_24_7 durably while local ownership
+        // silently continued to treat it as "the" one runtime slot -- a
+        // dual-authority hazard, not a fix. That in-memory migration is the
+        // next B2 patch; tracked, not silently dropped.
+        let run_id = self
+            .create_or_reuse_run_for_start(&db, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+            .await?;
 
         // BUNDLE-7-PHASE-7A fault seam: after run row creation, before
         // dynamic-selection evaluation. No AppState selection state exists
@@ -2442,14 +2457,24 @@ impl AppState {
     /// (unchanged) so the production start path and the synthetic lifecycle
     /// proof test both create a run through the exact same code — never a
     /// separate test-only reimplementation of this identity resolution.
+    /// B2: the durable single-active-run gate, now scoped to
+    /// `(engine_id, mode, execution_domain)` instead of `(engine_id, mode)`
+    /// alone (migration 0081) -- a duplicate start attempt for the SAME
+    /// domain still refuses exactly as before; a start attempt for a
+    /// DIFFERENT domain no longer observes the other domain's durable run at
+    /// all, durably proving domain isolation at this layer independent of
+    /// AppState's in-memory ownership state (see this function's one caller
+    /// for the current in-memory scope boundary).
     pub async fn create_or_reuse_run_for_start(
         self: &Arc<Self>,
         db: &PgPool,
+        execution_domain: &str,
     ) -> Result<uuid::Uuid, RuntimeLifecycleError> {
-        if let Some(active) = mqk_db::fetch_active_run_for_engine(
+        if let Some(active) = mqk_db::fetch_active_run_for_engine_for_domain(
             db,
             DAEMON_ENGINE_ID,
             self.deployment_mode().as_db_mode(),
+            execution_domain,
         )
         .await
         .map_err(|err| RuntimeLifecycleError::internal("start active-run lookup failed", err))?
@@ -2463,10 +2488,11 @@ impl AppState {
             ));
         }
 
-        let latest = mqk_db::fetch_latest_run_for_engine(
+        let latest = mqk_db::fetch_latest_run_for_engine_for_domain(
             db,
             DAEMON_ENGINE_ID,
             self.deployment_mode().as_db_mode(),
+            execution_domain,
         )
         .await
         .map_err(|err| RuntimeLifecycleError::internal("start latest-run lookup failed", err))?;
@@ -2475,8 +2501,8 @@ impl AppState {
             Some(run) => match run.status {
                 mqk_db::RunStatus::Created => Ok(run.run_id),
                 mqk_db::RunStatus::Stopped => {
-                    let run_id = self.next_daemon_run_id(db).await?;
-                    mqk_db::insert_run(
+                    let run_id = self.next_daemon_run_id(db, execution_domain).await?;
+                    mqk_db::insert_run_for_domain(
                         db,
                         &mqk_db::NewRun {
                             run_id,
@@ -2492,6 +2518,7 @@ impl AppState {
                             }),
                             host_fingerprint: self.node_id.clone(),
                         },
+                        execution_domain,
                     )
                     .await
                     .map_err(|err| RuntimeLifecycleError::internal("start insert_run failed", err))?;
@@ -2512,8 +2539,8 @@ impl AppState {
                 }
             },
             None => {
-                let run_id = self.next_daemon_run_id(db).await?;
-                mqk_db::insert_run(
+                let run_id = self.next_daemon_run_id(db, execution_domain).await?;
+                mqk_db::insert_run_for_domain(
                     db,
                     &mqk_db::NewRun {
                         run_id,
@@ -2529,6 +2556,7 @@ impl AppState {
                         }),
                         host_fingerprint: self.node_id.clone(),
                     },
+                    execution_domain,
                 )
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("start insert_run failed", err))?;
@@ -3943,7 +3971,9 @@ mod real_production_effects_matrix_tests {
         state: &Arc<AppState>,
         pool: &PgPool,
     ) -> Result<uuid::Uuid, RuntimeLifecycleError> {
-        let run_id = state.create_or_reuse_run_for_start(pool).await?;
+        let run_id = state
+            .create_or_reuse_run_for_start(pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
+            .await?;
 
         sqlx::query(
             r#"

@@ -658,10 +658,12 @@ async fn h07_after_clear_fresh_run_sees_no_stale_inbox_rows() {
 
     // Compute the actual fresh_run_id that next_daemon_run_id() would allocate.
     //
-    // Production formula (state/orchestrator_build.rs::next_daemon_run_id):
-    //   generation = COUNT(*) + 1 FROM runs WHERE engine_id='mqk-daemon' AND mode='LIVE-SHADOW'
+    // Production formula (state/orchestrator_build.rs::next_daemon_run_id),
+    // B2: generation is now counted and hashed per execution_domain; this
+    // scenario is equity-only, so equity_nyse throughout.
+    //   generation = COUNT(*) + 1 FROM runs WHERE engine_id='mqk-daemon' AND mode='LIVE-SHADOW' AND execution_domain='equity_nyse'
     //   fresh_run_id = Uuid::new_v5(NAMESPACE_DNS,
-    //       "mqk-daemon.run.v2|{node_id}|mqk-daemon|LIVE-SHADOW|{generation}")
+    //       "mqk-daemon.run.v2|{node_id}|mqk-daemon|LIVE-SHADOW|equity_nyse|{generation}")
     //
     // Queried AFTER clear so generation matches the real call's DB view.
     // node_id is derived via the same AppState constructor code path the
@@ -684,10 +686,11 @@ async fn h07_after_clear_fresh_run_sees_no_stale_inbox_rows() {
 
     let live_shadow_count: i64 = sqlx::query_scalar(
         "SELECT COALESCE(COUNT(*), 0)::bigint \
-         FROM runs WHERE engine_id = $1 AND mode = $2",
+         FROM runs WHERE engine_id = $1 AND mode = $2 AND execution_domain = $3",
     )
     .bind("mqk-daemon")
     .bind("LIVE-SHADOW")
+    .bind(mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
     .fetch_one(&pool)
     .await
     .expect("H07: count LIVE-SHADOW runs for fresh_run_id derivation");
@@ -696,8 +699,8 @@ async fn h07_after_clear_fresh_run_sees_no_stale_inbox_rows() {
     let computed_fresh_run_id = uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_DNS,
         format!(
-            "mqk-daemon.run.v2|{}|mqk-daemon|LIVE-SHADOW|{}",
-            node_id, next_generation
+            "mqk-daemon.run.v2|{}|mqk-daemon|LIVE-SHADOW|{}|{}",
+            node_id, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE, next_generation
         )
         .as_bytes(),
     );

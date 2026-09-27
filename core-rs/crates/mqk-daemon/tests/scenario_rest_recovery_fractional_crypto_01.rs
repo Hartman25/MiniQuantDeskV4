@@ -107,9 +107,9 @@ async fn halted_run(pool: &sqlx::PgPool) -> Uuid {
     let now = chrono::Utc::now();
     sqlx::query(
         r#"
-        insert into runs (run_id, engine_id, mode, started_at_utc, git_hash,
+        insert into runs (run_id, engine_id, mode, execution_domain, started_at_utc, git_hash,
                           config_hash, config_json, host_fingerprint)
-        values ($1, 'test-daemon', 'PAPER', $2, 'g', 'c', $3, 'h')
+        values ($1, 'test-daemon', 'PAPER', 'equity_nyse', $2, 'g', 'c', $3, 'h')
         "#,
     )
     .bind(run_id)

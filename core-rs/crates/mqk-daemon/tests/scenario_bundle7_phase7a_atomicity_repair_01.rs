@@ -119,7 +119,7 @@ async fn fetch_run_status(pool: &sqlx::PgPool, run_id: Uuid) -> mqk_db::RunStatu
 
 async fn fresh_run(pool: &sqlx::PgPool, st: &Arc<AppState>) -> Uuid {
     clear_any_preexisting_active_daemon_run(pool).await;
-    st.create_or_reuse_run_for_start(pool)
+    st.create_or_reuse_run_for_start(pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
         .await
         .expect("run creation must succeed")
 }

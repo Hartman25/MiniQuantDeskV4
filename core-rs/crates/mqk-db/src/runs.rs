@@ -113,6 +113,10 @@ pub struct RunRow {
     pub run_id: Uuid,
     pub engine_id: String,
     pub mode: String,
+    /// B2: `equity_nyse` | `crypto_24_7` (migration 0081). Every historical
+    /// row is deterministically `equity_nyse` -- see that migration's
+    /// backfill proof.
+    pub execution_domain: String,
     pub started_at_utc: DateTime<Utc>,
     pub git_hash: String,
     pub config_hash: String,
@@ -136,6 +140,7 @@ fn run_row_from_row(row: PgRow) -> Result<RunRow> {
         run_id: row.try_get("run_id")?,
         engine_id: row.try_get("engine_id")?,
         mode: row.try_get("mode")?,
+        execution_domain: row.try_get("execution_domain")?,
         started_at_utc: row.try_get("started_at_utc")?,
         git_hash: row.try_get("git_hash")?,
         config_hash: row.try_get("config_hash")?,
@@ -210,20 +215,46 @@ pub async fn count_runs_in_last_24h(pool: &PgPool, engine_id: &str, mode: &str) 
     Ok(n)
 }
 
-/// Insert a new run row. (Status defaults to CREATED in schema/migration)
+/// Insert a new run row bound to `equity_nyse` (Status defaults to CREATED
+/// in schema/migration). B2: a convenience wrapper over
+/// [`insert_run_for_domain`], not a DB-level default -- kept so the ~140
+/// pre-existing equity-only call sites across this workspace (production
+/// and test) that construct a plain [`NewRun`] need no change; every one of
+/// them predates any crypto runtime capability (still default-off per D2/B4)
+/// and is honestly equity-only. A caller that needs to create a run for a
+/// specific domain (in particular the one production single-active-run-per-
+/// domain gate, `AppState::create_or_reuse_run_for_start`) must call
+/// [`insert_run_for_domain`] explicitly.
 pub async fn insert_run(pool: &PgPool, run: &NewRun) -> Result<()> {
+    insert_run_for_domain(pool, run, crate::EXECUTION_DOMAIN_EQUITY_NYSE).await
+}
+
+/// Insert a new run row bound to an explicit `execution_domain`
+/// (`equity_nyse` | `crypto_24_7`). Fails closed on any other value --
+/// never silently coerced to a known domain.
+pub async fn insert_run_for_domain(
+    pool: &PgPool,
+    run: &NewRun,
+    execution_domain: &str,
+) -> Result<()> {
+    if !crate::is_known_execution_domain(execution_domain) {
+        return Err(anyhow!(
+            "insert_run_for_domain: unknown execution_domain '{execution_domain}'"
+        ));
+    }
     sqlx::query(
         r#"
         insert into runs (
-          run_id, engine_id, mode, started_at_utc, git_hash, config_hash, config_json, host_fingerprint
+          run_id, engine_id, mode, execution_domain, started_at_utc, git_hash, config_hash, config_json, host_fingerprint
         ) values (
-          $1, $2, $3, $4, $5, $6, $7, $8
+          $1, $2, $3, $4, $5, $6, $7, $8, $9
         )
         "#,
     )
     .bind(run.run_id)
     .bind(&run.engine_id)
     .bind(&run.mode)
+    .bind(execution_domain)
     .bind(run.started_at_utc)
     .bind(&run.git_hash)
     .bind(&run.config_hash)
@@ -231,7 +262,7 @@ pub async fn insert_run(pool: &PgPool, run: &NewRun) -> Result<()> {
     .bind(&run.host_fingerprint)
     .execute(pool)
     .await
-    .context("insert_run failed")?;
+    .context("insert_run_for_domain failed")?;
 
     Ok(())
 }
@@ -243,6 +274,7 @@ pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
           run_id,
           engine_id,
           mode,
+          execution_domain,
           started_at_utc,
           git_hash,
           config_hash,
@@ -297,17 +329,42 @@ pub async fn request_stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Equity-scoped convenience over [`fetch_latest_run_for_engine_for_domain`].
+///
+/// B2: every call site of this 2-arg form predates any crypto runtime
+/// capability, and this table's only production writer
+/// (`AppState::create_or_reuse_run_for_start`) now calls the `_for_domain`
+/// form directly with the real domain being started/queried, so this
+/// wrapper is never on the single-active-run-per-domain safety path. It
+/// remains a read/status convenience for equity-only surfaces. Kept
+/// separate from a silent default: a caller that needs the crypto_24_7
+/// domain must call [`fetch_latest_run_for_engine_for_domain`] explicitly.
 pub async fn fetch_latest_run_for_engine(
     pool: &PgPool,
     engine_id: &str,
     mode: &str,
 ) -> Result<Option<RunRow>> {
+    fetch_latest_run_for_engine_for_domain(pool, engine_id, mode, crate::EXECUTION_DOMAIN_EQUITY_NYSE).await
+}
+
+pub async fn fetch_latest_run_for_engine_for_domain(
+    pool: &PgPool,
+    engine_id: &str,
+    mode: &str,
+    execution_domain: &str,
+) -> Result<Option<RunRow>> {
+    if !crate::is_known_execution_domain(execution_domain) {
+        return Err(anyhow!(
+            "fetch_latest_run_for_engine_for_domain: unknown execution_domain '{execution_domain}'"
+        ));
+    }
     let row = sqlx::query(
         r#"
         select
           run_id,
           engine_id,
           mode,
+          execution_domain,
           started_at_utc,
           git_hash,
           config_hash,
@@ -323,30 +380,56 @@ pub async fn fetch_latest_run_for_engine(
         from runs
         where engine_id = $1
           and mode = $2
+          and execution_domain = $3
         order by started_at_utc desc, run_id desc
         limit 1
         "#,
     )
     .bind(engine_id)
     .bind(mode)
+    .bind(execution_domain)
     .fetch_optional(pool)
     .await
-    .context("fetch_latest_run_for_engine failed")?;
+    .context("fetch_latest_run_for_engine_for_domain failed")?;
 
     row.map(run_row_from_row).transpose()
 }
 
+/// Equity-scoped convenience over [`fetch_active_run_for_engine_for_domain`].
+/// See that function's doc comment and [`fetch_latest_run_for_engine`]'s for
+/// why this wrapper is safe to keep for existing (equity-only) call sites.
 pub async fn fetch_active_run_for_engine(
     pool: &PgPool,
     engine_id: &str,
     mode: &str,
 ) -> Result<Option<RunRow>> {
+    fetch_active_run_for_engine_for_domain(pool, engine_id, mode, crate::EXECUTION_DOMAIN_EQUITY_NYSE).await
+}
+
+/// The single-active-run-per-domain gate (B2): at most one ARMED/RUNNING run
+/// may exist for a given `(engine_id, mode, execution_domain)` triple.
+/// `create_or_reuse_run_for_start` is the one production caller that decides
+/// whether a NEW run may be created/reused from this result -- a duplicate
+/// start attempt for the SAME domain must see its own domain's active run
+/// and refuse; a start attempt for the OTHER domain must not see it at all.
+pub async fn fetch_active_run_for_engine_for_domain(
+    pool: &PgPool,
+    engine_id: &str,
+    mode: &str,
+    execution_domain: &str,
+) -> Result<Option<RunRow>> {
+    if !crate::is_known_execution_domain(execution_domain) {
+        return Err(anyhow!(
+            "fetch_active_run_for_engine_for_domain: unknown execution_domain '{execution_domain}'"
+        ));
+    }
     let row = sqlx::query(
         r#"
         select
           run_id,
           engine_id,
           mode,
+          execution_domain,
           started_at_utc,
           git_hash,
           config_hash,
@@ -362,6 +445,7 @@ pub async fn fetch_active_run_for_engine(
         from runs
         where engine_id = $1
           and mode = $2
+          and execution_domain = $3
           and status in ('ARMED', 'RUNNING')
         order by started_at_utc desc, run_id desc
         limit 1
@@ -369,9 +453,10 @@ pub async fn fetch_active_run_for_engine(
     )
     .bind(engine_id)
     .bind(mode)
+    .bind(execution_domain)
     .fetch_optional(pool)
     .await
-    .context("fetch_active_run_for_engine failed")?;
+    .context("fetch_active_run_for_engine_for_domain failed")?;
 
     row.map(run_row_from_row).transpose()
 }

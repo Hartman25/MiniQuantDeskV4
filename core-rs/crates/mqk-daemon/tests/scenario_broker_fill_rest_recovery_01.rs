@@ -163,9 +163,9 @@ async fn seed_halted_run(pool: &sqlx::PgPool, label: &str) -> uuid::Uuid {
     let now = chrono::Utc::now();
     sqlx::query(
         r#"
-        insert into runs (run_id, engine_id, mode, started_at_utc, git_hash,
+        insert into runs (run_id, engine_id, mode, execution_domain, started_at_utc, git_hash,
                           config_hash, config_json, host_fingerprint)
-        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        values ($1, $2, $3, 'equity_nyse', $4, $5, $6, $7, $8)
         on conflict (run_id) do nothing
         "#,
     )

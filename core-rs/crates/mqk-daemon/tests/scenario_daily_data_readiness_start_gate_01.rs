@@ -1477,7 +1477,7 @@ async fn sg_16_synthetic_ready_start_proves_ordering_and_shared_evaluation_id() 
     clear_any_preexisting_active_daemon_run(&pool).await;
     let st = std::sync::Arc::new(AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca));
     let run_id = st
-        .create_or_reuse_run_for_start(&pool)
+        .create_or_reuse_run_for_start(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
         .await
         .expect("SG-16: run creation must succeed");
     trace.push("run_created");
@@ -1659,7 +1659,7 @@ async fn sg_17_run_link_persist_failure_fails_closed_no_effects_invoked() {
     clear_any_preexisting_active_daemon_run(&pool).await;
     let st = std::sync::Arc::new(AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca));
     let run_id = st
-        .create_or_reuse_run_for_start(&pool)
+        .create_or_reuse_run_for_start(&pool, mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE)
         .await
         .expect("SG-17: run creation must succeed");
 

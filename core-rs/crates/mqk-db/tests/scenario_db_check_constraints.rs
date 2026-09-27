@@ -96,8 +96,8 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
 
     let err = sqlx::query(
         r#"
-        insert into runs (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint)
-        values ($1, $2, 'INVALID_MODE', 'h', 'c', '{}', 'host')
+        insert into runs (run_id, engine_id, mode, execution_domain, git_hash, config_hash, config_json, host_fingerprint)
+        values ($1, $2, 'INVALID_MODE', 'equity_nyse', 'h', 'c', '{}', 'host')
         "#,
     )
     .bind(Uuid::new_v4())

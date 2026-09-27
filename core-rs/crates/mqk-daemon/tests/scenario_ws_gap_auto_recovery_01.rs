@@ -111,9 +111,9 @@ async fn setup_run_with_order(pool: &sqlx::PgPool, run_status: &str) {
     let now = Utc::now();
 
     sqlx::query(
-        "insert into runs (run_id, engine_id, mode, started_at_utc,
+        "insert into runs (run_id, engine_id, mode, execution_domain, started_at_utc,
                             git_hash, config_hash, config_json, host_fingerprint)
-         values ($1, $2, 'PAPER', $3, 'test-hash',
+         values ($1, $2, 'PAPER', 'equity_nyse', $3, 'test-hash',
                  'test-cfg-hash', '{\"src\":\"brk-gap-auto-trigger-01\"}'::jsonb, 'test-host')
          on conflict (run_id) do nothing",
     )

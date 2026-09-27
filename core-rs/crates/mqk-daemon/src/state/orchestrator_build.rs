@@ -117,9 +117,20 @@ impl RuntimeAccountAuthority for DaemonAccountAuthority {
 }
 
 impl AppState {
+    /// B2: `generation` (and therefore the derived run_id) is counted and
+    /// hashed per `execution_domain`. Before this parameter existed, the
+    /// COUNT query and the v5 hash input were scoped only to
+    /// `(engine_id, mode)` -- once a second domain's runs are inserted into
+    /// the SAME `runs` table (B2's whole point), two domains starting their
+    /// Nth run at the same generation count would hash to the IDENTICAL
+    /// run_id (a genuine cross-domain identity collision, not merely a
+    /// display concern). Each domain now counts its own generation
+    /// sequence and the domain string is part of the hash input, so
+    /// equity_nyse's and crypto_24_7's run_id sequences can never collide.
     pub(super) async fn next_daemon_run_id(
         &self,
         db: &PgPool,
+        execution_domain: &str,
     ) -> Result<Uuid, RuntimeLifecycleError> {
         let generation: i64 = sqlx::query_scalar(
             r#"
@@ -127,10 +138,12 @@ impl AppState {
               FROM runs
              WHERE engine_id = $1
                AND mode = $2
+               AND execution_domain = $3
             "#,
         )
         .bind(DAEMON_ENGINE_ID)
         .bind(self.deployment_mode().as_db_mode())
+        .bind(execution_domain)
         .fetch_one(db)
         .await
         .map_err(|err| RuntimeLifecycleError::internal("next_daemon_run_id failed", err))?;
@@ -138,10 +151,11 @@ impl AppState {
         Ok(Uuid::new_v5(
             &Uuid::NAMESPACE_DNS,
             format!(
-                "mqk-daemon.run.v2|{}|{}|{}|{}",
+                "mqk-daemon.run.v2|{}|{}|{}|{}|{}",
                 self.node_id,
                 DAEMON_ENGINE_ID,
                 self.deployment_mode().as_db_mode(),
+                execution_domain,
                 generation
             )
             .as_bytes(),
