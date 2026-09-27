@@ -49,18 +49,25 @@ use sqlx::Row;
 
 use crate::api_types::{
     PaperJournalAdmissionRow, PaperJournalAdmissionsLane, PaperJournalClosedTradeRow,
-    PaperJournalClosedTradesLane, PaperJournalFillRow, PaperJournalFillsLane, PaperJournalResponse,
+    PaperJournalClosedTradeRowV2, PaperJournalClosedTradesLane, PaperJournalFillRow,
+    PaperJournalFillsLane, PaperJournalResponse,
 };
 use crate::state::{resolve_authoritative_closed_trade_view, AppState, ClosureFragment};
 
 const CANONICAL: &str = "/api/v1/paper/journal";
+const CANONICAL_V2: &str = "/api/v2/paper/journal";
 
 /// Build a no-db (or no-active-run) journal response.
-fn unavailable_response(truth_state: &str) -> Response {
+fn unavailable_response<R: serde::Serialize>(
+    canonical: &str,
+    quantity_schema_version: Option<String>,
+    truth_state: &str,
+) -> Response {
     (
         StatusCode::OK,
-        Json(PaperJournalResponse {
-            canonical_route: CANONICAL.to_string(),
+        Json(PaperJournalResponse::<R> {
+            quantity_schema_version,
+            canonical_route: canonical.to_string(),
             run_id: None,
             fills_lane: PaperJournalFillsLane {
                 truth_state: truth_state.to_string(),
@@ -72,7 +79,7 @@ fn unavailable_response(truth_state: &str) -> Response {
                 backend: "unavailable".to_string(),
                 rows: vec![],
             },
-            closed_trades_lane: PaperJournalClosedTradesLane {
+            closed_trades_lane: PaperJournalClosedTradesLane::<R> {
                 truth_state: truth_state.to_string(),
                 backend: "unavailable".to_string(),
                 accounting_epoch: None,
@@ -87,6 +94,42 @@ fn unavailable_response(truth_state: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+/// Exact-quantity mapping: `qty_micros` is the fragment's raw `QtyMicros`. Pure/no IO.
+fn map_closure_fragments_v2(
+    run_id: uuid::Uuid,
+    fragments: &[ClosureFragment],
+) -> Option<Vec<PaperJournalClosedTradeRowV2>> {
+    Some(
+        fragments
+            .iter()
+            .map(|f| {
+                let (open_strategy_id, open_strategy_semantic_fingerprint) =
+                    f.open_lineage.identity_pair();
+                let (close_strategy_id, close_strategy_semantic_fingerprint) =
+                    f.close_lineage.identity_pair();
+                PaperJournalClosedTradeRowV2 {
+                    run_id,
+                    symbol: f.symbol.clone(),
+                    direction: f.direction.to_string(),
+                    qty_micros: f.qty.raw(),
+                    entry_price_micros: f.entry_price_micros,
+                    exit_price_micros: f.exit_price_micros,
+                    gross_realized_pnl_micros: f.gross_realized_pnl_micros,
+                    open_inbox_id: f.open_inbox_id,
+                    open_internal_order_id: f.open_internal_order_id.clone(),
+                    close_inbox_id: f.close_inbox_id,
+                    close_internal_order_id: f.close_internal_order_id.clone(),
+                    open_strategy_id,
+                    open_strategy_semantic_fingerprint,
+                    close_strategy_id,
+                    close_strategy_semantic_fingerprint,
+                    attribution_state: f.attribution.as_str().to_string(),
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Map internal read-model fragments into the API row shape. Pure/no IO.
@@ -132,8 +175,35 @@ fn map_closure_fragments(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
+    paper_journal_response(&st, CANONICAL, None, map_closure_fragments).await
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v2/paper/journal
+// ---------------------------------------------------------------------------
+
+/// V2: exact `qty_micros` on every closed-trade row (whole or fractional).
+pub(crate) async fn paper_journal_v2(State(st): State<Arc<AppState>>) -> Response {
+    paper_journal_response(
+        &st,
+        CANONICAL_V2,
+        Some(crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string()),
+        map_closure_fragments_v2,
+    )
+    .await
+}
+
+/// Shared journal path: every lane except the closed-trade row shape is
+/// identical for V1 and V2. `map_fragments` returning `None` (a V1 row that
+/// cannot represent a fractional quantity) fails the whole response closed.
+async fn paper_journal_response<R: serde::Serialize>(
+    st: &Arc<AppState>,
+    canonical: &str,
+    quantity_schema_version: Option<String>,
+    map_fragments: fn(uuid::Uuid, &[ClosureFragment]) -> Option<Vec<R>>,
+) -> Response {
     let Some(db) = st.db.as_ref() else {
-        return unavailable_response("no_db");
+        return unavailable_response::<R>(canonical, quantity_schema_version, "no_db");
     };
 
     let active_run_id = match st.current_status_snapshot().await {
@@ -142,7 +212,7 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
     };
 
     let Some(run_id) = active_run_id else {
-        return unavailable_response("no_active_run");
+        return unavailable_response::<R>(canonical, quantity_schema_version, "no_active_run");
     };
 
     // --- Fills lane: from fill_quality_telemetry ---
@@ -297,7 +367,7 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
                         .get("side")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())?;
-                    let qty = payload.get("qty").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let qty = payload.get("qty").and_then(|v| v.as_i64())?;
 
                     Some(PaperJournalAdmissionRow {
                         event_id: event_id.to_string(),
@@ -347,16 +417,18 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
     let closed_trades_canonical_watermark = view.canonical_last_applied_inbox_id;
     let closed_trades_accounting_watermark = view.accounting_last_applied_inbox_id;
     let closed_trades_watermark_state = view.accounting_watermark_state;
-    let Some(api_closed_trades) = map_closure_fragments(run_id, &view.fragments) else {
-        return super::execution_order_analysis::v1_fractional_unavailable(
+    let Some(api_closed_trades) = map_fragments(run_id, &view.fragments) else {
+        return super::execution_order_analysis::v1_fractional_refusal(
+            CANONICAL_V2,
             "the paper-journal closed-trade lane",
         );
     };
 
     (
         StatusCode::OK,
-        Json(PaperJournalResponse {
-            canonical_route: CANONICAL.to_string(),
+        Json(PaperJournalResponse::<R> {
+            quantity_schema_version,
+            canonical_route: canonical.to_string(),
             run_id: Some(run_id.to_string()),
             fills_lane: PaperJournalFillsLane {
                 truth_state: fills_truth_state.to_string(),
@@ -368,7 +440,7 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
                 backend: admissions_backend.to_string(),
                 rows: api_admissions,
             },
-            closed_trades_lane: PaperJournalClosedTradesLane {
+            closed_trades_lane: PaperJournalClosedTradesLane::<R> {
                 truth_state: closed_trades_truth_state.to_string(),
                 backend: CLOSED_TRADES_BACKEND.to_string(),
                 accounting_epoch: closed_trades_epoch,
@@ -387,7 +459,7 @@ pub(crate) async fn paper_journal(State(st): State<Arc<AppState>>) -> Response {
 
 #[cfg(test)]
 mod closure_fragment_qty_tests {
-    use super::map_closure_fragments;
+    use super::{map_closure_fragments, map_closure_fragments_v2};
     use crate::state::closed_trade_attribution::{
         ClosureAttribution, ClosureFragment, ResolvedLineage,
     };
@@ -423,5 +495,19 @@ mod closure_fragment_qty_tests {
         assert_eq!(rows.iter().map(|r| r.qty).collect::<Vec<_>>(), vec![10, 3]);
 
         assert!(map_closure_fragments(run_id, &[fragment("10"), fragment("0.5")]).is_none());
+    }
+
+    #[test]
+    fn v2_carries_every_quantity_exactly_including_fractional_and_micro_dust() {
+        let run_id = uuid::Uuid::nil();
+        let rows = map_closure_fragments_v2(
+            run_id,
+            &[fragment("10"), fragment("0.5"), fragment("0.000001")],
+        )
+        .expect("V2 has no whole-unit precondition");
+        assert_eq!(
+            rows.iter().map(|r| r.qty_micros).collect::<Vec<_>>(),
+            vec![10_000_000, 500_000, 1]
+        );
     }
 }

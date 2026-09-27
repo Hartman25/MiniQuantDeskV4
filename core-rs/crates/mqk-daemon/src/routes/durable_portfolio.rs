@@ -623,7 +623,7 @@ pub(crate) async fn portfolio_durable_positions(
     State(st): State<Arc<AppState>>,
     Query(params): Query<RunIdParam>,
 ) -> axum::response::Response {
-    durable_positions_response(&st, params, |positions| {
+    durable_positions_response(&st, params, None, |positions| {
         positions
             .iter()
             .map(|p| {
@@ -651,18 +651,23 @@ pub(crate) async fn portfolio_durable_positions_v2(
     State(st): State<Arc<AppState>>,
     Query(params): Query<RunIdParam>,
 ) -> axum::response::Response {
-    durable_positions_response(&st, params, |positions| {
-        Ok(positions
-            .iter()
-            .map(|p| PortfolioDurablePositionRowV2 {
-                symbol: p.symbol.clone(),
-                qty_signed_micros: p.qty_signed.raw(),
-                avg_entry_price: p.avg_entry_price_micros as f64
-                    / mqk_portfolio::MICROS_SCALE as f64,
-                provenance: p.provenance.clone(),
-            })
-            .collect())
-    })
+    durable_positions_response(
+        &st,
+        params,
+        Some(crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string()),
+        |positions| {
+            Ok(positions
+                .iter()
+                .map(|p| PortfolioDurablePositionRowV2 {
+                    symbol: p.symbol.clone(),
+                    qty_signed_micros: p.qty_signed.raw(),
+                    avg_entry_price: p.avg_entry_price_micros as f64
+                        / mqk_portfolio::MICROS_SCALE as f64,
+                    provenance: p.provenance.clone(),
+                })
+                .collect())
+        },
+    )
     .await
 }
 
@@ -672,6 +677,7 @@ pub(crate) async fn portfolio_durable_positions_v2(
 async fn durable_positions_response<R: serde::Serialize>(
     st: &Arc<AppState>,
     params: RunIdParam,
+    quantity_schema_version: Option<String>,
     map_rows: impl Fn(
         &[mqk_db::PaperPortfolioSnapshotPosition],
     ) -> Result<Vec<R>, axum::response::Response>,
@@ -691,6 +697,7 @@ async fn durable_positions_response<R: serde::Serialize>(
         return (
             StatusCode::OK,
             Json(PortfolioDurablePositionsResponse::<R> {
+                quantity_schema_version: quantity_schema_version.clone(),
                 truth_state: "db_unavailable".to_string(),
                 snapshot_id: None,
                 captured_at_utc: None,
@@ -711,6 +718,7 @@ async fn durable_positions_response<R: serde::Serialize>(
             return (
                 StatusCode::OK,
                 Json(PortfolioDurablePositionsResponse::<R> {
+                    quantity_schema_version: quantity_schema_version.clone(),
                     truth_state: "query_failed".to_string(),
                     snapshot_id: None,
                     captured_at_utc: None,
@@ -724,6 +732,7 @@ async fn durable_positions_response<R: serde::Serialize>(
             return (
                 StatusCode::OK,
                 Json(PortfolioDurablePositionsResponse::<R> {
+                    quantity_schema_version: quantity_schema_version.clone(),
                     truth_state: "not_found".to_string(),
                     snapshot_id: None,
                     captured_at_utc: None,
@@ -740,6 +749,7 @@ async fn durable_positions_response<R: serde::Serialize>(
         return (
             StatusCode::OK,
             Json(PortfolioDurablePositionsResponse::<R> {
+                quantity_schema_version: quantity_schema_version.clone(),
                 truth_state: "unsupported_source".to_string(),
                 snapshot_id: None,
                 captured_at_utc: None,
@@ -764,6 +774,7 @@ async fn durable_positions_response<R: serde::Serialize>(
             return (
                 StatusCode::OK,
                 Json(PortfolioDurablePositionsResponse::<R> {
+                    quantity_schema_version: quantity_schema_version.clone(),
                     truth_state: "query_failed".to_string(),
                     snapshot_id: None,
                     captured_at_utc: None,
@@ -779,6 +790,7 @@ async fn durable_positions_response<R: serde::Serialize>(
         return (
             StatusCode::OK,
             Json(PortfolioDurablePositionsResponse::<R> {
+                quantity_schema_version: quantity_schema_version.clone(),
                 truth_state: "snapshot_unavailable".to_string(),
                 snapshot_id: None,
                 captured_at_utc: None,
@@ -797,6 +809,7 @@ async fn durable_positions_response<R: serde::Serialize>(
         return (
             StatusCode::OK,
             Json(PortfolioDurablePositionsResponse::<R> {
+                quantity_schema_version: quantity_schema_version.clone(),
                 truth_state: PortfolioProvenanceState::InvalidSnapshot
                     .as_str()
                     .to_string(),
@@ -824,6 +837,7 @@ async fn durable_positions_response<R: serde::Serialize>(
     (
         StatusCode::OK,
         Json(PortfolioDurablePositionsResponse::<R> {
+            quantity_schema_version: quantity_schema_version.clone(),
             truth_state: truth_state.to_string(),
             snapshot_id: Some(snapshot.snapshot.snapshot_id.to_string()),
             captured_at_utc: Some(snapshot.snapshot.captured_at_utc.to_rfc3339()),

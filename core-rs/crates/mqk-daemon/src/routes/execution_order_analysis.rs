@@ -67,24 +67,6 @@ pub(crate) fn v1_fractional_refusal(v2_route: &str, what: &str) -> axum::respons
         .into_response()
 }
 
-/// Same refusal as [`v1_fractional_refusal`] for a V1 surface that has no
-/// exact V2 representation yet: fail closed (never truncate/round/omit/panic)
-/// and say so. `what` names the surface.
-pub(crate) fn v1_fractional_unavailable(what: &str) -> axum::response::Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({
-            "error": "quantity_not_representable_in_v1",
-            "detail": format!(
-                "{what} contains a fractional or non-whole-unit quantity that the V1 whole-unit \
-                 contract cannot represent, and this surface has no exact V2 representation yet; \
-                 no value was truncated, rounded or omitted"
-            ),
-        })),
-    )
-        .into_response()
-}
-
 async fn load_execution_outbox(
     st: &AppState,
     canonical: &str,

@@ -826,6 +826,7 @@ async fn durable_positions_fractional_position_v1_409_v2_exact() {
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
     assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["quantity_schema_version"], "qty_micros_v1");
     let rows: std::collections::BTreeMap<String, i64> = json["positions"]
         .as_array()
         .expect("positions array")

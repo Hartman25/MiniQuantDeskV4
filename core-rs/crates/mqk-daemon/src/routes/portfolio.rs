@@ -18,9 +18,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use crate::api_types::{
     PortfolioEconomicsStatusExposureRow, PortfolioEconomicsStatusPositionRow,
     PortfolioEconomicsStatusResponse, PortfolioFillRow, PortfolioFillsResponse,
-    PortfolioLiveWeightRow, PortfolioLiveWeightsResponse, PortfolioOpenOrderRow,
-    PortfolioOpenOrdersResponse, PortfolioPositionRow, PortfolioPositionsResponse,
-    PortfolioSummaryResponse, RiskDenialRow, RiskDenialsResponse, RiskSummaryResponse,
+    PortfolioLiveWeightRow, PortfolioLiveWeightRowV2, PortfolioLiveWeightsResponse,
+    PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
+    PortfolioPositionsResponse, PortfolioSummaryResponse, RiskDenialRow, RiskDenialsResponse,
+    RiskSummaryResponse,
 };
 use crate::state::{
     bridge_instrument_registry_v2_to_economics, AppState, InstrumentEconomicsBridgeResult,
@@ -894,6 +895,23 @@ fn live_weight_row_from_pure(
     })
 }
 
+/// Exact-quantity row: the same valuation, quantity as raw `QtyMicros`.
+fn live_weight_row_v2_from_pure(
+    row: mqk_portfolio::PositionWeightRow,
+) -> Option<PortfolioLiveWeightRowV2> {
+    Some(PortfolioLiveWeightRowV2 {
+        symbol: row.symbol,
+        signed_qty_micros: row.signed_qty.raw(),
+        mark_price_micros: row.mark_price_micros,
+        mark_ts_utc: row.mark_ts_utc,
+        mark_source: row.mark_source,
+        market_value_micros: row.market_value_micros.map(clamp_i128_to_i64),
+        absolute_notional_micros: row.absolute_notional_micros.map(clamp_i128_to_i64),
+        weight_bps: row.weight_bps,
+        missing_mark: row.missing_mark,
+    })
+}
+
 /// Truthful, read-only live position valuation seam.
 ///
 /// Reads positions/cash from the in-memory execution snapshot (the same
@@ -910,6 +928,35 @@ pub(crate) async fn portfolio_live_weights(
     Query(params): Query<LiveWeightsParams>,
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    live_weights_response(&st, params, None, live_weight_row_from_pure).await
+}
+
+/// Canonical exact-quantity route for live weights (raw `QtyMicros`).
+pub(crate) const LIVE_WEIGHTS_V2_ROUTE: &str = "/api/v2/portfolio/live-weights";
+
+/// V2: exact `signed_qty_micros` for every position (whole or fractional).
+pub(crate) async fn portfolio_live_weights_v2(
+    Query(params): Query<LiveWeightsParams>,
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    live_weights_response(
+        &st,
+        params,
+        Some(crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string()),
+        live_weight_row_v2_from_pure,
+    )
+    .await
+}
+
+/// Shared valuation path: everything except the row shape is identical for V1
+/// and V2. `map_row` returning `None` (a V1 row that cannot represent a
+/// fractional quantity) fails the whole response closed.
+async fn live_weights_response<R: serde::Serialize>(
+    st: &Arc<AppState>,
+    params: LiveWeightsParams,
+    quantity_schema_version: Option<String>,
+    map_row: impl Fn(mqk_portfolio::PositionWeightRow) -> Option<R>,
+) -> axum::response::Response {
     let timeframe = params
         .timeframe
         .filter(|s| !s.trim().is_empty())
@@ -919,7 +966,8 @@ pub(crate) async fn portfolio_live_weights(
     let Some(snapshot) = snap else {
         return (
             StatusCode::OK,
-            Json(PortfolioLiveWeightsResponse {
+            Json(PortfolioLiveWeightsResponse::<R> {
+                quantity_schema_version,
                 truth_state: "no_snapshot".to_string(),
                 timeframe,
                 cash_micros: 0,
@@ -994,17 +1042,19 @@ pub(crate) async fn portfolio_live_weights(
     let Some(positions) = result
         .positions
         .into_iter()
-        .map(live_weight_row_from_pure)
+        .map(map_row)
         .collect::<Option<Vec<_>>>()
     else {
-        return super::execution_order_analysis::v1_fractional_unavailable(
+        return super::execution_order_analysis::v1_fractional_refusal(
+            LIVE_WEIGHTS_V2_ROUTE,
             "the live-weights position valuation",
         );
     };
 
     (
         StatusCode::OK,
-        Json(PortfolioLiveWeightsResponse {
+        Json(PortfolioLiveWeightsResponse::<R> {
+            quantity_schema_version,
             truth_state,
             timeframe,
             cash_micros: result.cash_micros,
@@ -1927,7 +1977,7 @@ mod broker_position_pnl_qty_tests {
 
 #[cfg(test)]
 mod live_weight_row_qty_tests {
-    use super::live_weight_row_from_pure;
+    use super::{live_weight_row_from_pure, live_weight_row_v2_from_pure};
 
     fn row(qty: &str) -> mqk_portfolio::PositionWeightRow {
         mqk_portfolio::PositionWeightRow {
@@ -1948,5 +1998,17 @@ mod live_weight_row_qty_tests {
         assert_eq!(live_weight_row_from_pure(row("10")).unwrap().signed_qty, 10);
         assert_eq!(live_weight_row_from_pure(row("-3")).unwrap().signed_qty, -3);
         assert!(live_weight_row_from_pure(row("0.5")).is_none());
+    }
+
+    #[test]
+    fn v2_carries_the_exact_signed_quantity_for_whole_fractional_and_short_rows() {
+        for (qty, micros) in [
+            ("10", 10_000_000),
+            ("0.5", 500_000),
+            ("-1.500001", -1_500_001),
+        ] {
+            let v2 = live_weight_row_v2_from_pure(row(qty)).expect("V2 never refuses");
+            assert_eq!(v2.signed_qty_micros, micros, "{qty}");
+        }
     }
 }

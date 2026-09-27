@@ -52,8 +52,8 @@ use uuid::Uuid;
 use super::durable_portfolio::{parse_explicit_run_id, resolve_run, RunIdParam, RunResolution};
 use crate::api_types::{
     StrategyDecayMonitor, StrategyDecayWindowMetrics, StrategyPerformanceCoverageBucket,
-    StrategyPerformanceResponse, StrategyPerformanceRow, StrategyRegimeContext,
-    StrategyRiskVisibility,
+    StrategyPerformanceResponse, StrategyPerformanceRow, StrategyPerformanceRowV2,
+    StrategyRegimeContext, StrategyRiskVisibility,
 };
 use crate::dynamic_selection_dispatch_authority::timeframe_secs_to_db_label;
 use crate::state::{
@@ -61,6 +61,7 @@ use crate::state::{
 };
 
 const CANONICAL: &str = "/api/v1/strategy/performance";
+const CANONICAL_V2: &str = "/api/v2/strategy/performance";
 
 /// Every P&L field in this response is gross trading P&L -- fees are never
 /// netted in. See `FEE_ALLOCATION_STATE`.
@@ -86,7 +87,25 @@ const REGIME_AUTHORITY: &str = "research_only_observational";
 /// (8) without being unbounded.
 const REGIME_BAR_WINDOW: i64 = 20;
 
-fn unavailable_response(
+/// An exact attributed-quantity sum exceeded `i64` micros: fail closed (never
+/// saturate) so no understated total is served.
+fn quantity_overflow_response(canonical: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "quantity_total_overflow",
+            "detail": format!(
+                "an attributed closed-quantity total on {canonical} exceeds the \
+                 representable range; no saturated or truncated value was served"
+            ),
+        })),
+    )
+        .into_response()
+}
+
+fn unavailable_response<R: serde::Serialize>(
+    canonical: &str,
+    quantity_schema_version: Option<String>,
     status: StatusCode,
     truth_state: &str,
     run_id: Option<String>,
@@ -94,8 +113,9 @@ fn unavailable_response(
 ) -> Response {
     (
         status,
-        Json(StrategyPerformanceResponse {
-            canonical_route: CANONICAL.to_string(),
+        Json(StrategyPerformanceResponse::<R> {
+            quantity_schema_version,
+            canonical_route: canonical.to_string(),
             truth_state: truth_state.to_string(),
             run_id,
             accounting_provenance_state,
@@ -137,7 +157,8 @@ fn attributed_fragment_identity(f: &ClosureFragment) -> Option<(String, String)>
 /// and the same exact semantic strategy identity, collapsed into one event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AttributedCloseEvent {
-    qty: i64,
+    /// Exact sum of the collapsed fragments' raw `QtyMicros`.
+    qty_micros: i64,
     gross_pnl_micros: i64,
     /// Raw fragment count collapsed into this one event (P3-08: two FIFO
     /// fragments closed by one economic close order -> `fragment_count = 2`,
@@ -158,9 +179,8 @@ struct AttributedCloseEvent {
 /// -> `(qty_sum, gross_pnl_sum, fragment_count)`.
 type EventAccumulatorMap = BTreeMap<(String, String, i64, String), (i64, i64, i64)>;
 
-/// `None` when an attributed fragment carries a fractional quantity: the
-/// whole-unit performance aggregation cannot represent it, so the caller must
-/// fail closed rather than truncate, drop or panic.
+/// `None` only when an exact quantity sum overflows `i64` micros: the caller
+/// must fail closed rather than saturate.
 fn build_attributed_close_events(
     fragments: &[ClosureFragment],
 ) -> Option<BTreeMap<(String, String), Vec<AttributedCloseEvent>>> {
@@ -180,9 +200,8 @@ fn build_attributed_close_events(
             f.close_inbox_id,
             f.close_internal_order_id.clone(),
         );
-        let whole_qty = f.qty.to_whole_units_checked()?;
         let entry = event_map.entry(key).or_insert((0, 0, 0));
-        entry.0 = entry.0.saturating_add(whole_qty);
+        entry.0 = entry.0.checked_add(f.qty.raw())?;
         entry.1 = entry.1.saturating_add(f.gross_realized_pnl_micros);
         entry.2 = entry.2.saturating_add(1);
     }
@@ -197,7 +216,7 @@ fn build_attributed_close_events(
             .entry((strategy_id, fingerprint))
             .or_default()
             .push(AttributedCloseEvent {
-                qty,
+                qty_micros: qty,
                 gross_pnl_micros: pnl,
                 fragment_count: frag_count,
                 close_internal_order_id,
@@ -300,9 +319,11 @@ fn compute_performance_row(
     decay_monitor: StrategyDecayMonitor,
     regime_context: StrategyRegimeContext,
     risk_visibility: StrategyRiskVisibility,
-) -> StrategyPerformanceRow {
+) -> Option<StrategyPerformanceRowV2> {
     let attributed_fragment_count: i64 = events.iter().map(|e| e.fragment_count).sum();
-    let attributed_closed_qty: i64 = events.iter().map(|e| e.qty).sum();
+    let attributed_closed_qty_micros: i64 = events
+        .iter()
+        .try_fold(0i64, |acc, e| acc.checked_add(e.qty_micros))?;
     let event_pnls: Vec<i64> = events.iter().map(|e| e.gross_pnl_micros).collect();
     let agg = aggregate_event_pnls(&event_pnls);
 
@@ -325,12 +346,12 @@ fn compute_performance_row(
         Some(agg.gross_profit_micros as f64 / agg.gross_loss_abs_micros as f64)
     };
 
-    StrategyPerformanceRow {
+    Some(StrategyPerformanceRowV2 {
         strategy_id,
         strategy_semantic_fingerprint,
         attributed_fragment_count,
         attributed_close_event_count: agg.event_count,
-        attributed_closed_qty,
+        attributed_closed_qty_micros,
         gross_realized_pnl_micros: agg.gross_realized_pnl_micros,
         gross_profit_micros: agg.gross_profit_micros,
         gross_loss_abs_micros: agg.gross_loss_abs_micros,
@@ -346,7 +367,36 @@ fn compute_performance_row(
         decay_monitor,
         regime_context,
         risk_visibility,
-    }
+    })
+}
+
+/// V1 whole-unit projection of an exact row: `None` when the attributed closed
+/// quantity has no whole-unit form (the caller must fail closed, never
+/// truncate).
+fn performance_row_v1(row: StrategyPerformanceRowV2) -> Option<StrategyPerformanceRow> {
+    Some(StrategyPerformanceRow {
+        attributed_closed_qty: mqk_schemas::QtyMicros::new(row.attributed_closed_qty_micros)
+            .to_whole_units_checked()?,
+        strategy_id: row.strategy_id,
+        strategy_semantic_fingerprint: row.strategy_semantic_fingerprint,
+        attributed_fragment_count: row.attributed_fragment_count,
+        attributed_close_event_count: row.attributed_close_event_count,
+        gross_realized_pnl_micros: row.gross_realized_pnl_micros,
+        gross_profit_micros: row.gross_profit_micros,
+        gross_loss_abs_micros: row.gross_loss_abs_micros,
+        winning_close_event_count: row.winning_close_event_count,
+        losing_close_event_count: row.losing_close_event_count,
+        flat_close_event_count: row.flat_close_event_count,
+        hit_rate: row.hit_rate,
+        gross_expectancy_micros_per_close_event: row.gross_expectancy_micros_per_close_event,
+        average_win_micros: row.average_win_micros,
+        average_loss_abs_micros: row.average_loss_abs_micros,
+        profit_factor: row.profit_factor,
+        max_realized_pnl_drawdown_micros: row.max_realized_pnl_drawdown_micros,
+        decay_monitor: row.decay_monitor,
+        regime_context: row.regime_context,
+        risk_visibility: row.risk_visibility,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +884,38 @@ pub(crate) async fn strategy_performance(
     State(st): State<Arc<AppState>>,
     Query(params): Query<RunIdParam>,
 ) -> Response {
+    strategy_performance_response(&st, params, CANONICAL, None, performance_row_v1).await
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v2/strategy/performance
+// ---------------------------------------------------------------------------
+
+/// V2: exact `attributed_closed_qty_micros` (whole or fractional).
+pub(crate) async fn strategy_performance_v2(
+    State(st): State<Arc<AppState>>,
+    Query(params): Query<RunIdParam>,
+) -> Response {
+    strategy_performance_response(
+        &st,
+        params,
+        CANONICAL_V2,
+        Some(crate::api_types::QUANTITY_SCHEMA_VERSION_QTY_MICROS_V1.to_string()),
+        Some,
+    )
+    .await
+}
+
+/// Shared performance path: everything except the row shape is identical for
+/// V1 and V2. `map_row` returning `None` (a V1 row that cannot represent a
+/// fractional quantity) fails the whole response closed.
+async fn strategy_performance_response<R: serde::Serialize>(
+    st: &Arc<AppState>,
+    params: RunIdParam,
+    canonical: &str,
+    quantity_schema_version: Option<String>,
+    map_row: fn(StrategyPerformanceRowV2) -> Option<R>,
+) -> Response {
     let explicit_run_id = match parse_explicit_run_id(params.run_id.as_deref()) {
         Ok(id) => id,
         Err(detail) => {
@@ -846,21 +928,44 @@ pub(crate) async fn strategy_performance(
     };
 
     let Some(db) = st.db.as_ref() else {
-        return unavailable_response(StatusCode::OK, "db_unavailable", None, None);
+        return unavailable_response::<R>(
+            canonical,
+            quantity_schema_version,
+            StatusCode::OK,
+            "db_unavailable",
+            None,
+            None,
+        );
     };
 
     let run = match resolve_run(db, explicit_run_id).await {
         RunResolution::Found(r) => *r,
         RunResolution::NotFound => {
-            return unavailable_response(StatusCode::OK, "not_found", None, None);
+            return unavailable_response::<R>(
+                canonical,
+                quantity_schema_version,
+                StatusCode::OK,
+                "not_found",
+                None,
+                None,
+            );
         }
         RunResolution::QueryFailed => {
-            return unavailable_response(StatusCode::OK, "query_failed", None, None);
+            return unavailable_response::<R>(
+                canonical,
+                quantity_schema_version,
+                StatusCode::OK,
+                "query_failed",
+                None,
+                None,
+            );
         }
     };
 
     if run.mode != "PAPER" {
-        return unavailable_response(
+        return unavailable_response::<R>(
+            canonical,
+            quantity_schema_version,
             StatusCode::OK,
             "unsupported_source",
             Some(run.run_id.to_string()),
@@ -876,7 +981,9 @@ pub(crate) async fn strategy_performance(
     // snapshot/watermark) must never be transformed into performance rows,
     // fabricated zero, or a partial attribution_coverage.
     if view.truth_state != "active" {
-        return unavailable_response(
+        return unavailable_response::<R>(
+            canonical,
+            quantity_schema_version,
             StatusCode::OK,
             view.truth_state,
             Some(run.run_id.to_string()),
@@ -910,9 +1017,7 @@ pub(crate) async fn strategy_performance(
     let coverage_has_manual_mixed = has_coverage_bucket("manual_or_mixed");
 
     let Some(events_by_strategy) = build_attributed_close_events(&view.fragments) else {
-        return super::execution_order_analysis::v1_fractional_unavailable(
-            "the strategy-performance closed-trade aggregation",
-        );
+        return quantity_overflow_response(canonical);
     };
     let mut rows = Vec::with_capacity(events_by_strategy.len());
     for ((strategy_id, fingerprint), events) in events_by_strategy {
@@ -936,20 +1041,30 @@ pub(crate) async fn strategy_performance(
             regime_kind_is_high_volatility,
         )
         .await;
-        rows.push(compute_performance_row(
+        let Some(exact_row) = compute_performance_row(
             strategy_id,
             fingerprint,
             &events,
             decay_monitor,
             regime_context,
             risk_visibility,
-        ));
+        ) else {
+            return quantity_overflow_response(canonical);
+        };
+        let Some(row) = map_row(exact_row) else {
+            return super::execution_order_analysis::v1_fractional_refusal(
+                CANONICAL_V2,
+                "the strategy-performance closed-trade aggregation",
+            );
+        };
+        rows.push(row);
     }
 
     (
         StatusCode::OK,
-        Json(StrategyPerformanceResponse {
-            canonical_route: CANONICAL.to_string(),
+        Json(StrategyPerformanceResponse::<R> {
+            quantity_schema_version,
+            canonical_route: canonical.to_string(),
             truth_state: "active".to_string(),
             run_id: Some(run.run_id.to_string()),
             accounting_provenance_state: view.accounting_provenance_state.map(str::to_string),
@@ -1080,13 +1195,17 @@ mod tests {
 
 #[cfg(test)]
 mod attributed_close_event_qty_tests {
-    use super::build_attributed_close_events;
+    use super::{
+        build_attributed_close_events, compute_decay_monitor, compute_performance_row,
+        performance_row_v1, unavailable_regime_context,
+    };
+    use crate::api_types::{StrategyPerformanceRowV2, StrategyRiskVisibility};
     use crate::state::closed_trade_attribution::{
         ClosureAttribution, ClosureFragment, ResolvedLineage,
     };
     use mqk_schemas::QtyMicros;
 
-    fn fragment(qty: &str, attribution: ClosureAttribution) -> ClosureFragment {
+    fn fragment(qty: &str, close_order: &str, attribution: ClosureAttribution) -> ClosureFragment {
         let lineage = || ResolvedLineage::Strategy {
             strategy_id: "s".to_string(),
             strategy_semantic_fingerprint: "f".repeat(64),
@@ -1101,41 +1220,90 @@ mod attributed_close_event_qty_tests {
             open_inbox_id: 1,
             open_internal_order_id: "o1".to_string(),
             close_inbox_id: 2,
-            close_internal_order_id: "o2".to_string(),
+            close_internal_order_id: close_order.to_string(),
             open_lineage: lineage(),
             close_lineage: lineage(),
             attribution,
         }
     }
 
-    #[test]
-    fn whole_unit_attributed_fragments_aggregate() {
-        let events = build_attributed_close_events(&[
-            fragment("10", ClosureAttribution::Attributed),
-            fragment("4", ClosureAttribution::Attributed),
-        ])
-        .expect("whole-unit fragments are representable");
+    fn exact_row(fragments: &[ClosureFragment]) -> Option<StrategyPerformanceRowV2> {
+        let events = build_attributed_close_events(fragments)?;
         let series = events.values().next().expect("one strategy series");
-        assert_eq!(series.len(), 1, "fragments of one closing order collapse");
+        compute_performance_row(
+            "s".to_string(),
+            "f".repeat(64),
+            series,
+            compute_decay_monitor(series),
+            unavailable_regime_context("test"),
+            StrategyRiskVisibility {
+                risk_visibility_state: "normal".to_string(),
+                risk_flags: vec![],
+                suppression_truth_state: "not_active".to_string(),
+                active_strategy_suppression: Some(false),
+                active_suppression_id: None,
+                active_suppression_trigger_domain: None,
+                active_suppression_trigger_reason: None,
+                recommended_operator_action: "none".to_string(),
+            },
+        )
     }
 
     #[test]
-    fn a_fractional_attributed_fragment_yields_none_not_a_panic() {
+    fn whole_unit_fragments_collapse_and_v1_keeps_the_whole_unit_total() {
+        let frags = [
+            fragment("10", "o2", ClosureAttribution::Attributed),
+            fragment("4", "o2", ClosureAttribution::Attributed),
+        ];
+        let events = build_attributed_close_events(&frags).expect("no overflow");
+        assert_eq!(events.values().next().unwrap().len(), 1);
+        let row = exact_row(&frags).unwrap();
+        assert_eq!(row.attributed_closed_qty_micros, 14_000_000);
+        assert_eq!(performance_row_v1(row).unwrap().attributed_closed_qty, 14);
+    }
+
+    #[test]
+    fn a_fractional_total_is_exact_in_v2_and_refused_by_v1_not_rounded() {
+        let row = exact_row(&[
+            fragment("10", "o2", ClosureAttribution::Attributed),
+            fragment("0.000001", "o3", ClosureAttribution::Attributed),
+        ])
+        .unwrap();
+        assert_eq!(row.attributed_closed_qty_micros, 10_000_001);
         assert!(
-            build_attributed_close_events(&[fragment("0.5", ClosureAttribution::Attributed)])
-                .is_none()
+            performance_row_v1(row).is_none(),
+            "V1 must not round 10.000001 to 10"
         );
     }
 
     #[test]
-    fn a_fractional_non_attributed_fragment_is_not_aggregated_so_it_is_not_refused() {
-        // Only attributed fragments contribute to this aggregation; a
-        // non-attributed one is skipped exactly as before.
-        let events = build_attributed_close_events(&[
-            fragment("10", ClosureAttribution::Attributed),
-            fragment("0.5", ClosureAttribution::CrossStrategy),
+    fn a_non_attributed_fractional_fragment_never_contributes_to_the_total() {
+        let row = exact_row(&[
+            fragment("10", "o2", ClosureAttribution::Attributed),
+            fragment("0.5", "o3", ClosureAttribution::CrossStrategy),
         ])
-        .expect("non-attributed fragments never reach the whole-unit conversion");
-        assert_eq!(events.len(), 1);
+        .unwrap();
+        assert_eq!(row.attributed_closed_qty_micros, 10_000_000);
+        assert!(performance_row_v1(row).is_some());
+    }
+
+    #[test]
+    fn a_quantity_total_overflow_fails_closed_instead_of_saturating() {
+        let half_plus = (i64::MAX / 2 + 1).to_string();
+        let raw = |micros: &str| {
+            let mut f = fragment("1", "o2", ClosureAttribution::Attributed);
+            f.qty = QtyMicros::new(micros.parse().unwrap());
+            f
+        };
+        assert!(
+            build_attributed_close_events(&[raw(&half_plus), raw(&half_plus)]).is_none(),
+            "same close event: summed micros overflow"
+        );
+        let mut other_event = raw(&half_plus);
+        other_event.close_internal_order_id = "o3".to_string();
+        assert!(
+            exact_row(&[raw(&half_plus), other_event]).is_none(),
+            "distinct close events: row total overflows"
+        );
     }
 }

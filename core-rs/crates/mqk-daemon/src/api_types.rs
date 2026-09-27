@@ -1417,6 +1417,9 @@ pub struct PortfolioDurablePositionRowV2 {
 /// [`PortfolioDurablePositionRowV2`] (exact micros).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioDurablePositionsResponse<R = PortfolioDurablePositionRow> {
+    /// `Some("qty_micros_v1")` on the exact V2 route; absent on V1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_schema_version: Option<String>,
     /// `"active"` | `"snapshot_unavailable"` | `"snapshot_stale"` |
     /// `"db_unavailable"` | `"query_failed"`.
     pub truth_state: String,
@@ -1504,6 +1507,22 @@ pub struct PortfolioLiveWeightRow {
     pub missing_mark: bool,
 }
 
+/// Exact-quantity row for `GET /api/v2/portfolio/live-weights`:
+/// `signed_qty_micros` is raw `QtyMicros` (1.0 unit == 1_000_000), the only
+/// quantity authority. Every other field is identical to [`PortfolioLiveWeightRow`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioLiveWeightRowV2 {
+    pub symbol: String,
+    pub signed_qty_micros: i64,
+    pub mark_price_micros: Option<i64>,
+    pub mark_ts_utc: Option<i64>,
+    pub mark_source: Option<String>,
+    pub market_value_micros: Option<i64>,
+    pub absolute_notional_micros: Option<i64>,
+    pub weight_bps: Option<i64>,
+    pub missing_mark: bool,
+}
+
 /// Response for `GET /api/v1/portfolio/live-weights`.
 ///
 /// Truthful, read-only live position valuation seam
@@ -1527,15 +1546,21 @@ pub struct PortfolioLiveWeightRow {
 ///   NAV (cash + sum of market values) is `<= 0`; weights are not computed.
 /// - `"active"` — NAV and weights are fully computed. This also covers a
 ///   flat / no-position portfolio, where NAV == cash.
+///
+/// `R` is the row shape: [`PortfolioLiveWeightRow`] (V1, whole-unit) or
+/// [`PortfolioLiveWeightRowV2`] (exact micros).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioLiveWeightsResponse {
+pub struct PortfolioLiveWeightsResponse<R = PortfolioLiveWeightRow> {
+    /// `Some("qty_micros_v1")` on the exact V2 route; absent on V1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_schema_version: Option<String>,
     pub truth_state: String,
     /// Timeframe used for the md_bars mark lookup (echoed; defaults to `"1D"`).
     pub timeframe: String,
     pub cash_micros: i64,
     pub nav_micros: Option<i64>,
     pub gross_exposure_micros: Option<i64>,
-    pub positions: Vec<PortfolioLiveWeightRow>,
+    pub positions: Vec<R>,
     pub missing_mark_symbols: Vec<String>,
 }
 
@@ -4556,6 +4581,29 @@ pub struct PaperJournalClosedTradeRow {
     pub attribution_state: String,
 }
 
+/// Exact-quantity closed-trade row for `GET /api/v2/paper/journal`:
+/// `qty_micros` is raw `QtyMicros` (1.0 unit == 1_000_000); every other field
+/// is identical to [`PaperJournalClosedTradeRow`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalClosedTradeRowV2 {
+    pub run_id: Uuid,
+    pub symbol: String,
+    pub direction: String,
+    pub qty_micros: i64,
+    pub entry_price_micros: i64,
+    pub exit_price_micros: i64,
+    pub gross_realized_pnl_micros: i64,
+    pub open_inbox_id: i64,
+    pub open_internal_order_id: String,
+    pub close_inbox_id: i64,
+    pub close_internal_order_id: String,
+    pub open_strategy_id: Option<String>,
+    pub open_strategy_semantic_fingerprint: Option<String>,
+    pub close_strategy_id: Option<String>,
+    pub close_strategy_semantic_fingerprint: Option<String>,
+    pub attribution_state: String,
+}
+
 /// Closed-trade attribution lane of the paper journal.
 ///
 /// `truth_state`:
@@ -4578,8 +4626,11 @@ pub struct PaperJournalClosedTradeRow {
 /// - `"query_failed"` — a DB query or lineage lookup errored; `rows` empty.
 /// - `"no_active_run"` — DB present but no active run; `rows` empty.
 /// - `"no_db"` — no DB pool; `rows` empty.
+///
+/// `R` is the closed-trade row shape: [`PaperJournalClosedTradeRow`] (V1,
+/// whole-unit) or [`PaperJournalClosedTradeRowV2`] (exact micros).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaperJournalClosedTradesLane {
+pub struct PaperJournalClosedTradesLane<R = PaperJournalClosedTradeRow> {
     pub truth_state: String,
     pub backend: String,
     /// Durable `sys_paper_portfolio_accounting_state.accounting_epoch`
@@ -4620,7 +4671,7 @@ pub struct PaperJournalClosedTradesLane {
     /// `truth_state` must never be `"active"` when this is
     /// `"accounting_watermark_mismatch"`.
     pub accounting_watermark_state: Option<String>,
-    pub rows: Vec<PaperJournalClosedTradeRow>,
+    pub rows: Vec<R>,
 }
 
 /// Response for `GET /api/v1/paper/journal`.
@@ -4640,8 +4691,16 @@ pub struct PaperJournalClosedTradesLane {
 ///
 /// No lane fabricates history.  If a lane is unavailable its `rows`
 /// are empty and `truth_state` says so explicitly.
+///
+/// `R` is the closed-trade row shape (see [`PaperJournalClosedTradesLane`]).
+/// The exact V2 route sets `quantity_schema_version`; its fills lane stays the
+/// documented whole-unit best-effort `fill_quality_telemetry` lane and its
+/// admissions lane the whole-unit signal route's audit record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaperJournalResponse {
+pub struct PaperJournalResponse<R = PaperJournalClosedTradeRow> {
+    /// `Some("qty_micros_v1")` on the exact V2 route; absent on V1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_schema_version: Option<String>,
     /// Self-identifying canonical route.
     pub canonical_route: String,
     /// Active run ID when lanes are `"active"`.  `None` otherwise.
@@ -4652,7 +4711,7 @@ pub struct PaperJournalResponse {
     pub admissions_lane: PaperJournalAdmissionsLane,
     /// Attributed FIFO closed-trade history — see
     /// [`PaperJournalClosedTradesLane`].
-    pub closed_trades_lane: PaperJournalClosedTradesLane,
+    pub closed_trades_lane: PaperJournalClosedTradesLane<R>,
 }
 
 // ---------------------------------------------------------------------------
@@ -4872,6 +4931,33 @@ pub struct StrategyRegimeContext {
     pub valid_bar_count: Option<i64>,
 }
 
+/// Exact-quantity row for `GET /api/v2/strategy/performance`: identical to
+/// [`StrategyPerformanceRow`] except `attributed_closed_qty_micros` (raw
+/// `QtyMicros`) replaces the whole-unit `attributed_closed_qty`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyPerformanceRowV2 {
+    pub strategy_id: String,
+    pub strategy_semantic_fingerprint: String,
+    pub attributed_fragment_count: i64,
+    pub attributed_close_event_count: i64,
+    pub attributed_closed_qty_micros: i64,
+    pub gross_realized_pnl_micros: i64,
+    pub gross_profit_micros: i64,
+    pub gross_loss_abs_micros: i64,
+    pub winning_close_event_count: i64,
+    pub losing_close_event_count: i64,
+    pub flat_close_event_count: i64,
+    pub hit_rate: Option<f64>,
+    pub gross_expectancy_micros_per_close_event: Option<f64>,
+    pub average_win_micros: Option<f64>,
+    pub average_loss_abs_micros: Option<f64>,
+    pub profit_factor: Option<f64>,
+    pub max_realized_pnl_drawdown_micros: i64,
+    pub decay_monitor: StrategyDecayMonitor,
+    pub regime_context: StrategyRegimeContext,
+    pub risk_visibility: StrategyRiskVisibility,
+}
+
 /// Response for `GET /api/v1/strategy/performance`.
 ///
 /// `truth_state`:
@@ -4888,8 +4974,14 @@ pub struct StrategyRegimeContext {
 ///   durable PAPER run exists yet for this engine).
 /// - `"unsupported_source"` — the resolved run is not PAPER mode.
 /// - `"db_unavailable"` — no DB pool configured.
+///
+/// `R` is the row shape: [`StrategyPerformanceRow`] (V1, whole-unit) or
+/// [`StrategyPerformanceRowV2`] (exact micros).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyPerformanceResponse {
+pub struct StrategyPerformanceResponse<R = StrategyPerformanceRow> {
+    /// `Some("qty_micros_v1")` on the exact V2 route; absent on V1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_schema_version: Option<String>,
     pub canonical_route: String,
     pub truth_state: String,
     pub run_id: Option<String>,
@@ -4905,7 +4997,7 @@ pub struct StrategyPerformanceResponse {
     /// so no `net_pnl`/`net_expectancy`/`after_cost_expectancy` field exists
     /// anywhere in this response.
     pub fee_allocation_state: String,
-    pub rows: Vec<StrategyPerformanceRow>,
+    pub rows: Vec<R>,
     /// Deterministic coverage across every P2 attribution state — proves no
     /// economic P&L silently disappears. Always empty when `truth_state`
     /// is not `"active"`.
