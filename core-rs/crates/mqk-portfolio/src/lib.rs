@@ -24,6 +24,7 @@ pub mod constraints;
 pub mod cycle;
 pub mod dynamic_selection;
 pub mod ledger;
+pub mod option_lifecycle;
 
 pub use accounting::{apply_entry, apply_fill, recompute_from_ledger};
 pub use allocator::{
