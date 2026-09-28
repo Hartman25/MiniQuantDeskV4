@@ -3124,14 +3124,87 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
         }
     };
 
+    let snapshot_captured_at = Some(schema_snap.captured_at_utc.to_rfc3339());
+
+    // Gate 4b (D3, V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): a position
+    // symbol with unresolved options-lifecycle evidence must never have its
+    // local economic state overwritten by this snapshot -- adoption is one
+    // atomic whole-account baseline write (not per-symbol), so any single
+    // affected position refuses the whole adoption rather than silently
+    // accepting a baseline built while that position's true state is
+    // unproven. Scoped by this daemon's own configured Alpaca account
+    // identity; vacuously Clear per symbol when no lifecycle evidence
+    // exists at all (every equity/crypto symbol today).
+    if let Some(fetcher) = st.option_lifecycle_activity_fetcher.as_ref() {
+        let broker_account_id = fetcher.broker_account_id();
+        for symbol in broker_reconcile.positions.keys() {
+            match crate::state::option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate(
+                db,
+                &broker_account_id,
+                symbol,
+            )
+            .await
+            {
+                Ok(status) if status.must_fail_closed() => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(AdoptBrokerPositionBaselineResponse {
+                            truth_state: "active".to_string(),
+                            accepted: false,
+                            decision: format!(
+                                "refused: position '{symbol}' has an unresolved options-\
+                                 lifecycle event ({status:?}); adopting this broker snapshot as \
+                                 local truth would overwrite unproven local economic state"
+                            ),
+                            baseline_position_count: 0,
+                            baseline_order_count: 0,
+                            snapshot_captured_at,
+                            audit_event_id: None,
+                            gate: Some("repair.option_lifecycle_pending".to_string()),
+                            reconcile_refreshed: false,
+                            reconcile_status_after: String::new(),
+                            reconcile_mismatched_positions: 0,
+                            reconcile_mismatched_orders: 0,
+                            reconcile_mismatched_fills: 0,
+                        }),
+                    )
+                        .into_response();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(AdoptBrokerPositionBaselineResponse {
+                            truth_state: "active".to_string(),
+                            accepted: false,
+                            decision: format!(
+                                "refused: options-lifecycle pending-gate check failed for \
+                                 '{symbol}': {e}"
+                            ),
+                            baseline_position_count: 0,
+                            baseline_order_count: 0,
+                            snapshot_captured_at,
+                            audit_event_id: None,
+                            gate: Some("repair.option_lifecycle_gate_unavailable".to_string()),
+                            reconcile_refreshed: false,
+                            reconcile_status_after: String::new(),
+                            reconcile_mismatched_positions: 0,
+                            reconcile_mismatched_orders: 0,
+                            reconcile_mismatched_fills: 0,
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
     let baseline_position_count = broker_reconcile.positions.len();
     let baseline_order_count = broker_reconcile.orders.len();
     let local_baseline = mqk_reconcile::LocalSnapshot {
         orders: broker_reconcile.orders.clone(),
         positions: broker_reconcile.positions.clone(),
     };
-
-    let snapshot_captured_at = Some(schema_snap.captured_at_utc.to_rfc3339());
 
     // Serialize broker snapshot for durable storage.
     let snapshot_json = match serde_json::to_value(&schema_snap) {

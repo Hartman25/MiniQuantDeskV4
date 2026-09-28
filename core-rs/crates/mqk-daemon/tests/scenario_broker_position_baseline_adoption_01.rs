@@ -1016,6 +1016,148 @@ async fn ir01_adoption_publishes_clean_reconcile_status() {
     let _ = mqk_db::clear_broker_position_baseline(&db).await;
 }
 
+// ===========================================================================
+// D3 (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01) production wiring:
+// pending options-lifecycle evidence must refuse broker-snapshot baseline
+// adoption for the affected position, without disturbing unrelated
+// adoptions.
+// ===========================================================================
+
+/// Fake `OptionLifecycleActivityFetcher` for injection — only
+/// `broker_account_id()` is exercised by the adoption route's Gate 4b.
+struct FakeOptionLifecycleActivityFetcherForBaseline(String);
+
+impl mqk_daemon::state::OptionLifecycleActivityFetcher
+    for FakeOptionLifecycleActivityFetcherForBaseline
+{
+    fn fetch_option_lifecycle_activities_since(
+        &self,
+        _activity_type: &str,
+        _after_id: Option<&str>,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+        unreachable!("adoption's Gate 4b never fetches from Alpaca")
+    }
+
+    fn broker_account_id(&self) -> String {
+        self.0.clone()
+    }
+}
+
+/// D3-BASELINE-01: a position symbol with unresolved options-lifecycle
+/// evidence under the daemon's own configured account refuses the WHOLE
+/// baseline adoption (one atomic whole-account write) rather than silently
+/// overwriting local truth for that position.
+#[tokio::test(flavor = "multi_thread")]
+async fn d3_baseline01_pending_lifecycle_position_refuses_adoption() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("d3_baseline01: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let broker_account_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
+
+    // Seed unresolved lifecycle evidence for the exact "AAPL" symbol the
+    // snapshot below reports a position in.
+    mqk_db::option_lifecycle_activity::insert_option_lifecycle_activity_if_new(
+        &db,
+        &mqk_db::option_lifecycle_activity::NewOptionLifecycleActivity {
+            activity_id: format!("d3-baseline-opexc-{}", uuid::Uuid::new_v4()),
+            broker_account_id: broker_account_id.clone(),
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            activity_type: mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
+            option_symbol: Some("AAPL".to_string()),
+            underlying_symbol_raw: None,
+            activity_date: "2026-06-19".to_string(),
+            qty_raw: "-1".to_string(),
+            price_raw: None,
+            net_amount_raw: "0".to_string(),
+            ingested_at_utc: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("seed pending lifecycle activity failed");
+
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    *st.broker_snapshot.write().await = Some(fake_broker_snapshot_with_position());
+    st.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
+        FakeOptionLifecycleActivityFetcherForBaseline(broker_account_id),
+    ));
+    let st = Arc::new(st);
+
+    let router = paper_alpaca_router_from_state(Arc::clone(&st));
+    let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "adoption must refuse when a position has unresolved lifecycle evidence: {json}"
+    );
+    assert_eq!(json["accepted"], false, "{json}");
+    assert_eq!(json["gate"], "repair.option_lifecycle_pending", "{json}");
+
+    // No baseline row must have been written -- the whole adoption refused.
+    let row = mqk_db::load_broker_position_baseline(&db)
+        .await
+        .expect("load failed");
+    assert!(
+        row.is_none(),
+        "D3-BASELINE-01: no baseline row must be written when adoption is refused"
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+/// D3-BASELINE-02: positions with zero lifecycle evidence (every real
+/// equity/crypto symbol today) adopt normally even with the fetcher
+/// configured -- the gate is a genuine no-op when nothing is pending, not
+/// a blanket refusal whenever the fetcher exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn d3_baseline02_unaffected_positions_adopt_normally() {
+    let _baseline_guard = BROKER_BASELINE_FIXTURE_LOCK.lock().await;
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("d3_baseline02: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let broker_account_id = format!("d3-baseline-acct-{}", uuid::Uuid::new_v4());
+
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    *st.broker_snapshot.write().await = Some(fake_broker_snapshot_with_position());
+    st.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
+        FakeOptionLifecycleActivityFetcherForBaseline(broker_account_id),
+    ));
+    let st = Arc::new(st);
+
+    let router = paper_alpaca_router_from_state(Arc::clone(&st));
+    let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "adoption must succeed when no position has lifecycle evidence: {json}"
+    );
+    assert_eq!(json["accepted"], true, "{json}");
+    assert_eq!(json["baseline_position_count"], 1, "{json}");
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
 // ---------------------------------------------------------------------------
 // IR06: Adoption clears BRK-09R blocker — reconcile status in DB becomes "ok".
 //

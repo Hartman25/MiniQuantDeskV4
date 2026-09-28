@@ -1496,7 +1496,10 @@ pub async fn submit_internal_strategy_decision(
     }
 
     // Gate 6: active run must exist and be in "running" state.
-    let status = match state.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match state
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(s) => s,
         Err(err) => {
             return outcome(
@@ -1565,6 +1568,57 @@ pub async fn submit_internal_strategy_decision(
             );
         }
     };
+
+    // Gate 7b (D3, V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): an unresolved
+    // options-lifecycle event (OPEXC/OPASN/OPEXP durably ingested by D1, not
+    // yet applied by D2) for this exact symbol must block real economic
+    // action on it. Scoped by the configured Alpaca account's own identity
+    // (mirrors B6/D1's `broker_account_id` pattern) so this account's
+    // pending evidence never leaks into a check for a different account. No
+    // `option_lifecycle_activity_fetcher` configured means no Alpaca account
+    // is connected at all -- vacuously Clear, since no lifecycle evidence
+    // could exist without one (matches D1/D2's own "Alpaca options
+    // capability does not exist in this codebase yet" scope).
+    if let Some(fetcher) = state.option_lifecycle_activity_fetcher.as_ref() {
+        let broker_account_id = fetcher.broker_account_id();
+        match crate::state::option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate(
+            db,
+            &broker_account_id,
+            &decision.symbol,
+        )
+        .await
+        {
+            Ok(status) if status.must_fail_closed() => {
+                return outcome(
+                    false,
+                    "rejected",
+                    &did,
+                    &sid,
+                    Some(active_run_id),
+                    vec![format!(
+                        "internal decision refused: symbol '{}' has an unresolved options-\
+                         lifecycle event ({status:?}); no economic action may proceed until D2 \
+                         durably applies the matching effect",
+                        decision.symbol
+                    )],
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return outcome(
+                    false,
+                    "unavailable",
+                    &did,
+                    &sid,
+                    Some(active_run_id),
+                    vec![format!(
+                        "internal decision unavailable: options-lifecycle pending-gate check \
+                         failed: {err}"
+                    )],
+                );
+            }
+        }
+    }
 
     if let Err(blocker) = non_equity_explicit_size_gate(
         &instrument_context.asset_class,

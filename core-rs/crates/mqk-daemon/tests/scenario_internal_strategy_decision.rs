@@ -206,7 +206,8 @@ async fn seed_active_run(st: &Arc<state::AppState>) -> Uuid {
         .await
         .expect("heartbeat_run");
 
-    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     run_id
 }
 
@@ -890,6 +891,329 @@ async fn decision_duplicate_decision_id_returns_duplicate() {
     assert_eq!(
         count, 1,
         "duplicate submission must not create a second outbox row"
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Gate 7b (D3, V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): production
+// pending-lifecycle enforcement
+// ---------------------------------------------------------------------------
+//
+// Proves `option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate`
+// is genuinely consulted by the real order-admission path
+// (`submit_internal_strategy_decision`), not merely a tested-but-unwired
+// helper: an unresolved D1 lifecycle activity whose `option_symbol` matches
+// `decision.symbol` must refuse the decision before the durable outbox
+// enqueue; an unaffected decision (no lifecycle evidence at all, the case
+// for every real equity/crypto symbol today) must pass through unaffected;
+// resolving the blocking activity via D2 clears the block.
+
+/// Fake `OptionLifecycleActivityFetcher` -- only `broker_account_id()` is
+/// exercised by Gate 7b (the fetch method is never called from the
+/// admission path, only from the separate ingestion caller). Each test
+/// uses its OWN unique account id so leftover evidence from one test can
+/// never be visible to another test's gate evaluation.
+struct FakeOptionLifecycleActivityFetcher(String);
+
+impl mqk_daemon::state::OptionLifecycleActivityFetcher for FakeOptionLifecycleActivityFetcher {
+    fn fetch_option_lifecycle_activities_since(
+        &self,
+        _activity_type: &str,
+        _after_id: Option<&str>,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+        unreachable!("Gate 7b never fetches from Alpaca; it only evaluates durable DB evidence")
+    }
+
+    fn broker_account_id(&self) -> String {
+        self.0.clone()
+    }
+}
+
+async fn seed_pending_opexc(
+    pool: &sqlx::PgPool,
+    broker_account_id: &str,
+    option_symbol: &str,
+    engine_id: &str,
+) -> String {
+    use mqk_db::option_lifecycle_activity::{
+        insert_option_lifecycle_activity_if_new, NewOptionLifecycleActivity,
+        OptionLifecycleActivityType,
+    };
+    let activity_id = unique_id("d3-opexc");
+    insert_option_lifecycle_activity_if_new(
+        pool,
+        &NewOptionLifecycleActivity {
+            activity_id: activity_id.clone(),
+            broker_account_id: broker_account_id.to_string(),
+            engine_id: engine_id.to_string(),
+            mode: "PAPER".to_string(),
+            activity_type: OptionLifecycleActivityType::Exercise,
+            option_symbol: Some(option_symbol.to_string()),
+            underlying_symbol_raw: None,
+            activity_date: "2026-06-19".to_string(),
+            qty_raw: "-1".to_string(),
+            price_raw: None,
+            net_amount_raw: "0".to_string(),
+            ingested_at_utc: Utc::now(),
+        },
+    )
+    .await
+    .expect("seed_pending_opexc: insert failed");
+    activity_id
+}
+
+/// D3 / Gate 7b: a decision for a symbol with unresolved D1 lifecycle
+/// evidence must be refused before the outbox enqueue.
+#[tokio::test]
+#[ignore]
+async fn decision_blocked_by_unresolved_option_lifecycle_evidence() {
+    let pool = make_db_pool().await;
+
+    sqlx::query("DELETE FROM sys_arm_state WHERE sentinel_id = 1")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_arm_state");
+
+    let sid = unique_id("d3block");
+    seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
+    mqk_db::persist_arm_state(&pool, "ARMED", None)
+        .await
+        .expect("persist arm state");
+
+    let broker_account_id = unique_id("d3-acct");
+    let mut st_inner = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    );
+    st_inner.instrument_registry_path = common::canonical_equity_registry_path();
+    st_inner.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
+        FakeOptionLifecycleActivityFetcher(broker_account_id.clone()),
+    ));
+    let st = Arc::new(st_inner);
+    let run_id = seed_active_run(&st).await;
+
+    // AAPL (the decision's own symbol) carries unresolved lifecycle
+    // evidence under this exact broker account.
+    let activity_id = seed_pending_opexc(&pool, &broker_account_id, "AAPL", "mqk-daemon").await;
+
+    let dec_id = unique_id("dec");
+    let out = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
+
+    assert!(
+        !out.accepted,
+        "pending lifecycle evidence must block admission"
+    );
+    assert_eq!(
+        out.disposition, "rejected",
+        "must be rejected, not unavailable or accepted; got: {:?}, blockers={:?}",
+        out.disposition, out.blockers
+    );
+    assert!(
+        out.blockers
+            .iter()
+            .any(|b| b.contains("options-lifecycle") && b.contains(&activity_id)),
+        "blocker must name the unresolved options-lifecycle evidence and its activity_id; \
+         got: {:?}",
+        out.blockers
+    );
+
+    // No outbox row must exist for the blocked decision_id.
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM oms_outbox WHERE idempotency_key = $1")
+            .bind(&dec_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count outbox");
+    assert_eq!(
+        count, 0,
+        "the pending-lifecycle refusal must not create any outbox row"
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// D3 / Gate 7b: a decision for an unrelated symbol (no lifecycle evidence
+/// at all, matching every real equity/crypto symbol today) must proceed
+/// unaffected even with the fetcher configured -- pending state under one
+/// symbol never leaks into another.
+#[tokio::test]
+#[ignore]
+async fn decision_unaffected_symbol_proceeds_despite_fetcher_configured() {
+    let pool = make_db_pool().await;
+
+    sqlx::query("DELETE FROM sys_arm_state WHERE sentinel_id = 1")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_arm_state");
+
+    let sid = unique_id("d3clear");
+    seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
+    mqk_db::persist_arm_state(&pool, "ARMED", None)
+        .await
+        .expect("persist arm state");
+
+    let broker_account_id = unique_id("d3-acct");
+    let mut st_inner = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    );
+    st_inner.instrument_registry_path = common::canonical_equity_registry_path();
+    st_inner.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
+        FakeOptionLifecycleActivityFetcher(broker_account_id.clone()),
+    ));
+    let st = Arc::new(st_inner);
+    let run_id = seed_active_run(&st).await;
+
+    // Deliberately seed pending evidence for a DIFFERENT symbol only.
+    seed_pending_opexc(
+        &pool,
+        &broker_account_id,
+        "MSFT260619C00300000",
+        "mqk-daemon",
+    )
+    .await;
+
+    let dec_id = unique_id("dec");
+    let out = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
+
+    assert!(
+        out.accepted,
+        "AAPL decision must not be blocked by MSFT's unresolved lifecycle evidence; \
+         disposition={:?}, blockers={:?}",
+        out.disposition, out.blockers
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// D3 / Gate 7b: once D2 durably applies the blocking activity's effect,
+/// the SAME symbol's next decision is no longer refused for the
+/// options-lifecycle reason.
+#[tokio::test]
+#[ignore]
+async fn decision_unblocked_after_d2_applies_the_blocking_activity() {
+    let pool = make_db_pool().await;
+
+    sqlx::query("DELETE FROM sys_arm_state WHERE sentinel_id = 1")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_arm_state");
+
+    let sid = unique_id("d3resolve");
+    seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
+    mqk_db::persist_arm_state(&pool, "ARMED", None)
+        .await
+        .expect("persist arm state");
+
+    let broker_account_id = unique_id("d3-acct");
+    let mut st_inner = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    );
+    st_inner.instrument_registry_path = common::canonical_equity_registry_path();
+    st_inner.set_option_lifecycle_activity_fetcher_for_test(std::sync::Arc::new(
+        FakeOptionLifecycleActivityFetcher(broker_account_id.clone()),
+    ));
+    let st = Arc::new(st_inner);
+    let run_id = seed_active_run(&st).await;
+
+    let activity_id = seed_pending_opexc(&pool, &broker_account_id, "AAPL", "mqk-daemon").await;
+
+    // Precondition: blocked.
+    let blocked =
+        submit_internal_strategy_decision(&st, make_decision(&unique_id("dec"), &sid)).await;
+    assert_eq!(blocked.disposition, "rejected");
+
+    // Expiration needs no paired trade -- apply it directly (D2).
+    let applied = mqk_daemon::state::option_lifecycle_apply::apply_option_lifecycle_activity(
+        &pool,
+        &broker_account_id,
+        "mqk-daemon",
+        "PAPER",
+        &activity_id,
+        mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
+        &mqk_daemon::state::option_lifecycle_apply::OptionContractTerms {
+            strike_micros: 200_000_000,
+            multiplier: 100,
+            is_call: true,
+            underlying_symbol: "AAPL".to_string(),
+        },
+        Utc::now(),
+    )
+    .await;
+    // No paired OPTRD was seeded, so D2 itself stays Pending -- the gate
+    // must therefore ALSO remain Pending (never falsely cleared by an
+    // incomplete apply attempt). Assert that precondition explicitly,
+    // then seed the paired trade and re-apply to genuinely resolve it.
+    assert!(matches!(
+        applied,
+        Ok(mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Pending { .. })
+    ));
+
+    use mqk_db::option_lifecycle_activity::{
+        insert_option_lifecycle_activity_if_new, NewOptionLifecycleActivity,
+        OptionLifecycleActivityType,
+    };
+    insert_option_lifecycle_activity_if_new(
+        &pool,
+        &NewOptionLifecycleActivity {
+            activity_id: activity_id.clone(),
+            broker_account_id: broker_account_id.clone(),
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            activity_type: OptionLifecycleActivityType::PairedTrade,
+            option_symbol: None,
+            underlying_symbol_raw: Some("AAPL".to_string()),
+            activity_date: "2026-06-19".to_string(),
+            qty_raw: "100".to_string(),
+            price_raw: Some("200.00".to_string()),
+            net_amount_raw: "-20000".to_string(),
+            ingested_at_utc: Utc::now(),
+        },
+    )
+    .await
+    .expect("seed paired trade failed");
+
+    let applied = mqk_daemon::state::option_lifecycle_apply::apply_option_lifecycle_activity(
+        &pool,
+        &broker_account_id,
+        "mqk-daemon",
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Exercise,
+        &mqk_daemon::state::option_lifecycle_apply::OptionContractTerms {
+            strike_micros: 200_000_000,
+            multiplier: 100,
+            is_call: true,
+            underlying_symbol: "AAPL".to_string(),
+        },
+        Utc::now(),
+    )
+    .await
+    .expect("apply must not error");
+    assert!(matches!(
+        applied,
+        mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Applied(_)
+    ));
+
+    // Postcondition: a NEW decision for the same symbol is no longer
+    // refused for the options-lifecycle reason.
+    let after =
+        submit_internal_strategy_decision(&st, make_decision(&unique_id("dec"), &sid)).await;
+    assert!(
+        !after
+            .blockers
+            .iter()
+            .any(|b| b.contains("options-lifecycle")),
+        "D3: once D2 has genuinely applied the blocking activity, the gate must clear; \
+         got disposition={:?} blockers={:?}",
+        after.disposition,
+        after.blockers
     );
 
     cleanup_run(&pool, run_id).await;
