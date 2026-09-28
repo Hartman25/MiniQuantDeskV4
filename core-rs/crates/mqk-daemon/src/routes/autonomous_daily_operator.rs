@@ -689,6 +689,9 @@ pub(crate) async fn attempt_manual_intervention_recovery(
         &adapter_id,
         &assignment_identity,
         &runtime_binding_identity,
+        // This operator route is EquityNyse-only (same as
+        // resolve_autonomous_daily_session_plan_from_env above).
+        None,
     );
     if current_operation_id != operation.operation_id {
         return ManualInterventionRecoveryOutcome::IdentityMismatch;

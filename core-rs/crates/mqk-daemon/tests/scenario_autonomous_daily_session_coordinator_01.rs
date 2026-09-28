@@ -171,6 +171,7 @@ fn resolve_identity_for_env(
         adapter_id,
         &assignment_identity,
         &runtime_binding_identity,
+        None,
     );
     (
         plan,

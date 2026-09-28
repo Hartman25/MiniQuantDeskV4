@@ -600,26 +600,53 @@ pub fn derive_runtime_binding_identity(binding: &EffectiveRuntimeBinding) -> Str
 // B.5 — Operation identity
 // ---------------------------------------------------------------------------
 
-/// Deterministic UUIDv5 operation identity over all six identity components.
+/// Deterministic UUIDv5 operation identity over all six identity components,
+/// plus an optional seventh for a non-equity domain.
 /// Never `Uuid::new_v4()`, never a current timestamp, never a process-local
 /// sequence — two repeated resolutions for the same immutable identity
 /// always return the same operation id.
+///
+/// B5-CORRECTION (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION):
+/// `crypto_execution_policy_fingerprint` is `None` for every EquityNyse
+/// caller today — the seed and therefore the derived operation id are
+/// byte-for-byte identical to before this parameter existed. For a
+/// Crypto24_7 operation, the caller passes
+/// `crypto_execution_policy::crypto_execution_policy_fingerprint(..)`
+/// (already normalized: spelling/case/whitespace variants of the same
+/// gtc/ioc choice share one fingerprint) so the operation's own durable
+/// identity is genuinely sensitive to a gtc<->ioc policy change — the
+/// "relevant durable semantic/config identity" the crypto execution policy
+/// fingerprint must actually participate in, not a standalone value no
+/// identity authority consumes.
 pub fn derive_autonomous_daily_operation_id(
     plan: &AutonomousDailySessionPlan,
     deployment_mode: &str,
     adapter_id: &str,
     assignment_identity: &str,
     runtime_binding_identity: &str,
+    crypto_execution_policy_fingerprint: Option<&str>,
 ) -> Uuid {
-    let seed = format!(
-        "mqk.autonomous-daily-operation.v1|{}|{}|{}|{}|{}|{}",
-        plan.market_date,
-        deployment_mode.trim(),
-        adapter_id.trim(),
-        plan.session_plan_identity,
-        assignment_identity,
-        runtime_binding_identity,
-    );
+    let seed = match crypto_execution_policy_fingerprint {
+        None => format!(
+            "mqk.autonomous-daily-operation.v1|{}|{}|{}|{}|{}|{}",
+            plan.market_date,
+            deployment_mode.trim(),
+            adapter_id.trim(),
+            plan.session_plan_identity,
+            assignment_identity,
+            runtime_binding_identity,
+        ),
+        Some(fingerprint) => format!(
+            "mqk.autonomous-daily-operation.v1|{}|{}|{}|{}|{}|{}|crypto_tif={}",
+            plan.market_date,
+            deployment_mode.trim(),
+            adapter_id.trim(),
+            plan.session_plan_identity,
+            assignment_identity,
+            runtime_binding_identity,
+            fingerprint,
+        ),
+    };
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed.as_bytes())
 }
 

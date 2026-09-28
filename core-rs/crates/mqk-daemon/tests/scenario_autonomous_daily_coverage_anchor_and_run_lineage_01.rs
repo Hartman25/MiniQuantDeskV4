@@ -226,6 +226,7 @@ async fn create_test_operation(
         adapter_id,
         &assignment_identity,
         &runtime_binding_identity,
+        None,
     );
 
     let args = mqk_db::CreateAutonomousDailyOperationArgs {

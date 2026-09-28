@@ -467,12 +467,24 @@ pub async fn tick_autonomous_daily_coordinator(
     let assignment_identity = derive_assignment_identity(&config);
     let runtime_binding_identity =
         derive_runtime_binding_identity(&runtime_context.effective_runtime_binding);
+    // B5-CORRECTION: only a Crypto24_7 operation's identity is sensitive to
+    // the crypto execution-policy fingerprint -- None here reproduces the
+    // pre-existing EquityNyse seed byte-for-byte.
+    let crypto_execution_policy_fingerprint = match domain {
+        ExecutionDomain::EquityNyse => None,
+        ExecutionDomain::Crypto24_7 => Some(
+            super::crypto_execution_policy::crypto_execution_policy_fingerprint(
+                state.configured_crypto_time_in_force(),
+            ),
+        ),
+    };
     let operation_id = derive_autonomous_daily_operation_id(
         &plan,
         deployment_mode,
         &adapter_id,
         &assignment_identity,
         &runtime_binding_identity,
+        crypto_execution_policy_fingerprint.as_deref(),
     );
 
     let (operation, created) = match create_or_recover(

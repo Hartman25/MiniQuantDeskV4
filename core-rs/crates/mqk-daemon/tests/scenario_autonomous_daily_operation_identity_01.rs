@@ -833,8 +833,10 @@ fn sample_plan(market_date: &str) -> AutonomousDailySessionPlan {
 #[test]
 fn same_operation_identity_input_produces_same_uuid() {
     let plan = sample_plan("2025-01-06");
-    let id_a = derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x");
-    let id_b = derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x");
+    let id_a =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x", None);
+    let id_b =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x", None);
     assert_eq!(id_a, id_b);
 }
 
@@ -843,8 +845,10 @@ fn same_operation_identity_input_produces_same_uuid() {
 fn market_date_change_changes_operation_id() {
     let plan_a = sample_plan("2025-01-06");
     let plan_b = sample_plan("2025-01-07");
-    let id_a = derive_autonomous_daily_operation_id(&plan_a, "paper", "alpaca", "asgn-x", "bind-x");
-    let id_b = derive_autonomous_daily_operation_id(&plan_b, "paper", "alpaca", "asgn-x", "bind-x");
+    let id_a =
+        derive_autonomous_daily_operation_id(&plan_a, "paper", "alpaca", "asgn-x", "bind-x", None);
+    let id_b =
+        derive_autonomous_daily_operation_id(&plan_b, "paper", "alpaca", "asgn-x", "bind-x", None);
     assert_ne!(id_a, id_b);
 }
 
@@ -855,8 +859,10 @@ fn session_plan_change_changes_operation_id() {
     let mut plan_b = plan_a.clone();
     plan_a.session_plan_identity = "splan-A".to_string();
     plan_b.session_plan_identity = "splan-B".to_string();
-    let id_a = derive_autonomous_daily_operation_id(&plan_a, "paper", "alpaca", "asgn-x", "bind-x");
-    let id_b = derive_autonomous_daily_operation_id(&plan_b, "paper", "alpaca", "asgn-x", "bind-x");
+    let id_a =
+        derive_autonomous_daily_operation_id(&plan_a, "paper", "alpaca", "asgn-x", "bind-x", None);
+    let id_b =
+        derive_autonomous_daily_operation_id(&plan_b, "paper", "alpaca", "asgn-x", "bind-x", None);
     assert_ne!(id_a, id_b);
 }
 
@@ -864,8 +870,10 @@ fn session_plan_change_changes_operation_id() {
 #[test]
 fn assignment_change_changes_operation_id() {
     let plan = sample_plan("2025-01-06");
-    let id_a = derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-A", "bind-x");
-    let id_b = derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-B", "bind-x");
+    let id_a =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-A", "bind-x", None);
+    let id_b =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-B", "bind-x", None);
     assert_ne!(id_a, id_b);
 }
 
@@ -873,9 +881,122 @@ fn assignment_change_changes_operation_id() {
 #[test]
 fn runtime_binding_change_changes_operation_id() {
     let plan = sample_plan("2025-01-06");
-    let id_a = derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-A");
-    let id_b = derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-B");
+    let id_a =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-A", None);
+    let id_b =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-B", None);
     assert_ne!(id_a, id_b);
+}
+
+/// B5-CORRECTION (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION):
+/// `None` (the sole shape every EquityNyse caller passes) must reproduce the
+/// exact pre-existing operation id — proves this parameter's addition made
+/// zero behavior change for the only current production caller.
+#[test]
+fn equity_none_fingerprint_matches_pre_existing_five_component_identity() {
+    let plan = sample_plan("2025-01-06");
+    let with_none =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x", None);
+    // The pre-B5-correction seed had no seventh component at all; recompute
+    // it here directly to prove `None`'s output is unchanged, not merely
+    // "some deterministic value".
+    let expected_seed = format!(
+        "mqk.autonomous-daily-operation.v1|{}|{}|{}|{}|{}|{}",
+        plan.market_date, "paper", "alpaca", plan.session_plan_identity, "asgn-x", "bind-x",
+    );
+    let expected = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, expected_seed.as_bytes());
+    assert_eq!(
+        with_none, expected,
+        "B5: adding the crypto_execution_policy_fingerprint parameter must not change the \
+         operation id for any caller that passes None"
+    );
+}
+
+/// B5-CORRECTION: a genuine gtc<->ioc policy change is an economic behavior
+/// change and must change the derived operation id when a fingerprint is
+/// supplied (the Crypto24_7 shape) — this is the "relevant durable
+/// semantic/config identity" proof the mission's B5 truth-check required.
+#[test]
+fn crypto_tif_fingerprint_gtc_vs_ioc_changes_operation_id() {
+    let plan = sample_plan("2025-01-06");
+    let gtc_fp = mqk_daemon::state::crypto_execution_policy::crypto_execution_policy_fingerprint(
+        mqk_daemon::state::crypto_execution_policy::CryptoTimeInForceConfig::Explicit(
+            mqk_daemon::state::crypto_execution_policy::CryptoTimeInForce::Gtc,
+        ),
+    );
+    let ioc_fp = mqk_daemon::state::crypto_execution_policy::crypto_execution_policy_fingerprint(
+        mqk_daemon::state::crypto_execution_policy::CryptoTimeInForceConfig::Explicit(
+            mqk_daemon::state::crypto_execution_policy::CryptoTimeInForce::Ioc,
+        ),
+    );
+    let id_gtc = derive_autonomous_daily_operation_id(
+        &plan,
+        "paper",
+        "alpaca",
+        "asgn-x",
+        "bind-x",
+        Some(&gtc_fp),
+    );
+    let id_ioc = derive_autonomous_daily_operation_id(
+        &plan,
+        "paper",
+        "alpaca",
+        "asgn-x",
+        "bind-x",
+        Some(&ioc_fp),
+    );
+    let id_none =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x", None);
+    assert_ne!(
+        id_gtc, id_ioc,
+        "B5: a gtc<->ioc crypto execution-policy change must change the operation id"
+    );
+    assert_ne!(
+        id_gtc, id_none,
+        "B5: a Crypto24_7 identity (fingerprint present) must never collide with the \
+         EquityNyse identity (fingerprint absent) for otherwise-identical inputs"
+    );
+}
+
+/// B5-CORRECTION: spelling/case/whitespace variants of the same gtc choice
+/// must normalize to the identical fingerprint and therefore the identical
+/// operation id — the fingerprint must be sensitive to the economic choice
+/// only, never to non-economic formatting of the same choice.
+#[test]
+fn crypto_tif_fingerprint_case_and_whitespace_variants_share_one_operation_id() {
+    let plan = sample_plan("2025-01-06");
+    let canonical =
+        mqk_daemon::state::crypto_execution_policy::crypto_time_in_force_config_from_env_value(
+            Some("gtc"),
+        );
+    let via_case =
+        mqk_daemon::state::crypto_execution_policy::crypto_time_in_force_config_from_env_value(
+            Some(" GTC \t"),
+        );
+    let fp_canonical =
+        mqk_daemon::state::crypto_execution_policy::crypto_execution_policy_fingerprint(canonical);
+    let fp_via_case =
+        mqk_daemon::state::crypto_execution_policy::crypto_execution_policy_fingerprint(via_case);
+    let id_canonical = derive_autonomous_daily_operation_id(
+        &plan,
+        "paper",
+        "alpaca",
+        "asgn-x",
+        "bind-x",
+        Some(&fp_canonical),
+    );
+    let id_via_case = derive_autonomous_daily_operation_id(
+        &plan,
+        "paper",
+        "alpaca",
+        "asgn-x",
+        "bind-x",
+        Some(&fp_via_case),
+    );
+    assert_eq!(
+        id_canonical, id_via_case,
+        "B5: case/whitespace normalization alone must never change the derived operation id"
+    );
 }
 
 /// No operation-identity helper reads env or constructs a bootstrap — this
@@ -889,7 +1010,8 @@ fn operation_identity_helper_takes_no_hidden_env_or_bootstrap_input() {
     let plan = sample_plan("2025-01-06");
     // Pure function signature: only explicit arguments, no `_from_env`
     // suffix, no `AppState`/env access possible from within its body.
-    let _ = derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x");
+    let _ =
+        derive_autonomous_daily_operation_id(&plan, "paper", "alpaca", "asgn-x", "bind-x", None);
 }
 
 // ---------------------------------------------------------------------------

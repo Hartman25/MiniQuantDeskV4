@@ -206,6 +206,7 @@ async fn resolve_active_identity(
         adapter_id,
         &assignment_identity,
         &runtime_binding_identity,
+        None,
     );
     (
         plan,
