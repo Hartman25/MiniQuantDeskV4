@@ -126,6 +126,7 @@ pub fn equity_instrument<S: Into<String>>(symbol: S) -> Instrument {
         venue: None,
         currency: "USD".to_string(),
         contract: ContractSpec::Equity,
+        provenance: None,
     }
 }
 
@@ -288,19 +289,17 @@ impl IntentV2Contract {
             ContractSpec::Equity => Self::Equity {
                 instrument_kind: None,
             },
-            ContractSpec::Crypto => {
-                if instrument.asset_class == AssetClass::Forex {
-                    Self::ForexPair {
-                        base_currency: String::new(),
-                        quote_currency: String::new(),
-                    }
-                } else {
-                    Self::CryptoSpot {
-                        base_currency: String::new(),
-                        quote_currency: instrument.currency.clone(),
-                    }
-                }
-            }
+            ContractSpec::Crypto => Self::CryptoSpot {
+                base_currency: String::new(),
+                quote_currency: instrument.currency.clone(),
+            },
+            ContractSpec::Forex {
+                base_currency,
+                quote_currency,
+            } => Self::ForexPair {
+                base_currency: base_currency.clone(),
+                quote_currency: quote_currency.clone(),
+            },
             ContractSpec::Future {
                 root,
                 expiry_yyyymm,
@@ -614,7 +613,7 @@ fn validate_intent_contract(intent: &OrderIntentV2) -> Option<IntentV2Validation
         ) => validate_option_contract(underlying, expiry_yyyymmdd, *strike_micros, *multiplier),
         (
             AssetClass::Forex,
-            _,
+            ContractSpec::Forex { .. },
             IntentV2Contract::ForexPair {
                 base_currency,
                 quote_currency,
@@ -650,6 +649,13 @@ fn validate_order_spec_contract(spec: &OrderSpec) -> Option<IntentV2Validation> 
                 ..
             },
         ) => validate_option_contract(underlying, expiry_yyyymmdd, *strike_micros, *multiplier),
+        (
+            AssetClass::Forex,
+            ContractSpec::Forex {
+                base_currency,
+                quote_currency,
+            },
+        ) => validate_currency_pair(base_currency, quote_currency, "missing_forex_pair"),
         _ => Some(IntentV2Validation::invalid(
             "asset_contract_mismatch",
             "ExecutionIntentV2 asset class and contract shape do not match.",

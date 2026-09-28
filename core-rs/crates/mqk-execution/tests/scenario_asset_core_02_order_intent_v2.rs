@@ -25,6 +25,7 @@ fn crypto_intent() -> OrderIntentV2 {
         venue: Some("coinbase".to_string()),
         currency: "USD".to_string(),
         contract: ContractSpec::Crypto,
+        provenance: None,
     };
     OrderIntentV2::new(instrument, OrderSide::Buy, QtyMicros::new(250_000)).with_contract(
         mqk_execution::IntentV2Contract::CryptoSpot {

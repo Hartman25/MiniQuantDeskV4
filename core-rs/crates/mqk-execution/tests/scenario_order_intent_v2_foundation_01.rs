@@ -37,6 +37,7 @@ fn order_intent_v2_crypto_fixture() -> OrderIntentV2 {
         venue: Some("coinbase".to_string()),
         currency: "USD".to_string(),
         contract: ContractSpec::Crypto,
+        provenance: None,
     };
     OrderIntentV2::new(instrument, OrderSide::Buy, QtyMicros::new(250_000)).with_contract(
         IntentV2Contract::CryptoSpot {
@@ -58,6 +59,7 @@ fn order_intent_v2_future_fixture() -> OrderIntentV2 {
             multiplier: 5,
             tick_size_micros: 250_000,
         },
+        provenance: None,
     };
     OrderIntentV2::new(instrument, OrderSide::Buy, qty(1))
 }
@@ -75,6 +77,7 @@ fn order_intent_v2_option_fixture() -> OrderIntentV2 {
             right: OptionRight::Call,
             multiplier: 100,
         },
+        provenance: None,
     };
     OrderIntentV2::new(instrument, OrderSide::Buy, qty(1))
 }
@@ -85,7 +88,11 @@ fn order_intent_v2_forex_fixture() -> OrderIntentV2 {
         asset_class: AssetClass::Forex,
         venue: Some("IDEALPRO".to_string()),
         currency: "USD".to_string(),
-        contract: ContractSpec::Crypto,
+        contract: ContractSpec::Forex {
+            base_currency: "EUR".to_string(),
+            quote_currency: "USD".to_string(),
+        },
+        provenance: None,
     };
     OrderIntentV2::new(instrument, OrderSide::Buy, qty(10)).with_contract(
         IntentV2Contract::ForexPair {

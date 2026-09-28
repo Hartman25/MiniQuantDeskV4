@@ -618,12 +618,52 @@ pub struct Instrument {
     pub currency: String,
     /// Contract specification for derivatives.
     pub contract: ContractSpec,
+    /// Durable, broker-confirmed contract identity — Wave C1
+    /// (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION).
+    /// `None` for a research-only, backtest, or not-yet-broker-resolved
+    /// instrument: this field is the ONLY place broker-confirmed contract
+    /// provenance is represented, so a continuous research series (which
+    /// never goes through broker contract resolution) is structurally
+    /// incapable of acquiring an executable broker identity merely by
+    /// existing — it would have to earn a `Some(..)` here, which nothing in
+    /// the research/backtest path ever constructs.
+    #[serde(default)]
+    pub provenance: Option<BrokerContractProvenance>,
+}
+
+/// Durable, provider-neutral broker-confirmed contract identity — Wave C1.
+///
+/// Populated only once a specific broker has actually resolved a contract
+/// (e.g. IBKR's `conId`/`localSymbol` for a specific dated future or FX
+/// pair, confirmed via that broker's own contract-details lookup). This is
+/// evidence *about* an already-constructed [`Instrument`], never a second,
+/// competing identity: [`ContractSpec`] (root/expiry, base/quote, strike,
+/// etc.) remains the canonical shape every asset-neutral consumer matches
+/// on; `provider`/`native_contract_id`/`local_symbol`/`exchange` here are
+/// purely the broker's own confirmation of a specific tradable instance of
+/// that shape, and never substitute for it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BrokerContractProvenance {
+    /// Stable per-broker provider identifier (e.g. `"ibkr"`, `"alpaca"`).
+    /// Not the same vocabulary as `mqk_md` market-data provider ids — this
+    /// names the *execution* broker that confirmed this contract.
+    pub provider: String,
+    /// The broker's own opaque native contract identifier (e.g. IBKR's
+    /// `conId`). Broker-specific format; never parsed or interpreted here.
+    pub native_contract_id: String,
+    /// The broker's own exact symbol spelling for this specific contract
+    /// (e.g. IBKR's `localSymbol`, which for a dated future disambiguates
+    /// month/year in that broker's own notation).
+    pub local_symbol: String,
+    /// The specific exchange the broker resolved this contract against
+    /// (e.g. `"CME"`, `"GLOBEX"`, `"IDEALPRO"`).
+    pub exchange: String,
 }
 
 /// Contract details for non-spot instruments.
 ///
-/// Equity is the default (no extra fields). Options/futures carry enough
-/// metadata to uniquely identify contracts.
+/// Equity is the default (no extra fields). Options/futures/forex carry
+/// enough metadata to uniquely identify contracts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContractSpec {
     /// Spot equities / ETFs.
@@ -636,7 +676,16 @@ pub enum ContractSpec {
         right: OptionRight,
         multiplier: i32,
     },
-    /// Futures.
+    /// Futures. `expiry_yyyymm` is always an explicit, dated contract month
+    /// (canonical `YYYYMM`, see [`is_canonical_yyyymm`]) — there is
+    /// deliberately no "continuous"/perpetual variant and no automatic-roll
+    /// mechanism anywhere in this enum or its constructors: a continuous
+    /// research series is a distinct concept the research/backtest domain
+    /// represents on its own terms and never converts into this executable
+    /// shape. Rolling from one dated contract to the next (if ever
+    /// implemented) must be an explicit, separately-authorized operator/
+    /// strategy decision that constructs a brand-new `Future` value with the
+    /// next `expiry_yyyymm` — never a mutation of this one.
     Future {
         root: String,
         expiry_yyyymm: String,
@@ -645,6 +694,16 @@ pub enum ContractSpec {
     },
     /// Spot crypto (pair symbol is usually enough; venue matters).
     Crypto,
+    /// Spot/forward FX pair — Wave C1. Canonical base/quote identity
+    /// (`base_currency`/`quote_currency`, each an uppercase ISO-4217-style
+    /// code; see [`is_canonical_currency_code`]), distinct from
+    /// [`ContractSpec::Crypto`] even though both are quoted pairs: an FX
+    /// pair's economics (pip/lot sizing, leverage, 24x5 session) are
+    /// currency-market-specific, not modeled by the crypto shape.
+    Forex {
+        base_currency: String,
+        quote_currency: String,
+    },
 }
 
 /// True iff `s` is a canonical compact `YYYYMM` (exactly six ASCII digits,
@@ -772,4 +831,114 @@ pub struct Position {
     pub qty: i64,
     /// Average entry price in integer micros.
     pub avg_price_micros: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Wave C1 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION):
+// ContractSpec::Forex + BrokerContractProvenance
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod contract_provenance_tests {
+    use super::*;
+
+    fn base_instrument(contract: ContractSpec, asset_class: AssetClass) -> Instrument {
+        Instrument {
+            symbol: "EUR/USD".to_string(),
+            asset_class,
+            venue: Some("IDEALPRO".to_string()),
+            currency: "USD".to_string(),
+            contract,
+            provenance: None,
+        }
+    }
+
+    /// A freshly-constructed instrument (the shape every research/backtest
+    /// path produces) has no broker provenance -- it cannot be mistaken for
+    /// a broker-confirmed, executable contract merely by existing.
+    #[test]
+    fn fresh_instrument_has_no_broker_provenance_by_default() {
+        let instrument = base_instrument(ContractSpec::Equity, AssetClass::Equity);
+        assert_eq!(instrument.provenance, None);
+    }
+
+    /// Once a broker resolves the contract, provenance is attached without
+    /// altering the canonical `ContractSpec` identity it describes.
+    #[test]
+    fn broker_confirmed_provenance_is_additive_not_a_second_identity() {
+        let mut instrument = base_instrument(
+            ContractSpec::Future {
+                root: "MES".to_string(),
+                expiry_yyyymm: "202606".to_string(),
+                multiplier: 5,
+                tick_size_micros: 250_000,
+            },
+            AssetClass::Future,
+        );
+        let before_contract = instrument.contract.clone();
+        instrument.provenance = Some(BrokerContractProvenance {
+            provider: "ibkr".to_string(),
+            native_contract_id: "620731015".to_string(),
+            local_symbol: "MESM6".to_string(),
+            exchange: "CME".to_string(),
+        });
+        assert_eq!(
+            instrument.contract, before_contract,
+            "attaching provenance must never change the canonical contract shape"
+        );
+        assert_eq!(
+            instrument.provenance.unwrap().native_contract_id,
+            "620731015"
+        );
+    }
+
+    /// `Instrument` deserializes from JSON that predates this field (no
+    /// `"provenance"` key at all) as `None` -- `#[serde(default)]` keeps
+    /// every pre-existing fixture/registry file readable unchanged.
+    #[test]
+    fn provenance_defaults_to_none_when_absent_from_json() {
+        let json = r#"{
+            "symbol": "AAPL",
+            "asset_class": "Equity",
+            "venue": null,
+            "currency": "USD",
+            "contract": "Equity"
+        }"#;
+        let instrument: Instrument = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(instrument.provenance, None);
+    }
+
+    /// `ContractSpec::Forex` round-trips through JSON exactly, and a Forex
+    /// pair is structurally distinct from a Crypto pair even though both are
+    /// quoted-pair shapes (Wave C1's whole reason for a dedicated variant
+    /// instead of reusing `ContractSpec::Crypto` with an `AssetClass::Forex`
+    /// label, which is what this repo did before this patch).
+    #[test]
+    fn forex_contract_spec_round_trips_and_is_distinct_from_crypto() {
+        let forex = ContractSpec::Forex {
+            base_currency: "EUR".to_string(),
+            quote_currency: "USD".to_string(),
+        };
+        let json = serde_json::to_string(&forex).expect("serialize");
+        let back: ContractSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(forex, back);
+        assert_ne!(forex, ContractSpec::Crypto);
+    }
+
+    /// A different `native_contract_id` (the broker's own confirmed
+    /// identity) is a different provenance, even when every other field
+    /// (provider/local_symbol/exchange) is identical -- provenance equality
+    /// must be exact broker-confirmed identity, not a partial match.
+    #[test]
+    fn provenance_equality_requires_the_exact_native_contract_id() {
+        let a = BrokerContractProvenance {
+            provider: "ibkr".to_string(),
+            native_contract_id: "620731015".to_string(),
+            local_symbol: "MESM6".to_string(),
+            exchange: "CME".to_string(),
+        };
+        let mut b = a.clone();
+        b.native_contract_id = "999999999".to_string();
+        assert_ne!(a, b);
+    }
 }

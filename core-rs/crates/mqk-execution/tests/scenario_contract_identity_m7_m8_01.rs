@@ -11,6 +11,9 @@
 //! | CI03 | futures/options quantities are whole contracts (never fractional)      |
 //! | CI04 | pair legs (FX / crypto) must be distinct                               |
 //! | CI05 | the options permission classifier applies CI02/CI03 to every leg       |
+//! | CI06 | Wave C1: AssetClass::Forex requires ContractSpec::Forex -- any other    |
+//! |      | ContractSpec shape is refused as asset_contract_mismatch, never         |
+//! |      | silently accepted through a wildcard shape check                       |
 
 use mqk_execution::{
     classify_option_strategy_structure, ExecutionIntentV2, IntentV2Contract, OptionLegSide,
@@ -36,6 +39,7 @@ fn future_instrument(expiry_yyyymm: &str) -> Instrument {
             multiplier: 5,
             tick_size_micros: 250_000,
         },
+        provenance: None,
     }
 }
 
@@ -52,6 +56,7 @@ fn option_instrument(expiry_yyyymmdd: &str) -> Instrument {
             right: OptionRight::Call,
             multiplier: 100,
         },
+        provenance: None,
     }
 }
 
@@ -114,22 +119,32 @@ fn ci03_futures_and_options_trade_whole_contracts_only() {
 }
 
 fn pair_intent(class: AssetClass, base: &str, quote: &str) -> OrderIntentV2 {
-    let contract = match class {
-        AssetClass::Forex => IntentV2Contract::ForexPair {
-            base_currency: base.to_string(),
-            quote_currency: quote.to_string(),
-        },
-        _ => IntentV2Contract::CryptoSpot {
-            base_currency: base.to_string(),
-            quote_currency: quote.to_string(),
-        },
+    let (contract, contract_spec) = match class {
+        AssetClass::Forex => (
+            IntentV2Contract::ForexPair {
+                base_currency: base.to_string(),
+                quote_currency: quote.to_string(),
+            },
+            ContractSpec::Forex {
+                base_currency: base.to_string(),
+                quote_currency: quote.to_string(),
+            },
+        ),
+        _ => (
+            IntentV2Contract::CryptoSpot {
+                base_currency: base.to_string(),
+                quote_currency: quote.to_string(),
+            },
+            ContractSpec::Crypto,
+        ),
     };
     let instrument = Instrument {
         symbol: "PAIR".to_string(),
         asset_class: class,
         venue: None,
         currency: "USD".to_string(),
-        contract: ContractSpec::Crypto,
+        contract: contract_spec,
+        provenance: None,
     };
     OrderIntentV2::new(instrument, OrderSide::Buy, whole(1)).with_contract(contract)
 }
@@ -148,6 +163,45 @@ fn ci04_pair_legs_must_be_distinct() {
             );
         }
     }
+}
+
+/// CI06: an `AssetClass::Forex` instrument whose `ContractSpec` is anything
+/// other than `ContractSpec::Forex` must be refused as `asset_contract_
+/// mismatch`, both through the intent model and the order-spec model.
+/// Before Wave C1 added `ContractSpec::Forex`, `validate_intent_contract`'s
+/// Forex arm matched the `ContractSpec` position with a bare wildcard (`_`)
+/// -- any shape at all was accepted for a Forex-labeled instrument, which
+/// this test would have wrongly passed against.
+#[test]
+fn ci06_forex_asset_class_requires_forex_contract_spec_not_any_shape() {
+    let mismatched = Instrument {
+        symbol: "EUR/USD".to_string(),
+        asset_class: AssetClass::Forex,
+        venue: None,
+        currency: "USD".to_string(),
+        // Deliberately the WRONG shape for AssetClass::Forex.
+        contract: ContractSpec::Equity,
+        provenance: None,
+    };
+    let intent = OrderIntentV2::new(mismatched.clone(), OrderSide::Buy, whole(1)).with_contract(
+        IntentV2Contract::ForexPair {
+            base_currency: "EUR".to_string(),
+            quote_currency: "USD".to_string(),
+        },
+    );
+    let intent_result = intent.validate_model();
+    assert!(
+        !intent_result.valid,
+        "CI06: a Forex asset_class with a non-Forex ContractSpec must be refused, not routed \
+         through as though the shapes agreed"
+    );
+    assert_eq!(intent_result.reason_code, "asset_contract_mismatch");
+
+    let spec_result =
+        ExecutionIntentV2::market("cid".to_string(), mismatched, OrderSide::Buy, whole(1))
+            .validate_model();
+    assert!(!spec_result.valid, "CI06: order-spec model must agree");
+    assert_eq!(spec_result.reason_code, "asset_contract_mismatch");
 }
 
 fn leg(
