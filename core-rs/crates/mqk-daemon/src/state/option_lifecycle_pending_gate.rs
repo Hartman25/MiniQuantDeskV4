@@ -53,15 +53,19 @@ impl OptionLifecycleGateStatus {
     }
 }
 
-/// Evaluate the D3 gate for one option symbol. Read-only: makes no
-/// mutation of any kind, and never inspects any symbol other than
-/// `option_symbol` -- callers evaluating other symbols are structurally
+/// Evaluate the D3 gate for one option symbol, scoped to
+/// `broker_account_id` (D1 correction: a symbol's lifecycle-pending state
+/// under one broker account must never be conflated with another
+/// account's evidence). Read-only: makes no mutation of any kind, and
+/// never inspects any symbol/account other than the ones given --
+/// callers evaluating other symbols or accounts are structurally
 /// unaffected by this symbol's state.
 pub async fn evaluate_option_lifecycle_pending_gate(
     pool: &PgPool,
+    broker_account_id: &str,
     option_symbol: &str,
 ) -> anyhow::Result<OptionLifecycleGateStatus> {
-    match find_unresolved_option_lifecycle_activity(pool, option_symbol).await? {
+    match find_unresolved_option_lifecycle_activity(pool, broker_account_id, option_symbol).await? {
         Some((blocking_activity_id, blocking_activity_type)) => {
             Ok(OptionLifecycleGateStatus::Pending {
                 blocking_activity_id,

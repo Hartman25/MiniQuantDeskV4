@@ -16,6 +16,25 @@
 //!
 //! `activity_id` (Alpaca's own id) is the natural idempotency key -- an
 //! activity must never be applied to the ledger twice.
+//!
+//! # D1 correction: shared id, broker/account provenance (migration 0086)
+//!
+//! Alpaca reports an `OPEXC`/`OPASN` activity and its paired `OPTRD` trade
+//! under the IDENTICAL `id` value (re-verified live against Alpaca's
+//! current docs). `activity_id` alone can therefore never be a PRIMARY KEY
+//! for this table -- migration 0086 widens it to `(broker_account_id,
+//! activity_id, activity_type)`, so the two rows of a pair coexist,
+//! disambiguated by type, and adds `broker_account_id` (the authenticated
+//! Alpaca `APCA-API-KEY-ID`) so two distinct accounts can never collide.
+//! That shared id is also the correct provider-documented correlation
+//! evidence between a lifecycle activity and its paired trade --
+//! [`find_paired_trade_activity`] now looks it up directly instead of the
+//! superseded, unsafe `(option_symbol, activity_date)` lookup. `symbol`
+//! means different things per activity type (the OCC option contract for
+//! `OPEXC`/`OPASN`/`OPEXP`; the underlying ticker for `OPTRD`) -- `
+//! option_symbol`/`underlying_symbol_raw` are now two separate,
+//! CHECK-enforced mutually exclusive columns rather than one column
+//! conflating both meanings.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -59,17 +78,37 @@ impl OptionLifecycleActivityType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOptionLifecycleActivity {
     pub activity_id: String,
+    /// D1 correction: the authenticated Alpaca account's own
+    /// `APCA-API-KEY-ID` (never the secret key). Part of the ledger's
+    /// PRIMARY KEY as of migration 0086.
+    pub broker_account_id: String,
     pub engine_id: String,
     pub mode: String,
     pub activity_type: OptionLifecycleActivityType,
-    pub option_symbol: String,
+    /// The OCC option-contract symbol (e.g. `"AAPL260619C00200000"`).
+    /// `Some` for `Exercise`/`Assignment`/`Expiration`, `None` for
+    /// `PairedTrade` (whose raw `symbol` field is the underlying, not an
+    /// option contract -- see `underlying_symbol_raw`). DB-CHECK-enforced.
+    pub option_symbol: Option<String>,
+    /// The raw Alpaca `symbol` field for a `PairedTrade` row -- the
+    /// underlying ticker (e.g. `"AAPL"`), never the option contract.
+    /// `Some` only for `PairedTrade`. DB-CHECK-enforced.
+    pub underlying_symbol_raw: Option<String>,
     /// Alpaca's own reported activity date, as an opaque string (e.g.
-    /// `"2026-06-19"`) -- used only for `OPEXC`/`OPASN` <-> `OPTRD`
-    /// correlation, never parsed into a chronology-bearing type here.
+    /// `"2026-06-19"`) -- descriptive only; correlation uses the shared
+    /// `activity_id`, not this field.
     pub activity_date: String,
+    /// `OPEXC`/`OPASN`/`OPEXP`: contracts affected (signed, per Alpaca's
+    /// own convention). `OPTRD`: underlying shares (signed).
     pub qty_raw: String,
-    /// Populated only for `PairedTrade`.
+    /// `OPTRD` only: strike price per share. `None` for
+    /// `OPEXC`/`OPASN`/`OPEXP`.
     pub price_raw: Option<String>,
+    /// Alpaca's own reported `net_amount` -- authoritative signed cash
+    /// evidence. Always `"0"` for `OPEXC`/`OPASN`/`OPEXP`; the real signed
+    /// strike consideration for `OPTRD`. Preserved exactly as reported so
+    /// D2 never has to manufacture a cash effect.
+    pub net_amount_raw: String,
     pub ingested_at_utc: DateTime<Utc>,
 }
 
@@ -79,7 +118,8 @@ pub enum InsertOptionLifecycleActivityOutcome {
     AlreadyExists,
 }
 
-/// Insert one activity row, deduplicated at the DB level on `activity_id`.
+/// Insert one activity row, deduplicated at the DB level on
+/// `(broker_account_id, activity_id, activity_type)`.
 pub async fn insert_option_lifecycle_activity_if_new(
     pool: &PgPool,
     activity: &NewOptionLifecycleActivity,
@@ -87,20 +127,24 @@ pub async fn insert_option_lifecycle_activity_if_new(
     let result = sqlx::query(
         r#"
         insert into sys_option_lifecycle_activity_ledger (
-            activity_id, engine_id, mode, activity_type, option_symbol,
-            activity_date, qty_raw, price_raw, ingested_at_utc
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        on conflict (activity_id) do nothing
+            activity_id, broker_account_id, engine_id, mode, activity_type,
+            option_symbol, underlying_symbol_raw, activity_date, qty_raw,
+            price_raw, net_amount_raw, ingested_at_utc
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        on conflict (broker_account_id, activity_id, activity_type) do nothing
         "#,
     )
     .bind(&activity.activity_id)
+    .bind(&activity.broker_account_id)
     .bind(&activity.engine_id)
     .bind(&activity.mode)
     .bind(activity.activity_type.as_str())
     .bind(&activity.option_symbol)
+    .bind(&activity.underlying_symbol_raw)
     .bind(&activity.activity_date)
     .bind(&activity.qty_raw)
     .bind(&activity.price_raw)
+    .bind(&activity.net_amount_raw)
     .bind(activity.ingested_at_utc)
     .execute(pool)
     .await
@@ -115,6 +159,7 @@ pub async fn insert_option_lifecycle_activity_if_new(
 
 pub async fn fetch_option_lifecycle_ingestion_cursor(
     pool: &PgPool,
+    broker_account_id: &str,
     engine_id: &str,
     mode: &str,
     activity_type: OptionLifecycleActivityType,
@@ -123,9 +168,10 @@ pub async fn fetch_option_lifecycle_ingestion_cursor(
         r#"
         select last_activity_id
           from sys_option_lifecycle_ingestion_cursor
-         where engine_id = $1 and mode = $2 and activity_type = $3
+         where broker_account_id = $1 and engine_id = $2 and mode = $3 and activity_type = $4
         "#,
     )
+    .bind(broker_account_id)
     .bind(engine_id)
     .bind(mode)
     .bind(activity_type.as_str())
@@ -145,8 +191,17 @@ pub struct OptionLifecycleIngestionBatchOutcome {
 /// Ingest one batch of activities (all the same `activity_type`) and
 /// advance that type's cursor, atomically -- restart-safety mirrors
 /// `ingest_crypto_fee_activity_batch` exactly.
+///
+/// # D1 correction: scope validation before any mutation
+///
+/// Every row in `batch` must match the requested `(broker_account_id,
+/// engine_id, mode, activity_type)` scope exactly, checked for the entire
+/// batch before any row is inserted or the cursor is touched -- a
+/// mismatched row refuses the whole call atomically.
+#[allow(clippy::too_many_arguments)]
 pub async fn ingest_option_lifecycle_activity_batch(
     pool: &PgPool,
+    broker_account_id: &str,
     engine_id: &str,
     mode: &str,
     activity_type: OptionLifecycleActivityType,
@@ -161,6 +216,28 @@ pub async fn ingest_option_lifecycle_activity_batch(
         });
     }
 
+    for activity in batch {
+        if activity.broker_account_id != broker_account_id
+            || activity.engine_id != engine_id
+            || activity.mode != mode
+            || activity.activity_type.as_str() != activity_type.as_str()
+        {
+            return Err(anyhow::anyhow!(
+                "ingest_option_lifecycle_activity_batch: refused -- activity_id={:?} carries \
+                 scope (broker_account_id={:?}, engine_id={:?}, mode={:?}, activity_type={:?}) \
+                 which does not match the requested batch scope \
+                 (broker_account_id={broker_account_id:?}, engine_id={engine_id:?}, \
+                 mode={mode:?}, activity_type={:?}); zero rows mutated",
+                activity.activity_id,
+                activity.broker_account_id,
+                activity.engine_id,
+                activity.mode,
+                activity.activity_type.as_str(),
+                activity_type.as_str(),
+            ));
+        }
+    }
+
     let mut tx = pool
         .begin()
         .await
@@ -173,20 +250,24 @@ pub async fn ingest_option_lifecycle_activity_batch(
         let result = sqlx::query(
             r#"
             insert into sys_option_lifecycle_activity_ledger (
-                activity_id, engine_id, mode, activity_type, option_symbol,
-                activity_date, qty_raw, price_raw, ingested_at_utc
-            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            on conflict (activity_id) do nothing
+                activity_id, broker_account_id, engine_id, mode, activity_type,
+                option_symbol, underlying_symbol_raw, activity_date, qty_raw,
+                price_raw, net_amount_raw, ingested_at_utc
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            on conflict (broker_account_id, activity_id, activity_type) do nothing
             "#,
         )
         .bind(&activity.activity_id)
+        .bind(&activity.broker_account_id)
         .bind(&activity.engine_id)
         .bind(&activity.mode)
         .bind(activity.activity_type.as_str())
         .bind(&activity.option_symbol)
+        .bind(&activity.underlying_symbol_raw)
         .bind(&activity.activity_date)
         .bind(&activity.qty_raw)
         .bind(&activity.price_raw)
+        .bind(&activity.net_amount_raw)
         .bind(activity.ingested_at_utc)
         .execute(&mut *tx)
         .await
@@ -202,13 +283,14 @@ pub async fn ingest_option_lifecycle_activity_batch(
     sqlx::query(
         r#"
         insert into sys_option_lifecycle_ingestion_cursor (
-            engine_id, mode, activity_type, last_activity_id, updated_at_utc
-        ) values ($1, $2, $3, $4, $5)
-        on conflict (engine_id, mode, activity_type)
+            broker_account_id, engine_id, mode, activity_type, last_activity_id, updated_at_utc
+        ) values ($1, $2, $3, $4, $5, $6)
+        on conflict (broker_account_id, engine_id, mode, activity_type)
         do update set last_activity_id = excluded.last_activity_id,
                       updated_at_utc = excluded.updated_at_utc
         "#,
     )
+    .bind(broker_account_id)
     .bind(engine_id)
     .bind(mode)
     .bind(activity_type.as_str())
@@ -234,83 +316,105 @@ type OptionLifecycleActivityRow = (
     String,
     String,
     String,
+    Option<String>,
+    Option<String>,
     String,
     String,
     Option<String>,
+    String,
     DateTime<Utc>,
 );
 
 fn row_to_activity(row: OptionLifecycleActivityRow) -> Result<NewOptionLifecycleActivity> {
     let (
         activity_id,
+        broker_account_id,
         engine_id,
         mode,
         activity_type,
         option_symbol,
+        underlying_symbol_raw,
         activity_date,
         qty_raw,
         price_raw,
+        net_amount_raw,
         ingested_at_utc,
     ) = row;
     Ok(NewOptionLifecycleActivity {
         activity_id,
+        broker_account_id,
         engine_id,
         mode,
         activity_type: OptionLifecycleActivityType::parse(&activity_type)?,
         option_symbol,
+        underlying_symbol_raw,
         activity_date,
         qty_raw,
         price_raw,
+        net_amount_raw,
         ingested_at_utc,
     })
 }
 
+const OPTION_LIFECYCLE_ACTIVITY_COLUMNS: &str = "activity_id, broker_account_id, engine_id, \
+     mode, activity_type, option_symbol, underlying_symbol_raw, activity_date, qty_raw, \
+     price_raw, net_amount_raw, ingested_at_utc";
+
 /// Read back one durably-ingested activity row, for test/audit
 /// verification and for D2's pairing lookup.
+///
+/// D1 correction: `activity_id` alone is ambiguous (a lifecycle activity
+/// and its paired trade share it) -- `(broker_account_id, activity_id,
+/// activity_type)` names an unambiguous row, exactly the table's own
+/// PRIMARY KEY.
 pub async fn fetch_option_lifecycle_activity(
     pool: &PgPool,
+    broker_account_id: &str,
     activity_id: &str,
+    activity_type: OptionLifecycleActivityType,
 ) -> Result<Option<NewOptionLifecycleActivity>> {
-    let row: Option<OptionLifecycleActivityRow> = sqlx::query_as(
-        r#"
-        select activity_id, engine_id, mode, activity_type, option_symbol,
-               activity_date, qty_raw, price_raw, ingested_at_utc
-          from sys_option_lifecycle_activity_ledger
-         where activity_id = $1
-        "#,
-    )
-    .bind(activity_id)
-    .fetch_optional(pool)
-    .await
-    .context("fetch_option_lifecycle_activity failed")?;
+    let query = format!(
+        "select {OPTION_LIFECYCLE_ACTIVITY_COLUMNS}
+           from sys_option_lifecycle_activity_ledger
+          where broker_account_id = $1 and activity_id = $2 and activity_type = $3"
+    );
+    let row: Option<OptionLifecycleActivityRow> = sqlx::query_as(&query)
+        .bind(broker_account_id)
+        .bind(activity_id)
+        .bind(activity_type.as_str())
+        .fetch_optional(pool)
+        .await
+        .context("fetch_option_lifecycle_activity failed")?;
 
     row.map(row_to_activity).transpose()
 }
 
-/// D2's pairing lookup: find the `OPTRD` row (if any) sharing the same
-/// `(option_symbol, activity_date)` as a given `OPEXC`/`OPASN` row. Returns
-/// `Ok(None)` when no paired trade has been ingested yet -- the caller's
-/// resolution must remain `Pending`, never assume one will arrive or
-/// fabricate a value.
+/// D2's pairing lookup: find the `OPTRD` row (if any) sharing the SAME
+/// `activity_id` as a given `OPEXC`/`OPASN` row -- the provider-documented
+/// correlation evidence (Alpaca reports both halves of a pair under one
+/// identical id). Returns `Ok(None)` when no paired trade has been
+/// ingested yet -- the caller's resolution must remain `Pending`, never
+/// assume one will arrive or fabricate a value. Deterministic and
+/// unambiguous by construction: the ledger's own PRIMARY KEY guarantees at
+/// most one `(broker_account_id, activity_id, 'OPTRD')` row can ever
+/// exist, so this is never a "pick one of several plausible matches"
+/// lookup.
 pub async fn find_paired_trade_activity(
     pool: &PgPool,
-    option_symbol: &str,
-    activity_date: &str,
+    broker_account_id: &str,
+    activity_id: &str,
 ) -> Result<Option<NewOptionLifecycleActivity>> {
-    let row: Option<OptionLifecycleActivityRow> = sqlx::query_as(
-        r#"
-        select activity_id, engine_id, mode, activity_type, option_symbol,
-               activity_date, qty_raw, price_raw, ingested_at_utc
-          from sys_option_lifecycle_activity_ledger
-         where option_symbol = $1 and activity_date = $2 and activity_type = 'OPTRD'
-         limit 1
-        "#,
-    )
-    .bind(option_symbol)
-    .bind(activity_date)
-    .fetch_optional(pool)
-    .await
-    .context("find_paired_trade_activity failed")?;
+    let query = format!(
+        "select {OPTION_LIFECYCLE_ACTIVITY_COLUMNS}
+           from sys_option_lifecycle_activity_ledger
+          where broker_account_id = $1 and activity_id = $2 and activity_type = 'OPTRD'"
+    );
+    let row: Option<OptionLifecycleActivityRow> = sqlx::query_as(&query)
+        .bind(broker_account_id)
+        .bind(activity_id)
+        .fetch_optional(pool)
+        .await
+        .context("find_paired_trade_activity failed")?;
 
     row.map(row_to_activity).transpose()
 }
@@ -442,12 +546,12 @@ pub async fn fetch_applied_option_lifecycle_effect(
 // D3: pending-lifecycle gate query
 // ---------------------------------------------------------------------------
 
-/// D3's pending-lifecycle gate: does `option_symbol` have any `OPEXC`/
-/// `OPASN`/`OPEXP` activity durably ingested by D1 that has not yet had a
-/// matching `PairedLifecycleEffect` applied by D2? Purely derived from the
-/// two existing D1/D2 tables via a LEFT JOIN -- no separate mutable state,
-/// so the answer is restart-safe by construction: it reflects only what is
-/// already committed.
+/// D3's pending-lifecycle gate: does `option_symbol` (scoped to
+/// `broker_account_id`) have any `OPEXC`/`OPASN`/`OPEXP` activity durably
+/// ingested by D1 that has not yet had a matching `PairedLifecycleEffect`
+/// applied by D2? Purely derived from the two existing D1/D2 tables via a
+/// LEFT JOIN -- no separate mutable state, so the answer is restart-safe by
+/// construction: it reflects only what is already committed.
 ///
 /// Returns the oldest such unresolved activity, if any. A caller with a
 /// non-`None` result must treat `option_symbol` (and its underlying) as
@@ -458,6 +562,7 @@ pub async fn fetch_applied_option_lifecycle_effect(
 /// matching effect.
 pub async fn find_unresolved_option_lifecycle_activity(
     pool: &PgPool,
+    broker_account_id: &str,
     option_symbol: &str,
 ) -> Result<Option<(String, OptionLifecycleActivityType)>> {
     let row: Option<(String, String)> = sqlx::query_as(
@@ -466,13 +571,15 @@ pub async fn find_unresolved_option_lifecycle_activity(
           from sys_option_lifecycle_activity_ledger l
           left join sys_option_lifecycle_applied a
             on a.lifecycle_activity_id = l.activity_id
-         where l.option_symbol = $1
+         where l.broker_account_id = $1
+           and l.option_symbol = $2
            and l.activity_type in ('OPEXC', 'OPASN', 'OPEXP')
            and a.lifecycle_activity_id is null
          order by l.ingested_at_utc asc
          limit 1
         "#,
     )
+    .bind(broker_account_id)
     .bind(option_symbol)
     .fetch_optional(pool)
     .await

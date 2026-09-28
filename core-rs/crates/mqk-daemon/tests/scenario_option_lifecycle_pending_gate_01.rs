@@ -39,6 +39,8 @@ use mqk_db::option_lifecycle_activity::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
+const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id";
+
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) if !v.trim().is_empty() => v,
@@ -78,13 +80,43 @@ fn lifecycle_activity(
 ) -> NewOptionLifecycleActivity {
     NewOptionLifecycleActivity {
         activity_id: activity_id.to_string(),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
         engine_id: engine_id.to_string(),
         mode: "PAPER".to_string(),
         activity_type,
-        option_symbol: option_symbol.to_string(),
+        option_symbol: Some(option_symbol.to_string()),
+        underlying_symbol_raw: None,
         activity_date: activity_date.to_string(),
         qty_raw: qty_raw.to_string(),
         price_raw: None,
+        net_amount_raw: "0".to_string(),
+        ingested_at_utc: Utc::now(),
+    }
+}
+
+/// The paired OPTRD row must share `activity_id` with its OPEXC/OPASN
+/// sibling (D1: the shared id is the real correlation evidence).
+fn paired_trade_activity(
+    activity_id: &str,
+    engine_id: &str,
+    underlying_symbol_raw: &str,
+    activity_date: &str,
+    qty_raw: &str,
+    price_raw: &str,
+    net_amount_raw: &str,
+) -> NewOptionLifecycleActivity {
+    NewOptionLifecycleActivity {
+        activity_id: activity_id.to_string(),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        engine_id: engine_id.to_string(),
+        mode: "PAPER".to_string(),
+        activity_type: OptionLifecycleActivityType::PairedTrade,
+        option_symbol: None,
+        underlying_symbol_raw: Some(underlying_symbol_raw.to_string()),
+        activity_date: activity_date.to_string(),
+        qty_raw: qty_raw.to_string(),
+        price_raw: Some(price_raw.to_string()),
+        net_amount_raw: net_amount_raw.to_string(),
         ingested_at_utc: Utc::now(),
     }
 }
@@ -109,9 +141,10 @@ async fn k01_unresolved_exercise_is_pending() {
         .await
         .unwrap();
 
-    let status = evaluate_option_lifecycle_pending_gate(&pool, &option_symbol)
-        .await
-        .expect("gate must not error");
+    let status =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+            .await
+            .expect("gate must not error");
 
     assert!(status.must_fail_closed());
     match status {
@@ -135,9 +168,10 @@ async fn k02_symbol_with_no_activity_is_clear() {
     let pool = require_pool(&url).await.expect("pool");
     let option_symbol = unique_option_symbol("k02");
 
-    let status = evaluate_option_lifecycle_pending_gate(&pool, &option_symbol)
-        .await
-        .expect("gate must not error");
+    let status =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+            .await
+            .expect("gate must not error");
 
     assert_eq!(status, OptionLifecycleGateStatus::Clear);
     assert!(!status.must_fail_closed());
@@ -169,13 +203,23 @@ async fn k03_applied_expiration_is_clear_not_pending() {
         is_call: true,
         underlying_symbol: "AAPL".to_string(),
     };
-    apply_option_lifecycle_activity(&pool, &engine_id, "PAPER", &activity_id, &terms, Utc::now())
-        .await
-        .expect("apply must not error");
+    apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Expiration,
+        &terms,
+        Utc::now(),
+    )
+    .await
+    .expect("apply must not error");
 
-    let status = evaluate_option_lifecycle_pending_gate(&pool, &option_symbol)
-        .await
-        .expect("gate must not error");
+    let status =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+            .await
+            .expect("gate must not error");
 
     assert_eq!(
         status,
@@ -205,12 +249,14 @@ async fn k04_unrelated_symbols_do_not_affect_each_other() {
         .await
         .unwrap();
 
-    let pending_status = evaluate_option_lifecycle_pending_gate(&pool, &pending_symbol)
-        .await
-        .expect("gate must not error");
-    let clear_status = evaluate_option_lifecycle_pending_gate(&pool, &clear_symbol)
-        .await
-        .expect("gate must not error");
+    let pending_status =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &pending_symbol)
+            .await
+            .expect("gate must not error");
+    let clear_status =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &clear_symbol)
+            .await
+            .expect("gate must not error");
 
     assert!(
         pending_status.must_fail_closed(),
@@ -243,9 +289,10 @@ async fn k05_applying_the_blocking_activity_clears_the_gate() {
         .await
         .unwrap();
 
-    let before = evaluate_option_lifecycle_pending_gate(&pool, &option_symbol)
-        .await
-        .expect("gate must not error");
+    let before =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+            .await
+            .expect("gate must not error");
     assert!(
         before.must_fail_closed(),
         "K05: precondition -- must start Pending before evidence completes"
@@ -262,9 +309,11 @@ async fn k05_applying_the_blocking_activity_clears_the_gate() {
     };
     let outcome = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Exercise,
         &terms,
         Utc::now(),
     )
@@ -275,36 +324,39 @@ async fn k05_applying_the_blocking_activity_clears_the_gate() {
         mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Pending { .. }
     ));
 
-    let still_pending = evaluate_option_lifecycle_pending_gate(&pool, &option_symbol)
-        .await
-        .expect("gate must not error");
+    let still_pending =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+            .await
+            .expect("gate must not error");
     assert!(
         still_pending.must_fail_closed(),
         "K05: an apply attempt that itself resolves to Pending (missing OPTRD) \
          must not clear the gate -- no synthetic evidence"
     );
 
-    // Now ingest the paired OPTRD and apply again -- genuine completion.
-    let trade = NewOptionLifecycleActivity {
-        activity_id: format!("{engine_id}::optrd"),
-        engine_id: engine_id.clone(),
-        mode: "PAPER".to_string(),
-        activity_type: OptionLifecycleActivityType::PairedTrade,
-        option_symbol: option_symbol.clone(),
-        activity_date: "2026-06-19".to_string(),
-        qty_raw: "100".to_string(),
-        price_raw: Some("200.00".to_string()),
-        ingested_at_utc: Utc::now(),
-    };
+    // Now ingest the paired OPTRD (SAME activity_id -- the real
+    // provider-documented correlation evidence) and apply again -- genuine
+    // completion.
+    let trade = paired_trade_activity(
+        &activity_id,
+        &engine_id,
+        "AAPL",
+        "2026-06-19",
+        "100",
+        "200.00",
+        "-20000",
+    );
     insert_option_lifecycle_activity_if_new(&pool, &trade)
         .await
         .unwrap();
 
     let outcome = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Exercise,
         &terms,
         Utc::now(),
     )
@@ -315,9 +367,10 @@ async fn k05_applying_the_blocking_activity_clears_the_gate() {
         mqk_daemon::state::option_lifecycle_apply::ApplyOptionLifecycleOutcome::Applied(_)
     ));
 
-    let after = evaluate_option_lifecycle_pending_gate(&pool, &option_symbol)
-        .await
-        .expect("gate must not error");
+    let after =
+        evaluate_option_lifecycle_pending_gate(&pool, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+            .await
+            .expect("gate must not error");
     assert_eq!(
         after,
         OptionLifecycleGateStatus::Clear,
@@ -349,9 +402,10 @@ async fn k06_gate_answer_survives_a_fresh_pool_restart_simulation() {
     // A brand new pool/connection, as a fresh process would open on
     // restart -- no in-memory state is shared with pool_a.
     let pool_b = require_pool(&url).await.expect("pool b");
-    let status = evaluate_option_lifecycle_pending_gate(&pool_b, &option_symbol)
-        .await
-        .expect("gate must not error");
+    let status =
+        evaluate_option_lifecycle_pending_gate(&pool_b, TEST_BROKER_ACCOUNT_ID, &option_symbol)
+            .await
+            .expect("gate must not error");
 
     assert!(
         status.must_fail_closed(),

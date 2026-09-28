@@ -60,6 +60,7 @@ pub mod fill_authority;
 pub mod inbound;
 pub mod mleg;
 pub mod normalize;
+pub mod option_lifecycle_normalize;
 pub mod snapshot;
 pub mod types;
 use crate::mleg::{
@@ -674,6 +675,74 @@ impl AlpacaBrokerAdapter {
                 return Err(BrokerError::Transient {
                     detail: format!(
                         "fetch_fee_activities_since: pagination made no progress at \
+                         activity_type={activity_type:?} page_token={prev_page_token:?}; \
+                         refusing to loop"
+                    ),
+                });
+            }
+
+            all_activities.extend(activities);
+
+            if page_len < FILL_ACTIVITIES_PAGE_SIZE {
+                break;
+            }
+        }
+
+        Ok(all_activities)
+    }
+
+    // -----------------------------------------------------------------------
+    // D1 correction (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): options
+    // lifecycle (OPEXC/OPASN/OPEXP/OPTRD) account-activity fetch
+    // -----------------------------------------------------------------------
+    /// Fetch all activities of one Alpaca options-lifecycle activity type
+    /// (`"OPEXC"`, `"OPASN"`, `"OPEXP"`, or `"OPTRD"`) since `after_id`
+    /// (exclusive), paginating to exhaustion.
+    ///
+    /// Mirrors [`Self::fetch_fee_activities_since`]'s pagination and
+    /// no-progress-guard shape exactly, against the same generic
+    /// `GET /v2/account/activities/{type}` endpoint. Reuses
+    /// [`AlpacaFeeActivity`] as the raw wire shape -- the endpoint's JSON
+    /// envelope (`id`/`activity_type`/`date`/`net_amount`/`description`/
+    /// `symbol`/`qty`/`price`/`status`) is identical across activity types;
+    /// only the per-type semantics of `symbol`/`qty`/`price`/`net_amount`
+    /// differ, which [`option_lifecycle_normalize::normalize_option_lifecycle_activity`]
+    /// interprets. Returns raw records only -- no normalization, no ledger
+    /// application (this crate does not own portfolio/ledger state).
+    ///
+    /// `activity_type` must be one of
+    /// [`option_lifecycle_normalize::ALPACA_OPTION_LIFECYCLE_ACTIVITY_TYPES`];
+    /// any other value is a caller programming error, not a broker error —
+    /// this function does not validate it beyond passing it into the URL.
+    pub fn fetch_option_lifecycle_activities_since(
+        &self,
+        activity_type: &str,
+        after_id: Option<&str>,
+    ) -> Result<Vec<AlpacaFeeActivity>, BrokerError> {
+        let mut current_page_token: Option<String> = after_id.map(str::to_owned);
+        let mut all_activities: Vec<AlpacaFeeActivity> = Vec::new();
+
+        loop {
+            let mut path = format!(
+                "/v2/account/activities/{activity_type}?direction=asc&page_size={FILL_ACTIVITIES_PAGE_SIZE}"
+            );
+            if let Some(token) = current_page_token.as_deref() {
+                path.push_str("&page_token=");
+                path.push_str(token);
+            }
+
+            let activities: Vec<AlpacaFeeActivity> = self.get(&path)?;
+            let page_len = activities.len();
+            let prev_page_token = current_page_token.clone();
+
+            if let Some(last) = activities.last() {
+                current_page_token = Some(last.id.clone());
+            }
+
+            if page_len == FILL_ACTIVITIES_PAGE_SIZE && current_page_token == prev_page_token {
+                return Err(BrokerError::Transient {
+                    detail: format!(
+                        "fetch_option_lifecycle_activities_since: pagination made no progress at \
                          activity_type={activity_type:?} page_token={prev_page_token:?}; \
                          refusing to loop"
                     ),

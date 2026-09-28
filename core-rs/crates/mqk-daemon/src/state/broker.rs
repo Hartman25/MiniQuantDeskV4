@@ -17,8 +17,9 @@ use mqk_execution::{
 use super::types::{BrokerKind, DeploymentMode, RuntimeLifecycleError};
 use super::{
     BrokerAssetShortablePreflight, BrokerAssetShortablePreflightFetcher, BrokerFillActivityFetcher,
-    BrokerSnapshotFetcher, CryptoFeeActivityFetcher, WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV,
-    ALPACA_KEY_LIVE_ENV, ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
+    BrokerSnapshotFetcher, CryptoFeeActivityFetcher, OptionLifecycleActivityFetcher,
+    WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV, ALPACA_KEY_LIVE_ENV, ALPACA_KEY_PAPER_ENV,
+    ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
 };
 
 // ---------------------------------------------------------------------------
@@ -398,6 +399,84 @@ pub(super) fn build_crypto_fee_activity_fetcher_from_env(
     };
 
     Some(Arc::new(AlpacaCryptoFeeActivityFetcher(
+        AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url,
+            api_key_id: key_id,
+            api_secret_key: secret,
+            crypto_capability_enabled: false,
+            options_mleg_capability_enabled: false,
+        }),
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// D1 correction (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): production
+// options-lifecycle activity fetcher
+// ---------------------------------------------------------------------------
+
+/// Thin newtype wrapping `AlpacaBrokerAdapter` that implements
+/// `OptionLifecycleActivityFetcher`. Only the read-only options-lifecycle
+/// account-activity fetch path is reachable through this type. Order
+/// submission, cancel, replace, and `fetch_events` are not exposed.
+struct AlpacaOptionLifecycleActivityFetcher(AlpacaBrokerAdapter);
+
+impl OptionLifecycleActivityFetcher for AlpacaOptionLifecycleActivityFetcher {
+    fn fetch_option_lifecycle_activities_since(
+        &self,
+        activity_type: &str,
+        after_id: Option<&str>,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+        self.0
+            .fetch_option_lifecycle_activities_since(activity_type, after_id)
+            .map_err(|e| e.to_string())
+    }
+
+    fn broker_account_id(&self) -> String {
+        self.0.account_identity().to_string()
+    }
+}
+
+/// D1 correction: construct a production options-lifecycle activity
+/// fetcher.
+///
+/// Returns `Some(fetcher)` only when `broker_kind == Some(BrokerKind::Alpaca)`
+/// and the matching credentials are present in the environment — same
+/// fail-closed shape as `build_crypto_fee_activity_fetcher_from_env`. This
+/// fetches read-only account-activity history (never an order); Alpaca
+/// options trading capability does not exist in this codebase yet, so this
+/// fetcher exists independently of any such flag. Nothing in the daemon
+/// calls it automatically.
+pub(super) fn build_option_lifecycle_activity_fetcher_from_env(
+    broker_kind: Option<BrokerKind>,
+    deployment_mode: DeploymentMode,
+) -> Option<Arc<dyn OptionLifecycleActivityFetcher>> {
+    match broker_kind {
+        Some(BrokerKind::Alpaca) => {}
+        _ => return None,
+    }
+
+    let (key_env, secret_env) = match deployment_mode {
+        DeploymentMode::Paper => (ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_PAPER_ENV),
+        _ => (ALPACA_KEY_LIVE_ENV, ALPACA_SECRET_LIVE_ENV),
+    };
+    let paper_override = match deployment_mode {
+        DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
+        _ => None,
+    };
+    let base_url = match alpaca_base_url_for_mode(deployment_mode, paper_override.as_deref()) {
+        Ok(u) => u,
+        Err(_) => return None, // e.g. Backtest mode — not wired for Alpaca
+    };
+    let key_id = match std::env::var(key_env) {
+        Ok(v) => v,
+        Err(_) => return None, // credentials absent — fail-closed
+    };
+    let secret = match std::env::var(secret_env) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    Some(Arc::new(AlpacaOptionLifecycleActivityFetcher(
         AlpacaBrokerAdapter::new(AlpacaConfig {
             base_url,
             api_key_id: key_id,

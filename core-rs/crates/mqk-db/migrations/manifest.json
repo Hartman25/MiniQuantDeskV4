@@ -524,6 +524,12 @@
       "path": "0085_crypto_fee_activity_broker_account_scope.sql",
       "status": "applied",
       "intent": "V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01 B6 correction: add broker_account_id (the authenticated Alpaca APCA-API-KEY-ID) to sys_crypto_fee_activity_ledger and sys_crypto_fee_ingestion_cursor, and widen both tables' PRIMARY KEY to include it, closing the gap where 0083 scoped fee evidence and cursor authority by (engine_id, mode, activity_type) alone -- insufficient because Alpaca activity ids are unique only within one account, so two distinct broker accounts sharing an engine_id/mode label could collide on activity_id or share one cursor watermark. Idempotent (existence-guarded); ADD COLUMN ... NOT NULL carries no DEFAULT, so this migration fails loudly rather than fabricating an account identity for any pre-existing row -- safe because no production caller has ever driven either table (0083/0084's own intent records this). Does not modify 0083/0084."
+    },
+    {
+      "id": "0086",
+      "path": "0086_option_lifecycle_broker_account_scope_and_shape.sql",
+      "status": "applied",
+      "intent": "V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01 D1 correction: add broker_account_id to sys_option_lifecycle_activity_ledger and sys_option_lifecycle_ingestion_cursor (mirrors 0085's B6 fix); widen the ledger's PRIMARY KEY to (broker_account_id, activity_id, activity_type) closing the confirmed collision where Alpaca reports an OPEXC/OPASN activity and its paired OPTRD trade under the IDENTICAL activity id (0084's activity_id-only PK silently dropped the OPTRD row via ON CONFLICT DO NOTHING); make option_symbol nullable and add underlying_symbol_raw, CHECK-enforced mutually exclusive by activity_type, so an OPTRD row's raw `symbol` field (the underlying ticker, per Alpaca's own docs) is never conflated with an OPEXC/OPASN/OPEXP row's OCC option-contract symbol; add net_amount_raw (NOT NULL) preserving Alpaca's own authoritative signed cash evidence. Idempotent (existence-guarded); ADD COLUMN ... NOT NULL carries no DEFAULT (safe: no production caller has ever driven either table). Does not modify 0084/0085."
     }
   ]
 }

@@ -30,6 +30,7 @@ pub mod market_calendar;
 pub mod market_data_latest_bar;
 mod multi_symbol_config;
 pub mod option_lifecycle_apply;
+pub mod option_lifecycle_ingestion;
 pub mod option_lifecycle_pending_gate;
 mod orchestrator_build;
 mod paper_portfolio_accounting;
@@ -104,8 +105,8 @@ pub use autonomous_daily_operation::{
 };
 use broker::{
     build_asset_shortable_preflight_fetcher_from_env, build_crypto_fee_activity_fetcher_from_env,
-    build_fill_activity_fetcher_from_env, build_snapshot_fetcher_from_env,
-    build_ws_gap_fill_fetcher_from_env,
+    build_fill_activity_fetcher_from_env, build_option_lifecycle_activity_fetcher_from_env,
+    build_snapshot_fetcher_from_env, build_ws_gap_fill_fetcher_from_env,
 };
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use dry_run_strategy::{
@@ -1017,6 +1018,15 @@ pub struct AppState {
     /// present, independent of the separate Crypto trading-capability flag
     /// (D2/B4). Nothing schedules this automatically.
     pub crypto_fee_activity_fetcher: Option<Arc<dyn CryptoFeeActivityFetcher>>,
+    /// D1 correction (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): injectable
+    /// Alpaca options-lifecycle activity fetcher, consumed by
+    /// `state::option_lifecycle_ingestion::ingest_option_lifecycle_activities_once`.
+    /// `None` when not configured (no Alpaca credentials, or a non-Alpaca
+    /// broker). Read-only account-activity fetch — never an order — so
+    /// this is constructed whenever Alpaca credentials are present.
+    /// Nothing schedules this automatically; no HTTP route is wired by
+    /// this patch.
+    pub option_lifecycle_activity_fetcher: Option<Arc<dyn OptionLifecycleActivityFetcher>>,
     /// BROKER-POSITION-BASELINE-ADOPTION-01: Adopted broker position baseline.
     ///
     /// Operator-confirmed local truth snapshot used by the reconcile tick as
@@ -1232,6 +1242,36 @@ pub trait CryptoFeeActivityFetcher: Send + Sync {
     /// (Alpaca's own `APCA-API-KEY-ID`) -- durable account provenance the
     /// caller must scope fee evidence and cursor authority by, never merely
     /// `engine_id`/`mode`.
+    fn broker_account_id(&self) -> String;
+}
+
+/// D1 correction (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): injectable
+/// abstraction over Alpaca's options-lifecycle (`OPEXC`/`OPASN`/`OPEXP`/
+/// `OPTRD`) account-activity fetch
+/// (`AlpacaBrokerAdapter::fetch_option_lifecycle_activities_since`).
+/// Mirrors [`CryptoFeeActivityFetcher`] exactly — tests inject a fake
+/// implementation (no real Alpaca call), production wiring is
+/// `AlpacaOptionLifecycleActivityFetcher` in `state/broker.rs`. Read-only
+/// account-activity fetch (never an order submission) — Alpaca options
+/// trading capability does not exist in this codebase yet, so this fetcher
+/// exists independently of any such flag.
+pub trait OptionLifecycleActivityFetcher: Send + Sync {
+    /// Fetch `activity_type` (`"OPEXC"`, `"OPASN"`, `"OPEXP"`, or
+    /// `"OPTRD"`) account activities in ascending order, paginated to
+    /// exhaustion. `after_id`: if `Some`, only activities strictly after
+    /// this activity id are returned — the restart-safe cursor's own
+    /// semantics. Returns `Err(String)` if the REST call fails; callers
+    /// treat this as REST unavailable and fail closed (no mutation, cursor
+    /// never advanced).
+    fn fetch_option_lifecycle_activities_since(
+        &self,
+        activity_type: &str,
+        after_id: Option<&str>,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String>;
+
+    /// The authenticated broker account this fetcher targets (Alpaca's own
+    /// `APCA-API-KEY-ID`) -- durable account provenance the caller must
+    /// scope lifecycle evidence and cursor authority by.
     fn broker_account_id(&self) -> String;
 }
 
@@ -1850,6 +1890,15 @@ impl AppState {
         self.crypto_fee_activity_fetcher = Some(fetcher);
     }
 
+    /// D1 correction: Test helper — inject a fake `OptionLifecycleActivityFetcher`
+    /// without a real Alpaca call.
+    pub fn set_option_lifecycle_activity_fetcher_for_test(
+        &mut self,
+        fetcher: Arc<dyn OptionLifecycleActivityFetcher>,
+    ) {
+        self.option_lifecycle_activity_fetcher = Some(fetcher);
+    }
+
     /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Test helper — inject an on-demand
     /// broker snapshot fetcher.
     ///
@@ -2086,6 +2135,13 @@ impl AppState {
             runtime_selection.deployment_mode,
         );
 
+        // D1 correction: options-lifecycle activity fetcher; mirrors
+        // crypto_fee_activity_fetcher wiring exactly.
+        let option_lifecycle_activity_fetcher = build_option_lifecycle_activity_fetcher_from_env(
+            runtime_selection.broker_kind,
+            runtime_selection.deployment_mode,
+        );
+
         // BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: on-demand snapshot fetcher for
         // the adopt-broker-position-baseline route when the cache is absent at idle.
         let snapshot_fetcher = build_snapshot_fetcher_from_env(
@@ -2255,6 +2311,7 @@ impl AppState {
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
             crypto_fee_activity_fetcher,
+            option_lifecycle_activity_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),
             snapshot_fetcher,
             asset_shortable_preflight_fetcher,

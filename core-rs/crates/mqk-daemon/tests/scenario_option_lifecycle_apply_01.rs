@@ -38,6 +38,8 @@ use mqk_portfolio::option_lifecycle::LifecyclePendingReason;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id";
+
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) if !v.trim().is_empty() => v,
@@ -73,35 +75,45 @@ fn lifecycle_activity(
 ) -> NewOptionLifecycleActivity {
     NewOptionLifecycleActivity {
         activity_id: activity_id.to_string(),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
         engine_id: engine_id.to_string(),
         mode: "PAPER".to_string(),
         activity_type,
-        option_symbol: option_symbol.to_string(),
+        option_symbol: Some(option_symbol.to_string()),
+        underlying_symbol_raw: None,
         activity_date: activity_date.to_string(),
         qty_raw: qty_raw.to_string(),
         price_raw: None,
+        net_amount_raw: "0".to_string(),
         ingested_at_utc: Utc::now(),
     }
 }
 
+/// The paired OPTRD row must share `activity_id` with its OPEXC/OPASN
+/// sibling (D1: the shared id is the real correlation evidence) and
+/// carries `underlying_symbol_raw`, never `option_symbol`.
 fn optrd(
     activity_id: &str,
     engine_id: &str,
-    option_symbol: &str,
+    underlying_symbol_raw: &str,
     activity_date: &str,
     qty_raw: &str,
     price_raw: &str,
 ) -> NewOptionLifecycleActivity {
-    let mut a = lifecycle_activity(
-        activity_id,
-        engine_id,
-        OptionLifecycleActivityType::PairedTrade,
-        option_symbol,
-        activity_date,
-        qty_raw,
-    );
-    a.price_raw = Some(price_raw.to_string());
-    a
+    NewOptionLifecycleActivity {
+        activity_id: activity_id.to_string(),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
+        engine_id: engine_id.to_string(),
+        mode: "PAPER".to_string(),
+        activity_type: OptionLifecycleActivityType::PairedTrade,
+        option_symbol: None,
+        underlying_symbol_raw: Some(underlying_symbol_raw.to_string()),
+        activity_date: activity_date.to_string(),
+        qty_raw: qty_raw.to_string(),
+        price_raw: Some(price_raw.to_string()),
+        net_amount_raw: "0".to_string(),
+        ingested_at_utc: Utc::now(),
+    }
 }
 
 fn call_terms(strike_micros: i64) -> OptionContractTerms {
@@ -135,9 +147,11 @@ async fn j01_expiration_applies_without_any_paired_trade() {
 
     let outcome = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Expiration,
         &call_terms(200_000_000),
         Utc::now(),
     )
@@ -173,9 +187,9 @@ async fn j02_exercise_with_matching_paired_trade_applies_with_correct_effect() {
         .await
         .unwrap();
     let trade = optrd(
-        &format!("{engine_id}::optrd"),
+        &activity_id,
         &engine_id,
-        &option_symbol,
+        "AAPL",
         "2026-06-19",
         "200",
         "200.00",
@@ -186,9 +200,11 @@ async fn j02_exercise_with_matching_paired_trade_applies_with_correct_effect() {
 
     let outcome = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Exercise,
         // 2 contracts * 100 multiplier = 200 shares; $200 strike * 200 = $40,000.
         &call_terms(200_000_000),
         Utc::now(),
@@ -231,9 +247,11 @@ async fn j03_exercise_without_paired_trade_is_pending() {
 
     let outcome = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Exercise,
         &call_terms(200_000_000),
         Utc::now(),
     )
@@ -271,9 +289,9 @@ async fn j04_paired_trade_strike_mismatch_is_pending_never_trusted() {
     // Broker's own paired trade reports a DIFFERENT price than the caller's
     // canonical strike -- a genuine anomaly.
     let trade = optrd(
-        &format!("{engine_id}::optrd"),
+        &activity_id,
         &engine_id,
-        &option_symbol,
+        "AAPL",
         "2026-06-19",
         "100",
         "199.50",
@@ -284,9 +302,11 @@ async fn j04_paired_trade_strike_mismatch_is_pending_never_trusted() {
 
     let outcome = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Exercise,
         &call_terms(200_000_000), // caller believes strike is $200
         Utc::now(),
     )
@@ -330,9 +350,11 @@ async fn j05_second_apply_call_is_already_applied_zero_new_mutation() {
 
     let first = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Expiration,
         &call_terms(200_000_000),
         Utc::now(),
     )
@@ -342,9 +364,11 @@ async fn j05_second_apply_call_is_already_applied_zero_new_mutation() {
 
     let second = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Expiration,
         &call_terms(200_000_000),
         Utc::now(),
     )
@@ -379,9 +403,11 @@ async fn j06_fractional_contracts_remain_pending_through_composition() {
 
     let outcome = apply_option_lifecycle_activity(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         &activity_id,
+        OptionLifecycleActivityType::Expiration,
         &call_terms(200_000_000),
         Utc::now(),
     )

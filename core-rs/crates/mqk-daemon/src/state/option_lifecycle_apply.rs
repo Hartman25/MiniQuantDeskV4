@@ -124,11 +124,14 @@ fn parse_decimal_to_micros(field: &'static str, raw: &str) -> Result<i64, Pendin
 /// `OPEXP` activity already durably ingested by D1). Idempotent: a second
 /// call for the same `lifecycle_activity_id` after a successful apply
 /// returns `AlreadyApplied` with zero new mutation.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_option_lifecycle_activity(
     pool: &PgPool,
+    broker_account_id: &str,
     engine_id: &str,
     mode: &str,
     lifecycle_activity_id: &str,
+    lifecycle_activity_type: OptionLifecycleActivityType,
     terms: &OptionContractTerms,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<ApplyOptionLifecycleOutcome> {
@@ -138,7 +141,14 @@ pub async fn apply_option_lifecycle_activity(
         return Ok(ApplyOptionLifecycleOutcome::AlreadyApplied(existing));
     }
 
-    let Some(raw) = fetch_option_lifecycle_activity(pool, lifecycle_activity_id).await? else {
+    let Some(raw) = fetch_option_lifecycle_activity(
+        pool,
+        broker_account_id,
+        lifecycle_activity_id,
+        lifecycle_activity_type,
+    )
+    .await?
+    else {
         anyhow::bail!(
             "apply_option_lifecycle_activity: activity {lifecycle_activity_id} not found in \
              sys_option_lifecycle_activity_ledger -- D1 ingestion must run first"
@@ -157,12 +167,16 @@ pub async fn apply_option_lifecycle_activity(
         }
     };
 
+    let option_symbol = raw.option_symbol.clone().expect(
+        "OPEXC/OPASN/OPEXP rows always carry option_symbol -- enforced by the DB CHECK constraint",
+    );
+
     if matches!(
         kind,
         OptionLifecycleEventKind::Exercise | OptionLifecycleEventKind::Assignment
     ) {
         let Some(optrd) =
-            find_paired_trade_activity(pool, &raw.option_symbol, &raw.activity_date).await?
+            find_paired_trade_activity(pool, broker_account_id, lifecycle_activity_id).await?
         else {
             return Ok(ApplyOptionLifecycleOutcome::Pending {
                 reason: PendingApplyReason::PairedTradeEvidenceMissing,
@@ -193,7 +207,7 @@ pub async fn apply_option_lifecycle_activity(
 
     let evidence = LifecycleBrokerEvidence {
         kind,
-        option_symbol: raw.option_symbol.clone(),
+        option_symbol: option_symbol.clone(),
         underlying_symbol: terms.underlying_symbol.clone(),
         contracts: QtyMicros::new(contracts_micros),
         multiplier: terms.multiplier,
