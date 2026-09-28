@@ -31,10 +31,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::market_calendar::{
-    self, CalendarCoverageState, MarketCalendarProvider, MarketSessionState,
+    self, CalendarCoverageState, Crypto24x7Provider, MarketCalendarProvider, MarketSessionState,
 };
 use super::session_controller::SessionWindow;
-use super::{MultiSymbolConfigSource, MultiSymbolRuntimeConfig};
+use super::{ExecutionDomain, MultiSymbolConfigSource, MultiSymbolRuntimeConfig};
 use mqk_runtime::native_strategy::EffectiveRuntimeBinding;
 
 // ---------------------------------------------------------------------------
@@ -425,6 +425,41 @@ pub fn resolve_autonomous_daily_session_plan(
 /// (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01).
 /// No-override behavior is therefore byte-for-byte identical to the Bundle 2
 /// authoritative schedule for the same `now_utc`.
+///
+/// B3: `domain` selects the authoritative calendar authority —
+/// `EquityNyse` is byte-for-byte unchanged (still the Bundle 2 NYSE context
+/// provider); `Crypto24_7` uses [`Crypto24x7Provider`] directly rather than
+/// loading the equity-shaped `DailyDataReadinessContext` (instrument
+/// registry file, provider registry, strategy registry) at all — crypto's
+/// session truth is parameter-free (module docs on `Crypto24x7Provider`) and
+/// has no legitimate reason to depend on equity's instrument/provider
+/// config. The fixed-window override remains an equity-only operator knob
+/// (unchanged): it is never applied to `Crypto24_7`, since a 24/7 venue has
+/// no session boundary for an operator UTC window to override.
+pub fn resolve_autonomous_daily_session_plan_for_domain(
+    domain: ExecutionDomain,
+    now_utc: DateTime<Utc>,
+    timing: &AutonomousDailyPlanTiming,
+) -> AutonomousDailySessionPlanResolution {
+    match domain {
+        ExecutionDomain::EquityNyse => {
+            resolve_autonomous_daily_session_plan_from_env(now_utc, timing)
+        }
+        ExecutionDomain::Crypto24_7 => resolve_autonomous_daily_session_plan(
+            &Crypto24x7Provider,
+            now_utc,
+            timing,
+            &FixedWindowOverrideConfig::Absent,
+        ),
+    }
+}
+
+/// Equity-only production entry point (unchanged behavior/signature) — see
+/// [`resolve_autonomous_daily_session_plan_for_domain`] for the domain-aware
+/// wrapper B3 adds around this. Every existing caller of this function is
+/// equity-only today (repo truth: no Crypto autonomous caller exists), so it
+/// is kept as the direct, explicit equity entry point rather than silently
+/// defaulting a domain internally.
 pub fn resolve_autonomous_daily_session_plan_from_env(
     now_utc: DateTime<Utc>,
     timing: &AutonomousDailyPlanTiming,

@@ -63,11 +63,13 @@ use chrono::{TimeZone, Utc};
 use mqk_daemon::state::{
     classify_crypto_continuous_session, classify_equity_us_regular_session,
     classify_forex_weekday_continuous_session, classify_futures_globex_session,
-    resolve_market_session_schedule, resolve_session_profile_for_instrument_metadata,
-    supported_session_profiles, Crypto24x7Provider, FixedWindowOverrideProvider,
-    FuturesSessionWindows, MarketCalendarProvider, MarketSessionProfile, MarketSessionState,
-    MarketSessionTruth, MarketVenueSessionKind, NyseWeekdaysProvider, SessionAuthority,
-    SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow,
+    resolve_autonomous_daily_session_plan_for_domain, resolve_market_session_schedule,
+    resolve_session_profile_for_instrument_metadata, supported_session_profiles,
+    AutonomousDailyPlanTiming, AutonomousDailySessionPlanResolution, Crypto24x7Provider,
+    ExecutionDomain, FixedWindowOverrideProvider, FuturesSessionWindows, MarketCalendarProvider,
+    MarketSessionProfile, MarketSessionState, MarketSessionTruth, MarketVenueSessionKind,
+    NyseWeekdaysProvider, SessionAuthority, SessionProfileResolutionTruth, SessionProfileStatus,
+    SessionWindow,
 };
 
 // ---------------------------------------------------------------------------
@@ -1356,4 +1358,179 @@ fn k247_06_equity_schedule_unaffected_by_crypto_branch() {
         "K247-06: NYSE schedule must remain closed on Saturday after this patch"
     );
     assert_eq!(schedule.calendar_source, "nyse_weekdays_heuristic");
+}
+
+// ---------------------------------------------------------------------------
+// B3 — DOMAIN SESSION SCHEDULING: per-execution-domain session/calendar
+// authority is genuinely independent (mission V4-M5-M8-APPROVED-DECISIONS-
+// IMPLEMENTATION-01-CONTINUATION, required negative proofs).
+// ---------------------------------------------------------------------------
+//
+// | Test     | Claim                                                                |
+// |----------|-----------------------------------------------------------------------|
+// | B3-01    | Equity normal 16:00 ET close leaves Crypto RegularOpen/active         |
+// | B3-02    | Equity Black-Friday 13:00 ET early close leaves Crypto active         |
+// | B3-03    | Weekend Equity Closed / Crypto active (session-plan level)            |
+// | B3-04    | UTC midnight rotates Crypto's market_date while Equity's ET-based     |
+// |          | market_date has not yet rotated -- the two day boundaries are         |
+// |          | genuinely decoupled, not incidentally equal                           |
+// | B3-05    | resolve_autonomous_daily_session_plan_for_domain(EquityNyse, ...) is  |
+// |          | byte-identical to resolve_autonomous_daily_session_plan_from_env      |
+// | B3-06    | An NYSE holiday that makes Equity NotApplicable leaves Crypto's       |
+// |          | session-plan resolution Applicable at the identical instant           |
+
+/// B3-01: at 20:30 UTC on an ordinary July weekday (16:30 EDT, after the
+/// regular 16:00 ET close), NYSE is AfterHours/not-in-session while Crypto
+/// is still RegularOpen/in-session at the exact same instant.
+#[test]
+fn b3_01_equity_normal_close_leaves_crypto_active() {
+    let after_close = ts(2024, 7, 8, 20, 30, 0); // Monday, ordinary trading day
+    let equity_truth = provider().session_for(after_close);
+    assert_eq!(equity_truth.state, MarketSessionState::AfterHours);
+    assert!(!equity_truth.is_in_session());
+
+    let crypto_truth = Crypto24x7Provider.session_for(after_close);
+    assert_eq!(crypto_truth.state, MarketSessionState::RegularOpen);
+    assert!(
+        crypto_truth.is_in_session(),
+        "B3-01: crypto must remain active after equity's ordinary close"
+    );
+}
+
+/// B3-02: 18:01 UTC on Black Friday 2024-11-29 (13:01 EST, one minute past
+/// the 13:00 ET early close) is EarlyClose/not-in-session for NYSE, but
+/// still RegularOpen/in-session for crypto at the same instant.
+#[test]
+fn b3_02_equity_early_close_leaves_crypto_active() {
+    let after_early_close = ts(2024, 11, 29, 18, 1, 0);
+    let equity_truth = provider().session_for(after_early_close);
+    assert_eq!(equity_truth.state, MarketSessionState::EarlyClose);
+    assert!(!equity_truth.is_in_session());
+
+    let crypto_truth = Crypto24x7Provider.session_for(after_early_close);
+    assert_eq!(crypto_truth.state, MarketSessionState::RegularOpen);
+    assert!(
+        crypto_truth.is_in_session(),
+        "B3-02: crypto must remain active through equity's early close"
+    );
+}
+
+/// B3-03: at the session-plan level (not just the raw provider), a weekend
+/// instant is `NotApplicable` (Weekend) for equity while crypto resolves
+/// `Applicable` for the same instant via
+/// [`resolve_autonomous_daily_session_plan_for_domain`].
+#[test]
+fn b3_03_weekend_equity_not_applicable_crypto_applicable() {
+    let saturday = ts(2026, 1, 3, 12, 0, 0);
+    let timing = AutonomousDailyPlanTiming::production_default();
+
+    let equity_resolution = resolve_autonomous_daily_session_plan_for_domain(
+        ExecutionDomain::EquityNyse,
+        saturday,
+        &timing,
+    );
+    assert!(
+        matches!(
+            equity_resolution,
+            AutonomousDailySessionPlanResolution::NotApplicable { .. }
+        ),
+        "B3-03: equity session plan must be NotApplicable on a Saturday: {equity_resolution:?}"
+    );
+
+    let crypto_resolution = resolve_autonomous_daily_session_plan_for_domain(
+        ExecutionDomain::Crypto24_7,
+        saturday,
+        &timing,
+    );
+    assert!(
+        matches!(
+            crypto_resolution,
+            AutonomousDailySessionPlanResolution::Applicable(_)
+        ),
+        "B3-03: crypto session plan must be Applicable on the same Saturday: {crypto_resolution:?}"
+    );
+}
+
+/// B3-04: at 02:00 UTC on 2026-01-06 (a new UTC calendar day has started,
+/// but it is still 2026-01-05 21:00 EST -- equity's ET trading day has NOT
+/// rolled over yet), crypto's `market_date` is already 2026-01-06 while
+/// equity's remains 2026-01-05. The two day boundaries are governed by
+/// disjoint code paths in `resolve_market_session_schedule` (keyed off
+/// `truth.source`), not incidentally-equal arithmetic -- this proves it.
+#[test]
+fn b3_04_utc_midnight_rotates_crypto_day_only() {
+    let post_utc_midnight_pre_et_midnight = ts(2026, 1, 6, 2, 0, 0);
+
+    let crypto_schedule =
+        resolve_market_session_schedule(&Crypto24x7Provider, post_utc_midnight_pre_et_midnight);
+    assert_eq!(
+        crypto_schedule.market_date,
+        (2026, 1, 6),
+        "B3-04: crypto's market_date must already be the new UTC day"
+    );
+
+    let equity_schedule =
+        resolve_market_session_schedule(&provider(), post_utc_midnight_pre_et_midnight);
+    assert_eq!(
+        equity_schedule.market_date,
+        (2026, 1, 5),
+        "B3-04: equity's ET-based market_date must still be the PRIOR day -- \
+         UTC midnight must not rotate equity's trading date"
+    );
+}
+
+/// B3-05: the new domain-aware equity arm is byte-identical to the
+/// pre-existing `resolve_autonomous_daily_session_plan_from_env` entry point
+/// -- adding domain selection must not change equity's own resolution.
+#[test]
+fn b3_05_domain_wrapper_equity_arm_matches_existing_entry_point() {
+    let now = ts(2026, 3, 10, 15, 0, 0); // ordinary Tuesday trading hours
+    let timing = AutonomousDailyPlanTiming::production_default();
+
+    let via_domain =
+        resolve_autonomous_daily_session_plan_for_domain(ExecutionDomain::EquityNyse, now, &timing);
+    let via_env = mqk_daemon::state::resolve_autonomous_daily_session_plan_from_env(now, &timing);
+    assert_eq!(
+        via_domain, via_env,
+        "B3-05: EquityNyse arm of the domain wrapper must match the pre-existing entry point exactly"
+    );
+}
+
+/// B3-06: on the known NYSE full-day holiday 2026-07-03, equity's
+/// session-plan resolution is `NotApplicable(ExchangeHoliday)` while
+/// crypto's resolves `Applicable` at the identical instant -- the plan-level
+/// counterpart to K247-02's raw-provider proof.
+#[test]
+fn b3_06_equity_holiday_not_applicable_crypto_applicable() {
+    let holiday = ts(2026, 7, 3, 15, 0, 0);
+    let timing = AutonomousDailyPlanTiming::production_default();
+
+    let equity_resolution = resolve_autonomous_daily_session_plan_for_domain(
+        ExecutionDomain::EquityNyse,
+        holiday,
+        &timing,
+    );
+    match equity_resolution {
+        AutonomousDailySessionPlanResolution::NotApplicable { reason_code, .. } => {
+            assert_eq!(
+                reason_code.as_str(),
+                "exchange_holiday",
+                "B3-06: equity must classify 2026-07-03 as an exchange holiday"
+            );
+        }
+        other => panic!("B3-06: expected equity NotApplicable(ExchangeHoliday), got {other:?}"),
+    }
+
+    let crypto_resolution = resolve_autonomous_daily_session_plan_for_domain(
+        ExecutionDomain::Crypto24_7,
+        holiday,
+        &timing,
+    );
+    assert!(
+        matches!(
+            crypto_resolution,
+            AutonomousDailySessionPlanResolution::Applicable(_)
+        ),
+        "B3-06: crypto session plan must be Applicable through equity's holiday: {crypto_resolution:?}"
+    );
 }

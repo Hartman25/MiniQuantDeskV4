@@ -92,11 +92,11 @@ pub use autonomous_completed_bar_task::{
 pub use autonomous_daily_operation::{
     derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, project_autonomous_daily_operation_read_model,
-    resolve_autonomous_daily_session_plan, resolve_autonomous_daily_session_plan_from_env,
-    resolve_fixed_window_override_config_from_env, AutonomousDailyOperationEventReadModel,
-    AutonomousDailyOperationReadModel, AutonomousDailyPlanReason, AutonomousDailyPlanTiming,
-    AutonomousDailyScheduleSource, AutonomousDailySessionPlan,
-    AutonomousDailySessionPlanResolution, FixedWindowOverrideConfig,
+    resolve_autonomous_daily_session_plan, resolve_autonomous_daily_session_plan_for_domain,
+    resolve_autonomous_daily_session_plan_from_env, resolve_fixed_window_override_config_from_env,
+    AutonomousDailyOperationEventReadModel, AutonomousDailyOperationReadModel,
+    AutonomousDailyPlanReason, AutonomousDailyPlanTiming, AutonomousDailyScheduleSource,
+    AutonomousDailySessionPlan, AutonomousDailySessionPlanResolution, FixedWindowOverrideConfig,
 };
 use broker::{
     build_asset_shortable_preflight_fetcher_from_env, build_fill_activity_fetcher_from_env,
