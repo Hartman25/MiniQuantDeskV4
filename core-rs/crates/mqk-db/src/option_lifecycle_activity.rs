@@ -437,3 +437,49 @@ pub async fn fetch_applied_option_lifecycle_effect(
         },
     ))
 }
+
+// ---------------------------------------------------------------------------
+// D3: pending-lifecycle gate query
+// ---------------------------------------------------------------------------
+
+/// D3's pending-lifecycle gate: does `option_symbol` have any `OPEXC`/
+/// `OPASN`/`OPEXP` activity durably ingested by D1 that has not yet had a
+/// matching `PairedLifecycleEffect` applied by D2? Purely derived from the
+/// two existing D1/D2 tables via a LEFT JOIN -- no separate mutable state,
+/// so the answer is restart-safe by construction: it reflects only what is
+/// already committed.
+///
+/// Returns the oldest such unresolved activity, if any. A caller with a
+/// non-`None` result must treat `option_symbol` (and its underlying) as
+/// lifecycle-pending: never synthesize a fill from a broker position change
+/// for it, never overwrite its local snapshot from broker truth, and refuse
+/// (fail closed) any execution that depends on its resolved state -- until
+/// this returns `None` again, i.e. until D2 has genuinely applied the
+/// matching effect.
+pub async fn find_unresolved_option_lifecycle_activity(
+    pool: &PgPool,
+    option_symbol: &str,
+) -> Result<Option<(String, OptionLifecycleActivityType)>> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        r#"
+        select l.activity_id, l.activity_type
+          from sys_option_lifecycle_activity_ledger l
+          left join sys_option_lifecycle_applied a
+            on a.lifecycle_activity_id = l.activity_id
+         where l.option_symbol = $1
+           and l.activity_type in ('OPEXC', 'OPASN', 'OPEXP')
+           and a.lifecycle_activity_id is null
+         order by l.ingested_at_utc asc
+         limit 1
+        "#,
+    )
+    .bind(option_symbol)
+    .fetch_optional(pool)
+    .await
+    .context("find_unresolved_option_lifecycle_activity failed")?;
+
+    row.map(|(activity_id, activity_type_raw)| {
+        OptionLifecycleActivityType::parse(&activity_type_raw).map(|t| (activity_id, t))
+    })
+    .transpose()
+}
