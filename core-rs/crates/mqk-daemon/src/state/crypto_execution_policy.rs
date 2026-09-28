@@ -22,19 +22,20 @@
 //!   an already-read `Option<&str>`; `_from_env` is the one env-reading
 //!   wrapper, mirroring `env.rs`'s `operator_auth_mode_from_env_values`/
 //!   `_from_env` pair.
-//! - This module does not by itself put a crypto order on the wire, does not
-//!   rewrite or default any order's `time_in_force` field, and is not called
-//!   from `decision.rs`. Wiring a configured value into a real order remains
-//!   explicit future work for whichever caller eventually constructs a
-//!   crypto `InternalStrategyDecision` — it must pass the resolved,
-//!   already-admissible value in directly, never let `decision.rs` reach
-//!   into this config and silently rewrite an existing value (that
-//!   "silent rewrite" pattern is the exact defect IR-2 exists to forbid).
-//! - Crypto capability remains default off (`D2/B4`); this module has zero
-//!   production callers today, matching this repo's established precedent
-//!   for asset-class capability work (`ASSET-CORE-01`..`05`: build the
-//!   model/config layer and prove it before a concrete consumer requires
-//!   wiring).
+//! - B5 correction: `decision.rs::resolve_admitted_time_in_force` is now the
+//!   one production caller. It reads this module's resolved config once,
+//!   then emits `Explicit(gtc)`/`Explicit(ioc)` directly into the real
+//!   `InternalStrategyDecision`/order-intent path for a crypto order —
+//!   `decision.rs` never reaches into this module to silently rewrite an
+//!   *existing* decision value (the pattern IR-2 forbids); it replaces the
+//!   generic translator's meaningless `"day"` placeholder, which crypto
+//!   never admits, with the configured choice before the order is built.
+//!   `Unconfigured`/`Invalid` refuses before that order is constructed.
+//! - Crypto capability remains default off (`D2/B4`) at the higher
+//!   dispatch/arm gates; this module's config is consumed unconditionally
+//!   once a crypto decision reaches `submit_internal_strategy_decision`,
+//!   matching this repo's established precedent for asset-class capability
+//!   work (`ASSET-CORE-01`..`05`).
 
 use sha2::{Digest, Sha256};
 
