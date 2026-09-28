@@ -913,6 +913,46 @@ No TensorFlow dependency, model-runtime crate, ONNX runtime, local-LLM superviso
 
 This G5 entry does **not** alter G2's historical census/bucket counts, G3, or G4, and does not make any new ML/AI ID a Lane row or V4 blocker. It supersedes only conflicting interpretation of the older deferred ML design note near the end of this document; that historical note remains preserved. Durable capability detail lives in §I2B (planning-only statuses `MILESTONE_CANDIDATE` / `RESEARCH_HYPOTHESIS` / `PLANNED / NOT AUTHORIZED`); this section is the decision record and does not duplicate it.
 
+### G6. M5-M8 operator-approved-decisions implementation controller (`V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01`, 2026-09-27 -> 2026-09-28)
+
+Starting HEAD `ead40bf1` (G4's baseline). Ending HEAD `e5fea9d5`. Thirty-nine local commits above `origin/main` `8e029b86`, **NOT PUSHED**. This wave implements the operator's approved M6/M7/M8 design decisions on top of G3/G4's QtyMicros closure; it does not reopen G3/G4. The session executing waves B/C/D1-D4 was interrupted by an unplanned machine restart before D5 was proven/committed; this entry closes that continuation (D5 + second adversarial sweep) under the same controller.
+
+**Wave B (M6 — execution-domain identity, Crypto policy, fee ledger):**
+
+| Commits | Patch | Invariant |
+|---|---|---|
+| `9e490fd6`..`e7b681b5` | B1/D1-D2/B4 | Execution-domain identity threaded onto autonomous daily operations and runs; explicit default-off Paper-only Alpaca Crypto capability flag added (`crypto_capability_enabled`, never `true` in a checked-in constructor) |
+| `88e71d3c`..`6ea2f09a` | B2/B2.2/B2.4 | Execution-domain identity on the runtime leader-lease gate; domain-keyed `AppState` runtime ownership — one domain's lease/session state cannot be read as another's |
+| `7e97c3ab` | B2.3 | Negative/mutation proof that a cross-domain outbox claim is rejected |
+| `4af00bc3`, `ff9ba7dc`, `67c612ca` | B2.5/B2.6 | Domain-scope orphan-recovery lookups, status-snapshot lookups, and per-run signal/order intake caps all keyed by execution domain, not global |
+| `7e05ca6c` | B3 | Per-execution-domain session/calendar authority (Crypto is not NYSE-session-gated); corrected forward by `c7cc525e` (B3 correction: `ExecutionDomain` threaded through the autonomous daily coordinator itself, not just the session check) |
+| `ba687998` | B5 | Explicit Crypto time-in-force execution policy (`gtc`/`ioc` only, mirrors the G4 IR-2 decision at the policy-surface level); corrected forward by `eb3fb760` (B5 correction: the TIF choice is folded into durable operation identity, so a TIF change is a new identity, not a silent mutation) |
+| `d33cd7f6` | B6 | Durable deterministic Crypto fee-activity ingestion (schema + normalization); corrected forward by `88ead4d6` (B6 correction: a real production ingestion caller exists — verified this session, §"Second adversarial sweep" below — the schema is not an orphaned model) |
+
+**Wave C (M7 — futures/FX identity, IBKR foundation):**
+
+| Commits | Patch | Invariant |
+|---|---|---|
+| `53cc3993` | C1 | Provider-neutral futures/FX canonical identity (schemas + execution); no automatic continuous-future roll is representable — there is no continuous/perpetual `ContractSpec::Future` variant to roll, by construction |
+| `93fdc15c` | C2/C3 | IBKR dependency decision recorded; deterministic `mqk-broker-ibkr` adapter foundation built behind an `IbkrTransport` trait seam with a fake in-process transport — no real IBKR Gateway connectivity required for code closure |
+| `1120d531` | C4 | Futures/FX contract resolution against the C1 identity model; unresolved/ambiguous contracts refuse rather than guess |
+
+**Wave D (M8 — options lifecycle, vertical-spread mleg):**
+
+| Commits | Patch | Invariant | Proof (local, this session for D5; D1-D4 proof recorded in prior session artifacts) |
+|---|---|---|---|
+| `ce50dcf6` | D4 | Typed options lifecycle events (`Exercise`/`Assignment`/`Expiration`) in `mqk-portfolio`, model-only, zero production callers — distinct from an ordinary fill | pre-existing |
+| `3a7416be` | D1 | Durable options-lifecycle activity ingestion (migration 0084) — raw broker `OPEXC`/`OPASN`/`OPEXP`/`OPTRD` evidence lands in an append-only ledger before any accounting effect is derived | pre-existing |
+| `b008a471` | D2 | `apply_option_lifecycle_activity`: idempotent apply transaction — a retry of the same `lifecycle_activity_id` short-circuits to `AlreadyApplied` before any mutation, never a double effect | `scenario_option_lifecycle_apply_01` j01-j06, re-run this session against disposable Postgres on port 5434: 6/6 pass, including `j05_second_apply_call_is_already_applied_zero_new_mutation` |
+| `37ac3de2` | D3 | `evaluate_option_lifecycle_pending_gate`: read-only, restart-safe-by-construction (derived entirely from the durable D1/D2 tables, no separate mutable flag) fail-closed gate — a future execution/reconcile caller must refuse rather than trust broker truth while lifecycle evidence is unresolved | `scenario_option_lifecycle_pending_gate_01` k01-k06, re-run this session: 6/6 pass, including `k06_gate_answer_survives_a_fresh_pool_restart_simulation` |
+| `e5fea9d5` | D5 | `AlpacaBrokerAdapter::submit_vertical_spread`/`cancel_vertical_spread`/`replace_vertical_spread`, gated by a new default-off `options_mleg_capability_enabled` flag (never `true` in any checked-in constructor); submission always carries both legs of a defined-risk vertical spread in one `order_class=mleg` POST, never decomposed into independent per-leg orders; response normalization matches legs back by option symbol, refusing `AmbiguousSubmit` on any leg-count or identity mismatch; cancel/replace always refuse (`options_mleg_cancel_unproven`/`options_mleg_replace_unproven`) because Alpaca's public API reference does not document mleg-specific cancel/replace semantics | 9/9 unit tests (`mleg::tests`, `mleg_vertical_spread_tests`) green; negative/mutation control this session: dropping the short leg from `build_mleg_submit_body`'s output turns `build_mleg_submit_body_carries_exactly_two_legs_never_split` and `submit_vertical_spread_sends_exactly_one_post_with_both_legs` RED, reverted to GREEN; `mqk-broker-alpaca` full crate 94+ tests green; `mqk-daemon` compiles clean with the new required `AlpacaConfig` field threaded through all six existing constructor sites in `state/broker.rs` |
+
+**Second adversarial sweep (this session, post-D5-commit):** no reopening of G3/G4 without contradiction; found none. `crypto_capability_enabled: true` and `options_mleg_capability_enabled: true` occur only inside `#[cfg(test)]` modules in `mqk-broker-alpaca/src/lib.rs` — zero occurrences in any checked-in constructor or daemon wiring site (`grep` verified repo-wide). `asset_risk_policy` (Wave C1-adjacent) has zero callers in `order_router.rs`, `gateway.rs`, or `mqk-daemon/src` — remains model-only, not wired into live routing. B6's crypto fee-activity ingestion has a real production caller (`state/crypto_fee_ingestion.rs`, wired from `routes.rs`/`routes/repair.rs`) — B6 correction confirmed, not an orphaned schema. IBKR's `IbkrTransport` trait + fake transport confirms the mockable-seam invariant; `contract_resolution.rs` module docs state the no-automatic-roll guarantee structurally (no continuous-future variant exists to roll). D2/D3 idempotency and restart-safety are proven by real DB-backed tests (`j05`, `k06` above), not just structural reading. No `Uuid::new_v4()` in the option-lifecycle apply path. No synthetic fill/snapshot-overwrite path was found for a pending-lifecycle option. Remaining ordinary deterministic defects in the audited M5-M8 stack: **NONE FOUND**.
+
+**Acceptance boundary (local, this session):** `cargo check -p mqk-broker-alpaca -p mqk-daemon --tests` clean; `cargo test -p mqk-broker-alpaca` full crate green (94+29+6+23+32+17+29+18+4+16+6+3+17 = all green across every scenario file); `cargo test -p mqk-daemon --test scenario_option_lifecycle_apply_01 --test scenario_option_lifecycle_pending_gate_01 --test scenario_external_snapshot_refresh_risk03 --test scenario_live_shadow_flatten_on_halt_01` against disposable Postgres on verified port 5434: 18/18 pass; `cargo clippy -p mqk-broker-alpaca -p mqk-daemon --tests -- -D warnings` clean; `rustfmt --check` clean on touched files; `git diff --check` clean.
+
+**Resource boundary:** full local `cargo test --workspace` **NOT RUN** (resource bounded, per §30). GitHub CI: NOT VERIFIED (no push). Paper orders 0; Live orders 0; broker/provider network calls 0; `smoke_logs/` untouched. No real Alpaca options/crypto Paper or Live proof performed. No real IBKR Gateway/provider proof performed. No controlled Live proof performed. M6/M7/M8 milestone exit gates are **NOT** claimed operationally complete — this entry records deterministic code-level closure of the operator-approved D1-D5/B/C decisions only. Next step per mission: independent review of `48bed899`..`e5fea9d5`, then at most one consolidated surgical correction controller before any push.
+
 ## H. Immediate Sequencing From This Contract
 
 1. Current read-only audit/preparation: inspect Milestone 1 bounded subsystems and build the complete finding set without spending Claude implementation usage unnecessarily.

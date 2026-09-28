@@ -1164,4 +1164,27 @@ IR-3 malformed/unknown outbox side cannot explain reconcile drift               
 Alpaca supports_asset_class(Crypto)                                                                          STILL FALSE (operator decision; unchanged)
 ```
 
+## M5-M8 Operator-Approved-Decisions Implementation Controller (`V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01`, 2026-09-27 -> 2026-09-28)
+
+Authoritative record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G6. Starting HEAD `ead40bf1`; ending HEAD `e5fea9d5`; thirty-nine local commits, not pushed; full `cargo test --workspace` NOT RUN (resource bounded); GitHub CI not verified. This controller was interrupted by an unplanned machine restart before D5; resumed and closed in continuation without redoing prior discovery.
+
+```text
+M6 execution-domain identity (autonomous ops, runs, leader lease, orphan recovery, intake caps)   CLOSED_PROVEN (B1-B2.6, `9e490fd6`..`7e97c3ab`)
+M6 per-execution-domain session/calendar authority (Crypto not NYSE-gated)                        CLOSED_PROVEN (B3, `7e05ca6c`, corrected `c7cc525e`)
+M6 explicit Crypto time-in-force policy folded into durable operation identity                     CLOSED_PROVEN (B5, `ba687998`, corrected `eb3fb760`)
+M6 durable Crypto fee-activity ingestion with real production caller                                CLOSED_PROVEN (B6, `d33cd7f6`, corrected `88ead4d6`; caller verified this session)
+M6 Alpaca `supports_asset_class(Crypto)` / new `crypto_capability_enabled` default                 STILL FALSE / DEFAULT OFF (operator decision; grep-verified zero non-test true occurrences)
+M7 provider-neutral futures/FX identity; no automatic continuous-future roll representable         CLOSED_PROVEN (C1, `53cc3993`)
+M7 IBKR adapter foundation behind mockable `IbkrTransport` seam; dependency decision recorded       CLOSED_PROVEN (C2/C3, `93fdc15c`); no real Gateway connectivity required
+M7 futures/FX contract resolution; unresolved/ambiguous contracts refuse                            CLOSED_PROVEN (C4, `1120d531`)
+M8 typed options lifecycle events, model-only, zero production callers                              CLOSED_PROVEN (D4, `ce50dcf6`, pre-existing)
+M8 durable options-lifecycle activity ingestion (migration 0084)                                    CLOSED_PROVEN (D1, `3a7416be`)
+M8 idempotent options-lifecycle apply transaction (retry never double-applies)                      CLOSED_PROVEN (D2, `b008a471`); DB-proven this session (j05, disposable Postgres :5434)
+M8 fail-closed pending-lifecycle reconciliation gate, restart-safe by construction                  CLOSED_PROVEN (D3, `37ac3de2`); DB-proven this session (k06, disposable Postgres :5434)
+M8 atomic Alpaca options mleg vertical-spread submit; default-off capability; cancel/replace refuse  CLOSED_PROVEN (D5, `e5fea9d5`); mutation-proven this session (dropped leg -> RED -> reverted GREEN)
+M8 options execution real Paper/Live proof; IBKR real Gateway proof; controlled Live proof           OPERATOR_VALIDATION_REQUIRED (none performed; out of scope for this controller)
+```
+
+Second adversarial sweep (this session, post-D5): no ordinary deterministic defect found in the audited M5-M8 stack; `asset_risk_policy` confirmed model-only (zero callers in `order_router.rs`/`gateway.rs`/`mqk-daemon/src`); no `Uuid::new_v4()` in the option-lifecycle apply path; no synthetic fill or snapshot-overwrite path for a pending-lifecycle option. Overall status: **M5-M8 deterministic engineering is LOCALLY COMPLETE for the operator-approved D1-D5/B/C decisions.** M6/M7/M8 milestone exit gates remain **NOT** operationally complete — no real Alpaca options/crypto Paper or Live session, no real IBKR Gateway session, no controlled Live proof. No milestone is claimed `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`. Next: independent review of `48bed899`..`e5fea9d5`, then at most one consolidated surgical correction controller before any push.
+
 Crypto time-in-force is no longer an open operator decision. Because the generic translator emits `day`, the Crypto strategy path fails closed at admission until a future authorized surface emits `gtc`/`ioc`. M5-M8 remain not `COMPLETE`, `ACCEPTED` or `OPERATIONALLY VALIDATED`.

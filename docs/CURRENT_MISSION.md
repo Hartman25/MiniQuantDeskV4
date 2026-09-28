@@ -6,6 +6,18 @@ This file is intentionally short. It records current durable project state, not 
 
 ---
 
+## -11. M5-M8 Operator-Approved-Decisions Implementation Controller (2026-09-27 -> 2026-09-28, `V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01`)
+
+Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G6 and the section of the same name at the end of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `ead40bf1`; ending HEAD `e5fea9d5`; thirty-nine local commits, NOT pushed. Interrupted mid-mission by an unplanned machine restart before D5; resumed and closed in continuation. Supersedes §-10 where they differ.
+
+- Implements the operator's approved M6/M7/M8 design decisions on top of G3/G4's QtyMicros closure: per-execution-domain identity/session/TIF/fee-ledger for Crypto (Wave B), provider-neutral futures/FX identity + a mockable-transport IBKR adapter foundation (Wave C), and the full options-lifecycle chain — durable ingestion, idempotent apply, fail-closed pending-reconciliation gate, and an atomic default-off Alpaca multi-leg (`mleg`) vertical-spread submit/cancel/replace (Wave D, D1-D5).
+- D5 (this continuation): `AlpacaBrokerAdapter::submit_vertical_spread` always carries both legs of a defined-risk vertical spread in one `order_class=mleg` POST, never decomposed into independent per-leg orders; gated by a new default-off `options_mleg_capability_enabled` flag; cancel/replace always refuse (Alpaca's public reference does not document mleg-specific semantics). Mutation-proven (dropping a leg turns the relevant tests RED).
+- Second adversarial sweep across the full local M5-M8 stack found no ordinary deterministic defect: Crypto/mleg capability flags remain default-off everywhere outside test code; `asset_risk_policy` remains model-only (zero routing callers); B6's fee-activity ingestion has a real production caller; D2/D3 idempotency and restart-safety re-proven against a disposable DB.
+- Unchanged hard stops: real Alpaca options/crypto Paper or Live session, real IBKR Gateway session, controlled Live proof, 24/7 autonomous scheduling, fractional research/backtest. M6/M7/M8 milestone exit gates are NOT operationally complete.
+- Not run: full `cargo test --workspace` (resource bounded), any Paper/Live/provider session, GitHub CI. Next: independent review of `48bed899`..`e5fea9d5`, then at most one consolidated surgical correction controller before any push.
+
+---
+
 ## -10. M5-M8 Consolidated Surgical Correction Controller (2026-09-27, `V4-M5-M8-CONSOLIDATED-SURGICAL-CORRECTION-01`)
 
 Full record: `MiniQuantDeskV4_Master_Program_Plan_and_Ledger.md` §G4 and the section of the same name at the end of `docs/V4_CODE_COMPLETION_MANIFEST.md`. Starting HEAD `ead40bf1`; five local commits, NOT pushed. Supersedes §-9 where they differ.
