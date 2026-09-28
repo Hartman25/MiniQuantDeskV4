@@ -40,6 +40,7 @@
 //!   closed, never silently defaults)
 
 pub mod connection;
+pub mod contract_resolution;
 pub mod events;
 pub mod identity;
 pub mod order_mapping;
