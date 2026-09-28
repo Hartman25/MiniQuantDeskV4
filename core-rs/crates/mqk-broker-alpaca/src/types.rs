@@ -179,6 +179,75 @@ pub struct AlpacaSubmitResponse {
     pub created_at: Option<String>,
 }
 // ---------------------------------------------------------------------------
+// D5: multi-leg (mleg) options order types - POST /v2/orders (order_class=mleg)
+//
+// Per Alpaca's official POST /v2/orders reference (verified 2026-09-28):
+// a multi-leg order carries `"order_class": "mleg"`, a top-level `"qty"`
+// (units of the overall spread strategy, not per-leg), `"limit_price"` (the
+// net spread price), and a `"legs"` array of up to 4 entries, each with
+// `symbol`, `side` ("buy"/"sell"), `position_intent`
+// ("buy_to_open"/"buy_to_close"/"sell_to_open"/"sell_to_close"), and
+// `ratio_qty`. The response echoes the same parent-order shape with `"legs"`
+// populated immediately on submit -- no separate nested-query call is
+// needed to observe per-leg identity. Alpaca's public reference does not
+// document cancel/replace semantics specific to `order_class=mleg`; this
+// crate therefore never attempts a PATCH/DELETE against an mleg parent (see
+// `AlpacaBrokerAdapter::cancel_vertical_spread` /
+// `replace_vertical_spread`), refusing fail-closed instead of reusing the
+// simple-order cancel/replace path against an unproven shape.
+// ---------------------------------------------------------------------------
+/// One leg of an outbound multi-leg order submission.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlpacaMlegLegBody {
+    pub symbol: String,
+    /// `"buy"` or `"sell"`.
+    pub side: String,
+    /// `"buy_to_open"`, `"buy_to_close"`, `"sell_to_open"`, or `"sell_to_close"`.
+    pub position_intent: String,
+    /// Proportional quantity relative to the parent order's `qty`, as a
+    /// decimal string (e.g. `"1"` for a 1:1 single-ratio vertical spread).
+    pub ratio_qty: String,
+}
+/// Raw Alpaca multi-leg order submission request body for
+/// `POST /v2/orders` with `order_class: "mleg"`. Always submitted as ONE
+/// request carrying every leg -- this crate never submits legs
+/// independently.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlpacaMlegSubmitBody {
+    pub order_class: String,
+    /// Units of the overall spread strategy (e.g. `"1"` for one spread).
+    pub qty: String,
+    #[serde(rename = "type")]
+    pub order_type: String,
+    pub time_in_force: String,
+    /// Net spread price as a decimal string.
+    pub limit_price: String,
+    pub legs: Vec<AlpacaMlegLegBody>,
+    pub client_order_id: String,
+}
+/// One leg as echoed back in a multi-leg order's response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaMlegLegResponse {
+    /// Alpaca-assigned broker order UUID for this individual leg.
+    pub id: String,
+    pub symbol: String,
+    pub side: String,
+    pub status: String,
+}
+/// Raw Alpaca multi-leg order submission response body from
+/// `POST /v2/orders`. `legs` is populated immediately -- no separate
+/// nested-query call is required.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaMlegSubmitResponse {
+    /// Alpaca-assigned broker order UUID for the parent order.
+    pub id: String,
+    pub client_order_id: String,
+    pub order_class: String,
+    pub qty: String,
+    pub status: String,
+    pub legs: Vec<AlpacaMlegLegResponse>,
+}
+// ---------------------------------------------------------------------------
 // Replace types - PATCH /v2/orders/{order_id}
 // ---------------------------------------------------------------------------
 /// Raw Alpaca replace request body for `PATCH /v2/orders/{order_id}`.

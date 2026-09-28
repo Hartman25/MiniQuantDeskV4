@@ -58,15 +58,20 @@
 pub mod fee_attribution;
 pub mod fill_authority;
 pub mod inbound;
+pub mod mleg;
 pub mod normalize;
 pub mod snapshot;
 pub mod types;
+use crate::mleg::{
+    build_mleg_submit_body, normalize_mleg_submit_response, MlegRefusal,
+    SubmitVerticalSpreadRequest, SubmittedVerticalSpread,
+};
 use crate::normalize::normalize_trade_update;
 use crate::types::{
-    AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFeeActivity, AlpacaFetchCursor, AlpacaOpenOrderRaw,
-    AlpacaOrder, AlpacaOrderActivity, AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody,
-    AlpacaReplaceResponse, AlpacaSubmitBody, AlpacaSubmitResponse, AlpacaTradeUpdate,
-    AlpacaTradeUpdatesResume,
+    AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFeeActivity, AlpacaFetchCursor,
+    AlpacaMlegSubmitResponse, AlpacaOpenOrderRaw, AlpacaOrder, AlpacaOrderActivity,
+    AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody, AlpacaReplaceResponse, AlpacaSubmitBody,
+    AlpacaSubmitResponse, AlpacaTradeUpdate, AlpacaTradeUpdatesResume,
 };
 pub use fee_attribution::{normalize_fee_activity, FeeAttributionRecord, FeeNormalizeError};
 pub use inbound::{
@@ -195,6 +200,16 @@ pub struct AlpacaConfig {
     /// Live-targeting config can never advertise Crypto regardless of this
     /// field's value -- a structural guarantee, not a convention.
     pub crypto_capability_enabled: bool,
+    /// D5 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION):
+    /// explicit, default-off multi-leg (mleg) vertical-spread options
+    /// order capability. Never `true` in any checked-in default
+    /// constructor (`paper()`, `live()`, `new_for_test()`) -- a caller
+    /// must opt in explicitly via
+    /// [`AlpacaBrokerAdapter::with_options_mleg_capability_enabled`].
+    /// Gates [`AlpacaBrokerAdapter::submit_vertical_spread`] only; it does
+    /// not affect `supports_asset_class` or single-leg equity/crypto
+    /// order submission at all.
+    pub options_mleg_capability_enabled: bool,
 }
 
 impl AlpacaConfig {
@@ -245,6 +260,7 @@ impl AlpacaBrokerAdapter {
                 api_key_id: cfg.api_key_id.trim().to_owned(),
                 api_secret_key: cfg.api_secret_key.trim().to_owned(),
                 crypto_capability_enabled: cfg.crypto_capability_enabled,
+                options_mleg_capability_enabled: cfg.options_mleg_capability_enabled,
             },
             client,
         }
@@ -270,6 +286,22 @@ impl AlpacaBrokerAdapter {
         self.cfg.crypto_capability_enabled
     }
 
+    /// D5: explicit opt-in for the multi-leg vertical-spread options
+    /// capability, callable on any already-constructed adapter. Never
+    /// wired to a checked-in default -- an operator/config layer above
+    /// this crate calls it explicitly.
+    pub fn with_options_mleg_capability_enabled(mut self, enabled: bool) -> Self {
+        self.cfg.options_mleg_capability_enabled = enabled;
+        self
+    }
+
+    /// D5: the multi-leg vertical-spread capability flag as configured.
+    /// `submit_vertical_spread` refuses fail-closed whenever this is
+    /// `false`.
+    pub fn options_mleg_capability_enabled(&self) -> bool {
+        self.cfg.options_mleg_capability_enabled
+    }
+
     /// Test constructor: injects a mock base URL so `Retry-After`-threading
     /// tests can point the adapter at an in-process mock server.
     #[cfg(test)]
@@ -279,6 +311,7 @@ impl AlpacaBrokerAdapter {
             api_key_id: "test-key".to_string(),
             api_secret_key: "test-secret".to_string(),
             crypto_capability_enabled: false,
+            options_mleg_capability_enabled: false,
         })
     }
     /// Convenience constructor for Alpaca paper trading.
@@ -296,6 +329,7 @@ impl AlpacaBrokerAdapter {
             api_key_id,
             api_secret_key,
             crypto_capability_enabled: false,
+            options_mleg_capability_enabled: false,
         })
     }
 
@@ -314,6 +348,7 @@ impl AlpacaBrokerAdapter {
             api_key_id,
             api_secret_key,
             crypto_capability_enabled: false,
+            options_mleg_capability_enabled: false,
         })
     }
     // -----------------------------------------------------------------------
@@ -694,6 +729,111 @@ impl AlpacaBrokerAdapter {
     pub fn fetch_asset(&self, symbol: &str) -> Result<AlpacaAssetRaw, BrokerError> {
         let normalized = symbol.trim().to_ascii_uppercase();
         self.get(&format!("/v2/assets/{normalized}"))
+    }
+
+    /// D5 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION):
+    /// submit a two-leg vertical spread as ONE `order_class=mleg` order.
+    /// Refuses fail-closed before any HTTP call when
+    /// `options_mleg_capability_enabled` is `false` -- the default for
+    /// every checked-in constructor. Not a `BrokerAdapter` trait method:
+    /// no production caller exists yet (Alpaca options capability does
+    /// not exist in this codebase), mirroring D1/D2/D3's own scope.
+    ///
+    /// Never submits the two legs as independent orders -- `build_body`
+    /// (see `mleg::build_mleg_submit_body`) always carries both legs in
+    /// the single request this method sends.
+    pub fn submit_vertical_spread(
+        &self,
+        req: &SubmitVerticalSpreadRequest,
+    ) -> Result<SubmittedVerticalSpread, BrokerError> {
+        if !self.cfg.options_mleg_capability_enabled {
+            return Err(BrokerError::Reject {
+                code: "options_mleg_capability_disabled".to_string(),
+                detail: "submit_vertical_spread: options_mleg_capability_enabled is false -- \
+                         this capability defaults off and must be explicitly opted into"
+                    .to_string(),
+            });
+        }
+        let body = build_mleg_submit_body(req);
+        let url = format!("{}/v2/orders", self.cfg.base_url);
+        let client = self.client.clone();
+        let key_id = self.cfg.api_key_id.clone();
+        let secret_key = self.cfg.api_secret_key.clone();
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| BrokerError::AmbiguousSubmit {
+            detail: format!("submit_vertical_spread: body serialize error: {e}"),
+        })?;
+        let alpaca: AlpacaMlegSubmitResponse = Self::run_async(async move {
+            let http_resp = client
+                .post(&url)
+                .header("APCA-API-KEY-ID", &key_id)
+                .header("APCA-API-SECRET-KEY", &secret_key)
+                .header("Content-Type", "application/json")
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(classify_transport_err_for_submit)?;
+            let status = http_resp.status();
+            if !status.is_success() {
+                let retry_after_ms = parse_retry_after_ms(
+                    http_resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                );
+                let resp_body = http_resp.text().await.unwrap_or_default();
+                return Err(classify_http_status(status, &resp_body, retry_after_ms));
+            }
+            http_resp
+                .json()
+                .await
+                .map_err(|e| BrokerError::AmbiguousSubmit {
+                    detail: format!("submit_vertical_spread: response parse error: {e}"),
+                })
+        })?;
+        normalize_mleg_submit_response(alpaca, req).map_err(|refusal| match refusal {
+            MlegRefusal::LegCountMismatch { expected, actual } => BrokerError::AmbiguousSubmit {
+                detail: format!(
+                    "submit_vertical_spread: broker returned {actual} legs, expected \
+                     {expected} -- the order may be live at the broker in an unproven shape"
+                ),
+            },
+            MlegRefusal::LegIdentityMismatch { detail } => BrokerError::AmbiguousSubmit {
+                detail: format!("submit_vertical_spread: {detail}"),
+            },
+        })
+    }
+
+    /// D5: cancel of an `order_class=mleg` parent order. Alpaca's public
+    /// `POST /v2/orders` reference does not document cancel semantics
+    /// specific to `order_class=mleg` (no confirmation that
+    /// `DELETE /v2/orders/{id}` against the parent cancels both legs
+    /// atomically, nor of any per-leg cancel contract) -- this method
+    /// therefore always refuses rather than reusing the simple-order
+    /// `cancel_order` path against an unproven shape.
+    pub fn cancel_vertical_spread(&self, broker_parent_order_id: &str) -> Result<(), BrokerError> {
+        Err(BrokerError::Reject {
+            code: "options_mleg_cancel_unproven".to_string(),
+            detail: format!(
+                "cancel_vertical_spread: cancel semantics for order_class=mleg parent \
+                 {broker_parent_order_id:?} are not documented by Alpaca's public API \
+                 reference -- refusing rather than guessing"
+            ),
+        })
+    }
+
+    /// D5: replace of an `order_class=mleg` parent order. Same rationale
+    /// as `cancel_vertical_spread` -- always refuses; never reuses the
+    /// simple-order `replace_order` GET+PATCH path against an unproven
+    /// multi-leg shape.
+    pub fn replace_vertical_spread(&self, broker_parent_order_id: &str) -> Result<(), BrokerError> {
+        Err(BrokerError::Reject {
+            code: "options_mleg_replace_unproven".to_string(),
+            detail: format!(
+                "replace_vertical_spread: replace semantics for order_class=mleg parent \
+                 {broker_parent_order_id:?} are not documented by Alpaca's public API \
+                 reference -- refusing rather than guessing"
+            ),
+        })
     }
 }
 // ---------------------------------------------------------------------------
@@ -1153,6 +1293,7 @@ mod supports_asset_class_tests {
             api_key_id: "k".to_string(),
             api_secret_key: "s".to_string(),
             crypto_capability_enabled: false,
+            options_mleg_capability_enabled: false,
         });
         assert!(!a.supports_asset_class(AssetClass::Crypto));
     }
@@ -1164,6 +1305,7 @@ mod supports_asset_class_tests {
             api_key_id: "k".to_string(),
             api_secret_key: "s".to_string(),
             crypto_capability_enabled: true,
+            options_mleg_capability_enabled: false,
         });
         assert!(a.supports_asset_class(AssetClass::Crypto));
         assert!(a.crypto_capability_enabled());
@@ -1178,6 +1320,7 @@ mod supports_asset_class_tests {
             api_key_id: "k".to_string(),
             api_secret_key: "s".to_string(),
             crypto_capability_enabled: true,
+            options_mleg_capability_enabled: false,
         });
         assert!(!a.supports_asset_class(AssetClass::Crypto));
     }
@@ -2298,5 +2441,145 @@ mod broker_retry_tests {
         let err = adapter.cancel_order("order-1", &token).unwrap_err();
         assert!(matches!(err, BrokerError::RateLimit { .. }));
         mock.assert_hits(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D5: multi-leg vertical-spread submission -- capability gate, single-POST
+// shape, and cancel/replace fail-closed refusal. Mock fixtures only, no
+// real Alpaca order.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod mleg_vertical_spread_tests {
+    use super::*;
+    use crate::mleg::{MlegPositionIntent, MlegSide, VerticalSpreadLeg};
+
+    fn request() -> SubmitVerticalSpreadRequest {
+        SubmitVerticalSpreadRequest {
+            client_order_id: "test-co-1".to_string(),
+            qty: "1".to_string(),
+            limit_price: "2.50".to_string(),
+            time_in_force: "day".to_string(),
+            long_leg: VerticalSpreadLeg {
+                option_symbol: "AAPL260619C00500000".to_string(),
+                side: MlegSide::Buy,
+                position_intent: MlegPositionIntent::BuyToOpen,
+            },
+            short_leg: VerticalSpreadLeg {
+                option_symbol: "AAPL260619C00510000".to_string(),
+                side: MlegSide::Sell,
+                position_intent: MlegPositionIntent::SellToOpen,
+            },
+        }
+    }
+
+    /// The capability defaults off in `new_for_test` -- refusal must happen
+    /// before any HTTP call. `MockServer` is intentionally not started: a
+    /// network call here would panic against a non-listening address,
+    /// proving this really is a pre-HTTP refusal.
+    #[test]
+    fn submit_vertical_spread_refuses_before_any_http_call_when_capability_disabled() {
+        let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string());
+        let err = adapter.submit_vertical_spread(&request()).unwrap_err();
+        assert_eq!(
+            err,
+            BrokerError::Reject {
+                code: "options_mleg_capability_disabled".to_string(),
+                detail: "submit_vertical_spread: options_mleg_capability_enabled is false -- \
+                         this capability defaults off and must be explicitly opted into"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn submit_vertical_spread_sends_exactly_one_post_with_both_legs() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v2/orders")
+                .json_body_partial(r#"{"order_class": "mleg"}"#)
+                .json_body_partial(r#"{"legs": [{"symbol": "AAPL260619C00500000"}, {"symbol": "AAPL260619C00510000"}]}"#);
+            then.status(200).json_body(serde_json::json!({
+                "id": "parent-1",
+                "client_order_id": "test-co-1",
+                "order_class": "mleg",
+                "qty": "1",
+                "status": "accepted",
+                "legs": [
+                    {"id": "leg-long-1", "symbol": "AAPL260619C00500000", "side": "buy", "status": "accepted"},
+                    {"id": "leg-short-1", "symbol": "AAPL260619C00510000", "side": "sell", "status": "accepted"}
+                ]
+            }));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
+            .with_options_mleg_capability_enabled(true);
+        let submitted = adapter
+            .submit_vertical_spread(&request())
+            .expect("capability enabled, mock returns exactly two legs -- must succeed");
+
+        assert_eq!(submitted.broker_parent_order_id, "parent-1");
+        assert_eq!(submitted.long_leg.broker_leg_order_id, "leg-long-1");
+        assert_eq!(submitted.short_leg.broker_leg_order_id, "leg-short-1");
+        // Exactly one submission for both legs -- never two independent
+        // per-leg orders.
+        mock.assert_hits(1);
+    }
+
+    /// Negative control: a broker response missing a leg must never be
+    /// treated as a normal success -- the order may be live at the broker
+    /// in an unproven shape, so this must surface as `AmbiguousSubmit`
+    /// (fail closed, no synthetic completion), not `Reject`.
+    #[test]
+    fn submit_vertical_spread_fails_closed_when_broker_returns_wrong_leg_count() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v2/orders");
+            then.status(200).json_body(serde_json::json!({
+                "id": "parent-2",
+                "client_order_id": "test-co-1",
+                "order_class": "mleg",
+                "qty": "1",
+                "status": "accepted",
+                "legs": [
+                    {"id": "leg-long-1", "symbol": "AAPL260619C00500000", "side": "buy", "status": "accepted"}
+                ]
+            }));
+        });
+
+        let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
+            .with_options_mleg_capability_enabled(true);
+        let err = adapter.submit_vertical_spread(&request()).unwrap_err();
+        assert!(
+            matches!(err, BrokerError::AmbiguousSubmit { .. }),
+            "a leg-count mismatch must fail closed as AmbiguousSubmit, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_vertical_spread_always_refuses_no_http_call() {
+        let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string())
+            .with_options_mleg_capability_enabled(true);
+        let err = adapter.cancel_vertical_spread("parent-1").unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "options_mleg_cancel_unproven"
+        ));
+    }
+
+    #[test]
+    fn replace_vertical_spread_always_refuses_no_http_call() {
+        let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string())
+            .with_options_mleg_capability_enabled(true);
+        let err = adapter.replace_vertical_spread("parent-1").unwrap_err();
+        assert!(matches!(
+            err,
+            BrokerError::Reject { code, .. } if code == "options_mleg_replace_unproven"
+        ));
     }
 }

@@ -198,6 +198,7 @@ fn lsf02_flatten_on_halt_bypasses_sticky_max_drawdown_halt_via_real_alpaca_adapt
         api_key_id: "test-key".to_string(),
         api_secret_key: "test-secret".to_string(),
         crypto_capability_enabled: false,
+        options_mleg_capability_enabled: false,
     });
     let gateway = BrokerGateway::for_test(broker, PassGate, risk_gate, PassGate);
 
