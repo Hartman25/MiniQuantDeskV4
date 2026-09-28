@@ -64,8 +64,8 @@ pub mod option_lifecycle_normalize;
 pub mod snapshot;
 pub mod types;
 use crate::mleg::{
-    build_mleg_submit_body, normalize_mleg_submit_response, MlegRefusal,
-    SubmitVerticalSpreadRequest, SubmittedVerticalSpread,
+    build_mleg_submit_body, normalize_mleg_submit_response, MlegRefusal, SubmittedVerticalSpread,
+    VerifiedVerticalSpreadSubmission,
 };
 use crate::normalize::normalize_trade_update;
 use crate::types::{
@@ -822,9 +822,15 @@ impl AlpacaBrokerAdapter {
     /// Never submits the two legs as independent orders -- `build_body`
     /// (see `mleg::build_mleg_submit_body`) always carries both legs in
     /// the single request this method sends.
+    /// D5 correction: accepts only a [`VerifiedVerticalSpreadSubmission`] --
+    /// constructible solely via [`mleg::build_verified_vertical_spread_request`],
+    /// which re-derives and proves the frozen call/put vertical structure
+    /// before any request exists at all. The compiler, not caller
+    /// discipline, rules out ever reaching this HTTP call with an unproven
+    /// two-symbol pair.
     pub fn submit_vertical_spread(
         &self,
-        req: &SubmitVerticalSpreadRequest,
+        verified: &VerifiedVerticalSpreadSubmission,
     ) -> Result<SubmittedVerticalSpread, BrokerError> {
         if !self.cfg.options_mleg_capability_enabled {
             return Err(BrokerError::Reject {
@@ -834,6 +840,7 @@ impl AlpacaBrokerAdapter {
                     .to_string(),
             });
         }
+        let req = verified.request();
         let body = build_mleg_submit_body(req);
         let url = format!("{}/v2/orders", self.cfg.base_url);
         let client = self.client.clone();
@@ -883,35 +890,52 @@ impl AlpacaBrokerAdapter {
         })
     }
 
-    /// D5: cancel of an `order_class=mleg` parent order. Alpaca's public
-    /// `POST /v2/orders` reference does not document cancel semantics
-    /// specific to `order_class=mleg` (no confirmation that
-    /// `DELETE /v2/orders/{id}` against the parent cancels both legs
-    /// atomically, nor of any per-leg cancel contract) -- this method
-    /// therefore always refuses rather than reusing the simple-order
-    /// `cancel_order` path against an unproven shape.
+    /// D5 correction: cancel of an `order_class=mleg` parent order.
+    /// Re-verified live against Alpaca's current official docs (Context7,
+    /// this correction): Alpaca's REST reference documents generic
+    /// `DELETE /v2/orders/{id}` cancel and, at the FIX protocol level, a
+    /// dedicated Multileg Order Cancel/Replace Request (`AC`) message --
+    /// so mleg cancel/replace is a real, Alpaca-supported operation, not
+    /// undocumented. What is NOT sufficiently documented at the REST level
+    /// this crate actually speaks is a complete success-path contract for
+    /// `DELETE` against an mleg PARENT id (e.g. whether both legs cancel
+    /// atomically, or any per-leg partial-cancel shape) -- this method
+    /// therefore still always refuses. This is a conservative MQD policy
+    /// pending that proof, never a claim that Alpaca leaves mleg cancel
+    /// undocumented.
     pub fn cancel_vertical_spread(&self, broker_parent_order_id: &str) -> Result<(), BrokerError> {
         Err(BrokerError::Reject {
             code: "options_mleg_cancel_unproven".to_string(),
             detail: format!(
-                "cancel_vertical_spread: cancel semantics for order_class=mleg parent \
-                 {broker_parent_order_id:?} are not documented by Alpaca's public API \
-                 reference -- refusing rather than guessing"
+                "cancel_vertical_spread: REST DELETE /v2/orders/{{id}} success-path semantics \
+                 for order_class=mleg parent {broker_parent_order_id:?} (atomic vs. per-leg \
+                 cancel) are not sufficiently proven here -- conservative MQD policy refusal, \
+                 not a claim that Alpaca leaves mleg cancel undocumented"
             ),
         })
     }
 
-    /// D5: replace of an `order_class=mleg` parent order. Same rationale
-    /// as `cancel_vertical_spread` -- always refuses; never reuses the
-    /// simple-order `replace_order` GET+PATCH path against an unproven
-    /// multi-leg shape.
+    /// D5 correction: replace of an `order_class=mleg` parent order.
+    /// Re-verified live against Alpaca's current official docs (Context7,
+    /// this correction): `PATCH /v2/orders/{order_id}` documents
+    /// mleg-specific error responses (`403 "replace mleg order is
+    /// disabled"`, `422 "order chain not fully replaced"`, among others),
+    /// confirming mleg replace is a real, gated Alpaca operation -- and the
+    /// FIX-level Multileg Order Cancel/Replace Request (`AC`) documents a
+    /// complete re-supply-all-legs contract. The REST success-path request/
+    /// response shape (does REST PATCH require resupplying every leg the
+    /// same way FIX `AC` does?) is not sufficiently proven here to
+    /// implement narrowly and safely, so this method still always refuses
+    /// -- a conservative MQD policy, never a claim that Alpaca leaves mleg
+    /// replace undocumented.
     pub fn replace_vertical_spread(&self, broker_parent_order_id: &str) -> Result<(), BrokerError> {
         Err(BrokerError::Reject {
             code: "options_mleg_replace_unproven".to_string(),
             detail: format!(
-                "replace_vertical_spread: replace semantics for order_class=mleg parent \
-                 {broker_parent_order_id:?} are not documented by Alpaca's public API \
-                 reference -- refusing rather than guessing"
+                "replace_vertical_spread: REST PATCH /v2/orders/{{id}} success-path leg-resupply \
+                 semantics for order_class=mleg parent {broker_parent_order_id:?} are not \
+                 sufficiently proven here -- conservative MQD policy refusal, not a claim that \
+                 Alpaca leaves mleg replace undocumented"
             ),
         })
     }
@@ -2532,25 +2556,54 @@ mod broker_retry_tests {
 #[cfg(test)]
 mod mleg_vertical_spread_tests {
     use super::*;
-    use crate::mleg::{MlegPositionIntent, MlegSide, VerticalSpreadLeg};
+    use crate::mleg::{build_verified_vertical_spread_request, MlegPositionIntent};
+    use mqk_execution::option_strategy_permission::{
+        OptionLegSide, ProposedOptionLeg, ProposedOptionStrategy,
+    };
+    use mqk_schemas::{OptionRight, QtyMicros};
 
-    fn request() -> SubmitVerticalSpreadRequest {
-        SubmitVerticalSpreadRequest {
-            client_order_id: "test-co-1".to_string(),
-            qty: "1".to_string(),
-            limit_price: "2.50".to_string(),
-            time_in_force: "day".to_string(),
-            long_leg: VerticalSpreadLeg {
-                option_symbol: "AAPL260619C00500000".to_string(),
-                side: MlegSide::Buy,
-                position_intent: MlegPositionIntent::BuyToOpen,
-            },
-            short_leg: VerticalSpreadLeg {
-                option_symbol: "AAPL260619C00510000".to_string(),
-                side: MlegSide::Sell,
-                position_intent: MlegPositionIntent::SellToOpen,
-            },
+    /// A valid call vertical: long $500 call / short $510 call, same
+    /// underlying/expiry, opening both legs -- the one shape every test in
+    /// this module builds from unless it is deliberately proving a refusal.
+    fn proposed_call_vertical() -> ProposedOptionStrategy {
+        ProposedOptionStrategy {
+            underlying: "AAPL".to_string(),
+            legs: vec![
+                ProposedOptionLeg {
+                    side: OptionLegSide::Long,
+                    right: OptionRight::Call,
+                    strike_micros: 500_000_000,
+                    expiry_yyyymmdd: "20260619".to_string(),
+                    qty: QtyMicros::new(1_000_000),
+                    multiplier: 100,
+                },
+                ProposedOptionLeg {
+                    side: OptionLegSide::Short,
+                    right: OptionRight::Call,
+                    strike_micros: 510_000_000,
+                    expiry_yyyymmdd: "20260619".to_string(),
+                    qty: QtyMicros::new(1_000_000),
+                    multiplier: 100,
+                },
+            ],
+            covering_share_qty: None,
+            cash_secured_collateral_micros: None,
         }
+    }
+
+    fn verified_request() -> VerifiedVerticalSpreadSubmission {
+        build_verified_vertical_spread_request(
+            &proposed_call_vertical(),
+            "AAPL260619C00500000",
+            "AAPL260619C00510000",
+            MlegPositionIntent::BuyToOpen,
+            MlegPositionIntent::SellToOpen,
+            "test-co-1".to_string(),
+            "1".to_string(),
+            "2.50".to_string(),
+            "day".to_string(),
+        )
+        .expect("proposed_call_vertical must build a verified submission")
     }
 
     /// The capability defaults off in `new_for_test` -- refusal must happen
@@ -2560,7 +2613,9 @@ mod mleg_vertical_spread_tests {
     #[test]
     fn submit_vertical_spread_refuses_before_any_http_call_when_capability_disabled() {
         let adapter = AlpacaBrokerAdapter::new_for_test("http://127.0.0.1:1".to_string());
-        let err = adapter.submit_vertical_spread(&request()).unwrap_err();
+        let err = adapter
+            .submit_vertical_spread(&verified_request())
+            .unwrap_err();
         assert_eq!(
             err,
             BrokerError::Reject {
@@ -2598,7 +2653,7 @@ mod mleg_vertical_spread_tests {
         let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
             .with_options_mleg_capability_enabled(true);
         let submitted = adapter
-            .submit_vertical_spread(&request())
+            .submit_vertical_spread(&verified_request())
             .expect("capability enabled, mock returns exactly two legs -- must succeed");
 
         assert_eq!(submitted.broker_parent_order_id, "parent-1");
@@ -2634,7 +2689,9 @@ mod mleg_vertical_spread_tests {
 
         let adapter = AlpacaBrokerAdapter::new_for_test(server.base_url())
             .with_options_mleg_capability_enabled(true);
-        let err = adapter.submit_vertical_spread(&request()).unwrap_err();
+        let err = adapter
+            .submit_vertical_spread(&verified_request())
+            .unwrap_err();
         assert!(
             matches!(err, BrokerError::AmbiguousSubmit { .. }),
             "a leg-count mismatch must fail closed as AmbiguousSubmit, got {err:?}"
