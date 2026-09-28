@@ -49,6 +49,7 @@ use mqk_daemon::state::autonomous_daily_coverage_authority::{
 };
 use mqk_daemon::state::autonomous_daily_outcome::derive_expected_bar_set;
 use mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     resolve_autonomous_daily_session_plan_from_env, run_durable_session_controller_tick, AppState,
     AutonomousDailyPlanTiming, AutonomousDailySessionPlan, AutonomousDailySessionPlanResolution,
@@ -809,9 +810,13 @@ async fn pe_tick_typed(
     st: &Arc<AppState>,
     now_utc: DateTime<Utc>,
 ) -> AutonomousDailyCoordinatorTickOutcome {
-    tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput { state: st, now_utc })
-        .await
-        .expect("coordinator tick must not error")
+    tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: st,
+        now_utc,
+        domain: ExecutionDomain::EquityNyse,
+    })
+    .await
+    .expect("coordinator tick must not error")
 }
 
 async fn pe_events_count(pool: &sqlx::PgPool, operation_id: Uuid) -> i64 {

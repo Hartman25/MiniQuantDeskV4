@@ -32,6 +32,7 @@ use mqk_daemon::state::autonomous_completed_bar_task::{
 use mqk_daemon::state::autonomous_daily_coordinator::{
     apply_completed_bar_driver_outcome, apply_completed_bar_task_permanent_failure,
 };
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{self, AppState, AutonomousSessionTruth, BrokerKind, DeploymentMode};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -2725,6 +2726,7 @@ async fn m01_task_level_prepare_to_running_exactly_once() {
     let pre_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: m01_pre_preopen(),
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("m01: pre-preopen tick must not error");
@@ -2794,6 +2796,7 @@ async fn m01_task_level_prepare_to_running_exactly_once() {
         let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
             state: &st,
             now_utc: m01_t_start(),
+            domain: ExecutionDomain::EquityNyse,
         })
         .await
         .expect("m01: start-path tick must not error");
@@ -2968,6 +2971,7 @@ async fn n01_supervised_task_drives_real_adapter_under_injected_clock() {
     let pre_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: m01_pre_preopen(),
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("n01: pre-preopen tick must not error");
@@ -3032,6 +3036,7 @@ async fn n01_supervised_task_drives_real_adapter_under_injected_clock() {
         let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
             state: &st,
             now_utc: m01_t_start(),
+            domain: ExecutionDomain::EquityNyse,
         })
         .await
         .expect("n01: start-path tick must not error");

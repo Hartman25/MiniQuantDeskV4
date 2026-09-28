@@ -76,6 +76,7 @@ use mqk_daemon::state::autonomous_daily_coverage_authority::{
 };
 use mqk_daemon::state::autonomous_daily_outcome::derive_expected_bar_set;
 use mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     resolve_autonomous_daily_session_plan_from_env, run_durable_session_controller_tick, AppState,
     AutonomousDailyPlanTiming, AutonomousDailySessionPlan, AutonomousDailySessionPlanResolution,
@@ -580,9 +581,13 @@ async fn ci_tick_typed(
     st: &std::sync::Arc<AppState>,
     now_utc: DateTime<Utc>,
 ) -> AutonomousDailyCoordinatorTickOutcome {
-    tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput { state: st, now_utc })
-        .await
-        .expect("coordinator tick must not error")
+    tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: st,
+        now_utc,
+        domain: ExecutionDomain::EquityNyse,
+    })
+    .await
+    .expect("coordinator tick must not error")
 }
 
 async fn ci_events_count(pool: &sqlx::PgPool, operation_id: Uuid) -> i64 {
@@ -697,7 +702,8 @@ async fn ci_03_matching_local_runtime_active_is_always_false_with_no_local_runti
     assert_eq!(operation.run_id, Some(run_id), "fixture bound a run_id");
     let st = ci_daemon_state(pool.clone(), &webhook_url).await;
     assert_eq!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await,
         None,
         "a freshly-constructed AppState never owns a local execution loop"
     );
@@ -818,9 +824,11 @@ async fn ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_no
     let st = ci_daemon_state(pool.clone(), &webhook_url).await;
     // The matching-runtime fact under test: a locally-owned execution loop
     // bound to the exact same run_id this operation durably bound.
-    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    st.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     assert_eq!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await,
         Some(run_id),
         "fixture: AppState now owns the matching run_id"
     );

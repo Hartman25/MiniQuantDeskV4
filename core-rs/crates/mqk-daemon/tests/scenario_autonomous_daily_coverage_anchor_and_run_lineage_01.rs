@@ -55,6 +55,7 @@ use mqk_daemon::state::autonomous_daily_coverage_authority::{
     REASON_COVERAGE_AUTHORITY_MISSING_AFTER_ACTIVITY, REASON_COVERAGE_AUTHORITY_NOT_BOUND,
 };
 use mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{self, AppState, BrokerKind, DeploymentMode};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1187,6 +1188,7 @@ async fn e01_coordinator_binds_pristine_anchor_and_replays_on_second_tick() {
     let outcome1 = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("tick ok");
@@ -1215,6 +1217,7 @@ async fn e01_coordinator_binds_pristine_anchor_and_replays_on_second_tick() {
     let outcome2 = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: now + chrono::Duration::minutes(1),
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("tick ok");
@@ -1275,6 +1278,7 @@ async fn e02_prior_activity_running_missing_authority_reaches_evidence_degraded(
     let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("tick ok");
@@ -1353,6 +1357,7 @@ async fn e03_prior_activity_pre_running_missing_authority_reaches_manual_interve
     let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("tick ok");
@@ -1426,6 +1431,7 @@ async fn e04_close_priority_stops_runtime_even_with_a_coverage_conflict() {
     let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: past_close,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("tick ok");
@@ -1535,6 +1541,7 @@ async fn f02_adapter_proceeds_once_the_coordinator_has_bound_the_authority() {
     let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &coordinator_st,
         now_utc: now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("coordinator tick ok");
@@ -1821,6 +1828,7 @@ async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_
     let coordinator_fut = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &coordinator_st,
         now_utc: shared_now_utc,
+        domain: ExecutionDomain::EquityNyse,
     });
 
     // Task B: the real production completed-bar adapter, under a
@@ -2013,6 +2021,7 @@ async fn g01_prepare_data_only_mid_day_drift_returns_conflict_and_invokes_no_dri
     let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &coordinator_st,
         now_utc: now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("coordinator tick ok");

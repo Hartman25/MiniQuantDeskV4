@@ -42,6 +42,7 @@ use mqk_daemon::state::autonomous_daily_coordinator::{
     dispatch_by_state, tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
     AutonomousDailyCoordinatorTickOutcome,
 };
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     self, derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env, AppState,
@@ -463,6 +464,7 @@ async fn assert_route_never_reenters_stopping_and_converges(
         let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
             state: st,
             now_utc: now,
+            domain: ExecutionDomain::EquityNyse,
         })
         .await?;
 
@@ -550,7 +552,15 @@ async fn t1_closed_session_evidence_degraded_never_reenters_stopping() -> anyhow
         let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
             .await?
             .expect("row must exist before tick");
-        let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+        let outcome = dispatch_by_state(
+            &st,
+            ExecutionDomain::EquityNyse,
+            &pool,
+            operation,
+            &plan,
+            now,
+        )
+        .await?;
 
         let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
             .await?
@@ -651,7 +661,15 @@ async fn t2_closed_session_still_fail_closed_on_unacked_outbox() -> anyhow::Resu
     let tick0 = seeded.postclose_finalize_utc + Duration::seconds(1);
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, seeded, &plan, tick0).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        seeded,
+        &plan,
+        tick0,
+    )
+    .await?;
     assert!(
         !matches!(
             outcome,
@@ -722,7 +740,8 @@ async fn t3_effective_close_plus_1s_before_postclose_finalize_never_recovers() -
     let outbox_before = outbox_row_count_for_run(&pool, run_id).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, seeded, &plan, now).await?;
+    let outcome =
+        dispatch_by_state(&st, ExecutionDomain::EquityNyse, &pool, seeded, &plan, now).await?;
 
     assert!(
         !matches!(
@@ -860,7 +879,8 @@ async fn t4_mid_run_evidence_degraded_stopped_at_none_still_session_closes() -> 
 
     let now = plan.effective_operation_close_utc + Duration::seconds(1);
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, seeded, &plan, now).await?;
+    let outcome =
+        dispatch_by_state(&st, ExecutionDomain::EquityNyse, &pool, seeded, &plan, now).await?;
 
     assert!(
         !matches!(

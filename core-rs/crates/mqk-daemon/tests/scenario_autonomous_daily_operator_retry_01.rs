@@ -32,6 +32,7 @@ use mqk_daemon::daily_data_readiness::expected_intraday_end_ts_window;
 use mqk_daemon::state::autonomous_daily_coordinator::attempt_canonical_start;
 use mqk_daemon::state::autonomous_runtime_context::resolve_autonomous_runtime_context;
 use mqk_daemon::state::market_calendar::{resolve_market_session_schedule, NyseWeekdaysProvider};
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     self, derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env, AppState,
@@ -573,7 +574,12 @@ async fn t01_full_recovery_lifecycle_market_data_repair() -> anyhow::Result<()> 
 
     // 12-13: next coordinator tick reevaluates readiness and progresses.
     let outcome = mqk_daemon::state::autonomous_daily_coordinator::dispatch_by_state(
-        &st, &pool, recovered, &plan, now,
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        recovered,
+        &plan,
+        now,
     )
     .await?;
     assert!(
@@ -1229,7 +1235,12 @@ async fn r10_recovered_operation_still_requires_arm_before_start() -> anyhow::Re
     // Coordinator dispatch progresses preparing_data -> awaiting_open with
     // readiness now satisfied (still integrity-disarmed throughout).
     let after_preparing = mqk_daemon::state::autonomous_daily_coordinator::dispatch_by_state(
-        &st, &pool, recovered, &plan, now,
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        recovered,
+        &plan,
+        now,
     )
     .await?;
     let awaiting_open_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
@@ -1243,8 +1254,15 @@ async fn r10_recovered_operation_still_requires_arm_before_start() -> anyhow::Re
     // Negative control: attempt_canonical_start must refuse (durable arm
     // disarmed / integrity halted) and start_execution_runtime must never
     // be reached — start_attempt_count stays exactly 0.
-    let outcome =
-        attempt_canonical_start(&st, &pool, awaiting_open_row, now, STATE_AWAITING_OPEN).await?;
+    let outcome = attempt_canonical_start(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        awaiting_open_row,
+        now,
+        STATE_AWAITING_OPEN,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -1693,7 +1711,12 @@ async fn t_legacy_full_recovery_lifecycle_market_data_not_fresh() -> anyhow::Res
     // Next coordinator tick reevaluates readiness and progresses on its own
     // — this route never shortcuts into awaiting_open/start itself.
     let outcome = mqk_daemon::state::autonomous_daily_coordinator::dispatch_by_state(
-        &st, &pool, recovered, &plan, now,
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        recovered,
+        &plan,
+        now,
     )
     .await?;
     assert!(

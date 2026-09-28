@@ -28,6 +28,7 @@ use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use mqk_daemon::state::autonomous_daily_coordinator::{
     dispatch_by_state, AutonomousDailyCoordinatorTickOutcome,
 };
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     self, derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env, AppState,
@@ -382,7 +383,8 @@ async fn t1_clean_stopped_run_first_tick_schedules_not_immediate_start() -> anyh
         .expect("row must exist");
     assert!(before.next_retry_utc.is_none(), "fixture precondition");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, before, &plan, now).await?;
+    let outcome =
+        dispatch_by_state(&st, ExecutionDomain::EquityNyse, &pool, before, &plan, now).await?;
     assert_eq!(
         outcome,
         AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled,
@@ -446,7 +448,8 @@ async fn t2_due_retry_genuinely_attempts_start_never_reschedules_again() -> anyh
     let before = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    let outcome = dispatch_by_state(&st, &pool, before, &plan, now).await?;
+    let outcome =
+        dispatch_by_state(&st, ExecutionDomain::EquityNyse, &pool, before, &plan, now).await?;
     assert_eq!(
         outcome,
         AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled
@@ -458,7 +461,15 @@ async fn t2_due_retry_genuinely_attempts_start_never_reschedules_again() -> anyh
     let scheduled_retry_utc = scheduled.next_retry_utc.expect("must be scheduled");
     let due_now = scheduled_retry_utc + Duration::seconds(1);
 
-    let outcome2 = dispatch_by_state(&st, &pool, scheduled, &plan, due_now).await?;
+    let outcome2 = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        scheduled,
+        &plan,
+        due_now,
+    )
+    .await?;
     assert!(
         !matches!(
             outcome2,
@@ -534,7 +545,15 @@ async fn t3_non_coverage_reason_never_recovers_falls_through_to_finalization() -
         Some("unknown_order_evidence_conflict")
     );
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         !matches!(
             outcome,
@@ -584,7 +603,15 @@ async fn t4_session_window_closed_never_recovers() -> anyhow::Result<()> {
     let after_close = operation.postclose_finalize_utc + Duration::seconds(1);
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, after_close).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        after_close,
+    )
+    .await?;
     assert!(
         !matches!(
             outcome,
@@ -661,7 +688,15 @@ async fn t5_run_not_actually_terminal_fails_closed() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -705,7 +740,15 @@ async fn t6_halted_run_never_recovers() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -748,7 +791,15 @@ async fn t7_unresolved_outbox_fails_closed() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -797,7 +848,15 @@ async fn t8_unresolved_inbox_fails_closed() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -846,7 +905,15 @@ async fn t9_dirty_reconcile_fails_closed() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -896,7 +963,15 @@ async fn t9b_unmatched_broker_events_fails_closed() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -932,7 +1007,15 @@ async fn t10_durably_disarmed_fails_closed() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -1022,7 +1105,15 @@ async fn t11_no_run_ever_bound_is_still_eligible() -> anyhow::Result<()> {
         .expect("row must exist");
     assert!(operation.run_id.is_none(), "fixture precondition");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert_eq!(
         outcome,
         AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled,
@@ -1051,7 +1142,8 @@ async fn t12_repeated_ticks_before_due_are_idempotent() -> anyhow::Result<()> {
     let before = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    let outcome1 = dispatch_by_state(&st, &pool, before, &plan, now).await?;
+    let outcome1 =
+        dispatch_by_state(&st, ExecutionDomain::EquityNyse, &pool, before, &plan, now).await?;
     assert_eq!(
         outcome1,
         AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled
@@ -1063,7 +1155,15 @@ async fn t12_repeated_ticks_before_due_are_idempotent() -> anyhow::Result<()> {
 
     // A second tick, still before the retry is due: must not start, and
     // must not reschedule to a different time.
-    let outcome2 = dispatch_by_state(&st, &pool, after_first.clone(), &plan, now).await?;
+    let outcome2 = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        after_first.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         !matches!(
             outcome2,

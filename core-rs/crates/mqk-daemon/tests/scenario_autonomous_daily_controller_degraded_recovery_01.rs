@@ -27,6 +27,7 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use mqk_daemon::state::autonomous_daily_coordinator::{
     dispatch_by_state, AutonomousDailyCoordinatorTickOutcome,
 };
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     self, derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env, AppState,
@@ -342,7 +343,15 @@ async fn t1_degraded_with_running_run_does_not_recover() -> anyhow::Result<()> {
         .expect("row must exist");
     let operation = before.clone();
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -394,7 +403,15 @@ async fn t2_degraded_with_stop_requested_but_not_stopped_does_not_recover() -> a
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -433,7 +450,15 @@ async fn t3_degraded_with_clean_stopped_run_recovers_via_normal_path() -> anyhow
         .expect("row must exist");
     let operation = before.clone();
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert_eq!(
         outcome,
         AutonomousDailyCoordinatorTickOutcome::RuntimeStopped,
@@ -490,7 +515,15 @@ async fn t4a_degraded_with_stopped_run_and_unresolved_outbox_fails_closed() -> a
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -548,7 +581,15 @@ async fn t4b_degraded_with_stopped_run_and_dirty_reconcile_fails_closed() -> any
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -620,7 +661,15 @@ async fn t4c_degraded_with_stopped_run_and_unapplied_inbox_fails_closed() -> any
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -691,7 +740,15 @@ async fn t4d_degraded_with_stopped_run_and_unmatched_broker_events_fails_closed(
         .await?
         .expect("row must exist");
     let st = paper_state_with_db(pool.clone(), &adapter_id);
-    let outcome = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -750,7 +807,15 @@ async fn t5_repeated_ticks_after_recovery_are_idempotent() -> anyhow::Result<()>
     let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .expect("row must exist");
-    let outcome1 = dispatch_by_state(&st, &pool, operation, &plan, now).await?;
+    let outcome1 = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        operation,
+        &plan,
+        now,
+    )
+    .await?;
     assert_eq!(
         outcome1,
         AutonomousDailyCoordinatorTickOutcome::RuntimeStopped

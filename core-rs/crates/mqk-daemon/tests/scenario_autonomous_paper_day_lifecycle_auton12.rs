@@ -53,6 +53,7 @@ use mqk_daemon::state::autonomous_daily_coordinator::{
     tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
     AutonomousDailyCoordinatorTickOutcome,
 };
+use mqk_daemon::state::ExecutionDomain;
 use state::{
     AlpacaWsContinuityState, AutonomousSessionSchedule, AutonomousSessionTruth, BrokerKind,
     DeploymentMode, SessionWindow, StrategyFleetEntry,
@@ -161,13 +162,18 @@ async fn al01_tick_driven_session_boundary_stop_produces_stopped_at_boundary() {
     }
 
     // Establish DB-backed active run + inject fake execution loop (AUTON-PAPER-03B seam).
-    st.establish_db_backed_active_run_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
-        .await
-        .expect("AL-01: DB-backed active run must be established");
+    st.establish_db_backed_active_run_for_test(
+        mqk_daemon::state::ExecutionDomain::EquityNyse,
+        run_id,
+    )
+    .await
+    .expect("AL-01: DB-backed active run must be established");
 
     // Verify preconditions before the tick.
     assert!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_some(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await
+            .is_some(),
         "AL-01 precondition: locally_owned_run_id must be Some before the stop tick"
     );
     {
@@ -215,7 +221,9 @@ async fn al01_tick_driven_session_boundary_stop_produces_stopped_at_boundary() {
 
     // No dangling local ownership after stop.
     assert!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await
+            .is_none(),
         "AL-01: locally_owned_run_id must be None after session-boundary stop (loop joined)"
     );
 }
@@ -369,7 +377,9 @@ async fn al02_tick_driven_start_passes_all_pre_db_gates_reaches_db_gate() {
 
     // No dangling local ownership.
     assert!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await
+            .is_none(),
         "AL-02: locally_owned_run_id must be None after a DB-gate-blocked start"
     );
 }
@@ -766,6 +776,7 @@ async fn al03_durable_coordinator_drives_a_real_successful_start_and_stop() {
     let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("AL-03: start tick must not error");
@@ -805,7 +816,8 @@ async fn al03_durable_coordinator_drives_a_real_successful_start_and_stop() {
         run.status
     );
     assert_eq!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await,
         Some(run_id),
         "AL-03: local ownership must bind to the exact run_id"
     );
@@ -815,6 +827,7 @@ async fn al03_durable_coordinator_drives_a_real_successful_start_and_stop() {
     let stop_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: close_now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("AL-03: stop tick must not error");
@@ -846,7 +859,9 @@ async fn al03_durable_coordinator_drives_a_real_successful_start_and_stop() {
         run_after_stop.status
     );
     assert!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await
+            .is_none(),
         "AL-03: local ownership must be cleared after the canonical stop"
     );
 

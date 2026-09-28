@@ -33,6 +33,7 @@ use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use mqk_daemon::state::autonomous_daily_coordinator::{
     dispatch_by_state, AutonomousDailyCoordinatorTickOutcome,
 };
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     self, AppState, AutonomousDailyScheduleSource, AutonomousDailySessionPlan,
 };
@@ -398,7 +399,15 @@ async fn green_ordinary_tick_reconciles_terminal_run_without_operator_action() -
     // No route call, no CAS/version supplied by a human -- exactly the
     // ordinary per-tick call shape `session_controller.rs` uses in
     // production.
-    let outcome = dispatch_by_state(&st, &pool, manual, &plan, tick_now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual,
+        &plan,
+        tick_now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -486,7 +495,15 @@ async fn negative_control_active_run_is_not_auto_closed() -> anyhow::Result<()> 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let tick_now = now + chrono::Duration::hours(2);
 
-    let outcome = dispatch_by_state(&st, &pool, manual, &plan, tick_now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual,
+        &plan,
+        tick_now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -538,7 +555,15 @@ async fn negative_control_halted_run_is_not_auto_closed() -> anyhow::Result<()> 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let tick_now = now + chrono::Duration::hours(2);
 
-    let outcome = dispatch_by_state(&st, &pool, manual, &plan, tick_now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual,
+        &plan,
+        tick_now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -604,7 +629,15 @@ async fn negative_control_unresolved_outbox_is_not_auto_closed() -> anyhow::Resu
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     let tick_now = now + chrono::Duration::hours(2);
 
-    let outcome = dispatch_by_state(&st, &pool, manual, &plan, tick_now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual,
+        &plan,
+        tick_now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,

@@ -66,6 +66,7 @@ use mqk_daemon::state::autonomous_daily_coordinator::{
 };
 use mqk_daemon::state::autonomous_runtime_context::resolve_autonomous_runtime_context;
 use mqk_daemon::state::market_calendar::{resolve_market_session_schedule, NyseWeekdaysProvider};
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     self, derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env, AppState,
@@ -438,7 +439,15 @@ async fn pos1_data_repairable_reason_with_repaired_readiness_auto_recovers() -> 
     let bars = expected_bar_window(now, 5);
     seed_bars_via_normal_ingestion(&pool, &bars).await;
 
-    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(outcome, AutonomousDailyCoordinatorTickOutcome::PreparingData),
         "repaired data-repairable blocker must automatically re-enter preparing_data, got {outcome:?}"
@@ -518,7 +527,15 @@ async fn pos2_repeated_ticks_while_still_blocked_produce_no_mutation() -> anyhow
     let now = st.daily_data_readiness_now().await;
 
     // Deliberately no bars seeded -- readiness genuinely still blocked.
-    let outcome1 = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome1 = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome1,
@@ -534,7 +551,15 @@ async fn pos2_repeated_ticks_while_still_blocked_produce_no_mutation() -> anyhow
         "a still-blocked automatic recovery attempt must not mutate state"
     );
 
-    let outcome2 = dispatch_by_state(&st, &pool, after1.clone(), &plan, now).await?;
+    let outcome2 = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        after1.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome2,
@@ -577,7 +602,15 @@ async fn pos3_tick_after_recovery_already_applied_makes_no_further_mutation() ->
     let bars = expected_bar_window(now, 5);
     seed_bars_via_normal_ingestion(&pool, &bars).await;
 
-    let outcome1 = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome1 = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(matches!(
         outcome1,
         AutonomousDailyCoordinatorTickOutcome::PreparingData
@@ -592,7 +625,15 @@ async fn pos3_tick_after_recovery_already_applied_makes_no_further_mutation() ->
     // handler (not the manual-intervention arm at all, since the durable
     // state has already changed) -- episode is over, no automatic-recovery
     // code path is even reachable again for this occurrence.
-    let outcome2 = dispatch_by_state(&st, &pool, after_recovery.clone(), &plan, now).await?;
+    let outcome2 = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        after_recovery.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         !matches!(
             outcome2,
@@ -644,7 +685,15 @@ async fn neg1_non_data_reason_never_auto_recovers() -> anyhow::Result<()> {
     let bars = expected_bar_window(now, 5);
     seed_bars_via_normal_ingestion(&pool, &bars).await;
 
-    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -686,7 +735,15 @@ async fn neg2_data_repairable_but_unrepaired_readiness_stays_manual() -> anyhow:
 
     // No bars seeded at all -- readiness is genuinely, unambiguously still
     // blocked.
-    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -722,7 +779,15 @@ async fn neg3_unknown_reason_fails_closed() -> anyhow::Result<()> {
     let bars = expected_bar_window(now, 5);
     seed_bars_via_normal_ingestion(&pool, &bars).await;
 
-    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,
@@ -805,7 +870,15 @@ async fn pos4_concurrent_recovery_winner_and_loser_both_project_preparing_data(
     //    must re-read and classify. Because the winner applied the EXACT
     //    same (expected_state -> new_state) transition, this classifies as
     //    `AlreadyApplied`, not `StaleState`.
-    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
 
     // 4. Coordinator projection is PreparingData, never stale
     //    ManualInterventionRequired.
@@ -914,7 +987,15 @@ async fn neg4_different_concurrent_transition_stays_stale_and_manual() -> anyhow
     // classification cannot satisfy AlreadyApplied either (current.state !=
     // args.new_state) -- this must resolve to StaleState, and StaleState
     // must never be treated as recovered.
-    let outcome = dispatch_by_state(&st, &pool, manual.clone(), &plan, now).await?;
+    let outcome = dispatch_by_state(
+        &st,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        manual.clone(),
+        &plan,
+        now,
+    )
+    .await?;
     assert!(
         matches!(
             outcome,

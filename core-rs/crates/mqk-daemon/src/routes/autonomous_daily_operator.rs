@@ -55,7 +55,7 @@ use crate::state::autonomous_daily_operation::{
     AutonomousDailyPlanTiming, AutonomousDailySessionPlanResolution,
 };
 use crate::state::autonomous_runtime_context::resolve_autonomous_runtime_context;
-use crate::state::AppState;
+use crate::state::{AppState, ExecutionDomain};
 
 use mqk_db::{
     AutonomousDailyOperationRecord, AutonomousDailyTransitionOutcome,
@@ -944,7 +944,9 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale(
     let previous_reason_code = operation.state_reason_code.clone();
     let operation_id = operation.operation_id;
 
-    match handle_outcome_finalization(&st, &pool, operation, now_utc).await {
+    match handle_outcome_finalization(&st, ExecutionDomain::EquityNyse, &pool, operation, now_utc)
+        .await
+    {
         Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeFinalized {
             operation_id,
             outcome_reason_code,
@@ -1271,7 +1273,11 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale_manual(
             .into_response();
     }
 
-    if st.locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse).await == Some(expected_run_id) {
+    if st
+        .locally_owned_run_id(crate::state::ExecutionDomain::EquityNyse)
+        .await
+        == Some(expected_run_id)
+    {
         return (
             StatusCode::CONFLICT,
             Json(finalize_stale_manual_refusal_response(
@@ -1404,7 +1410,15 @@ pub(crate) async fn autonomous_daily_operation_finalize_stale_manual(
                     }
                 };
 
-            match handle_outcome_finalization(&st, &pool, updated, now_utc).await {
+            match handle_outcome_finalization(
+                &st,
+                ExecutionDomain::EquityNyse,
+                &pool,
+                updated,
+                now_utc,
+            )
+            .await
+            {
                 Ok(AutonomousDailyCoordinatorTickOutcome::OutcomeFinalized {
                     operation_id,
                     outcome_reason_code,

@@ -63,6 +63,7 @@ use mqk_daemon::state::autonomous_daily_coordinator::{
     handle_running, tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
     AutonomousDailyCoordinatorTickOutcome,
 };
+use mqk_daemon::state::ExecutionDomain;
 use mqk_daemon::state::{
     self as daemon_state, AppState, AutonomousDailyPlanTiming, AutonomousSessionTruth, BrokerKind,
     DeploymentMode, MultiSymbolConfigSource, MultiSymbolRuntimeConfig, OperatorAuthMode,
@@ -546,7 +547,9 @@ async fn active_bootstrap_state(pool: sqlx::PgPool) -> AppState {
 
 async fn running_dispatch_eligible_state(pool: sqlx::PgPool, run_id: Uuid) -> AppState {
     let state = active_bootstrap_state(pool).await;
-    state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    state
+        .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     // D4 REPAIR 2: `AppState::record_signal_evaluation` derives its
     // evaluation identity from `status.active_run_id`, not from
     // `execution_loop`'s injected ownership — production keeps both in sync
@@ -955,7 +958,9 @@ async fn phase_d_missing_evaluation_evidence_fails_closed_never_completes_claim(
     state
         .set_native_strategy_bootstrap_for_test(Some(bootstrap))
         .await;
-    state.inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id).await;
+    state
+        .inject_running_loop_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, run_id)
+        .await;
     state.status.write().await.active_run_id = Some(run_id);
 
     let expected_ts = timing.effective_open.timestamp() + 300;
@@ -1436,7 +1441,10 @@ async fn phase_d_task_permanent_failure_degrades_operation_once_and_stays_visibl
 
     // No runtime ownership change: this test never established local
     // ownership, and none was created by the failure path.
-    assert!(st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none());
+    assert!(st
+        .locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+        .await
+        .is_none());
     assert_eq!(
         degraded.run_id, run_id_before,
         "run_id must be untouched by task failure"
@@ -1946,6 +1954,7 @@ async fn phase_d_full_day_lifecycle() {
     let preopen_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: preopen_now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("PD: preopen tick must not error");
@@ -2089,6 +2098,7 @@ async fn phase_d_full_day_lifecycle() {
             tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
                 state: &st,
                 now_utc: pd_now(),
+                domain: ExecutionDomain::EquityNyse,
             })
             .await
             .expect("PD: start tick must not error");
@@ -2122,7 +2132,8 @@ async fn phase_d_full_day_lifecycle() {
     assert_eq!(running_operation.state, mqk_db::STATE_RUNNING);
     assert_eq!(running_operation.run_id, Some(run_id_1));
     assert_eq!(
-        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await,
+        st.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await,
         Some(run_id_1),
         "local ownership must bind to the exact run_id"
     );
@@ -2215,10 +2226,15 @@ async fn phase_d_full_day_lifecycle() {
         assert_eq!(restarted.adapter_id(), PD_ADAPTER_ID);
     }
     let crash_detected_now = pd_now() + chrono::Duration::minutes(2);
-    let recovery_scheduled =
-        handle_running(&st2, &pool, running_operation.clone(), crash_detected_now)
-            .await
-            .expect("PD: handle_running must not error");
+    let recovery_scheduled = handle_running(
+        &st2,
+        ExecutionDomain::EquityNyse,
+        &pool,
+        running_operation.clone(),
+        crash_detected_now,
+    )
+    .await
+    .expect("PD: handle_running must not error");
     assert_eq!(
         recovery_scheduled,
         AutonomousDailyCoordinatorTickOutcome::RecoveryScheduled
@@ -2244,6 +2260,7 @@ async fn phase_d_full_day_lifecycle() {
             tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
                 state: &st2,
                 now_utc: recovery_due_now,
+                domain: ExecutionDomain::EquityNyse,
             })
             .await
             .expect("PD: recovery tick must not error");
@@ -2290,7 +2307,11 @@ async fn phase_d_full_day_lifecycle() {
     .expect("row exists");
     assert_eq!(recovered_row.state, mqk_db::STATE_RUNNING);
     assert_eq!(recovered_row.run_id, Some(run_id_2));
-    assert_eq!(st2.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await, Some(run_id_2));
+    assert_eq!(
+        st2.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await,
+        Some(run_id_2)
+    );
 
     // The already-completed bar must not be reevaluated after recovery.
     let post_recovery_tick = tick_autonomous_completed_bar_driver_from_state(
@@ -2328,6 +2349,7 @@ async fn phase_d_full_day_lifecycle() {
     let close_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st2,
         now_utc: close_now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("PD: close tick must not error");
@@ -2349,7 +2371,9 @@ async fn phase_d_full_day_lifecycle() {
     assert_eq!(stopped_row.state, mqk_db::STATE_STOPPING);
     assert!(stopped_row.stopped_at_utc.is_some());
     assert!(
-        st2.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse, ).await.is_none(),
+        st2.locally_owned_run_id(mqk_daemon::state::ExecutionDomain::EquityNyse,)
+            .await
+            .is_none(),
         "local ownership must be cleared after the canonical stop"
     );
 
@@ -2608,6 +2632,7 @@ async fn phase_d_integrated_stale_running_row_releases_and_bar_chain_completes()
     let preopen_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: preopen_now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("PD integrated: preopen tick must not error despite the stale row's existence");
@@ -2662,6 +2687,7 @@ async fn phase_d_integrated_stale_running_row_releases_and_bar_chain_completes()
             tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
                 state: &st,
                 now_utc: pd_now(),
+                domain: ExecutionDomain::EquityNyse,
             })
             .await
             .expect("PD integrated: start tick must not error");
@@ -2856,6 +2882,7 @@ async fn phase_d_integrated_stale_running_row_with_active_run_fails_closed() {
     let preopen_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: preopen_now,
+        domain: ExecutionDomain::EquityNyse,
     })
     .await
     .expect("PD negative: preopen coordinator tick must not error");
@@ -2892,6 +2919,7 @@ async fn phase_d_integrated_stale_running_row_with_active_run_fails_closed() {
             tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
                 state: &st,
                 now_utc: pd_now(),
+                domain: ExecutionDomain::EquityNyse,
             })
             .await
             .expect("PD negative: start tick must not error");

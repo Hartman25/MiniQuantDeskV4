@@ -129,7 +129,7 @@ use super::autonomous_daily_coverage_authority::{
 };
 use super::autonomous_daily_operation::{
     derive_assignment_identity, derive_autonomous_daily_operation_id,
-    derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env,
+    derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_for_domain,
     AutonomousDailyPlanTiming, AutonomousDailySessionPlan, AutonomousDailySessionPlanResolution,
 };
 use super::autonomous_retry_policy::{
@@ -141,6 +141,7 @@ use super::autonomous_runtime_context::{
     resolve_autonomous_runtime_context, ResolvedAutonomousRuntimeContext,
 };
 use super::lifecycle::AutonomousArmOutcome;
+use super::ExecutionDomain;
 use super::{AppState, MultiSymbolRuntimeConfig};
 
 use mqk_db::{
@@ -193,9 +194,20 @@ fn parse_market_date(s: &str) -> anyhow::Result<NaiveDate> {
 /// Injected tick input. The coordinator reads no wall clock of its own —
 /// the production session loop passes `Utc::now()` once per tick; tests
 /// inject a fixed instant.
+///
+/// B3-COORDINATOR-DOMAIN-GENERICITY-01: `domain` selects both the
+/// calendar/session-plan authority (via
+/// [`resolve_autonomous_daily_session_plan_for_domain`]) and the
+/// [`ExecutionDomain`]-keyed runtime-ownership slot this tick reads/writes —
+/// threaded through the entire dispatch chain rather than hardcoded, so a
+/// non-equity caller is a real, exercised code path and not merely a
+/// calendar-level distinction. The sole production caller
+/// (`session_controller.rs`) passes `ExecutionDomain::EquityNyse`
+/// unconditionally today — zero behavior change.
 pub struct AutonomousDailyCoordinatorTickInput<'a> {
     pub state: &'a Arc<AppState>,
     pub now_utc: DateTime<Utc>,
+    pub domain: ExecutionDomain,
 }
 
 /// Typed, bounded outcome of one coordinator tick (D2.20). Never a
@@ -329,7 +341,11 @@ pub enum AutonomousDailyCoordinatorTickOutcome {
 pub async fn tick_autonomous_daily_coordinator(
     input: AutonomousDailyCoordinatorTickInput<'_>,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
-    let AutonomousDailyCoordinatorTickInput { state, now_utc } = input;
+    let AutonomousDailyCoordinatorTickInput {
+        state,
+        now_utc,
+        domain,
+    } = input;
 
     // Calendar resolution is pure calendar math — it must never require a
     // DB call, preserving the pre-existing "zero DB call on a weekend/
@@ -339,7 +355,7 @@ pub async fn tick_autonomous_daily_coordinator(
     let adapter_id = state.adapter_id().to_string();
 
     let timing = AutonomousDailyPlanTiming::production_default();
-    let resolution = resolve_autonomous_daily_session_plan_from_env(now_utc, &timing);
+    let resolution = resolve_autonomous_daily_session_plan_for_domain(domain, now_utc, &timing);
 
     let plan = match resolution {
         AutonomousDailySessionPlanResolution::NotApplicable { reason_code, .. } => {
@@ -356,6 +372,7 @@ pub async fn tick_autonomous_daily_coordinator(
                 Some(pool) => {
                     resolve_or_reconcile_on_nontrading_day(
                         state,
+                        domain,
                         &pool,
                         deployment_mode,
                         &adapter_id,
@@ -380,6 +397,7 @@ pub async fn tick_autonomous_daily_coordinator(
                 Some(pool) => {
                     resolve_or_degrade_on_resolution_failure(
                         state,
+                        domain,
                         &pool,
                         deployment_mode,
                         &adapter_id,
@@ -413,6 +431,7 @@ pub async fn tick_autonomous_daily_coordinator(
         Err(_err) => {
             return resolve_or_degrade_on_resolution_failure(
                 state,
+                domain,
                 &pool,
                 deployment_mode,
                 &adapter_id,
@@ -431,6 +450,7 @@ pub async fn tick_autonomous_daily_coordinator(
         Err(_err) => {
             return resolve_or_degrade_on_resolution_failure(
                 state,
+                domain,
                 &pool,
                 deployment_mode,
                 &adapter_id,
@@ -457,6 +477,7 @@ pub async fn tick_autonomous_daily_coordinator(
 
     let (operation, created) = match create_or_recover(
         state,
+        domain,
         &pool,
         &plan,
         operation_id,
@@ -496,6 +517,7 @@ pub async fn tick_autonomous_daily_coordinator(
     // after `create_or_recover` and strictly before any state-handler call.
     if let Some(blocked_outcome) = ensure_coverage_authority(
         state,
+        domain,
         &pool,
         &operation,
         &config,
@@ -532,7 +554,7 @@ pub async fn tick_autonomous_daily_coordinator(
         return Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization);
     }
 
-    dispatch_by_state(state, &pool, operation, &plan, now_utc).await
+    dispatch_by_state(state, domain, &pool, operation, &plan, now_utc).await
 }
 
 // ---------------------------------------------------------------------------
@@ -564,8 +586,10 @@ const NONTRADING_DAY_RECONCILE_DETAIL: &str =
 /// [`reconcile_existing_operation_against_relevant_lookup`] rather than
 /// reporting the blocked outcome directly: a current configuration failure
 /// must never erase lifecycle control over an already-created operation.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_or_degrade_on_resolution_failure(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     deployment_mode: &str,
     adapter_id: &str,
@@ -585,6 +609,7 @@ async fn resolve_or_degrade_on_resolution_failure(
         Some(operation) => {
             reconcile_existing_operation_against_relevant_lookup(
                 state,
+                domain,
                 pool,
                 operation,
                 degrade_reason_code,
@@ -611,6 +636,7 @@ async fn resolve_or_degrade_on_resolution_failure(
 /// reconcile the existing operation.
 async fn resolve_or_reconcile_on_nontrading_day(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     deployment_mode: &str,
     adapter_id: &str,
@@ -629,6 +655,7 @@ async fn resolve_or_reconcile_on_nontrading_day(
         Some(operation) => {
             reconcile_existing_operation_against_relevant_lookup(
                 state,
+                domain,
                 pool,
                 operation,
                 reason_code,
@@ -679,6 +706,7 @@ async fn resolve_or_reconcile_on_nontrading_day(
 /// or secret ever enters the signature.
 async fn reconcile_existing_operation_against_relevant_lookup(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     reason_code: &'static str,
@@ -698,7 +726,7 @@ async fn reconcile_existing_operation_against_relevant_lookup(
                 | mqk_db::STATE_CALENDAR_UNAVAILABLE
         )
     {
-        return handle_session_close(state, pool, operation, now_utc).await;
+        return handle_session_close(state, domain, pool, operation, now_utc).await;
     }
 
     let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
@@ -709,7 +737,15 @@ async fn reconcile_existing_operation_against_relevant_lookup(
     match operation.state.as_str() {
         STATE_STOPPING | STATE_STOP_RETRYING => {
             let postclose_finalize_utc = operation.postclose_finalize_utc;
-            handle_stopping(state, pool, operation, postclose_finalize_utc, now_utc).await
+            handle_stopping(
+                state,
+                domain,
+                pool,
+                operation,
+                postclose_finalize_utc,
+                now_utc,
+            )
+            .await
         }
         STATE_RUNNING => {
             let newly_applied = apply_manual_if_changed(
@@ -741,7 +777,7 @@ async fn reconcile_existing_operation_against_relevant_lookup(
         // the same finalization seam instead, exactly like the
         // `STATE_STOPPING`/`STATE_STOP_RETRYING` arm above.
         mqk_db::STATE_EVIDENCE_DEGRADED if operation.stopped_at_utc.is_some() => {
-            handle_outcome_finalization(state, pool, operation, now_utc).await
+            handle_outcome_finalization(state, domain, pool, operation, now_utc).await
         }
         STATE_MANUAL_INTERVENTION_REQUIRED
         | mqk_db::STATE_CONTROLLER_DEGRADED
@@ -804,6 +840,7 @@ async fn reconcile_existing_operation_against_relevant_lookup(
 #[allow(clippy::too_many_arguments)]
 async fn create_or_recover(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     plan: &AutonomousDailySessionPlan,
     operation_id: Uuid,
@@ -821,10 +858,12 @@ async fn create_or_recover(
         market_date: parse_market_date(&plan.market_date)?,
         deployment_mode: deployment_mode.to_string(),
         adapter_id: adapter_id.to_string(),
-        // D1/B1: this coordinator drives only the equity-NYSE autonomous
-        // path today; a future crypto_24_7 coordinator is a separate B2/B3
-        // wiring effort, not introduced by this patch.
-        execution_domain: mqk_db::EXECUTION_DOMAIN_EQUITY_NYSE.to_string(),
+        // B3-COORDINATOR-DOMAIN-GENERICITY-01: the durable row's own
+        // execution_domain identity must match the caller's real domain —
+        // `domain.as_str()` is byte-identical to the previous hardcoded
+        // `EXECUTION_DOMAIN_EQUITY_NYSE` constant for the only production
+        // caller (EquityNyse) and correctly labels a Crypto24_7 tick.
+        execution_domain: domain.as_str().to_string(),
         session_plan_identity: plan.session_plan_identity.clone(),
         assignment_identity: assignment_identity.to_string(),
         runtime_binding_identity: runtime_binding_identity.to_string(),
@@ -857,6 +896,7 @@ async fn create_or_recover(
         } => {
             let outcome = handle_identity_conflict(
                 state,
+                domain,
                 pool,
                 existing_operation_id,
                 assignment_identity,
@@ -901,6 +941,7 @@ pub struct AutonomousCoverageAuthorityPreBindTestHook {
 #[allow(clippy::too_many_arguments)]
 async fn ensure_coverage_authority(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     config: &MultiSymbolRuntimeConfig,
@@ -921,6 +962,7 @@ async fn ensure_coverage_authority(
             return Ok(Some(
                 apply_coverage_blocker(
                     state,
+                    domain,
                     pool,
                     operation,
                     REASON_COVERAGE_POLICY_RESOLUTION_UNAVAILABLE,
@@ -941,6 +983,7 @@ async fn ensure_coverage_authority(
         return Ok(Some(
             apply_coverage_blocker(
                 state,
+                domain,
                 pool,
                 operation,
                 REASON_COVERAGE_POLICY_CONSTRUCTION_FAILED,
@@ -960,6 +1003,7 @@ async fn ensure_coverage_authority(
             return Ok(Some(
                 apply_coverage_blocker(
                     state,
+                    domain,
                     pool,
                     operation,
                     REASON_COVERAGE_POLICY_CONSTRUCTION_FAILED,
@@ -985,6 +1029,7 @@ async fn ensure_coverage_authority(
                         | CoverageAuthorityEnsureResult::Unreadable => Ok(Some(
                             apply_coverage_blocker(
                                 state,
+                                domain,
                                 pool,
                                 operation,
                                 REASON_COVERAGE_AUTHORITY_CONFLICT,
@@ -998,6 +1043,7 @@ async fn ensure_coverage_authority(
                 Ok(PristineCheckOutcome::HasActivity) | Err(_) => Ok(Some(
                     apply_coverage_blocker(
                         state,
+                        domain,
                         pool,
                         operation,
                         REASON_COVERAGE_AUTHORITY_MISSING_AFTER_ACTIVITY,
@@ -1011,6 +1057,7 @@ async fn ensure_coverage_authority(
         CoverageAuthorityCheck::Unreadable => Ok(Some(
             apply_coverage_blocker(
                 state,
+                domain,
                 pool,
                 operation,
                 REASON_COVERAGE_AUTHORITY_UNREADABLE,
@@ -1022,6 +1069,7 @@ async fn ensure_coverage_authority(
         CoverageAuthorityCheck::Invalid | CoverageAuthorityCheck::Conflict => Ok(Some(
             apply_coverage_blocker(
                 state,
+                domain,
                 pool,
                 operation,
                 REASON_COVERAGE_AUTHORITY_CONFLICT,
@@ -1048,6 +1096,7 @@ async fn ensure_coverage_authority(
 /// runtime past close.
 async fn apply_coverage_blocker(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     reason_code: &'static str,
@@ -1078,7 +1127,7 @@ async fn apply_coverage_blocker(
         // so a fresh coverage-authority problem here falls through to this
         // function's own evidence_degraded self-loop below instead of
         // re-requesting stopping.
-        return handle_session_close(state, pool, operation.clone(), now_utc).await;
+        return handle_session_close(state, domain, pool, operation.clone(), now_utc).await;
     }
 
     let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
@@ -1169,6 +1218,7 @@ async fn apply_coverage_blocker(
 /// since the conflict first appeared observed the same identity mismatch.
 async fn handle_identity_conflict(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     existing_operation_id: Uuid,
     assignment_identity: &str,
@@ -1207,7 +1257,7 @@ async fn handle_identity_conflict(
                 | mqk_db::STATE_CALENDAR_UNAVAILABLE
         )
     {
-        return handle_session_close(state, pool, existing, now_utc).await;
+        return handle_session_close(state, domain, pool, existing, now_utc).await;
     }
 
     let reason = AutonomousCoordinatorReason::OperationIdentityConflict;
@@ -1943,6 +1993,7 @@ fn evidence_degraded_runtime_stop_already_recorded(
 
 pub async fn dispatch_by_state(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     plan: &AutonomousDailySessionPlan,
@@ -1991,7 +2042,7 @@ pub async fn dispatch_by_state(
                 | mqk_db::STATE_CALENDAR_UNAVAILABLE
         )
     {
-        return handle_session_close(state, pool, operation, now_utc).await;
+        return handle_session_close(state, domain, pool, operation, now_utc).await;
     }
 
     match operation.state.as_str() {
@@ -2015,20 +2066,45 @@ pub async fn dispatch_by_state(
         }
         STATE_PREPARING_DATA => handle_preparing_data(state, pool, &operation, plan, now_utc).await,
         STATE_PREFLIGHT_BLOCKED => {
-            handle_preflight_blocked(state, pool, &operation, plan, now_utc).await
+            handle_preflight_blocked(state, domain, pool, &operation, plan, now_utc).await
         }
         STATE_AWAITING_OPEN => {
-            attempt_canonical_start(state, pool, operation, now_utc, STATE_AWAITING_OPEN).await
+            attempt_canonical_start(state, domain, pool, operation, now_utc, STATE_AWAITING_OPEN)
+                .await
         }
         STATE_START_RETRYING => {
-            attempt_canonical_start(state, pool, operation, now_utc, STATE_START_RETRYING).await
+            attempt_canonical_start(
+                state,
+                domain,
+                pool,
+                operation,
+                now_utc,
+                STATE_START_RETRYING,
+            )
+            .await
         }
-        STATE_RUNNING => handle_running(state, pool, operation, now_utc).await,
+        STATE_RUNNING => handle_running(state, domain, pool, operation, now_utc).await,
         STATE_RECOVERY_RETRYING => {
-            attempt_canonical_start(state, pool, operation, now_utc, STATE_RECOVERY_RETRYING).await
+            attempt_canonical_start(
+                state,
+                domain,
+                pool,
+                operation,
+                now_utc,
+                STATE_RECOVERY_RETRYING,
+            )
+            .await
         }
         STATE_STOPPING | STATE_STOP_RETRYING => {
-            handle_stopping(state, pool, operation, plan.postclose_finalize_utc, now_utc).await
+            handle_stopping(
+                state,
+                domain,
+                pool,
+                operation,
+                plan.postclose_finalize_utc,
+                now_utc,
+            )
+            .await
         }
         STATE_MANUAL_INTERVENTION_REQUIRED => {
             let reason_code = operation
@@ -2159,7 +2235,7 @@ pub async fn dispatch_by_state(
                 // here for `controller_degraded`. No new legal transition
                 // edge: `manual_intervention_required -> stopping` is
                 // already legal in `mqk_db::is_legal_operation_transition`.
-                match state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await {
+                match state.locally_owned_run_id(domain).await {
                     Some(local_run_id) if local_run_id == expected_run_id => Ok(
                         AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                             reason_code: bounded_static_reason(reason_code),
@@ -2278,10 +2354,11 @@ pub async fn dispatch_by_state(
                 );
             };
 
-            match state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await {
+            match state.locally_owned_run_id(domain).await {
                 Some(local_run_id) if local_run_id == expected_run_id => {
                     attempt_controller_degraded_recovery(
                         state,
+                        domain,
                         pool,
                         &operation,
                         expected_run_id,
@@ -2329,9 +2406,13 @@ pub async fn dispatch_by_state(
         // unchanged.
         mqk_db::STATE_EVIDENCE_DEGRADED => {
             if operation.stopped_at_utc.is_some() {
-                match attempt_evidence_degraded_recovery(state, pool, &operation, now_utc).await? {
+                match attempt_evidence_degraded_recovery(state, domain, pool, &operation, now_utc)
+                    .await?
+                {
                     Some(outcome) => Ok(outcome),
-                    None => handle_outcome_finalization(state, pool, operation, now_utc).await,
+                    None => {
+                        handle_outcome_finalization(state, domain, pool, operation, now_utc).await
+                    }
                 }
             } else {
                 Ok(
@@ -2460,6 +2541,7 @@ async fn handle_preparing_data(
 
 async fn handle_preflight_blocked(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     plan: &AutonomousDailySessionPlan,
@@ -2516,7 +2598,15 @@ async fn handle_preflight_blocked(
             "preopen readiness resolved; entering start sequence",
         )
         .await?;
-        return attempt_canonical_start(state, pool, updated, now_utc, STATE_START_RETRYING).await;
+        return attempt_canonical_start(
+            state,
+            domain,
+            pool,
+            updated,
+            now_utc,
+            STATE_START_RETRYING,
+        )
+        .await;
     }
     if report.start_allowed {
         return Ok(AutonomousDailyCoordinatorTickOutcome::PreflightBlocked {
@@ -2640,6 +2730,7 @@ async fn classify_and_apply_preopen_blocker(
 
 pub async fn attempt_canonical_start(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
@@ -2652,7 +2743,7 @@ pub async fn attempt_canonical_start(
     // recovery_retrying always has a prior run_id and reaches this
     // function only after `handle_running` has already ruled out the
     // operator-managed case.
-    if operation.run_id.is_none() && state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await.is_some() {
+    if operation.run_id.is_none() && state.locally_owned_run_id(domain).await.is_some() {
         let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
@@ -2736,10 +2827,10 @@ pub async fn attempt_canonical_start(
         }
     };
 
-    match state.start_execution_runtime(super::ExecutionDomain::EquityNyse).await {
+    match state.start_execution_runtime(domain).await {
         Ok(snapshot) => {
             let Some(run_id) = snapshot.active_run_id else {
-                let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
+                let _ = state.stop_execution_runtime(domain).await;
                 let newly_applied = apply_manual_if_changed(
                     pool,
                     &operation,
@@ -2757,11 +2848,11 @@ pub async fn attempt_canonical_start(
                     },
                 );
             };
-            if state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await != Some(run_id) {
+            if state.locally_owned_run_id(domain).await != Some(run_id) {
                 // D2.12 crash-window policy: a successful start whose
                 // durable operation binding cannot be confirmed must never
                 // be presented as running.
-                let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
+                let _ = state.stop_execution_runtime(domain).await;
                 let newly_applied = apply_manual_if_changed(
                     pool,
                     &operation,
@@ -2824,7 +2915,7 @@ pub async fn attempt_canonical_start(
                     // transition could not be confirmed. Best-effort stop;
                     // the operation is never presented as running and the
                     // run is never silently adopted.
-                    let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
+                    let _ = state.stop_execution_runtime(domain).await;
                     let newly_applied = apply_manual_if_changed(
                         pool,
                         &operation,
@@ -2846,7 +2937,7 @@ pub async fn attempt_canonical_start(
                 }
                 Err(store_err) => {
                     handle_running_transition_store_error(
-                        state, pool, &operation, run_id, from_state, store_err, now_utc,
+                        state, domain, pool, &operation, run_id, from_state, store_err, now_utc,
                     )
                     .await
                 }
@@ -2929,6 +3020,7 @@ async fn running_transition_event_matches(
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_running_transition_store_error(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     run_id: Uuid,
@@ -2965,7 +3057,7 @@ pub async fn handle_running_transition_store_error(
             // illegal degraded target (the re-read row may genuinely be
             // `running`, whose only legal manual-adjacent edge is
             // `controller_degraded`, never `manual_intervention_required`).
-            let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
+            let _ = state.stop_execution_runtime(domain).await;
             let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
                 fault_class: "durable_transition_unconfirmed_after_start",
             };
@@ -2997,7 +3089,7 @@ pub async fn handle_running_transition_store_error(
             )
         }
         Ok(None) => {
-            let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
+            let _ = state.stop_execution_runtime(domain).await;
             anyhow::bail!(
                 "autonomous_daily_coordinator: operation {} vanished after a running-transition \
                  store error ({store_err})",
@@ -3013,7 +3105,7 @@ pub async fn handle_running_transition_store_error(
             // the pre-attempt snapshot (always `start_retrying` or
             // `recovery_retrying` here), which always has a legal edge to
             // `manual_intervention_required`.
-            let _ = state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await;
+            let _ = state.stop_execution_runtime(domain).await;
             let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
                 fault_class: "durable_transition_unconfirmed_after_start",
             };
@@ -3140,6 +3232,7 @@ async fn classify_start_sequence_failure(
 
 pub async fn handle_running(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
@@ -3163,7 +3256,7 @@ pub async fn handle_running(
         );
     };
 
-    let local_run_id = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await;
+    let local_run_id = state.locally_owned_run_id(domain).await;
     if local_run_id == Some(expected_run_id) {
         return Ok(AutonomousDailyCoordinatorTickOutcome::Running {
             run_id: expected_run_id,
@@ -3409,6 +3502,7 @@ async fn check_terminated_run_safe_to_recover(
 /// (scheduled, attempted, or refused with a specific diagnostic reason).
 async fn attempt_evidence_degraded_recovery(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
@@ -3447,7 +3541,7 @@ async fn attempt_evidence_degraded_recovery(
         // there is no "still exactly this run" success case to short-
         // circuit here; any local ownership at all is a contradiction with
         // this operation's own durable `stopped_at_utc` truth.
-        if state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await.is_some() {
+        if state.locally_owned_run_id(domain).await.is_some() {
             let newly_applied = apply_manual_if_changed(
                 pool,
                 operation,
@@ -3592,6 +3686,7 @@ async fn attempt_evidence_degraded_recovery(
     Ok(Some(
         attempt_canonical_start(
             state,
+            domain,
             pool,
             operation.clone(),
             now_utc,
@@ -3629,6 +3724,7 @@ async fn attempt_evidence_degraded_recovery(
 /// completed-bar driver from the coordinator.
 async fn attempt_controller_degraded_recovery(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     expected_run_id: Uuid,
@@ -3740,7 +3836,7 @@ async fn attempt_controller_degraded_recovery(
     // run+operation authority seam below rather than trusting the ownership
     // check `dispatch_by_state` performed before any of this async work
     // ran.
-    if state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await != Some(expected_run_id) {
+    if state.locally_owned_run_id(domain).await != Some(expected_run_id) {
         let newly_applied = apply_manual_if_changed(
             pool,
             operation,
@@ -4063,11 +4159,12 @@ pub(crate) async fn reconcile_durable_run_without_local_owner(
 
 pub async fn handle_session_close(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
-    let local_run_id = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await;
+    let local_run_id = state.locally_owned_run_id(domain).await;
 
     match (operation.run_id, local_run_id) {
         (Some(expected), Some(actual)) if expected == actual => {
@@ -4082,7 +4179,7 @@ pub async fn handle_session_close(
                 "effective operation window closed; stopping the matching autonomous runtime",
             )
             .await?;
-            retry_stop(state, pool, updated, now_utc).await
+            retry_stop(state, domain, pool, updated, now_utc).await
         }
         (Some(_), Some(_)) => {
             // Mismatched runtime: never stopped by the coordinator.
@@ -4158,6 +4255,7 @@ pub async fn handle_session_close(
 
 pub async fn handle_stopping(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     postclose_finalize_utc: DateTime<Utc>,
@@ -4173,7 +4271,7 @@ pub async fn handle_stopping(
     // lookup`'s fallback-lookup routing alike -- so a stopped, finalization-
     // eligible operation discovered through either path is never abandoned.
     if operation.stopped_at_utc.is_some() {
-        return handle_outcome_finalization(state, pool, operation, now_utc).await;
+        return handle_outcome_finalization(state, domain, pool, operation, now_utc).await;
     }
     if now_utc >= postclose_finalize_utc {
         let newly_applied = apply_manual_if_changed(
@@ -4198,11 +4296,12 @@ pub async fn handle_stopping(
             return Ok(AutonomousDailyCoordinatorTickOutcome::RetryNotDue);
         }
     }
-    retry_stop(state, pool, operation, now_utc).await
+    retry_stop(state, domain, pool, operation, now_utc).await
 }
 
 pub async fn retry_stop(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
@@ -4212,7 +4311,7 @@ pub async fn retry_stop(
     // that appeared, disappeared, or changed identity since the last tick
     // must never be stopped (or left un-reconciled) merely because the
     // operation remains `stop_retrying`.
-    let local_run_id = state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await;
+    let local_run_id = state.locally_owned_run_id(domain).await;
 
     match (operation.run_id, local_run_id) {
         (Some(expected), Some(actual)) if expected == actual => {
@@ -4285,7 +4384,7 @@ pub async fn retry_stop(
             }
         };
 
-    match state.stop_execution_runtime(super::ExecutionDomain::EquityNyse).await {
+    match state.stop_execution_runtime(domain).await {
         Ok(_) => {
             // REPAIR 5: restart-safe, idempotent stop completion — never
             // rewinds an already-recorded stopped_at_utc, and clears stale
@@ -4334,10 +4433,11 @@ pub async fn retry_stop(
 /// None` (never started) is never "matching" -- there is nothing to match.
 async fn matching_local_runtime_active(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     operation: &AutonomousDailyOperationRecord,
 ) -> bool {
     match operation.run_id {
-        Some(expected) => state.locally_owned_run_id(super::ExecutionDomain::EquityNyse).await == Some(expected),
+        Some(expected) => state.locally_owned_run_id(domain).await == Some(expected),
         None => false,
     }
 }
@@ -4376,12 +4476,14 @@ async fn matching_local_runtime_active(
 // in this function changed for that route's sake.
 pub(crate) async fn handle_outcome_finalization(
     state: &Arc<AppState>,
+    domain: ExecutionDomain,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
     let context = super::autonomous_daily_outcome::AutonomousDailyFinalizationContext {
-        matching_local_runtime_active: matching_local_runtime_active(state, &operation).await,
+        matching_local_runtime_active: matching_local_runtime_active(state, domain, &operation)
+            .await,
     };
 
     // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
