@@ -66,9 +66,15 @@ fn test_engine_id(label: &str) -> String {
     format!("test-crypto-fee-{}-{}", label, Uuid::new_v4())
 }
 
+/// Fixed test broker/account identity for every single-account test below;
+/// B6's own multi-account isolation proof lives in
+/// scenario_crypto_fee_activity_ingestion_caller_01.rs (G06-G08).
+const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id";
+
 fn cash_fee(activity_id: &str, engine_id: &str, fee_micros: i64) -> NewCryptoFeeActivity {
     NewCryptoFeeActivity {
         activity_id: activity_id.to_string(),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
         engine_id: engine_id.to_string(),
         mode: "PAPER".to_string(),
         activity_type: "CFEE".to_string(),
@@ -102,7 +108,7 @@ async fn f01_duplicate_activity_id_is_dedup_no_duplicate_charge() {
             .expect("second insert must not error");
     assert_eq!(second, InsertCryptoFeeActivityOutcome::AlreadyExists);
 
-    let stored = fetch_crypto_fee_activity(&pool, &activity_id)
+    let stored = fetch_crypto_fee_activity(&pool, TEST_BROKER_ACCOUNT_ID, &activity_id)
         .await
         .expect("fetch must succeed")
         .expect("row must exist");
@@ -119,9 +125,15 @@ async fn f02_cursor_absent_before_any_ingestion() {
     let pool = require_pool(&url).await.expect("pool");
     let engine_id = test_engine_id("f02");
 
-    let cursor = fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("fetch must succeed");
+    let cursor = fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("fetch must succeed");
     assert_eq!(cursor, None);
 }
 
@@ -139,6 +151,7 @@ async fn f03_batch_inserts_and_advances_cursor_atomically() {
     ];
     let outcome = ingest_crypto_fee_activity_batch(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         "CFEE",
@@ -156,9 +169,15 @@ async fn f03_batch_inserts_and_advances_cursor_atomically() {
         }
     );
 
-    let cursor = fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("fetch must succeed");
+    let cursor = fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("fetch must succeed");
     assert_eq!(cursor, Some(a2));
 }
 
@@ -174,18 +193,34 @@ async fn f04_replaying_the_identical_batch_is_a_pure_noop() {
         cash_fee(&a2, &engine_id, -2_000),
     ];
 
-    ingest_crypto_fee_activity_batch(&pool, &engine_id, "PAPER", "CFEE", &batch, &a2, Utc::now())
-        .await
-        .expect("first ingest must succeed");
-    let cursor_after_first = fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("fetch must succeed");
+    ingest_crypto_fee_activity_batch(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+        &batch,
+        &a2,
+        Utc::now(),
+    )
+    .await
+    .expect("first ingest must succeed");
+    let cursor_after_first = fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("fetch must succeed");
 
     // Simulate a restart that (not yet knowing the cursor advanced, or
     // re-fetching an overlapping range defensively) re-submits the SAME
     // batch.
     let replay_outcome = ingest_crypto_fee_activity_batch(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         "CFEE",
@@ -204,9 +239,15 @@ async fn f04_replaying_the_identical_batch_is_a_pure_noop() {
         "F04: replaying an already-ingested batch must apply zero new economic effect"
     );
 
-    let cursor_after_replay = fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("fetch must succeed");
+    let cursor_after_replay = fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("fetch must succeed");
     assert_eq!(
         cursor_after_first, cursor_after_replay,
         "F04: cursor must be unchanged by a no-op replay"
@@ -228,9 +269,15 @@ async fn f05_partially_pre_inserted_batch_resumes_without_gap_or_double_apply() 
         .await
         .expect("pre-insert must succeed");
     assert_eq!(
-        fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-            .await
-            .expect("fetch must succeed"),
+        fetch_crypto_fee_ingestion_cursor(
+            &pool,
+            TEST_BROKER_ACCOUNT_ID,
+            &engine_id,
+            "PAPER",
+            "CFEE"
+        )
+        .await
+        .expect("fetch must succeed"),
         None,
         "F05 setup: cursor must still be absent after the simulated crash"
     );
@@ -243,6 +290,7 @@ async fn f05_partially_pre_inserted_batch_resumes_without_gap_or_double_apply() 
     ];
     let outcome = ingest_crypto_fee_activity_batch(
         &pool,
+        TEST_BROKER_ACCOUNT_ID,
         &engine_id,
         "PAPER",
         "CFEE",
@@ -261,9 +309,15 @@ async fn f05_partially_pre_inserted_batch_resumes_without_gap_or_double_apply() 
         "F05: activity 1 must be recognized AlreadyExists, activity 2 newly Inserted"
     );
 
-    let cursor = fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("fetch must succeed");
+    let cursor = fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("fetch must succeed");
     assert_eq!(
         cursor,
         Some(a2),
@@ -281,7 +335,7 @@ async fn f06_all_three_attribution_shapes_round_trip_exactly() {
     insert_crypto_fee_activity_if_new(&pool, &cash)
         .await
         .expect("cash insert must succeed");
-    let stored_cash = fetch_crypto_fee_activity(&pool, &cash.activity_id)
+    let stored_cash = fetch_crypto_fee_activity(&pool, TEST_BROKER_ACCOUNT_ID, &cash.activity_id)
         .await
         .expect("fetch must succeed")
         .expect("row must exist");
@@ -294,6 +348,7 @@ async fn f06_all_three_attribution_shapes_round_trip_exactly() {
 
     let asset_denominated = NewCryptoFeeActivity {
         activity_id: format!("{engine_id}::asset"),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
         engine_id: engine_id.clone(),
         mode: "PAPER".to_string(),
         activity_type: "CFEE".to_string(),
@@ -306,10 +361,14 @@ async fn f06_all_three_attribution_shapes_round_trip_exactly() {
     insert_crypto_fee_activity_if_new(&pool, &asset_denominated)
         .await
         .expect("asset-denominated insert must succeed");
-    let stored_asset = fetch_crypto_fee_activity(&pool, &asset_denominated.activity_id)
-        .await
-        .expect("fetch must succeed")
-        .expect("row must exist");
+    let stored_asset = fetch_crypto_fee_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &asset_denominated.activity_id,
+    )
+    .await
+    .expect("fetch must succeed")
+    .expect("row must exist");
     assert_eq!(
         stored_asset.attribution_status,
         CryptoFeeAttributionStatus::AssetDenominatedFeeUnsupported
@@ -319,6 +378,7 @@ async fn f06_all_three_attribution_shapes_round_trip_exactly() {
 
     let zero = NewCryptoFeeActivity {
         activity_id: format!("{engine_id}::zero"),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
         engine_id: engine_id.clone(),
         mode: "PAPER".to_string(),
         activity_type: "CFEE".to_string(),
@@ -331,7 +391,7 @@ async fn f06_all_three_attribution_shapes_round_trip_exactly() {
     insert_crypto_fee_activity_if_new(&pool, &zero)
         .await
         .expect("confirmed-zero insert must succeed");
-    let stored_zero = fetch_crypto_fee_activity(&pool, &zero.activity_id)
+    let stored_zero = fetch_crypto_fee_activity(&pool, TEST_BROKER_ACCOUNT_ID, &zero.activity_id)
         .await
         .expect("fetch must succeed")
         .expect("row must exist");
@@ -356,6 +416,7 @@ async fn f07_payload_shape_check_constraint_refuses_malformed_cash_fee() {
     // Rust types happen to prevent.
     let malformed = NewCryptoFeeActivity {
         activity_id: format!("{engine_id}::malformed"),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
         engine_id: engine_id.clone(),
         mode: "PAPER".to_string(),
         activity_type: "CFEE".to_string(),

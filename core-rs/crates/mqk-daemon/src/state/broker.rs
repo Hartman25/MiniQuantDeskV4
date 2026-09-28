@@ -351,6 +351,10 @@ impl CryptoFeeActivityFetcher for AlpacaCryptoFeeActivityFetcher {
             .fetch_fee_activities_since(activity_type, after_id)
             .map_err(|e| e.to_string())
     }
+
+    fn broker_account_id(&self) -> String {
+        self.0.account_identity().to_string()
+    }
 }
 
 /// B6: construct a production crypto fee-activity fetcher.

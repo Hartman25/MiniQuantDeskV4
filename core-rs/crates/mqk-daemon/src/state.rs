@@ -1227,6 +1227,12 @@ pub trait CryptoFeeActivityFetcher: Send + Sync {
         activity_type: &str,
         after_id: Option<&str>,
     ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String>;
+
+    /// B6 correction: the authenticated broker account this fetcher targets
+    /// (Alpaca's own `APCA-API-KEY-ID`) -- durable account provenance the
+    /// caller must scope fee evidence and cursor authority by, never merely
+    /// `engine_id`/`mode`.
+    fn broker_account_id(&self) -> String;
 }
 
 /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Injectable on-demand broker snapshot fetcher.

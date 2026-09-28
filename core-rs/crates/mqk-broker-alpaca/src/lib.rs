@@ -277,6 +277,17 @@ impl AlpacaBrokerAdapter {
         self
     }
 
+    /// B6/D1 correction: the authenticated account's own durable identity --
+    /// the trimmed `APCA-API-KEY-ID` (never the secret key). Alpaca scopes
+    /// activity ids and account state to one account; this is the natural
+    /// raw identity a caller uses to scope any durable fee/lifecycle
+    /// evidence or cursor by "which broker account", mirroring
+    /// `mqk-broker-ibkr::identity::IbkrDeploymentIdentity::account_id`'s
+    /// role for that adapter.
+    pub fn account_identity(&self) -> &str {
+        &self.cfg.api_key_id
+    }
+
     /// D2/B4: the Crypto capability flag as configured (not the same as
     /// whether Crypto is actually advertised -- see `supports_asset_class`,
     /// which additionally requires a Paper-targeting `base_url`). Exposed

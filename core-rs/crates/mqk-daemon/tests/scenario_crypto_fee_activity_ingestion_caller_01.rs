@@ -120,6 +120,11 @@ fn malformed_activity(id: &str) -> AlpacaFeeActivity {
     }
 }
 
+/// Fixed test broker/account identity -- every fetcher below targets the
+/// same account unless a test explicitly constructs a distinct one (B6
+/// correction: multi-account scoping proof).
+const TEST_BROKER_ACCOUNT_ID: &str = "test-alpaca-key-id-primary";
+
 /// Always returns the same fixed batch, regardless of `after_id`.
 struct FixedFetcher(Vec<AlpacaFeeActivity>);
 
@@ -130,6 +135,10 @@ impl CryptoFeeActivityFetcher for FixedFetcher {
         _after_id: Option<&str>,
     ) -> Result<Vec<AlpacaFeeActivity>, String> {
         Ok(self.0.clone())
+    }
+
+    fn broker_account_id(&self) -> String {
+        TEST_BROKER_ACCOUNT_ID.to_string()
     }
 }
 
@@ -154,6 +163,31 @@ impl CryptoFeeActivityFetcher for AssertingFetcher {
         );
         Ok(self.activities.clone())
     }
+
+    fn broker_account_id(&self) -> String {
+        TEST_BROKER_ACCOUNT_ID.to_string()
+    }
+}
+
+/// A fetcher bound to an explicit, caller-chosen broker account -- used by
+/// the B6 multi-account isolation proof (G06/G07).
+struct AccountScopedFetcher {
+    broker_account_id: String,
+    activities: Vec<AlpacaFeeActivity>,
+}
+
+impl CryptoFeeActivityFetcher for AccountScopedFetcher {
+    fn fetch_fee_activities_since(
+        &self,
+        _activity_type: &str,
+        _after_id: Option<&str>,
+    ) -> Result<Vec<AlpacaFeeActivity>, String> {
+        Ok(self.activities.clone())
+    }
+
+    fn broker_account_id(&self) -> String {
+        self.broker_account_id.clone()
+    }
 }
 
 #[tokio::test]
@@ -170,9 +204,15 @@ async fn g01_empty_fetch_is_pure_noop() {
     assert_eq!(outcome.newly_inserted, 0);
     assert_eq!(outcome.already_existed, 0);
 
-    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("cursor fetch must succeed");
+    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(
         cursor, None,
         "G01: an empty fetch must never create a cursor row"
@@ -201,16 +241,22 @@ async fn g02_fresh_batch_ingests_and_advances_cursor_all_three_shapes() {
     assert_eq!(outcome.newly_inserted, 3);
     assert_eq!(outcome.already_existed, 0);
 
-    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("cursor fetch must succeed");
+    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(
         cursor,
         Some(a3.clone()),
         "G02: cursor must advance to the last (ascending-order) activity id"
     );
 
-    let stored_cash = mqk_db::fetch_crypto_fee_activity(&pool, &a1)
+    let stored_cash = mqk_db::fetch_crypto_fee_activity(&pool, TEST_BROKER_ACCOUNT_ID, &a1)
         .await
         .expect("fetch must succeed")
         .expect("row must exist");
@@ -220,7 +266,7 @@ async fn g02_fresh_batch_ingests_and_advances_cursor_all_three_shapes() {
     );
     assert_eq!(stored_cash.fee_micros, Some(-50_000));
 
-    let stored_asset = mqk_db::fetch_crypto_fee_activity(&pool, &a2)
+    let stored_asset = mqk_db::fetch_crypto_fee_activity(&pool, TEST_BROKER_ACCOUNT_ID, &a2)
         .await
         .expect("fetch must succeed")
         .expect("row must exist");
@@ -230,7 +276,7 @@ async fn g02_fresh_batch_ingests_and_advances_cursor_all_three_shapes() {
     );
     assert_eq!(stored_asset.qty_raw.as_deref(), Some("-0.0002"));
 
-    let stored_zero = mqk_db::fetch_crypto_fee_activity(&pool, &a3)
+    let stored_zero = mqk_db::fetch_crypto_fee_activity(&pool, TEST_BROKER_ACCOUNT_ID, &a3)
         .await
         .expect("fetch must succeed")
         .expect("row must exist");
@@ -280,9 +326,15 @@ async fn g03_second_call_reads_persisted_cursor_and_threads_it_as_after_id() {
     .expect("second ingest must succeed");
     assert_eq!(outcome.newly_inserted, 1);
 
-    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("cursor fetch must succeed");
+    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(cursor, Some(a2));
 }
 
@@ -358,18 +410,212 @@ async fn g05_normalize_failure_fails_closed_before_any_db_write() {
         "G05: a normalize failure anywhere in the batch must fail the whole attempt"
     );
 
-    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, &engine_id, "PAPER", "CFEE")
-        .await
-        .expect("cursor fetch must succeed");
+    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+    )
+    .await
+    .expect("cursor fetch must succeed");
     assert_eq!(
         cursor, None,
         "G05: the cursor must never advance when the attempt failed closed"
     );
-    let stored = mqk_db::fetch_crypto_fee_activity(&pool, &good_id)
+    let stored = mqk_db::fetch_crypto_fee_activity(&pool, TEST_BROKER_ACCOUNT_ID, &good_id)
         .await
         .expect("fetch must succeed");
     assert!(
         stored.is_none(),
         "G05: the valid activity in a failed batch must never be partially ingested"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// B6 correction: durable broker/account provenance
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn g06_two_accounts_sharing_an_activity_id_never_collide() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("g06");
+    // Same engine_id/mode/activity_type AND the same raw activity_id -- only
+    // broker_account_id differs. Pre-0085 this would collide on the
+    // activity_id-only PRIMARY KEY and the second ingest would report
+    // already_existed instead of newly_inserted.
+    let shared_activity_id = format!("{engine_id}::shared");
+
+    let fetcher_a = AccountScopedFetcher {
+        broker_account_id: "account-A".to_string(),
+        activities: vec![cash_fee_activity(&shared_activity_id, "BTCUSD", "-0.01")],
+    };
+    let outcome_a = ingest_crypto_fee_activities_once(
+        &pool,
+        &fetcher_a,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+        Utc::now(),
+    )
+    .await
+    .expect("account A ingest must succeed");
+    assert_eq!(outcome_a.newly_inserted, 1);
+
+    let fetcher_b = AccountScopedFetcher {
+        broker_account_id: "account-B".to_string(),
+        activities: vec![cash_fee_activity(&shared_activity_id, "BTCUSD", "-0.02")],
+    };
+    let outcome_b = ingest_crypto_fee_activities_once(
+        &pool,
+        &fetcher_b,
+        &engine_id,
+        "PAPER",
+        "CFEE",
+        Utc::now(),
+    )
+    .await
+    .expect("account B ingest must succeed");
+    assert_eq!(
+        outcome_b.newly_inserted, 1,
+        "G06: account B's activity must be genuinely new, not dropped as a false duplicate \
+         of account A's identically-numbered activity"
+    );
+
+    let stored_a = mqk_db::fetch_crypto_fee_activity(&pool, "account-A", &shared_activity_id)
+        .await
+        .expect("fetch must succeed")
+        .expect("account A's row must exist");
+    let stored_b = mqk_db::fetch_crypto_fee_activity(&pool, "account-B", &shared_activity_id)
+        .await
+        .expect("fetch must succeed")
+        .expect("account B's row must exist");
+    assert_eq!(stored_a.fee_micros, Some(-10_000));
+    assert_eq!(
+        stored_b.fee_micros,
+        Some(-20_000),
+        "G06: account B's own fee value must survive distinctly, not be overwritten/merged \
+         with account A's"
+    );
+}
+
+#[tokio::test]
+async fn g07_cursor_for_one_account_never_advances_or_gates_another() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("g07");
+    let a1 = format!("{engine_id}::a-act");
+    let b1 = format!("{engine_id}::b-act");
+
+    let fetcher_a = AccountScopedFetcher {
+        broker_account_id: "account-A".to_string(),
+        activities: vec![cash_fee_activity(&a1, "BTCUSD", "-0.01")],
+    };
+    ingest_crypto_fee_activities_once(&pool, &fetcher_a, &engine_id, "PAPER", "CFEE", Utc::now())
+        .await
+        .expect("account A ingest must succeed");
+
+    // Account B has never ingested anything under this engine_id/mode: its
+    // cursor must read None, never account A's watermark.
+    let cursor_b_before =
+        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-B", &engine_id, "PAPER", "CFEE")
+            .await
+            .expect("cursor fetch must succeed");
+    assert_eq!(
+        cursor_b_before, None,
+        "G07: account B's cursor must never read account A's watermark"
+    );
+
+    let fetcher_b = AccountScopedFetcher {
+        broker_account_id: "account-B".to_string(),
+        activities: vec![cash_fee_activity(&b1, "ETHUSD", "-0.03")],
+    };
+    ingest_crypto_fee_activities_once(&pool, &fetcher_b, &engine_id, "PAPER", "CFEE", Utc::now())
+        .await
+        .expect("account B ingest must succeed");
+
+    let cursor_a =
+        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-A", &engine_id, "PAPER", "CFEE")
+            .await
+            .expect("cursor fetch must succeed");
+    assert_eq!(
+        cursor_a,
+        Some(a1),
+        "G07: account A's cursor must be unaffected by account B's later ingest"
+    );
+    let cursor_b_after =
+        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-B", &engine_id, "PAPER", "CFEE")
+            .await
+            .expect("cursor fetch must succeed");
+    assert_eq!(cursor_b_after, Some(b1));
+}
+
+#[tokio::test]
+async fn g08_mismatched_scope_in_a_batch_refuses_atomically_before_any_write() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("g08");
+    let good_id = format!("{engine_id}::good");
+    let mismatched_id = format!("{engine_id}::mismatched");
+
+    let good = mqk_db::NewCryptoFeeActivity {
+        activity_id: good_id.clone(),
+        broker_account_id: "account-A".to_string(),
+        engine_id: engine_id.clone(),
+        mode: "PAPER".to_string(),
+        activity_type: "CFEE".to_string(),
+        symbol: Some("BTCUSD".to_string()),
+        attribution_status: mqk_db::CryptoFeeAttributionStatus::ConfirmedZeroFee,
+        fee_micros: None,
+        qty_raw: None,
+        ingested_at_utc: Utc::now(),
+    };
+    // Same batch call, but this row claims a different broker_account_id
+    // than the batch's requested scope.
+    let mismatched = mqk_db::NewCryptoFeeActivity {
+        activity_id: mismatched_id.clone(),
+        broker_account_id: "account-B".to_string(),
+        engine_id: engine_id.clone(),
+        mode: "PAPER".to_string(),
+        activity_type: "CFEE".to_string(),
+        symbol: Some("BTCUSD".to_string()),
+        attribution_status: mqk_db::CryptoFeeAttributionStatus::ConfirmedZeroFee,
+        fee_micros: None,
+        qty_raw: None,
+        ingested_at_utc: Utc::now(),
+    };
+
+    let result = mqk_db::ingest_crypto_fee_activity_batch(
+        &pool,
+        "account-A",
+        &engine_id,
+        "PAPER",
+        "CFEE",
+        &[good, mismatched],
+        &mismatched_id,
+        Utc::now(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "G08: a batch containing any row outside the requested scope must refuse atomically"
+    );
+
+    let stored_good = mqk_db::fetch_crypto_fee_activity(&pool, "account-A", &good_id)
+        .await
+        .expect("fetch must succeed");
+    assert!(
+        stored_good.is_none(),
+        "G08: the in-scope row must NOT be partially ingested when a later row in the same \
+         batch is out of scope -- the whole batch is one atomic unit"
+    );
+    let cursor =
+        mqk_db::fetch_crypto_fee_ingestion_cursor(&pool, "account-A", &engine_id, "PAPER", "CFEE")
+            .await
+            .expect("cursor fetch must succeed");
+    assert_eq!(
+        cursor, None,
+        "G08: the cursor must never advance when the batch was refused"
     );
 }

@@ -518,6 +518,12 @@
       "path": "0084_option_lifecycle_activity_ingestion.sql",
       "status": "applied",
       "intent": "D1: durable, restart-safe, deduplicated options lifecycle activity ingestion. Per Alpaca's official docs, exercise/assignment/expiration are reported as three distinct non-trade activities (OPEXC/OPASN/OPEXP, each net_amount=0); the actual underlying-share delivery and strike cash consideration for OPEXC/OPASN is reported via a separate same-day paired OPTRD trade activity. sys_option_lifecycle_activity_ledger stores each of the four raw activity types as its own evidence row keyed by Alpaca's own activity_id (PRIMARY KEY, ON CONFLICT DO NOTHING dedup, mirrors migration 0083's activity_id contract exactly); a CHECK constraint enforces exactly OPTRD carries a price. sys_option_lifecycle_ingestion_cursor is the restart-safe per-(engine_id,mode,activity_type) watermark. sys_option_lifecycle_applied is a separate idempotent-apply marker (D2): one row per lifecycle activity_id whose PairedLifecycleEffect (mqk_portfolio::option_lifecycle) has already been durably applied -- re-attempting apply for an already-applied activity_id is a checked no-op. No production caller wired in this patch -- Alpaca options capability does not exist in this codebase yet; this is the durable evidence layer a future ingestion/apply caller requires before it could exist safely."
+    },
+    {
+      "id": "0085",
+      "path": "0085_crypto_fee_activity_broker_account_scope.sql",
+      "status": "applied",
+      "intent": "V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01 B6 correction: add broker_account_id (the authenticated Alpaca APCA-API-KEY-ID) to sys_crypto_fee_activity_ledger and sys_crypto_fee_ingestion_cursor, and widen both tables' PRIMARY KEY to include it, closing the gap where 0083 scoped fee evidence and cursor authority by (engine_id, mode, activity_type) alone -- insufficient because Alpaca activity ids are unique only within one account, so two distinct broker accounts sharing an engine_id/mode label could collide on activity_id or share one cursor watermark. Idempotent (existence-guarded); ADD COLUMN ... NOT NULL carries no DEFAULT, so this migration fails loudly rather than fabricating an account identity for any pre-existing row -- safe because no production caller has ever driven either table (0083/0084's own intent records this). Does not modify 0083/0084."
     }
   ]
 }

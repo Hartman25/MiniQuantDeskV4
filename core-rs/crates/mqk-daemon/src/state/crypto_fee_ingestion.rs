@@ -39,6 +39,7 @@ use super::CryptoFeeActivityFetcher;
 /// invented.
 fn new_crypto_fee_activity_from_record(
     record: &FeeAttributionRecord,
+    broker_account_id: &str,
     engine_id: &str,
     mode: &str,
     ingested_at_utc: DateTime<Utc>,
@@ -51,6 +52,7 @@ fn new_crypto_fee_activity_from_record(
             fee_micros,
         } => NewCryptoFeeActivity {
             activity_id: activity_id.clone(),
+            broker_account_id: broker_account_id.to_string(),
             engine_id: engine_id.to_string(),
             mode: mode.to_string(),
             activity_type: activity_type.clone(),
@@ -67,6 +69,7 @@ fn new_crypto_fee_activity_from_record(
             qty_raw,
         } => NewCryptoFeeActivity {
             activity_id: activity_id.clone(),
+            broker_account_id: broker_account_id.to_string(),
             engine_id: engine_id.to_string(),
             mode: mode.to_string(),
             activity_type: activity_type.clone(),
@@ -82,6 +85,7 @@ fn new_crypto_fee_activity_from_record(
             symbol,
         } => NewCryptoFeeActivity {
             activity_id: activity_id.clone(),
+            broker_account_id: broker_account_id.to_string(),
             engine_id: engine_id.to_string(),
             mode: mode.to_string(),
             activity_type: activity_type.clone(),
@@ -119,9 +123,17 @@ pub async fn ingest_crypto_fee_activities_once(
     activity_type: &str,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<CryptoFeeIngestionBatchOutcome> {
-    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(pool, engine_id, mode, activity_type)
-        .await
-        .context("ingest_crypto_fee_activities_once: fetch_crypto_fee_ingestion_cursor failed")?;
+    let broker_account_id = fetcher.broker_account_id();
+
+    let cursor = mqk_db::fetch_crypto_fee_ingestion_cursor(
+        pool,
+        &broker_account_id,
+        engine_id,
+        mode,
+        activity_type,
+    )
+    .await
+    .context("ingest_crypto_fee_activities_once: fetch_crypto_fee_ingestion_cursor failed")?;
 
     let raw: Vec<AlpacaFeeActivity> = fetcher
         .fetch_fee_activities_since(activity_type, cursor.as_deref())
@@ -146,7 +158,11 @@ pub async fn ingest_crypto_fee_activities_once(
             )
         })?;
         batch.push(new_crypto_fee_activity_from_record(
-            &record, engine_id, mode, now_utc,
+            &record,
+            &broker_account_id,
+            engine_id,
+            mode,
+            now_utc,
         ));
     }
 
@@ -156,6 +172,7 @@ pub async fn ingest_crypto_fee_activities_once(
 
     mqk_db::ingest_crypto_fee_activity_batch(
         pool,
+        &broker_account_id,
         engine_id,
         mode,
         activity_type,

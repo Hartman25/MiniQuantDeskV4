@@ -17,6 +17,19 @@
 //! (`fee_attribution.rs`'s own doc: "an activity must never be applied to
 //! the ledger twice") and is this table's PRIMARY KEY -- a duplicate insert
 //! is a DB-level no-op, not merely caller discipline.
+//!
+//! # B6 correction: broker/account provenance (migration 0085)
+//!
+//! `activity_id` alone is unique only *within one Alpaca account*. Migration
+//! 0085 adds `broker_account_id` (the authenticated account's own
+//! `APCA-API-KEY-ID`, never the secret key) and widens the PRIMARY KEY on
+//! both the ledger and the cursor to `(broker_account_id, ...)`, so two
+//! distinct broker accounts can never collide on activity id or share a
+//! cursor watermark, even if they happen to share an `engine_id`/`mode`
+//! label. [`ingest_crypto_fee_activity_batch`] validates every row in a
+//! batch against the requested `(broker_account_id, engine_id, mode,
+//! activity_type)` scope *before* any insert or cursor advance -- a mixed
+//! or mismatched batch refuses atomically, mutating nothing.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -60,6 +73,11 @@ impl CryptoFeeAttributionStatus {
 #[derive(Debug, Clone)]
 pub struct NewCryptoFeeActivity {
     pub activity_id: String,
+    /// B6 correction: the authenticated Alpaca account's own
+    /// `APCA-API-KEY-ID` (never the secret key) -- durable broker/account
+    /// provenance, not merely `engine_id`/`mode`. Part of both tables'
+    /// PRIMARY KEY as of migration 0085.
+    pub broker_account_id: String,
     pub engine_id: String,
     pub mode: String,
     pub activity_type: String,
@@ -92,13 +110,14 @@ pub async fn insert_crypto_fee_activity_if_new(
     let result = sqlx::query(
         r#"
         insert into sys_crypto_fee_activity_ledger (
-            activity_id, engine_id, mode, activity_type, symbol,
+            activity_id, broker_account_id, engine_id, mode, activity_type, symbol,
             attribution_status, fee_micros, qty_raw, ingested_at_utc
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        on conflict (activity_id) do nothing
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        on conflict (broker_account_id, activity_id) do nothing
         "#,
     )
     .bind(&activity.activity_id)
+    .bind(&activity.broker_account_id)
     .bind(&activity.engine_id)
     .bind(&activity.mode)
     .bind(&activity.activity_type)
@@ -124,6 +143,7 @@ pub async fn insert_crypto_fee_activity_if_new(
 /// from the beginning (`after_id: None`).
 pub async fn fetch_crypto_fee_ingestion_cursor(
     pool: &PgPool,
+    broker_account_id: &str,
     engine_id: &str,
     mode: &str,
     activity_type: &str,
@@ -132,9 +152,10 @@ pub async fn fetch_crypto_fee_ingestion_cursor(
         r#"
         select last_activity_id
           from sys_crypto_fee_ingestion_cursor
-         where engine_id = $1 and mode = $2 and activity_type = $3
+         where broker_account_id = $1 and engine_id = $2 and mode = $3 and activity_type = $4
         "#,
     )
+    .bind(broker_account_id)
     .bind(engine_id)
     .bind(mode)
     .bind(activity_type)
@@ -165,8 +186,18 @@ pub struct CryptoFeeIngestionBatchOutcome {
 /// `batch` must be empty only when the caller has nothing new to ingest;
 /// this function does not advance the cursor for an empty batch (there is
 /// nothing whose `activity_id` the new cursor value could honestly name).
+///
+/// # B6 correction: scope validation before any mutation
+///
+/// Every row in `batch` must match the requested `(broker_account_id,
+/// engine_id, mode, activity_type)` scope exactly. This is checked for the
+/// *entire batch* before any row is inserted or the cursor is touched --
+/// one mismatched row refuses the whole call atomically (`Err`, zero
+/// mutation), never a partial ingest of the rows that did match.
+#[allow(clippy::too_many_arguments)]
 pub async fn ingest_crypto_fee_activity_batch(
     pool: &PgPool,
+    broker_account_id: &str,
     engine_id: &str,
     mode: &str,
     activity_type: &str,
@@ -181,6 +212,27 @@ pub async fn ingest_crypto_fee_activity_batch(
         });
     }
 
+    for activity in batch {
+        if activity.broker_account_id != broker_account_id
+            || activity.engine_id != engine_id
+            || activity.mode != mode
+            || activity.activity_type != activity_type
+        {
+            return Err(anyhow::anyhow!(
+                "ingest_crypto_fee_activity_batch: refused -- activity_id={:?} carries scope \
+                 (broker_account_id={:?}, engine_id={:?}, mode={:?}, activity_type={:?}) which \
+                 does not match the requested batch scope \
+                 (broker_account_id={broker_account_id:?}, engine_id={engine_id:?}, \
+                 mode={mode:?}, activity_type={activity_type:?}); zero rows mutated",
+                activity.activity_id,
+                activity.broker_account_id,
+                activity.engine_id,
+                activity.mode,
+                activity.activity_type,
+            ));
+        }
+    }
+
     let mut tx = pool
         .begin()
         .await
@@ -193,13 +245,14 @@ pub async fn ingest_crypto_fee_activity_batch(
         let result = sqlx::query(
             r#"
             insert into sys_crypto_fee_activity_ledger (
-                activity_id, engine_id, mode, activity_type, symbol,
+                activity_id, broker_account_id, engine_id, mode, activity_type, symbol,
                 attribution_status, fee_micros, qty_raw, ingested_at_utc
-            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            on conflict (activity_id) do nothing
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            on conflict (broker_account_id, activity_id) do nothing
             "#,
         )
         .bind(&activity.activity_id)
+        .bind(&activity.broker_account_id)
         .bind(&activity.engine_id)
         .bind(&activity.mode)
         .bind(&activity.activity_type)
@@ -222,13 +275,14 @@ pub async fn ingest_crypto_fee_activity_batch(
     sqlx::query(
         r#"
         insert into sys_crypto_fee_ingestion_cursor (
-            engine_id, mode, activity_type, last_activity_id, updated_at_utc
-        ) values ($1, $2, $3, $4, $5)
-        on conflict (engine_id, mode, activity_type)
+            broker_account_id, engine_id, mode, activity_type, last_activity_id, updated_at_utc
+        ) values ($1, $2, $3, $4, $5, $6)
+        on conflict (broker_account_id, engine_id, mode, activity_type)
         do update set last_activity_id = excluded.last_activity_id,
                       updated_at_utc = excluded.updated_at_utc
         "#,
     )
+    .bind(broker_account_id)
     .bind(engine_id)
     .bind(mode)
     .bind(activity_type)
@@ -255,6 +309,7 @@ type CryptoFeeActivityRow = (
     String,
     String,
     String,
+    String,
     Option<String>,
     String,
     Option<i64>,
@@ -263,18 +318,24 @@ type CryptoFeeActivityRow = (
 );
 
 /// Read back one durably-ingested activity row, for test/audit verification.
+///
+/// B6 correction: `activity_id` alone is unique only within one broker
+/// account (migration 0085), so `broker_account_id` is required to name an
+/// unambiguous row -- the same shape as the table's own PRIMARY KEY.
 pub async fn fetch_crypto_fee_activity(
     pool: &PgPool,
+    broker_account_id: &str,
     activity_id: &str,
 ) -> Result<Option<NewCryptoFeeActivity>> {
     let row: Option<CryptoFeeActivityRow> = sqlx::query_as(
         r#"
-        select activity_id, engine_id, mode, activity_type, symbol,
+        select activity_id, broker_account_id, engine_id, mode, activity_type, symbol,
                attribution_status, fee_micros, qty_raw, ingested_at_utc
           from sys_crypto_fee_activity_ledger
-         where activity_id = $1
+         where broker_account_id = $1 and activity_id = $2
         "#,
     )
+    .bind(broker_account_id)
     .bind(activity_id)
     .fetch_optional(pool)
     .await
@@ -283,6 +344,7 @@ pub async fn fetch_crypto_fee_activity(
     row.map(
         |(
             activity_id,
+            broker_account_id,
             engine_id,
             mode,
             activity_type,
@@ -294,6 +356,7 @@ pub async fn fetch_crypto_fee_activity(
         )| {
             Ok(NewCryptoFeeActivity {
                 activity_id,
+                broker_account_id,
                 engine_id,
                 mode,
                 activity_type,
