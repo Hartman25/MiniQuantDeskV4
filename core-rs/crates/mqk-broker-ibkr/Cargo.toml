@@ -1,0 +1,28 @@
+[package]
+name = "mqk-broker-ibkr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+sha2 = "0.10"
+
+mqk-execution = { path = "../mqk-execution" }
+mqk-schemas = { path = "../mqk-schemas" }
+
+# C2 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION): selected
+# and pinned IBKR TWS API client. Evidence (crates.io, 2026-09-27):
+# MIT-licensed (compatible with this repo's Proprietary license); actively
+# maintained (last published 2026-09-21, 72 releases, ~220k total
+# downloads); tokio-async client (matches this workspace's async runtime);
+# real contract/order/account/market-data/execution modules; documented
+# reconnect-notice support (`TRANSPORT_RECONNECT_CODE`). No dependency on
+# this crate makes a real IB Gateway/TWS network connection anywhere in
+# this patch -- see `IbkrTransport` in `connection.rs`.
+ibapi = "4.2.0"
+
+[dev-dependencies]
+mqk-execution = { path = "../mqk-execution", features = ["testkit"] }
