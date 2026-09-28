@@ -30,12 +30,12 @@ use chrono::Utc;
 use crate::{
     api_types::{
         AdoptBrokerPositionBaselineRequest, AdoptBrokerPositionBaselineResponse,
-        HaltedRunFillApplyRequest, HaltedRunFillApplyResponse, HaltedRunFillEntry,
-        HaltedRunFillPlanResponse, HaltedRunFillRestRecoveryRequest,
-        HaltedRunFillRestRecoveryResponse, HaltedRunPortfolioSnapshotRequest,
-        HaltedRunPortfolioSnapshotResponse, OutboxRepairRequest, OutboxRepairResponse,
-        PortfolioPositionSummary, RestRecoveredFill, WsGapFillRecoveryRequest,
-        WsGapFillRecoveryResponse,
+        CryptoFeeActivityIngestRequest, CryptoFeeActivityIngestResponse, HaltedRunFillApplyRequest,
+        HaltedRunFillApplyResponse, HaltedRunFillEntry, HaltedRunFillPlanResponse,
+        HaltedRunFillRestRecoveryRequest, HaltedRunFillRestRecoveryResponse,
+        HaltedRunPortfolioSnapshotRequest, HaltedRunPortfolioSnapshotResponse, OutboxRepairRequest,
+        OutboxRepairResponse, PortfolioPositionSummary, RestRecoveredFill,
+        WsGapFillRecoveryRequest, WsGapFillRecoveryResponse,
     },
     state::{
         reconcile_broker_snapshot_from_schema, recover_oms_and_portfolio, AppState,
@@ -2798,6 +2798,127 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// B6 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION)
+// POST /api/v1/ops/repair/crypto-fee-activity-ingest
+// ---------------------------------------------------------------------------
+//
+// Operator-triggered ingestion of Alpaca day-end CFEE/FEE account activities
+// into the durable `sys_crypto_fee_activity_ledger` (migration 0083).
+//
+// ## Safety contract
+//
+// - Requires DB configured — absent DB refuses (truth_state: "no_db").
+// - Requires a `CryptoFeeActivityFetcher` configured (Alpaca broker kind +
+//   credentials present) — absent fetcher refuses
+//   (gate: "repair.fetcher_unavailable").
+// - Read-only account-activity fetch — never places, cancels, or replaces
+//   an order; safe regardless of the separate Crypto trading-capability
+//   flag (D2/B4).
+// - Idempotent/restart-safe: reads the durable cursor fresh every call and
+//   dedups on Alpaca's own `activity_id` at the DB level
+//   (`ingest_crypto_fee_activity_batch`) — calling this route repeatedly,
+//   including after a crash mid-call, never double-applies an activity.
+// - No scheduler calls this automatically; the operator must trigger it.
+pub(crate) async fn repair_crypto_fee_activity_ingest(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<CryptoFeeActivityIngestRequest>,
+) -> Response {
+    let activity_type = body.activity_type.trim().to_string();
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(CryptoFeeActivityIngestResponse {
+                truth_state: "no_db".to_string(),
+                activity_type,
+                fetcher_available: false,
+                newly_inserted: 0,
+                already_existed: 0,
+                gate: Some("repair.db_required".to_string()),
+                evidence: "DB is not configured on this daemon".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    if activity_type != "CFEE" && activity_type != "FEE" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(CryptoFeeActivityIngestResponse {
+                truth_state: "active".to_string(),
+                activity_type: activity_type.clone(),
+                fetcher_available: st.crypto_fee_activity_fetcher.is_some(),
+                newly_inserted: 0,
+                already_existed: 0,
+                gate: Some("repair.invalid_request".to_string()),
+                evidence: format!("activity_type must be 'CFEE' or 'FEE', got {activity_type:?}"),
+            }),
+        )
+            .into_response();
+    }
+
+    let Some(fetcher) = st.crypto_fee_activity_fetcher.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(CryptoFeeActivityIngestResponse {
+                truth_state: "active".to_string(),
+                activity_type,
+                fetcher_available: false,
+                newly_inserted: 0,
+                already_existed: 0,
+                gate: Some("repair.fetcher_unavailable".to_string()),
+                evidence: "CryptoFeeActivityFetcher is not configured on this daemon (Alpaca \
+                           broker kind and credentials required); fee-activity ingestion is \
+                           unavailable"
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match crate::state::crypto_fee_ingestion::ingest_crypto_fee_activities_once(
+        db,
+        fetcher,
+        crate::state::DAEMON_ENGINE_ID,
+        st.deployment_mode().as_db_mode(),
+        &activity_type,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(CryptoFeeActivityIngestResponse {
+                truth_state: "active".to_string(),
+                activity_type,
+                fetcher_available: true,
+                newly_inserted: outcome.newly_inserted,
+                already_existed: outcome.already_existed,
+                gate: None,
+                evidence: format!(
+                    "ingested {} new, {} already present",
+                    outcome.newly_inserted, outcome.already_existed
+                ),
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(CryptoFeeActivityIngestResponse {
+                truth_state: "active".to_string(),
+                activity_type,
+                fetcher_available: true,
+                newly_inserted: 0,
+                already_existed: 0,
+                gate: Some("repair.ingestion_failed".to_string()),
+                evidence: format!("{err:#}"),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

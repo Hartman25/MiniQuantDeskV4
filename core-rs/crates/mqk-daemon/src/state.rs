@@ -17,6 +17,7 @@ pub mod autonomous_runtime_context;
 mod broker;
 pub(crate) mod closed_trade_attribution;
 pub mod crypto_execution_policy;
+pub mod crypto_fee_ingestion;
 mod deadman;
 pub(crate) mod dry_run_strategy;
 mod env;
@@ -100,8 +101,9 @@ pub use autonomous_daily_operation::{
     AutonomousDailySessionPlan, AutonomousDailySessionPlanResolution, FixedWindowOverrideConfig,
 };
 use broker::{
-    build_asset_shortable_preflight_fetcher_from_env, build_fill_activity_fetcher_from_env,
-    build_snapshot_fetcher_from_env, build_ws_gap_fill_fetcher_from_env,
+    build_asset_shortable_preflight_fetcher_from_env, build_crypto_fee_activity_fetcher_from_env,
+    build_fill_activity_fetcher_from_env, build_snapshot_fetcher_from_env,
+    build_ws_gap_fill_fetcher_from_env,
 };
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use dry_run_strategy::{
@@ -1003,6 +1005,16 @@ pub struct AppState {
     /// `None` when not configured (tests inject a fake; production wiring
     /// is a follow-up once the service function is proven safe).
     pub ws_gap_fill_fetcher: Option<Arc<dyn WsGapFillFetcher>>,
+    /// B6 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION):
+    /// Injectable Alpaca day-end crypto fee-activity fetcher, consumed by
+    /// `state::crypto_fee_ingestion::ingest_crypto_fee_activities_once` via
+    /// the operator-triggered `POST /api/v1/ops/repair/crypto-fee-activity-ingest`
+    /// route. `None` when not configured (no Alpaca credentials, or a
+    /// non-Alpaca broker). Read-only account-activity fetch — never an
+    /// order — so this is constructed whenever Alpaca credentials are
+    /// present, independent of the separate Crypto trading-capability flag
+    /// (D2/B4). Nothing schedules this automatically.
+    pub crypto_fee_activity_fetcher: Option<Arc<dyn CryptoFeeActivityFetcher>>,
     /// BROKER-POSITION-BASELINE-ADOPTION-01: Adopted broker position baseline.
     ///
     /// Operator-confirmed local truth snapshot used by the reconcile tick as
@@ -1188,6 +1200,31 @@ pub trait WsGapFillFetcher: Send + Sync {
         &self,
         since_activity_id: Option<&str>,
     ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOrderActivity>, String>;
+}
+
+/// B6 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION): injectable
+/// abstraction over Alpaca's day-end `CFEE`/`FEE` account-activity fetch
+/// (`AlpacaBrokerAdapter::fetch_fee_activities_since`). Mirrors
+/// `BrokerFillActivityFetcher`/`WsGapFillFetcher` exactly — tests inject a
+/// fake implementation (no real Alpaca call), production wiring is
+/// `AlpacaCryptoFeeActivityFetcher` in `state/broker.rs`. This is a read-only
+/// account-activity fetch (not an order submission), so it is safe to call
+/// regardless of the separate Crypto trading-capability flag (D2/B4) — it
+/// never places, cancels, or replaces an order.
+pub trait CryptoFeeActivityFetcher: Send + Sync {
+    /// Fetch `activity_type` (`"CFEE"` or `"FEE"`) account activities in
+    /// ascending order, paginated to exhaustion. `after_id`: if `Some`, only
+    /// activities strictly after this activity id are returned — the
+    /// restart-safe cursor's own semantics (mirrors
+    /// `AlpacaBrokerAdapter::fetch_fee_activities_since`'s `after_id`
+    /// parameter exactly). Returns `Err(String)` if the REST call fails;
+    /// callers treat this as REST unavailable and fail closed (no mutation,
+    /// cursor never advanced).
+    fn fetch_fee_activities_since(
+        &self,
+        activity_type: &str,
+        after_id: Option<&str>,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String>;
 }
 
 /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Injectable on-demand broker snapshot fetcher.
@@ -1796,6 +1833,15 @@ impl AppState {
         self.ws_gap_fill_fetcher = Some(fetcher);
     }
 
+    /// B6: Test helper — inject a fake `CryptoFeeActivityFetcher` without a
+    /// real Alpaca call.
+    pub fn set_crypto_fee_activity_fetcher_for_test(
+        &mut self,
+        fetcher: Arc<dyn CryptoFeeActivityFetcher>,
+    ) {
+        self.crypto_fee_activity_fetcher = Some(fetcher);
+    }
+
     /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Test helper — inject an on-demand
     /// broker snapshot fetcher.
     ///
@@ -2023,6 +2069,15 @@ impl AppState {
             runtime_selection.deployment_mode,
         );
 
+        // B6: crypto day-end fee-activity fetcher; mirrors ws_gap_fill_fetcher
+        // wiring exactly. None when Alpaca not configured or credentials
+        // absent (fail-closed). Read-only, so constructed regardless of the
+        // Crypto trading-capability flag (D2/B4).
+        let crypto_fee_activity_fetcher = build_crypto_fee_activity_fetcher_from_env(
+            runtime_selection.broker_kind,
+            runtime_selection.deployment_mode,
+        );
+
         // BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: on-demand snapshot fetcher for
         // the adopt-broker-position-baseline route when the cache is absent at idle.
         let snapshot_fetcher = build_snapshot_fetcher_from_env(
@@ -2191,6 +2246,7 @@ impl AppState {
             )),
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
+            crypto_fee_activity_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),
             snapshot_fetcher,
             asset_shortable_preflight_fetcher,
@@ -5822,7 +5878,8 @@ operator_reconcile_or_repair_required"
         // reconcile task was never spawned (e.g. a FailedStart rollback,
         // before the atomic commit that would have led to it) simply finds
         // nothing to abort here.
-        self.clear_reconcile_task_owner_for_run(domain, run_id).await;
+        self.clear_reconcile_task_owner_for_run(domain, run_id)
+            .await;
 
         self.clear_economic_mirrors_for_run(domain, run_id).await;
         outcome
@@ -5988,7 +6045,9 @@ operator_reconcile_or_repair_required"
             .lock()
             .await
             .owned_run_id()?;
-        let outcome = self.clear_local_runtime_for_run(domain, run_id, reason).await;
+        let outcome = self
+            .clear_local_runtime_for_run(domain, run_id, reason)
+            .await;
         if outcome.cleared {
             Some((run_id, outcome))
         } else {
@@ -6036,7 +6095,10 @@ operator_reconcile_or_repair_required"
     /// `idle`/`starting`/`running`/`degraded` (`Reserved` counts as
     /// `starting` — ownership exists but no run metadata is committed yet).
     /// Read-only; never mutates ownership.
-    pub(crate) async fn local_runtime_lifecycle_label(&self, domain: ExecutionDomain) -> &'static str {
+    pub(crate) async fn local_runtime_lifecycle_label(
+        &self,
+        domain: ExecutionDomain,
+    ) -> &'static str {
         match &*self.runtime_ownership.get(domain).lock().await {
             LocalRuntimeOwnership::Idle => "idle",
             LocalRuntimeOwnership::Reserved { .. } | LocalRuntimeOwnership::Starting { .. } => {
@@ -6050,7 +6112,10 @@ operator_reconcile_or_repair_required"
     /// Phase 7C Part 4: the `run_id` behind the current ownership state, for
     /// every non-`Idle` state (`Reserved`/`Starting`/`Active`/`Degraded` all
     /// carry one). `None` only for `Idle`.
-    pub(crate) async fn local_runtime_owning_run_id(&self, domain: ExecutionDomain) -> Option<Uuid> {
+    pub(crate) async fn local_runtime_owning_run_id(
+        &self,
+        domain: ExecutionDomain,
+    ) -> Option<Uuid> {
         match &*self.runtime_ownership.get(domain).lock().await {
             LocalRuntimeOwnership::Idle => None,
             LocalRuntimeOwnership::Reserved { run_id }
@@ -6376,7 +6441,9 @@ impl AppState {
     /// `plant_accepted_artifact_for_test`.
     #[cfg(test)]
     pub(crate) fn plant_day_signal_count_for_test(&self, domain: ExecutionDomain, value: u32) {
-        self.day_signal_count.get(domain).store(value, Ordering::SeqCst)
+        self.day_signal_count
+            .get(domain)
+            .store(value, Ordering::SeqCst)
     }
 
     /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: test-only
@@ -6395,7 +6462,8 @@ impl AppState {
         &self,
         state: DynamicSelectionRuntimeState,
     ) {
-        self.commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, state).await;
+        self.commit_dynamic_selection_runtime_state(ExecutionDomain::EquityNyse, state)
+            .await;
     }
 
     /// Inject a never-finishing fake execution loop for tests.
@@ -8116,12 +8184,21 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
 
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle).await;
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle)
+            .await;
 
-        assert!(state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id).await);
+        assert!(
+            state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id)
+                .await
+        );
         assert!(
             !state
-                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, m1_test_uuid("m1b01.other_run_id"))
+                .reconcile_task_owner_matches(
+                    ExecutionDomain::EquityNyse,
+                    m1_test_uuid("m1b01.other_run_id")
+                )
                 .await
         );
     }
@@ -8144,7 +8221,9 @@ mod tests {
         assert!(!state.integrity.read().await.halted);
 
         let handle = tokio::spawn(async {});
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle).await;
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle)
+            .await;
         // Let the watchdog observe the already-finished task.
         tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -8164,7 +8243,9 @@ mod tests {
         let handle = tokio::spawn(async {
             panic!("simulated reconcile tick panic");
         });
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle).await;
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle)
+            .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         assert!(state.integrity.read().await.halted);
@@ -8182,7 +8263,9 @@ mod tests {
         let handle = tokio::spawn(async move {
             panic!("{SENTINEL}");
         });
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle).await;
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle)
+            .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Sanity: the failure was still detected and fails closed.
@@ -8210,25 +8293,37 @@ mod tests {
         let handle_a = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_a, handle_a).await;
-        assert!(state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a).await);
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_a, handle_a)
+            .await;
+        assert!(
+            state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a)
+                .await
+        );
         assert!(!state.integrity.read().await.halted);
 
         let handle_b = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_b, handle_b).await;
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_b, handle_b)
+            .await;
 
         // Give both watchdogs a moment: A's must resolve Cancelled (aborted
         // by B's install) and must NOT fail closed; B remains the live owner.
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         assert!(
-            state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_b).await,
+            state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_b)
+                .await,
             "B08: the new run must own the slot"
         );
         assert!(
-            !state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a).await,
+            !state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a)
+                .await,
             "B09: the superseded run must no longer be the registered owner"
         );
         assert!(
@@ -8253,17 +8348,29 @@ mod tests {
         let handle = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle).await;
-        assert!(state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id).await);
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle)
+            .await;
+        assert!(
+            state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id)
+                .await
+        );
 
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
 
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         assert!(
-            !state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id).await,
+            !state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id)
+                .await,
             "B07: a clean stop must clear the reconcile task ownership record"
         );
         assert!(
@@ -8308,9 +8415,15 @@ mod tests {
             .await
             .expect("m1b10 worker must start before cancellation");
 
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle).await;
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::OperatorStop)
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle)
+            .await;
+        state
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
 
         assert!(
@@ -8318,7 +8431,11 @@ mod tests {
             "B10: clear_local_runtime_for_run must not return until the \
              already-started reconcile worker future has actually terminated"
         );
-        assert!(!state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id).await);
+        assert!(
+            !state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_id)
+                .await
+        );
         assert!(!state.integrity.read().await.halted);
     }
 
@@ -8342,29 +8459,49 @@ mod tests {
             .await
             .expect("m1b11 worker must start before cancellation");
 
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_a, handle_a).await;
-        assert!(state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a).await);
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_a, handle_a)
+            .await;
+        assert!(
+            state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a)
+                .await
+        );
 
         // This is the exact production pre-spawn seam used by Paper.
-        state.prepare_reconcile_task_spawn(ExecutionDomain::EquityNyse, ).await;
+        state
+            .prepare_reconcile_task_spawn(ExecutionDomain::EquityNyse)
+            .await;
 
         assert!(
             terminated.load(std::sync::atomic::Ordering::SeqCst),
             "B11: pre-spawn preparation must observe actual prior-worker \
              termination before a replacement worker can be spawned"
         );
-        assert!(!state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a).await);
+        assert!(
+            !state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_a)
+                .await
+        );
 
         // Only after prior-worker terminal completion is observed does
         // the replacement worker exist.
         let handle_b = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_b, handle_b).await;
-        assert!(state.reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_b).await);
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_b, handle_b)
+            .await;
+        assert!(
+            state
+                .reconcile_task_owner_matches(ExecutionDomain::EquityNyse, run_b)
+                .await
+        );
         assert!(!state.integrity.read().await.halted);
 
-        state.prepare_reconcile_task_spawn(ExecutionDomain::EquityNyse, ).await;
+        state
+            .prepare_reconcile_task_spawn(ExecutionDomain::EquityNyse)
+            .await;
     }
     // M1-TERMINAL-TASK-AUTHORITY-TIMING-01: prove the canonical
     // synchronous order-submission ReconcileGate fails closed from the
@@ -8384,7 +8521,9 @@ mod tests {
 
         let gate = ReconcileTruthGate {
             reconcile_status: Arc::clone(&state.reconcile_status),
-            reconcile_task_owner: Arc::clone(state.reconcile_task_owner.get(ExecutionDomain::EquityNyse)),
+            reconcile_task_owner: Arc::clone(
+                state.reconcile_task_owner.get(ExecutionDomain::EquityNyse),
+            ),
         };
 
         // Negative control: no owned worker preserves the prior status-only
@@ -8397,7 +8536,11 @@ mod tests {
         // Lock contention itself must fail closed rather than optimistically
         // assume the worker is healthy.
         {
-            let _held = state.reconcile_task_owner.get(ExecutionDomain::EquityNyse).lock().await;
+            let _held = state
+                .reconcile_task_owner
+                .get(ExecutionDomain::EquityNyse)
+                .lock()
+                .await;
             assert!(
                 !mqk_execution::ReconcileGate::is_clean(&gate),
                 "Patch17: owner-lock contention must fail closed"
@@ -8415,7 +8558,11 @@ mod tests {
 
         let abort_handle = handle.abort_handle();
         let (_completion_tx, completion_rx) = watch::channel(false);
-        *state.reconcile_task_owner.get(ExecutionDomain::EquityNyse).lock().await = Some(ReconcileTaskOwnership {
+        *state
+            .reconcile_task_owner
+            .get(ExecutionDomain::EquityNyse)
+            .lock()
+            .await = Some(ReconcileTaskOwnership {
             run_id,
             abort_handle,
             completion_rx,
@@ -8443,7 +8590,11 @@ mod tests {
         );
 
         let _ = handle.await;
-        *state.reconcile_task_owner.get(ExecutionDomain::EquityNyse).lock().await = None;
+        *state
+            .reconcile_task_owner
+            .get(ExecutionDomain::EquityNyse)
+            .lock()
+            .await = None;
     }
 
     // D02 (M1-CRITICAL-TASK-INTEGRATED-FAULT-PROOF-01): unlike B02/B03 above
@@ -8476,7 +8627,9 @@ mod tests {
             settle_fn,
             Duration::from_millis(10),
         );
-        state.install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle).await;
+        state
+            .install_reconcile_task_owner(ExecutionDomain::EquityNyse, run_id, handle)
+            .await;
 
         // First tick fires at `interval` (10ms); give the real ticker and the
         // real watchdog ample margin to both run.
@@ -8571,7 +8724,11 @@ mod ownership_state_machine_tests {
         let run_id = run_id_for("t1");
 
         assert!(matches!(
-            *state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await,
+            *state
+                .runtime_ownership
+                .get(ExecutionDomain::EquityNyse)
+                .lock()
+                .await,
             LocalRuntimeOwnership::Idle
         ));
 
@@ -8584,7 +8741,10 @@ mod ownership_state_machine_tests {
             LocalRuntimeOwnership::Reserved { run_id: r } if r == run_id
         ));
         assert!(
-            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await.is_none(),
+            state
+                .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+                .await
+                .is_none(),
             "Reserved must never report running"
         );
 
@@ -8595,7 +8755,13 @@ mod ownership_state_machine_tests {
             dynamic_selection_outcome: None,
         };
         let metadata = state
-            .prepare_starting_metadata_and_mirrors(ExecutionDomain::EquityNyse, run_id, bundle, Vec::new(), "test")
+            .prepare_starting_metadata_and_mirrors(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                bundle,
+                Vec::new(),
+                "test",
+            )
             .await
             .expect("Reserved -> Starting must succeed");
         assert_eq!(metadata.run_id, run_id);
@@ -8604,7 +8770,10 @@ mod ownership_state_machine_tests {
             LocalRuntimeOwnership::Starting { run_id: r, .. } if r == run_id
         ));
         assert!(
-            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await.is_none(),
+            state
+                .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+                .await
+                .is_none(),
             "Starting must never report running"
         );
 
@@ -8618,7 +8787,9 @@ mod ownership_state_machine_tests {
             LocalRuntimeOwnership::Active { run_id: r, .. } if r == run_id
         ));
         assert_eq!(
-            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
+            state
+                .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+                .await,
             Some(run_id),
             "Active must report running"
         );
@@ -8626,7 +8797,11 @@ mod ownership_state_machine_tests {
         // Cleanup: stop the fake loop directly (bypassing the DB-dependent
         // stop_execution_runtime path this hermetic test does not need).
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
     }
 
@@ -8638,7 +8813,10 @@ mod ownership_state_machine_tests {
         let state = fresh_state();
         let run_id = run_id_for("t2");
 
-        state.reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_id).await.unwrap();
+        state
+            .reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_id)
+            .await
+            .unwrap();
         let err = state
             .reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_id)
             .await
@@ -8673,7 +8851,10 @@ mod ownership_state_machine_tests {
         let run_a = run_id_for("t3-run-a");
         let run_b = run_id_for("t3-run-b");
 
-        state.reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_a).await.unwrap();
+        state
+            .reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_a)
+            .await
+            .unwrap();
         let bundle = RunStartLocalBundle {
             execution_snapshot: None,
             accepted_artifact: None,
@@ -8681,7 +8862,13 @@ mod ownership_state_machine_tests {
             dynamic_selection_outcome: None,
         };
         state
-            .prepare_starting_metadata_and_mirrors(ExecutionDomain::EquityNyse, run_a, bundle, Vec::new(), "test")
+            .prepare_starting_metadata_and_mirrors(
+                ExecutionDomain::EquityNyse,
+                run_a,
+                bundle,
+                Vec::new(),
+                "test",
+            )
             .await
             .unwrap();
 
@@ -8709,27 +8896,48 @@ mod ownership_state_machine_tests {
         // Installing A's own handle now succeeds — proves the failed B
         // install above left A's reservation completely intact.
         let handle_a = fake_handle(run_a);
-        state.install_active_runtime(ExecutionDomain::EquityNyse, run_a, handle_a).await.unwrap();
-        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_a));
+        state
+            .install_active_runtime(ExecutionDomain::EquityNyse, run_a, handle_a)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+                .await,
+            Some(run_a)
+        );
 
         // clear_local_runtime_for_run(run_b, ..) must refuse to touch A's
         // Active state — "run A cannot clear B" (requirement 4).
         let outcome = state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_b, LifecycleClearReason::FailedStart)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_b,
+                LifecycleClearReason::FailedStart,
+            )
             .await;
         assert!(!outcome.cleared, "run B must never clear run A's ownership");
         assert_eq!(
-            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await,
+            state
+                .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+                .await,
             Some(run_a),
             "run A's Active ownership must be completely unchanged"
         );
 
         // The matching run_id does clear it.
         let outcome_a = state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_a, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_a,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
         assert!(outcome_a.cleared);
-        assert!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await.is_none());
+        assert!(state
+            .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+            .await
+            .is_none());
     }
 
     // -----------------------------------------------------------------
@@ -8756,9 +8964,13 @@ mod ownership_state_machine_tests {
         *state.native_strategy_bootstrap.lock().await = Some(NativeStrategyBootstrap {
             outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Dormant,
         });
-        state.day_signal_count.get(ExecutionDomain::EquityNyse).store(4242, Ordering::SeqCst);
         state
-            .day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse)
+            .day_signal_count
+            .get(ExecutionDomain::EquityNyse)
+            .store(4242, Ordering::SeqCst);
+        state
+            .day_signal_count_by_symbol
+            .get(ExecutionDomain::EquityNyse)
             .write()
             .await
             .insert("AAPL".to_string(), 7);
@@ -8784,7 +8996,10 @@ mod ownership_state_machine_tests {
             })
             .await;
 
-        state.reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_a).await.unwrap();
+        state
+            .reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_a)
+            .await
+            .unwrap();
         let metadata_a = Arc::new(RunStartMetadata {
             run_id: run_a,
             accepted_artifact: Some(sentinel_artifact.clone()),
@@ -8794,7 +9009,11 @@ mod ownership_state_machine_tests {
             frozen_assignments_source: "test_fixture",
             approved_for_live: false,
         });
-        *state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await = LocalRuntimeOwnership::Active {
+        *state
+            .runtime_ownership
+            .get(ExecutionDomain::EquityNyse)
+            .lock()
+            .await = LocalRuntimeOwnership::Active {
             run_id: run_a,
             metadata: metadata_a,
             handle: fake_handle(run_a),
@@ -8809,7 +9028,12 @@ mod ownership_state_machine_tests {
         assert_eq!(err, run_a);
 
         // Every sentinel value must be byte-for-byte unchanged.
-        assert_eq!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await, Some(run_a));
+        assert_eq!(
+            state
+                .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+                .await,
+            Some(run_a)
+        );
         assert_eq!(
             state
                 .execution_snapshot
@@ -8824,10 +9048,17 @@ mod ownership_state_machine_tests {
             Some(sentinel_artifact)
         );
         assert!(state.native_strategy_bootstrap.lock().await.is_some());
-        assert_eq!(state.day_signal_count.get(ExecutionDomain::EquityNyse).load(Ordering::SeqCst), 4242);
         assert_eq!(
             state
-                .day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse)
+                .day_signal_count
+                .get(ExecutionDomain::EquityNyse)
+                .load(Ordering::SeqCst),
+            4242
+        );
+        assert_eq!(
+            state
+                .day_signal_count_by_symbol
+                .get(ExecutionDomain::EquityNyse)
                 .read()
                 .await
                 .get("AAPL")
@@ -8844,7 +9075,11 @@ mod ownership_state_machine_tests {
 
         // Cleanup.
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_a, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_a,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
     }
 
@@ -8856,8 +9091,14 @@ mod ownership_state_machine_tests {
         let state = fresh_state();
         let run_id = run_id_for("t16");
 
-        state.reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_id).await.unwrap();
-        assert!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await.is_none());
+        state
+            .reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_id)
+            .await
+            .unwrap();
+        assert!(state
+            .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+            .await
+            .is_none());
 
         let bundle = RunStartLocalBundle {
             execution_snapshot: None,
@@ -8866,20 +9107,34 @@ mod ownership_state_machine_tests {
             dynamic_selection_outcome: None,
         };
         state
-            .prepare_starting_metadata_and_mirrors(ExecutionDomain::EquityNyse, run_id, bundle, Vec::new(), "test")
+            .prepare_starting_metadata_and_mirrors(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                bundle,
+                Vec::new(),
+                "test",
+            )
             .await
             .unwrap();
         assert!(
-            state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await.is_none(),
+            state
+                .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+                .await
+                .is_none(),
             "Starting must never report running, even with metadata committed"
         );
 
         // A Degraded state must also never report running.
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::FailedStart)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::FailedStart,
+            )
             .await;
         state
-            .note_local_runtime_degraded(ExecutionDomain::EquityNyse,
+            .note_local_runtime_degraded(
+                ExecutionDomain::EquityNyse,
                 run_id,
                 BoundedLifecycleDegradation {
                     operation: "test_op",
@@ -8887,8 +9142,15 @@ mod ownership_state_machine_tests {
                 },
             )
             .await;
-        assert!(state.locally_owned_run_id(ExecutionDomain::EquityNyse, ).await.is_none());
-        let lock = state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await;
+        assert!(state
+            .locally_owned_run_id(ExecutionDomain::EquityNyse,)
+            .await
+            .is_none());
+        let lock = state
+            .runtime_ownership
+            .get(ExecutionDomain::EquityNyse)
+            .lock()
+            .await;
         match &*lock {
             LocalRuntimeOwnership::Degraded { run_id: r, detail } => {
                 assert_eq!(*r, run_id);
@@ -8919,7 +9181,10 @@ mod ownership_state_machine_tests {
             timeframe: "1Min".to_string(),
         }];
 
-        state.reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_id).await.unwrap();
+        state
+            .reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_id)
+            .await
+            .unwrap();
         let bundle = RunStartLocalBundle {
             execution_snapshot: None,
             accepted_artifact: Some(sentinel_artifact.clone()),
@@ -8929,7 +9194,8 @@ mod ownership_state_machine_tests {
             dynamic_selection_outcome: None,
         };
         state
-            .prepare_starting_metadata_and_mirrors(ExecutionDomain::EquityNyse,
+            .prepare_starting_metadata_and_mirrors(
+                ExecutionDomain::EquityNyse,
                 run_id,
                 bundle,
                 frozen.clone(),
@@ -8942,7 +9208,11 @@ mod ownership_state_machine_tests {
             .await
             .unwrap();
 
-        let lock = state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await;
+        let lock = state
+            .runtime_ownership
+            .get(ExecutionDomain::EquityNyse)
+            .lock()
+            .await;
         match &*lock {
             LocalRuntimeOwnership::Active {
                 run_id: r,
@@ -8968,7 +9238,11 @@ mod ownership_state_machine_tests {
         drop(lock);
 
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
     }
 
@@ -8992,9 +9266,13 @@ mod ownership_state_machine_tests {
         *state.native_strategy_bootstrap.lock().await = Some(NativeStrategyBootstrap {
             outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Dormant,
         });
-        state.day_signal_count.get(ExecutionDomain::EquityNyse).store(99, Ordering::SeqCst);
         state
-            .day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse)
+            .day_signal_count
+            .get(ExecutionDomain::EquityNyse)
+            .store(99, Ordering::SeqCst);
+        state
+            .day_signal_count_by_symbol
+            .get(ExecutionDomain::EquityNyse)
             .write()
             .await
             .insert("MSFT".to_string(), 3);
@@ -9040,7 +9318,11 @@ mod ownership_state_machine_tests {
             evidence_validation_state: None,
             explicit_authority_id: None,
         };
-        *state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await = LocalRuntimeOwnership::Active {
+        *state
+            .runtime_ownership
+            .get(ExecutionDomain::EquityNyse)
+            .lock()
+            .await = LocalRuntimeOwnership::Active {
             run_id,
             metadata: Arc::new(RunStartMetadata {
                 run_id,
@@ -9053,10 +9335,17 @@ mod ownership_state_machine_tests {
             }),
             handle: fake_handle(run_id),
         };
-        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_some());
+        assert!(state
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse,)
+            .await
+            .is_some());
 
         let outcome = state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::FailedStart)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::FailedStart,
+            )
             .await;
         assert!(outcome.cleared);
         assert!(outcome.stopped_live_handle);
@@ -9064,17 +9353,35 @@ mod ownership_state_machine_tests {
 
         // Ownership.
         assert!(matches!(
-            *state.runtime_ownership.get(ExecutionDomain::EquityNyse).lock().await,
+            *state
+                .runtime_ownership
+                .get(ExecutionDomain::EquityNyse)
+                .lock()
+                .await,
             LocalRuntimeOwnership::Idle
         ));
-        assert!(state.dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse, ).await.is_none());
+        assert!(state
+            .dynamic_selection_runtime_snapshot(ExecutionDomain::EquityNyse,)
+            .await
+            .is_none());
 
         // Every economic mirror.
         assert!(state.execution_snapshot.read().await.is_none());
         assert!(state.accepted_artifact.read().await.is_none());
         assert!(state.native_strategy_bootstrap.lock().await.is_none());
-        assert_eq!(state.day_signal_count.get(ExecutionDomain::EquityNyse).load(Ordering::SeqCst), 0);
-        assert!(state.day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse).read().await.is_empty());
+        assert_eq!(
+            state
+                .day_signal_count
+                .get(ExecutionDomain::EquityNyse)
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert!(state
+            .day_signal_count_by_symbol
+            .get(ExecutionDomain::EquityNyse)
+            .read()
+            .await
+            .is_empty());
         assert!(
             state.try_claim_b5_alert_for_test("MSFT").await,
             "b5 alert dedup must be cleared (claim succeeds again)"
@@ -9106,11 +9413,19 @@ mod ownership_state_machine_tests {
         let state = fresh_state();
         let run_id = run_id_for("t-idempotent");
         let outcome = state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::FailedStart)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::FailedStart,
+            )
             .await;
         assert!(!outcome.cleared);
         let outcome2 = state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_id, LifecycleClearReason::FailedStart)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_id,
+                LifecycleClearReason::FailedStart,
+            )
             .await;
         assert!(!outcome2.cleared);
     }
@@ -9140,7 +9455,9 @@ mod ownership_state_machine_tests {
         };
         let reconcile_gate = types::ReconcileTruthGate {
             reconcile_status: Arc::clone(&state.reconcile_status),
-            reconcile_task_owner: Arc::clone(state.reconcile_task_owner.get(ExecutionDomain::EquityNyse)),
+            reconcile_task_owner: Arc::clone(
+                state.reconcile_task_owner.get(ExecutionDomain::EquityNyse),
+            ),
         };
         let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64);
         let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
@@ -9257,7 +9574,10 @@ mod ownership_state_machine_tests {
         let run_a = run_id_for("install-failure-run-a");
         let run_b = run_id_for("install-failure-run-b");
 
-        state.reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_a).await.unwrap();
+        state
+            .reserve_runtime_ownership(ExecutionDomain::EquityNyse, run_a)
+            .await
+            .unwrap();
         let bundle = RunStartLocalBundle {
             execution_snapshot: None,
             accepted_artifact: None,
@@ -9265,7 +9585,13 @@ mod ownership_state_machine_tests {
             dynamic_selection_outcome: None,
         };
         state
-            .prepare_starting_metadata_and_mirrors(ExecutionDomain::EquityNyse, run_a, bundle, Vec::new(), "test")
+            .prepare_starting_metadata_and_mirrors(
+                ExecutionDomain::EquityNyse,
+                run_a,
+                bundle,
+                Vec::new(),
+                "test",
+            )
             .await
             .unwrap();
 
@@ -9303,7 +9629,11 @@ mod ownership_state_machine_tests {
         );
 
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, run_a, LifecycleClearReason::FailedStart)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                run_a,
+                LifecycleClearReason::FailedStart,
+            )
             .await;
     }
 
@@ -9366,11 +9696,19 @@ mod ownership_state_machine_tests {
             .expect("crypto Reserved -> Starting must succeed, independent of equity");
 
         state
-            .install_active_runtime(ExecutionDomain::EquityNyse, equity_run, fake_handle(equity_run))
+            .install_active_runtime(
+                ExecutionDomain::EquityNyse,
+                equity_run,
+                fake_handle(equity_run),
+            )
             .await
             .expect("equity Starting -> Active must succeed");
         state
-            .install_active_runtime(ExecutionDomain::Crypto24_7, crypto_run, fake_handle(crypto_run))
+            .install_active_runtime(
+                ExecutionDomain::Crypto24_7,
+                crypto_run,
+                fake_handle(crypto_run),
+            )
             .await
             .expect("crypto Starting -> Active must succeed, independent of equity");
 
@@ -9387,10 +9725,18 @@ mod ownership_state_machine_tests {
 
         // Cleanup so the spawned fake handles don't outlive the test.
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, equity_run, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                equity_run,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
         state
-            .clear_local_runtime_for_run(ExecutionDomain::Crypto24_7, crypto_run, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::Crypto24_7,
+                crypto_run,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
     }
 
@@ -9470,22 +9816,37 @@ mod ownership_state_machine_tests {
             .await
             .unwrap();
         state
-            .install_active_runtime(ExecutionDomain::EquityNyse, equity_run, fake_handle(equity_run))
+            .install_active_runtime(
+                ExecutionDomain::EquityNyse,
+                equity_run,
+                fake_handle(equity_run),
+            )
             .await
             .unwrap();
         state
-            .install_active_runtime(ExecutionDomain::Crypto24_7, crypto_run, fake_handle(crypto_run))
+            .install_active_runtime(
+                ExecutionDomain::Crypto24_7,
+                crypto_run,
+                fake_handle(crypto_run),
+            )
             .await
             .unwrap();
 
         // Clear equity only.
         let outcome = state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, equity_run, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                equity_run,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
         assert!(outcome.cleared, "equity clear must actually clear equity");
 
         assert!(
-            state.active_owned_run_id(ExecutionDomain::EquityNyse).await.is_none(),
+            state
+                .active_owned_run_id(ExecutionDomain::EquityNyse)
+                .await
+                .is_none(),
             "equity must now be idle"
         );
         assert_eq!(
@@ -9502,7 +9863,11 @@ mod ownership_state_machine_tests {
         // instead of `PerDomain`) is exactly the change that would flip this
         // proof from GREEN to RED.
         state
-            .clear_local_runtime_for_run(ExecutionDomain::Crypto24_7, crypto_run, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::Crypto24_7,
+                crypto_run,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
     }
 
@@ -9579,7 +9944,11 @@ mod ownership_state_machine_tests {
         // Clear equity only -- crypto's independently active counters must
         // survive untouched.
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, equity_run, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                equity_run,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
 
         assert_eq!(
@@ -9625,10 +9994,18 @@ mod ownership_state_machine_tests {
 
         // Cleanup so the spawned fake handles don't outlive the test.
         state
-            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, equity_run_2, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::EquityNyse,
+                equity_run_2,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
         state
-            .clear_local_runtime_for_run(ExecutionDomain::Crypto24_7, crypto_run, LifecycleClearReason::OperatorStop)
+            .clear_local_runtime_for_run(
+                ExecutionDomain::Crypto24_7,
+                crypto_run,
+                LifecycleClearReason::OperatorStop,
+            )
             .await;
     }
 
@@ -9641,8 +10018,12 @@ mod ownership_state_machine_tests {
         let equity_run = run_id_for("b24-reconcile-equity");
         let crypto_run = run_id_for("b24-reconcile-crypto");
 
-        let equity_task = tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(86_400)).await });
-        let crypto_task = tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(86_400)).await });
+        let equity_task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(86_400)).await
+        });
+        let crypto_task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(86_400)).await
+        });
 
         state
             .install_reconcile_task_owner(ExecutionDomain::EquityNyse, equity_run, equity_task)
@@ -9707,7 +10088,10 @@ mod ownership_state_machine_tests {
             (ExecutionDomain::EquityNyse, equity_run),
             (ExecutionDomain::Crypto24_7, crypto_run),
         ] {
-            state.reserve_runtime_ownership(domain, run_id).await.unwrap();
+            state
+                .reserve_runtime_ownership(domain, run_id)
+                .await
+                .unwrap();
             let bundle = RunStartLocalBundle {
                 execution_snapshot: None,
                 accepted_artifact: None,
@@ -9724,17 +10108,29 @@ mod ownership_state_machine_tests {
                 .unwrap();
         }
 
-        assert!(state.active_owned_run_id(ExecutionDomain::EquityNyse).await.is_some());
-        assert!(state.active_owned_run_id(ExecutionDomain::Crypto24_7).await.is_some());
+        assert!(state
+            .active_owned_run_id(ExecutionDomain::EquityNyse)
+            .await
+            .is_some());
+        assert!(state
+            .active_owned_run_id(ExecutionDomain::Crypto24_7)
+            .await
+            .is_some());
 
         state.stop_for_shutdown().await;
 
         assert!(
-            state.active_owned_run_id(ExecutionDomain::EquityNyse).await.is_none(),
+            state
+                .active_owned_run_id(ExecutionDomain::EquityNyse)
+                .await
+                .is_none(),
             "shutdown must stop equity"
         );
         assert!(
-            state.active_owned_run_id(ExecutionDomain::Crypto24_7).await.is_none(),
+            state
+                .active_owned_run_id(ExecutionDomain::Crypto24_7)
+                .await
+                .is_none(),
             "shutdown must also stop crypto — explicit iteration over every domain, \
              not just the historically-equity-only path"
         );

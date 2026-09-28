@@ -17,8 +17,8 @@ use mqk_execution::{
 use super::types::{BrokerKind, DeploymentMode, RuntimeLifecycleError};
 use super::{
     BrokerAssetShortablePreflight, BrokerAssetShortablePreflightFetcher, BrokerFillActivityFetcher,
-    BrokerSnapshotFetcher, WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV, ALPACA_KEY_LIVE_ENV,
-    ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
+    BrokerSnapshotFetcher, CryptoFeeActivityFetcher, WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV,
+    ALPACA_KEY_LIVE_ENV, ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
 };
 
 // ---------------------------------------------------------------------------
@@ -319,6 +319,79 @@ pub(super) fn build_fill_activity_fetcher_from_env(
     };
 
     Some(Arc::new(AlpacaFillActivityFetcher(
+        AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url,
+            api_key_id: key_id,
+            api_secret_key: secret,
+            crypto_capability_enabled: false,
+        }),
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// B6 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION): production
+// crypto fee-activity fetcher
+// ---------------------------------------------------------------------------
+
+/// Thin newtype wrapping `AlpacaBrokerAdapter` that implements
+/// `CryptoFeeActivityFetcher`. Only the read-only day-end fee-activity fetch
+/// path is reachable through this type. Order submission, cancel, replace,
+/// and `fetch_events` are not exposed.
+struct AlpacaCryptoFeeActivityFetcher(AlpacaBrokerAdapter);
+
+impl CryptoFeeActivityFetcher for AlpacaCryptoFeeActivityFetcher {
+    fn fetch_fee_activities_since(
+        &self,
+        activity_type: &str,
+        after_id: Option<&str>,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+        self.0
+            .fetch_fee_activities_since(activity_type, after_id)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// B6: construct a production crypto fee-activity fetcher.
+///
+/// Returns `Some(fetcher)` only when `broker_kind == Some(BrokerKind::Alpaca)`
+/// and the matching credentials are present in the environment — same
+/// fail-closed shape as `build_fill_activity_fetcher_from_env`. This fetches
+/// read-only account-activity history (never an order), so it is
+/// constructed regardless of the separate Crypto trading-capability flag
+/// (D2/B4); nothing in the daemon calls it automatically today (no
+/// scheduled ingestion loop is wired by this patch) — it exists as a real,
+/// callable, tested production path, not a live consumer.
+pub(super) fn build_crypto_fee_activity_fetcher_from_env(
+    broker_kind: Option<BrokerKind>,
+    deployment_mode: DeploymentMode,
+) -> Option<Arc<dyn CryptoFeeActivityFetcher>> {
+    match broker_kind {
+        Some(BrokerKind::Alpaca) => {}
+        _ => return None,
+    }
+
+    let (key_env, secret_env) = match deployment_mode {
+        DeploymentMode::Paper => (ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_PAPER_ENV),
+        _ => (ALPACA_KEY_LIVE_ENV, ALPACA_SECRET_LIVE_ENV),
+    };
+    let paper_override = match deployment_mode {
+        DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
+        _ => None,
+    };
+    let base_url = match alpaca_base_url_for_mode(deployment_mode, paper_override.as_deref()) {
+        Ok(u) => u,
+        Err(_) => return None, // e.g. Backtest mode — not wired for Alpaca
+    };
+    let key_id = match std::env::var(key_env) {
+        Ok(v) => v,
+        Err(_) => return None, // credentials absent — fail-closed
+    };
+    let secret = match std::env::var(secret_env) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    Some(Arc::new(AlpacaCryptoFeeActivityFetcher(
         AlpacaBrokerAdapter::new(AlpacaConfig {
             base_url,
             api_key_id: key_id,

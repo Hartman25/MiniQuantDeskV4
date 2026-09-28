@@ -7253,6 +7253,35 @@ pub struct WsGapFillRecoveryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// B6 (V4-M5-M8-APPROVED-DECISIONS-IMPLEMENTATION-01-CONTINUATION) — crypto
+// fee-activity ingestion API types
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/ops/repair/crypto-fee-activity-ingest — request body.
+#[derive(Debug, Deserialize)]
+pub struct CryptoFeeActivityIngestRequest {
+    /// `"CFEE"` or `"FEE"` (Alpaca's two day-end fee activity types).
+    pub activity_type: String,
+}
+
+/// Response from `POST /api/v1/ops/repair/crypto-fee-activity-ingest`.
+#[derive(Debug, Serialize)]
+pub struct CryptoFeeActivityIngestResponse {
+    pub truth_state: String,
+    pub activity_type: String,
+    /// Whether a `CryptoFeeActivityFetcher` was configured on this daemon.
+    pub fetcher_available: bool,
+    /// Number of activities newly durably ingested this call.
+    pub newly_inserted: usize,
+    /// Number of fetched activities that were already present (dedup, not
+    /// an error) — e.g. an overlapping re-fetch after a restart.
+    pub already_existed: usize,
+    /// Filled when the operation was refused before any fetch or mutation.
+    pub gate: Option<String>,
+    pub evidence: String,
+}
+
+// ---------------------------------------------------------------------------
 // BROKER-POSITION-BASELINE-ADOPTION-01
 // ---------------------------------------------------------------------------
 

@@ -320,9 +320,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
     use repair::{
-        repair_adopt_broker_position_baseline, repair_halted_run_fill_apply,
-        repair_halted_run_fill_plan, repair_halted_run_fill_rest_recovery,
-        repair_halted_run_portfolio_snapshot, repair_outbox_ambiguous, repair_ws_gap_fill_recovery,
+        repair_adopt_broker_position_baseline, repair_crypto_fee_activity_ingest,
+        repair_halted_run_fill_apply, repair_halted_run_fill_plan,
+        repair_halted_run_fill_rest_recovery, repair_halted_run_portfolio_snapshot,
+        repair_outbox_ambiguous, repair_ws_gap_fill_recovery,
     };
     use required_market_data::{
         required_universe_plan, required_universe_scheduler_start,
@@ -902,6 +903,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/ops/repair/ws-gap-fill-recovery",
             post(repair_ws_gap_fill_recovery),
+        )
+        .route(
+            "/api/v1/ops/repair/crypto-fee-activity-ingest",
+            post(repair_crypto_fee_activity_ingest),
         )
         .route(
             "/api/v1/ops/repair/adopt-broker-position-baseline",
