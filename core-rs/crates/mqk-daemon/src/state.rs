@@ -16,6 +16,7 @@ pub mod autonomous_retry_policy;
 pub mod autonomous_runtime_context;
 mod broker;
 pub(crate) mod closed_trade_attribution;
+pub mod crypto_execution_policy;
 mod deadman;
 pub(crate) mod dry_run_strategy;
 mod env;
@@ -4914,6 +4915,17 @@ operator_reconcile_or_repair_required"
 
     pub fn run_config_hash(&self) -> &str {
         &self.runtime_selection.run_config_hash
+    }
+
+    /// Mission-B5 (V4-M5-M8 crypto TIF policy): the operator's explicit
+    /// Crypto time-in-force configuration, read fresh from
+    /// `MQK_CRYPTO_TIME_IN_FORCE` on every call — see
+    /// `crypto_execution_policy` module docs for the full contract. Zero
+    /// production callers today (crypto capability stays default off).
+    pub fn configured_crypto_time_in_force(
+        &self,
+    ) -> crypto_execution_policy::CryptoTimeInForceConfig {
+        crypto_execution_policy::crypto_time_in_force_config_from_env()
     }
 
     pub fn deployment_readiness(&self) -> &DeploymentReadiness {
