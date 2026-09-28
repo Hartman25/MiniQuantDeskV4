@@ -92,6 +92,7 @@ fn lifecycle_activity(
 /// The paired OPTRD row must share `activity_id` with its OPEXC/OPASN
 /// sibling (D1: the shared id is the real correlation evidence) and
 /// carries `underlying_symbol_raw`, never `option_symbol`.
+#[allow(clippy::too_many_arguments)]
 fn optrd(
     activity_id: &str,
     engine_id: &str,
@@ -99,6 +100,7 @@ fn optrd(
     activity_date: &str,
     qty_raw: &str,
     price_raw: &str,
+    net_amount_raw: &str,
 ) -> NewOptionLifecycleActivity {
     NewOptionLifecycleActivity {
         activity_id: activity_id.to_string(),
@@ -111,7 +113,7 @@ fn optrd(
         activity_date: activity_date.to_string(),
         qty_raw: qty_raw.to_string(),
         price_raw: Some(price_raw.to_string()),
-        net_amount_raw: "0".to_string(),
+        net_amount_raw: net_amount_raw.to_string(),
         ingested_at_utc: Utc::now(),
     }
 }
@@ -121,6 +123,15 @@ fn call_terms(strike_micros: i64) -> OptionContractTerms {
         strike_micros,
         multiplier: 100,
         is_call: true,
+        underlying_symbol: "AAPL".to_string(),
+    }
+}
+
+fn put_terms(strike_micros: i64) -> OptionContractTerms {
+    OptionContractTerms {
+        strike_micros,
+        multiplier: 100,
+        is_call: false,
         underlying_symbol: "AAPL".to_string(),
     }
 }
@@ -186,6 +197,8 @@ async fn j02_exercise_with_matching_paired_trade_applies_with_correct_effect() {
     insert_option_lifecycle_activity_if_new(&pool, &a)
         .await
         .unwrap();
+    // Real Alpaca doc pattern (long call exercise): holder RECEIVES shares
+    // (+200) and PAYS the strike consideration (net_amount NEGATIVE).
     let trade = optrd(
         &activity_id,
         &engine_id,
@@ -193,6 +206,7 @@ async fn j02_exercise_with_matching_paired_trade_applies_with_correct_effect() {
         "2026-06-19",
         "200",
         "200.00",
+        "-40000",
     );
     insert_option_lifecycle_activity_if_new(&pool, &trade)
         .await
@@ -205,7 +219,6 @@ async fn j02_exercise_with_matching_paired_trade_applies_with_correct_effect() {
         "PAPER",
         &activity_id,
         OptionLifecycleActivityType::Exercise,
-        // 2 contracts * 100 multiplier = 200 shares; $200 strike * 200 = $40,000.
         &call_terms(200_000_000),
         Utc::now(),
     )
@@ -216,10 +229,210 @@ async fn j02_exercise_with_matching_paired_trade_applies_with_correct_effect() {
         ApplyOptionLifecycleOutcome::Applied(effect) => {
             assert_eq!(
                 effect.underlying_shares_delivered_raw.as_deref(),
-                Some("200")
+                Some("200"),
+                "J02: long call exercise must RECEIVE shares (positive)"
             );
-            assert_eq!(effect.cash_effect_micros, Some(40_000_000_000));
+            assert_eq!(
+                effect.cash_effect_micros,
+                Some(-40_000_000_000),
+                "J02: long call exercise must PAY the strike consideration (negative) -- \
+                 preserved exactly from OPTRD's own signed net_amount, never re-derived"
+            );
             assert_eq!(effect.option_contracts_removed_raw, "2");
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn j02b_long_put_exercise_delivers_shares_and_receives_cash() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("j02b");
+    let option_symbol = format!("{engine_id}::AAPL260619P00200000");
+    let activity_id = format!("{engine_id}::opexc");
+
+    let a = lifecycle_activity(
+        &activity_id,
+        &engine_id,
+        OptionLifecycleActivityType::Exercise,
+        &option_symbol,
+        "2026-06-19",
+        "-2",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &a)
+        .await
+        .unwrap();
+    // Long put exercise: holder DELIVERS shares (-200) and RECEIVES the
+    // strike consideration (net_amount POSITIVE) -- the opposite sign
+    // pattern from the call case, proving direction genuinely depends on
+    // is_call, not merely on the Exercise/Assignment kind.
+    let trade = optrd(
+        &activity_id,
+        &engine_id,
+        "AAPL",
+        "2026-06-19",
+        "-200",
+        "200.00",
+        "40000",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &trade)
+        .await
+        .unwrap();
+
+    let outcome = apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Exercise,
+        &put_terms(200_000_000),
+        Utc::now(),
+    )
+    .await
+    .expect("apply must not error");
+
+    match outcome {
+        ApplyOptionLifecycleOutcome::Applied(effect) => {
+            assert_eq!(
+                effect.underlying_shares_delivered_raw.as_deref(),
+                Some("-200"),
+                "J02b: long put exercise must DELIVER shares (negative)"
+            );
+            assert_eq!(
+                effect.cash_effect_micros,
+                Some(40_000_000_000),
+                "J02b: long put exercise must RECEIVE the strike consideration (positive)"
+            );
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn j02c_short_call_assignment_delivers_shares_and_receives_cash() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("j02c");
+    let option_symbol = format!("{engine_id}::AAPL260619C00200000");
+    let activity_id = format!("{engine_id}::opasn");
+
+    let a = lifecycle_activity(
+        &activity_id,
+        &engine_id,
+        OptionLifecycleActivityType::Assignment,
+        &option_symbol,
+        "2026-06-19",
+        "2",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &a)
+        .await
+        .unwrap();
+    // Real Alpaca doc pattern (short call assignment): writer DELIVERS
+    // shares (negative) and RECEIVES the strike consideration (positive).
+    let trade = optrd(
+        &activity_id,
+        &engine_id,
+        "AAPL",
+        "2026-06-19",
+        "-200",
+        "200.00",
+        "40000",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &trade)
+        .await
+        .unwrap();
+
+    let outcome = apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Assignment,
+        &call_terms(200_000_000),
+        Utc::now(),
+    )
+    .await
+    .expect("apply must not error");
+
+    match outcome {
+        ApplyOptionLifecycleOutcome::Applied(effect) => {
+            assert_eq!(
+                effect.underlying_shares_delivered_raw.as_deref(),
+                Some("-200"),
+                "J02c: short call assignment must DELIVER shares (negative)"
+            );
+            assert_eq!(
+                effect.cash_effect_micros,
+                Some(40_000_000_000),
+                "J02c: short call assignment must RECEIVE the strike consideration (positive)"
+            );
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn j02d_short_put_assignment_receives_shares_and_pays_cash() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("j02d");
+    let option_symbol = format!("{engine_id}::AAPL260619P00200000");
+    let activity_id = format!("{engine_id}::opasn");
+
+    let a = lifecycle_activity(
+        &activity_id,
+        &engine_id,
+        OptionLifecycleActivityType::Assignment,
+        &option_symbol,
+        "2026-06-19",
+        "2",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &a)
+        .await
+        .unwrap();
+    // Short put assignment: writer RECEIVES shares (positive) and PAYS the
+    // strike consideration (negative) -- the fourth and last direction.
+    let trade = optrd(
+        &activity_id,
+        &engine_id,
+        "AAPL",
+        "2026-06-19",
+        "200",
+        "200.00",
+        "-40000",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &trade)
+        .await
+        .unwrap();
+
+    let outcome = apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Assignment,
+        &put_terms(200_000_000),
+        Utc::now(),
+    )
+    .await
+    .expect("apply must not error");
+
+    match outcome {
+        ApplyOptionLifecycleOutcome::Applied(effect) => {
+            assert_eq!(
+                effect.underlying_shares_delivered_raw.as_deref(),
+                Some("200"),
+                "J02d: short put assignment must RECEIVE shares (positive)"
+            );
+            assert_eq!(
+                effect.cash_effect_micros,
+                Some(-40_000_000_000),
+                "J02d: short put assignment must PAY the strike consideration (negative)"
+            );
         }
         other => panic!("expected Applied, got {other:?}"),
     }
@@ -295,6 +508,7 @@ async fn j04_paired_trade_strike_mismatch_is_pending_never_trusted() {
         "2026-06-19",
         "100",
         "199.50",
+        "-19950",
     );
     insert_option_lifecycle_activity_if_new(&pool, &trade)
         .await
@@ -420,4 +634,188 @@ async fn j06_fractional_contracts_remain_pending_through_composition() {
             reason: PendingApplyReason::Lifecycle(LifecyclePendingReason::FractionalContracts)
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// D2 correction: direction cross-check, account/domain scope, overflow
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn j07_paired_trade_direction_mismatch_is_pending_never_trusted() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("j07");
+    let option_symbol = format!("{engine_id}::AAPL260619C00200000");
+    let activity_id = format!("{engine_id}::opexc");
+
+    let a = lifecycle_activity(
+        &activity_id,
+        &engine_id,
+        OptionLifecycleActivityType::Exercise,
+        &option_symbol,
+        "2026-06-19",
+        "-2",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &a)
+        .await
+        .unwrap();
+    // A long call exercise must RECEIVE shares (positive); this OPTRD
+    // reports a NEGATIVE share delta with the correct price -- a genuine
+    // direction anomaly (e.g. a mis-configured is_call), never silently
+    // trusted.
+    let trade = optrd(
+        &activity_id,
+        &engine_id,
+        "AAPL",
+        "2026-06-19",
+        "-200",
+        "200.00",
+        "40000",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &trade)
+        .await
+        .unwrap();
+
+    let outcome = apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Exercise,
+        &call_terms(200_000_000),
+        Utc::now(),
+    )
+    .await
+    .expect("apply must not error");
+
+    match outcome {
+        ApplyOptionLifecycleOutcome::Pending {
+            reason:
+                PendingApplyReason::PairedTradeDirectionMismatch {
+                    expected_positive_share_delta,
+                    optrd_qty_raw,
+                },
+        } => {
+            assert!(expected_positive_share_delta);
+            assert_eq!(optrd_qty_raw, "-200");
+        }
+        other => panic!("expected PairedTradeDirectionMismatch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn j08_wrong_engine_or_mode_scope_refuses() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("j08");
+    let option_symbol = format!("{engine_id}::AAPL260619C00200000");
+    let activity_id = format!("{engine_id}::opexp");
+
+    let a = lifecycle_activity(
+        &activity_id,
+        &engine_id,
+        OptionLifecycleActivityType::Expiration,
+        &option_symbol,
+        "2026-06-19",
+        "-1",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &a)
+        .await
+        .unwrap();
+
+    // The ledger row genuinely belongs to `engine_id`/PAPER -- a caller
+    // asking to apply it under a DIFFERENT engine_id must be refused, not
+    // silently reattributed.
+    let result = apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        "a-different-engine-id",
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Expiration,
+        &call_terms(200_000_000),
+        Utc::now(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "J08: applying evidence under a mismatched engine_id must refuse, not silently \
+         reattribute it"
+    );
+
+    let result = apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "LIVE",
+        &activity_id,
+        OptionLifecycleActivityType::Expiration,
+        &call_terms(200_000_000),
+        Utc::now(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "J08: applying evidence under a mismatched mode must refuse, not silently reattribute it"
+    );
+}
+
+#[tokio::test]
+async fn j09_overflowing_paired_trade_decimal_fails_closed() {
+    let url = require_db_url();
+    let pool = require_pool(&url).await.expect("pool");
+    let engine_id = test_engine_id("j09");
+    let option_symbol = format!("{engine_id}::AAPL260619C00200000");
+    let activity_id = format!("{engine_id}::opexc");
+
+    let a = lifecycle_activity(
+        &activity_id,
+        &engine_id,
+        OptionLifecycleActivityType::Exercise,
+        &option_symbol,
+        "2026-06-19",
+        "-2",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &a)
+        .await
+        .unwrap();
+    // A whole-unit magnitude that fits i64 on its own (~9.22e15) but whose
+    // micros-scale (x1,000,000) representation overflows i64 (~9.22e18
+    // max) -- structurally impossible for a real settlement, but the
+    // checked arithmetic must fail closed rather than wrap.
+    let trade = optrd(
+        &activity_id,
+        &engine_id,
+        "AAPL",
+        "2026-06-19",
+        "9223372036854775",
+        "200.00",
+        "0",
+    );
+    insert_option_lifecycle_activity_if_new(&pool, &trade)
+        .await
+        .unwrap();
+
+    let outcome = apply_option_lifecycle_activity(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &engine_id,
+        "PAPER",
+        &activity_id,
+        OptionLifecycleActivityType::Exercise,
+        &call_terms(200_000_000),
+        Utc::now(),
+    )
+    .await
+    .expect("apply must not error -- overflow is Pending, not a hard error");
+
+    match outcome {
+        ApplyOptionLifecycleOutcome::Pending {
+            reason: PendingApplyReason::DecimalOverflow { field, .. },
+        } => {
+            assert_eq!(field, "optrd_qty");
+        }
+        other => panic!("expected DecimalOverflow, got {other:?}"),
+    }
 }

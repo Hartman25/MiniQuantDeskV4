@@ -429,6 +429,11 @@ pub async fn find_paired_trade_activity(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedOptionLifecycleEffect {
     pub lifecycle_activity_id: String,
+    /// D2 correction: the authenticated Alpaca account's own
+    /// `APCA-API-KEY-ID`. Part of this table's PRIMARY KEY as of migration
+    /// 0087 -- two accounts whose lifecycle activity ids collided must
+    /// never share one applied-marker row.
+    pub broker_account_id: String,
     pub engine_id: String,
     pub mode: String,
     pub option_symbol: String,
@@ -449,8 +454,9 @@ pub enum InsertAppliedOptionLifecycleEffectOutcome {
 }
 
 /// Durably record that `effect` has been applied, deduplicated on
-/// `lifecycle_activity_id`. Safe to call with the same id any number of
-/// times -- only the first call ever mutates the table.
+/// `(broker_account_id, lifecycle_activity_id)`. Safe to call with the
+/// same id any number of times -- only the first call ever mutates the
+/// table.
 pub async fn insert_applied_option_lifecycle_effect_if_new(
     pool: &PgPool,
     effect: &AppliedOptionLifecycleEffect,
@@ -458,14 +464,15 @@ pub async fn insert_applied_option_lifecycle_effect_if_new(
     let result = sqlx::query(
         r#"
         insert into sys_option_lifecycle_applied (
-            lifecycle_activity_id, engine_id, mode, option_symbol,
+            lifecycle_activity_id, broker_account_id, engine_id, mode, option_symbol,
             underlying_symbol, option_contracts_removed_raw,
             underlying_shares_delivered_raw, cash_effect_micros, applied_at_utc
-        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        on conflict (lifecycle_activity_id) do nothing
+        ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        on conflict (broker_account_id, lifecycle_activity_id) do nothing
         "#,
     )
     .bind(&effect.lifecycle_activity_id)
+    .bind(&effect.broker_account_id)
     .bind(&effect.engine_id)
     .bind(&effect.mode)
     .bind(&effect.option_symbol)
@@ -490,6 +497,7 @@ type AppliedOptionLifecycleEffectRow = (
     String,
     String,
     String,
+    String,
     Option<String>,
     String,
     Option<String>,
@@ -497,21 +505,24 @@ type AppliedOptionLifecycleEffectRow = (
     DateTime<Utc>,
 );
 
-/// Read back whether `lifecycle_activity_id` has already been applied, for
-/// test/audit verification and for D3's pending-lifecycle gate.
+/// Read back whether `(broker_account_id, lifecycle_activity_id)` has
+/// already been applied, for test/audit verification and for D3's
+/// pending-lifecycle gate.
 pub async fn fetch_applied_option_lifecycle_effect(
     pool: &PgPool,
+    broker_account_id: &str,
     lifecycle_activity_id: &str,
 ) -> Result<Option<AppliedOptionLifecycleEffect>> {
     let row: Option<AppliedOptionLifecycleEffectRow> = sqlx::query_as(
         r#"
-        select lifecycle_activity_id, engine_id, mode, option_symbol,
+        select lifecycle_activity_id, broker_account_id, engine_id, mode, option_symbol,
                underlying_symbol, option_contracts_removed_raw,
                underlying_shares_delivered_raw, cash_effect_micros, applied_at_utc
           from sys_option_lifecycle_applied
-         where lifecycle_activity_id = $1
+         where broker_account_id = $1 and lifecycle_activity_id = $2
         "#,
     )
+    .bind(broker_account_id)
     .bind(lifecycle_activity_id)
     .fetch_optional(pool)
     .await
@@ -520,6 +531,7 @@ pub async fn fetch_applied_option_lifecycle_effect(
     Ok(row.map(
         |(
             lifecycle_activity_id,
+            broker_account_id,
             engine_id,
             mode,
             option_symbol,
@@ -530,6 +542,7 @@ pub async fn fetch_applied_option_lifecycle_effect(
             applied_at_utc,
         )| AppliedOptionLifecycleEffect {
             lifecycle_activity_id,
+            broker_account_id,
             engine_id,
             mode,
             option_symbol,
@@ -570,7 +583,8 @@ pub async fn find_unresolved_option_lifecycle_activity(
         select l.activity_id, l.activity_type
           from sys_option_lifecycle_activity_ledger l
           left join sys_option_lifecycle_applied a
-            on a.lifecycle_activity_id = l.activity_id
+            on a.broker_account_id = l.broker_account_id
+           and a.lifecycle_activity_id = l.activity_id
          where l.broker_account_id = $1
            and l.option_symbol = $2
            and l.activity_type in ('OPEXC', 'OPASN', 'OPEXP')

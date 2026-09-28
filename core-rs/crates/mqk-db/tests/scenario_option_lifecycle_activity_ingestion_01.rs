@@ -427,6 +427,7 @@ async fn h07_applied_effect_insert_is_idempotent_on_lifecycle_activity_id() {
 
     let effect = AppliedOptionLifecycleEffect {
         lifecycle_activity_id: lifecycle_activity_id.clone(),
+        broker_account_id: TEST_BROKER_ACCOUNT_ID.to_string(),
         engine_id: engine_id.clone(),
         mode: "PAPER".to_string(),
         option_symbol: "AAPL260619C00200000".to_string(),
@@ -454,10 +455,14 @@ async fn h07_applied_effect_insert_is_idempotent_on_lifecycle_activity_id() {
         InsertAppliedOptionLifecycleEffectOutcome::AlreadyApplied
     );
 
-    let stored = fetch_applied_option_lifecycle_effect(&pool, &lifecycle_activity_id)
-        .await
-        .expect("fetch must succeed")
-        .expect("row must exist");
+    let stored = fetch_applied_option_lifecycle_effect(
+        &pool,
+        TEST_BROKER_ACCOUNT_ID,
+        &lifecycle_activity_id,
+    )
+    .await
+    .expect("fetch must succeed")
+    .expect("row must exist");
     assert_eq!(
         stored.cash_effect_micros,
         Some(40_000_000_000),

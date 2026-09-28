@@ -530,6 +530,12 @@
       "path": "0086_option_lifecycle_broker_account_scope_and_shape.sql",
       "status": "applied",
       "intent": "V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01 D1 correction: add broker_account_id to sys_option_lifecycle_activity_ledger and sys_option_lifecycle_ingestion_cursor (mirrors 0085's B6 fix); widen the ledger's PRIMARY KEY to (broker_account_id, activity_id, activity_type) closing the confirmed collision where Alpaca reports an OPEXC/OPASN activity and its paired OPTRD trade under the IDENTICAL activity id (0084's activity_id-only PK silently dropped the OPTRD row via ON CONFLICT DO NOTHING); make option_symbol nullable and add underlying_symbol_raw, CHECK-enforced mutually exclusive by activity_type, so an OPTRD row's raw `symbol` field (the underlying ticker, per Alpaca's own docs) is never conflated with an OPEXC/OPASN/OPEXP row's OCC option-contract symbol; add net_amount_raw (NOT NULL) preserving Alpaca's own authoritative signed cash evidence. Idempotent (existence-guarded); ADD COLUMN ... NOT NULL carries no DEFAULT (safe: no production caller has ever driven either table). Does not modify 0084/0085."
+    },
+    {
+      "id": "0087",
+      "path": "0087_option_lifecycle_applied_broker_account_scope.sql",
+      "status": "applied",
+      "intent": "V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01 D2 correction: add broker_account_id to sys_option_lifecycle_applied and widen its PRIMARY KEY to (broker_account_id, lifecycle_activity_id), mirroring 0085/0086 exactly -- closes the gap where two distinct broker accounts whose lifecycle activity ids collided would share one applied-marker row, letting one account's applied effect silently gate the other's genuinely distinct lifecycle event as AlreadyApplied. Idempotent (existence-guarded); ADD COLUMN ... NOT NULL carries no DEFAULT (safe: no production caller has ever driven this table). Does not modify 0084/0086."
     }
   ]
 }
