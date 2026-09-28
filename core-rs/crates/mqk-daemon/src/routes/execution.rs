@@ -213,7 +213,9 @@ pub(crate) async fn execution_order_submit(
         }
     };
 
-    let _lifecycle = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
+    let _lifecycle = st
+        .lifecycle_guard(crate::state::ExecutionDomain::EquityNyse)
+        .await;
 
     let Some(db) = st.db.as_ref() else {
         return manual_order_submit_response(
@@ -275,7 +277,10 @@ pub(crate) async fn execution_order_submit(
         );
     }
 
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return manual_order_submit_response(
@@ -316,6 +321,53 @@ pub(crate) async fn execution_order_submit(
             Some(active_run_id),
             blockers,
         );
+    }
+
+    // Gate (D3, V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01): an unresolved
+    // options-lifecycle event for this exact symbol must block a manual
+    // operator order on it, mirroring `decision.rs`'s Gate 7b exactly (this
+    // is a second real economic-order-admission surface, not the same
+    // seam). No `option_lifecycle_activity_fetcher` configured means no
+    // Alpaca account is connected -- vacuously Clear.
+    if let Some(fetcher) = st.option_lifecycle_activity_fetcher.as_ref() {
+        let broker_account_id = fetcher.broker_account_id();
+        match crate::state::option_lifecycle_pending_gate::evaluate_option_lifecycle_pending_gate(
+            db,
+            &broker_account_id,
+            &validated.symbol,
+        )
+        .await
+        {
+            Ok(status) if status.must_fail_closed() => {
+                return manual_order_submit_response(
+                    StatusCode::CONFLICT,
+                    false,
+                    "rejected",
+                    validated.client_request_id,
+                    Some(active_run_id),
+                    vec![format!(
+                        "execution order submit refused: symbol '{}' has an unresolved \
+                         options-lifecycle event ({status:?}); no economic action may proceed \
+                         until D2 durably applies the matching effect",
+                        validated.symbol
+                    )],
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return manual_order_submit_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    false,
+                    "unavailable",
+                    validated.client_request_id,
+                    Some(active_run_id),
+                    vec![format!(
+                        "execution order submit unavailable: options-lifecycle pending-gate \
+                         check failed: {err}"
+                    )],
+                );
+            }
+        }
     }
 
     let order_json = validated.order_json();
@@ -417,7 +469,9 @@ pub(crate) async fn execution_order_cancel(
         }
     };
 
-    let _lifecycle = st.lifecycle_guard(crate::state::ExecutionDomain::EquityNyse).await;
+    let _lifecycle = st
+        .lifecycle_guard(crate::state::ExecutionDomain::EquityNyse)
+        .await;
 
     let Some(db) = st.db.as_ref() else {
         return manual_order_cancel_response(
@@ -479,7 +533,10 @@ pub(crate) async fn execution_order_cancel(
         );
     }
 
-    let status = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let status = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             return manual_order_cancel_response(
@@ -750,7 +807,10 @@ pub(crate) async fn execution_fill_quality(State(st): State<Arc<AppState>>) -> i
     };
 
     // Derive active run_id from the durable status snapshot.
-    let active_run_id = match st.current_status_snapshot(crate::state::ExecutionDomain::EquityNyse).await {
+    let active_run_id = match st
+        .current_status_snapshot(crate::state::ExecutionDomain::EquityNyse)
+        .await
+    {
         Ok(snap) => snap.active_run_id,
         Err(_) => None,
     };

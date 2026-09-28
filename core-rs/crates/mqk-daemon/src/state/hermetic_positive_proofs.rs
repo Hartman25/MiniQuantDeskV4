@@ -482,7 +482,8 @@ mod tests {
         // Existing test-only runtime-ownership seam. This supplies the
         // exact local ownership the operator-order route requires without
         // spawning a real execution loop that can race this enqueue proof.
-        st.inject_running_loop_for_test(ExecutionDomain::EquityNyse, run_id).await;
+        st.inject_running_loop_for_test(ExecutionDomain::EquityNyse, run_id)
+            .await;
 
         {
             let mut execution = st.execution_snapshot.write().await;
@@ -668,6 +669,95 @@ mod tests {
                 .expect("limit row present");
             assert_eq!(row.order_json["symbol"], "MSFT");
             assert_eq!(row.order_json["order_type"], "limit");
+
+            st.stop_for_shutdown().await;
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------
+    // D3 (V4-M5-M8-INDEPENDENT-REVIEW-CORRECTION-01) second-sweep finding:
+    // the pending-lifecycle gate must also cover the manual operator
+    // order-submit route -- a second real economic-order-admission
+    // surface distinct from `submit_internal_strategy_decision`, which a
+    // caller could otherwise use to bypass the gate entirely.
+    // -----------------------------------------------------------------
+
+    struct FakeOptionLifecycleFetcherForOrderSubmit;
+
+    impl crate::state::OptionLifecycleActivityFetcher for FakeOptionLifecycleFetcherForOrderSubmit {
+        fn fetch_option_lifecycle_activities_since(
+            &self,
+            _activity_type: &str,
+            _after_id: Option<&str>,
+        ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaFeeActivity>, String> {
+            unreachable!("the order-submit gate never fetches from Alpaca")
+        }
+
+        fn broker_account_id(&self) -> String {
+            "hermetic-order-submit-acct".to_string()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hermetic_order_submit_blocked_by_pending_option_lifecycle() {
+        mqk_db::run_isolated("hermetic_order_d3_blocked", |pool| async move {
+            let mut st_inner = Arc::try_unwrap(hermetic_order_daemon_state(pool).await)
+                .unwrap_or_else(|_| panic!("sole owner of the freshly constructed AppState"));
+            st_inner.set_option_lifecycle_activity_fetcher_for_test(Arc::new(
+                FakeOptionLifecycleFetcherForOrderSubmit,
+            ));
+            let st = Arc::new(st_inner);
+            arm(&st).await;
+            let db = st.db.as_ref().expect("db configured");
+            let _run_id = seed_active_order_run_without_dispatch(&st, db).await;
+
+            // valid_order_request() targets symbol "AAPL" -- seed unresolved
+            // lifecycle evidence for that exact symbol under this fetcher's
+            // own broker_account_id.
+            mqk_db::option_lifecycle_activity::insert_option_lifecycle_activity_if_new(
+                db,
+                &mqk_db::option_lifecycle_activity::NewOptionLifecycleActivity {
+                    activity_id: "hermetic-d3-opexc".to_string(),
+                    broker_account_id: "hermetic-order-submit-acct".to_string(),
+                    engine_id: "mqk-daemon".to_string(),
+                    mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
+                    activity_type:
+                        mqk_db::option_lifecycle_activity::OptionLifecycleActivityType::Exercise,
+                    option_symbol: Some("AAPL".to_string()),
+                    underlying_symbol_raw: None,
+                    activity_date: "2026-06-19".to_string(),
+                    qty_raw: "-1".to_string(),
+                    price_raw: None,
+                    net_amount_raw: "0".to_string(),
+                    ingested_at_utc: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("seed pending lifecycle activity");
+
+            let (status, json) = post_manual_order(&st, valid_order_request()).await;
+            assert_eq!(status, StatusCode::CONFLICT, "expected refusal: {json}");
+            assert_eq!(json["accepted"], false);
+            assert_eq!(json["disposition"], "rejected");
+            let blockers = json["blockers"]
+                .as_array()
+                .expect("blockers must be an array");
+            assert!(
+                blockers
+                    .iter()
+                    .any(|b| b.as_str().unwrap_or("").contains("options-lifecycle")),
+                "blocker must mention options-lifecycle: {json}"
+            );
+
+            // No outbox row must exist for the blocked client_request_id.
+            let row = mqk_db::outbox_fetch_by_idempotency_key(db, "manual-order-001")
+                .await
+                .expect("fetch outbox row");
+            assert!(
+                row.is_none(),
+                "D3: the pending-lifecycle refusal must not create any outbox row"
+            );
 
             st.stop_for_shutdown().await;
         })
