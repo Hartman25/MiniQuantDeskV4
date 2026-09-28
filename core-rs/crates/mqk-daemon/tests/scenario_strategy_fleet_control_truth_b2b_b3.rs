@@ -300,7 +300,7 @@ async fn b3_t01_t02_t03_telemetry_seam_from_appstate() {
 
     // T01: Signal limit not exceeded → throttle_open.
     assert!(
-        !st.day_signal_limit_exceeded(),
+        !st.day_signal_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse),
         "T01: day_signal_limit_exceeded must be false before any signals"
     );
 
@@ -321,9 +321,9 @@ async fn b3_t01_t02_t03_telemetry_seam_from_appstate() {
 
     // T03: Saturate the signal counter → limit exceeded.
     // Use the test seam rather than submitting 100 real HTTP signals.
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
     assert!(
-        st.day_signal_limit_exceeded(),
+        st.day_signal_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse),
         "T03: day_signal_limit_exceeded must be true at saturation"
     );
 }

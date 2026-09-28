@@ -277,7 +277,7 @@ are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth).
     // by Gate 1d; if no run is active, the counter resets at the next run
     // start.  Both states are worth surfacing to the operator.
     if st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion
-        && st.day_signal_limit_exceeded()
+        && st.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse)
     {
         rows.push(ActiveAlertRow {
             alert_id: "autonomous.signal_limit.day_limit_reached".to_string(),
@@ -1002,7 +1002,7 @@ are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth).
 
     // AUTON-PAPER-01: Day signal limit alert — same source as /api/v1/alerts/active.
     if st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion
-        && st.day_signal_limit_exceeded()
+        && st.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse)
     {
         extra_signals.push((
             "autonomous.signal_limit.day_limit_reached",

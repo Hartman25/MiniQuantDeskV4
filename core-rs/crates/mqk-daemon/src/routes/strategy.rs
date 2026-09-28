@@ -199,7 +199,9 @@ pub(crate) async fn build_dispatch_summary_response_v2(
     let mut per_symbol = Vec::with_capacity(target_states.len());
     for row in target_states {
         per_symbol.push(PerSymbolDispatchRowV2 {
-            day_order_count: state.symbol_day_order_count(&row.symbol).await,
+            day_order_count: state
+                .symbol_day_order_count(crate::state::ExecutionDomain::EquityNyse, &row.symbol)
+                .await,
             day_order_limit,
             // Cap #9 has a classification helper, but no trusted current
             // in-memory per-symbol staleness source is wired into this route.
@@ -930,13 +932,13 @@ pub(crate) async fn strategy_signal(
     // Placed pre-lifecycle-guard so it is pure in-memory and always reachable
     // without DB, even in tests.  409/day_limit_reached tells the signal
     // producer to stop for the remainder of this run.
-    if st.day_signal_limit_exceeded() {
+    if st.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse) {
         // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert once per run when the day
         // signal limit is hit.  Deduped: only the first refusal sends Discord.
         if st.try_claim_day_limit_alert() {
             let notifier = st.discord_notifier.clone();
             let env = Some(st.deployment_mode().as_api_label().to_string());
-            let count = st.day_signal_count();
+            let count = st.day_signal_count(crate::state::ExecutionDomain::EquityNyse);
             let ts = Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
             tokio::spawn(async move {
                 notifier
@@ -973,7 +975,7 @@ pub(crate) async fn strategy_signal(
                     "strategy signal refused: autonomous day signal limit reached \
                  ({} signals accepted this run); \
                  no further signals will be accepted until the next run start",
-                    st.day_signal_count()
+                    st.day_signal_count(crate::state::ExecutionDomain::EquityNyse)
                 )],
             },
         );
@@ -1326,7 +1328,7 @@ pub(crate) async fn strategy_signal(
     // tick_strategy_dispatch returns None and no callback is made.
     // B1C will consume the result from tick_strategy_dispatch.
     {
-        let now_tick = st.day_signal_count() as u64;
+        let now_tick = st.day_signal_count(crate::state::ExecutionDomain::EquityNyse) as u64;
         let end_ts = st.session_now_ts().await;
         st.deposit_strategy_bar_input(StrategyBarInput {
             now_tick,
@@ -1349,7 +1351,7 @@ pub(crate) async fn strategy_signal(
     {
         Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
-            st.increment_day_signal_count();
+            st.increment_day_signal_count(crate::state::ExecutionDomain::EquityNyse);
             // JOUR-01: Write durable signal-admission audit event (best-effort, non-fatal).
             // The outbox write above is authoritative; this creates a supervision record.
             write_signal_admission_event(

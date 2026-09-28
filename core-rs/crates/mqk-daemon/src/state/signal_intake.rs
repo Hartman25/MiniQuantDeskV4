@@ -8,7 +8,7 @@
 
 use std::sync::atomic::Ordering;
 
-use super::AppState;
+use super::{AppState, ExecutionDomain};
 
 /// PT-AUTO-02: Maximum number of strategy signals accepted per execution run.
 ///
@@ -87,43 +87,54 @@ fn normalize_symbol_key(symbol: &str) -> String {
 }
 
 impl AppState {
-    /// Returns the current per-run signal intake count.
-    pub fn day_signal_count(&self) -> u32 {
-        self.day_signal_count.load(Ordering::SeqCst)
+    /// Returns the current per-run signal intake count for `domain`.
+    ///
+    /// B2.6: domain-scoped -- this counter is per-domain (`PerDomain`), not
+    /// process-wide, so Equity and Crypto each have their own independent
+    /// per-run signal intake bound.
+    pub fn day_signal_count(&self, domain: ExecutionDomain) -> u32 {
+        self.day_signal_count.get(domain).load(Ordering::SeqCst)
     }
 
-    /// Increment the per-run signal intake counter by one.
+    /// Increment the per-run signal intake counter for `domain` by one.
     ///
     /// Called from the strategy signal route on Gate 7 Ok(true) (new enqueue).
     /// Not called for duplicates (Ok(false)) or Gate failures.
-    pub(crate) fn increment_day_signal_count(&self) {
-        self.day_signal_count.fetch_add(1, Ordering::SeqCst);
+    pub(crate) fn increment_day_signal_count(&self, domain: ExecutionDomain) {
+        self.day_signal_count
+            .get(domain)
+            .fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Returns `true` when the per-run signal count has reached
+    /// Returns `true` when `domain`'s per-run signal count has reached
     /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`.  Gate 1d refuses signals when true.
-    pub fn day_signal_limit_exceeded(&self) -> bool {
-        self.day_signal_count.load(Ordering::SeqCst) >= MAX_AUTONOMOUS_SIGNALS_PER_RUN
+    pub fn day_signal_limit_exceeded(&self, domain: ExecutionDomain) -> bool {
+        self.day_signal_count.get(domain).load(Ordering::SeqCst) >= MAX_AUTONOMOUS_SIGNALS_PER_RUN
     }
 
-    /// Test seam: set the day signal count to an arbitrary value.
+    /// Test seam: set `domain`'s day signal count to an arbitrary value.
     ///
     /// Named `_for_test` to signal intent; never called in production code.
     /// Used by PT-AUTO-02 proof tests to simulate a saturated counter without
     /// submitting 100 real signals.
-    pub fn set_day_signal_count_for_test(&self, count: u32) {
-        self.day_signal_count.store(count, Ordering::SeqCst);
+    pub fn set_day_signal_count_for_test(&self, domain: ExecutionDomain, count: u32) {
+        self.day_signal_count
+            .get(domain)
+            .store(count, Ordering::SeqCst);
     }
 
     // -----------------------------------------------------------------------
     // MULTI-SYMBOL-DAY-ORDER-CAP-01: Gate 1f per-symbol order count cap
     // -----------------------------------------------------------------------
 
-    /// Returns the current per-run order intake count for `symbol`
-    /// (cap #4 counter, keyed by normalized symbol).
-    pub async fn symbol_day_order_count(&self, symbol: &str) -> u32 {
+    /// Returns the current per-run order intake count for `symbol` in
+    /// `domain` (cap #4 counter, keyed by normalized symbol).
+    ///
+    /// B2.6: domain-scoped, for the same reason as `day_signal_count`.
+    pub async fn symbol_day_order_count(&self, domain: ExecutionDomain, symbol: &str) -> u32 {
         let key = normalize_symbol_key(symbol);
         self.day_signal_count_by_symbol
+            .get(domain)
             .read()
             .await
             .get(&key)
@@ -131,14 +142,19 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    /// Increment the per-run order intake counter for `symbol` by one.
+    /// Increment the per-run order intake counter for `symbol` in `domain`
+    /// by one.
     ///
     /// Called alongside [`increment_day_signal_count`](Self::increment_day_signal_count)
     /// on every new outbox enqueue (Gate 7 Ok(true)). Not called for
     /// duplicates or gate failures.
-    pub(crate) async fn increment_symbol_day_order_count(&self, symbol: &str) {
+    pub(crate) async fn increment_symbol_day_order_count(
+        &self,
+        domain: ExecutionDomain,
+        symbol: &str,
+    ) {
         let key = normalize_symbol_key(symbol);
-        let mut map = self.day_signal_count_by_symbol.write().await;
+        let mut map = self.day_signal_count_by_symbol.get(domain).write().await;
         *map.entry(key).or_insert(0) += 1;
     }
 
@@ -148,26 +164,36 @@ impl AppState {
         *self.per_symbol_day_order_limit.read().await
     }
 
-    /// Returns `true` when `symbol`'s per-run order count has reached the
-    /// configured [`per_symbol_day_order_limit`](Self::per_symbol_day_order_limit).
+    /// Returns `true` when `symbol`'s per-run order count in `domain` has
+    /// reached the configured
+    /// [`per_symbol_day_order_limit`](Self::per_symbol_day_order_limit).
     ///
     /// Always `false` when Gate 1f is disabled (limit `None`) — the default.
-    pub async fn symbol_day_order_limit_exceeded(&self, symbol: &str) -> bool {
+    pub async fn symbol_day_order_limit_exceeded(
+        &self,
+        domain: ExecutionDomain,
+        symbol: &str,
+    ) -> bool {
         match self.per_symbol_day_order_limit().await {
-            Some(limit) => self.symbol_day_order_count(symbol).await >= limit,
+            Some(limit) => self.symbol_day_order_count(domain, symbol).await >= limit,
             None => false,
         }
     }
 
-    /// Test seam: set the per-run order intake count for `symbol` to an
-    /// arbitrary value.
+    /// Test seam: set the per-run order intake count for `symbol` in
+    /// `domain` to an arbitrary value.
     ///
     /// Named `_for_test` to signal intent; never called in production code.
     /// Used by Gate 1f proof tests to simulate a saturated per-symbol counter
     /// without driving real outbox enqueues.
-    pub fn set_symbol_day_order_count_for_test(&self, symbol: &str, count: u32) {
+    pub fn set_symbol_day_order_count_for_test(
+        &self,
+        domain: ExecutionDomain,
+        symbol: &str,
+        count: u32,
+    ) {
         let key = normalize_symbol_key(symbol);
-        if let Ok(mut map) = self.day_signal_count_by_symbol.try_write() {
+        if let Ok(mut map) = self.day_signal_count_by_symbol.get(domain).try_write() {
             map.insert(key, count);
         }
     }
@@ -182,15 +208,20 @@ impl AppState {
         }
     }
 
-    /// Reset all per-symbol order intake counts. Called at run start
-    /// alongside `day_signal_count` so cap #4 applies per execution run, not
-    /// per daemon process lifetime (same day-rollover boundary as Gate 1).
+    /// Reset all per-symbol order intake counts for `domain`. Called at run
+    /// start alongside `day_signal_count` so cap #4 applies per execution
+    /// run, not per daemon process lifetime (same day-rollover boundary as
+    /// Gate 1).
     ///
     /// `pub` (not `pub(super)`) so D07 in
     /// `scenario_multi_symbol_day_order_cap_01.rs` can exercise the reset
     /// directly without driving a full run-start lifecycle transition.
-    pub async fn reset_symbol_day_order_counts(&self) {
-        self.day_signal_count_by_symbol.write().await.clear();
+    pub async fn reset_symbol_day_order_counts(&self, domain: ExecutionDomain) {
+        self.day_signal_count_by_symbol
+            .get(domain)
+            .write()
+            .await
+            .clear();
     }
 
     // -----------------------------------------------------------------------

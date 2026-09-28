@@ -247,9 +247,9 @@ async fn d01_gate_1f_disabled_by_default() {
         "default per-symbol day order limit must be None (Gate 1f disabled)"
     );
 
-    st.set_symbol_day_order_count_for_test("AAPL", 9_999);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 9_999);
     assert!(
-        !st.symbol_day_order_limit_exceeded("AAPL").await,
+        !st.symbol_day_order_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await,
         "Gate 1f must never be exceeded when the limit is unset"
     );
 
@@ -275,10 +275,10 @@ async fn d02_below_configured_limit_not_exceeded() {
     ));
 
     st.set_per_symbol_day_order_limit_for_test(Some(5));
-    st.set_symbol_day_order_count_for_test("AAPL", 4);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 4);
 
     assert!(
-        !st.symbol_day_order_limit_exceeded("AAPL").await,
+        !st.symbol_day_order_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await,
         "count 4 < limit 5 must not be exceeded"
     );
 
@@ -306,10 +306,10 @@ async fn d03_at_configured_limit_fires_before_db() {
     ));
 
     st.set_per_symbol_day_order_limit_for_test(Some(1));
-    st.set_symbol_day_order_count_for_test("AAPL", 1);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 1);
 
     assert!(
-        st.symbol_day_order_limit_exceeded("AAPL").await,
+        st.symbol_day_order_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await,
         "count 1 >= limit 1 must be exceeded"
     );
 
@@ -339,8 +339,8 @@ async fn d04_per_symbol_granularity_symbol_a_capped_symbol_b_unaffected() {
     ));
 
     st.set_per_symbol_day_order_limit_for_test(Some(1));
-    st.set_symbol_day_order_count_for_test("AAPL", 1); // at limit
-    st.set_symbol_day_order_count_for_test("MSFT", 0); // untouched
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 1); // at limit
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "MSFT", 0); // untouched
 
     let d_aapl = make_decision_for_symbol(&unique_id("dec"), "strat-a", "AAPL");
     let out_aapl = submit_internal_strategy_decision(&st, d_aapl).await;
@@ -374,12 +374,12 @@ async fn d05_gate_1f_independent_of_account_wide_gate_1() {
     ));
 
     // Account-wide counter is far from MAX_AUTONOMOUS_SIGNALS_PER_RUN (100).
-    st.set_day_signal_count_for_test(0);
-    assert!(!st.day_signal_limit_exceeded());
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 0);
+    assert!(!st.day_signal_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse));
 
     // Per-symbol counter is at its (much smaller) configured limit.
     st.set_per_symbol_day_order_limit_for_test(Some(1));
-    st.set_symbol_day_order_count_for_test("AAPL", 1);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 1);
 
     let d = make_decision_for_symbol(&unique_id("dec"), "strat-a", "AAPL");
     let out = submit_internal_strategy_decision(&st, d).await;
@@ -390,7 +390,7 @@ async fn d05_gate_1f_independent_of_account_wide_gate_1() {
         out.disposition
     );
     assert!(
-        !st.day_signal_limit_exceeded(),
+        !st.day_signal_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse),
         "account-wide day signal limit must remain unaffected by Gate 1f"
     );
 }
@@ -409,12 +409,12 @@ async fn d06_account_wide_gate_1_unchanged() {
     ));
 
     // Saturate the account-wide counter (PT-AUTO-02 behavior, unchanged).
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
 
     // Per-symbol counter is far from its configured limit.
     st.set_per_symbol_day_order_limit_for_test(Some(1));
-    st.set_symbol_day_order_count_for_test("AAPL", 0);
-    assert!(!st.symbol_day_order_limit_exceeded("AAPL").await);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 0);
+    assert!(!st.symbol_day_order_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await);
 
     let d = make_decision_for_symbol(&unique_id("dec"), "strat-a", "AAPL");
     let out = submit_internal_strategy_decision(&st, d).await;
@@ -439,15 +439,15 @@ async fn d07_reset_clears_all_per_symbol_counts() {
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
 
-    st.set_symbol_day_order_count_for_test("AAPL", 3);
-    st.set_symbol_day_order_count_for_test("MSFT", 7);
-    assert_eq!(st.symbol_day_order_count("AAPL").await, 3);
-    assert_eq!(st.symbol_day_order_count("MSFT").await, 7);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 3);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "MSFT", 7);
+    assert_eq!(st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await, 3);
+    assert_eq!(st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, "MSFT").await, 7);
 
-    st.reset_symbol_day_order_counts().await;
+    st.reset_symbol_day_order_counts(mqk_daemon::state::ExecutionDomain::EquityNyse).await;
 
-    assert_eq!(st.symbol_day_order_count("AAPL").await, 0);
-    assert_eq!(st.symbol_day_order_count("MSFT").await, 0);
+    assert_eq!(st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await, 0);
+    assert_eq!(st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, "MSFT").await, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +464,7 @@ async fn d08_blocker_message_names_symbol_and_limit() {
     ));
 
     st.set_per_symbol_day_order_limit_for_test(Some(1));
-    st.set_symbol_day_order_count_for_test("AAPL", 1);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 1);
 
     let d = make_decision_for_symbol(&unique_id("dec"), "strat-a", "AAPL");
     let out = submit_internal_strategy_decision(&st, d).await;
@@ -516,8 +516,8 @@ async fn d09_acceptance_increments_account_wide_and_per_symbol_counters() {
     ));
     let run_id = seed_active_run(&st).await;
 
-    let before_account = st.day_signal_count();
-    let before_symbol = st.symbol_day_order_count("AAPL").await;
+    let before_account = st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse);
+    let before_symbol = st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await;
 
     let dec_id = unique_id("dec");
     let d = make_decision_for_symbol(&dec_id, &sid, "AAPL");
@@ -530,12 +530,12 @@ async fn d09_acceptance_increments_account_wide_and_per_symbol_counters() {
     );
 
     assert_eq!(
-        st.day_signal_count(),
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
         before_account + 1,
         "account-wide day signal count must increment by one on acceptance"
     );
     assert_eq!(
-        st.symbol_day_order_count("AAPL").await,
+        st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL").await,
         before_symbol + 1,
         "per-symbol day order count for AAPL must increment by one on acceptance"
     );

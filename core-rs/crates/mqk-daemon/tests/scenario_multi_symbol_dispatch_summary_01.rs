@@ -370,7 +370,7 @@ async fn s10_day_order_count_and_limit_are_wired_values() {
     let _lock = env_lock().lock().await;
     let _env = no_runtime_config_env();
     let st = bare_state();
-    st.set_symbol_day_order_count_for_test("AAPL", 7);
+    st.set_symbol_day_order_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, "AAPL", 7);
     st.set_per_symbol_day_order_limit_for_test(Some(9));
     st.record_per_symbol_target_state(target_state("AAPL", "s1", 0, 1, "order_will_be_submitted"))
         .await;

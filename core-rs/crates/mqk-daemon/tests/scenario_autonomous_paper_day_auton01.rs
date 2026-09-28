@@ -471,7 +471,7 @@ async fn au09_alert_day_limit_reached_when_limit_hit_and_running() {
     let st = make_paper_alpaca();
 
     // Saturate the day signal counter (MAX_AUTONOMOUS_SIGNALS_PER_RUN = 100).
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
 
     let router = routes::build_router(Arc::clone(&st));
     let req = Request::builder()

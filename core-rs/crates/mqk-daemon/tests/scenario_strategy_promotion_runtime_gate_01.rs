@@ -679,8 +679,8 @@ async fn internal_active_paper_exact_identity_accepted_one_outbox_row() {
     ));
     let run_id = seed_active_run(&st).await;
 
-    let before_account = st.day_signal_count();
-    let before_symbol = st.symbol_day_order_count(SYMBOL).await;
+    let before_account = st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse);
+    let before_symbol = st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, SYMBOL).await;
 
     let dec_id = unique_id("dec");
     let d = make_decision(&dec_id, &sid, SYMBOL, TIMEFRAME_SECS);
@@ -699,24 +699,24 @@ async fn internal_active_paper_exact_identity_accepted_one_outbox_row() {
         "exactly one synthetic outbox row must exist"
     );
     assert_eq!(
-        st.day_signal_count(),
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
         before_account + 1,
         "account-wide counter increments only after a new outbox insert"
     );
     assert_eq!(
-        st.symbol_day_order_count(SYMBOL).await,
+        st.symbol_day_order_count(mqk_daemon::state::ExecutionDomain::EquityNyse, SYMBOL).await,
         before_symbol + 1,
         "per-symbol counter increments only after a new outbox insert"
     );
 
     // Duplicate remains idempotent: no second row, no counter movement.
-    let before_account_2 = st.day_signal_count();
+    let before_account_2 = st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse);
     let out2 = submit_internal_strategy_decision(&st, d).await;
     assert!(!out2.accepted);
     assert_eq!(out2.disposition, "duplicate");
     assert_eq!(outbox_row_count(&pool, &dec_id).await, 1);
     assert_eq!(
-        st.day_signal_count(),
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
         before_account_2,
         "duplicate must not advance the account-wide counter"
     );

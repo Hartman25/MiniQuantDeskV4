@@ -1651,7 +1651,7 @@ async fn ptauto02_e15a_under_limit_passes_gate_1d_reaches_db_gate() {
 
     // count = 0 (default) → Gate 1d should pass.
     assert_eq!(
-        st.day_signal_count(),
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
         0,
         "E15a: day_signal_count must be 0 at test start"
     );
@@ -1711,9 +1711,9 @@ async fn ptauto02_e15b_at_limit_gate_1d_fires_409_day_limit_reached() {
     st.set_session_clock_ts_for_test(regular_ts).await;
 
     // Saturate the counter to exactly MAX_AUTONOMOUS_SIGNALS_PER_RUN (100).
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
     assert!(
-        st.day_signal_limit_exceeded(),
+        st.day_signal_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse),
         "E15b: day_signal_limit_exceeded() must be true at count=100"
     );
 
@@ -1748,7 +1748,7 @@ async fn ptauto02_e15b_at_limit_gate_1d_fires_409_day_limit_reached() {
     );
     // Counter must not increment on refusal.
     assert_eq!(
-        st.day_signal_count(),
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
         100,
         "E15b: day_signal_count must remain 100 after Gate 1d refusal"
     );
@@ -1784,7 +1784,7 @@ async fn ptauto03_e16a_system_status_surfaces_signal_count_healthy() {
         state::DeploymentMode::Paper,
         state::BrokerKind::Alpaca,
     ));
-    assert_eq!(st.day_signal_count(), 0, "E16a: count must be 0 at boot");
+    assert_eq!(st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse), 0, "E16a: count must be 0 at boot");
 
     let (status, body) = call(
         routes::build_router(Arc::clone(&st)),
@@ -1815,9 +1815,9 @@ async fn ptauto03_e16b_system_status_surfaces_signal_count_at_limit() {
         state::DeploymentMode::Paper,
         state::BrokerKind::Alpaca,
     ));
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
     assert!(
-        st.day_signal_limit_exceeded(),
+        st.day_signal_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse),
         "E16b: day_signal_limit_exceeded() must be true at count=100"
     );
 
@@ -1924,9 +1924,9 @@ async fn ptauto04_e17_phase2_consolidated_healthy_path_all_autonomous_controls_p
     st.set_session_clock_ts_for_test(regular_ts).await;
 
     // ── Gate 1d: count=5, well under MAX=100 ─────────────────────────────────
-    st.set_day_signal_count_for_test(5);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 5);
     assert!(
-        !st.day_signal_limit_exceeded(),
+        !st.day_signal_limit_exceeded(mqk_daemon::state::ExecutionDomain::EquityNyse),
         "E17: day_signal_limit_exceeded() must be false at count=5"
     );
 

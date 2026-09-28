@@ -514,7 +514,14 @@ pub struct AppState {
     /// at the start of each new execution run in `start_execution_runtime`.
     /// Gate 1d refuses further signals once this reaches
     /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`.
-    day_signal_count: Arc<AtomicU32>,
+    ///
+    /// B2.6: per-domain (`PerDomain`), not process-wide — this is documented
+    /// as "per execution run", and B2.4 made one run-per-domain concurrent;
+    /// a single shared counter would let Crypto's signal volume trip
+    /// Equity's Gate 1d (or Crypto's run start silently zero Equity's
+    /// in-progress count), exactly the "one domain's boundary erases
+    /// another domain's state" defect B2.6 exists to close.
+    day_signal_count: PerDomain<Arc<AtomicU32>>,
     /// MULTI-SYMBOL-DAY-ORDER-CAP-01: Per-run, per-symbol order intake counter
     /// (cap #4, design doc §6 "Cap #4 — per_symbol_day_order_count_limit").
     ///
@@ -522,7 +529,9 @@ pub struct AppState {
     /// `day_signal_count` on every new outbox enqueue (Gate 7 Ok(true)).
     /// Reset (cleared) at the start of each new execution run, at the same
     /// point `day_signal_count` is reset to 0.
-    day_signal_count_by_symbol: Arc<RwLock<HashMap<String, u32>>>,
+    ///
+    /// B2.6: per-domain, for the same reason as `day_signal_count` above.
+    day_signal_count_by_symbol: PerDomain<Arc<RwLock<HashMap<String, u32>>>>,
     /// MULTI-SYMBOL-DAY-ORDER-CAP-01: Optional per-symbol daily order count
     /// limit (cap #4). `None` (the default, from an unset
     /// `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`) disables Gate 1f entirely — all
@@ -2061,8 +2070,14 @@ impl AppState {
             alpaca_ws_task_exited: Arc::new(AtomicBool::new(false)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
-            day_signal_count: Arc::new(AtomicU32::new(0)),
-            day_signal_count_by_symbol: Arc::new(RwLock::new(HashMap::new())),
+            day_signal_count: PerDomain::new(
+                Arc::new(AtomicU32::new(0)),
+                Arc::new(AtomicU32::new(0)),
+            ),
+            day_signal_count_by_symbol: PerDomain::new(
+                Arc::new(RwLock::new(HashMap::new())),
+                Arc::new(RwLock::new(HashMap::new())),
+            ),
             per_symbol_day_order_limit: Arc::new(RwLock::new(
                 signal_intake::per_symbol_day_order_count_limit_from_env(),
             )),
@@ -5327,7 +5342,7 @@ operator_reconcile_or_repair_required"
                 // e.g. panic/supervisor exit) — no locally-owned run
                 // remains, so every economic mirror for it is cleared too,
                 // not only dynamic-selection authority.
-                self.clear_economic_mirrors_for_run(run_id).await;
+                self.clear_economic_mirrors_for_run(domain, run_id).await;
                 self.publish_status(StatusSnapshot {
                     daemon_uptime_secs: uptime_secs(),
                     active_run_id: None,
@@ -5379,7 +5394,7 @@ operator_reconcile_or_repair_required"
                 // Part 4: ownership was already unconditionally moved to
                 // `Idle` above by the time this runs — mirrors must not be
                 // left stale behind it either way).
-                self.clear_economic_mirrors_for_run(run_id).await;
+                self.clear_economic_mirrors_for_run(domain, run_id).await;
                 let exit = match handle.join_handle.await {
                     Ok(exit) => exit,
                     Err(err) => {
@@ -5480,8 +5495,8 @@ operator_reconcile_or_repair_required"
         *self.execution_snapshot.write().await = bundle.execution_snapshot;
         *self.accepted_artifact.write().await = bundle.accepted_artifact.clone();
         *self.native_strategy_bootstrap.lock().await = bundle.native_strategy_bootstrap;
-        self.day_signal_count.store(0, Ordering::SeqCst);
-        self.reset_symbol_day_order_counts().await;
+        self.day_signal_count.get(domain).store(0, Ordering::SeqCst);
+        self.reset_symbol_day_order_counts(domain).await;
         self.reset_signal_blocked_alert_state();
         self.reset_bar_tick_counters();
         self.clear_per_symbol_target_states().await;
@@ -5716,12 +5731,23 @@ operator_reconcile_or_repair_required"
     /// handle for that exact run) — this function itself performs no
     /// run_id check, matching `commit_run_start_bundle`'s pre-existing
     /// "caller already reserved" contract.
-    async fn clear_economic_mirrors_for_run(&self, _run_id: Uuid) {
+    ///
+    /// B2.6: `execution_snapshot`/`accepted_artifact`/`native_strategy_
+    /// bootstrap`/the alert-dedup sets/bar-tick counters/per-symbol target
+    /// state remain process-wide (unchanged by this patch — see B2.6
+    /// classification notes; none of them carry execution authority). Only
+    /// `day_signal_count`/`day_signal_count_by_symbol` are domain-keyed:
+    /// before this fix, clearing EITHER domain unconditionally zeroed BOTH
+    /// domains' per-run signal/order-intake counters, so a stop/halt of one
+    /// domain could reset the OTHER domain's still-active Gate 1d/Gate 1f
+    /// caps mid-run — precisely "one domain's boundary erases another
+    /// domain's state".
+    async fn clear_economic_mirrors_for_run(&self, domain: ExecutionDomain, _run_id: Uuid) {
         *self.execution_snapshot.write().await = None;
         *self.accepted_artifact.write().await = None;
         *self.native_strategy_bootstrap.lock().await = None;
-        self.day_signal_count.store(0, Ordering::SeqCst);
-        self.reset_symbol_day_order_counts().await;
+        self.day_signal_count.get(domain).store(0, Ordering::SeqCst);
+        self.reset_symbol_day_order_counts(domain).await;
         self.reset_signal_blocked_alert_state();
         self.reset_bar_tick_counters();
         self.clear_per_symbol_target_states().await;
@@ -5786,7 +5812,7 @@ operator_reconcile_or_repair_required"
         // nothing to abort here.
         self.clear_reconcile_task_owner_for_run(domain, run_id).await;
 
-        self.clear_economic_mirrors_for_run(run_id).await;
+        self.clear_economic_mirrors_for_run(domain, run_id).await;
         outcome
     }
 
@@ -6317,8 +6343,8 @@ impl AppState {
     /// accessor for `day_signal_count`, for the same sentinel-preservation
     /// reason as `accepted_artifact_snapshot_for_test`.
     #[cfg(test)]
-    pub(crate) fn day_signal_count_snapshot_for_test(&self) -> u32 {
-        self.day_signal_count.load(Ordering::SeqCst)
+    pub(crate) fn day_signal_count_snapshot_for_test(&self, domain: ExecutionDomain) -> u32 {
+        self.day_signal_count.get(domain).load(Ordering::SeqCst)
     }
 
     /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: plant a
@@ -6337,8 +6363,8 @@ impl AppState {
     /// sentinel `day_signal_count` value, for the same reason as
     /// `plant_accepted_artifact_for_test`.
     #[cfg(test)]
-    pub(crate) fn plant_day_signal_count_for_test(&self, value: u32) {
-        self.day_signal_count.store(value, Ordering::SeqCst)
+    pub(crate) fn plant_day_signal_count_for_test(&self, domain: ExecutionDomain, value: u32) {
+        self.day_signal_count.get(domain).store(value, Ordering::SeqCst)
     }
 
     /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: test-only
@@ -8718,9 +8744,9 @@ mod ownership_state_machine_tests {
         *state.native_strategy_bootstrap.lock().await = Some(NativeStrategyBootstrap {
             outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Dormant,
         });
-        state.day_signal_count.store(4242, Ordering::SeqCst);
+        state.day_signal_count.get(ExecutionDomain::EquityNyse).store(4242, Ordering::SeqCst);
         state
-            .day_signal_count_by_symbol
+            .day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse)
             .write()
             .await
             .insert("AAPL".to_string(), 7);
@@ -8786,10 +8812,10 @@ mod ownership_state_machine_tests {
             Some(sentinel_artifact)
         );
         assert!(state.native_strategy_bootstrap.lock().await.is_some());
-        assert_eq!(state.day_signal_count.load(Ordering::SeqCst), 4242);
+        assert_eq!(state.day_signal_count.get(ExecutionDomain::EquityNyse).load(Ordering::SeqCst), 4242);
         assert_eq!(
             state
-                .day_signal_count_by_symbol
+                .day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse)
                 .read()
                 .await
                 .get("AAPL")
@@ -8954,9 +8980,9 @@ mod ownership_state_machine_tests {
         *state.native_strategy_bootstrap.lock().await = Some(NativeStrategyBootstrap {
             outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Dormant,
         });
-        state.day_signal_count.store(99, Ordering::SeqCst);
+        state.day_signal_count.get(ExecutionDomain::EquityNyse).store(99, Ordering::SeqCst);
         state
-            .day_signal_count_by_symbol
+            .day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse)
             .write()
             .await
             .insert("MSFT".to_string(), 3);
@@ -9035,8 +9061,8 @@ mod ownership_state_machine_tests {
         assert!(state.execution_snapshot.read().await.is_none());
         assert!(state.accepted_artifact.read().await.is_none());
         assert!(state.native_strategy_bootstrap.lock().await.is_none());
-        assert_eq!(state.day_signal_count.load(Ordering::SeqCst), 0);
-        assert!(state.day_signal_count_by_symbol.read().await.is_empty());
+        assert_eq!(state.day_signal_count.get(ExecutionDomain::EquityNyse).load(Ordering::SeqCst), 0);
+        assert!(state.day_signal_count_by_symbol.get(ExecutionDomain::EquityNyse).read().await.is_empty());
         assert!(
             state.try_claim_b5_alert_for_test("MSFT").await,
             "b5 alert dedup must be cleared (claim succeeds again)"
@@ -9463,6 +9489,132 @@ mod ownership_state_machine_tests {
         // the singleton (a single `Arc<Mutex<LocalRuntimeOwnership>>` field
         // instead of `PerDomain`) is exactly the change that would flip this
         // proof from GREEN to RED.
+        state
+            .clear_local_runtime_for_run(ExecutionDomain::Crypto24_7, crypto_run, LifecycleClearReason::OperatorStop)
+            .await;
+    }
+
+    /// B2.6: the per-run signal/order-intake caps (`day_signal_count`,
+    /// `day_signal_count_by_symbol`, Gate 1d/Gate 1f) must be domain-local —
+    /// stopping/clearing one domain's run must never zero the OTHER
+    /// domain's still-active counter, and starting a NEW run in one domain
+    /// must never reset the other domain's in-progress count.
+    ///
+    /// Negative control: before this patch, `day_signal_count`/
+    /// `day_signal_count_by_symbol` were single process-wide fields (not
+    /// `PerDomain`), and `clear_economic_mirrors_for_run` took an unused
+    /// `_run_id` — every clear (or new-run start) unconditionally zeroed
+    /// BOTH domains' counters. Reverting the `PerDomain` field types (or
+    /// re-widening `clear_economic_mirrors_for_run`'s reset to a shared
+    /// field) turns the assertions below RED.
+    #[tokio::test]
+    async fn b26_day_signal_count_is_domain_local() {
+        let state = fresh_state();
+        let equity_run = run_id_for("b26-day-signal-equity");
+        let crypto_run = run_id_for("b26-day-signal-crypto");
+
+        let bundle = || RunStartLocalBundle {
+            execution_snapshot: None,
+            accepted_artifact: None,
+            native_strategy_bootstrap: None,
+            dynamic_selection_outcome: None,
+        };
+        for (domain, run_id) in [
+            (ExecutionDomain::EquityNyse, equity_run),
+            (ExecutionDomain::Crypto24_7, crypto_run),
+        ] {
+            state
+                .reserve_runtime_ownership(domain, run_id)
+                .await
+                .unwrap();
+            state
+                .prepare_starting_metadata_and_mirrors(domain, run_id, bundle(), Vec::new(), "test")
+                .await
+                .unwrap();
+            state
+                .install_active_runtime(domain, run_id, fake_handle(run_id))
+                .await
+                .unwrap();
+        }
+
+        // Drive independent signal volume into each domain.
+        state.increment_day_signal_count(ExecutionDomain::EquityNyse);
+        state.increment_day_signal_count(ExecutionDomain::EquityNyse);
+        state.increment_day_signal_count(ExecutionDomain::EquityNyse);
+        state.increment_day_signal_count(ExecutionDomain::Crypto24_7);
+        state
+            .increment_symbol_day_order_count(ExecutionDomain::EquityNyse, "AAPL")
+            .await;
+        state
+            .increment_symbol_day_order_count(ExecutionDomain::Crypto24_7, "BTC")
+            .await;
+
+        assert_eq!(state.day_signal_count(ExecutionDomain::EquityNyse), 3);
+        assert_eq!(state.day_signal_count(ExecutionDomain::Crypto24_7), 1);
+        assert_eq!(
+            state
+                .symbol_day_order_count(ExecutionDomain::EquityNyse, "AAPL")
+                .await,
+            1
+        );
+        assert_eq!(
+            state
+                .symbol_day_order_count(ExecutionDomain::Crypto24_7, "BTC")
+                .await,
+            1
+        );
+
+        // Clear equity only -- crypto's independently active counters must
+        // survive untouched.
+        state
+            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, equity_run, LifecycleClearReason::OperatorStop)
+            .await;
+
+        assert_eq!(
+            state.day_signal_count(ExecutionDomain::EquityNyse),
+            0,
+            "equity's own counter must be cleared by its own stop"
+        );
+        assert_eq!(
+            state.day_signal_count(ExecutionDomain::Crypto24_7),
+            1,
+            "crypto's still-active counter must survive equity's clear"
+        );
+        assert_eq!(
+            state
+                .symbol_day_order_count(ExecutionDomain::Crypto24_7, "BTC")
+                .await,
+            1,
+            "crypto's per-symbol counter must survive equity's clear"
+        );
+
+        // A fresh equity run start must reset only equity's counter, never
+        // crypto's still-active in-progress count.
+        let equity_run_2 = run_id_for("b26-day-signal-equity-2");
+        state
+            .reserve_runtime_ownership(ExecutionDomain::EquityNyse, equity_run_2)
+            .await
+            .unwrap();
+        state
+            .prepare_starting_metadata_and_mirrors(
+                ExecutionDomain::EquityNyse,
+                equity_run_2,
+                bundle(),
+                Vec::new(),
+                "test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.day_signal_count(ExecutionDomain::Crypto24_7),
+            1,
+            "a new equity run start must never reset crypto's independent counter"
+        );
+
+        // Cleanup so the spawned fake handles don't outlive the test.
+        state
+            .clear_local_runtime_for_run(ExecutionDomain::EquityNyse, equity_run_2, LifecycleClearReason::OperatorStop)
+            .await;
         state
             .clear_local_runtime_for_run(ExecutionDomain::Crypto24_7, crypto_run, LifecycleClearReason::OperatorStop)
             .await;

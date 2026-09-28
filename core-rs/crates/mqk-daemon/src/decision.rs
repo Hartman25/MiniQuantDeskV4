@@ -975,7 +975,11 @@ pub async fn submit_internal_strategy_decision(
     }
 
     // Gate 1: PT-AUTO-02 per-run signal intake bound.
-    if state.day_signal_limit_exceeded() {
+    // B2.6: this internal-decision path is currently equity-only (repo
+    // truth: no Crypto caller exists yet); hardcoded explicitly rather than
+    // silently defaulted, matching every other equity-only production
+    // caller of a domain-keyed AppState primitive.
+    if state.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse) {
         return outcome(
             false,
             "day_limit_reached",
@@ -986,7 +990,7 @@ pub async fn submit_internal_strategy_decision(
                 "internal decision refused: autonomous day signal limit reached \
                  ({} signals accepted this run); \
                  no further decisions will be accepted until the next run start",
-                state.day_signal_count()
+                state.day_signal_count(crate::state::ExecutionDomain::EquityNyse)
             )],
         );
     }
@@ -996,7 +1000,10 @@ pub async fn submit_internal_strategy_decision(
     // MQK_PER_SYMBOL_DAY_ORDER_LIMIT is set; in that case Gate 1 above always
     // passes through unaffected — this is an additive, independent counter.
     if state
-        .symbol_day_order_limit_exceeded(&decision.symbol)
+        .symbol_day_order_limit_exceeded(
+            crate::state::ExecutionDomain::EquityNyse,
+            &decision.symbol,
+        )
         .await
     {
         return outcome(
@@ -1010,7 +1017,12 @@ pub async fn submit_internal_strategy_decision(
                  ({} orders accepted this run for this symbol); \
                  no further decisions for this symbol will be accepted until the next run start",
                 decision.symbol.trim(),
-                state.symbol_day_order_count(&decision.symbol).await
+                state
+                    .symbol_day_order_count(
+                        crate::state::ExecutionDomain::EquityNyse,
+                        &decision.symbol
+                    )
+                    .await
             )],
         );
     }
@@ -1522,11 +1534,14 @@ pub async fn submit_internal_strategy_decision(
     match mqk_db::outbox_enqueue_for_running_run(db, active_run_id, &did, order_json).await {
         Ok(mqk_db::OutboxEnqueueOutcome::Enqueued) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
-            state.increment_day_signal_count();
+            state.increment_day_signal_count(crate::state::ExecutionDomain::EquityNyse);
             // MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol counterpart (cap #4),
             // incremented alongside the account-wide counter above.
             state
-                .increment_symbol_day_order_count(&decision.symbol)
+                .increment_symbol_day_order_count(
+                    crate::state::ExecutionDomain::EquityNyse,
+                    &decision.symbol,
+                )
                 .await;
             outcome(true, "accepted", &did, &sid, Some(active_run_id), vec![])
         }

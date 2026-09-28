@@ -147,7 +147,7 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
         Some(f) if f.len() == 1 => Some(f[0].strategy_id.clone()),
         _ => None,
     };
-    let throttle_open = !state.day_signal_limit_exceeded();
+    let throttle_open = !state.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse);
     let last_ts = state.last_bar_input_ts();
     let last_decision_time: Option<String> = if last_ts > 0 {
         chrono::DateTime::<chrono::Utc>::from_timestamp(last_ts, 0) // allow: telemetry surface

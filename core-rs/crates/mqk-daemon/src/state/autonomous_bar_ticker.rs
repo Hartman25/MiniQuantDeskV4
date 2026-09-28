@@ -142,16 +142,17 @@ pub(super) async fn run_bar_tick(state: &Arc<AppState>, qty: i64) {
     }
 
     // Gate 3: per-run signal limit not exceeded.
-    if state.day_signal_limit_exceeded() {
+    // Equity-only: this ticker is Gate 2'd on the NYSE session above.
+    if state.day_signal_limit_exceeded(super::ExecutionDomain::EquityNyse) {
         warn!(
-            count = state.day_signal_count(),
+            count = state.day_signal_count(super::ExecutionDomain::EquityNyse),
             "autonomous_bar_ticker: skip_limit_exceeded — \
              per-run signal limit reached; no bar deposited this tick"
         );
         return;
     }
 
-    let now_tick = state.day_signal_count() as u64;
+    let now_tick = state.day_signal_count(super::ExecutionDomain::EquityNyse) as u64;
     let end_ts = session_ts;
     state
         .deposit_strategy_bar_input(StrategyBarInput {
@@ -228,7 +229,7 @@ mod tests {
             )
             .await;
         // Saturate the per-run signal limit (PT-AUTO-02).
-        state.set_day_signal_count_for_test(100);
+        state.set_day_signal_count_for_test(crate::state::ExecutionDomain::EquityNyse, 100);
         run_bar_tick(&state, 1).await;
         assert!(
             state.pending_strategy_bar_input_is_none_for_test().await,

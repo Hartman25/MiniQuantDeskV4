@@ -183,8 +183,8 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     let (autonomous_signal_count, autonomous_signal_limit_hit) =
         if st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion {
             (
-                Some(st.day_signal_count()),
-                Some(st.day_signal_limit_exceeded()),
+                Some(st.day_signal_count(crate::state::ExecutionDomain::EquityNyse)),
+                Some(st.day_signal_limit_exceeded(crate::state::ExecutionDomain::EquityNyse)),
             )
         } else {
             (None, None)

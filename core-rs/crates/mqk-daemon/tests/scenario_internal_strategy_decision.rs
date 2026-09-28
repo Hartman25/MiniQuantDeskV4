@@ -360,7 +360,7 @@ async fn decision_day_limit_reached_blocks_before_db() {
     ));
     // Saturate the counter.  The state has no DB, so if the order of gates
     // were wrong we would see "unavailable" instead of "day_limit_reached".
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
 
     let d = make_decision("dec-limit", "strat-a");
     let out = submit_internal_strategy_decision(&st, d).await;
@@ -860,7 +860,7 @@ async fn decision_duplicate_decision_id_returns_duplicate() {
     assert!(first.accepted, "first submission must be accepted");
     assert_eq!(first.disposition, "accepted");
 
-    let count_after_first = st.day_signal_count();
+    let count_after_first = st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse);
 
     // Second submission with the same decision_id — must be duplicate.
     let second = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
@@ -875,7 +875,7 @@ async fn decision_duplicate_decision_id_returns_duplicate() {
 
     // The day signal counter must not have advanced for the duplicate.
     assert_eq!(
-        st.day_signal_count(),
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
         count_after_first,
         "duplicate must not increment the day signal counter"
     );

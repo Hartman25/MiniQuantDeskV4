@@ -394,7 +394,7 @@ async fn sto05_day_limit_gate_refuses_and_creates_no_outbox() {
     let st = no_db_state();
     // Saturate the day signal counter.  MAX_AUTONOMOUS_SIGNALS_PER_RUN = 100.
     // Any value >= 100 triggers the gate.
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
 
     let d = make_decision("sto05-dec", "sto05-strat");
     let out = submit_internal_strategy_decision(&st, d).await;
@@ -602,7 +602,7 @@ async fn sto02_duplicate_decision_id_creates_no_second_row() {
         "STO02: first submission must be accepted; disposition={:?}",
         first.disposition
     );
-    let count_after_first = st.day_signal_count();
+    let count_after_first = st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse);
 
     // Second submission with same decision_id — must be duplicate.
     let second = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
@@ -618,7 +618,7 @@ async fn sto02_duplicate_decision_id_creates_no_second_row() {
 
     // Day counter must not advance for duplicate.
     assert_eq!(
-        st.day_signal_count(),
+        st.day_signal_count(mqk_daemon::state::ExecutionDomain::EquityNyse),
         count_after_first,
         "STO02: duplicate must not increment the day signal counter"
     );

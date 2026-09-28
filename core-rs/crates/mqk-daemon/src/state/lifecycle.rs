@@ -4258,7 +4258,7 @@ mod real_production_effects_matrix_tests {
         state
             .plant_accepted_artifact_for_test(Some(sentinel_artifact.clone()))
             .await;
-        state.plant_day_signal_count_for_test(4242);
+        state.plant_day_signal_count_for_test(ExecutionDomain::EquityNyse, 4242);
         state
             .commit_dynamic_selection_runtime_state_for_test(off_disposition_fixture(run_a))
             .await;
@@ -4336,7 +4336,7 @@ mod real_production_effects_matrix_tests {
              run B's rollback)"
         );
         assert_eq!(
-            state.day_signal_count_snapshot_for_test(),
+            state.day_signal_count_snapshot_for_test(ExecutionDomain::EquityNyse),
             4242,
             "FA-02: run A's sentinel day_signal_count must be unchanged"
         );
@@ -7409,7 +7409,7 @@ mod dynamic_selection_cleanup_contract_tests {
                 produced_by: "test".to_string(),
             }))
             .await;
-        state.plant_day_signal_count_for_test(77);
+        state.plant_day_signal_count_for_test(ExecutionDomain::EquityNyse, 77);
 
         let err = state
             .stop_execution_runtime(ExecutionDomain::EquityNyse, )
@@ -7430,7 +7430,7 @@ mod dynamic_selection_cleanup_contract_tests {
              dynamic-selection state"
         );
         assert_eq!(
-            state.day_signal_count_snapshot_for_test(),
+            state.day_signal_count_snapshot_for_test(ExecutionDomain::EquityNyse),
             0,
             "stop_execution_runtime must clear day_signal_count too"
         );
@@ -7463,7 +7463,7 @@ mod dynamic_selection_cleanup_contract_tests {
                 produced_by: "test".to_string(),
             }))
             .await;
-        state.plant_day_signal_count_for_test(88);
+        state.plant_day_signal_count_for_test(ExecutionDomain::EquityNyse, 88);
 
         let err = state
             .halt_execution_runtime(ExecutionDomain::EquityNyse, )
@@ -7483,7 +7483,7 @@ mod dynamic_selection_cleanup_contract_tests {
             "halt_execution_runtime must clear accepted_artifact too, before the \
              DB-dependent steps that can fail"
         );
-        assert_eq!(state.day_signal_count_snapshot_for_test(), 0);
+        assert_eq!(state.day_signal_count_snapshot_for_test(ExecutionDomain::EquityNyse), 0);
     }
 
     /// Test 12: `stop_for_shutdown` clears committed dynamic-selection state
@@ -7511,7 +7511,7 @@ mod dynamic_selection_cleanup_contract_tests {
                 produced_by: "test".to_string(),
             }))
             .await;
-        state.plant_day_signal_count_for_test(99);
+        state.plant_day_signal_count_for_test(ExecutionDomain::EquityNyse, 99);
 
         state.stop_for_shutdown().await;
         assert!(
@@ -7523,7 +7523,7 @@ mod dynamic_selection_cleanup_contract_tests {
             "stop_for_shutdown must now also clear accepted_artifact — closing the \
              pre-existing asymmetry this patch fixes"
         );
-        assert_eq!(state.day_signal_count_snapshot_for_test(), 0);
+        assert_eq!(state.day_signal_count_snapshot_for_test(ExecutionDomain::EquityNyse), 0);
     }
 
     /// Cleanup is idempotent: clearing twice (or clearing when already
@@ -7653,7 +7653,7 @@ mod dynamic_selection_cleanup_contract_tests {
                 produced_by: "test".to_string(),
             }))
             .await;
-        state.plant_day_signal_count_for_test(66);
+        state.plant_day_signal_count_for_test(ExecutionDomain::EquityNyse, 66);
 
         let exit = state
             .reap_finished_execution_loop(ExecutionDomain::EquityNyse, )
@@ -7669,7 +7669,7 @@ mod dynamic_selection_cleanup_contract_tests {
             state.accepted_artifact_snapshot_for_test().await.is_none(),
             "reap_finished_execution_loop must clear accepted_artifact too"
         );
-        assert_eq!(state.day_signal_count_snapshot_for_test(), 0);
+        assert_eq!(state.day_signal_count_snapshot_for_test(ExecutionDomain::EquityNyse), 0);
     }
 
     /// The fault-seam get/set primitive round-trips correctly and defaults

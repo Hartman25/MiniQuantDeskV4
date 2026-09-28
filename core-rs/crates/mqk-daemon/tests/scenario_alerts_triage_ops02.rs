@@ -600,7 +600,7 @@ async fn ops02_t8_ops10_day_limit_alert_appears_in_triage() {
 
     // Saturate the counter to trigger day_signal_limit_exceeded() == true.
     // MAX_AUTONOMOUS_SIGNALS_PER_RUN is 100.
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
 
     let router = routes::build_router(Arc::clone(&st));
 

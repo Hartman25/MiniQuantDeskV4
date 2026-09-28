@@ -393,7 +393,7 @@ async fn r06_gate1d_limit_exceeded_intent_placed_false() {
     st.update_ws_continuity(live_ws()).await;
     st.set_session_clock_ts_for_test(NYSE_REGULAR_TS).await;
     // Saturate the per-run counter (PT-AUTO-02 proof seam).
-    st.set_day_signal_count_for_test(100);
+    st.set_day_signal_count_for_test(mqk_daemon::state::ExecutionDomain::EquityNyse, 100);
 
     let router = routes::build_router(Arc::clone(&st));
     let (status, json) = call(router, signal_req("sig-rts07-r06")).await;
